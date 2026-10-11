@@ -718,16 +718,31 @@ def reserve_refusal_line(host, now, path=None):
     state under the record's lock, before either process logs, so the
     pair's one budget bounds both layers' lines together. The per-host
     allowance is the hostname's own fact and the total is the hour's,
-    and both are held on the hour the caller's clock names: an entry
-    outside the hour on either side of it is a clock the pair does not
-    share, and it binds nothing here. A refused reservation holds the
-    line back the way the hour's own cap does, and the caller counts
-    the refusal into its window as a held-back line. The write is best
-    effort exactly as the record's other updates are: a record nothing
-    can read or write reserves nothing, and the pair writes the line
+    and both are held on the hour the reservation's own captured
+    moment names: an entry outside the hour on either side of it is a
+    clock the pair does not share, and it binds nothing here. The
+    moment the reservation decides on is captured under the lock
+    itself, from the clock the caller passes, because the caller's own
+    capture precedes the lock's wait: another process can spend the
+    pair's whole budget while a stalled caller waits for the lock, and
+    the capture the caller took before the wait would prune the newer
+    stamps away as clocks the pair does not share, finding an empty
+    budget where the pair's lines stand and granting a line over them.
+    The locked capture decides on whichever hour the pair's newest
+    lines spent, however long the wait that led to it ran, and the
+    same capture is the moment the reservation records and the stamp
+    the caller's line accounting carries. The reservation answers with
+    the captured stamp when it takes the slot and with nothing when
+    the budget refuses, so a caller asks whether the answer is nothing
+    and carries the stamp otherwise, and a stamp of zero still proves
+    a slot the caller took. A refused reservation holds the line back
+    the way the hour's own cap does, and the caller counts the refusal
+    into its window as a held-back line. The write is best effort
+    exactly as the record's other updates are: a record nothing can
+    read or write reserves nothing, and the pair writes the line
     rather than hold it on a proof that never reached the file.
     """
-    if not host or not isinstance(now, (int, float)):
+    if not host or not (isinstance(now, (int, float)) or callable(now)):
         return True
     path = spent_refusal_lines_record_path() if path is None else path
     record_path = Path(path)
@@ -741,17 +756,18 @@ def reserve_refusal_line(host, now, path=None):
         if lock_handle is not None:
             lock_handle.close()
         lock_handle = None
+    stamp = now() if callable(now) else now
     try:
         hosts, times = _read_spent_refusal_lines_record(path)
-        hosts = {name: stamp for name, stamp in hosts.items()
-                 if -HOUR_SECONDS <= now - stamp < HOUR_SECONDS}
-        times = [stamp for stamp in times
-                if -HOUR_SECONDS <= now - stamp < HOUR_SECONDS]
+        hosts = {name: moment for name, moment in hosts.items()
+                 if -HOUR_SECONDS <= stamp - moment < HOUR_SECONDS}
+        times = [moment for moment in times
+                if -HOUR_SECONDS <= stamp - moment < HOUR_SECONDS]
         if (hosts.get(host) is not None
                 or len(times) >= REFUSAL_LOG_LINES_PER_HOUR):
-            return False
-        hosts[host] = now
-        times.append(now)
+            return None
+        hosts[host] = stamp
+        times.append(stamp)
         fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
                                    prefix=f".{record_path.name}.")
         try:
@@ -761,9 +777,9 @@ def reserve_refusal_line(host, now, path=None):
         except BaseException:
             os.unlink(tmp)
             raise
-        return True
+        return stamp
     except Exception:
-        return True
+        return stamp
     finally:
         if lock_handle is not None:
             lock_handle.close()
@@ -1599,9 +1615,15 @@ class BoundedRefusalRecorder:
         layer's, held in the shared state under the record's lock, so a
         backend whose answers were lost and a console whose reports
         reached nothing cannot each draw a whole cap beside the other's
-        lines. A reservation the shared budget refuses holds the line
-        back here exactly as the hour's own cap does, and the refusal
-        counts into the window as a held-back line.
+        lines. The reservation captures the moment it decides on under
+        that lock, after the wait, from this recorder's own clock, so a
+        caller stalled behind the lock past an hour still meets the
+        stamps the pair's newer lines spent, and the granted stamp is
+        the moment the line's accounting here carries, the hostname's
+        pace and the hour's line times alike. A reservation the shared
+        budget refuses holds the line back here exactly as the hour's
+        own cap does, and the refusal counts into the window as a
+        held-back line, at the moment the wait has run to.
         """
         now = self._now()
         with self._lock:
@@ -1636,18 +1658,24 @@ class BoundedRefusalRecorder:
             if host in self._last_lines or len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
                 self._count_suppressed(now)
                 return False
-            if not reserve_refusal_line(host, now):
+            granted = reserve_refusal_line(host, self._now)
+            if granted is None:
                 # The pair's shared budget spent this hour's line already,
                 # in the other process: the console drew the cap with
                 # lines whose answers never folded back, or the hostname's
                 # own line stands there for the hour, and no line of this
-                # layer's joins it. The refusal counts into the window
-                # here the way every other held-back line does, so the
-                # pair's one budget loses no refusal it holds back.
-                self._count_suppressed(now)
+                # layer's joins it. The reservation captured the moment
+                # it decided on under the record's lock, after the wait,
+                # so the held-back line belongs to the hour the pair's
+                # newest lines opened and not to the stale capture the
+                # wait began with: the refusal counts into the window
+                # here the way every other held-back line does, at the
+                # moment the wait has run to, so the pair's one budget
+                # loses no refusal it holds back.
+                self._count_suppressed(self._now())
                 return False
-            self._last_lines[host] = now
-            self._line_times.append(now)
+            self._last_lines[host] = granted
+            self._line_times.append(granted)
             self._line_ids.append(_mint_line_id())
             return True
 
@@ -1824,9 +1852,15 @@ class BoundedRefusalRecorder:
         record's lock, so a console whose failures reached no backend
         cannot draw a second cap beside the lines a backend already
         spent, however lost the answers that would have folded them in
-        were. A refused reservation holds the line back the way the
-        hour's own cap does, and the first failure it holds back counts
-        once into the window.
+        were. The reservation captures the moment it decides on under
+        that lock, after the wait, from this recorder's own clock, so a
+        caller stalled behind the lock past an hour still meets the
+        stamps the pair's newer lines spent, and the granted stamp is
+        the moment the line's accounting here carries, the hostname's
+        pace and the hour's line times alike. A refused reservation
+        holds the line back the way the hour's own cap does, and the
+        first failure it holds back counts once into the window, at the
+        moment the wait has run to.
         """
         now = self._now()
         with self._lock:
@@ -1864,23 +1898,30 @@ class BoundedRefusalRecorder:
                     self._first_failures[host] = now
                     self._count_suppressed(now)
                 return False
-            if not reserve_refusal_line(host, now):
+            granted = reserve_refusal_line(host, self._now)
+            if granted is None:
                 # The pair's shared budget spent this hour's line already,
                 # in the other process: the backend drew the cap with lines
                 # whose answers never folded back, or the hostname's own
                 # line stands there for the hour, and this console's
-                # fallback writes no second line beside them. The first
-                # failure counts once into the window here, the way a line
-                # the hour's own cap holds back is counted, and no layer
-                # writes the refusal a line within the hour.
+                # fallback writes no second line beside them. The
+                # reservation captured the moment it decided on under the
+                # record's lock, after the wait, so the failure and its
+                # count belong to the hour the pair's newest lines opened
+                # and not to the stale capture the wait began with. The
+                # first failure counts once into the window here, at the
+                # moment the wait has run to, the way a line the hour's
+                # own cap holds back is counted, and no layer writes the
+                # refusal a line within the hour.
+                moment = self._now()
                 if host not in self._first_failures:
-                    self._first_failures[host] = now
-                    self._count_suppressed(now)
+                    self._first_failures[host] = moment
+                    self._count_suppressed(moment)
                 return False
-            self._last_lines[host] = now
+            self._last_lines[host] = granted
             if notice_id is not None:
                 self._named_notices[host] = notice_id
-            self._line_times.append(now)
+            self._line_times.append(granted)
             self._line_ids.append(_mint_line_id())
             return True
 

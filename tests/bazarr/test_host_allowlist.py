@@ -13387,3 +13387,70 @@ def test_lost_acknowledgements_hold_the_pairs_line_cap_to_one_budget(tmp_path, m
     assert window is not None
     assert window[0] == cap
 
+
+def test_a_stalled_line_reservation_resumes_inside_the_newer_budgets_hour(
+        tmp_path, monkeypatch):
+    """A line reservation waits for the record's lock on the moment its
+    caller captured, and a pause that holds the lock past an hour lets
+    the other process spend the pair's whole line budget in the
+    meantime: the stalled caller's stale capture then pruned the newer
+    stamps away as clocks the pair does not share and granted a line
+    over the budget they held, so the pair lost its one cap to a line an
+    hour behind the ones that spent it. The reservation captures its own
+    moment under the lock now, after the wait, from the clock the caller
+    passes, and the pair's budget decides on the moment the lock gives:
+    a caller that resumes past the newer lines' hour meets their stamps,
+    is refused and counts its held-back line into the window at the
+    moment the wait has run to, the budget the newer lines spent still
+    binding the next caller inside it, and once the hour has run the
+    reservation grants again and the line's accounting carries the
+    granted stamp, the hostname's pace and the hour's line times
+    alike."""
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+
+    # The other layer spent the pair's whole line cap while this caller
+    # waited to be told: twenty lines stamped inside one hour of each
+    # other, on the record the pair shares.
+    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+        assert supervisor.host_policy.reserve_refusal_line(
+            f"other{index}.example.com", 3701.0 + index)
+
+    # The stalled caller arrives with a capture an hour behind the
+    # record's lock, and the wait runs past the hour: the reservation
+    # captures its own moment under the lock, meets the newer stamps,
+    # refuses, and the line is held back and counted into the window at
+    # the moment the wait has run to.
+    moments = {"now": 3735.0}
+    stall = [100.0, 3735.0]
+
+    def stalled_clock():
+        if stall:
+            return stall.pop(0)
+        return moments["now"]
+
+    recorder = supervisor.host_policy.BoundedRefusalRecorder(now=stalled_clock)
+    assert recorder.note("stalled.example.com") is False
+    held = recorder.hour_suppressed_window()
+    assert held is not None
+    assert held[0] == 1
+    assert held[1] == 3735.0
+    assert recorder.hour_line_times() == []
+
+    # The pair's one budget holds: a fresh caller inside the same hour
+    # meets the twenty lines the other layer spent and is held back the
+    # same way, because the stalled caller's refusal overwrote nothing.
+    assert supervisor.host_policy.reserve_refusal_line(
+        "fresh.example.com", 3736.0) is None
+
+    # Once the hour since the pair's newest line has run, a caller
+    # stalled behind the lock again is granted on the moment the lock
+    # gives, past the newer stamps' hour, and the granted stamp is what
+    # the line accounting carries: the hour's line times and the
+    # hostname's pace both hold the locked capture, and not the stale
+    # one the wait began with.
+    moments["now"] = 7400.0
+    stall.extend([7300.0, 7400.0])
+    assert recorder.note("granted.example.com") is True
+    assert recorder.hour_line_times() == [7400.0]
+    assert recorder.hour_line_hosts() == [("granted.example.com", 7400.0)]
+
