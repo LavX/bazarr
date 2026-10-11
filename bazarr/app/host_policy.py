@@ -898,7 +898,7 @@ class BoundedRefusalRecorder:
         while len(self._hosts) > REFUSED_HOSTS_LIMIT:
             self._hosts.popitem(last=False)
 
-    def note(self, host, line_at=None, refused_at=None):
+    def note(self, host, line_at=None, refused_at=None, counted_elsewhere=False):
         """Record a refusal; True when a per-host line may be written now.
 
         ``line_at`` carries the time a console elsewhere spent this
@@ -916,6 +916,17 @@ class BoundedRefusalRecorder:
         stamps and its bound drops the oldest refusal by its stamp, so a
         delayed notice displaces no genuinely newer refusal, and a newer
         stamp already recorded for the host is never moved back.
+
+        ``counted_elsewhere`` says the refusal this notice carries was
+        counted by the console that saw it, in a line it wrote or in the
+        window its held-back lines count into: the hostname is recorded
+        here all the same, its refusal time folded in, but no line is
+        written and no count joins a window, because the pair names the
+        refusal once and the count the console holds is already it. The
+        report says so beside the notice's own identity, independently of
+        the line times the hour can roll away while the notice still
+        waits for its answer, so a recovery that lands past them records
+        the hostname without counting the refusal again.
         """
         now = self._now()
         with self._lock:
@@ -931,6 +942,14 @@ class BoundedRefusalRecorder:
                     self._last_lines[host] = max(self._last_lines[host], line_at)
                 else:
                     self._last_lines[host] = line_at
+                return False
+            if counted_elsewhere:
+                # The console that saw the refusal counted it into the
+                # window the report carries, or named it in a line of its
+                # own: the hostname joins the record with its refusal
+                # time, and nothing increments here, because the pair
+                # owes the refusal one naming and this count is already
+                # made.
                 return False
             if host in self._last_lines or len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
                 self._count_suppressed(now)

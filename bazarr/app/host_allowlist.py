@@ -404,7 +404,7 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
                    suppressed=0, suppressed_since=None, suppressed_id=None, mirrored=0,
                    mirrored_since=None, mirrored_id=None, mirrored_ids=None,
                    mirrored_counts=None, recent=None, refused_at=None,
-                   notice=None):
+                   notice=None, notice_counted=False):
     """Record a refused hostname and keep a code on the console.
 
     The backend's own refusals call this, and so does the report the front
@@ -464,6 +464,18 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
     named nowhere rather than twice, and one whose accounting never
     completed, because this backend died between its receipt and its
     record, leaves the refusal to the console that saw it.
+
+    The report also carries the notice's own accounting state beside its
+    identity: whether the console that saw the refusal already counted
+    it, in a line it wrote or in the window the report carries. The line
+    times the report carries are the only other thing that says so, and
+    the hour rolls them away while a notice still waits for its answer,
+    so the explicit state travels independently of them. A notice whose
+    refusal is counted nowhere yet is recorded the way it always was, in
+    a line of this hour's own or as a suppressed count, and a counted one
+    is recorded as a hostname alone: the refusal joins the record with
+    its own time, and no line and no count names it again, because the
+    count the console holds is the one naming the pair owes it.
     """
     shown = effective_host(host)
     if not shown or not check_active(config):
@@ -510,7 +522,8 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
             # named twice, and a backend that restarts holds its own
             # retries to the one accounting.
             record_notice_accounted(notice, time.time())
-        if _refusals.note(shown, line_at, refused_at):
+        if _refusals.note(shown, line_at, refused_at,
+                          counted_elsewhere=notice_counted):
             logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
                             'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
     _flush_suppressed_summary()
@@ -584,6 +597,11 @@ def front_refusal_notice(config=settings):
         # the refusal to the console, and a delivery no backend ever took
         # in leaves no entry at all.
         record_notice_receipt(notice_id, time.time())
+    # The notice's accounting state travels beside its identity, so the
+    # console that already counted the refusal the notice carries says so
+    # without leaning on the line times the hour can roll away while the
+    # notice waits for its answer.
+    notice_counted = request.form.get('notice_counted', '').strip() == '1'
     logged = request.form.get('logged', '')
     try:
         line_at = float(logged) if logged else None
@@ -657,7 +675,7 @@ def front_refusal_notice(config=settings):
                    suppressed_id=window_id, mirrored=mirrored_back, mirrored_since=mirrored_opens,
                    mirrored_id=mirrored_id, mirrored_ids=mirrored_ids,
                    mirrored_counts=mirrored_counts, recent=recent, refused_at=pending_at,
-                   notice=notice_id or None)
+                   notice=notice_id or None, notice_counted=notice_counted)
     headers = {}
     times = _refusals.hour_line_times()
     if times:

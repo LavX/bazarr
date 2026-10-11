@@ -901,7 +901,7 @@ class _RefusalReporter:
         self._pending = OrderedDict()  # host -> time of its last attempt (None until tried)
         self._pending_at = OrderedDict()  # host -> when this console last refused a waiting host
         self._pending_ids = OrderedDict()  # host -> the stable identity of its waiting notice
-        self._pending_accounted = set()  # waiting hosts whose refusal this console already counted
+        self._accounted_notices = set()  # identities of notices whose refusal this console counted
         self._accounted = OrderedDict()  # host -> time this console last spent its line
         self._recent = OrderedDict()  # host -> time this console last refused it
         self._report_times = []  # times of this hour's acknowledged report deliveries
@@ -1469,8 +1469,10 @@ class _RefusalReporter:
         window to pay, on its own arrivals and its own timer. A released
         mirror whose answer proved the backend holds nothing of it is a
         different hold, this console's own debt and the only remaining
-        record of its counts, and that pays here alone once its hour has
-        run, whatever the recorder holds.
+        record of its counts, and that joins the recorder's own due
+        window in the one line the hour's budget rules name for the
+        counts both hold, at whichever of their hours runs last, paying
+        alone only when the recorder holds nothing due of its own.
         """
         now = self._now()
         carried = self._carried
@@ -1558,9 +1560,10 @@ class _RefusalReporter:
         or leaves them this console's, and a released mirror whose
         answer proved the backend holds nothing of it waits here as this
         console's own debt, the only remaining record of the counts, and
-        pays alone once its hour has run, beside whatever else the hour
-        holds. A second debt joins the first, and the one line pays every
-        identity both carried.
+        joins the one line this console's own due window pays at
+        whichever of their hours runs last, paying alone only when the
+        recorder holds nothing due of its own. A second debt joins the
+        first, and the one line pays every identity both carried.
         The pair keeps the one summary a window owes, and the
         lose-not-double trade with it: a window the record names paid is
         dropped here rather than logged a second time, whatever this
@@ -1569,30 +1572,17 @@ class _RefusalReporter:
         combined payment.
         """
         orphan = self._orphaned
-        if orphan is not None:
-            # A released mirror whose answer proved the backend holds
-            # nothing of it is this console's debt, and nothing anywhere
-            # else records its counts: the debt pays here alone once its
-            # window's hour has run, claiming every identity the mirror
-            # carried, and the payment completes them so whichever layer
-            # meets the proof drops its copy.
-            if host_policy.completed_windows_record_has(orphan[2]):
-                # A payment reached the record under the debt's identity:
-                # the counts are paid, wherever the line came from, and
-                # the debt leaves with the proof.
-                self._orphaned = None
-            elif now - orphan[1] >= host_policy.HOUR_SECONDS:
-                self._orphaned = None
-                if host_policy.claim_summary_payment(orphan[3], now):
-                    for window_id in orphan[3]:
-                        self._lines.complete_window(window_id)
-                    return orphan[0], orphan[1], now, orphan[2]
-                # The claim met another payment's proof: the counts are
-                # paid elsewhere, and nothing is owed here.
         own = self._lines.hour_suppressed_window()
+        if orphan is not None and host_policy.completed_windows_record_has(orphan[2]):
+            # A payment reached the record under the debt's identity: the
+            # counts are paid, wherever the line came from, and the debt
+            # leaves with the proof.
+            self._orphaned = None
+            orphan = None
         mirror = (self.mirrored_summary()
-                  if own is not None or self._mirrored_owner else None)
-        if (own is not None and mirror is not None and mirror[2] is not None
+                  if (own is not None or self._mirrored_owner
+                      or orphan is not None) else None)
+        if (mirror is not None and mirror[2] is not None
                 and not self._mirrored_owner
                 and host_policy.claim_summary_payment(mirror[3], now)):
             # The two windows overlap in the hour they count and the one
@@ -1603,14 +1593,69 @@ class _RefusalReporter:
             # timer of the pair reaches the mirror first, the backend's
             # own flush meets the proof on every constituent alike and
             # drops the copy it holds instead of logging a second line
-            # beside the one this console owes.
+            # beside the one this console owes. A debt the release carved
+            # stands for the second window when the recorder holds none of
+            # its own: the debt's counts overlap the mirror's the same way
+            # in the hour they count, so the one line the hour allows pays
+            # them together, and the console takes the decision on the
+            # mirror's identities before either hour runs.
             self._mirrored_owner = True
         if own is None:
             # Nothing this console's own recorder holds is due, so nothing
-            # combines here: the window the acknowledgement mirrored is the
-            # backend's to pay, on its own arrivals and its own timer, and
-            # a claim this console returned with its own window's carry
-            # leaves the merged window the backend's to pay whole.
+            # of its own combines here: the window the acknowledgement
+            # mirrored is the backend's to pay, on its own arrivals and
+            # its own timer, and a claim this console returned with its
+            # own window's carry leaves the merged window the backend's
+            # to pay whole. A mirror this console claimed for a debt
+            # beside it is the exception: the two windows' counts overlap
+            # in the hour they count, so the hour's budget rules name one
+            # summary for them and the payment is this console's, one
+            # line for the debt's counts beside the mirror's at whichever
+            # of their hours runs last. A debt with no claimed mirror is
+            # the only thing the hour holds of this console's, and it
+            # pays alone once its hour has run, claiming every identity
+            # the released mirror carried, and the payment completes them
+            # so whichever layer meets the proof drops its copy.
+            if orphan is not None and self._mirrored_owner and mirror is not None:
+                if (now - mirror[1] < host_policy.HOUR_SECONDS
+                        or now - orphan[1] < host_policy.HOUR_SECONDS):
+                    # One of the two windows the one line joins is still
+                    # inside its hour: the line waits, and the worker's
+                    # next paced look pays what has come due by then.
+                    return None
+                self._orphaned = None
+                paid = host_policy.claim_summary_payment(orphan[3], now)
+                if paid:
+                    for window_id in orphan[3]:
+                        self._lines.complete_window(window_id)
+                for mirror_id in mirror[3]:
+                    # The one line pays every constituent the mirror
+                    # counts, and the payment completes each of them: the
+                    # backend's own flush reads the proof on any copy it
+                    # still holds, and a backend that lost the window is
+                    # told nothing owed, on any of the identities the
+                    # answer carried.
+                    self._lines.complete_window(mirror_id)
+                self._mirrored = None
+                self._mirrored_paid = False
+                self._mirrored_owner = False
+                self._mirrored_released = False
+                if paid:
+                    return (mirror[0] + orphan[0],
+                            min(mirror[1], orphan[1]), now, mirror[2])
+                # The claim on the debt met another payment's proof: the
+                # debt's counts are paid elsewhere, and the line pays the
+                # claimed mirror's alone.
+                return mirror[0], mirror[1], now, mirror[2]
+            if (orphan is not None
+                    and now - orphan[1] >= host_policy.HOUR_SECONDS):
+                self._orphaned = None
+                if host_policy.claim_summary_payment(orphan[3], now):
+                    for window_id in orphan[3]:
+                        self._lines.complete_window(window_id)
+                    return orphan[0], orphan[1], now, orphan[2]
+                # The claim met another payment's proof: the counts are
+                # paid elsewhere, and nothing is owed here.
             return self._lines.take_summary()
         if now - own[1] < host_policy.HOUR_SECONDS:
             # Nothing this console's own recorder holds is due, so nothing
@@ -1624,57 +1669,80 @@ class _RefusalReporter:
             # the mirror's hour, and the worker's next paced look pays
             # what has come due by then.
             return None
+        if orphan is not None and now - orphan[1] < host_policy.HOUR_SECONDS:
+            # The console's own window is due and the debt's is not: the
+            # hour's budget rules name one summary for the counts both
+            # hold, so the one line waits for the debt's hour and pays
+            # them together, and the worker's next paced look pays what
+            # has come due by then.
+            return None
         summary = self._lines.take_summary()
-        if summary is None or mirror is None or mirror[2] is None:
-            return summary
-        if self._mirrored_paid:
-            # The shared record proves the backend paid this window while
-            # this console held the copy, and the one summary it owes is
-            # logged there already: the copy is resolved here rather than
-            # carried again. The counts this console's own window holds
-            # are none of them: the fold that would have carried the
-            # window into the backend's payment claims its ID on the
-            # record, and the take above has just claimed that ID
-            # unopposed, so no line anywhere has counted these refusals
-            # and they owe this console their own summary beside the one
-            # the backend logged. The pair keeps the one summary a
-            # window owes, not one per hour: the two windows count
-            # refusals no report carried between them, and the mirror's
-            # payment settles the mirror's alone.
-            self._mirrored = None
-            self._mirrored_paid = False
-            self._mirrored_released = False
-            return summary
-        if (not self._mirrored_owner
-                and not host_policy.claim_summary_payment(mirror[3], summary[2])):
-            # The backend's own timer claimed the payment of the mirrored
-            # window inside this very decision, so the one summary the
-            # mirror owes is logged there. This console's own window is
-            # not part of that payment, and the take above proved it the
-            # same way: the fold that would have carried its counts into
-            # the backend's line claims their ID, so a window that
-            # survives its own take holds counts no line ever named, and
-            # they pay here as their own summary, whichever timer reached
-            # the mirror first. The claim is the pair's one payment
-            # decision on each window, and the copy is dropped with the
-            # payment it stands for.
-            self._mirrored = None
-            self._mirrored_paid = False
-            self._mirrored_released = False
-            return summary
+        if summary is None:
+            return None
         count, opened, closed, window_id = summary
-        for mirror_id in mirror[3]:
-            # The one line pays every constituent the mirror counts, and
-            # the payment completes each of them: the backend's own flush
-            # reads the proof on any copy it still holds, and a backend
-            # that lost the window is told nothing owed, on any of the
-            # identities the answer carried.
-            self._lines.complete_window(mirror_id)
-        self._mirrored = None
-        self._mirrored_paid = False
-        self._mirrored_owner = False
-        self._mirrored_released = False
-        return count + mirror[0], min(opened, mirror[1]), closed, window_id
+        if mirror is not None and mirror[2] is not None:
+            if self._mirrored_paid:
+                # The shared record proves the backend paid this window while
+                # this console held the copy, and the one summary it owes is
+                # logged there already: the copy is resolved here rather than
+                # carried again. The counts this console's own window holds
+                # are none of them: the fold that would have carried the
+                # window into the backend's payment claims its ID on the
+                # record, and the take above has just claimed that ID
+                # unopposed, so no line anywhere has counted these refusals
+                # and they owe this console their own summary beside the one
+                # the backend logged. The pair keeps the one summary a
+                # window owes, not one per hour: the two windows count
+                # refusals no report carried between them, and the mirror's
+                # payment settles the mirror's alone.
+                self._mirrored = None
+                self._mirrored_paid = False
+                self._mirrored_released = False
+            elif (not self._mirrored_owner
+                    and not host_policy.claim_summary_payment(mirror[3], closed)):
+                # The backend's own timer claimed the payment of the mirrored
+                # window inside this very decision, so the one summary the
+                # mirror owes is logged there. This console's own window is
+                # not part of that payment, and the take above proved it the
+                # same way: the fold that would have carried its counts into
+                # the backend's line claims their ID, so a window that
+                # survives its own take holds counts no line ever named, and
+                # they pay here as their own summary, whichever timer reached
+                # the mirror first. The claim is the pair's one payment
+                # decision on each window, and the copy is dropped with the
+                # payment it stands for.
+                self._mirrored = None
+                self._mirrored_paid = False
+                self._mirrored_released = False
+            else:
+                # The one line pays every constituent the mirror counts, and
+                # the payment completes each of them: the backend's own flush
+                # reads the proof on any copy it still holds, and a backend
+                # that lost the window is told nothing owed, on any of the
+                # identities the answer carried.
+                count += mirror[0]
+                opened = min(opened, mirror[1])
+                for mirror_id in mirror[3]:
+                    self._lines.complete_window(mirror_id)
+                self._mirrored = None
+                self._mirrored_paid = False
+                self._mirrored_owner = False
+                self._mirrored_released = False
+        if orphan is not None:
+            # The debt joins the one line the hour's budget rules name for
+            # the counts it holds beside the console's own: the counts add,
+            # the earlier opening keeps its place, and the payment
+            # completes every identity the released mirror carried, so
+            # whichever layer meets the proof drops its copy. A claim that
+            # meets another payment's proof leaves the debt paid elsewhere,
+            # and the line pays the counts it holds of its own.
+            if host_policy.claim_summary_payment(orphan[3], closed):
+                count += orphan[0]
+                opened = min(opened, orphan[1])
+                for window_id in orphan[3]:
+                    self._lines.complete_window(window_id)
+            self._orphaned = None
+        return count, opened, closed, window_id
 
     def report_due(self, host):
         """Queue the hostname for the delivery worker, or leave it alone.
@@ -1718,7 +1786,13 @@ class _RefusalReporter:
         a roll of newer names rolls a waiting hostname out of it, and the
         line the console spent for it is kept for its hour alone, so the
         notice's own stamp is what its report carries when neither of the
-        others survives to the delivery.
+        others survives to the delivery. The record entry an eviction
+        drops is trimmed with it: the outcome it holds is the console's
+        fact and its notice is resolved here, so an outcome that arrives
+        after its notice was evicted is a fact about a notice nothing
+        will deliver again, and the failure that eventually reports it
+        reconciles against no entry rather than leaving one nothing will
+        ever resolve.
 
         Every refusal refreshes the newest-refused set first, whatever the
         queue decides, because the skipped and the waiting names are still
@@ -1770,13 +1844,14 @@ class _RefusalReporter:
             return False
         self._pending[host] = None
         self._pending_at[host] = now
-        self._pending_ids[host] = host_policy.mint_notice_id()
+        notice_id = host_policy.mint_notice_id()
+        self._pending_ids[host] = notice_id
         if BACKEND_PORT is None:
             # The backend cannot be told, so the refusal path counted this
             # refusal already, in a line or in the window its held-back
             # lines count into: the notice owes no count of its own, and an
             # eviction after the recovery counts nothing for it.
-            self._pending_accounted.add(host)
+            self._accounted_notices.add(notice_id)
         elif self.line_time(host) is not None:
             # The hour's line budget for this hostname is spent, by the
             # line a failed delivery of an earlier notice named, by a line
@@ -1791,12 +1866,12 @@ class _RefusalReporter:
             # later fails counts nothing beside it, and an eviction after
             # it counts nothing either. A fresh refusal that arrives once
             # the pace has run carries no spent line and gets its own.
-            self._pending_accounted.add(host)
+            self._accounted_notices.add(notice_id)
             self._lines.note_held_back(host)
         while len(self._pending) > host_policy.REFUSED_HOSTS_LIMIT:
             dropped, _attempt = self._pending.popitem(last=False)
             self._pending_at.pop(dropped, None)
-            self._pending_ids.pop(dropped, None)
+            dropped_id = self._pending_ids.pop(dropped, None)
             if dropped == self._in_flight:
                 # The notice whose delivery is in flight is among the ones
                 # this eviction drops: its resolution has to reach the
@@ -1805,7 +1880,9 @@ class _RefusalReporter:
                 # for a notice nothing will ever resolve.
                 self._in_flight_evicted = True
             elif (BACKEND_PORT is not None
-                    and dropped not in self._pending_accounted):
+                    and dropped_id not in self._accounted_notices
+                    and self.line_time(dropped) is None
+                    and not self._lines.first_failure_is_counted(dropped)):
                 # The evicted notice will never be delivered, so no backend
                 # will count the refusal it carries: while the backend
                 # answers, this console is the pair's only recorder for
@@ -1822,7 +1899,18 @@ class _RefusalReporter:
                 # backend counts its refusal when the report lands, and
                 # the failure names it here when it does not.
                 self._lines.note_unreported()
-            self._pending_accounted.discard(dropped)
+            if dropped_id is not None:
+                # The record entry of the identity this eviction drops is
+                # trimmed with it: the outcome it holds is this console's
+                # fact and the notice it belongs to is resolved here, so
+                # the entry keeps no outcome for a notice whose queue
+                # entry is gone, and a failure that eventually reports a
+                # delivery that outlived its queue entry finds no
+                # late outcome to keep either. The identity's own mark
+                # resolves with it, so a fresh notice of the same hostname
+                # starts with a mark of its own.
+                host_policy.trim_notice_record(dropped_id)
+                self._accounted_notices.discard(dropped_id)
             self._lines.first_failure_resolved(dropped)
         self._wake.set()
         return True
@@ -1954,7 +2042,12 @@ class _RefusalReporter:
         self._pending.pop(host, None)
         self._pending_at.pop(host, None)
         self._pending_ids.pop(host, None)
-        self._pending_accounted.discard(host)
+        if notice_id is not None:
+            # The acknowledgement resolves the notice it answered, and
+            # the counted mark the notice holds leaves with it: the queue
+            # can hold a fresh notice of the same hostname in a moment,
+            # and its refusal is counted on its own terms.
+            self._accounted_notices.discard(notice_id)
         self._lines.first_failure_resolved(host)
 
     def report_failed(self, host, notice_id=None):
@@ -1970,11 +2063,18 @@ class _RefusalReporter:
         accounted is not that: the refusal the notice carried was named or
         merged there, whichever its own pace and cap decided, and this
         console does not name the hostname again from a failure whose
-        answer was merely lost. The receipt alone proves only that the
+        answer was merely lost. A failure whose notice this console
+        counted already is held to the same nothing: the outage's refusal
+        path counted the refusal into the window the notice's report
+        carries, and an earlier failure of the same notice named it in a
+        line of its own, so the pair holds the refusal's one naming in
+        the count the console made and a fresh failure adds nothing
+        beside it. The receipt alone proves only that the
         backend took the notice in, before it processed anything, and a
         backend that died between its receipt and its record leaves the
         refusal named nowhere: a notice the record shows taken in but
-        never accounted is named here, the only other layer that saw it.
+        never accounted, and counted nowhere by the console either, is
+        named here, the only other layer that saw it.
         The notice keeps its place in both cases, because the backend that
         took it in owes the acknowledgement the loss ate, and the retry
         reaches it and its own accounting holds the hostname from a
@@ -1995,7 +2095,13 @@ class _RefusalReporter:
         mark it counts resolves together with it: the mark lives exactly
         as long as the notice, and the notice is already gone, so the mark
         a later notice of the same hostname counts is its own and a
-        genuine first failure still reads as one.
+        genuine first failure still reads as one. A late outcome the
+        record of notices still holds for an evicted notice is a fact
+        about a notice nothing will deliver again, and the failure
+        reconciles it: the trim the eviction made is the notice's
+        resolution, and the failure that eventually reports the delivery
+        holds the record to it rather than leaving an outcome behind that
+        no delivery will ever claim.
         """
         self._last_failure = self._now()
         if host in self._pending:
@@ -2006,33 +2112,48 @@ class _RefusalReporter:
             self._in_flight_evicted = False
             self._in_flight_id = None
         if (notice_id is not None
-                and host_policy.notice_accounted_has(notice_id)):
-            # The backend completed this notice's accounting before the
-            # exchange failed, and the refusal the notice carries is named
-            # or merged there already, so the failure counts nothing here:
-            # no line is written, no slot of the hour is spent and no
-            # count joins a window, because the pair names the refusal
-            # once, whichever channel it reached first. The notice is owed
+                and (notice_id in self._accounted_notices
+                     or host_policy.notice_accounted_has(notice_id))):
+            # The refusal this notice carries is counted already: the
+            # backend completed the notice's accounting before the
+            # exchange failed and named or merged the refusal there, or
+            # this console counted it at the refusal that queued the
+            # notice, in a line it wrote or in the window its held-back
+            # lines count into, or an earlier failure of the same notice
+            # named it in a line. The failure counts nothing here: no
+            # line is written, no slot of the hour is spent and no count
+            # joins a window, because the pair names the refusal once,
+            # whichever channel reached it first, and the count it holds
+            # is already made. The notice is owed
             # no eviction count either, and a fresh notice the queue holds
             # under the hostname is owed everything of its own. The receipt
             # alone would say less: a backend that took the notice in and
             # died before it recorded the refusal named it nowhere, so the
             # fallback below accounts it here.
+            if evicted and host_policy.notice_accounted_has(notice_id):
+                # The delivery outlived its queue entry, and its answer was
+                # lost with a backend that had completed the notice's
+                # accounting: the eviction trimmed the record with the
+                # notice, and a late outcome may have landed in it after
+                # the trim, so the failure reconciles it rather than
+                # leaving an entry behind that no delivery will ever
+                # claim.
+                host_policy.trim_notice_record(notice_id)
             if not evicted and host in self._pending:
-                self._pending_accounted.add(host)
+                self._accounted_notices.add(notice_id)
             return
         self._account_line(host, notice_id)
         counted = self._lines.note_retry(host, notice_id)
         if counted:
             _print_refusal_line(_refusal_line_text(host))
-        if (not evicted and host in self._pending
+        if (not evicted and host in self._pending and notice_id is not None
                 and (counted or self._lines.first_failure_is_counted(host))):
             # The failure named this notice's refusal here, in the line it
             # wrote or in the first failure the hour's cap held back, or an
             # earlier failure of the same notice already did, so the
             # refusal is counted and an eviction after the failure counts
             # nothing for it a second time.
-            self._pending_accounted.add(host)
+            self._accounted_notices.add(notice_id)
         if evicted:
             # The notice this failure was taken for has already left the
             # queue, so nothing will ever resolve the mark it counts: the
@@ -2095,6 +2216,19 @@ class _RefusalReporter:
         happened and not when its notice was delivered.
         """
         return self._pending_at.get(host)
+
+    def notice_accounted(self, notice_id):
+        """Whether this console counted the refusal the notice carries.
+
+        The answer covers the refusal path's own counting, the line it
+        wrote at the refusal itself and the window its held-back lines
+        count into, and the failures of the notice that named the refusal
+        before this one, so the report the notice carries says beside its
+        identity that the refusal is counted here already. The line times
+        the hour rolls away cannot say it for a notice that waits past
+        them, so the explicit state travels independently of them.
+        """
+        return notice_id in self._accounted_notices
 
     def ready_to_deliver(self):
         """The backend answers again: everything it was not told is due now.
@@ -2266,7 +2400,13 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     matched against the identity the delivery carried, so it resolves the
     notice it answered and never a fresh notice of the same hostname the
     queue holds, whose refusal the backend it answers was never told
-    about.
+    about. The report also says when this console counted the refusal the
+    notice carries, in a line it wrote or in the window the report
+    carries, beside the identity itself: the line times the report folds
+    in are the only other thing that says it, and the hour rolls them
+    away while a notice still waits for its answer, so the explicit
+    state keeps the backend from counting a refusal the console's window
+    already holds.
     """
     data = {"host": host}
     notice_id = reporter.in_flight_notice_id()
@@ -2278,6 +2418,13 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         # that was really sent, never whatever fresh notice of the same
         # hostname the queue holds by then.
         data["notice"] = notice_id
+        if reporter.notice_accounted(notice_id):
+            # The refusal the notice carries is counted by this console
+            # already, in a line it wrote or in the window the report
+            # carries: the state travels beside the identity, because the
+            # line times the hour rolls away cannot say it for a notice
+            # that waits past them.
+            data["notice_counted"] = "1"
     logged = reporter.line_time(host, notice_id)
     if logged is not None:
         data["logged"] = str(logged)
