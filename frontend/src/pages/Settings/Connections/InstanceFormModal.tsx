@@ -147,6 +147,24 @@ function storedClientBaseUrl(value: string) {
   return base;
 }
 
+// Whether the form's destination fields moved away from the loaded row. The
+// base URL is compared the way the save compares it: the outgoing form path
+// against the stored path the way the client builds it, so a repeated
+// boundary slash the form's own spelling would strip away still counts as
+// the move it is. Turning certificate verification back on only hardens the
+// connection, so it is not a change.
+function destinationMoved(values: FormValues, instance: ArrInstance | null) {
+  return (
+    instance !== null &&
+    (values.ip.trim() !== instance.ip ||
+      Number(values.port) !== instance.port ||
+      normalizeBaseUrl(values.baseUrl) !==
+        storedClientBaseUrl(instance.base_url) ||
+      values.ssl !== instance.ssl ||
+      (instance.verify_ssl && !values.verifySsl))
+  );
+}
+
 const InstanceFormModal: FunctionComponent<Props> = ({
   opened,
   kind,
@@ -216,27 +234,27 @@ const InstanceFormModal: FunctionComponent<Props> = ({
   // with the address it is allowed to travel to. The moment a destination
   // field differs from the loaded row, the Keep mode is switched off and the
   // reason is shown, so the key is entered again rather than the save being
-  // refused by the server with no explanation. The base URL is compared the
-  // way the save compares it: the outgoing form path against the stored path
-  // the way the client builds it, so a repeated boundary slash the form's
-  // own spelling would strip away still counts as the move it is. Turning
-  // certificate verification back on only hardens the connection, so it is
-  // not a change.
-  const destinationChanged =
-    instance !== null &&
-    (form.values.ip.trim() !== instance.ip ||
-      Number(form.values.port) !== instance.port ||
-      normalizeBaseUrl(form.values.baseUrl) !==
-        storedClientBaseUrl(instance.base_url) ||
-      form.values.ssl !== instance.ssl ||
-      (instance.verify_ssl && !form.values.verifySsl));
+  // refused by the server with no explanation.
+  const destinationChanged = destinationMoved(form.values, instance);
   useEffect(() => {
-    if (destinationChanged && hasStoredKey && keyMode === "keep") {
+    // The comparison is read live off the form store rather than off the
+    // render's boolean: on the open commit that boolean was captured before
+    // the open effect's setValues applied, so it still compares the empty
+    // defaults and would switch the mode off for a row nobody touched. The
+    // form object is recreated every render and its `values` field holds the
+    // same stale snapshot, so the live store is read through getValues(),
+    // which the open effect above has already filled with the row's values
+    // by the time this effect runs.
+    if (
+      destinationMoved(form.getValues(), instance) &&
+      hasStoredKey &&
+      keyMode === "keep"
+    ) {
       setKeyMode("replace");
       resetTests();
     }
-    // The form object is recreated every render; only the comparison result
-    // matters here.
+    // The form object is recreated every render, so syncing on it would
+    // loop; the derived boolean still gates re-runs on user edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destinationChanged]);
 
