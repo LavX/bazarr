@@ -1358,9 +1358,14 @@ class _RefusalReporter:
         counts are logged already; a mirror with no ID joins nothing
         either, because the backend that holds it could not be told the
         combined payment and would log its own second line. A console
-        that holds no mirror pays its own window alone, and one that holds
-        no window of its own emits nothing here: the mirror is the
-        backend's window to pay, on its own arrivals and its own timer.
+        that holds no mirror pays its own window alone, and one that
+        holds a paid mirror pays its own alone the same way, beside the
+        line the backend already logged: the own window's counts were
+        never folded into the mirror's payment, or the claim on their ID
+        would have dropped the window, so the pair owes them their one
+        summary from this console. One that holds no window of its own
+        emits nothing here: the mirror is the backend's window to pay,
+        on its own arrivals and its own timer.
         """
         now = self._now()
         carried = self._carried
@@ -1411,22 +1416,27 @@ class _RefusalReporter:
         joins nothing, because the backend that holds it could not be
         told the combined payment.
 
-        The one payment the pair owes the hour is claimed before any line
-        is logged, on the record both processes share and under the lock
+        The one payment each window owes is claimed before any line is
+        logged, on the record both processes share and under the lock
         the record's own updates hold, so the console's aggregate and the
         backend's timer cannot both pay the same window however closely
         their turns overlap: the claim on the mirror's identity is what
         the console's combined payment takes, and a backend whose flush
-        claimed it first leaves the console holding nothing it may pay,
-        its own window dropped with the copy. A mirror the record proves
-        paid is dropped as well, and an own window that counts lines of
-        that paid hour is dropped with it rather than paid as the second
-        line the hour's one-summary ceiling forbids: the pair keeps the
-        lose-not-double trade, whatever this console's own hour says.
-        An own window whose hour the paid mirror's does not reach owes
-        its own hour's summary, so it is paid alone, and a mirror with no
-        ID joins nothing either, because the backend that holds it could
-        not be told the combined payment.
+        claimed it first settles the mirror alone, the copy dropped with
+        the payment it stands for. The console's own window is never part
+        of the mirror's payment, whichever timer wins: a fold that
+        carried the window's counts into the backend's line would have
+        claimed the window's ID on the record, and the take above claims
+        that ID unopposed or drops the window it holds as already paid,
+        so a window that survives its own take holds counts no line
+        anywhere has named, refusals no report carried between the
+        layers, and they owe this console their own summary beside the
+        one the backend logged. The pair keeps the one summary a window
+        owes, and the lose-not-double trade with it: a window the record
+        names paid is dropped here rather than logged a second time,
+        whatever this console's own hour says. A mirror with no ID joins
+        nothing either, because the backend that holds it could not be
+        told the combined payment.
         """
         own = self._lines.hour_suppressed_window()
         if own is None or now - own[1] < host_policy.HOUR_SECONDS:
@@ -1449,28 +1459,34 @@ class _RefusalReporter:
             # The shared record proves the backend paid this window while
             # this console held the copy, and the one summary it owes is
             # logged there already: the copy is resolved here rather than
-            # carried again. This console's own window is paid only where
-            # its counts fall outside the hour the paid line reported: an
-            # own window that counts lines of that hour is dropped with
-            # the copy, because the hour's one summary is paid, and one
-            # whose hour the paid window's never reached owes its own
-            # hour's summary still.
+            # carried again. The counts this console's own window holds
+            # are none of them: the fold that would have carried the
+            # window into the backend's payment claims its ID on the
+            # record, and the take above has just claimed that ID
+            # unopposed, so no line anywhere has counted these refusals
+            # and they owe this console their own summary beside the one
+            # the backend logged. The pair keeps the one summary a
+            # window owes, not one per hour: the two windows count
+            # refusals no report carried between them, and the mirror's
+            # payment settles the mirror's alone.
             self._mirrored = None
             self._mirrored_paid = False
-            if summary[1] < mirror[1] + host_policy.HOUR_SECONDS:
-                return None
             return summary
         if not host_policy.claim_summary_payment(mirror[2], summary[2]):
             # The backend's own timer claimed the payment of the mirrored
-            # window inside this very decision, so the one summary the two
-            # windows' hour owes is logged there, and this console's own
-            # window, counting lines of that same hour, is dropped with
-            # the copy rather than paid as a second line: the claim is the
-            # pair's one payment decision, whichever timer reached the
-            # window first.
+            # window inside this very decision, so the one summary the
+            # mirror owes is logged there. This console's own window is
+            # not part of that payment, and the take above proved it the
+            # same way: the fold that would have carried its counts into
+            # the backend's line claims their ID, so a window that
+            # survives its own take holds counts no line ever named, and
+            # they pay here as their own summary, whichever timer reached
+            # the mirror first. The claim is the pair's one payment
+            # decision on each window, and the copy is dropped with the
+            # payment it stands for.
             self._mirrored = None
             self._mirrored_paid = False
-            return None
+            return summary
         count, opened, closed, window_id = summary
         self._lines.complete_window(mirror[2])
         self._mirrored = None
@@ -1706,7 +1722,12 @@ class _RefusalReporter:
         fresh notice of the same host counts its own first failure anew.
         The delivery that carried the notice is resolved with it too, so
         an eviction that happened while it waited in flight is forgotten
-        rather than held against a later notice of the same host.
+        rather than held against a later notice of the same host. The
+        identity the answer resolves also leaves the record of notices
+        the pair shares, trimmed here, so the backend's bounded
+        accounting of notices reads the notice as resolved and drops its
+        mark before the mark of any notice still waiting, however many
+        acknowledged notices arrive around one that is.
 
         The acknowledgement resolves the notice it answers and nothing
         else: the queue can evict the notice whose delivery waited and a
@@ -1728,6 +1749,14 @@ class _RefusalReporter:
             self._in_flight = None
             self._in_flight_evicted = False
             self._in_flight_id = None
+        if notice_id is not None:
+            # The answer resolved the notice it answered, whichever notice
+            # the queue holds now, so its identity leaves the record of
+            # notices the pair shares: the backend's bounded accounting of
+            # notices then reads it as resolved and drops its mark before
+            # the mark of any notice still waiting, however many
+            # acknowledged notices arrive around one that is.
+            host_policy.trim_notice_record(notice_id)
         if (notice_id is not None and host in self._pending
                 and self._pending_ids.get(host) != notice_id):
             # The queue holds a fresh notice of this hostname, one the
@@ -2272,11 +2301,14 @@ def _print_due_refusal_summary(reporter: _RefusalReporter) -> None:
     the traffic has stopped. The other time is a failed delivery, whose
     host line the failure path writes itself.
 
-    The payment is also written to the record of completed windows the two
-    processes share, before this console builds anything on it, the same
-    way the backend writes its own: a console that holds a copy of the
+    The payment decision is claimed on the record of completed windows
+    the two processes share inside the take itself, before the line is
+    logged and before this console builds anything on it, the same way
+    the backend claims its own, so a console that holds a copy of the
     window, and any readiness that follows, verifies the payment from
-    there however its own answers turn out.
+    there however its own answers turn out, even from a payer that died
+    between its line and this write. The write below renews the same
+    proof for the answer that will carry it.
     """
     summary = reporter.take_summary()
     if summary:

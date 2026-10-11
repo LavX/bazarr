@@ -292,13 +292,17 @@ def _flush_suppressed_summary(recorder=None):
 
     The count is held for a full hour before it is reported; once it is due,
     the next refusal and every visit to System > Status both deliver it.
-    The payment is also written to the record the two processes share,
-    before any answer is built, so a console that holds a copy of the
-    window can verify the payment however its own answer turned out and
-    however many backends have restarted since. The recorder defaults to
-    the module's own; the summary timer below passes the one it armed with,
-    so a timer left running flushes the record it holds and nothing a
-    later swap put in its place.
+    The payment decision is claimed on the record the two processes share
+    inside the take itself, before the line is logged and before any
+    answer is built, so a console that holds a copy of the window can
+    verify the payment however its own answer turned out and however many
+    backends have restarted since, even from a payer that died between
+    its line and this write. The write below renews the same proof for
+    the answer that will carry it, so the record outlives whichever
+    answer was lost. The recorder defaults to the module's own; the
+    summary timer below passes the one it armed with, so a timer left
+    running flushes the record it holds and nothing a later swap put in
+    its place.
     """
     recorder = _refusals if recorder is None else recorder
     summary = recorder.take_summary()
