@@ -25,10 +25,8 @@ def translate_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(translate_main, 'validate_translation_params', lambda *a, **kw: None)
     monkeypatch.setattr(translate_main, 'convert_language_codes',
                         lambda to_lang, forced, hi: (Language('nld'), to_lang))
-    monkeypatch.setattr(translate_main, 'get_subtitle_path',
-                        lambda *a, **kw: str(tmp_path / 'video.nl.srt'))
-    monkeypatch.setattr(translate_main, 'get_subtitle_destination_path',
-                        lambda file, subtitle: str(tmp_path / subtitle))
+    monkeypatch.setattr(translate_main, 'translated_destination_path',
+                        lambda video_path, to_lang, forced, hi: str(tmp_path / 'video.nl.srt'))
     monkeypatch.setattr(translate_main, 'alpha3_from_alpha2', lambda code: 'nld')
 
     translator = MagicMock()
