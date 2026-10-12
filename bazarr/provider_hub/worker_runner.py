@@ -18,6 +18,40 @@ import traceback
 
 ABI = "bazarr.provider-worker.v1"
 
+# The reply is a single JSON line, so a traceback longer than this is cut to
+# its tail, where the raising frame is: that is the part the host logs.
+_ERROR_TRACEBACK_LIMIT = 8000
+
+
+def _error_payload(error):
+    """The error half of a failed worker's reply.
+
+    The plugin's own traceback travels with it, cut to its last 8,000
+    characters: the host's traceback for a plugin failure ends in the
+    transport for every plugin and every cause, so without this the log
+    cannot point at the plugin's frame. The errno is set only for an OSError
+    the operating system raised: the plugins raise PermissionError with a
+    message of their own for a refused login, and that form never carries
+    one, so its presence tells the two apart.
+    """
+    payload = {
+        "code": "provider",
+        "class_name": error.__class__.__name__,
+        "message": str(error),
+        # A rate limit the provider timed for us. The host rebuilds
+        # the exception from the class name and message alone, so
+        # without carrying this the provider's own "come back in an
+        # hour" is lost at the boundary and its backoff falls back
+        # to whatever the exception class is worth in general.
+        "retry_after": _retry_after(error),
+        "retryable": False,
+        "traceback": "".join(traceback.format_exception(type(error), error, error.__traceback__))[
+            -_ERROR_TRACEBACK_LIMIT:],
+    }
+    if isinstance(error, OSError) and isinstance(error.errno, int) and not isinstance(error.errno, bool):
+        payload["errno"] = error.errno
+    return payload
+
 
 def _load_provider():
     bundle_path = os.environ["BAZARR_PROVIDER_HUB_BUNDLE"]
@@ -173,18 +207,7 @@ def main():
                 "abi": ABI,
                 "id": request.get("id") if isinstance(request, dict) else None,
                 "ok": False,
-                "error": {
-                    "code": "provider",
-                    "class_name": error.__class__.__name__,
-                    "message": str(error),
-                    # A rate limit the provider timed for us. The host rebuilds
-                    # the exception from the class name and message alone, so
-                    # without carrying this the provider's own "come back in an
-                    # hour" is lost at the boundary and its backoff falls back
-                    # to whatever the exception class is worth in general.
-                    "retry_after": _retry_after(error),
-                    "retryable": False,
-                },
+                "error": _error_payload(error),
             }
         sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
         sys.stdout.flush()

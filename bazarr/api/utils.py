@@ -6,7 +6,7 @@ import hmac
 import logging
 
 from functools import wraps
-from flask import request, abort
+from flask import g, jsonify, request, abort, after_this_request
 from operator import itemgetter
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -115,6 +115,15 @@ def _subtitle_language_details(language_code):
 def _safe_apikey_compare(provided, expected):
     if not provided:
         return False
+    if not expected:
+        # An empty stored key authenticates nothing, by rule. The compare
+        # below would not give that rule by itself: compare_digest answers
+        # that two empty strings match, so a boot that withholds an
+        # undecryptable key as an empty string would otherwise pair with an
+        # empty presented key and let the request through. The guard is
+        # defense in depth on top of the presented-side check, which already
+        # refuses an empty or missing key before the stored one is read.
+        return False
     return hmac.compare_digest(str(provided), str(expected))
 
 
@@ -161,6 +170,169 @@ def authenticate(actual_method):
                 return actual_method(*args, **kwargs)
 
         return abort(401)
+
+    return wrapper
+
+
+def _never_cacheable(response):
+    """The response finalizer of the HLS and token routes: never cacheable.
+
+    It is registered before authentication, so it runs on every answer
+    those routes produce, including the 500 the framework builds from an
+    unhandled exception: no playlist, segment or token answer may be
+    stored by a cache. It adds no marker: the app-wide hook below is what
+    marks the token route's answers, so even that 500 carries the marker.
+    """
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+def editor_no_store(response):
+    """The app-wide response hook of the editor's no-store routes.
+
+    The finalizer above is registered only when a decorated view runs, but
+    the router itself answers an automatic OPTIONS request and refuses an
+    unsupported method with a 405 before any view is dispatched, so those
+    answers would otherwise carry no cache header at all. The hook is
+    scoped to the two routes the lane keeps no-store, the same way the
+    decorators scope them by path, and marks whatever those paths answer
+    with no-store, whatever built the answer. On the token route it also
+    restates the route marker, so the router-built OPTIONS and 405 and
+    even the unhandled-exception 500 reach the client marked, the way the
+    route's deliberate answers are marked. It is registered with the api
+    blueprint, so it runs after the finalizer and only re-states a header
+    a running view has already set.
+    """
+    path = request.path.rstrip('/')
+    if path.endswith('/api/editor/stream-token'):
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Bazarr-Stream-Token-Route'] = '1'
+    elif '/api/editor/hls/' in request.path:
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+def register_editor_no_store(blueprint):
+    """Register the no-store hook above on the api blueprint, app-wide.
+
+    Production calls this once from the api package, so the tests that
+    need the hook wire it the same way, through this registration, rather
+    than by installing the hook function by hand.
+    """
+    blueprint.after_app_request(editor_no_store)
+
+
+def _editor_unauthorized_response():
+    """The editor routes' 401: never cacheable, and marked on the token route.
+
+    The token route's marker tells the frontend that Bazarr itself answered,
+    rather than a reverse proxy returning the same status while Bazarr is
+    down or restarting.
+    """
+    response = jsonify({'message': 'Not authenticated'})
+    response.status_code = 401
+    response.headers['Cache-Control'] = 'no-store'
+    if request.path.rstrip('/').endswith('/api/editor/stream-token'):
+        response.headers['X-Bazarr-Stream-Token-Route'] = '1'
+    return response
+
+
+def _editor_request_carries_url_apikey():
+    """Whether the request carries an apikey outside the header.
+
+    The form is read only for the body types that carry form fields,
+    urlencoded and multipart, because reading request.form parses the
+    whole request for them. The answer says only that a key is present,
+    not that it is valid: the editor routes refuse an apikey in a URL or
+    a form whatever else the request presents, so a valid header
+    credential beside it changes nothing.
+    """
+    if 'apikey' in request.args:
+        return True
+    if request.mimetype not in ('application/x-www-form-urlencoded',
+                                'multipart/form-data'):
+        return False
+    return 'apikey' in request.form
+
+
+def authenticate_header_only(actual_method):
+    """Guard the editor routes: the API key in the header, nowhere else.
+
+    The editor routes exist for the frontend, which sends the key in the
+    X-API-KEY header. Keeping the query-string fallback there would let a
+    key regress into a URL unnoticed, so a script still passing apikey= in
+    a URL fails at once with a 401 instead of passing with a deprecation
+    warning nobody reads. The rest of the API keeps the fallback. The
+    refusal is checked before the header is read, so an apikey in the URL
+    is refused even beside a valid header key.
+    """
+    @wraps(actual_method)
+    def wrapper(*args, **kwargs):
+        if request.path.rstrip('/').endswith('/api/editor/stream-token'):
+            # Every answer of the token route is no-store, including one
+            # the framework builds from an unhandled exception. The
+            # finalizer is registered before authentication, so nothing
+            # this route produces can bypass it.
+            after_this_request(_never_cacheable)
+        if _editor_request_carries_url_apikey():
+            return _editor_unauthorized_response()
+        if _safe_apikey_compare(request.headers.get('X-API-KEY'), settings.auth.apikey):
+            with _user_request_scope():
+                return actual_method(*args, **kwargs)
+        return _editor_unauthorized_response()
+
+    return wrapper
+
+
+def authenticate_header_or_stream_token(actual_method):
+    """The HLS route's variant: the header, or a valid st in the query string.
+
+    A native player (Safari, iOS) cannot add headers to the segment requests
+    it makes itself, so the playlist URL it is given carries a media-scoped
+    stream token as st instead of the API key. The token is verified against
+    the route's own media type, media id, audio track and arr instance. An
+    apikey in the query or form is refused before either credential is read,
+    the same way the header-only routes refuse it.
+    """
+    @wraps(actual_method)
+    def wrapper(*args, **kwargs):
+        # Every answer of the HLS route is no-store, including one the
+        # framework builds from an unhandled exception. The finalizer is
+        # registered before authentication, so nothing this route produces
+        # can bypass it.
+        after_this_request(_never_cacheable)
+        if _editor_request_carries_url_apikey():
+            return _editor_unauthorized_response()
+        if _safe_apikey_compare(request.headers.get('X-API-KEY'), settings.auth.apikey):
+            with _user_request_scope():
+                return actual_method(*args, **kwargs)
+        token = request.args.get('st')
+        if token:
+            from api.editor import stream_token
+            arr_instance_id = request.args.get('arr_instance_id')
+            if arr_instance_id in (None, ''):
+                arr_instance_id = None
+            else:
+                try:
+                    arr_instance_id = int(arr_instance_id)
+                except (TypeError, ValueError):
+                    return _editor_unauthorized_response()
+            if stream_token.verify_stream_token(
+                token,
+                kwargs.get('media_type'),
+                kwargs.get('media_id'),
+                arr_instance_id,
+                kwargs.get('audio_track'),
+            ):
+                # The token was verified against this route's own scope, so
+                # the handler may echo it into the playlist it returns. Only
+                # the verified token reaches it: a st that merely rode along
+                # on a header-authenticated call is dropped, not echoed back
+                # into URIs unescaped.
+                g.editor_hls_stream_token = token
+                with _user_request_scope():
+                    return actual_method(*args, **kwargs)
+        return _editor_unauthorized_response()
 
     return wrapper
 

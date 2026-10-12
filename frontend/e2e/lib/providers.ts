@@ -14,6 +14,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { appPath } from "./base";
 import type { BazarrInstance } from "./container";
 import { allow, waitUntilReady } from "./container";
 import { runDir } from "./shared";
@@ -128,7 +129,10 @@ async function getJson<T>(
 
 async function installations(api: APIRequestContext): Promise<Installation[]> {
   return (
-    await getJson<{ data: Installation[] }>(api, "/api/provider-hub/providers")
+    await getJson<{ data: Installation[] }>(
+      api,
+      appPath("/api/provider-hub/providers"),
+    )
   ).data;
 }
 
@@ -142,7 +146,7 @@ async function installations(api: APIRequestContext): Promise<Installation[]> {
 async function catalogEntries(api: APIRequestContext): Promise<CatalogEntry[]> {
   const catalog = await getJson<{ entries: CatalogEntry[] }>(
     api,
-    "/api/provider-hub/catalog",
+    appPath("/api/provider-hub/catalog"),
     CATALOG_TIMEOUT_MS,
   );
   if (catalog.entries.length > 0) return catalog.entries;
@@ -152,7 +156,7 @@ async function catalogEntries(api: APIRequestContext): Promise<CatalogEntry[]> {
     throw new Error("could not resolve the provider catalog's main commit");
   }
   const response = await api.patch(
-    `/api/provider-hub/catalog/sources/${OFFICIAL_SOURCE}`,
+    appPath(`/api/provider-hub/catalog/sources/${OFFICIAL_SOURCE}`),
     // The field name is the API's own.
     // eslint-disable-next-line camelcase
     { data: { dev_ref: commit }, timeout: CATALOG_TIMEOUT_MS },
@@ -162,7 +166,7 @@ async function catalogEntries(api: APIRequestContext): Promise<CatalogEntry[]> {
   }
   const pinned = await getJson<{ entries: CatalogEntry[] }>(
     api,
-    "/api/provider-hub/catalog",
+    appPath("/api/provider-hub/catalog"),
     CATALOG_TIMEOUT_MS,
   );
   if (pinned.entries.length === 0) {
@@ -182,7 +186,7 @@ async function waitForJobs(api: APIRequestContext, ids: number[]) {
     const open = (
       await getJson<{ data: { job_id: number; status: string }[] }>(
         api,
-        "/api/system/jobs",
+        appPath("/api/system/jobs"),
       )
     ).data.filter(
       (job) =>
@@ -201,7 +205,7 @@ async function waitForJobs(api: APIRequestContext, ids: number[]) {
 async function enable(api: APIRequestContext, ids: string[]) {
   const settings = await getJson<{ general: { enabled_providers?: string[] } }>(
     api,
-    "/api/system/settings",
+    appPath("/api/system/settings"),
   );
   const current = settings.general.enabled_providers ?? [];
   const wanted = Array.from(new Set([...current, ...ids]));
@@ -209,7 +213,9 @@ async function enable(api: APIRequestContext, ids: string[]) {
   const form = new FormData();
   for (const id of wanted)
     form.append("settings-general-enabled_providers", id);
-  const response = await api.post("/api/system/settings", { multipart: form });
+  const response = await api.post(appPath("/api/system/settings"), {
+    multipart: form,
+  });
   if (!response.ok()) {
     throw new Error(`enabling providers answered ${response.status()}`);
   }
@@ -224,7 +230,7 @@ async function restartIntoPlace(
   // The connection can drop before the answer arrives; the poll below is
   // what says whether the restart happened.
   await api
-    .post("/api/system", { form: { action: "restart" } })
+    .post(appPath("/api/system"), { form: { action: "restart" } })
     .catch(() => undefined);
   const deadline = Date.now() + RESTART_CAP_MS;
   while (Date.now() < deadline) {
@@ -323,9 +329,12 @@ async function provision(
     }
     const jobs: number[] = [];
     for (const id of missing) {
-      const response = await api.post("/api/provider-hub/installations", {
-        data: { manifest: manifestOf(entries.get(id) as CatalogEntry) },
-      });
+      const response = await api.post(
+        appPath("/api/provider-hub/installations"),
+        {
+          data: { manifest: manifestOf(entries.get(id) as CatalogEntry) },
+        },
+      );
       if (response.status() !== 202) {
         throw new Error(`installing ${id} answered ${response.status()}`);
       }

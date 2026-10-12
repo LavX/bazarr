@@ -82,6 +82,14 @@ beforeEach(() => {
   wavesurfer.load.mockReset();
   server.use(
     http.get("/api/system/jobs", stillRunning),
+    http.get("/api/system/status", () =>
+      HttpResponse.json({
+        data: {
+          translation_availability: { available: true, reason: "" },
+          editor_translation_availability: { available: true, reason: "" },
+        },
+      }),
+    ),
     http.get("/api/system/languages", () =>
       HttpResponse.json([
         { code2: "en", code3: "eng", name: "English", enabled: true },
@@ -510,6 +518,183 @@ describe("WaveformTimeline on the job path", () => {
   });
 });
 
+describe("TranslatePanel and the translation gate", () => {
+  it("disables the translate action and shows the reason when the gate is closed", async () => {
+    server.use(
+      http.get("/api/system/status", () =>
+        HttpResponse.json({
+          data: {
+            translation_availability: {
+              available: false,
+              reason: "No translator is configured",
+            },
+            editor_translation_availability: {
+              available: false,
+              reason: "No translator is configured",
+            },
+          },
+        }),
+      ),
+    );
+    renderPanel();
+
+    expect(
+      await screen.findByText("No translator is configured"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Translate" }),
+    ).toBeDisabled();
+  });
+
+  it("stays enabled when only the configured engine is closed", async () => {
+    // The panel posts to the editor endpoint, which asks about the AI
+    // Subtitle Translator service, so a switched-off configured engine with a
+    // working service must not disable a translation the endpoint accepts.
+    server.use(
+      http.get("/api/system/status", () =>
+        HttpResponse.json({
+          data: {
+            translation_availability: {
+              available: false,
+              reason: "No translator is configured",
+            },
+            editor_translation_availability: { available: true, reason: "" },
+          },
+        }),
+      ),
+    );
+    renderPanel();
+
+    // The hook treats an unanswered status as available, so the enabled
+    // assertion has to wait for the fixture's answer: before it arrives, a
+    // component reading the wrong gate still looks enabled.
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState([QueryKeys.System, "status"])?.status,
+      ).toBe("success"),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Translate" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByText("No translator is configured"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("disables the translate action when only the editor's service cannot run", async () => {
+    // The other direction: the configured engine can translate, but the
+    // editor's service has no URL, so an enabled button would answer 409.
+    server.use(
+      http.get("/api/system/status", () =>
+        HttpResponse.json({
+          data: {
+            translation_availability: { available: true, reason: "" },
+            editor_translation_availability: {
+              available: false,
+              reason:
+                "The AI Subtitle Translator service URL is not configured",
+            },
+          },
+        }),
+      ),
+    );
+    renderPanel();
+
+    expect(
+      await screen.findByText(
+        "The AI Subtitle Translator service URL is not configured",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Translate" }),
+    ).toBeDisabled();
+  });
+
+  it("answers a stale gate inline and disables the panel's translate", async () => {
+    // The status the panel reads is cached for a minute, and the gate can
+    // close elsewhere after it was read: the 409 has to arrive inline with
+    // its own reason, and the status re-read it triggers has to disable the
+    // Translate button Try Again returns.
+    let statusFetches = 0;
+    let queueRequests = 0;
+    server.use(
+      // The first answer is what the stale panel read; every answer after
+      // it says the gate has closed, including the re-read the 409
+      // triggers.
+      http.get("/api/system/status", () => {
+        statusFetches += 1;
+        return HttpResponse.json({
+          data:
+            statusFetches === 1
+              ? {
+                  translation_availability: { available: true, reason: "" },
+                  editor_translation_availability: {
+                    available: true,
+                    reason: "",
+                  },
+                }
+              : {
+                  translation_availability: {
+                    available: false,
+                    reason: "No translator is configured",
+                  },
+                  editor_translation_availability: {
+                    available: false,
+                    reason: "No translator is configured",
+                  },
+                },
+        });
+      }),
+      // The editor endpoint answers the gate's refusal with an error field
+      // and 409. Its reason differs from the status answer's so the inline
+      // message is caught reading the 409's own body, not the re-read.
+      http.post("/api/translator/editor", () => {
+        queueRequests += 1;
+        return HttpResponse.json(
+          { error: "Translation was switched off" },
+          { status: 409 },
+        );
+      }),
+    );
+    renderPanel();
+    const user = userEvent.setup();
+
+    // The cached status still says the gate is open, so the panel's
+    // Translate is clickable.
+    const translate = await screen.findByRole("button", { name: "Translate" });
+    await waitFor(() => expect(translate).toBeEnabled());
+    await user.click(translate);
+
+    // The panel answers for itself, inline with no toast: the 409's own
+    // reason, a sentence nothing else on the page says.
+    expect(
+      await screen.findByText("Translation was switched off"),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("Translation not queued"),
+    ).not.toBeInTheDocument();
+
+    // The re-read brings the closed answer, whose reason joins the inline
+    // one while the failure stands.
+    expect(
+      await screen.findByText("No translator is configured"),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Try Again" }));
+
+    // The Translate button Try Again returns reads the re-read answer and
+    // comes back disabled, so the second attempt never reaches the server.
+    const translateAgain = await screen.findByRole("button", {
+      name: "Translate",
+    });
+    await waitFor(() => expect(translateAgain).toBeDisabled());
+    await user.click(translateAgain);
+    expect(queueRequests).toBe(1);
+    expect(statusFetches).toBe(2);
+  });
+});
+
 describe("EditorPage single-line translate", () => {
   function renderEditor(content: string) {
     const router = createMemoryRouter(
@@ -646,5 +831,436 @@ describe("EditorPage single-line translate", () => {
       expect(screen.getByTitle("Translate this cue")).toBeEnabled(),
     );
     expect(screen.getByTitle("Translate this cue")).toHaveTextContent("AI");
+  });
+
+  it("answers a stale gate with the server's refusal and disables the line translate", async () => {
+    // The status the controls read is cached, and the gate can close
+    // elsewhere after it was read: the refusal has to show the server's own
+    // reason, and the refetched status has to flip the line translate to its
+    // disabled state.
+    const srt =
+      "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
+    const statusAnswers = [
+      {
+        translation_availability: { available: true, reason: "" },
+        editor_translation_availability: { available: true, reason: "" },
+      },
+      {
+        translation_availability: {
+          available: false,
+          reason: "No translator is configured",
+        },
+        editor_translation_availability: {
+          available: false,
+          reason: "No translator is configured",
+        },
+      },
+    ];
+    let queueRequests = 0;
+    server.use(
+      http.get("/api/system/status", () =>
+        HttpResponse.json({ data: statusAnswers.shift() }),
+      ),
+      http.get("/api/movies/50/subtitles/en/content", () =>
+        HttpResponse.json({
+          content: srt,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en",
+          size: 100,
+          lastModified: 0,
+          mediaTitle: "Example",
+        }),
+      ),
+      // The reference the line is translated from, one load select away:
+      // the line translate button renders once a reference is loaded.
+      http.get("/api/movies/50/subtitles/hu/content", () =>
+        HttpResponse.json({
+          content: srt,
+          encoding: "utf-8",
+          format: "srt",
+          language: "hu",
+          size: 100,
+          lastModified: 0,
+        }),
+      ),
+      http.get("/api/editor/subtitles", () =>
+        HttpResponse.json({ subtitles: [] }),
+      ),
+      http.get("/api/editor/info", () =>
+        HttpResponse.json({
+          duration: 2,
+          videoCodec: "h264",
+          audioCodec: "aac",
+          resolution: "1920x1080",
+          container: "mkv",
+          audioTracks: [],
+        }),
+      ),
+      http.get("/api/editor/peaks", () =>
+        HttpResponse.json({ peaks: [0.5, -1], duration: 0.2, sampleRate: 10 }),
+      ),
+      // The editor endpoint answers the gate's refusal with an error field
+      // and 409, which is the body the refusal reads. The reason differs
+      // from the status answer's so the toast is caught reading the 409's
+      // own body, not the refetched status.
+      http.post("/api/translator/editor", () => {
+        queueRequests += 1;
+        return HttpResponse.json(
+          { error: "Translation was switched off" },
+          { status: 409 },
+        );
+      }),
+    );
+    renderEditor(srt);
+    const user = userEvent.setup();
+
+    // The AI button needs a reference to translate from. The first cue is
+    // selected on load, so opening the reference panel and picking a
+    // language is all the setup it needs.
+    await user.click(
+      await screen.findByRole("button", { name: "Reference Subtitle" }),
+    );
+    const referenceOption = await screen.findByText("Select language...");
+    // A native select has no Testing Library query of its own.
+    // eslint-disable-next-line testing-library/no-node-access
+    const referenceSelect = referenceOption.closest("select");
+    expect(referenceSelect).not.toBeNull();
+    await user.selectOptions(referenceSelect!, "hu");
+
+    // The cached status still says the gate is open, so the line translate
+    // is clickable.
+    const aiBtn = await screen.findByTitle("Translate this cue");
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    await user.click(aiBtn);
+
+    // The refusal speaks for itself: the 409's own reason, which only the
+    // toast can show because every other reason on the page reads the
+    // refetched status, then a title true of every 409 the endpoint
+    // answers. Before this fix the catch swallowed it.
+    expect(
+      await screen.findByText("Translation was switched off"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Translation not queued"),
+    ).toBeInTheDocument();
+
+    // The refusal also refetches the status, so the button reads the closed
+    // gate and disables itself with the reason in its title.
+    await waitFor(() =>
+      expect(
+        screen.getByTitle("Translate this cue: No translator is configured"),
+      ).toBeDisabled(),
+    );
+    expect(queueRequests).toBe(1);
+  });
+
+  it("leaves the subtitle unchanged when the queue refuses the line translate", async () => {
+    // The line translate adds a cue at the reference timing when the
+    // selected cue does not overlap it. A refusal has to leave the
+    // subtitle as it was, with no empty cue left to delete by hand.
+    const srt =
+      "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
+    // The reference sits at the playback position and away from the first
+    // cue, so the line targets a new cue instead of the selected one.
+    const reference = "1\n00:00:00,000 --> 00:00:00,500\nSzervusz\n";
+    let queueRequests = 0;
+    server.use(
+      http.get("/api/movies/50/subtitles/en/content", () =>
+        HttpResponse.json({
+          content: srt,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en",
+          size: 100,
+          lastModified: 0,
+          mediaTitle: "Example",
+        }),
+      ),
+      http.get("/api/movies/50/subtitles/hu/content", () =>
+        HttpResponse.json({
+          content: reference,
+          encoding: "utf-8",
+          format: "srt",
+          language: "hu",
+          size: 100,
+          lastModified: 0,
+        }),
+      ),
+      http.get("/api/editor/subtitles", () =>
+        HttpResponse.json({ subtitles: [] }),
+      ),
+      http.get("/api/editor/info", () =>
+        HttpResponse.json({
+          duration: 2,
+          videoCodec: "h264",
+          audioCodec: "aac",
+          resolution: "1920x1080",
+          container: "mkv",
+          audioTracks: [],
+        }),
+      ),
+      http.get("/api/editor/peaks", () =>
+        HttpResponse.json({ peaks: [0.5, -1], duration: 0.2, sampleRate: 10 }),
+      ),
+      // The endpoint refuses the line with a 409 and its reason, which is
+      // the body the refusal toast reads.
+      http.post("/api/translator/editor", () => {
+        queueRequests += 1;
+        return HttpResponse.json(
+          { error: "Translation was switched off" },
+          { status: 409 },
+        );
+      }),
+    );
+    renderEditor(srt);
+    const user = userEvent.setup();
+
+    // A reference is what the line translates from. The first cue is
+    // selected on load, so opening the reference panel and picking a
+    // language is all the setup the AI button needs.
+    await user.click(
+      await screen.findByRole("button", { name: "Reference Subtitle" }),
+    );
+    const referenceOption = await screen.findByText("Select language...");
+    // A native select has no Testing Library query of its own.
+    // eslint-disable-next-line testing-library/no-node-access
+    const referenceSelect = referenceOption.closest("select");
+    expect(referenceSelect).not.toBeNull();
+    await user.selectOptions(referenceSelect!, "hu");
+
+    // Two cues before the attempt, and the same two after it.
+    const grid = screen.getByRole("grid", { name: "Subtitle cues" });
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+
+    const aiBtn = await screen.findByTitle("Translate this cue");
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    await user.click(aiBtn);
+
+    // The refusal speaks for itself, and the subtitle keeps its two cues:
+    // the cue at the reference timing was never added.
+    expect(
+      await screen.findByText("Translation was switched off"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+    expect(screen.queryByText("00:00:00.500")).not.toBeInTheDocument();
+    expect(queueRequests).toBe(1);
+  });
+
+  it("leaves the subtitle unchanged when the queue answers without a job id", async () => {
+    // An answer that carries no job id means nothing was queued, so the
+    // subtitle has to stay as it was, with no cue at the reference timing.
+    const srt =
+      "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
+    const reference = "1\n00:00:00,000 --> 00:00:00,500\nSzervusz\n";
+    let queueRequests = 0;
+    server.use(
+      http.get("/api/movies/50/subtitles/en/content", () =>
+        HttpResponse.json({
+          content: srt,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en",
+          size: 100,
+          lastModified: 0,
+          mediaTitle: "Example",
+        }),
+      ),
+      http.get("/api/movies/50/subtitles/hu/content", () =>
+        HttpResponse.json({
+          content: reference,
+          encoding: "utf-8",
+          format: "srt",
+          language: "hu",
+          size: 100,
+          lastModified: 0,
+        }),
+      ),
+      http.get("/api/editor/subtitles", () =>
+        HttpResponse.json({ subtitles: [] }),
+      ),
+      http.get("/api/editor/info", () =>
+        HttpResponse.json({
+          duration: 2,
+          videoCodec: "h264",
+          audioCodec: "aac",
+          resolution: "1920x1080",
+          container: "mkv",
+          audioTracks: [],
+        }),
+      ),
+      http.get("/api/editor/peaks", () =>
+        HttpResponse.json({ peaks: [0.5, -1], duration: 0.2, sampleRate: 10 }),
+      ),
+      // The endpoint takes the request but answers no job id, which is the
+      // queue's way of saying nothing was queued.
+      http.post("/api/translator/editor", () => {
+        queueRequests += 1;
+        return HttpResponse.json({}, { status: 202 });
+      }),
+    );
+    renderEditor(srt);
+    const user = userEvent.setup();
+
+    // A reference away from the first cue is what sends the line to a new
+    // cue instead of the selected one. The first cue is selected on load,
+    // so opening the reference panel and picking a language is all the
+    // setup the AI button needs.
+    await user.click(
+      await screen.findByRole("button", { name: "Reference Subtitle" }),
+    );
+    const referenceOption = await screen.findByText("Select language...");
+    // A native select has no Testing Library query of its own.
+    // eslint-disable-next-line testing-library/no-node-access
+    const referenceSelect = referenceOption.closest("select");
+    expect(referenceSelect).not.toBeNull();
+    await user.selectOptions(referenceSelect!, "hu");
+
+    // Two cues before the attempt, and the same two after it.
+    const grid = screen.getByRole("grid", { name: "Subtitle cues" });
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+
+    const aiBtn = await screen.findByTitle("Translate this cue");
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    await user.click(aiBtn);
+
+    // The attempt ran and released the button, and the subtitle keeps its
+    // two cues: the cue at the reference timing was never added.
+    await waitFor(() => expect(queueRequests).toBe(1));
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+    expect(screen.queryByText("00:00:00.500")).not.toBeInTheDocument();
+  });
+
+  it("holds the initiating cue while the queue answer is pending, so a second click queues nothing", async () => {
+    // The insertion index the line translate targets belongs to a cue
+    // that does not exist until the queue accepts the line, so while the
+    // answer is pending the hold has to sit on the initiating cue. Held
+    // on the insertion index instead, the button that sent the line
+    // stayed clickable and a second click queued a second job.
+    const srt =
+      "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
+    // The reference sits at the playback position and away from both
+    // cues, so the line targets a new cue whichever cue is selected.
+    const reference = "1\n00:00:00,000 --> 00:00:00,500\nSzervusz\n";
+    let queueRequests = 0;
+    // Held until the test releases it, so the pending window is long
+    // enough to try a second click in.
+    let answerQueue: () => void = () => undefined;
+    const queueGate = new Promise<void>((resolve) => {
+      answerQueue = resolve;
+    });
+    server.use(
+      http.get("/api/movies/50/subtitles/en/content", () =>
+        HttpResponse.json({
+          content: srt,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en",
+          size: 100,
+          lastModified: 0,
+          mediaTitle: "Example",
+        }),
+      ),
+      http.get("/api/movies/50/subtitles/hu/content", () =>
+        HttpResponse.json({
+          content: reference,
+          encoding: "utf-8",
+          format: "srt",
+          language: "hu",
+          size: 100,
+          lastModified: 0,
+        }),
+      ),
+      http.get("/api/editor/subtitles", () =>
+        HttpResponse.json({ subtitles: [] }),
+      ),
+      http.get("/api/editor/info", () =>
+        HttpResponse.json({
+          duration: 2,
+          videoCodec: "h264",
+          audioCodec: "aac",
+          resolution: "1920x1080",
+          container: "mkv",
+          audioTracks: [],
+        }),
+      ),
+      http.get("/api/editor/peaks", () =>
+        HttpResponse.json({ peaks: [0.5, -1], duration: 0.2, sampleRate: 10 }),
+      ),
+      // The socket event is lost, and by the time the queue is re-read the
+      // job has left it, so the only outcome left is the kept result.
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      // The queue holds its answer, which opens the window a second click
+      // is tried in.
+      http.post("/api/translator/editor", () => {
+        queueRequests += 1;
+        return queueGate.then(() =>
+          HttpResponse.json({ jobId: 7 }, { status: 202 }),
+        );
+      }),
+      http.get("/api/translator/editor", ({ request }) => {
+        expect(new URL(request.url).searchParams.get("jobId")).toBe("7");
+        return HttpResponse.json({
+          jobId: 7,
+          status: "completed",
+          lines: [{ position: 0, line: "Szia" }],
+        });
+      }),
+    );
+    renderEditor(srt);
+    const user = userEvent.setup();
+
+    // A reference is what the line translates from. The first cue is
+    // selected on load, so opening the reference panel and picking a
+    // language is all the setup the AI button needs.
+    await user.click(
+      await screen.findByRole("button", { name: "Reference Subtitle" }),
+    );
+    const referenceOption = await screen.findByText("Select language...");
+    // A native select has no Testing Library query of its own.
+    // eslint-disable-next-line testing-library/no-node-access
+    const referenceSelect = referenceOption.closest("select");
+    expect(referenceSelect).not.toBeNull();
+    await user.selectOptions(referenceSelect!, "hu");
+
+    // The second cue is the initiating one, so its index differs from the
+    // insertion index the pending answer will use. A plain Enter in the
+    // cue text commits the first cue and advances the selection.
+    await user.type(screen.getByDisplayValue("Hello"), "{Enter}");
+    expect(screen.getByDisplayValue("World")).toBeInTheDocument();
+
+    const grid = screen.getByRole("grid", { name: "Subtitle cues" });
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+
+    const aiBtn = await screen.findByTitle("Translate this cue");
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    await user.click(aiBtn);
+
+    // The initiating cue's button is held from the first click, while the
+    // queue has not answered yet.
+    await waitFor(() => expect(aiBtn).toBeDisabled());
+    expect(aiBtn).toHaveTextContent("...");
+
+    // The one request the first click sent is still unanswered.
+    await waitFor(() => expect(queueRequests).toBe(1));
+
+    // A second click in the pending window queues nothing: a second job
+    // would answer the same release and be counted with the first.
+    await user.click(aiBtn);
+    act(() => {
+      answerQueue();
+    });
+
+    // The answer inserts the one cue at the reference timing and moves the
+    // selection to it, the tracked job fills it, the hold clears, and no
+    // second job was ever queued.
+    expect(await screen.findByText("Szia")).toBeVisible();
+    expect(grid).toHaveAttribute("aria-rowcount", "3");
+    expect(screen.getByTitle("End time")).toHaveValue("00:00:00.500");
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    expect(aiBtn).toHaveTextContent("AI");
+    expect(queueRequests).toBe(1);
   });
 });

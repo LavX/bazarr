@@ -6,6 +6,7 @@
  * rows) and on a real install alike.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
 import type { APIRequestContext, Page } from "@playwright/test";
 
@@ -17,7 +18,7 @@ const ARR_KINDS = [
 const MEDIA_SERVER_ROW = /^(Plex|Jellyfin|Emby|Silo) Version/;
 
 async function openStatus(page: Page, bazarrVersion: string) {
-  await page.goto("/system/status");
+  await page.goto(appPath("/system/status"));
   await expect(page.getByText("Bazarr Version", { exact: true })).toBeVisible();
   // The rows below it render from the same answer as the version, so once the
   // version is on the page the rest of the block is too.
@@ -26,7 +27,7 @@ async function openStatus(page: Page, bazarrVersion: string) {
 }
 
 async function bazarrVersion(api: APIRequestContext) {
-  const response = await api.get("/api/system/status");
+  const response = await api.get(appPath("/api/system/status"));
   expect(response.ok()).toBe(true);
   const { data } = (await response.json()) as {
     data: { bazarr_version: string };
@@ -53,7 +54,7 @@ async function expectedRows(api: APIRequestContext) {
       "/api/system/arr-instances",
       "/api/system/status",
     ].map(async (path) => {
-      const response = await api.get(path);
+      const response = await api.get(appPath(path));
       expect(response.ok(), path).toBe(true);
       return response.json();
     }),
@@ -105,20 +106,23 @@ test.describe(
       api,
     }) => {
       // The product switch and one enabled instance, as Settings saves them.
-      const toggle = await api.post("/api/system/settings", {
+      const toggle = await api.post(appPath("/api/system/settings"), {
         multipart: { "settings-general-use_jellyfin": "true" },
       });
       expect(toggle.ok()).toBe(true);
-      const created = await api.post("/api/system/media-server-instances", {
-        data: {
-          kind: "jellyfin",
-          name: "Jellyfin",
-          // Port 9 is discard: nothing answers there, so the probe fails fast.
-          url: "http://127.0.0.1:9",
-          api_key: "e2e-not-a-real-key",
-          enabled: true,
+      const created = await api.post(
+        appPath("/api/system/media-server-instances"),
+        {
+          data: {
+            kind: "jellyfin",
+            name: "Jellyfin",
+            // Port 9 is discard: nothing answers there, so the probe fails fast.
+            url: "http://127.0.0.1:9",
+            api_key: "e2e-not-a-real-key",
+            enabled: true,
+          },
         },
-      });
+      );
       expect(created.status()).toBe(201);
 
       await openStatus(page, await bazarrVersion(api));

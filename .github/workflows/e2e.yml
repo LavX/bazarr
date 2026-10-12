@@ -1,15 +1,27 @@
 name: End-to-end tests
 
-# On demand only. This is not a required check: it builds the image, starts
-# real Bazarr+ containers from it and drives them with Playwright. Specs that
-# need the provider network (@live) are left out; run those locally.
+# On demand only. This is not a required check: it builds an image from the
+# dispatched commit, starts real Bazarr+ containers from it and drives them
+# with Playwright, so it verifies that commit's build, not a shipped image.
+# Specs that need the provider network (@live) are left out; run those
+# locally. The release-pair input runs the stateless project twice on the
+# one image the dispatch builds: once at the root of its host, once under
+# general.base_url=/bazarr, so the dispatched commit is verified both ways
+# and both results are required, on the same image. A nonempty grep is
+# refused in release-pair mode: a subset can pass without exercising the
+# image, which is what the pair exists to do.
 on:
   workflow_dispatch:
     inputs:
       grep:
-        description: "Only run tests matching this tag or title, for example @wizard"
+        description: "Only run tests matching this tag or title, for example @wizard. Refused in release-pair mode"
         required: false
         default: ""
+      release_pair:
+        description: "Run the stateless project at the root and under /bazarr, on the one image this run builds"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -25,8 +37,23 @@ env:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # The release pair runs the stateless project twice in sequence, and
+    # each run's startup allowance alone is budgeted in container.ts: about
+    # 29.5 minutes at the root (one readiness phase) plus about 32.5 under
+    # /bazarr (two phases), so 62 minutes before any suite runs. Add the
+    # image build, the suite execution itself, cleanup and the paired
+    # report upload, and the pair needs more than 40: the timeout covers
+    # both full allowances and those stages.
+    timeout-minutes: 90
     steps:
+      - name: Refuse a grep in release-pair mode
+        # First, so a refused dispatch pays for nothing: no checkout, no
+        # install, no build.
+        if: ${{ inputs.release_pair && inputs.grep != '' }}
+        run: |
+          echo "::error::release_pair runs the whole stateless project: a grep could let both runs pass without exercising the image"
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@v7
 
@@ -56,7 +83,38 @@ jobs:
         run: npx playwright install --with-deps chromium
         working-directory: ${{ env.UI_DIRECTORY }}
 
+      - name: Run end-to-end tests (stateless at the root of its host)
+        if: ${{ inputs.release_pair }}
+        id: root
+        run: npm run e2e -- --project stateless
+        working-directory: ${{ env.UI_DIRECTORY }}
+
+      - name: Keep the root run's report
+        # Both reports must exist whichever run failed, so the paired upload
+        # always has them; the job still fails, because a failed run failed
+        # its own step. Nothing ran before the root run (a refusal or a
+        # failed build), so there is no report to keep either.
+        if: ${{ !cancelled() && inputs.release_pair && (steps.root.outcome == 'success' || steps.root.outcome == 'failure') }}
+        run: |
+          rm -rf e2e-report-root e2e-results-root
+          if [ -d e2e-report ]; then mv e2e-report e2e-report-root; fi
+          if [ -d e2e-results ]; then mv e2e-results e2e-results-root; fi
+        working-directory: ${{ env.UI_DIRECTORY }}
+
+      - name: Run end-to-end tests (stateless under /bazarr)
+        # The same image, built once above: both runs answer to one
+        # candidate. This runs when the root run succeeded or failed, so
+        # both reports exist whichever run failed; after a refusal or a
+        # failed build the root run never happened, there is no image to
+        # answer for, so it does not run at all.
+        if: ${{ !cancelled() && inputs.release_pair && (steps.root.outcome == 'success' || steps.root.outcome == 'failure') }}
+        run: |
+          export BAZARR_E2E_BASE_PATH=/bazarr
+          npm run e2e -- --project stateless
+        working-directory: ${{ env.UI_DIRECTORY }}
+
       - name: Run end-to-end tests
+        if: ${{ !inputs.release_pair }}
         run: |
           if [ -n "$GREP" ]; then
             npm run e2e -- --grep "$GREP"
@@ -68,11 +126,25 @@ jobs:
           GREP: ${{ inputs.grep }}
 
       - name: Upload report
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !inputs.release_pair }}
         uses: actions/upload-artifact@v7
         with:
           name: e2e-report
           path: |
+            ${{ env.UI_DIRECTORY }}/e2e-report/
+            ${{ env.UI_DIRECTORY }}/e2e-results/
+          retention-days: 14
+
+      - name: Upload the paired reports
+        # Only when the root run actually happened: after a refusal or a
+        # failed build there is no report to keep.
+        if: ${{ !cancelled() && inputs.release_pair && (steps.root.outcome == 'success' || steps.root.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-report-pair
+          path: |
+            ${{ env.UI_DIRECTORY }}/e2e-report-root/
+            ${{ env.UI_DIRECTORY }}/e2e-results-root/
             ${{ env.UI_DIRECTORY }}/e2e-report/
             ${{ env.UI_DIRECTORY }}/e2e-results/
           retention-days: 14

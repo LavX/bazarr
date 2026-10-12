@@ -17,6 +17,7 @@ from utilities.security_guards import subtitle_path_within_area
 from utilities.video_analyzer import subtitles_sync_references
 from subtitles.tools.subsyncer import SubSyncer  # noqa: F401
 from subtitles.tools.subsync_engines import is_sync_engine_output
+from subtitles.tools.translate.availability import translation_available
 from subtitles.tools.translate.main import translate_subtitles_file
 from subtitles.tools.translate.batch import extract_embedded_subtitle
 from subtitles.tools.mods import apply_subtitle_mods
@@ -237,6 +238,16 @@ class Subtitles(Resource):
         """Apply mods/tools on external subtitles"""
         args = self.patch_request_parser.parse_args()
         action = args.get("action")
+
+        # The gate refuses before anything else a translate can do. A sports
+        # translate extracts its embedded track inside this request, into the
+        # persistent extracted_subs directory, so a closed gate must not run
+        # the extractor, and it must not lose to the missing-file error for a
+        # request it refuses anyway.
+        if action == "translate":
+            availability = translation_available()
+            if not availability.available:
+                return availability.reason, 409
 
         language = args.get("language")
         subtitles_path = args.get("path") or ""

@@ -7,6 +7,7 @@ from flask_restx import Resource, Namespace
 
 from app.config import settings
 from app.jobs_queue import jobs_queue
+from subtitles.tools.translate.availability import translation_available
 from subtitles.tools.translate.editor import (cancel_editor_translation, editor_translation_state,
                                               enqueue_editor_translation)
 from subtitles.tools.translate.services.auth import get_translator_auth_headers
@@ -86,7 +87,7 @@ class TranslatorJobs(Resource):
 class TranslatorEditorJobs(Resource):
     @authenticate
     @api_ns_translator.doc(
-        responses={202: 'Queued', 400: 'Bad Request', 503: 'Service Unavailable'}
+        responses={202: 'Queued', 400: 'Bad Request', 409: 'Translation unavailable'}
     )
     def post(self):
         """Queue a translation of subtitle editor lines as a Bazarr job.
@@ -94,8 +95,13 @@ class TranslatorEditorJobs(Resource):
         Answers 202 with the job id. Progress arrives on the jobs socket like any
         other job, and GET returns the translated lines once the job has finished.
         """
-        if not get_service_url():
-            return {"error": "AI Subtitle Translator service URL not configured"}, 503
+        # The editor translates through the AI Subtitle Translator service
+        # whatever the settings page selected, so it asks the gate about that
+        # engine. The gate's reason replaces the URL-only refusal, which said
+        # nothing about an encryption key the client cannot even use.
+        availability = translation_available('openrouter')
+        if not availability.available:
+            return {"error": availability.reason}, 409
 
         data = flask_request.get_json(silent=True) or {}
         lines = data.get("lines")

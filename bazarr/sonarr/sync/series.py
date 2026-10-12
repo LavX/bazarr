@@ -265,9 +265,9 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                 outcome = sync_episodes(series_id=show['id'], episodes_data=episodes_data,
                                         arr_instance_id=arr_instance_id, arr_client=arr_client)
                 del episodes_data
-                # A series whose episode-file answer could not be decoded was
-                # skipped whole, the way a failed episode fetch is, so it
-                # belongs in the skipped count and the job name too.
+                # A series whose episode or episode-file answer could not be
+                # decoded was skipped whole, the way a failed episode fetch is,
+                # so it belongs in the skipped count and the job name too.
                 if outcome is SYNC_SKIPPED_UNREADABLE_EPISODE_FILES:
                     skipped_series.append(show['id'])
 
@@ -288,7 +288,7 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
             if len(skipped_series) > SONARR_SKIPPED_IDS_LOGGED:
                 shown_ids += ', ...'
             logging.warning(
-                'BAZARR Sonarr did not return episodes for %d of %d series%s; their episodes were left '
+                'BAZARR skipped the episode sync for %d of %d series%s; their episodes were left '
                 'unchanged until the next sync. Series ids: %s',
                 len(skipped_series), process_count,
                 f' (stopped asking after {SONARR_PREFETCH_FAILURE_LIMIT} failures in a row)'

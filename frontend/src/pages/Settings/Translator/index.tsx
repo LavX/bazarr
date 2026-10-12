@@ -246,7 +246,7 @@ const TestConnectionButton: FunctionComponent = () => {
       size="xs"
       onClick={handleTest}
       loading={testMutation.isPending}
-      disabled={!serviceUrl || !apiKey}
+      disabled={!serviceUrl}
     >
       Test Connection
     </Button>
@@ -558,4 +558,5 @@ const SettingsTranslatorView: FunctionComponent = () => {
   );
 };
 
+export { TestConnectionButton };
 export default SettingsTranslatorView;

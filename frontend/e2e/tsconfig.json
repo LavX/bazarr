@@ -11,6 +11,10 @@
     "isolatedModules": true,
     "noEmit": true,
     "ignoreDeprecations": "6.0",
+    // The suite's lint rule is an ES module loaded by eslint.config.mjs under
+    // its own Node, so it carries the .mts extension, and the checks of it in
+    // e2e/lib import it with that extension spelled out.
+    "allowImportingTsExtensions": true,
     "baseUrl": "./",
     "paths": {
       "@e2e/*": ["./*"],

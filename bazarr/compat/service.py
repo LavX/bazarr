@@ -10,7 +10,8 @@ from subliminal.video import Episode, Movie, Video
 from subliminal_patch.core_persistent import list_all_subtitles_parallel
 
 from app.config import settings
-from app.get_providers import (CREDENTIAL_THROTTLE_REASONS, get_provider_language_hook,
+from app.get_providers import (CREDENTIAL_THROTTLE_REASONS, announce_provider_throttle,
+                               get_provider_language_hook,
                                get_providers_sorted, get_providers_auth,
                                provider_is_usable, provider_throttle)
 from . import auth, cache as C, response_mapper as M
@@ -39,8 +40,13 @@ _CLIENT_MOVIEHASH_PROVIDERS = (
 _SHOOTER_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}(?:;[0-9a-fA-F]{32}){3}$")
 
 
-def _record_throttle(name, exception, ids=None, language=None, sports_context=None):
+def _record_throttle(name, exception, ids=None, language=None, sports_context=None, operation=None,
+                     announce=True):
     """Record a provider failure without spending the fanout's wall clock.
+
+    ``announce`` defaults the way provider_throttle's own does, so a caller
+    that omits it keeps the visible line rather than losing it below the
+    default filter.
 
     provider_throttle sleeps between the first few rate-limit events, which is
     correct where it came from: the library search retries the same provider in
@@ -54,7 +60,8 @@ def _record_throttle(name, exception, ids=None, language=None, sports_context=No
     failure we had already classified correctly.
     """
     return provider_throttle(name, exception, ids=ids, language=language,
-                             sports_context=sports_context, wait=False)
+                             sports_context=sports_context, wait=False,
+                             operation=operation, announce=announce)
 
 
 def _throttle_recorder(generation):
@@ -78,17 +85,18 @@ def _throttle_recorder(generation):
     asks a bad provider once more, where the alternative keeps skipping one the
     user has just fixed.
     """
-    def record(name, exception, ids=None, language=None, sports_context=None):
+    def record(name, exception, ids=None, language=None, sports_context=None, operation=None, announce=True):
         if generation != _pool_generation and (
                 exception.__class__.__name__ in CREDENTIAL_THROTTLE_REASONS):
             logger.info("compat: not recording a %s backoff for %s, the configuration it "
                         "judged has already been replaced",
                         exception.__class__.__name__, name)
-            # What a no-wait record returns: there is no retry on this path
-            # either way, so the caller's handling is unchanged.
-            return True
+            # What a no-wait record returns when nothing was recorded: there is
+            # no retry on this path either way, and a download now announces
+            # only what its own calls recorded.
+            return False
         return _record_throttle(name, exception, ids=ids, language=language,
-                                sports_context=sports_context)
+                                sports_context=sports_context, operation=operation, announce=announce)
 
     return record
 
@@ -114,6 +122,10 @@ def _get_compat_pool(*, restore_available=False):
                 # adoption_gate keeps a provider that is serving out a backoff
                 # from being re-adopted into the pool behind that record's back.
                 throttle_callback=_throttle_recorder(_pool_generation),
+                # A Discover download announces the one line the same way the
+                # library pools do: once the download stops, naming the
+                # deadline the attempts recorded.
+                throttle_announce=announce_provider_throttle,
                 adoption_gate=provider_is_usable,
                 language_hook=get_provider_language_hook(),
                 language_equals=[],

@@ -257,20 +257,15 @@ describe("Sportarr Connections", () => {
 
   it("edits and tests with the stored key without sending it or changing kind", async () => {
     // The whole edit, Test, save and reopen flow runs here, and on a loaded
-    // runner it went past the 20s default. The values are as short as the
-    // checks allow (20 keystrokes, down from 45) and user-event no longer
-    // waits on a timer between them, but with the CPU oversubscribed the test
-    // still took 10 to 15s against 2.6s idle, so it also gets a longer limit.
+    // runner it went past the 20s default. Only the name and the timeout are
+    // typed now, and user-event no longer waits on a timer between the
+    // keystrokes, but the flow still gets a longer limit for the
+    // CPU-oversubscribed runs.
     const user = userEvent.setup({ delay: null });
     const editedSportarr = {
       ...sportarr,
       name: "Arena",
       display_name: "Arena",
-      ip: "arena",
-      port: 1967,
-      base_url: "/lp",
-      ssl: true,
-      verify_ssl: true,
       http_timeout: 45,
     };
     let updateBody: unknown;
@@ -315,32 +310,28 @@ describe("Sportarr Connections", () => {
       ).toHaveValue("English Sports"),
     );
 
+    // The stored key is kept only while the destination stays as loaded, so
+    // this edit changes no destination field: the name and the timeout are
+    // typed over, and the address, port, base URL and both switches keep the
+    // values the row was loaded with.
     for (const [name, value] of [
       ["Name", "Arena"],
-      ["Address", "arena"],
-      ["Port", "1967"],
-      // The trailing slash is typed so the save can be seen dropping it.
-      ["Base URL", "/lp/"],
       ["Timeout", "45"],
     ]) {
       const field = dialog.getByRole("textbox", { name });
       await user.clear(field);
       await user.type(field, value);
     }
-    await user.click(dialog.getByRole("switch", { name: "Use SSL" }));
-    await user.click(
-      dialog.getByRole("switch", { name: "Verify certificate" }),
-    );
     await user.click(dialog.getByRole("button", { name: "Test Connection" }));
     expect(
       await dialog.findByText("Connected to Sportarr"),
     ).toBeInTheDocument();
     expect(testBody).toEqual({
-      ip: "arena",
-      port: 1967,
-      base_url: "/lp",
-      ssl: true,
-      verify_ssl: true,
+      ip: "192.168.1.10",
+      port: 1867,
+      base_url: "",
+      ssl: false,
+      verify_ssl: false,
       http_timeout: 45,
     });
     expect(testBody).not.toHaveProperty("api_key");
@@ -349,11 +340,11 @@ describe("Sportarr Connections", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(updateBody).toEqual({
       name: "Arena",
-      ip: "arena",
-      port: 1967,
-      base_url: "/lp",
-      ssl: true,
-      verify_ssl: true,
+      ip: "192.168.1.10",
+      port: 1867,
+      base_url: "",
+      ssl: false,
+      verify_ssl: false,
       http_timeout: 45,
       enabled: true,
       is_default: true,
@@ -369,7 +360,7 @@ describe("Sportarr Connections", () => {
     expect(updateBody).not.toHaveProperty("kind");
     expect(await screen.findByText("Arena")).toBeInTheDocument();
     expect(
-      within(cardNamed("Arena")).getByText("https://arena:1967/lp"),
+      within(cardNamed("Arena")).getByText("http://192.168.1.10:1867"),
     ).toBeInTheDocument();
     expect(screen.queryByText("(Main Sportarr)")).toBeNull();
     await user.click(
@@ -393,19 +384,17 @@ describe("Sportarr Connections", () => {
       "Arena",
     );
     expect(reopened.getByRole("textbox", { name: "Address" })).toHaveValue(
-      "arena",
+      "192.168.1.10",
     );
-    expect(reopened.getByRole("textbox", { name: "Port" })).toHaveValue("1967");
-    expect(reopened.getByRole("textbox", { name: "Base URL" })).toHaveValue(
-      "lp",
-    );
+    expect(reopened.getByRole("textbox", { name: "Port" })).toHaveValue("1867");
+    expect(reopened.getByRole("textbox", { name: "Base URL" })).toHaveValue("");
     expect(reopened.getByRole("textbox", { name: "Timeout" })).toHaveValue(
       "45",
     );
-    expect(reopened.getByRole("switch", { name: "Use SSL" })).toBeChecked();
+    expect(reopened.getByRole("switch", { name: "Use SSL" })).not.toBeChecked();
     expect(
       reopened.getByRole("switch", { name: "Verify certificate" }),
-    ).toBeChecked();
+    ).not.toBeChecked();
   }, 40_000);
 
   it("shows a wrong stored-key error after a card test without sending a key", async () => {

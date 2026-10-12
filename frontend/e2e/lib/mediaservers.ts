@@ -5,6 +5,7 @@
  */
 import type { APIRequestContext, Page } from "@playwright/test";
 import { expect } from "@playwright/test";
+import { appPath } from "./base";
 import { chooseIntent, stepHeading } from "./wizard";
 
 export type MediaServerKind = "emby" | "jellyfin" | "plex" | "silo";
@@ -50,7 +51,7 @@ const ROOT = "/api/system/media-server-instances";
 export async function listMediaServers(
   api: APIRequestContext,
 ): Promise<MediaServerInstance[]> {
-  const response = await api.get(ROOT);
+  const response = await api.get(appPath(ROOT));
   expect(response.status(), `GET ${ROOT}`).toBe(200);
   const body = (await response.json()) as { data: MediaServerInstance[] };
   return body.data;
@@ -60,7 +61,7 @@ export async function createMediaServer(
   api: APIRequestContext,
   body: MediaServerCreate,
 ): Promise<MediaServerInstance> {
-  const response = await api.post(ROOT, { data: body });
+  const response = await api.post(appPath(ROOT), { data: body });
   expect(response.status(), `POST ${ROOT} for ${body.kind}`).toBe(201);
   return (await response.json()) as MediaServerInstance;
 }
@@ -69,7 +70,7 @@ export async function deleteMediaServer(
   api: APIRequestContext,
   id: string,
 ): Promise<void> {
-  const response = await api.delete(`${ROOT}/${id}`);
+  const response = await api.delete(appPath(`${ROOT}/${id}`));
   expect(response.status(), `DELETE ${ROOT}/${id}`).toBe(204);
 }
 
@@ -92,7 +93,9 @@ export async function switchOnKinds(
 ): Promise<void> {
   const multipart: Record<string, string> = {};
   for (const kind of kinds) multipart[`settings-general-use_${kind}`] = "true";
-  const response = await api.post("/api/system/settings", { multipart });
+  const response = await api.post(appPath("/api/system/settings"), {
+    multipart,
+  });
   expect(response.ok(), "saving the media server switches").toBe(true);
 }
 

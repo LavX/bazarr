@@ -4,6 +4,7 @@
  * nothing a test leaves behind changes where the next one starts.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { expectFitsViewport, WIZARD_VIEWPORT } from "@e2e/lib/fit";
 import {
   chooseIntent,
@@ -42,7 +43,7 @@ test.describe("onboarding wizard", { tag: ["@stateful", "@wizard"] }, () => {
     await page.getByRole("button", { name: "Continue without Sonarr" }).click();
     await expect(stepHeading(page, "Radarr")).toBeVisible();
 
-    const response = await api.get("/api/system/arr-instances");
+    const response = await api.get(appPath("/api/system/arr-instances"));
     expect(response.status()).toBe(200);
     expect(await response.json()).toEqual([]);
   });
@@ -87,7 +88,7 @@ test.describe("onboarding wizard", { tag: ["@stateful", "@wizard"] }, () => {
     await dialog.getByRole("button", { name: "Leave setup" }).click();
     await expect(page).toHaveURL(/\/discover$/);
 
-    await page.goto("/settings/general");
+    await page.goto(appPath("/settings/general"));
     await page.getByRole("button", { name: "Run first-time setup" }).click();
     await expect(page).toHaveURL(/\/setup\/welcome$/);
     await expect(stepHeading(page, "Welcome to Bazarr+")).toBeVisible();

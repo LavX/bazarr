@@ -16,6 +16,7 @@ import {
   Group,
   MultiSelect,
   NumberInput,
+  PasswordInput,
   Stack,
   Text as MantineText,
   TextInput,
@@ -61,9 +62,13 @@ import {
   FormValues,
   runHooks,
   useFormActions,
+  useFormValues,
   useStagedValues,
 } from "@/pages/Settings/utilities/FormValues";
-import { useSettingValue } from "@/pages/Settings/utilities/hooks";
+import {
+  useBaseInput,
+  useSettingValue,
+} from "@/pages/Settings/utilities/hooks";
 import {
   SettingsProvider,
   useSettings,
@@ -831,6 +836,167 @@ const validation = ProviderList.map((provider) => {
     return { ...acc, ...item };
   }, {});
 
+// What the settings API says about one plugin secret without ever saying the
+// value: whether one is stored, and for a long one how it ends.
+interface SecretFieldDescriptor {
+  configured?: boolean;
+  last_four?: string;
+  decrypt_failed?: boolean;
+}
+
+// The write-only credential input of a plugin provider's card. The value
+// never comes back from the API (it reads empty), so the descriptor carries
+// the state instead, and every action is explicit so saving a form never
+// wipes or keeps a key by accident:
+// - untouched: the stored secret stays (the save's absent-means-unchanged
+//   rule makes an empty, untouched box mean "keep"), with "Configured, ends
+//   in 1a2b" beside it;
+// - Replace: the box stays read-only until Replace is pressed, and a typed
+//   value stages the replacement ("Replaces the stored key when you save");
+//   Cancel discards it and returns to Configured; emptying the input by
+//   typing unstages the replacement again;
+// - Clear: only the Clear button stages the removal ("Will be cleared when
+//   you save"), and Undo takes any staged change back out.
+// A field with no descriptor of its own is a shipped provider's password:
+// it renders exactly the plain password input it always had. The decision
+// is made per field, never by the section's descriptor map, because a
+// plugin that shares the built-in's section leaves its own descriptor map
+// behind and must not change the built-in password's behavior.
+const ProviderSecretInput: FunctionComponent<{
+  label: string;
+  section: string;
+  fieldKey: string;
+  description?: string;
+}> = ({ label, section, fieldKey, description }) => {
+  const settingKey = `settings-${section}-${fieldKey}`;
+  const descriptors = useSettingValue<LooseObject>(
+    `settings-${section}-__secret_fields`,
+  );
+  const staged = useStagedValues();
+  const form = useFormValues();
+  const { value, update } = useBaseInput({ settingKey });
+  const [replacing, setReplacing] = useState(false);
+
+  const stagedValue = settingKey in staged ? staged[settingKey] : undefined;
+  const clearStaged =
+    stagedValue !== undefined && (stagedValue === "" || stagedValue === null);
+  const replaceStaged =
+    typeof stagedValue === "string" && stagedValue.length > 0;
+  const descriptor =
+    (descriptors?.[fieldKey.toLowerCase()] as
+      | SecretFieldDescriptor
+      | undefined) ?? undefined;
+  const configured = descriptor?.configured === true;
+  const decryptFailed = descriptor?.decrypt_failed === true;
+  // A stored credential is replaced through an explicit action: the box is
+  // read-only until Replace is pressed. A field with nothing stored is
+  // edited directly.
+  const locked = configured || decryptFailed;
+
+  const unstage = () => {
+    form.setValues((values) => {
+      const settings = { ...values.settings };
+      delete settings[settingKey];
+      const hooks = { ...values.hooks };
+      delete hooks[settingKey];
+      return { ...values, settings, hooks };
+    });
+  };
+
+  const cancelReplace = () => {
+    setReplacing(false);
+    unstage();
+  };
+
+  if (descriptor === undefined) {
+    // No descriptor for this field: a shipped provider's password field,
+    // rendered exactly as before this input existed.
+    return <Password label={label} settingKey={settingKey}></Password>;
+  }
+
+  // What the field says about the stored value, in the order it matters:
+  // a staged change first (the action the reader is in the middle of), then
+  // the stored state, then the decrypt failure when nothing is staged. The
+  // failure notice must not hide the staged text: a replacement typed for a
+  // failed credential shows that it replaces the stored key.
+  const helper: string[] = [];
+  if (description) {
+    helper.push(description);
+  }
+  if (clearStaged) {
+    helper.push("Will be cleared when you save.");
+  } else if (replaceStaged) {
+    helper.push("Replaces the stored key when you save.");
+  } else if (configured) {
+    helper.push(
+      descriptor?.last_four
+        ? `Configured, ends in ${descriptor.last_four}`
+        : "Configured",
+    );
+  }
+  if (decryptFailed && !clearStaged && !replaceStaged) {
+    helper.push(
+      "The saved value could not be decrypted. Re-enter it and save.",
+    );
+  }
+
+  return (
+    <Stack gap={4}>
+      <PasswordInput
+        label={label}
+        description={helper.length > 0 ? helper.join(" ") : undefined}
+        placeholder={
+          configured && !clearStaged ? "Enter a replacement" : undefined
+        }
+        disabled={locked && !replacing}
+        value={(value as string) ?? ""}
+        onChange={(event) => {
+          const next = event.currentTarget.value;
+          if (next.trim() === "") {
+            // An empty or spaces-only input is editing, not clearing: only
+            // the Clear button stages the removal. A credential made only
+            // of spaces is never what a reader meant to save, and staging
+            // it would store the spaces as the key.
+            unstage();
+          } else {
+            update(next);
+          }
+        }}
+      ></PasswordInput>
+      {locked && !replacing && !clearStaged && !replaceStaged && (
+        <Button
+          size="compact-xs"
+          variant="subtle"
+          onClick={() => setReplacing(true)}
+        >
+          Replace
+        </Button>
+      )}
+      {(replacing || replaceStaged) && !clearStaged && (
+        <Button size="compact-xs" variant="subtle" onClick={cancelReplace}>
+          Cancel
+        </Button>
+      )}
+      {locked && clearStaged && (
+        <Button size="compact-xs" variant="subtle" onClick={unstage}>
+          Undo
+        </Button>
+      )}
+      {configured && !clearStaged && !replaceStaged && (
+        <Button
+          size="compact-xs"
+          variant="subtle"
+          onClick={() => {
+            update("");
+          }}
+        >
+          Clear
+        </Button>
+      )}
+    </Stack>
+  );
+};
+
 const ProviderTool: FunctionComponent<ProviderToolProps> = ({
   payload,
   enabledProviders,
@@ -1104,10 +1270,12 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         case "password":
           elements.push(
             <Fragment key={BuildKey(itemKey, key)}>
-              <Password
+              <ProviderSecretInput
                 label={label}
-                settingKey={`settings-${itemKey}-${key}`}
-              ></Password>
+                section={itemKey}
+                fieldKey={key}
+                description={value.description}
+              ></ProviderSecretInput>
               {error}
             </Fragment>,
           );

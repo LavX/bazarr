@@ -95,7 +95,13 @@ class PlexRefreshClient:
             raise MediaServerError('internal_error')
         if not metadata.imdb_id or not metadata.locatable(media_type):
             return None
-        for name, section in _sections(self.server, self.snapshot.libraries(media_type)):
+        libraries = self.snapshot.libraries(media_type)
+        if ensure_current:
+            # The connection and the section listing happen before any rung
+            # callback runs, so the guard runs first: a configuration change
+            # must stop the refresh before the credential is sent anywhere.
+            ensure_current()
+        for name, section in _sections(self.server, libraries):
             if ensure_current:
                 ensure_current()
             try:
@@ -123,6 +129,11 @@ class PlexRefreshClient:
         names = self.snapshot.libraries(media_type)
         if not names:
             return None
+        if ensure_current:
+            # The connection and the section listing happen before any section
+            # update is asked for, so the guard runs first: a configuration
+            # change must stop the refresh before the credential is sent.
+            ensure_current()
         updated = False
         failure = None
         for name, section in _sections(self.server, names):

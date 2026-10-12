@@ -29,12 +29,18 @@ def sonarr_session() -> requests.Session:
     The retry policy is intentionally narrow: only retry the canonical
     transient gateway statuses (502/503/504), never 4xx, to preserve the
     existing no-retry-on-client-error behaviour of the call sites.
+
+    Redirects are refused outright: the session's requests carry the
+    instance's API key, and a server that answers with a redirect is not the
+    instance the key belongs to. ``max_redirects = 0`` makes requests raise
+    before the next hop is ever contacted, GET and POST alike.
     """
     global _session
     if _session is None:
         with _session_lock:
             if _session is None:
                 s = requests.Session()
+                s.max_redirects = 0
                 adapter = HTTPAdapter(
                     pool_connections=20,
                     pool_maxsize=50,

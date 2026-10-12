@@ -60,6 +60,13 @@ authorizations = {
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 
+# App-wide, not blueprint-wide, on purpose: the router builds the automatic
+# OPTIONS answer and the 405 of an unsupported method outside the blueprint,
+# and the editor's no-store routes must stay no-store on those answers too.
+from .utils import register_editor_no_store  # noqa: E402
+
+register_editor_no_store(api_bp)
+
 
 @apidoc.apidoc.add_app_template_global
 def swagger_static(filename):

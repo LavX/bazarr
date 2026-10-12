@@ -760,7 +760,7 @@ class WorkflowRunStructureTests(unittest.TestCase):
 
     def test_the_final_tag_shape_is_validated_in_a_step(self):
         validation = self.prepare_steps["Validate final stable tag"]
-        self.assertEqual(validation["if"], "github.event_name == 'workflow_run'")
+        self.assertEqual(validation["if"], "github.event_name != 'pull_request'")
         self.assertIn("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$", validation["run"])
         preparation = self.prepare_steps["Verify published release and prepare packages"]
         self.assertEqual(preparation["env"]["RELEASE_TAG"],
@@ -769,7 +769,7 @@ class WorkflowRunStructureTests(unittest.TestCase):
 
     def test_the_lock_is_resolved_before_the_lane_prepares(self):
         resolution = self.prepare_steps["Resolve release lock"]
-        self.assertEqual(resolution["if"], "github.event_name == 'workflow_run'")
+        self.assertEqual(resolution["if"], "github.event_name != 'pull_request'")
         self.assertIn("release.py --resolve-lock", resolution["run"])
         self.assertIn("release.py --lock-base --tag \"$RELEASE_TAG\"", resolution["run"])
         self.assertIn("git fetch --depth=1 origin development", resolution["run"])
@@ -797,7 +797,7 @@ class WorkflowRunStructureTests(unittest.TestCase):
 
     def test_a_newly_resolved_lock_reaches_the_proposal_job(self):
         upload = self.prepare_steps["Upload resolved lock"]
-        self.assertEqual(upload["if"], "github.event_name == 'workflow_run' && steps.lock.outputs.resolved == 'true'")
+        self.assertEqual(upload["if"], "steps.lock.outputs.resolved == 'true'")
         self.assertEqual(upload["with"]["name"], self.jobs["prepare"]["outputs"]["lock_artifact"])
         self.assertEqual(upload["with"]["overwrite"], True)
         proposal = self.jobs["propose-lock"]

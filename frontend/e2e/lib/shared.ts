@@ -10,7 +10,13 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BazarrInstance, TimeBudget } from "./container";
-import { allowStartup, readApiKey, REQUEST_MS, startBazarr } from "./container";
+import {
+  allowStartup,
+  readApiKey,
+  REQUEST_MS,
+  startBazarr,
+  startupAllowanceMs,
+} from "./container";
 
 interface SharedRecord {
   name: string;
@@ -18,7 +24,6 @@ interface SharedRecord {
 }
 
 const LOCK_POLL_MS = 1_000;
-const LOCK_CAP_MS = 240_000;
 
 export function runDir(): string {
   const dir = process.env.BAZARR_E2E_RUN_DIR;
@@ -54,7 +59,13 @@ export async function completeOnboarding(instance: BazarrInstance) {
 }
 
 async function acquireLock(): Promise<void> {
-  const deadline = Date.now() + LOCK_CAP_MS;
+  // The wait is for the other worker's whole start, so its budget is that
+  // start's whole allowance, which already counts the onboarding request
+  // and the lost port races it retried within it. The one request on
+  // top is margin only, for the lock's own polling to notice the record
+  // after the start has written it, not a stage the allowance would be
+  // missing without.
+  const deadline = Date.now() + startupAllowanceMs() + REQUEST_MS;
   while (Date.now() < deadline) {
     try {
       await mkdir(lockPath());

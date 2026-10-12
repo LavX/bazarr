@@ -4,6 +4,7 @@
  */
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
+import { appPath } from "./base";
 
 /** Suggestions come from the metadata service, over the real network. */
 const SUGGESTION_TIMEOUT_MS = 20_000;
@@ -13,7 +14,7 @@ const SUGGESTION_TIMEOUT_MS = 20_000;
  * shown once over the first page.
  */
 export async function openDiscover(page: Page) {
-  await page.goto("/discover");
+  await page.goto(appPath("/discover"));
   const tour = page.getByRole("dialog", { name: "What's New" });
   await expect(tour).toBeVisible();
   await page.keyboard.press("Escape");

@@ -6,8 +6,18 @@ arr_instances row per kind and stamps that instance onto the library rows that
 have no owner yet. These cover when it builds an instance and when it must not:
 it runs on every start without duplicating anything, leaves an existing
 default alone, and with a kind switched off it acts only on rows that have no
-owner, never on rows naming an instance that is gone.
+owner, never on rows naming an instance that is gone. Once an instance has
+been deleted, its kind's ownerless rows may be straggler writes of the deleted
+server, so they are quarantined instead of stamped onto the survivor or used
+to rebuild it, and a row whose upstream id the stamping instance already owns
+is skipped alone instead of aborting every kind's stamp. The collision retries
+keep the ownerless filter, so a retry never touches a row another owner holds,
+and one colliding group never blocks another table's or kind's stamp. A
+collision inside the NULL-upstream group quarantines only the row that
+collided, and the refusal of a rebuild names the deployment's retirement, not
+the kind's own.
 """
+import logging
 from types import SimpleNamespace
 
 from sqlalchemy import insert, select
@@ -202,3 +212,284 @@ def test_backfill_run_by_the_cutover_takes_an_id_no_row_names():
     finally:
         session.close()
         engine.dispose()
+
+
+def test_backfill_quarantines_ownerless_rows_of_a_kind_with_a_deleted_instance(
+        schema_session, caplog):
+    # After a secondary instance is deleted, a straggler writer can still leave
+    # a row with no owner behind: a one-item sync past its default check, an
+    # exclusion whose episode row is already gone. The resume path used to
+    # stamp every ownerless row onto the single remaining instance, putting the
+    # deleted server's media under the default one, under its paths and its
+    # credentials. With a retirement on record the rows stay ownerless: the
+    # scoped reads and the delete-guard already handle rows with no owner.
+    from app.database import TableShows
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    repo.create("sonarr", "Default", api_key="k")
+    secondary = repo.create("sonarr", "Secondary", api_key="k2")
+    repo.delete(secondary.id)  # its id is retired on record
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/secondary", title="Straggler"))  # no owner
+
+    with caplog.at_level(logging.INFO, logger="arr_instances.backfill"):
+        summary = backfill_default_instances(
+            schema_session, _settings(use_radarr=False))
+
+    assert schema_session.execute(
+        select(TableShows.arr_instance_id)).scalar_one() is None
+    assert summary["sonarr"]["stamped"] == 0
+    assert summary["sonarr"]["quarantined"] == 1
+    assert any("Quarantined 1 ownerless sonarr row" in record.getMessage()
+               for record in caplog.records)
+
+
+def test_backfill_skips_an_ownerless_row_the_instance_already_own_and_stamps_the_rest(
+        schema_session, caplog):
+    # The same series, episode or movie can be tracked by both the default and
+    # a deleted secondary, so an ownerless row can carry an upstream id the
+    # remaining instance already owns. The bulk stamp used to die on the unique
+    # index (ux_table_episodes_instance_upstream_id) and abort the whole
+    # backfill, every other kind's stamp included. The colliding row alone is
+    # skipped and logged; every other row stamps.
+    from app.database import TableEpisodes
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    instance = repo.create("sonarr", "Sonarr", api_key="k")
+    schema_session.execute(insert(TableEpisodes).values(
+        arr_instance_id=instance.id, sonarrEpisodeId=5, sonarrSeriesId=1,
+        season=1, episode=1, path="/tv/a/s01e01.mkv", title="Owned"))
+    schema_session.execute(insert(TableEpisodes).values(
+        sonarrEpisodeId=5, sonarrSeriesId=2, season=1, episode=1,
+        path="/tv/b/s01e01.mkv", title="Orphaned duplicate"))
+    schema_session.execute(insert(TableEpisodes).values(
+        sonarrEpisodeId=6, sonarrSeriesId=2, season=1, episode=2,
+        path="/tv/b/s01e02.mkv", title="Orphaned unique"))
+
+    with caplog.at_level(logging.INFO, logger="arr_instances.backfill"):
+        summary = backfill_default_instances(
+            schema_session, _settings(use_radarr=False))
+
+    owners = dict(schema_session.execute(
+        select(TableEpisodes.path, TableEpisodes.arr_instance_id)).all())
+    assert owners["/tv/a/s01e01.mkv"] == instance.id
+    assert owners["/tv/b/s01e01.mkv"] is None  # the colliding row stays ownerless
+    assert owners["/tv/b/s01e02.mkv"] == instance.id
+    assert summary["sonarr"]["stamped"] == 1
+    assert any("Quarantined an ownerless table_episodes row" in record.getMessage()
+               for record in caplog.records)
+
+
+def test_backfill_does_not_rebuild_a_kind_whose_last_instance_was_deleted(
+        schema_session, caplog):
+    # A kind whose last instance was deliberately deleted had it rebuilt from
+    # the scalar connection settings, which still describe the deleted server,
+    # with every ownerless row stamped onto the copy. The switch-off after the
+    # delete is best effort, and a straggler row can land after it, so Use
+    # being on with an ownerless row present is no reason to resurrect it.
+    from app.database import TableShows
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    only = repo.create("sonarr", "Only", api_key="k")
+    repo.delete(only.id)  # the kind's last instance goes; its id is retired
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/only", title="Straggler"))  # no owner
+
+    with caplog.at_level(logging.INFO, logger="arr_instances.backfill"):
+        summary = backfill_default_instances(
+            schema_session, _settings(use_radarr=False))
+
+    assert summary["sonarr"]["created"] is False
+    assert summary["sonarr"]["reason"] == "deployment has a retired instance id"
+    assert ArrInstanceRepository(schema_session).list("sonarr") == []
+    assert schema_session.execute(
+        select(TableShows.arr_instance_id)).scalar_one() is None
+    assert any("Refused to rebuild the sonarr instance" in record.getMessage()
+               for record in caplog.records)
+
+
+def test_backfill_refusal_names_the_deployments_retirement_not_the_kinds_own(
+        schema_session, caplog):
+    # The retired-id table is deployment-wide: it keeps no kind column, so the
+    # retirement on record may be the other kind's. The refusal used to
+    # attribute it to the kind it was refusing, saying a sonarr instance was
+    # deleted when only radarr was ever retired. Both the log line and the
+    # summary reason now name the deployment's retirement instead.
+    from app.database import TableShows
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    radarr = repo.create("radarr", "Radarr", api_key="k")
+    repo.delete(radarr.id)  # radarr retires; sonarr was never deleted
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/a", title="Legacy"))  # no owner
+
+    with caplog.at_level(logging.INFO, logger="arr_instances.backfill"):
+        summary = backfill_default_instances(
+            schema_session, _settings(use_radarr=False))
+
+    assert summary["sonarr"]["created"] is False
+    assert summary["sonarr"]["reason"] == "deployment has a retired instance id"
+    assert summary["sonarr"]["quarantined"] == 1
+    assert ArrInstanceRepository(schema_session).list("sonarr") == []
+    assert schema_session.execute(
+        select(TableShows.arr_instance_id)).scalar_one() is None
+    refusals = [record.getMessage() for record in caplog.records
+                if "Refused to rebuild" in record.getMessage()]
+    assert any("Refused to rebuild the sonarr instance" in message
+               for message in refusals)
+    assert any("deployment has a retired instance id" in message
+               for message in refusals)
+    assert all("deleted sonarr instance" not in message for message in refusals)
+
+
+def test_backfill_collision_retries_never_touch_a_row_another_owner_owns(
+        schema_session, caplog):
+    # The bulk stamp collides on an unrelated group and the table is retried
+    # row-group by row-group. Those retries used to match only the group's
+    # upstream id, so a retry also updated rows other owners already held: an
+    # ownerless row whose upstream id another owner carries was stamped
+    # together with that owner's row, the two collided on the unique index and
+    # the stampable orphan was left quarantined, while on a NULL upstream id,
+    # whose duplicates the unique index cannot reject, the other owner's row
+    # itself was reassigned. Every retry keeps the ownerless filter.
+    from app.database import TableEpisodes
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    instance = repo.create("sonarr", "Sonarr", api_key="k")
+    other, gone = 4243, 4242  # rows naming owners that are not this instance
+    schema_session.execute(insert(TableEpisodes).values(
+        arr_instance_id=instance.id, sonarrEpisodeId=6, sonarrSeriesId=1,
+        season=1, episode=1, path="/tv/a/s01e01.mkv", title="Owned"))
+    schema_session.execute(insert(TableEpisodes).values(
+        sonarrEpisodeId=6, sonarrSeriesId=2, season=1, episode=1,
+        path="/tv/b/s01e01.mkv", title="Unrelated collision"))
+    schema_session.execute(insert(TableEpisodes).values(
+        arr_instance_id=other, sonarrEpisodeId=5, sonarrSeriesId=3,
+        season=1, episode=2, path="/tv/c/s01e02.mkv", title="Another owner"))
+    schema_session.execute(insert(TableEpisodes).values(
+        sonarrEpisodeId=5, sonarrSeriesId=4, season=1, episode=2,
+        path="/tv/d/s01e02.mkv", title="Orphan under another owner"))
+    schema_session.execute(insert(TableEpisodes).values(
+        arr_instance_id=gone, sonarrSeriesId=5, season=1, episode=3,
+        path="/tv/e/s01e03.mkv", title="Another owner without an upstream id"))
+    schema_session.execute(insert(TableEpisodes).values(
+        sonarrSeriesId=5, season=1, episode=3,
+        path="/tv/f/s01e03.mkv", title="Orphan without an upstream id"))
+
+    with caplog.at_level(logging.INFO, logger="arr_instances.backfill"):
+        summary = backfill_default_instances(
+            schema_session, _settings(use_radarr=False))
+
+    owners = dict(schema_session.execute(
+        select(TableEpisodes.path, TableEpisodes.arr_instance_id)).all())
+    assert owners["/tv/a/s01e01.mkv"] == instance.id
+    assert owners["/tv/b/s01e01.mkv"] is None  # the unrelated collision stays ownerless
+    assert owners["/tv/d/s01e02.mkv"] == instance.id  # the orphan stamps
+    assert owners["/tv/c/s01e02.mkv"] == other  # the other owner keeps its row
+    assert owners["/tv/f/s01e03.mkv"] == instance.id  # the NULL-id orphan stamps
+    assert owners["/tv/e/s01e03.mkv"] == gone  # and the other owner keeps its row
+    assert summary["sonarr"]["stamped"] == 2
+    assert any("Quarantined an ownerless table_episodes row (sonarrEpisodeId = 6)"
+               in record.getMessage() for record in caplog.records)
+
+
+def test_backfill_collision_isolates_to_its_group_across_tables_and_kinds(
+        schema_session, caplog):
+    # The savepoint recovery is per table and per kind: an episode collision
+    # quarantines only that episode group, while the same kind's other rows,
+    # another table's rows and the live Radarr kind's rows (movies and their
+    # own rootfolder table) all stamp, and the backfill returns cleanly with
+    # a summary for every kind.
+    from app.database import (
+        TableEpisodes, TableMovies, TableMoviesRootfolder, TableShows,
+        TableShowsRootfolder,
+    )
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    sonarr = repo.create("sonarr", "Sonarr", api_key="k")
+    schema_session.execute(insert(TableEpisodes).values(
+        arr_instance_id=sonarr.id, sonarrEpisodeId=5, sonarrSeriesId=1,
+        season=1, episode=1, path="/tv/a/s01e01.mkv", title="Owned"))
+    schema_session.execute(insert(TableEpisodes).values(
+        sonarrEpisodeId=5, sonarrSeriesId=2, season=1, episode=1,
+        path="/tv/b/s01e01.mkv", title="Colliding orphan"))
+    schema_session.execute(insert(TableEpisodes).values(
+        sonarrEpisodeId=6, sonarrSeriesId=2, season=1, episode=2,
+        path="/tv/b/s01e02.mkv", title="Uncollided orphan"))
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path="/tv/a", title="A"))
+    schema_session.execute(insert(TableShowsRootfolder).values(
+        upstream_rootfolder_id=1, path="/tv"))
+    schema_session.execute(insert(TableMovies).values(
+        radarrId=1, path="/m/a.mkv", title="A", tmdbId="10"))
+    schema_session.execute(insert(TableMoviesRootfolder).values(
+        upstream_rootfolder_id=1, path="/movies"))
+
+    with caplog.at_level(logging.INFO, logger="arr_instances.backfill"):
+        summary = backfill_default_instances(schema_session, _settings())
+
+    radarr = repo.get_default("radarr")
+    assert radarr is not None
+    owners = dict(schema_session.execute(
+        select(TableEpisodes.path, TableEpisodes.arr_instance_id)).all())
+    assert owners["/tv/a/s01e01.mkv"] == sonarr.id
+    assert owners["/tv/b/s01e01.mkv"] is None  # only the colliding group quarantines
+    assert owners["/tv/b/s01e02.mkv"] == sonarr.id
+    assert schema_session.execute(
+        select(TableShows.arr_instance_id)).scalar_one() == sonarr.id
+    assert schema_session.execute(
+        select(TableShowsRootfolder.arr_instance_id)).scalar_one() == sonarr.id
+    assert schema_session.execute(
+        select(TableMovies.arr_instance_id)).scalar_one() == radarr.id
+    assert schema_session.execute(
+        select(TableMoviesRootfolder.arr_instance_id)).scalar_one() == radarr.id
+    assert summary["sonarr"]["stamped"] == 3  # episode 6, the show, the rootfolder
+    assert summary["radarr"]["created"] is True and summary["radarr"]["stamped"] == 2
+    assert any("Quarantined an ownerless table_episodes row" in record.getMessage()
+               for record in caplog.records)
+
+
+def test_backfill_a_null_upstream_collision_quarantines_only_the_colliding_row(
+        schema_session, caplog):
+    # The NULL-upstream retry used to stamp every ownerless NULL row in one
+    # statement, so a collision on another of the instance-scoped unique
+    # indexes (a show's path) rolled the whole statement back and quarantined
+    # every other NULL row with it. The NULL rows are now stamped one by one,
+    # so only the colliding row stays ownerless and the rest stamp.
+    from app.database import TableShows
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    instance = repo.create("sonarr", "Sonarr", api_key="k")
+    schema_session.execute(insert(TableShows).values(
+        arr_instance_id=instance.id, path="/tv/a", title="Owned"))
+    schema_session.execute(insert(TableShows).values(
+        path="/tv/a", title="Colliding path"))  # NULL upstream id, owned path
+    schema_session.execute(insert(TableShows).values(
+        path="/tv/b", title="Unique path"))  # NULL upstream id, unique path
+
+    with caplog.at_level(logging.INFO, logger="arr_instances.backfill"):
+        summary = backfill_default_instances(
+            schema_session, _settings(use_radarr=False))
+
+    owners = dict(schema_session.execute(
+        select(TableShows.title, TableShows.arr_instance_id)).all())
+    assert owners["Owned"] == instance.id
+    assert owners["Colliding path"] is None  # the colliding row stays ownerless
+    assert owners["Unique path"] == instance.id  # the rest of the NULL group stamps
+    assert summary["sonarr"]["stamped"] == 1
+    assert any("Quarantined an ownerless table_shows row" in record.getMessage()
+               for record in caplog.records)
