@@ -504,15 +504,21 @@ def test_rootfolders_are_complete_owned_and_mapped(library, monkeypatch, tmp_pat
 def test_event_library_local_ids_pagination_and_disabled_admin_view(
     library, monkeypatch
 ):
-    from app.database import TableArrInstances
+    from app.database import TableArrInstances, TableSportsLeagues
     from sportarr.library import list_events, get_event
 
     session, sync = library
+    session.execute(
+        sa.update(TableSportsLeagues)
+        .where(TableSportsLeagues.id == 51, TableSportsLeagues.arr_instance_id == 1)
+        .values(tags="['Playoffs']")
+    )
     remote(monkeypatch, sync, [event([file(9, None)])])
     a, b = sync.sync_events(51, 1)[0], sync.sync_events(52, 2)[0]
     response = list_events(session, 51, 1)
     assert response["total"] == 1 and response["data"][0]["id"] == a
     item = response["data"][0]
+    assert item["tags"] == ["Playoffs"]
     assert item["partNumber"] is None and item["hasFile"] is True
     assert item["mapped_path"] == "/owner-1/part-9.mkv" and "ffprobe_cache" not in item
     assert get_event(session, b, 1) is None and get_event(session, 8, 1) is None

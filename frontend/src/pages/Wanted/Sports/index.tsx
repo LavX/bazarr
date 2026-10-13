@@ -95,6 +95,7 @@ const WantedSportsView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
   const [missingLanguage, setMissingLanguage] = useState<string | null>(null);
   const [debouncedSearch] = useDebouncedValue(search, 300);
 
@@ -102,6 +103,7 @@ const WantedSportsView: FunctionComponent = () => {
     debouncedSearch.length > 0 ||
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0 ||
+    tagFilter.length > 0 ||
     missingLanguage !== null;
 
   // The same library-wide audio-language catalogue the Series and Movies
@@ -177,9 +179,21 @@ const WantedSportsView: FunctionComponent = () => {
       ) {
         return false;
       }
+      if (
+        tagFilter.length > 0 &&
+        !tagFilter.some((tag) => item.tags?.includes(tag))
+      ) {
+        return false;
+      }
       return true;
     },
-    [debouncedSearch, audioLanguages, excludeLanguages, missingLanguage],
+    [
+      debouncedSearch,
+      audioLanguages,
+      excludeLanguages,
+      missingLanguage,
+      tagFilter,
+    ],
   );
 
   const columns = useMemo<ColumnDef<SportsWantedRow>[]>(
@@ -321,6 +335,8 @@ const WantedSportsView: FunctionComponent = () => {
       onAudioLanguagesChange={setAudioLanguages}
       excludeLanguages={excludeLanguages}
       onExcludeLanguagesChange={setExcludeLanguages}
+      tagValues={tagFilter}
+      onTagValuesChange={setTagFilter}
       missingLanguage={missingLanguage ?? undefined}
       onMissingLanguageChange={setMissingLanguage}
       langOptions={langOptions}

@@ -15,7 +15,7 @@ from utilities.security_guards import subtitle_path_within_area
 def add_sync_status(session, rows, data):
     if not rows:
         return
-    identities = [(event.arr_instance_id, event.id) for event, _, _ in rows]
+    identities = [(row[0].arr_instance_id, row[0].id) for row in rows]
     history = {
         (owner, event_id, path): timestamp
         for owner, event_id, path, timestamp in session.execute(
@@ -40,7 +40,8 @@ def add_sync_status(session, rows, data):
             active.setdefault((owner, event_id, path), state)
         elif 'sync' in (getattr(job, 'job_name', '') or '').lower():
             legacy.append((owner, event_id, job.job_name, state))
-    for (event, _, raw_mapping), result in zip(rows, data):
+    for row, result in zip(rows, data):
+        event, raw_mapping = row[0], row[2]
         mapping = read_sports_mappings(raw_mapping)
         states = result['sync_status'] = {}
         for item in result['subtitles']:
