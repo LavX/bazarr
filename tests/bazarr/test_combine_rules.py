@@ -1,5 +1,7 @@
 # coding=utf-8
 
+import pytest
+
 
 from subtitles.tools.combine.rules import (
     SourcePaths,
@@ -655,6 +657,63 @@ def test_the_dotted_alias_keeps_its_modifiers(tmp_path):
     )
     assert result is not None
     assert result.primary == str(base / "Movie.es.ar.forced.srt")
+
+
+def test_the_regional_tag_es_419_resolves(tmp_path):
+    """'.es-419' is the IETF tag for Latin American Spanish, and the tag a
+    translation of this language names its file with. It has to read as the
+    custom language: a file already carrying the regional tag that nothing
+    resolves leaves its profile language missing, and the next search
+    translates the same subtitle again."""
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.es-419.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["ea", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.es-419.srt")
+
+
+def test_the_regional_tag_keeps_its_modifiers(tmp_path):
+    base = make_video_dir(tmp_path, [
+        "Movie.mkv",
+        "Movie.es-419.forced.srt",
+        "Movie.en.srt",
+    ])
+    result = resolve_source_paths(
+        video_path=str(base / "Movie.mkv"),
+        languages=["ea", "en"],
+    )
+    assert result is not None
+    assert result.primary == str(base / "Movie.es-419.forced.srt")
+
+
+@pytest.mark.parametrize("filename,expected", [
+    ("Movie.es-419.srt", "ea"),
+    ("Movie.es-419.forced.srt", "ea:forced"),
+    ("Movie.es-419.hi.srt", "ea:HI"),
+    ("Movie.es-419.cc.srt", "ea:HI"),
+    ("Movie.es-419.sdh.srt", "ea:HI"),
+    # Every spelling that read as the language before still reads.
+    ("Movie.es-la.srt", "ea"),
+    ("Movie.spl.srt", "ea"),
+    ("Movie.spa-la.srt", "ea"),
+    ("Movie.ea.srt", "ea"),
+    ("Movie.es-mx.srt", "ea"),
+    ("Movie.lat.srt", "ea"),
+    ("Movie.es.ar.srt", "ea"),
+])
+def test_latino_spellings_read_as_the_custom_language(filename, expected):
+    """found_external is what the indexer reads a whole filename through, so
+    the regional tag and its forced and HI spellings have to map back to the
+    language for a translated file to satisfy its own profile."""
+    from languages.custom_lang import CustomLanguage
+
+    assert CustomLanguage.found_external(filename, filename) == expected
 
 
 def test_an_unregistered_two_segment_tag_is_still_rejected(tmp_path):

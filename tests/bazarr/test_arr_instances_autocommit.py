@@ -280,6 +280,117 @@ def test_a_failed_create_rolls_back_the_demoted_default(arr_session, arr_engine)
     assert stored(arr_engine) == [("sonarr", "First", 1, 0), ("sonarr", "Second", 1, 1)]
 
 
+def test_startup_backfill_collision_retries_never_touch_a_row_another_owner_owns(
+        arr_session, arr_engine, caplog):
+    """A bulk-stamp collision on the instance-scoped unique index recovers
+    through the savepoint machinery under AUTOCOMMIT: the table is retried
+    row-group by row-group, every retry keeps the ownerless filter, and the
+    stamps commit, which only a separate connection can prove."""
+    from app.database import TableEpisodes
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(arr_session)
+    instance = repo.create("sonarr", "Sonarr", api_key="k")
+    other, gone = 4243, 4242  # rows naming owners that are not this instance
+    arr_session.execute(sa.insert(TableEpisodes).values(
+        arr_instance_id=instance.id, sonarrEpisodeId=6, sonarrSeriesId=1,
+        season=1, episode=1, path="/tv/a/s01e01.mkv", title="Owned"))
+    arr_session.execute(sa.insert(TableEpisodes).values(
+        sonarrEpisodeId=6, sonarrSeriesId=2, season=1, episode=1,
+        path="/tv/b/s01e01.mkv", title="Unrelated collision"))
+    arr_session.execute(sa.insert(TableEpisodes).values(
+        arr_instance_id=other, sonarrEpisodeId=5, sonarrSeriesId=3,
+        season=1, episode=2, path="/tv/c/s01e02.mkv", title="Another owner"))
+    arr_session.execute(sa.insert(TableEpisodes).values(
+        sonarrEpisodeId=5, sonarrSeriesId=4, season=1, episode=2,
+        path="/tv/d/s01e02.mkv", title="Orphan under another owner"))
+    arr_session.execute(sa.insert(TableEpisodes).values(
+        arr_instance_id=gone, sonarrSeriesId=5, season=1, episode=3,
+        path="/tv/e/s01e03.mkv", title="Another owner without an upstream id"))
+    arr_session.execute(sa.insert(TableEpisodes).values(
+        sonarrSeriesId=5, season=1, episode=3,
+        path="/tv/f/s01e03.mkv", title="Orphan without an upstream id"))
+    settings = _settings()
+    settings.general.use_radarr = False
+
+    with caplog.at_level(logging.INFO, logger="arr_instances.backfill"):
+        result = backfill_default_instances(arr_session, settings)
+    arr_session.commit()
+
+    assert result["sonarr"]["stamped"] == 2
+    assert any("Quarantined an ownerless table_episodes row (sonarrEpisodeId = 6)"
+               in record.getMessage() for record in caplog.records)
+    with arr_engine.connect() as connection:
+        owners = dict(connection.execute(sa.text(
+            "SELECT path, arr_instance_id FROM table_episodes")).all())
+    assert owners["/tv/a/s01e01.mkv"] == instance.id
+    assert owners["/tv/b/s01e01.mkv"] is None  # the unrelated collision stays ownerless
+    assert owners["/tv/d/s01e02.mkv"] == instance.id  # the orphan stamps
+    assert owners["/tv/c/s01e02.mkv"] == other  # the other owner keeps its row
+    assert owners["/tv/f/s01e03.mkv"] == instance.id  # the NULL-id orphan stamps
+    assert owners["/tv/e/s01e03.mkv"] == gone  # and the other owner keeps its row
+
+
+def test_startup_backfill_a_null_upstream_collision_isolates_to_its_row_across_tables_and_kinds(
+        arr_session, arr_engine, caplog):
+    """The NULL-upstream group stamps its rows one by one, so a collision on
+    the owned path quarantines only that row: the distinct-path NULL row, the
+    same kind's other table, its root folder and the live Radarr kind's rows
+    all stamp, and every stamp is what a separate connection sees."""
+    from app.database import (TableEpisodes, TableMovies, TableMoviesRootfolder, TableShows,
+                              TableShowsRootfolder)
+    from arr_instances.backfill import backfill_default_instances
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(arr_session)
+    sonarr = repo.create("sonarr", "Sonarr", api_key="k")
+    arr_session.execute(sa.insert(TableShows).values(
+        arr_instance_id=sonarr.id, path="/tv/a", title="Owned"))
+    arr_session.execute(sa.insert(TableShows).values(
+        path="/tv/a", title="Colliding path"))  # NULL upstream id, owned path
+    arr_session.execute(sa.insert(TableShows).values(
+        path="/tv/b", title="Unique path"))  # NULL upstream id, unique path
+    arr_session.execute(sa.insert(TableEpisodes).values(
+        sonarrEpisodeId=7, sonarrSeriesId=2, season=1, episode=2,
+        path="/tv/b/s01e02.mkv", title="Uncollided orphan"))
+    arr_session.execute(sa.insert(TableShowsRootfolder).values(
+        upstream_rootfolder_id=1, path="/tv"))
+    arr_session.execute(sa.insert(TableMovies).values(
+        radarrId=1, path="/m/a.mkv", title="A", tmdbId="10"))
+    arr_session.execute(sa.insert(TableMoviesRootfolder).values(
+        upstream_rootfolder_id=1, path="/movies"))
+
+    with caplog.at_level(logging.INFO, logger="arr_instances.backfill"):
+        result = backfill_default_instances(arr_session, _settings())
+    arr_session.commit()
+
+    assert result["sonarr"]["stamped"] == 3  # the unique show, the episode, the rootfolder
+    assert result["radarr"]["created"] is True and result["radarr"]["stamped"] == 2
+    assert any("Quarantined an ownerless table_shows row" in record.getMessage()
+               for record in caplog.records)
+    with arr_engine.connect() as connection:
+        show_owners = dict(connection.execute(sa.text(
+            "SELECT title, arr_instance_id FROM table_shows")).all())
+        episode_owner = connection.execute(sa.text(
+            "SELECT arr_instance_id FROM table_episodes")).scalar_one()
+        rootfolders = dict(connection.execute(sa.text(
+            "SELECT 'shows', arr_instance_id FROM table_shows_rootfolder "
+            "UNION ALL SELECT 'movies', arr_instance_id FROM table_movies_rootfolder")).all())
+        movie_owner = connection.execute(sa.text(
+            "SELECT arr_instance_id FROM table_movies")).scalar_one()
+        defaults = dict(connection.execute(sa.text(
+            "SELECT kind, id FROM arr_instances WHERE is_default = 1")).all())
+    assert defaults["sonarr"] == sonarr.id
+    assert show_owners["Owned"] == sonarr.id
+    assert show_owners["Colliding path"] is None  # only the colliding row stays ownerless
+    assert show_owners["Unique path"] == sonarr.id  # the rest of the NULL group stamps
+    assert episode_owner == sonarr.id  # and the same kind's other table stamps
+    assert rootfolders["shows"] == sonarr.id
+    assert rootfolders["movies"] == defaults["radarr"]
+    assert movie_owner == defaults["radarr"]  # the other kind's table stamps its rows too
+
+
 # ------------------------------------------------ deleting with the synced library
 #
 # A Sonarr or Radarr instance that has synced once owns rows, and a plain delete

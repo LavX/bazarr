@@ -260,17 +260,15 @@ def missing_languages(context, session=None):
 
 
 def translation_destination(video_path, language, forced, hi):
-    from subliminal_patch.core import get_subtitle_path
-    from subtitles.indexer.utils import get_subtitle_destination_path
-    from subtitles.tools.translate.core.translator_utils import convert_language_codes
+    """The path a translation of ``language`` writes its file to.
 
-    lang, _ = convert_language_codes(language, forced, hi)
-    filename = get_subtitle_path(
-        video_path, language=lang, extension=".srt", forced_tag=forced, hi_tag=hi
-    )
-    return get_subtitle_destination_path(
-        file=video_path, subtitle=os.path.basename(filename)
-    )
+    Resolved through the same helper the translate write path names its
+    destination with: the sports write guard compares the two, so the
+    binding and the write must resolve the same name.
+    """
+    from subtitles.tools.translate.core.translator_utils import translated_destination_path
+
+    return translated_destination_path(video_path, language, forced, hi)
 
 
 def manual_translation_operation(event_id, arr_instance_id, source_path, to_language,
@@ -428,8 +426,10 @@ def translate_from_existing(context, target_code, cancel=None, translation_gate=
         return False
     if _already_translated_on_disk(context, target_code):
         return False
+    hi, forced = item.get("hi") == "True", item.get("forced") == "True"
     if translation_recently_failed(
-            context.arr_instance_id, "sports", context.event_id, source_lang, item["language"]):
+            context.arr_instance_id, "sports", context.event_id, source_lang, item["language"],
+            forced, hi):
         # The last translation of this event died inside the job, so
         # re-offering it would only queue another doomed job every scan; the
         # hold expires and every settings save clears it.
@@ -440,7 +440,6 @@ def translate_from_existing(context, target_code, cancel=None, translation_gate=
         )
         return False
 
-    hi, forced = item.get("hi") == "True", item.get("forced") == "True"
     destination = translation_destination(
         context.mapped_path, item["language"], forced, hi
     )

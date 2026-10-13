@@ -3,7 +3,12 @@ import { Alert, Button, Divider, LoadingOverlay, Stack } from "@mantine/core";
 import { useForm } from "@mantine/form";
 import { showNotification } from "@mantine/notifications";
 import { isObject } from "lodash";
-import { useSubtitleAction, useSystemSettings } from "@/apis/hooks";
+import {
+  useSubtitleAction,
+  useSystemSettings,
+  useTranslationAvailability,
+  useTranslationRefusal,
+} from "@/apis/hooks";
 import { Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
 import { notification } from "@/modules/notification";
@@ -137,6 +142,10 @@ const TranslationForm: FunctionComponent<Props> = ({
   const settings = useSystemSettings();
   const { mutateAsync, isPending } = useSubtitleAction();
   const modals = useModals();
+  const translation = useTranslationAvailability();
+  // The availability above is a cached status, so the gate can have closed
+  // since it was read: a 409 is where the server's reason gets a say.
+  const showTranslationRefusal = useTranslationRefusal();
 
   const { data: languages } = useEnabledLanguages();
 
@@ -171,35 +180,30 @@ const TranslationForm: FunctionComponent<Props> = ({
     settings: ReturnType<typeof useSystemSettings>,
   ): TranslationConfig => {
     const translatorType = settings?.data?.translator?.translator_type;
-    const defaultConfig: TranslationConfig = {
-      service: "Google Translate",
-      model: "",
-    };
 
     switch (translatorType) {
+      case "google_translate":
+        return { service: "Google Translate", model: "" };
       case "gemini":
         return {
-          ...defaultConfig,
           service: "Gemini",
           model: ` (${settings?.data?.translator?.gemini_model || ""})`,
         };
       case "lingarr":
-        return {
-          ...defaultConfig,
-          service: "Lingarr",
-        };
+        return { service: "Lingarr", model: "" };
       case "openrouter":
         return {
-          ...defaultConfig,
           service: "AI Translator",
           model: ` (${settings?.data?.translator?.openrouter_model || ""})`,
         };
       default:
-        return defaultConfig;
+        // An engine the form does not recognise is not "Google Translate":
+        // it is whatever the settings page holds, and the gate below is what
+        // says whether it can translate at all.
+        return { service: "", model: "" };
     }
   };
 
-  // In the component, replace lines 167-185 with:
   const config = getTranslationConfig(settings);
   const translatorService = config.service;
   const translatorModel = config.model;
@@ -230,28 +234,37 @@ const TranslationForm: FunctionComponent<Props> = ({
             );
             onSubmit?.();
             modals.closeSelf();
-          } catch {
-            showNotification(
-              notification.error(
-                "Translation failed",
-                "An error occurred while translating subtitles",
-              ),
-            );
+          } catch (error) {
+            // A stale status can leave the action enabled while the gate is
+            // closed: a 409 shows the server's own reason, and the generic
+            // sentence stays for every other failure.
+            if (!showTranslationRefusal(error)) {
+              showNotification(
+                notification.error(
+                  "Translation failed",
+                  "An error occurred while translating subtitles",
+                ),
+              );
+            }
           }
         }
       })}
     >
       <Stack pos="relative">
         <LoadingOverlay visible={isPending} />
-        <Alert>
-          <div>
-            {translatorService}
-            {translatorModel} will be used.
-          </div>
-          <div>
-            You can choose translation service in the subtitles settings.
-          </div>
-        </Alert>
+        {translation.available ? (
+          <Alert>
+            <div>
+              {translatorService}
+              {translatorModel} will be used.
+            </div>
+            <div>
+              You can choose translation service in the subtitles settings.
+            </div>
+          </Alert>
+        ) : (
+          <Alert color="red">{translation.reason}</Alert>
+        )}
         {isGoogleTranslator && (
           <Alert variant="outline">
             Enabled languages not listed here are unsupported by{" "}
@@ -260,7 +273,11 @@ const TranslationForm: FunctionComponent<Props> = ({
         )}
         <Selector {...options} {...form.getInputProps("language")}></Selector>
         <Divider></Divider>
-        <Button type="submit" loading={isPending}>
+        <Button
+          type="submit"
+          loading={isPending}
+          disabled={!translation.available}
+        >
           Start
         </Button>
       </Stack>

@@ -13,6 +13,7 @@ import {
 } from "@mantine/core";
 import { faRefresh } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { AxiosError } from "axios";
 import {
   usePlexAuthValidationQuery,
   usePlexSelectedServerQuery,
@@ -30,6 +31,28 @@ const ServerSection = () => {
   const [isSelecting, setIsSelecting] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
   const [wasAuthenticated, setWasAuthenticated] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
+
+  // What a refused server selection says, from the codes the picker refuses
+  // with: an address Plex does not list for the account, and a plex.tv that
+  // cannot be asked which addresses it lists.
+  const selectionErrorMessage = (error: unknown): string => {
+    if (error instanceof AxiosError) {
+      const data = error.response?.data as
+        | {
+            error_code?: string;
+            error?: string;
+          }
+        | undefined;
+      if (data?.error_code === "server_not_listed") {
+        return "Plex does not list this address for the selected server. Choose a connection Plex lists for it.";
+      }
+      if (data?.error_code === "plex_unreachable") {
+        return "Plex could not be reached to verify the server address. Try again in a moment.";
+      }
+    }
+    return "Could not save the selected server. Try again.";
+  };
 
   // Use hooks to fetch data internally
   const { data: authData } = usePlexAuthValidationQuery();
@@ -66,6 +89,7 @@ const ServerSection = () => {
     if (!server.bestConnection) return;
 
     setIsSelecting(true);
+    setSelectionError(null);
     try {
       await selectServerMutation({
         machineIdentifier: server.machineIdentifier,
@@ -83,8 +107,8 @@ const ServerSection = () => {
       // consumer, so the backend ignored them while they still inflated the
       // unsaved-changes count and fired the leave-page prompt (including on the
       // automatic single-server selection after OAuth).
-    } catch {
-      // Error is handled by the mutation hook
+    } catch (error) {
+      setSelectionError(selectionErrorMessage(error));
     } finally {
       setIsSelecting(false);
     }
@@ -148,6 +172,12 @@ const ServerSection = () => {
       <Stack gap="lg">
         <Title order={4}>Plex Servers</Title>
 
+        {selectionError && (
+          <Alert color="red" variant="light">
+            {selectionError}
+          </Alert>
+        )}
+
         {serversError && (
           <Alert color="red" variant="light">
             Failed to load servers: {serversError.message}
@@ -198,6 +228,21 @@ const ServerSection = () => {
                 <FontAwesomeIcon icon={faRefresh} size="sm" />
               </ActionIcon>
             </Group>
+            {selectionError && !isSaved && servers[0].bestConnection && (
+              // The automatic selection keeps its picked server after a
+              // refusal, so the initialization that picks once will not pick
+              // again on its own: a refused selection gets an action that
+              // tries the same server again rather than a list refresh that
+              // cannot recover it.
+              <Button
+                variant="light"
+                color="brand"
+                loading={isSelecting}
+                onClick={() => void selectAndSaveServer(servers[0])}
+              >
+                Try again
+              </Button>
+            )}
             {selectedServer && (
               <ConnectionsCard
                 servers={servers}

@@ -470,28 +470,56 @@ def test_retired_credentials_leave_no_trace_in_the_config_file(legacy_install):
     # stops being on disk, in either shape. The cleartext one is the shape a
     # pre-secret-store install carries, and it is the one nothing else can reach
     # any more, since encrypt-at-rest only visits registered paths.
+    import yaml
+
+    from secret_store.crypto import decrypt_secret, is_encrypted
+
     _, tmp_path = legacy_install
     raw = (tmp_path / "config" / "config.yaml").read_text(encoding="utf-8")
 
     assert CLEARTEXT_CREDENTIAL not in raw
     assert AT_REST_CREDENTIAL not in raw
-    # The control: the scrub is targeted, not a blanket credential wipe.
-    assert ADOPTED_CREDENTIAL in raw
+    # The control: the scrub is targeted, not a blanket credential wipe. The
+    # adopted credential survives it in the at-rest shape every registered secret
+    # wears now, ciphertext under the config's own master key, and that ciphertext
+    # decrypts back to the plaintext the plugin owns.
+    on_disk = yaml.safe_load(raw)
+    adopted_password = on_disk[ADOPTED_RETIRED_PROVIDER]["password"]
+    assert is_encrypted(adopted_password)
+    assert (
+        decrypt_secret(
+            adopted_password, master_key=on_disk["general"]["secrets_encryption_key"]
+        )
+        == ADOPTED_CREDENTIAL
+    )
 
 
 def test_adopted_retired_section_survives_with_its_credentials(legacy_install):
     # A retired id whose provider class is back (a trusted catalog plugin adopted
     # it) is a live provider again, and Provider Hub overlays its config from this
     # very section. Scrubbing it would silently wipe the plugin's credentials on
-    # the next boot.
+    # the next boot. The credentials survive the scrub encrypted at rest: the
+    # section is not one of Bazarr's own, so the boot's leftover scan registers
+    # its keys as plugin secrets and the write encrypts them like any other
+    # credential, while the settings API serves each one as an empty value plus
+    # the descriptor that says it is configured and how a long one ends.
     import yaml
+
+    from secret_store.crypto import is_encrypted
 
     result, tmp_path = legacy_install
     on_disk = yaml.safe_load((tmp_path / "config" / "config.yaml").read_text(encoding="utf-8"))
 
-    assert on_disk[ADOPTED_RETIRED_PROVIDER]["username"] == "someuser"
-    assert on_disk[ADOPTED_RETIRED_PROVIDER]["password"] == ADOPTED_CREDENTIAL
+    assert is_encrypted(on_disk[ADOPTED_RETIRED_PROVIDER]["username"])
+    assert is_encrypted(on_disk[ADOPTED_RETIRED_PROVIDER]["password"])
+    # The API never hands a plugin secret back, so the adopted section serves an
+    # empty value per credential and one descriptor map for the section. The
+    # username is too short for a last four; the password is long enough.
     assert result["api_settings_adopted_section"] == {
-        "username": "someuser",
-        "password": ADOPTED_CREDENTIAL,
+        "username": "",
+        "password": "",
+        "__secret_fields": {
+            "username": {"configured": True},
+            "password": {"configured": True, "last_four": ADOPTED_CREDENTIAL[-4:]},
+        },
     }

@@ -35,9 +35,16 @@ def _build_pooled_session(verify: bool) -> requests.Session:
 
     Retries are limited to transient gateway statuses (502/503/504) so 4xx
     responses still surface immediately to the caller, matching the
-    pre-existing behaviour of the rest of the code base."""
+    pre-existing behaviour of the rest of the code base.
+
+    Redirects are refused outright: this session carries the Plex token on
+    every request (operations, refreshes, probes and the status page all
+    share it), and a server that answers with a redirect is not the server
+    the address was verified for. ``max_redirects = 0`` makes requests raise
+    before the next hop is ever contacted."""
     s = requests.Session()
     s.verify = verify
+    s.max_redirects = 0
     adapter = HTTPAdapter(
         pool_connections=20,
         pool_maxsize=50,
@@ -145,25 +152,63 @@ def get_plex_server() -> PlexServer:
     FIFO-bounded so a settings rotation evicts old entries.
     """
     try:
-        auth_method = settings.plex.get('auth_method', 'apikey')
+        # The method, the address, the credential and the TLS choice are one
+        # snapshot under the account lock, the one every account save holds,
+        # so an address-and-key replacement landing between two reads cannot
+        # pair one account's address with another's key: the connection
+        # carries the snapshot's own credential to its own address. The
+        # account branch reads its addresses and credential in one call and
+        # follows the same snapshot. The plex.tv ask itself runs outside the
+        # lock, because it is a network request no lock may be held across:
+        # sign-ins and instance saves must not wait on a connection being
+        # built.
+        from media_servers.plex_account import ACCOUNT_LOCK
+        with ACCOUNT_LOCK:
+            auth_method = settings.plex.get('auth_method', 'apikey')
+            verify = plex_account_verify_ssl()
+
+            if auth_method == 'oauth':
+                if not settings.plex.get('token'):
+                    raise ValueError("OAuth token not found. Please re-authenticate with Plex.")
+                baseurl = settings.plex.get('server_url')
+                if not baseurl:
+                    raise ValueError("Server URL not configured. Please select a Plex server.")
+                token = settings.plex.get('token')
+            else:
+                protocol = "https://" if settings.plex.ssl else "http://"
+                baseurl = f"{protocol}{settings.plex.ip}:{settings.plex.port}"
+
+                credential = settings.plex.get('apikey')
+                if not credential:
+                    raise ValueError("API key not configured. Please configure Plex authentication.")
 
         if auth_method == 'oauth':
-            token = settings.plex.get('token')
-            if not token:
-                raise ValueError("OAuth token not found. Please re-authenticate with Plex.")
+            # The account token goes only to an address plex.tv lists for the
+            # signed-in account, and to the URI plex.tv listed for it rather
+            # than the stored string on its word. The answer is remembered per
+            # credential, so this costs one plex.tv call per start. The
+            # credential it verified is the one this connection sends.
+            from media_servers.plex_account import verified_server_addresses
+            addresses, status, credential = verified_server_addresses(settings)
+            if (status != 'ok' or not addresses
+                    or not credential or not credential.strip()):
+                raise ValueError("Plex does not list the saved server address for the "
+                                 "signed-in account. Choose the server again on the Plex card.")
+            with ACCOUNT_LOCK:
+                # A sign-in or a sign-out can land while plex.tv was being
+                # asked, so the captured account is confirmed against what is
+                # stored before anything connects with the answer: the answer
+                # belongs to the account it was asked about, and a sign-in
+                # landing between the ask and the send stops the connection
+                # rather than letting the older account's listing carry its
+                # credential.
+                if (settings.plex.get('auth_method', 'apikey') != 'oauth'
+                        or settings.plex.get('token') != token):
+                    raise ValueError("The Plex account changed while its server address "
+                                     "was being read. Start the connection again.")
+            baseurl = addresses[0]
 
-            baseurl = settings.plex.get('server_url')
-            if not baseurl:
-                raise ValueError("Server URL not configured. Please select a Plex server.")
-        else:
-            protocol = "https://" if settings.plex.ssl else "http://"
-            baseurl = f"{protocol}{settings.plex.ip}:{settings.plex.port}"
-
-            token = settings.plex.get('apikey')
-            if not token:
-                raise ValueError("API key not configured. Please configure Plex authentication.")
-
-        return plex_server_for(baseurl, token, plex_account_verify_ssl())
+        return plex_server_for(baseurl, credential, verify)
 
     except Exception as e:
         logger.error(f"Failed to connect to Plex server: {e}")  # noqa: G004

@@ -27,8 +27,10 @@ swapped in the stale staging folder.
 import html
 import os
 import re
+import signal
 import stat
 import subprocess
+import time
 
 import pytest
 
@@ -97,11 +99,11 @@ cp() {
 '''
 
 
-def _functions():
+def _functions(*names):
     with open(os.path.join(ROOT, 'site', 'install.sh')) as handle:
         script = handle.read()
     bodies = []
-    for name in FUNCTIONS:
+    for name in names or FUNCTIONS:
         body = re.search(rf'^{name}\(\) \{{.*?^\}}', script, re.S | re.M)
         assert body, f'{name}() is gone from install.sh, or no longer starts at column 0'
         bodies.append(body.group(0))
@@ -588,7 +590,7 @@ def test_a_run_killed_mid_copy_leaves_only_a_folder_marked_incomplete(install):
                         stubs=KILLED_CONFIG_COPY)
 
     [left] = backups
-    assert re.fullmatch(r'backup_\d{8}_\d{6}\.partial', left.name)
+    assert re.fullmatch(r'backup_\d{8}_\d{6}\.\d+\.partial', left.name)
 
 
 @pytest.mark.parametrize('signal', ['INT', 'TERM', 'HUP'])
@@ -622,13 +624,14 @@ def test_the_signal_trap_ends_with_do_backup(install):
     assert 'trap --' not in output
 
 
-@pytest.mark.parametrize('suffix', ['', '.partial'])
-def test_a_backup_folder_that_already_exists_is_left_alone(install, suffix):
-    # Two runs in the same second get the same name. The folder that is there is not this
-    # run's, so it is neither written into nor removed, and nothing is stopped.
+def test_a_backup_folder_with_the_final_name_that_already_exists_is_left_alone(install):
+    # Two runs in the same second still share the final name, and the folder that is
+    # there is not this run's, so it is neither written into nor removed, and nothing
+    # is stopped. A leftover partial no longer blocks a run: the new tests below pin
+    # that, because the partial name is the run's own now.
     install_dir, run = install
     _config_tree(install_dir / 'config', 'general:\n  port: 6767\n')
-    existing = install_dir / f'backup_20260929_120000{suffix}'
+    existing = install_dir / 'backup_20260929_120000'
     existing.mkdir()
     (existing / 'sentinel').write_text('keep me', encoding='utf-8')
 
@@ -641,6 +644,431 @@ def test_a_backup_folder_that_already_exists_is_left_alone(install, suffix):
     assert [entry.name for entry in existing.iterdir()] == ['sentinel']
     assert (existing / 'sentinel').read_text(encoding='utf-8') == 'keep me'
     assert docker_log == ''
+
+
+# --- Each run owns its partial folder and its spinner ---
+
+# The same second two runs share, so with the clock standing still both compute the
+# same backup_<ts> names.
+SAME_SECOND = r'''
+date() { printf '20260929_120000\n'; }
+'''
+
+# A copy that stops mid-step, holding its partial while a second run starts: the
+# first run blocks in its docker-compose.yml copy, its partial already created.
+BLOCKED_FIRST_COPY = r'''
+cp() {
+  if [[ "$2" == */docker-compose.yml ]]; then
+    printf 'building' > "$FAKE_FIRST_RUN_BLOCKED"
+    sleep 30
+  fi
+  command cp "$@"
+}
+'''
+
+
+def test_two_runs_in_the_same_second_each_own_their_partial(install, tmp_path):
+    # Two runs in the same second named the same partial folder, so the second run's
+    # mkdir refused it and the second run backed nothing up beside the first, even
+    # though the first run's folder was never the second run's to be blocked by. The
+    # name carries the run's pid now: both build beside each other, the final name
+    # goes to whoever finishes first, and neither run's cleanup meets the other's
+    # folder.
+    install_dir, _ = install
+    _config_tree(install_dir / 'config', 'general:\n  port: 6767\n')
+    rendered = tmp_path / 'rendered.yml'
+    rendered.write_text(_rendered_config(install_dir / 'config'), encoding='utf-8')
+    log = tmp_path / 'docker.log'
+    blocked = tmp_path / 'first-run-blocked'
+    env = dict(os.environ, FAKE_COMPOSE_CONFIG=str(rendered), FAKE_LOG=str(log),
+               FAKE_INSTALL=str(install_dir), FAKE_FIRST_RUN_BLOCKED=str(blocked))
+    program = _functions() + STUBS + SAME_SECOND + BLOCKED_FIRST_COPY + 'do_backup "$1"\n'
+    first = subprocess.Popen(['bash', '-c', program, 'bash', str(install_dir)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             text=True, env=env)
+    try:
+        for _ in range(400):
+            if blocked.exists():
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail('the first run never reached its docker-compose.yml copy')
+        assert list(install_dir.glob('backup_*.partial')), \
+            'the first run had not created its partial folder yet'
+        second = subprocess.run(['bash', '-c', _functions() + STUBS + SAME_SECOND + 'do_backup "$1"\n',
+                                 'bash', str(install_dir)], capture_output=True, text=True,
+                                timeout=60, env=env)
+        assert second.returncode == 0, (
+            "the second run was refused beside the first run's partial:\n"
+            f'{second.stdout}\n{second.stderr}')
+        assert 'Backed up docker-compose.yml, .env, ./config and the SQLite database inside it' \
+            in second.stdout
+        # The first run's partial is still there, still mid-build and still the first
+        # run's: the second run neither removed it nor moved anything into it.
+        [first_partial] = list(install_dir.glob('backup_*.partial'))
+        assert re.fullmatch(r'backup_20260929_120000\.\d+\.partial', first_partial.name)
+        assert (install_dir / 'backup_20260929_120000' / 'config' / 'db' / 'bazarr.db').is_file()
+        # The second run stopped the services for its own copy and took the final name;
+        # the first run's partial was never in its way.
+        assert log.read_text(encoding='utf-8') == 'stop\n'
+    finally:
+        first.kill()
+        first.wait()
+    # A run killed outright leaves only its own partial, named for what it is.
+    assert first_partial.exists() and not any(first_partial.iterdir())
+
+
+# The first run blocks in its docker-compose.yml copy until the test releases it, so
+# a second run can finish and take the final name while the first is mid-backup.
+BARRIER_FIRST_COPY = r'''
+cp() {
+  if [[ "$2" == */docker-compose.yml ]]; then
+    printf blocked > "$FAKE_FIRST_RUN_BLOCKED"
+    while [[ ! -e "$FAKE_RELEASE" ]]; do sleep 0.2; done
+  fi
+  command cp "$@"
+}
+'''
+
+
+def test_a_run_that_resumes_after_another_took_its_final_name_is_refused(install, tmp_path):
+    # The final-name refusal was only ever proven for a folder that was there before
+    # the run started. A run that resumes after a concurrent run has taken the final
+    # name in the meantime has to be refused too, its own partial is the only thing
+    # that goes, and the winner is left exactly as the other run wrote it.
+    install_dir, _ = install
+    _config_tree(install_dir / 'config', 'general:\n  port: 6767\n')
+    rendered = tmp_path / 'rendered.yml'
+    rendered.write_text(_rendered_config(install_dir / 'config'), encoding='utf-8')
+    log = tmp_path / 'docker.log'
+    blocked = tmp_path / 'first-run-blocked'
+    release = tmp_path / 'release'
+    env = dict(os.environ, FAKE_COMPOSE_CONFIG=str(rendered), FAKE_LOG=str(log),
+               FAKE_INSTALL=str(install_dir), FAKE_FIRST_RUN_BLOCKED=str(blocked),
+               FAKE_RELEASE=str(release))
+    program = _functions() + STUBS + SAME_SECOND + BARRIER_FIRST_COPY + 'do_backup "$1"\n'
+    first = subprocess.Popen(['bash', '-c', program, 'bash', str(install_dir)],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                             env=env)
+    try:
+        for _ in range(400):
+            if blocked.exists():
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail('the first run never reached its docker-compose.yml copy')
+        [first_partial] = list(install_dir.glob('backup_*.partial'))
+        assert first_partial.name == f'backup_20260929_120000.{first.pid}.partial'
+        # The second run finishes beside the blocked one and takes the final name.
+        second = subprocess.run(['bash', '-c', _functions() + STUBS + SAME_SECOND + 'do_backup "$1"\n',
+                                 'bash', str(install_dir)], capture_output=True, text=True,
+                                timeout=60, env=env)
+        assert second.returncode == 0, (
+            "the second run was refused beside the first run's partial:\n"
+            f'{second.stdout}\n{second.stderr}')
+        winning = install_dir / 'backup_20260929_120000'
+        won = _tree(winning)
+        assert set(won) == {'.env', 'docker-compose.yml', 'config', 'config/config',
+                            'config/config/config.yaml', 'config/db',
+                            'config/db/bazarr.db'}
+        # The first run resumes into a world where its final name is taken.
+        release.write_text('')
+        first_out, _ = first.communicate(timeout=60)
+        assert first.returncode != 0, first_out
+        assert 'FATAL Could not rename' in first_out and 'SUCCESS' not in first_out
+        assert 'INFO Removed the incomplete backup' in first_out
+        assert _tree(winning) == won, 'the refused run changed the winning backup'
+        assert not first_partial.exists(), "the refused run's own partial was left behind"
+        backups = [path.name for path in install_dir.iterdir() if path.name.startswith('backup_')]
+        assert backups == [winning.name]
+        assert log.read_text(encoding='utf-8').splitlines() == \
+            ['stop', 'stop', 'start (backup folders: backup_20260929_120000 )']
+    finally:
+        release.write_text('')
+        if first.poll() is None:
+            first.kill()
+            first.wait()
+
+
+# The compose child of each run, blocked on a barrier the test releases: the child
+# records the pid of the run that is waiting on it. The real run_with_spinner runs
+# here, not the stub, so the pid it holds is the run's own child to kill.
+BLOCKED_STOP = r'''
+docker() {
+  shift 3
+  case "$1" in
+    config) cat "$FAKE_COMPOSE_CONFIG" ;;
+    stop) printf '%s\n' "$BASHPID" > "$FAKE_CHILD_PID"
+          while [[ ! -e "$FAKE_RELEASE" ]]; do sleep 0.2; done
+          printf '%s\n' "$*" >> "$FAKE_LOG" ;;
+    start) local found; found=$(cd "$FAKE_INSTALL" && ls -d backup_* 2>/dev/null | tr '\n' ' ')
+           printf 'start (backup folders: %s)\n' "${found:-none}" >> "$FAKE_LOG" ;;
+    *) printf '%s\n' "$*" >> "$FAKE_LOG" ;;
+  esac
+}
+'''
+
+
+def test_an_interrupted_run_kills_only_its_own_compose_child(install, tmp_path):
+    # Two runs share the launching shell's process group, and the compose commands
+    # run_with_spinner runs sat in it with no way to be told apart: the interruption
+    # handling could not aim at the run's own child, and the command substitution it
+    # sat in held a trapped signal back until the command finished. The command is
+    # this run's own child, held by pid, and the wait it sits in lets the trap
+    # through at once, so the interrupted run ends promptly, its own child goes with
+    # it, and the other run's child is still going.
+    install_dir, _ = install
+    _config_tree(install_dir / 'config', 'general:\n  port: 6767\n')
+    rendered = tmp_path / 'rendered.yml'
+    rendered.write_text(_rendered_config(install_dir / 'config'), encoding='utf-8')
+    log = tmp_path / 'docker.log'
+    release = tmp_path / 'release'
+    program = (_functions() + STUBS + 'error() { printf "ERROR %s\\n" "$*"; }\n' +
+               _functions('spinner_start', 'spinner_stop', 'run_with_spinner') +
+               BLOCKED_STOP + SAME_SECOND + 'do_backup "$1"\n')
+    runs, children, outputs = {}, {}, {}
+    try:
+        for name in ('first', 'second'):
+            child_file = tmp_path / f'{name}.child'
+            out_file = tmp_path / f'{name}.out'
+            with open(out_file, 'w') as handle:
+                runs[name] = subprocess.Popen(
+                    ['bash', '-c', program, 'bash', str(install_dir)], stdout=handle,
+                    stderr=subprocess.STDOUT, text=True,
+                    env=dict(os.environ, FAKE_COMPOSE_CONFIG=str(rendered), FAKE_LOG=str(log),
+                             FAKE_INSTALL=str(install_dir), FAKE_RELEASE=str(release),
+                             FAKE_CHILD_PID=str(child_file)))
+            for _ in range(400):
+                if child_file.exists():
+                    break
+                assert runs[name].poll() is None, (
+                    f'the {name} run ended before its compose child:\n'
+                    f'{out_file.read_text(encoding="utf-8")}')
+                time.sleep(0.05)
+            else:
+                pytest.fail(f'the {name} run never reached its compose child')
+            children[name] = int(child_file.read_text(encoding='utf-8').strip())
+            outputs[name] = out_file
+        # Each run's compose child is its own.
+        assert children['first'] != children['second']
+        for pid in children.values():
+            os.kill(pid, 0)
+        # Interrupting the first run ends it with the interrupted status while its
+        # step is still going: its own child goes with it, the other run's does not.
+        runs['first'].send_signal(signal.SIGINT)
+        assert runs['first'].wait(timeout=10) == 130, (
+            'the interrupted run did not end promptly:\n'
+            f'{outputs["first"].read_text(encoding="utf-8")}')
+        for _ in range(400):
+            try:
+                os.kill(children['first'], 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail('the interrupted run left its own compose child running')
+        os.kill(children['second'], 0)
+        first_out = outputs['first'].read_text(encoding='utf-8')
+        assert ('ERROR Interrupted. Nothing was upgraded or reinstalled, '
+                'and the old services were started again.') in first_out
+        [second_partial] = list(install_dir.glob('backup_*.partial'))
+        assert second_partial.name == f'backup_20260929_120000.{runs["second"].pid}.partial'
+        assert log.read_text(encoding='utf-8').splitlines() == \
+            [f'start (backup folders: {second_partial.name} )']
+        # The second run finishes once its stop is released, beside the first run's
+        # interruption, and its backup is complete.
+        release.write_text('')
+        assert runs['second'].wait(timeout=60) == 0, outputs['second'].read_text(encoding='utf-8')
+        second_out = outputs['second'].read_text(encoding='utf-8')
+        assert 'Backed up docker-compose.yml, .env, ./config and the SQLite database inside it' \
+            in second_out
+        assert log.read_text(encoding='utf-8').splitlines() == \
+            [f'start (backup folders: {second_partial.name} )', 'stop']
+        final = install_dir / 'backup_20260929_120000'
+        assert set(_tree(final)) == {'.env', 'docker-compose.yml', 'config', 'config/config',
+                                     'config/config/config.yaml', 'config/db',
+                                     'config/db/bazarr.db'}
+        assert not list(install_dir.glob('backup_*.partial'))
+    finally:
+        release.write_text('')
+        for process in runs.values():
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
+# The compose child of an interrupted run with a TERM handler that takes its time, the
+# shape a command that keeps stopping things for a while after its TERM has: the child
+# records its pid, and the start command checks that pid, so the log says whether the
+# child was still alive when the old services came back.
+SLOW_TERM_STOP = r'''
+docker() {
+  shift 3
+  case "$1" in
+    config) cat "$FAKE_COMPOSE_CONFIG" ;;
+    stop) printf '%s\n' "$BASHPID" > "$FAKE_SLOW_CHILD"
+          trap 'sleep 0.5; exit 0' TERM
+          while [[ ! -e "$FAKE_RELEASE" ]]; do sleep 0.2; done
+          printf '%s\n' "$*" >> "$FAKE_LOG" ;;
+    start) if kill -0 "$(cat "$FAKE_SLOW_CHILD")" 2>/dev/null; then
+             printf 'start (slow child: alive)\n' >> "$FAKE_LOG"
+           else
+             printf 'start (slow child: gone)\n' >> "$FAKE_LOG"
+           fi ;;
+    *) printf '%s\n' "$*" >> "$FAKE_LOG" ;;
+  esac
+}
+'''
+
+
+def test_an_interrupted_run_reaps_the_compose_child_before_the_services_restart(
+        install, tmp_path):
+    # A command that handles TERM slowly can still be stopping things while the old
+    # services start again, and a stop still pending in it can undo that restart: the
+    # recovery starts only once the child is gone, which the start command observes,
+    # and the run does not outlive its own child.
+    install_dir, _ = install
+    _config_tree(install_dir / 'config', 'general:\n  port: 6767\n')
+    rendered = tmp_path / 'rendered.yml'
+    rendered.write_text(_rendered_config(install_dir / 'config'), encoding='utf-8')
+    log = tmp_path / 'docker.log'
+    release = tmp_path / 'release'
+    slow_child = tmp_path / 'slow-child'
+    out_file = tmp_path / 'run.out'
+    program = (_functions() + STUBS + 'error() { printf "ERROR %s\\n" "$*"; }\n' +
+               _functions('spinner_start', 'spinner_stop', 'run_with_spinner') +
+               SLOW_TERM_STOP + 'do_backup "$1"\n')
+    with open(out_file, 'w') as handle:
+        run = subprocess.Popen(
+            ['bash', '-c', program, 'bash', str(install_dir)],
+            stdout=handle, stderr=subprocess.STDOUT, text=True,
+            env=dict(os.environ, FAKE_COMPOSE_CONFIG=str(rendered), FAKE_LOG=str(log),
+                     FAKE_INSTALL=str(install_dir), FAKE_RELEASE=str(release),
+                     FAKE_SLOW_CHILD=str(slow_child)))
+    try:
+        for _ in range(400):
+            if slow_child.exists():
+                break
+            assert run.poll() is None, out_file.read_text(encoding='utf-8')
+            time.sleep(0.05)
+        else:
+            pytest.fail('the run never reached its compose child')
+        child = int(slow_child.read_text(encoding='utf-8').strip())
+        os.kill(child, 0)
+        run.send_signal(signal.SIGINT)
+        assert run.wait(timeout=10) == 130, out_file.read_text(encoding='utf-8')
+        # The start command ran only after the child was gone, and the child's death
+        # is observed from here as well.
+        assert log.read_text(encoding='utf-8').splitlines() == ['start (slow child: gone)']
+        with pytest.raises(ProcessLookupError):
+            os.kill(child, 0)
+        first_out = out_file.read_text(encoding='utf-8')
+        assert ('ERROR Interrupted. Nothing was upgraded or reinstalled, '
+                'and the old services were started again.') in first_out
+    finally:
+        release.write_text('')
+        if run.poll() is None:
+            run.kill()
+            run.wait()
+
+
+# The step an interrupted run is sitting in when the signal lands, still before its
+# own partial exists: the compose read at the top of do_backup.
+INTERRUPTED_COMPOSE_READ = r'''
+docker() {
+  case "$4" in
+    config) ( sleep 1 ) >/dev/null 2>&1 & local waiter=$!
+             ( sleep 0.3; kill -INT $$ ) >/dev/null 2>&1 &
+             wait "$waiter" ;;
+    start) local found; found=$(cd "$FAKE_INSTALL" && ls -d backup_* 2>/dev/null | tr '\n' ' ')
+           printf 'start (backup folders: %s)\n' "${found:-none}" >> "$FAKE_LOG" ;;
+    *) printf '%s\n' "$*" >> "$FAKE_LOG" ;;
+  esac
+}
+'''
+
+
+def test_an_interrupted_run_discards_only_its_own_partial(install):
+    # A run interrupted before its mkdir still names a partial, and with two runs in
+    # one second that name used to be the other run's live folder: the interrupted
+    # run's cleanup removed it and then started the services the other run had
+    # stopped for its own backup. The name is the run's own now, so the other run's
+    # folder is left exactly as it was, while the interrupted run still starts the
+    # old services again and ends with the interrupted status.
+    install_dir, run = install
+    _config_tree(install_dir / 'config', 'general:\n  port: 6767\n')
+    others = install_dir / 'backup_20260929_120000.partial'
+    (others / 'config').mkdir(parents=True)
+    (others / 'config' / 'half').write_text('half a copy', encoding='utf-8')
+
+    output, backups, docker_log = run(_rendered_config(install_dir / 'config'), succeed=False,
+                                      stubs=SAME_SECOND + INTERRUPTED_COMPOSE_READ +
+                                            'error() { printf "ERROR %s\\n" "$*"; }\n',
+                                      status=130)
+
+    assert 'Removed the incomplete backup' not in output
+    assert 'ERROR Interrupted. Nothing was upgraded or reinstalled' in output
+    assert 'FATAL' not in output and 'SUCCESS' not in output
+    assert _tree(others) == {'config': None, 'config/half': b'half a copy'}
+    assert [path.name for path in backups] == ['backup_20260929_120000.partial']
+    assert docker_log == 'start (backup folders: backup_20260929_120000.partial )\n'
+
+
+def test_discard_backup_leaves_a_partial_that_is_not_this_runs_alone(install):
+    # discard_backup's guard used to be shape-only: any backup_*.partial folder it
+    # was handed went, whichever run had built it. The pid in the name is the owner
+    # now, so a folder another run named is warned about and left for that run's own
+    # cleanup, and only this run's own partial is ever removed.
+    install_dir, _ = install
+    others = install_dir / 'backup_20260929_120000.999999.partial'
+    others.mkdir()
+    (others / 'sentinel').write_text('keep me', encoding='utf-8')
+
+    program = _functions() + STUBS + 'discard_backup "$1"\n'
+    result = subprocess.run(['bash', '-c', program, 'bash', str(others)], capture_output=True,
+                            text=True, timeout=60, env=dict(os.environ))
+
+    assert result.returncode == 0, f'{result.stdout}\n{result.stderr}'
+    assert 'WARN The incomplete backup' in result.stdout
+    assert 'INFO Removed' not in result.stdout
+    assert _tree(others) == {'sentinel': b'keep me'}
+
+
+# The stubs the spinner functions need: the colors are main's, and tput has nothing
+# to hide here.
+SPINNER_STUBS = r'''
+tput() { :; }
+info() { :; }; success() { :; }; warn() { :; }; error() { :; }
+RST=''; BLD=''; RED=''; GRN=''; YLW=''; BLU=''; CYN=''; DIM=''
+'''
+
+
+def test_the_spinner_runs_in_a_process_group_of_its_own(tmp_path):
+    # The spinner is one run's own job, but it used to share the run's process group,
+    # which two runs can also share with each other: one shell that started them both,
+    # with no job control, puts them all in one group, and a signal for that group
+    # then landed on both runs' spinners at once. The spinner runs in a group of its
+    # own now, and the run's own spinner_stop, which knows its pid, is still what
+    # stops it.
+    program = _functions('spinner_start', 'spinner_stop') + SPINNER_STUBS + r'''
+SPINNER_PID=""
+spinner_start "step"
+spinner=$SPINNER_PID
+kill -0 "$spinner" && echo SPINNER_ALIVE || echo SPINNER_DEAD
+echo "SPINPGID $(ps -o pgid= -p "$spinner" | tr -d ' ')"
+echo "SHELLPGID $(ps -o pgid= -p $$ | tr -d ' ')"
+spinner_stop ok "step"
+sleep 0.3
+kill -0 "$spinner" 2>/dev/null && echo AFTER_ALIVE || echo AFTER_DEAD
+'''
+    result = subprocess.run(['bash', '-c', program], capture_output=True, text=True,
+                            timeout=60, cwd=tmp_path)
+
+    assert 'SPINNER_ALIVE' in result.stdout, result.stdout + result.stderr
+    spin_pgid = re.search(r'SPINPGID (\d+)', result.stdout).group(1)
+    shell_pgid = re.search(r'SHELLPGID (\d+)', result.stdout).group(1)
+    assert spin_pgid != shell_pgid, "the spinner shares the run's process group"
+    assert 'AFTER_DEAD' in result.stdout, 'spinner_stop no longer stops the spinner'
 
 
 # --- The migration guide's backup and restore commands ---

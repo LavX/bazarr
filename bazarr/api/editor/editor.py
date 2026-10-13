@@ -10,9 +10,10 @@ import shutil
 import subprocess
 import threading
 import time
+
 from urllib.parse import quote
 
-from flask import Response, request, send_file
+from flask import Response, g, jsonify, request, send_file
 from flask_restx import Namespace, Resource, fields
 
 from arr_instances.resolution import scoped
@@ -25,7 +26,8 @@ from api.subtitles.content import resolve_subtitle_path  # noqa: F401
 from subtitles.tools.subsync_engines import (create_preview_workspace, discard_preview_workspace,
                                              is_sync_engine_language_key)
 
-from ..utils import authenticate
+from ..utils import authenticate_header_only, authenticate_header_or_stream_token
+from .stream_token import mint_stream_token, stream_token_lifetime
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +273,12 @@ def _parse_range_header(range_header, file_size):
 
 
 def _serve_file_with_ranges(file_path, mimetype):
-    """Serve a file with HTTP Range request support."""
+    """Serve a file with HTTP Range request support.
+
+    Every response is no-store: a cache that stored a segment could serve
+    it after its token expired, or to a request with no credential at all,
+    since caches do not key on X-API-KEY.
+    """
     file_size = os.path.getsize(file_path)
     range_header = request.headers.get('Range')
     range_tuple = _parse_range_header(range_header, file_size)
@@ -301,10 +308,12 @@ def _serve_file_with_ranges(file_path, mimetype):
         response.headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
         response.headers['Content-Length'] = length
         response.headers['Accept-Ranges'] = 'bytes'
+        response.headers['Cache-Control'] = 'no-store'
         return response
 
     response = send_file(file_path, mimetype=mimetype)
     response.headers['Accept-Ranges'] = 'bytes'
+    response.headers['Cache-Control'] = 'no-store'
     return response
 
 
@@ -875,7 +884,7 @@ def _wait_for_first_segment(cache_dir, deadline):
     'editor/hls/<string:media_type>/<int:media_id>/<int:audio_track>/<string:start_time>/<string:filename>'
 )
 class EditorHls(Resource):
-    @authenticate
+    @authenticate_header_or_stream_token
     def get(self, media_type, media_id, audio_track, start_time, filename):
         """HLS playlist + segments served from a per-session cache directory.
 
@@ -961,17 +970,22 @@ class EditorHls(Resource):
 
             # Relative segment and #EXT-X-MAP URLs do not inherit the
             # playlist query string. Carry the validated instance scope so
-            # every request resolves the same media and stream cache. Native
-            # HLS clients also need query authentication because they cannot
-            # inject headers into segment requests.
+            # every request resolves the same media and stream cache, and
+            # the stream token the request itself authenticated with,
+            # quoted for a URI: a native player cannot add headers to the
+            # segment requests it makes itself, so everything it fetches
+            # for one source carries one token with one expiry. Only the
+            # verified token is echoed, never an st that merely rode along
+            # on a header-authenticated call, and the HLS route never
+            # mints: the frontend knows the expiry.
+            stream_token_value = getattr(g, 'editor_hls_stream_token', None)
             resource_query = []
             if arr_instance_id is not None:
                 resource_query.append(f'arr_instance_id={arr_instance_id}')
             if player is not None:
                 resource_query.append(f'player={player}')
-            apikey_query = request.args.get('apikey')
-            if apikey_query:
-                resource_query.append(f'apikey={quote(apikey_query, safe="")}')
+            if stream_token_value:
+                resource_query.append(f'st={quote(stream_token_value, safe="")}')
             if resource_query:
                 try:
                     with open(target) as f:
@@ -1001,9 +1015,11 @@ class EditorHls(Resource):
                 )
             else:
                 response = send_file(target, mimetype='application/vnd.apple.mpegurl')
-            # Tell clients this is a live-ish playlist that may grow until
-            # ENDLIST appears, so they refetch instead of caching it.
-            response.headers['Cache-Control'] = 'no-cache'
+            # The playlist, like every response of this route, is no-store:
+            # a cache that stored it could hand segments to a request with
+            # no credential at all, and the playlist changes as ffmpeg
+            # writes segments.
+            response.headers['Cache-Control'] = 'no-store'
             return response
 
         # Init segment or media segment. Any request keeps the session alive.
@@ -1029,6 +1045,89 @@ class EditorHls(Resource):
         return _serve_file_with_ranges(target, mimetype)
 
 
+def _token_route_response(result):
+    """Every response of the token route: never cacheable, and marked.
+
+    The body is the credential itself, a token valid for up to 12 hours, so
+    a cache that stored it could hand it to a request that never passed
+    authentication. The marker header tells the frontend that Bazarr itself
+    answered, on the token and every error alike.
+    """
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], int):
+        body, status = result
+        response = jsonify({'message': body} if isinstance(body, str) else body)
+        response.status_code = status
+    else:
+        response = jsonify(result)
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['X-Bazarr-Stream-Token-Route'] = '1'
+    return response
+
+
+@api_ns_editor.route('editor/stream-token')
+class EditorStreamToken(Resource):
+    @authenticate_header_only
+    def get(self):
+        """Mint a media-scoped stream token for native HLS playback.
+
+        Takes the media type, media id, audio track and arr instance, and
+        resolves the media the way the HLS route does, so a token is only
+        ever minted for media the caller can already stream. The start time
+        and the player parameter are not bound, so a new start-time session
+        on the same track reuses the token. Returns the token and its
+        lifetime in seconds. The lifetime is the media's full duration plus
+        30 minutes, at least one hour and at most 12 hours, and 4 hours when
+        the duration is unknown; the editor renews before playback can
+        outrun it.
+        """
+        params = _validate_params()
+        if isinstance(params[0], str) and params[0] not in MEDIA_TYPES:
+            return _token_route_response(params)
+        media_type, media_id = params
+
+        arr_instance_id = _request_arr_instance_id()
+        if isinstance(arr_instance_id, tuple):
+            return _token_route_response(arr_instance_id)
+
+        audio_track = _optional_int(request.args.get('audioTrack', '0'), 'audioTrack')
+        if isinstance(audio_track, tuple):
+            return _token_route_response(audio_track)
+        if audio_track is None:
+            audio_track = 0
+        if audio_track < 0:
+            return _token_route_response(('audioTrack must be >= 0', 400))
+
+        resolved = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
+        if isinstance(resolved, tuple):
+            return _token_route_response(resolved)
+        video_path = resolved
+        if not os.path.isfile(video_path):
+            return _token_route_response(('Video file not found on disk', 404))
+
+        try:
+            probe_data = _probe_video(video_path)
+        except Exception:
+            # A probe that dies outright is as unusable as one that answers
+            # nothing, and must reach the client as the same no-store
+            # refusal rather than a bare 500.
+            logger.exception('Editor stream token probe failed for %s', video_path)
+            return _token_route_response(('Failed to probe video file', 500))
+        if not probe_data:
+            return _token_route_response(('Failed to probe video file', 500))
+
+        duration = None
+        fmt = probe_data.get('format', {})
+        if 'duration' in fmt:
+            try:
+                duration = float(fmt['duration'])
+            except (ValueError, TypeError):
+                pass
+
+        lifetime = stream_token_lifetime(duration)
+        token = mint_stream_token(media_type, media_id, arr_instance_id, audio_track, lifetime)
+        return _token_route_response({'token': token, 'lifetime': lifetime})
+
+
 @api_ns_editor.route('editor/peaks')
 class EditorPeaks(Resource):
     get_pending_model = api_ns_editor.model('EditorPeaksPending', {
@@ -1036,7 +1135,7 @@ class EditorPeaks(Resource):
         'status': fields.String(description='Always "pending"'),
     })
 
-    @authenticate
+    @authenticate_header_only
     @api_ns_editor.response(200, 'Cached waveform peaks')
     @api_ns_editor.response(202, 'Peaks are being generated by a job. Fetch again once it finishes.',
                             get_pending_model)
@@ -1070,7 +1169,7 @@ class EditorPeaks(Resource):
 
 @api_ns_editor.route('editor/info')
 class EditorInfo(Resource):
-    @authenticate
+    @authenticate_header_only
     def get(self):
         """Return video metadata for the editor UI."""
         resolved = _resolve_or_abort()
@@ -1146,7 +1245,7 @@ class EditorInfo(Resource):
 
 @api_ns_editor.route('editor/subtitles')
 class EditorSubtitles(Resource):
-    @authenticate
+    @authenticate_header_only
     def get(self):
         """Return available subtitle files for a media item."""
         import ast
@@ -1332,7 +1431,7 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
 
 @api_ns_editor.route('editor/sync')
 class EditorSync(Resource):
-    @authenticate
+    @authenticate_header_only
     def post(self):
         """Start syncing editor content. Returns a job key to poll."""
         import tempfile
@@ -1459,7 +1558,7 @@ class EditorSync(Resource):
         # to claim the standard completion announcement.
         return {'jobKey': job_key, 'jobId': queue_job_id, 'status': 'running'}, 202
 
-    @authenticate
+    @authenticate_header_only
     def get(self):
         """Poll sync job status. Returns synced content when complete."""
         job_key = request.args.get('jobKey')

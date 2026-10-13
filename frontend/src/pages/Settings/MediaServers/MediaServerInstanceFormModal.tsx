@@ -1,6 +1,6 @@
 /* eslint-disable camelcase */
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import {
   Alert,
   Button,
@@ -15,6 +15,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import { useForm } from "@mantine/form";
+import { AxiosError } from "axios";
 import {
   useMediaServerLibraries,
   useMediaServerTest,
@@ -99,6 +100,21 @@ export default function MediaServerInstanceFormModal({
           : null,
     },
   });
+  // A destination change means the stored credential cannot be kept: it was
+  // typed with the address it is allowed to travel to. When a destination
+  // field differs from the loaded row, Keep switches itself to Replace and the
+  // reason is shown, so the key is entered again rather than the save being
+  // refused by the server with no explanation. Turning certificate
+  // verification back on only hardens the connection, so it is not a change.
+  const destinationChanged =
+    instance !== null &&
+    (form.values.url.trim() !== instance.url ||
+      (instance.verify_ssl && !form.values.verifySsl));
+  useEffect(() => {
+    if (instance && destinationChanged && keyMode === "keep") {
+      setKeyMode("replace");
+    }
+  }, [instance, destinationChanged, keyMode]);
   const credentials: ConnectionOverrides =
     keyMode === "clear"
       ? { clear_api_key: true }
@@ -136,6 +152,18 @@ export default function MediaServerInstanceFormModal({
     event.stopPropagation();
     if (!save.isPending && !form.validate().hasErrors)
       save.mutate(undefined, { onSuccess: onClose });
+  };
+  // The server explains a refusal in the body (a re-enter-the-key answer, an
+  // address the account does not own); that message beats the generic retry
+  // text when there is one.
+  const serverErrorMessage = (error: unknown): string | undefined => {
+    if (error instanceof AxiosError) {
+      const data = error.response?.data as { message?: string } | undefined;
+      if (data?.message) {
+        return data.message;
+      }
+    }
+    return undefined;
   };
   return (
     <Modal
@@ -187,17 +215,29 @@ export default function MediaServerInstanceFormModal({
               <SegmentedControl
                 aria-label={`${credential} action`}
                 value={keyMode}
-                onChange={(value) => {
-                  setKeyMode(value as KeyMode);
-                  form.setFieldValue("apiKey", "");
-                }}
+                onChange={(value) => setKeyMode(value as KeyMode)}
                 data={[
-                  { value: "keep", label: "Keep" },
+                  // The stored key was typed for the saved address, so Keep
+                  // cannot be picked while the destination differs. A typed
+                  // replacement key stays in the form across mode switches,
+                  // so switching back to Replace does not lose it.
+                  {
+                    value: "keep",
+                    label: "Keep",
+                    disabled: destinationChanged,
+                  },
                   { value: "replace", label: "Replace" },
                   { value: "clear", label: "Clear" },
                 ]}
               />
             </>
+          )}
+          {destinationChanged && instance.api_key_set && (
+            <Text size="xs" c="orange">
+              The server address changed or certificate verification was turned
+              off, so the stored {credential.toLowerCase()} cannot be kept.
+              Enter it again to save the new address.
+            </Text>
           )}
           {keyMode === "replace" && (
             <PasswordInput
@@ -255,8 +295,8 @@ export default function MediaServerInstanceFormModal({
           )}
           {(test.isError || (test.isSuccess && !test.data.success)) && (
             <Alert color="red">
-              Connection test failed. Check the Server URL, {credential},
-              certificate and server access.
+              {serverErrorMessage(test.error) ??
+                `Connection test failed. Check the Server URL, ${credential.toLowerCase()}, certificate and server access.`}
             </Alert>
           )}
           <Text size="sm" c="dimmed">
@@ -358,8 +398,8 @@ export default function MediaServerInstanceFormModal({
           )}
           {save.isError && (
             <Alert color="red">
-              Could not save this instance. Check the name, full URL,{" "}
-              {credential.toLowerCase()} and library settings, then try again.
+              {serverErrorMessage(save.error) ??
+                `Could not save this instance. Check the name, full URL, ${credential.toLowerCase()} and library settings, then try again.`}
             </Alert>
           )}
           <Group justify="flex-end">

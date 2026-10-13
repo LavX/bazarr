@@ -14,8 +14,16 @@ else
 fi
 
 # --- Cleanup ---
+# SPINNER_PID and COMMAND_PID are this run's own children, held by pid because the
+# process group they sit in is not the run's alone: two runs started by one shell
+# share that group, so nothing here ever signals it.
 SPINNER_PID=""
-cleanup() { [[ -n "$SPINNER_PID" ]] && kill "$SPINNER_PID" 2>/dev/null; tput cnorm 2>/dev/null; }
+COMMAND_PID=""
+COMMAND_OUT_FILE=""
+cleanup() { [[ -n "$SPINNER_PID" ]] && kill "$SPINNER_PID" 2>/dev/null
+            [[ -n "$COMMAND_PID" ]] && kill "$COMMAND_PID" 2>/dev/null
+            [[ -n "$COMMAND_OUT_FILE" ]] && rm -f -- "$COMMAND_OUT_FILE"
+            tput cnorm 2>/dev/null; }
 trap cleanup EXIT
 trap 'printf "\n"; error "Interrupted"; exit 130' INT
 
@@ -51,6 +59,13 @@ confirm() {
 spinner_start() {
   local msg="$1"
   tput civis 2>/dev/null
+  # The spinner is this run's alone, so it runs in a process group of its own: a
+  # signal for the group the run sits in, which two runs share when one shell started
+  # them both, never lands on it, and only this run's own cleanup, which knows its
+  # pid, stops it. Monitor mode is off again straight away, so the commands
+  # run_with_spinner runs keep sharing the run's group and a Ctrl-C still reaches
+  # them, while their pid is what the run's own interruption and cleanup kill.
+  set -m
   (
     local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') i=0
     while true; do
@@ -59,6 +74,7 @@ spinner_start() {
     done
   ) &
   SPINNER_PID=$!
+  set +m
 }
 
 spinner_stop() {
@@ -70,11 +86,23 @@ spinner_stop() {
 
 run_with_spinner() {
   local msg="$1"; shift
+  local out_file rc
   spinner_start "$msg"
-  local out; out=$("$@" 2>&1)
-  local rc=$?
+  # The command is this run's own child, held by pid: it still shares the process
+  # group the run sits in, which two runs can also share with each other when one
+  # shell started them both, so nothing here ever signals that group. A background
+  # job with its output in a file gives the pid to interrupt, and the wait below
+  # still lets a trapped signal through at once, where a command substitution
+  # holds the trap back until the command finishes.
+  out_file=$(mktemp) || { spinner_stop fail "$msg"; return 1; }
+  COMMAND_OUT_FILE=$out_file
+  "$@" >"$out_file" 2>&1 &
+  COMMAND_PID=$!
+  wait "$COMMAND_PID"; rc=$?
+  COMMAND_PID=""
   if [[ $rc -eq 0 ]]; then spinner_stop ok "$msg"
-  else spinner_stop fail "$msg"; printf '%s\n' "$out" >&2; fi
+  else spinner_stop fail "$msg"; printf '%s\n' "$(<"$out_file")" >&2; fi
+  rm -f -- "$out_file"; COMMAND_OUT_FILE=""
   return $rc
 }
 
@@ -539,12 +567,18 @@ dump_postgres() {
 }
 
 # Removes the folder a failed backup was being built in, so no half-finished copy is left
-# to be taken for a backup, and a disk the copy filled is freed. Only do_backup's own
-# backup_<ts>.partial folder qualifies, and sudo is needed because the config was copied
-# with sudo.
+# to be taken for a backup, and a disk the copy filled is freed. Only this run's own
+# backup_<ts>.<pid>.partial folder qualifies, and sudo is needed because the config was
+# copied with sudo: a folder another run named is that run's, so it is warned about and
+# left for that run's own cleanup, never removed by this one.
 discard_backup() {
   local partial="$1"
   [[ "$partial" == */backup_*.partial && -d "$partial" ]] || return 0
+  if [[ "$partial" != */backup_*.$$.partial ]]; then
+    warn "The incomplete backup $partial is not this run's, so it was left as it is."
+    warn "It is not a usable backup: delete it yourself."
+    return 0
+  fi
   if sudo rm -rf -- "$partial"; then
     info "Removed the incomplete backup $partial"
   else
@@ -571,9 +605,28 @@ restart_and_fail() {
 # status. do_backup passes its own folders to it.
 backup_interrupted() {
   local compose="$1" partial="$2"
-  # The spinner of the step the signal landed in: the start below would overwrite its pid,
-  # and the EXIT cleanup only kills the last one.
+  # The spinner and the command of the step the signal landed in: the start below
+  # would overwrite their pids, and the EXIT cleanup only kills the last ones.
   [[ -n "$SPINNER_PID" ]] && kill "$SPINNER_PID" 2>/dev/null; SPINNER_PID=""
+  # The command gets a TERM, but one still handling it can be stopping things while
+  # the old services start again, and a stop still pending in it can undo that
+  # restart: the recovery below runs only once the command is gone. The wait is
+  # bounded, because the interruption has to stay prompt, and the KILL is the
+  # explicit step once the bound passes. The pid is this run's own child, and the
+  # shell reaps it as it exits, which is what the checks watch for.
+  if [[ -n "$COMMAND_PID" ]]; then
+    kill "$COMMAND_PID" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$COMMAND_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$COMMAND_PID" 2>/dev/null; then
+      kill -KILL "$COMMAND_PID" 2>/dev/null
+      while kill -0 "$COMMAND_PID" 2>/dev/null; do sleep 0.1; done
+    fi
+    COMMAND_PID=""
+  fi
+  [[ -n "$COMMAND_OUT_FILE" ]] && rm -f -- "$COMMAND_OUT_FILE"; COMMAND_OUT_FILE=""
   discard_backup "$partial"
   if run_with_spinner "Starting the old services again" sudo docker compose -f "$compose" start; then
     error "Interrupted. Nothing was upgraded or reinstalled, and the old services were started again."
@@ -588,15 +641,16 @@ backup_interrupted() {
 # compose stack is dumped once Bazarr+ has stopped. Any failed step ends the script before
 # anything is upgraded or reinstalled, with the old services started again. The summary
 # names only what was actually backed up.
-# The backup is built in backup_<ts>.partial and only renamed to backup_<ts> once every
-# step has worked, so a folder with the final name is always complete. A failed step or a
-# catchable signal removes the .partial folder and starts the old services again; a run
-# that is killed outright leaves it, named for what it is. The signal trap is do_backup's
-# own and is gone once it returns.
+# The backup is built in backup_<ts>.<pid>.partial, a folder only this run holds, and only
+# renamed to backup_<ts> once every step has worked, so a folder with the final name is
+# always complete. Two runs in the same second each build their own partial, and a failed
+# step or a catchable signal removes this run's partial only and starts the old services
+# again; a run that is killed outright leaves it, named for what it is. The signal trap is
+# do_backup's own and is gone once it returns.
 do_backup() {
   local dir="$1" ts; ts=$(date +%Y%m%d_%H%M%S)
   local backup="${dir}/backup_${ts}" compose="${dir}/docker-compose.yml"
-  local partial="${dir}/backup_${ts}.partial"
+  local partial="${dir}/backup_${ts}.$$.partial"
   local saved=("docker-compose.yml") database_item="" list i config_item
   local previous_int_trap; previous_int_trap=$(trap -p INT)
   # INT, TERM and HUP while the backup is being built end it the way a failed step does.
@@ -611,8 +665,9 @@ do_backup() {
     confirm "Continue without a database backup?" \
       || { info "Nothing was upgraded or reinstalled. Back up the database, then run the installer again."; exit 0; }
   fi
-  # A folder already there under either name is not this run's, so it is neither written
-  # into nor removed: backup_<ts> is checked here, and mkdir without -p refuses the other.
+  # A folder already there under the final name is not this run's, so it is neither
+  # written into nor removed. mkdir without -p still refuses this run's own partial,
+  # which no other run can be building in at the same time.
   [[ -e "$backup" ]] && fatal "$backup already exists and was left as it is. Nothing was changed."
   # 0700: the backup holds .env, config.yaml and possibly a database dump, all with secrets.
   ( umask 077 && mkdir "$partial" ) || fatal "Cannot create backup directory: $partial. Nothing was changed."

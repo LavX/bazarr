@@ -20,6 +20,10 @@ import pytest
 _PROFILE = {"items": [{"language": "hu", "translate_from": "en", "forced": "False", "hi": "False"}]}
 _PROFILE_FROM_FRENCH = {"items": [
     {"language": "hu", "translate_from": "fr", "forced": "False", "hi": "False"}]}
+_PROFILE_WITH_VARIANTS = {"items": [
+    {"language": "hu", "translate_from": "en", "forced": "False", "hi": "False"},
+    {"language": "hu", "translate_from": "en", "forced": "True", "hi": "False"},
+    {"language": "hu", "translate_from": "en", "forced": "False", "hi": "True"}]}
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +66,7 @@ def _wanted_episode_row(arr_instance_id=1, sonarr_episode_id=20):
     )
 
 
-def _run_failed_translation_job(monkeypatch, media_type, **media_ids):
+def _run_failed_translation_job(monkeypatch, media_type, forced=False, hi=False, **media_ids):
     from subtitles.tools.translate import main as translate_main
 
     def _refuse(*args, **kwargs):
@@ -77,9 +81,38 @@ def _run_failed_translation_job(monkeypatch, media_type, **media_ids):
         translate_main.translate_subtitles_file(
             video_path=f"/movies/fixture-{media_type}.mkv",
             source_srt_file=f"/movies/fixture-{media_type}.en.srt",
-            from_lang="en", to_lang="hu", forced=False, hi=False,
+            from_lang="en", to_lang="hu", forced=forced, hi=hi,
             media_type=media_type, metadata=None, job_id=1, **media_ids,
         )
+
+
+def _run_successful_translation_job(monkeypatch, media_type, forced=False, hi=False, **media_ids):
+    from subtitles.tools.translate import main as translate_main
+    from subzero.language import Language
+
+    monkeypatch.setattr(translate_main, "validate_translation_params", lambda *args, **kwargs: None)
+    monkeypatch.setattr(translate_main, "convert_language_codes",
+                        lambda to_lang, _forced, _hi: (Language("hun"), to_lang))
+    monkeypatch.setattr(translate_main, "translated_destination_path",
+                        lambda video_path, to_lang, forced, hi: f"/movies/fixture-{media_type}.hu.srt")
+    monkeypatch.setattr(translate_main, "alpha3_from_alpha2", lambda code: "hun")
+    translator = Mock()
+    translator.translate.return_value = True
+    translator.partial_error = None
+    monkeypatch.setattr(translate_main.TranslatorFactory, "create_translator",
+                        staticmethod(lambda *args, **kwargs: translator))
+    monkeypatch.setattr(translate_main, "activity", Mock())
+    monkeypatch.setattr(translate_main, "jobs_queue", SimpleNamespace(
+        get_job_name=lambda job_id: None, update_job_name=lambda **kwargs: None))
+    monkeypatch.setattr("api.subtitles.subtitles.postprocess_subtitles", lambda *args, **kwargs: None)
+    monkeypatch.setattr("subtitles.tools.combine.main.try_combine_for_video", lambda **kwargs: None)
+
+    translate_main.translate_subtitles_file(
+        video_path=f"/movies/fixture-{media_type}.mkv",
+        source_srt_file=f"/movies/fixture-{media_type}.en.srt",
+        from_lang="en", to_lang="hu", forced=forced, hi=hi,
+        media_type=media_type, metadata=None, job_id=1, **media_ids,
+    )
 
 
 def _prepare_movie_scan(monkeypatch, schema_session, translations, profile=None):
@@ -139,9 +172,9 @@ def _prepare_series_scan(monkeypatch, schema_session, translations, profile=None
 def test_a_recorded_failure_holds_the_item():
     from subtitles.tools.translate import failure_record
 
-    failure_record.record_failed_translation(1, "movies", 30, "en", "hu")
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=False, hi=False)
 
-    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu") is True
+    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu", forced=False, hi=False) is True
 
 
 def test_the_hold_expires_after_a_day(monkeypatch):
@@ -149,24 +182,102 @@ def test_the_hold_expires_after_a_day(monkeypatch):
 
     clock = {"now": 0.0}
     monkeypatch.setattr(failure_record, "_now", lambda: clock["now"])
-    failure_record.record_failed_translation(1, "movies", 30, "en", "hu")
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=False, hi=False)
 
     clock["now"] = failure_record.FAILURE_TTL_SECONDS - 1
-    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu") is True
+    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu", forced=False, hi=False) is True
 
     clock["now"] = failure_record.FAILURE_TTL_SECONDS
-    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu") is False
+    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu", forced=False, hi=False) is False
 
 
 def test_another_item_or_language_is_not_held_back():
     from subtitles.tools.translate import failure_record
 
-    failure_record.record_failed_translation(1, "movies", 30, "en", "hu")
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=False, hi=False)
 
-    assert failure_record.translation_recently_failed(1, "movies", 31, "en", "hu") is False
-    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "sv") is False
-    assert failure_record.translation_recently_failed(2, "movies", 30, "en", "hu") is False
-    assert failure_record.translation_recently_failed(1, "episode", 30, "en", "hu") is False
+    assert failure_record.translation_recently_failed(1, "movies", 31, "en", "hu", forced=False, hi=False) is False
+    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "sv", forced=False, hi=False) is False
+    assert failure_record.translation_recently_failed(2, "movies", 30, "en", "hu", forced=False, hi=False) is False
+    assert failure_record.translation_recently_failed(1, "episode", 30, "en", "hu", forced=False, hi=False) is False
+
+
+def test_a_failure_holds_back_only_its_own_variant():
+    from subtitles.tools.translate import failure_record
+
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=True, hi=False)
+
+    assert failure_record.translation_recently_failed(
+        1, "movies", 30, "en", "hu", forced=True, hi=False) is True
+    assert failure_record.translation_recently_failed(
+        1, "movies", 30, "en", "hu", forced=False, hi=False) is False
+    assert failure_record.translation_recently_failed(
+        1, "movies", 30, "en", "hu", forced=False, hi=True) is False
+
+
+def _wanted_episode_row_with_variants():
+    episode = _wanted_episode_row()
+    episode.missing_subtitles = "['hu', 'hu:forced', 'hu:hi']"
+    return episode
+
+
+def test_a_successful_variant_clears_only_its_own_failure(monkeypatch):
+    from subtitles.tools.translate import failure_record
+
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=False, hi=False)
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=True, hi=False)
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=False, hi=True)
+
+    _run_successful_translation_job(
+        monkeypatch, "movies", forced=True, hi=False,
+        sonarr_series_id=None, sonarr_episode_id=None, radarr_id=30, arr_instance_id=1)
+
+    assert failure_record.translation_recently_failed(
+        1, "movies", 30, "en", "hu", forced=True, hi=False) is False
+    assert failure_record.translation_recently_failed(
+        1, "movies", 30, "en", "hu", forced=False, hi=False) is True
+    assert failure_record.translation_recently_failed(
+        1, "movies", 30, "en", "hu", forced=False, hi=True) is True
+
+
+def _wanted_movie_row_with_variants():
+    movie = _wanted_movie_row()
+    movie.missing_subtitles = "['hu', 'hu:forced', 'hu:hi']"
+    return movie
+
+
+def _queued_variants(translations):
+    return sorted((kwargs['forced'], kwargs['hi'])
+                  for _, kwargs in translations.call_args_list)
+
+
+@pytest.mark.parametrize('failed_forced', [False, True], ids=['plain-failure', 'forced-failure'])
+@pytest.mark.parametrize('scan_kind', ['movie', 'episode'])
+def test_a_failed_variant_holds_back_only_that_variant(
+        schema_session, monkeypatch, scan_kind, failed_forced):
+    if scan_kind == 'movie':
+        _run_failed_translation_job(
+            monkeypatch, "movies", forced=failed_forced,
+            sonarr_series_id=None, sonarr_episode_id=None, radarr_id=30, arr_instance_id=1)
+        translations = Mock()
+        wanted, searches = _prepare_movie_scan(
+            monkeypatch, schema_session, translations, profile=_PROFILE_WITH_VARIANTS)
+        wanted._wanted_movie(_wanted_movie_row_with_variants(), providers_list=[])
+    else:
+        _run_failed_translation_job(
+            monkeypatch, "episode", forced=failed_forced,
+            sonarr_series_id=10, sonarr_episode_id=20, radarr_id=None, arr_instance_id=1)
+        translations = Mock()
+        wanted, searches = _prepare_series_scan(
+            monkeypatch, schema_session, translations, profile=_PROFILE_WITH_VARIANTS)
+        wanted._wanted_episode(_wanted_episode_row_with_variants(), providers_list=[])
+
+    if failed_forced:
+        assert _queued_variants(translations) == [(False, False), (False, True)]
+        assert searches == [[("hu", "False", "True")]]
+    else:
+        assert _queued_variants(translations) == [(False, True), (True, False)]
+        assert searches == [[("hu", "False", "False")]]
 
 
 def test_after_a_failed_movie_job_the_next_scan_searches_providers(schema_session, monkeypatch):
@@ -198,7 +309,7 @@ def test_after_a_failed_episode_job_the_next_scan_searches_providers(schema_sess
 def test_an_edited_source_language_is_not_held_back_by_the_old_failure(schema_session, monkeypatch):
     from subtitles.tools.translate import failure_record
 
-    failure_record.record_failed_translation(1, "movies", 30, "en", "hu")
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=False, hi=False)
     translations = Mock()
     wanted_movies, searches = _prepare_movie_scan(
         monkeypatch, schema_session, translations, profile=_PROFILE_FROM_FRENCH)
@@ -219,7 +330,7 @@ class _FakeUpdate:
 def test_saving_translator_settings_clears_the_record(schema_session, monkeypatch):
     from subtitles.tools.translate import failure_record
 
-    failure_record.record_failed_translation(1, "movies", 30, "en", "hu")
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=False, hi=False)
 
     from app import config
 
@@ -237,7 +348,7 @@ def test_saving_translator_settings_clears_the_record(schema_session, monkeypatc
     finally:
         config.settings["translator.translator_type"] = previous
 
-    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu") is False
+    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu", forced=False, hi=False) is False
 
     translations = Mock()
     wanted_movies, searches = _prepare_movie_scan(monkeypatch, schema_session, translations)
@@ -249,7 +360,7 @@ def test_saving_translator_settings_clears_the_record(schema_session, monkeypatc
 def test_saving_language_profiles_clears_the_record(schema_session, monkeypatch):
     from subtitles.tools.translate import failure_record
 
-    failure_record.record_failed_translation(1, "movies", 30, "en", "hu")
+    failure_record.record_failed_translation(1, "movies", 30, "en", "hu", forced=False, hi=False)
 
     from api.system import settings as api_settings
 
@@ -266,4 +377,4 @@ def test_saving_language_profiles_clears_the_record(schema_session, monkeypatch)
 
     api_settings._write_settings_rows([], [profile], [])
 
-    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu") is False
+    assert failure_record.translation_recently_failed(1, "movies", 30, "en", "hu", forced=False, hi=False) is False

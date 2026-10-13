@@ -323,6 +323,7 @@ def oauth_account(account, monkeypatch):
     """The same account signed in through OAuth with a server picked."""
     import api.plex.oauth  # noqa: F401  (imports the API before the checks run)
     for key, value in dict(auth_method='oauth', token='synthetic-plex-token',
+                           server_machine_id='machine-abc',
                            server_url='https://plex.example:32400').items():
         monkeypatch.setitem(account.plex, key, value)
     return account
@@ -368,6 +369,277 @@ def test_picking_the_first_server_follows_the_legacy_setting(oauth_account, plex
     oauth_account.plex.verify_ssl = legacy
     assert _server_picker()['data'][0]['name'] == 'Attic'
     assert plex_requests == [legacy]
+
+
+def test_the_api_key_connection_test_accepts_a_bracketed_ipv6_origin(account, monkeypatch):
+    """The trusted origin under the API key method is read from the configured
+    address the same way the submitted one is normalized, so a bracketed IPv6
+    literal is the same server on both sides rather than one only its brackets
+    keep apart from the address the request typed."""
+    import requests
+
+    from flask import Flask
+
+    from api.plex.oauth import PlexTestConnection
+    for key, value in dict(ip='[fe80::1]', port=32400, ssl=False).items():
+        monkeypatch.setitem(account.plex, key, value)
+    sent = []
+
+    def get(url, **_kwargs):
+        sent.append(url)
+        return _Response({'MediaContainer': {'size': 1}})
+
+    monkeypatch.setattr(requests, 'get', get)
+
+    with Flask(__name__).test_request_context('/plex/test-connection', method='POST',
+                                              json={'uri': 'http://[fe80::1]:32400'}):
+        result = PlexTestConnection.post.__wrapped__(PlexTestConnection())
+
+    assert result == {'success': True}
+    assert sent == ['http://[fe80::1]:32400/identity'], \
+        'the configured bracketed address was the trusted one'
+
+
+def test_the_api_key_connection_test_answers_a_database_error_in_its_snapshot(
+        account, monkeypatch):
+    """The snapshot read under the account lock is part of the connection
+    test, so a database error while it reads the account's instance is a
+    failure the route answers, not an exception that escapes its handler."""
+    import requests
+
+    from flask import Flask
+
+    from api.plex.oauth import PlexTestConnection
+
+    class Unreadable:
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError('synthetic database failure')
+
+    monkeypatch.setattr('app.database.database', Unreadable())
+    account.plex.instance_id = str(uuid4())
+
+    def get(url, **_kwargs):
+        return _Response({'MediaContainer': {'size': 1}})
+
+    monkeypatch.setattr(requests, 'get', get)
+
+    with Flask(__name__).test_request_context('/plex/test-connection', method='POST',
+                                              json={'uri': 'https://plex.example:32400'}):
+        result = PlexTestConnection.post.__wrapped__(PlexTestConnection())
+
+    assert result == {'success': False, 'error': 'synthetic database failure'}
+
+
+def test_a_replacement_between_the_address_and_the_key_reads_cannot_cross_the_pair(
+        account, built, monkeypatch):
+    """The API key connection reads its method, its address, its credential
+    and its TLS choice as one snapshot under the account lock, the one every
+    account save holds, so an address-and-key replacement landing while the
+    connection is being built cannot pair one account's address with
+    another's key: the connection carries the snapshot's own credential to
+    its own address, or the replaced pair once the replacement landed before
+    the snapshot. The unfixed order read the address and the key separately,
+    so the replaced key reached the address it replaced."""
+    from media_servers import plex_account
+    from plex import operations
+    from plex.operations import get_plex_server
+
+    landed = []
+
+    def land_the_replacement():
+        # The replacement lands inside the window wherever this head leaves
+        # one: at the fixed head the entry into the account lock runs it
+        # before the snapshot is taken, and at the unfixed head the key read
+        # runs it between the address read and its own.
+        if landed:
+            return
+        landed.append(True)
+        account.plex.ip = 'moved.example'
+        account.plex.apikey = 'moved-key'
+
+    real_lock = plex_account.ACCOUNT_LOCK
+
+    class _PausedLock:
+        def __enter__(self):
+            land_the_replacement()
+            return real_lock.__enter__()
+
+        def __exit__(self, *_exception):
+            return real_lock.__exit__(*_exception)
+
+    monkeypatch.setattr(plex_account, 'ACCOUNT_LOCK', _PausedLock())
+
+    real_settings = operations.settings
+    real_section = real_settings.plex
+    real_get = real_section.get
+
+    class _SectionProxy:
+        def __getattr__(self, name):
+            return getattr(real_section, name)
+
+        def get(self, key, default=None):
+            if key == 'apikey':
+                land_the_replacement()
+            return real_get(key, default)
+
+    class _SettingsProxy:
+        plex = _SectionProxy()
+
+        def __getattr__(self, name):
+            return getattr(real_settings, name)
+
+    monkeypatch.setattr(operations, 'settings', _SettingsProxy())
+
+    server = get_plex_server()
+
+    assert (server.baseurl, server.token) in (
+        ('https://plex.example:32400', 'synthetic-plex-key'),
+        ('https://moved.example:32400', 'moved-key')), \
+        'the connection paired one account\'s address with another account\'s key'
+
+
+@pytest.mark.parametrize('call', [_connection_test, _library_listing, _autopulse_paths],
+                         ids=lambda call: call.__name__.strip('_'))
+def test_an_account_transition_landing_at_the_tls_read_cannot_weaken_the_send(
+        oauth_account, repo, plex_requests, monkeypatch, call):
+    """An allowed account transition can clear the token and turn certificate
+    verification off. The three panel sends used to read the TLS setting
+    separately, after the verification captured the token, so a transition
+    landing between the two sent the captured OAuth token with the weaker
+    setting the transition left behind. The fixed reads capture the TLS
+    setting before the verification, the same coherent capture the
+    credential and the destination are part of, so the account the
+    transition leaves is the one the listing confirms and nothing is sent.
+    """
+    import api.plex.oauth  # the module attribute the routes read
+    from plex import operations
+
+    row = _plex_row(repo, verify_ssl=True)
+    _own(oauth_account, row)
+    real = operations.plex_account_verify_ssl
+    landed = []
+
+    def transition():
+        # The transition lands wherever this head reads the TLS setting: at
+        # the unfixed head that is after the token was captured and verified,
+        # and at the fixed head it is before the verification, so the account
+        # the transition leaves is the one the listing has to answer for.
+        if not landed:
+            landed.append(True)
+            monkeypatch.setitem(oauth_account.plex, 'token', '')
+            repo.update(row.id, verify_ssl=False)
+        return real()
+
+    monkeypatch.setattr(operations, 'plex_account_verify_ssl', transition)
+    monkeypatch.setattr(api.plex.oauth, 'plex_account_verify_ssl', transition)
+
+    call()
+
+    assert plex_requests == [], \
+        'the captured token was sent after the account changed, or with the weaker TLS'
+
+
+@pytest.mark.parametrize('call', [_connection_test, _library_listing, _autopulse_paths],
+                         ids=lambda call: call.__name__.strip('_'))
+def test_a_replacement_between_the_tls_read_and_the_credential_cannot_go_out_under_it(
+        oauth_account, repo, plex_requests, monkeypatch, call):
+    """The replacement interleaving: the choice is captured while certificate
+    verification is off, the account token is replaced while verification is
+    turned on, and the send then carries the replacement token under the
+    disabled choice. The TLS read and the credential capture are one snapshot
+    under the account lock and the snapshot is confirmed before any send, so
+    nothing is sent: neither the replacement under the weaker choice it
+    replaced nor the captured token after the account left it behind."""
+    from media_servers import plex_account
+
+    row = _plex_row(repo, verify_ssl=False)
+    _own(oauth_account, row)
+    plex_account.forget_plex_tv_answer()
+    landed = []
+
+    def land_the_replacement():
+        # The replacement lands wherever this head captures the credential:
+        # at the unfixed head the TLS choice was read on its own before the
+        # verification, so the token the verification returns is the
+        # replacement while the choice the send carries is still the disabled
+        # one. At the fixed head the same landing is inside the verification
+        # too, but the snapshot was captured before it and the confirm before
+        # the send refuses the pair.
+        if landed:
+            return
+        landed.append(True)
+        monkeypatch.setitem(oauth_account.plex, 'token', 'replacement-plex-token')
+        repo.update(row.id, verify_ssl=True)
+
+    real = plex_account.verified_server_addresses
+
+    def verified(settings, **kwargs):
+        land_the_replacement()
+        return real(settings, **kwargs)
+
+    monkeypatch.setattr(plex_account, 'verified_server_addresses', verified)
+
+    call()
+
+    assert plex_requests == [], \
+        'the replacement token was sent, or sent under the choice it replaced'
+
+
+# --- The Autopulse configuration, built from a verification result -----------
+
+def test_the_autopulse_config_refuses_an_address_plex_tv_does_not_list(
+        oauth_account, plex_requests, monkeypatch):
+    """The generated configuration pairs the account token with a server
+    address, so it is built only from a verification result: an address plex.tv
+    does not list for the signed-in account refuses generation, and the token
+    is never embedded next to an address nobody verified."""
+    from media_servers import plex_account
+    from utilities import autopulse_webhook
+    from utilities.autopulse_webhook import generate_autopulse_config
+    monkeypatch.setitem(oauth_account.plex, 'server_url', 'https://unlisted.example:32400')
+    templates = []
+    monkeypatch.setattr(autopulse_webhook, '_get_autopulse_template',
+                        lambda: templates.append(True) or
+                        {'config': 'url = "{url}" token = "{token}"', 'version': '1'})
+    plex_account.forget_plex_tv_answer()
+
+    assert generate_autopulse_config() is None
+    assert templates == [], 'no template was asked for without a verified address'
+    assert plex_requests == [], 'the token was sent nowhere'
+
+
+def test_the_autopulse_config_refuses_while_the_provider_is_unreachable(
+        oauth_account, plex_requests, monkeypatch):
+    """With Autopulse itself not answering, there is no template to build the
+    configuration from, and none is returned."""
+    from media_servers import plex_account
+    from utilities import autopulse_webhook
+    from utilities.autopulse_webhook import generate_autopulse_config
+    plex_account.forget_plex_tv_answer()
+    monkeypatch.setattr(autopulse_webhook, '_get_autopulse_template', lambda: None)
+
+    assert generate_autopulse_config() is None
+
+
+def test_the_autopulse_config_embeds_the_uri_plex_tv_listed(oauth_account, plex_requests,
+                                                           monkeypatch):
+    """A stored spelling of a listed origin gives way to the URI plex.tv
+    returned, and the credential embedded with it is the one the listing was
+    verified with."""
+    from media_servers import plex_account
+    from utilities import autopulse_webhook
+    from utilities.autopulse_webhook import generate_autopulse_config
+    monkeypatch.setitem(oauth_account.plex, 'server_url', 'https://plex.example:32400/legacy')
+    monkeypatch.setattr(autopulse_webhook, '_get_autopulse_template',
+                        lambda: {'config': 'url = "{url}" token = "{token}"', 'version': '1'})
+    plex_account.forget_plex_tv_answer()
+
+    config = generate_autopulse_config()
+
+    assert config is not None
+    assert 'url = "https://plex.example:32400"' in config['config_yaml']
+    assert 'url = "https://plex.example:32400/legacy"' not in config['config_yaml']
+    assert 'token = "synthetic-plex-token"' in config['config_yaml']
 
 
 # --- The webhook handlers, against a faked plex.tv account -------------------
@@ -583,3 +855,61 @@ def test_removing_a_webhook_without_naming_one_is_a_bad_request(plex_tv):
     with pytest.raises(BadRequest):
         _webhook_call('PlexWebhookDelete', body={})
     assert plex_tv.account.asked == []
+
+
+def test_verification_leaves_the_account_lock_free_for_a_transition(oauth_account, built, monkeypatch):
+    """The plex.tv verification is a network ask, and no lock may be held
+    across it: an account transition trying the lock while a connection is
+    being verified must get through, the same way it gets through while no
+    connection is being built. The unfixed order held the account lock across
+    the ask, so sign-ins and instance saves waited on a connection they never
+    asked for."""
+    import threading
+
+    from media_servers import plex_account
+    from plex.operations import get_plex_server
+
+    real_lock = plex_account.ACCOUNT_LOCK
+    taken = threading.Event()
+
+    def transition():
+        if real_lock.acquire(timeout=3):
+            real_lock.release()
+            taken.set()
+
+    def verified(_settings, **_kwargs):
+        thread = threading.Thread(target=transition)
+        thread.start()
+        thread.join(5)
+        return ['https://plex.example:32400'], 'ok', 'synthetic-plex-token'
+
+    monkeypatch.setattr(plex_account, 'verified_server_addresses', verified)
+
+    server = get_plex_server()
+
+    assert taken.is_set(), 'the account lock was free while the address was being verified'
+    assert server.baseurl == 'https://plex.example:32400'
+    assert server.token == 'synthetic-plex-token'
+
+
+def test_a_sign_in_landing_during_verification_does_not_connect_with_the_verified_answer(
+        oauth_account, built, monkeypatch):
+    """The verification's answer belongs to the account it was asked about, so
+    the captured account is confirmed against what is stored before anything
+    connects with the answer: a sign-in landing while plex.tv was being asked
+    stops the connection rather than letting the older account's listing carry
+    its credential. The unfixed order had nothing to confirm against, and
+    connected with the replaced account none the wiser."""
+    from media_servers import plex_account
+    from plex.operations import get_plex_server
+
+    def verified(_settings, **_kwargs):
+        # A sign-in lands while the address is being verified.
+        oauth_account.plex.token = 'replacement-token'
+        return ['https://plex.example:32400'], 'ok', 'synthetic-plex-token'
+
+    monkeypatch.setattr(plex_account, 'verified_server_addresses', verified)
+
+    with pytest.raises(ValueError, match='account changed'):
+        get_plex_server()
+    assert built == [], 'no connection was built on the replaced account\'s listing'

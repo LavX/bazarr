@@ -73,17 +73,26 @@ def test_an_existing_file_next_to_the_video_keeps_precedence(tmp_path, subtitle_
 
 
 def test_translate_passes_a_custom_folder_destination_to_the_translator(tmp_path, monkeypatch, subtitle_folder):
+    from languages import get_languages
     from subtitles.tools.translate import main as translate_main
+    from subtitles.tools.translate.core import translator_utils
     from subzero.language import Language
 
     custom = tmp_path / "subs"
     subtitle_folder("absolute", str(custom))
     video = tmp_path / "video.mkv"
 
+    # The destination is resolved inside translated_destination_path now, so
+    # the naming stubs target the helper's own module bindings; the folder
+    # resolution itself stays real, because the custom folder is the subject.
+    monkeypatch.setattr(get_languages, "languages_dict", [
+        {"code2": "en", "code3": "eng", "name": "English", "code3b": "eng"},
+        {"code2": "hu", "code3": "hun", "name": "Hungarian", "code3b": "hun"},
+    ], raising=False)
     monkeypatch.setattr(translate_main, "validate_translation_params", lambda *a, **kw: None)
     monkeypatch.setattr(translate_main, "convert_language_codes",
                         lambda to_lang, forced, hi: (Language("hun"), to_lang))
-    monkeypatch.setattr(translate_main, "get_subtitle_path", lambda *a, **kw: str(tmp_path / "video.hu.srt"))
+    monkeypatch.setattr(translator_utils, "get_subtitle_path", lambda *a, **kw: str(tmp_path / "video.hu.srt"))
     monkeypatch.setattr(translate_main, "alpha3_from_alpha2", lambda code: "hun")
 
     seen = {}
@@ -108,6 +117,57 @@ def test_translate_passes_a_custom_folder_destination_to_the_translator(tmp_path
 
     assert seen["dest_srt_file"] == os.path.join(str(custom), "video.hu.srt"), (
         "a first-time translation in absolute subfolder mode must target the custom folder, not None")
+
+
+@pytest.mark.parametrize("forced,hi,expected_name", [
+    (False, False, "video.es-419.srt"),
+    (True, False, "video.es-419.forced.srt"),
+    (False, True, "video.es-419.hi.srt"),
+])
+def test_translate_names_a_custom_language_target_with_its_regional_tag(
+        tmp_path, monkeypatch, subtitle_folder, forced, hi, expected_name):
+    """A translation targeting a custom language names its file with the
+    regional tag the profile selected, not the language's internal code:
+    Spanish (Latino) is es-419 on disk, while the internal alpha3 "spl" is a
+    code nothing resolves. The forced and HI tags keep their usual place
+    behind the tag, the way any language's translation names its file.
+    """
+    from languages import get_languages
+    from subtitles.tools.translate import main as translate_main
+
+    subtitle_folder("current")
+    video = tmp_path / "video.mkv"
+
+    monkeypatch.setattr(get_languages, "languages_dict", [
+        {"code2": "en", "code3": "eng", "name": "English", "code3b": "eng"},
+        {"code2": "ea", "code3": "spl", "name": "Spanish (Latino)", "code3b": "spl"},
+    ], raising=False)
+
+    monkeypatch.setattr(translate_main, "validate_translation_params", lambda *a, **kw: None)
+
+    seen = {}
+    translator = MagicMock()
+    translator.translate.return_value = True
+
+    def _create(kind, **kwargs):
+        seen.update(kwargs)
+        return translator
+
+    monkeypatch.setattr(translate_main.TranslatorFactory, "create_translator", staticmethod(_create))
+
+    with (
+        patch("api.subtitles.subtitles.postprocess_subtitles", lambda *a, **kw: None),
+        patch("subtitles.tools.combine.main.try_combine_for_video", lambda **kw: None),
+    ):
+        translate_main.translate_subtitles_file(
+            video_path=str(video), source_srt_file=str(tmp_path / "video.en.srt"),
+            from_lang="en", to_lang="ea", forced=forced, hi=hi,
+            media_type="movies", sonarr_series_id=None, sonarr_episode_id=None,
+            radarr_id=9, metadata={}, job_id="job-1")
+
+    assert seen["dest_srt_file"] == os.path.join(str(tmp_path), expected_name), (
+        "a translation to a custom language must name its file with the regional tag, "
+        "not the language's internal code")
 
 
 @pytest.mark.parametrize("mode", ["absolute", "relative"])

@@ -10,7 +10,8 @@ from datetime import datetime
 from functools import reduce
 
 from constants import MINIMUM_VIDEO_SIZE
-from app.database import database, TableShows, TableEpisodes, delete, update, insert, select, get_exclusion_clause
+from app.database import (database, TableShows, TableEpisodes, TableArrInstances, delete, update,
+                          insert, select, get_exclusion_clause)
 from app.config import settings
 from utilities.path_mappings import path_mappings
 from subtitles.indexer.series import store_subtitles, series_full_scan_subtitles  # noqa: F401
@@ -21,8 +22,8 @@ from sonarr.info import get_sonarr_info
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications
 from subtitles.adaptive_searching import is_search_active
-from arr_instances.resolution import (client_for_instance, scoped, skip_unscoped_sync,
-                                      sonarr_series_owner, stamp_owner)
+from arr_instances.resolution import (client_for_instance, default_instance_id, scoped,
+                                      skip_unscoped_sync, sonarr_series_owner, stamp_owner)
 
 from .parser import episodeParser
 from .utils import get_episodes_from_sonarr_api, get_episodesFiles_from_sonarr_api
@@ -38,10 +39,11 @@ FEATURE_PREFIX = "SYNC_EPISODES "
 # inserts on modern SQLite/PostgreSQL deployments.
 EPISODE_INSERT_CHUNK_SIZE = 50
 
-# Returned by sync_episodes when the series' episode-file answer could not be
-# decoded and the series was skipped whole, so the bulk sync can count that
-# series as skipped the way it counts a failed episode fetch. Every other
-# return, including the implicit one, means the sync itself ran.
+# Returned by sync_episodes when the series was skipped whole: its episode-file
+# answer could not be decoded, or its episode list could not be fetched or
+# decoded into an episode array. The bulk sync counts that series as skipped the
+# way it counts a failed pre-fetch. Every other return, including the implicit
+# one, means the sync itself ran.
 SYNC_SKIPPED_UNREADABLE_EPISODE_FILES = object()
 
 
@@ -147,87 +149,119 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                                                 arr_client=arr_client)
     else:
         episodes = episodes_data
-    if episodes:
-        # Episodes inherit their owning instance (and local series ref) from
-        # their parent series. Resolved BEFORE parsing, not after: episodeParser
-        # reads the embedded audio track, and that metadata cache is keyed by
-        # the owning instance, so handing it the requested scope (None on every
-        # default-instance path) would leave the cache query unscoped. Falls
-        # back to the default instance when the parent is unstamped; leaves both
-        # unset for a pre-backfill install. When this sync is instance-scoped,
-        # the explicit instance owns the episodes.
-        owner_instance_id, parent_local_id = sonarr_series_owner(database, series_id, arr_instance_id)
-        if arr_instance_id is not None:
-            owner_instance_id = arr_instance_id
+    # A fetch failure and a real empty list are different answers and must not
+    # share a branch. Only a list is a real answer: the fetch helper answers
+    # None for a connection error, a non-200 status or a body that is not JSON,
+    # and a 200 carrying a JSON object or a string instead of the episode array
+    # is just as unreadable. Nothing in any of those can be trusted, and
+    # reading it as "no episodes" would delete every local row of the series on
+    # a transient Sonarr outage or a proxy interposing a different body, so the
+    # series is skipped and the sentinel return tells the bulk sync to count it
+    # as skipped. An empty list is a real answer: Sonarr has no episodes for
+    # this series anymore, so the delete path below removes the stale local
+    # rows.
+    if not isinstance(episodes, list):
+        logging.error("BAZARR could not read the episodes of series %s from Sonarr; "
+                      "the series was skipped and no episode was deleted", series_id)
+        return SYNC_SKIPPED_UNREADABLE_EPISODE_FILES
 
-        sonarr_version = get_sonarr_info.semver()
-        if sonarr_version and sonarr_version >= semver.Version(*(4, 0, 9, 2421)):
-            # We skip this if the episodes already contain an episodeFile structure (added with Sonarr v4.0.9.2421)
-            pass
-        else:
-            # For Sonarr lower than 4.0.9.2421, we need to update episodes to integrate the
-            # episodeFile API endpoint results
-            episodeFiles = get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id,
-                                                             arr_client=arr_client)
-            if episodeFiles is None:
-                # A body that is not JSON is a failed fetch, not an empty
-                # answer. Without the episodeFile records no episode below
-                # carries its file, so every one of them would count as gone
-                # and the sync would delete the whole series. Skip the series
-                # instead, the way a failed episodes fetch does. The sentinel
-                # return tells the bulk sync this series was skipped, where an
-                # empty return would read as a sync that ran.
-                logging.error("BAZARR could not read the episode files of series %s from Sonarr; "
-                              "the series was skipped and no episode was deleted", series_id)
-                return SYNC_SKIPPED_UNREADABLE_EPISODE_FILES
-            if episodeFiles:
-                for episode in episodes:
-                    if episodeFiles and episode['hasFile']:
-                        item = [x for x in episodeFiles if x['id'] == episode['episodeFileId']]
-                        if item:
-                            episode['episodeFile'] = item[0]
+    # Episodes inherit their owning instance (and local series ref) from
+    # their parent series. Resolved BEFORE parsing, not after: episodeParser
+    # reads the embedded audio track, and that metadata cache is keyed by
+    # the owning instance, so handing it the requested scope (None on every
+    # default-instance path) would leave the cache query unscoped. Falls
+    # back to the default instance when the parent is unstamped; leaves both
+    # unset for a pre-backfill install. When this sync is instance-scoped,
+    # the explicit instance owns the episodes.
+    owner_instance_id, parent_local_id = sonarr_series_owner(database, series_id, arr_instance_id)
+    if arr_instance_id is not None:
+        owner_instance_id = arr_instance_id
 
-        sync_monitored = settings.sonarr.sync_only_monitored_series and settings.sonarr.sync_only_monitored_episodes
-        if sync_monitored:
-            episodes_monitored = get_episodes_monitored_table(series_id, arr_instance_id)
-            skipped_count = 0
+    # An empty answer used to do nothing, so the delete it now drives must not
+    # become a new cross-instance hazard: upstream ids are not unique across
+    # instances, and the legacy unscoped query spans them. Scope an empty-list
+    # delete on the default path to the enabled default instance, the owner of
+    # a default call's rows. A pre-backfill install has no instances at all, so
+    # every row is the implicit default's and the delete stays unscoped as
+    # before. Saved instances without an enabled default name no owner for the
+    # deletion, so the series is skipped rather than risk another instance's
+    # rows.
+    delete_scope = arr_instance_id
+    if not episodes and delete_scope is None:
+        delete_scope = default_instance_id(database, "sonarr")
+        if delete_scope is None and database.execute(
+                select(TableArrInstances.id)
+                .where(TableArrInstances.kind == "sonarr")
+                .limit(1)).first() is not None:
+            logging.warning("BAZARR cannot tell which instance owns the episodes of series %s "
+                            "because no enabled default Sonarr instance exists; the series was "
+                            "skipped and no episode was deleted", series_id)
+            return SYNC_SKIPPED_UNREADABLE_EPISODE_FILES
 
-        for episode in episodes:
-            if 'hasFile' in episode and episode['hasFile'] and 'episodeFile' in episode:
-                if sync_monitored:
-                    try:
-                        monitored_status_db = bool_map[episodes_monitored[episode['episodeFileId']]]
-                    except KeyError:
-                        monitored_status_db = None
+    sonarr_version = get_sonarr_info.semver()
+    if episodes and not (sonarr_version and sonarr_version >= semver.Version(*(4, 0, 9, 2421))):
+        # For Sonarr lower than 4.0.9.2421, we need to update episodes to integrate the
+        # episodeFile API endpoint results. An empty episode list needs no file records,
+        # so the endpoint is not asked at all; a failed fetch below must not turn an
+        # empty answer into a skipped series either.
+        episodeFiles = get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id,
+                                                          arr_client=arr_client)
+        if not isinstance(episodeFiles, list):
+            # A body that is not a JSON episode-file array is a failed fetch,
+            # not an empty answer: a decoded object or string would leave every
+            # episode without its file record below, so every one of them
+            # would count as gone and the sync would delete the whole series
+            # (an object answer would crash at the id lookup instead). Skip
+            # the series instead, the way a failed episodes fetch does.
+            logging.error("BAZARR could not read the episode files of series %s from Sonarr; "
+                          "the series was skipped and no episode was deleted", series_id)
+            return SYNC_SKIPPED_UNREADABLE_EPISODE_FILES
+        if episodeFiles:
+            for episode in episodes:
+                if episode['hasFile']:
+                    item = [x for x in episodeFiles if x['id'] == episode['episodeFileId']]
+                    if item:
+                        episode['episodeFile'] = item[0]
 
-                    if monitored_status_db is None:
-                        # not in db, might need to add, if we have a file on disk
-                        pass
-                    elif monitored_status_db != episode['monitored']:
-                        # monitored status changed and we don't know about it until now
-                        trace(f"(Monitor Status Mismatch) {episode['title']}")
-                        # pass
-                    elif not episode['monitored']:
-                        # Add unmonitored episode in sonarr to current episode list, otherwise it will be deleted from db
-                        current_episodes_sonarr.append(episode['id'])
-                        skipped_count += 1
-                        continue
+    sync_monitored = settings.sonarr.sync_only_monitored_series and settings.sonarr.sync_only_monitored_episodes
+    if sync_monitored:
+        episodes_monitored = get_episodes_monitored_table(series_id, arr_instance_id)
+        skipped_count = 0
 
-                if (episode['episodeFile']['size'] > MINIMUM_VIDEO_SIZE or
-                        check_actual_file_size(episode['episodeFile']['path']) or
-                        (settings.general.enable_strm_support and episode['episodeFile']['path'].lower().endswith('.strm'))):
-                    # Add episodes in sonarr to current episode list
+    for episode in episodes:
+        if 'hasFile' in episode and episode['hasFile'] and 'episodeFile' in episode:
+            if sync_monitored:
+                try:
+                    monitored_status_db = bool_map[episodes_monitored[episode['episodeFileId']]]
+                except KeyError:
+                    monitored_status_db = None
+
+                if monitored_status_db is None:
+                    # not in db, might need to add, if we have a file on disk
+                    pass
+                elif monitored_status_db != episode['monitored']:
+                    # monitored status changed and we don't know about it until now
+                    trace(f"(Monitor Status Mismatch) {episode['title']}")
+                    # pass
+                elif not episode['monitored']:
+                    # Add unmonitored episode in sonarr to current episode list, otherwise it will be deleted from db
                     current_episodes_sonarr.append(episode['id'])
+                    skipped_count += 1
+                    continue
 
-                    # Parse episode data
-                    if episode['id'] in current_episodes_in_db_row_as_dict:
-                        parsed_episode = episodeParser(episode, arr_instance_id=owner_instance_id)
-                        if not set(parsed_episode.items()).issubset(set(current_episodes_in_db_row_as_dict[episode['id']].items())):
-                            episodes_to_update.append(parsed_episode)
-                    else:
-                        episodes_to_add.append(episodeParser(episode, arr_instance_id=owner_instance_id))
-    else:
-        return
+            if (episode['episodeFile']['size'] > MINIMUM_VIDEO_SIZE or
+                    check_actual_file_size(episode['episodeFile']['path']) or
+                    (settings.general.enable_strm_support and episode['episodeFile']['path'].lower().endswith('.strm'))):
+                # Add episodes in sonarr to current episode list
+                current_episodes_sonarr.append(episode['id'])
+
+                # Parse episode data
+                if episode['id'] in current_episodes_in_db_row_as_dict:
+                    parsed_episode = episodeParser(episode, arr_instance_id=owner_instance_id)
+                    if not set(parsed_episode.items()).issubset(set(current_episodes_in_db_row_as_dict[episode['id']].items())):
+                        episodes_to_update.append(parsed_episode)
+                else:
+                    episodes_to_add.append(episodeParser(episode, arr_instance_id=owner_instance_id))
 
     if sync_monitored:
         # try to avoid unnecessary database calls
@@ -238,15 +272,43 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     # Remove old episodes from DB
     episodes_to_delete = list(set(current_episodes_id_db_list) - set(current_episodes_sonarr))
 
+    if not episodes:
+        # An empty answer removes every row of the series in the owning scope.
+        # The current-rows read above ran unscoped on the default path, so its
+        # id list can hold another instance's episode ids for this series, and
+        # upstream episode ids collide across instances and series: applying
+        # that list to the owning scope could delete and clean up an unrelated
+        # series' episode that happens to share an id. This read only decides
+        # whether there is anything to delete; the delete below is carried by
+        # the series clause in the owning scope, never by an id list. Within
+        # one instance an episode id belongs to exactly one series, so the
+        # series clause never blocks a legitimate delete.
+        episodes_to_delete = database.execute(
+            scoped(select(TableEpisodes.sonarrEpisodeId)
+                   .where(TableEpisodes.sonarrSeriesId == series_id),
+                   TableEpisodes.arr_instance_id, delete_scope)).scalars().all()
+
     rows_changed = False
 
     if len(episodes_to_delete):
         # Before the row goes: the mismatch record points at the local id with
         # no foreign key to enforce it, and SQLite reuses a deleted id.
-        forget_media_by_upstream('series', episodes_to_delete, arr_instance_id)
+        if not episodes:
+            forget_media_by_upstream('series', [], delete_scope, series_upstream_id=series_id)
+        else:
+            forget_media_by_upstream('series', episodes_to_delete, delete_scope)
         try:
-            database.execute(scoped(delete(TableEpisodes).where(TableEpisodes.sonarrEpisodeId.in_(episodes_to_delete)),
-                                    TableEpisodes.arr_instance_id, arr_instance_id))
+            if not episodes:
+                # One bound variable per episode row overflows the 999-variable
+                # limit of legacy SQLite builds on a series with about a
+                # thousand episodes, the OperationalError escapes the
+                # IntegrityError catch below, and it fires after the mismatch
+                # records were already forgotten. Delete by series instead; the
+                # scoped read above already gated that there is a row to lose.
+                stmt = delete(TableEpisodes).where(TableEpisodes.sonarrSeriesId == series_id)
+            else:
+                stmt = delete(TableEpisodes).where(TableEpisodes.sonarrEpisodeId.in_(episodes_to_delete))
+            database.execute(scoped(stmt, TableEpisodes.arr_instance_id, delete_scope))
         except IntegrityError as e:
             logging.error(f"BAZARR cannot delete episodes because of {e}")  # noqa: G004
         else:

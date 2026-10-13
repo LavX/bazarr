@@ -5,6 +5,8 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import simpleImportSort from "eslint-plugin-simple-import-sort";
 import testingLibrary from "eslint-plugin-testing-library";
 import globals from "globals";
+import { noRequestShortcut } from "./e2e/lint/no-request-shortcut.mts";
+import { noRootRelativeUrl } from "./e2e/lint/no-root-relative-url.mts";
 
 export default tseslint.config(
   {
@@ -94,6 +96,27 @@ export default tseslint.config(
     rules: {
       "no-empty-pattern": "off",
       "react-hooks/rules-of-hooks": "off",
+    },
+  },
+  {
+    // The e2e suite must resolve every URL against the path the instance
+    // is served under, and never through a request context the guard
+    // cannot see. The rules' own files say what they flag and why; the
+    // harness's vitest checks (e2e/lib/*.test.ts) stand in for pages and
+    // requests with plain strings, so the rules leave them alone.
+    files: ["e2e/**/*.ts"],
+    ignores: ["e2e/lib/**/*.test.ts"],
+    plugins: {
+      "bazarr-e2e": {
+        rules: {
+          "no-root-relative-url": noRootRelativeUrl,
+          "no-request-shortcut": noRequestShortcut,
+        },
+      },
+    },
+    rules: {
+      "bazarr-e2e/no-root-relative-url": "error",
+      "bazarr-e2e/no-request-shortcut": "error",
     },
   },
 );

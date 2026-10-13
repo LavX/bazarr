@@ -4,6 +4,7 @@
  */
 import type { APIRequestContext, Page } from "@playwright/test";
 import { expect } from "@playwright/test";
+import { appPath } from "./base";
 
 export type JobStatus = "pending" | "running" | "failed" | "completed";
 
@@ -22,7 +23,7 @@ export async function getJob(
   api: APIRequestContext,
   id: number,
 ): Promise<Job | null> {
-  const response = await api.get(`/api/system/jobs?id=${id}`);
+  const response = await api.get(appPath(`/api/system/jobs?id=${id}`));
   expect(response.ok()).toBe(true);
   const { data } = (await response.json()) as { data: Job[] };
   return data.find((job) => job.job_id === id) ?? null;

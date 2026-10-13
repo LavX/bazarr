@@ -6,7 +6,10 @@ dev-dist
 dist
 node_modules
 
-# Playwright end-to-end output
+# Playwright end-to-end output, and where a release pair moves the first
+# run's report out of the way
 e2e-report/
 e2e-results/
+e2e-report-root/
+e2e-results-root/
 .vitest-reports

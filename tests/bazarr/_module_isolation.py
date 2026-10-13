@@ -32,8 +32,38 @@ def _is_replaceable(module):
     return os.path.abspath(origin).startswith(_REPO_ROOT + os.sep)
 
 
+def _resync_parent_attribute(name):
+    """Re-point a repo parent package's attribute at what sys.modules holds.
+
+    Importing a submodule binds it as an attribute on its parent package, and
+    that binding survives a sys.modules restore: the parent keeps pointing at
+    a deleted module while sys.modules holds another one, or nothing. A later
+    ``from parent import child`` then binds the parent's stale copy while a
+    ``from parent.child import X`` imports a fresh module, so the two disagree
+    and a class patched through one is not the class the other constructs
+    from.
+    """
+    parent_name, _, child = name.rpartition(".")
+    if not parent_name:
+        return
+    parent = sys.modules.get(parent_name)
+    if parent is None or not _is_replaceable(parent):
+        return
+    module = sys.modules.get(name)
+    if module is not None:
+        setattr(parent, child, module)
+        return
+    stale = getattr(parent, child, None)
+    if stale is not None and _is_replaceable(stale):
+        try:
+            delattr(parent, child)
+        except AttributeError:
+            pass
+
+
 def restore(before):
     """Return sys.modules to ``before``, leaving installed packages alone."""
+    touched = set(sys.modules) | set(before)
     for name in list(sys.modules):
         if name in before:
             continue
@@ -42,3 +72,8 @@ def restore(before):
 
     for name, module in before.items():
         sys.modules[name] = module
+
+    # Package attributes must agree with sys.modules again, or a later
+    # from-import binds a copy the restore just deleted.
+    for name in touched:
+        _resync_parent_attribute(name)

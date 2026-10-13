@@ -94,6 +94,11 @@ def refresh_libraries(instance_id):
         raise MediaServerError('connection_disabled')
     if snapshot.configuration_error:
         raise MediaServerError(snapshot.configuration_error)
+    if not snapshot.sendable:
+        # A held destination is not one the stored credential may be sent to
+        # at all, and the client would connect and list sections before the
+        # first guard below runs, so the run stops here, before it is built.
+        raise MediaServerError('server_not_listed')
     scopes = list(_requests(snapshot))
     if not scopes:
         raise MediaServerError('library_missing')

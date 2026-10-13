@@ -59,7 +59,8 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                 path_replace_fn=path_mappings.path_replace,
             )
             if source_srt and translation_recently_failed(
-                    arr_instance_id, 'episode', episode.sonarrEpisodeId, translate_cfg['from'], lang_code):
+                    arr_instance_id, 'episode', episode.sonarrEpisodeId, translate_cfg['from'],
+                    lang_code, translate_cfg['forced'], translate_cfg['hi']):
                 # The last translation of this item died inside the job, so
                 # re-offering it would only queue another doomed job every
                 # scan; the hold expires and every settings save clears it.

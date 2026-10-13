@@ -23,9 +23,12 @@ from utilities.central import get_log_file_path
 from utilities.security_guards import api_key_matches
 
 from .auth import is_session_authenticated
-from .config import settings, base_url, get_ssl_verify
+from .config import SettingsFollowupError, settings, base_url, get_ssl_verify, save_settings
 from .database import database, System
 from .get_args import args
+from .host_allowlist import check_active, host_page, verify_approval_code
+from .host_policy import (APPROVAL_SEGMENT, effective_host, in_default_set, is_approvable_host,
+                          normalize_entries)
 from .logger import CoverStreamAborted
 
 frontend_build_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'frontend', 'build')
@@ -158,6 +161,64 @@ def catch_all(path):
 @check_login
 def download_log():
     return send_file(get_log_file_path(), max_age=0, as_attachment=True)
+
+
+@ui_bp.route('/' + APPROVAL_SEGMENT, methods=['POST'])
+def approve_refused_host():
+    """Allow a hostname through the request-host check with its console code.
+
+    The endpoint is open to a refused hostname on purpose: the page that names
+    the hostname is the only place that can submit it, and the one-time code
+    is the credential. A wrong code counts against the same in-memory throttle
+    login uses. The save goes through the settings path, so config.yaml and
+    the live settings agree without a restart, and the same write is what the
+    Docker supervisor re-reads. Only a hostname the allowlist can match may be
+    added, and the endpoint answers 404 once a login mode is configured,
+    because the check it serves is off then.
+    """
+    # Imported here: api.system.account reads app.config at import time, and
+    # pulling it in at module scope would tie the ui blueprint to it.
+    from api.system.account import _is_rate_limited, _record_failed_attempt
+
+    if not check_active(settings):
+        return abort(404)
+
+    host = effective_host(request.form.get('host', ''))
+    code = (request.form.get('code') or '').strip()
+    address = request.remote_addr
+
+    if _is_rate_limited(address):
+        return host_page(host, message='Too many attempts. Try again in 5 minutes.'), 429
+
+    if not is_approvable_host(host):
+        _record_failed_attempt(address)
+        return host_page(host, message='That hostname cannot be allowed.'), 403
+
+    if not code or not verify_approval_code(code):
+        _record_failed_attempt(address)
+        return host_page(host, message='Wrong or missing approval code. Use the most recent '
+                                       'approval-code line printed to the console Bazarr+ runs '
+                                       'in; it never appears in bazarr.log.'), 403
+
+    existing = normalize_entries(getattr(settings.general, 'allowed_hosts', None))
+    if host in existing or in_default_set(host):
+        return redirect(base_url or '/', code=302)
+
+    try:
+        save_settings([('settings-general-allowed_hosts', existing + [host])])
+    except SettingsFollowupError:
+        # The configuration is on disk and the live settings hold it; only the
+        # work after the save failed. The hostname is allowed, which is what
+        # the operator asked for, so the page carries on and the log carries
+        # the rest.
+        logging.exception('BAZARR allowed host %s through the request-host check, but applying the '
+                          'settings save failed', host)
+    except Exception:
+        logging.exception('BAZARR could not allow host %s through the request-host check', host)
+        return host_page(host, message='The hostname could not be saved. Try again.'), 503
+
+    logging.info('BAZARR allowed host %s through the request-host check with the approval code.', host)
+    return redirect(base_url or '/', code=302)
 
 
 def _instance_image_url(kind, url):

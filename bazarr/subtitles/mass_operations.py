@@ -952,6 +952,14 @@ def _process_subtitle_item(item, action, options, job_id):
             sync_kwargs['publication_guard'] = sports_guard
             return sync_subtitles(**sync_kwargs)
     elif action == 'translate':
+        # Re-asked per item: the entry check answered before the job was
+        # queued, and an operator can switch translation off between two
+        # items. The item fails with the gate's reason instead of queueing
+        # one doomed translation job after another.
+        from subtitles.tools.translate.availability import translation_available
+        availability = translation_available()
+        if not availability.available:
+            raise ValueError(availability.reason)
         from subtitles.tools.translate.main import translate_subtitles_file
         if item.get('sports_event_id'):
             media_type = 'sports'
@@ -1334,6 +1342,31 @@ def _process_media_action(items, action, job_id):
     return {'queued': queued, 'skipped': skipped, 'errors': errors}
 
 
+class _TranslationGateClosed(Exception):
+    """A mass translate refused by the gate before a job existed.
+
+    str() is the gate's reason."""
+
+
+def _translation_gate_refusal(job_id=None):
+    """Refuse a mass translate while the gate is closed.
+
+    A batch that is already running, one with a job id, fails with the reason:
+    the queue marks a job that returns as completed, and a closed gate must not
+    read as success. A batch still being scheduled is refused through
+    _TranslationGateClosed, which mass_batch_operation answers with the payload
+    its callers expect. An open gate returns quietly.
+    """
+    from subtitles.tools.translate.availability import translation_available
+
+    availability = translation_available()
+    if availability.available:
+        return
+    if job_id:
+        raise JobFailed(availability.reason)
+    raise _TranslationGateClosed(availability.reason)
+
+
 def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     """Main entry point for all batch operations on subtitles.
 
@@ -1352,6 +1385,20 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     """
     if action not in VALID_ACTIONS:
         return {'queued': 0, 'skipped': 0, 'errors': [f'Invalid action: {action}']}
+
+    # A translate refuses before a job exists, exactly like the API above it:
+    # without the gate a switched-off or half-configured translator turned a
+    # mass translate into one doomed job per item, whichever door the request
+    # came through. The refusal arrives as an exception and leaves no local
+    # behind, because the scheduling call below rebinds every local of this
+    # frame against this function's signature: a name the signature does not
+    # accept would be handed to the job as a keyword argument, and the
+    # open-gate self-schedule would crash with a TypeError.
+    if action == 'translate':
+        try:
+            _translation_gate_refusal(job_id)
+        except _TranslationGateClosed as refusal:
+            return {'queued': 0, 'skipped': 0, 'errors': [str(refusal)]}
 
     options = options or {}
 

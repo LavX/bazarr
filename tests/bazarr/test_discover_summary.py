@@ -648,6 +648,184 @@ def test_the_reconciliation_is_idempotent(summary_database):
                    for statement in statements)
 
 
+def test_a_dangling_movie_the_default_already_owns_merges_into_its_row(summary_database):
+    """The unique index a reassign writes through is per instance and tmdbId,
+    so a dangling duplicate of a movie the default owns could never be
+    reassigned to it: the UPDATE collided on it and rolled the whole reconcile
+    back at every boot. The default's row wins instead and the duplicate
+    merges into it, keeping the default's row with its recorded subtitles and
+    history."""
+    from app.database import TableHistoryMovie, TableMovies
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 2, kind="radarr", name="Films")
+    add_movie(session, 200, 2, missing="[]", upstream=31)
+    add_movie(session, 210, 9, missing="['en']", upstream=32)
+    session.get(TableMovies, 210).tmdbId = "1200"    # the default's movie, named by a deleted instance
+    recorded = '[{"code3": "eng", "path": "/movies/200.eng.srt"}]'
+    session.get(TableMovies, 200).subtitles = recorded
+    add_movie_history(session, 1, 1, 200, 2)
+    session.commit()
+
+    reconcile_dangling_library_owners(session)
+
+    assert owners(session, TableMovies) == {200: 2}
+    assert session.execute(
+        sa.select(TableMovies.subtitles).where(TableMovies.id == 200)
+    ).scalar_one() == recorded
+    assert session.execute(
+        sa.select(sa.func.count()).select_from(TableHistoryMovie)).scalar_one() == 1
+
+
+def test_a_dangling_movie_the_default_does_not_own_is_reassigned_despite_a_merge(summary_database):
+    """The blind UPDATE was all or nothing, so one colliding row also stopped
+    a second dangling movie the default did not own from ever being written.
+    Row by row, the collision merges and the other movie still gets the
+    default as its owner."""
+    from app.database import TableMovies
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 2, kind="radarr", name="Films")
+    add_movie(session, 200, 2, missing="[]", upstream=31)
+    add_movie(session, 210, 9, missing="['en']", upstream=32)
+    add_movie(session, 220, 9, missing="['en']", upstream=33)
+    session.get(TableMovies, 210).tmdbId = "1200"    # the default's movie, named by a deleted instance
+    session.commit()
+
+    reconcile_dangling_library_owners(session)
+
+    assert owners(session, TableMovies) == {200: 2, 220: 2}
+
+
+def test_a_dangling_episode_the_default_already_owns_merges_into_its_row(summary_database):
+    """The episode table's per-instance unique index is on sonarrEpisodeId,
+    so the same collision as the movie one kept a dangling duplicate of an
+    episode the default owns unreconcilable. The default's episode wins, with
+    its recorded subtitles and history; the duplicate goes."""
+    from app.database import TableEpisodes, TableHistory
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_show(session, 100, 1)
+    add_episode(session, 111, 100, 1, missing="[]", upstream=500)
+    add_episode(session, 112, 100, 9, missing="['en']", upstream=500)
+    recorded = '[{"code3": "eng", "path": "/series/100/111.eng.srt"}]'
+    session.get(TableEpisodes, 111).subtitles = recorded
+    add_episode_history(session, 1, 1, 111, 100, 1)
+    session.commit()
+
+    reconcile_dangling_library_owners(session)
+
+    assert owners(session, TableEpisodes) == {111: 1}
+    assert session.execute(
+        sa.select(TableEpisodes.subtitles).where(TableEpisodes.id == 111)
+    ).scalar_one() == recorded
+    assert session.execute(
+        sa.select(sa.func.count()).select_from(TableHistory)).scalar_one() == 1
+
+
+def test_a_dangling_episode_the_default_does_not_own_is_reassigned_despite_a_merge(summary_database):
+    """The episode twin of the movie sibling case: the collision no longer
+    stops the reconcile, so an episode with no row on the default instance
+    still gets reassigned to it."""
+    from app.database import TableEpisodes
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_show(session, 100, 1)
+    add_episode(session, 111, 100, 1, missing="[]", upstream=500)
+    add_episode(session, 112, 100, 9, missing="['en']", upstream=500)
+    add_episode(session, 113, 100, 9, missing="['en']", upstream=501)
+    session.commit()
+
+    reconcile_dangling_library_owners(session)
+
+    assert owners(session, TableEpisodes) == {111: 1, 113: 1}
+
+
+def test_reconciliation_with_merges_still_converges_on_a_second_run(summary_database):
+    """A run that merges collisions and reassigns the rest leaves nothing
+    dangling: the second run finds no deleted owner left and writes no row,
+    not even a DELETE."""
+    from app.database import TableEpisodes, TableMovies
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="radarr", name="Films")
+    add_show(session, 100, 1)
+    add_episode(session, 111, 100, 1, missing="[]", upstream=500)
+    add_episode(session, 112, 100, 9, missing="['en']", upstream=500)
+    add_episode(session, 113, 100, 9, missing="['en']", upstream=501)
+    add_movie(session, 200, 2, missing="[]", upstream=31)
+    add_movie(session, 210, 9, missing="['en']", upstream=32)
+    add_movie(session, 220, 9, missing="['en']", upstream=33)
+    session.get(TableMovies, 210).tmdbId = "1200"    # the default's movie, named by a deleted instance
+    session.commit()
+
+    reconcile_dangling_library_owners(session)
+    reconciled = (owners(session, TableEpisodes), owners(session, TableMovies))
+    assert reconciled == ({111: 1, 113: 1}, {200: 2, 220: 2})
+    _, statements = counted(summary_database.engine,
+                            lambda: reconcile_dangling_library_owners(session))
+
+    assert (owners(session, TableEpisodes), owners(session, TableMovies)) == reconciled
+    assert not any(statement.lstrip().upper().startswith(("UPDATE", "DELETE"))
+                   for statement in statements)
+
+
+def test_a_merged_dangling_show_moves_its_episodes_to_the_winning_show(summary_database):
+    """A dangling show that duplicates the default's merges by deletion, and
+    the foreign key cascade on its series would take its episodes with it.
+    They move to the winning show first, and then the episode decision
+    applies: the default's own episode stays, the episode duplicating it
+    merges, and an episode the default does not have survives under the
+    winner with its series repointed."""
+    from app.database import TableEpisodes, TableShows
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_show(session, 100, 1)                        # the default's show
+    add_episode(session, 111, 100, 1, missing="[]", upstream=500)
+    add_show(session, 120, 9, upstream=10)            # the same series, from a deleted instance
+    add_episode(session, 121, 120, 9, missing="['en']", upstream=500)
+    add_episode(session, 122, 120, 9, missing="['en']", upstream=501)
+    session.commit()
+
+    reconcile_dangling_library_owners(session)
+
+    assert owners(session, TableShows) == {100: 1}
+    assert owners(session, TableEpisodes) == {111: 1, 122: 1}
+    assert session.execute(
+        sa.select(TableEpisodes.series_id).where(TableEpisodes.id == 122)
+    ).scalar_one() == 100
+
+
+def test_a_dangling_episode_waits_for_a_parent_that_cannot_move(summary_database):
+    """A show under a deleted instance with the same path as the default's
+    but a different series id cannot be reassigned: the path index collides
+    and the show keeps its deleted owner. Its episode used to move alone,
+    ending up under the default while its series still named the deleted
+    instance, a mismatch no later run repaired. The episode waits with its
+    parent now."""
+    from app.database import TableEpisodes, TableShows
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_show(session, 100, 1)                        # the default's show
+    add_show(session, 120, 9, upstream=11)
+    session.get(TableShows, 120).path = "/series/100"    # collides with the default's show
+    add_episode(session, 121, 120, 9, missing="['en']", upstream=501)
+    session.commit()
+
+    reconcile_dangling_library_owners(session)
+
+    assert owners(session, TableShows) == {100: 1, 120: 9}
+    assert owners(session, TableEpisodes) == {121: 9}
+    assert session.execute(
+        sa.select(TableEpisodes.series_id).where(TableEpisodes.id == 121)
+    ).scalar_one() == 120
+
+
 def test_media_items_and_language_requirements_are_published_separately(
         summary_database, quiet_queue, libraries_on):
     """One item needing two languages is one item and two requirements.

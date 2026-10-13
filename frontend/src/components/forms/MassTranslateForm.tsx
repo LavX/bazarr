@@ -11,7 +11,12 @@ import {
 import { useForm } from "@mantine/form";
 import { notifications } from "@mantine/notifications";
 import { isObject } from "lodash";
-import { useBatchAction, useSystemSettings } from "@/apis/hooks";
+import {
+  useBatchAction,
+  useSystemSettings,
+  useTranslationAvailability,
+  useTranslationRefusal,
+} from "@/apis/hooks";
 import { BatchItem } from "@/apis/raw/subtitles";
 import { Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
@@ -187,6 +192,10 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
   const settings = useSystemSettings();
   const { mutateAsync, isPending } = useBatchAction();
   const modals = useModals();
+  const translation = useTranslationAvailability();
+  // The availability above is a cached status, so the gate can have closed
+  // since it was read: a 409 is where the server's reason gets a say.
+  const showTranslationRefusal = useTranslationRefusal();
 
   const { data: languages } = useEnabledLanguages();
 
@@ -242,31 +251,27 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
     settingsData: ReturnType<typeof useSystemSettings>,
   ): TranslationConfig => {
     const tType = settingsData?.data?.translator?.translator_type;
-    const defaultConfig: TranslationConfig = {
-      service: "Google Translate",
-      model: "",
-    };
 
     switch (tType) {
+      case "google_translate":
+        return { service: "Google Translate", model: "" };
       case "gemini":
         return {
-          ...defaultConfig,
           service: "Gemini",
           model: ` (${settingsData?.data?.translator?.gemini_model || ""})`,
         };
       case "lingarr":
-        return {
-          ...defaultConfig,
-          service: "Lingarr",
-        };
+        return { service: "Lingarr", model: "" };
       case "openrouter":
         return {
-          ...defaultConfig,
           service: "AI Subtitle Translator",
           model: ` (${settingsData?.data?.translator?.openrouter_model || ""})`,
         };
       default:
-        return defaultConfig;
+        // An engine the form does not recognise is not "Google Translate":
+        // it is whatever the settings page holds, and the gate below is what
+        // says whether it can translate at all.
+        return { service: "", model: "" };
     }
   };
 
@@ -341,27 +346,36 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
       onComplete?.();
       modals.closeSelf();
     } catch (error) {
-      notifications.show({
-        title: "Translation Failed",
-        message: String(error),
-        color: "red",
-      });
+      // A stale status can leave the action enabled while the gate is
+      // closed: a 409 shows the server's own reason, and the raw transport
+      // error stays for every other failure.
+      if (!showTranslationRefusal(error)) {
+        notifications.show({
+          title: "Translation Failed",
+          message: String(error),
+          color: "red",
+        });
+      }
     }
   };
 
   return (
     <form onSubmit={form.onSubmit(handleSubmit)}>
       <Stack>
-        <Alert>
-          <Text size="sm">
-            {translatorService}
-            {translatorModel} will be used to translate{" "}
-            <strong>{items.length}</strong> item(s).
-          </Text>
-          <Text size="xs" c="var(--bz-text-tertiary)" mt="xs">
-            You can choose translation service in the subtitles settings.
-          </Text>
-        </Alert>
+        {translation.available ? (
+          <Alert>
+            <Text size="sm">
+              {translatorService}
+              {translatorModel} will be used to translate{" "}
+              <strong>{items.length}</strong> item(s).
+            </Text>
+            <Text size="xs" c="var(--bz-text-tertiary)" mt="xs">
+              You can choose translation service in the subtitles settings.
+            </Text>
+          </Alert>
+        ) : (
+          <Alert color="red">{translation.reason}</Alert>
+        )}
 
         {items.length > 0 && items.length <= 5 && (
           <Stack gap="xs">
@@ -425,7 +439,7 @@ const MassTranslateForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           <Button
             type="submit"
             loading={isPending}
-            disabled={items.length === 0}
+            disabled={items.length === 0 || !translation.available}
           >
             Translate {items.length} Item(s)
           </Button>

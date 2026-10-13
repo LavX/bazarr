@@ -535,6 +535,17 @@ def dispatcher(data):
                         f'the episodes of series {media_id}'):
                     return
                 arr_client = client_for_instance(database, arr_instance_id) if arr_instance_id is not None else None
+                if arr_instance_id is not None and arr_client is None:
+                    # The queue is drained asynchronously, so an event can be
+                    # dispatched after its instance was disabled or deleted. The
+                    # fetch would then go through the default Sonarr connection
+                    # while the deletion keeps the named instance's scope, and
+                    # an empty default answer would delete that instance's
+                    # rows. Skip the event instead, the way the per-instance
+                    # entry points skip an unknown instance.
+                    logging.warning('BAZARR skipping Sonarr series %s for unknown or disabled '
+                                    'instance %s', media_id, arr_instance_id)
+                    return
                 sync_episodes(series_id=media_id, defer_search=settings.sonarr.defer_search_signalr, is_signalr=True,
                               arr_instance_id=arr_instance_id, arr_client=arr_client)
             elif arr_instance_id is not None:

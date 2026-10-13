@@ -4,6 +4,7 @@
  * the instance that another spec could trip over.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import {
   chooseLanguage,
   openDiscover,
@@ -74,7 +75,9 @@ test.describe(
       page,
       api,
     }) => {
-      const settings = await (await api.get("/api/system/settings")).json();
+      const settings = await (
+        await api.get(appPath("/api/system/settings"))
+      ).json();
       const wallMs =
         Number(settings.compat_endpoint.search_timeout_seconds) * 1000;
 

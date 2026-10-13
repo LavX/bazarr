@@ -6,6 +6,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useEditorTranslationAvailability } from "@/apis/hooks";
 import { stripTags } from "./stripTags";
 import type { Cue } from "./types";
 
@@ -97,6 +98,9 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(
     const [startDraft, setStartDraft] = useState("");
     const [endDraft, setEndDraft] = useState("");
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    // The editor's own gate answer, not the configured engine's: the two can
+    // differ in both directions, and this button posts to the editor endpoint.
+    const translation = useEditorTranslationAvailability();
 
     // Expose imperative handle for parent to focus and read uncommitted text
     useImperativeHandle(
@@ -407,17 +411,23 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(
                       <button
                         type="button"
                         onClick={onTranslateLine}
-                        disabled={translatingLine}
-                        title="Translate and create cue"
+                        disabled={translatingLine || !translation.available}
+                        title={`Translate and create cue${
+                          translation.available ? "" : `: ${translation.reason}`
+                        }`}
                         style={{
                           background: "var(--mantine-color-brand-5)",
                           border: "none",
                           borderRadius: 3,
                           padding: "2px 6px",
-                          cursor: translatingLine ? "wait" : "pointer",
+                          cursor:
+                            translatingLine || !translation.available
+                              ? "not-allowed"
+                              : "pointer",
                           fontSize: 10,
                           color: "#fff",
-                          opacity: translatingLine ? 0.5 : 1,
+                          opacity:
+                            translatingLine || !translation.available ? 0.5 : 1,
                         }}
                       >
                         {translatingLine ? "..." : "AI"}
@@ -724,17 +734,23 @@ const DetailPane = forwardRef<DetailPaneHandle, DetailPaneProps>(
                     <button
                       type="button"
                       onClick={onTranslateLine}
-                      disabled={translatingLine}
-                      title="Translate this cue"
+                      disabled={translatingLine || !translation.available}
+                      title={`Translate this cue${
+                        translation.available ? "" : `: ${translation.reason}`
+                      }`}
                       style={{
                         background: "var(--mantine-color-brand-5)",
                         border: "none",
                         borderRadius: 3,
                         padding: "2px 6px",
-                        cursor: translatingLine ? "wait" : "pointer",
+                        cursor:
+                          translatingLine || !translation.available
+                            ? "not-allowed"
+                            : "pointer",
                         fontSize: 10,
                         color: "#fff",
-                        opacity: translatingLine ? 0.5 : 1,
+                        opacity:
+                          translatingLine || !translation.available ? 0.5 : 1,
                       }}
                     >
                       {translatingLine ? "..." : "AI"}
