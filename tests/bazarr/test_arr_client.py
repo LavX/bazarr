@@ -162,7 +162,9 @@ def test_service_test_connection_for_instance_404(schema_session):
 
 
 def test_service_test_connection_for_instance_applies_overrides_with_stored_key(schema_session):
-    # edit-form "keep current key" + edited host: stored key, body connection override
+    # edit-form "keep current key" + edited host: an override that moves the
+    # address is refused outright, and one that keeps the stored destination
+    # still probes it with the stored key.
     from arr_instances import service
     from arr_instances.repository import ArrInstanceRepository
 
@@ -175,10 +177,21 @@ def test_service_test_connection_for_instance_applies_overrides_with_stored_key(
         captured.update(url=url, headers=headers)
         return _FakeResp(200, {"version": "4.0.0"})
 
-    service.test_connection_for_instance(
+    body, status = service.test_connection_for_instance(
         schema_session, inst.id, args={"ip": "9.9.9.9", "port": 9000}, http_get=fake_get)
 
-    assert captured["url"].startswith("http://9.9.9.9:9000")
+    assert status == 200
+    assert body["ok"] is False
+    assert body["error"] == "reenter_key"
+    assert body["message"] == service.REENTER_KEY
+    assert captured == {}, "the stored key never reached the new address"
+
+    body, status = service.test_connection_for_instance(
+        schema_session, inst.id, args={"http_timeout": 120}, http_get=fake_get)
+
+    assert status == 200 and body["ok"] is True and body["version"] == "4.0.0"
+    # the decrypted STORED key probes the stored address, not a body value
+    assert captured["url"].startswith("http://1.2.3.4:8989")
     assert captured["headers"]["X-Api-Key"] == "stored-secret"
 
 

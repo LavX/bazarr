@@ -13,6 +13,7 @@ from app.database import (TableArrInstances, TableShowsRootfolder, TableMoviesRo
                           TableShows, TableMovies)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
+from secret_store.migration import decrypt_failure_issues, replaced_secret_issues
 from utilities.path_mappings import path_mappings
 from sonarr.rootfolder import check_sonarr_rootfolder
 from radarr.rootfolder import check_radarr_rootfolder
@@ -249,8 +250,72 @@ def get_health_issues():
                                        'to your content.'})
 
     health_issues.extend(_postprocessing_command_issues())
+    health_issues.extend(translate_from_profile_issues())
+
+    # A stored credential that will not decrypt is withheld from every
+    # consumer, so the provider it belongs to stops authenticating with no
+    # visible cause. The issue names the setting path, never the value.
+    health_issues.extend(decrypt_failure_issues())
+    # Credentials this boot replaced because their stored value would not
+    # decrypt (the API key): nothing to re-enter, but the tools holding the
+    # old value still have to be told.
+    health_issues.extend(replaced_secret_issues())
+    health_issues.extend(_host_allowlist_issues())
 
     return health_issues
+
+
+def translate_from_profile_issues():
+    """One line per profile that translates a language from another one while
+    translation is unavailable, with the gate's reason.
+
+    Those profiles still work: their missing languages fall back to the provider
+    search, exactly as if the profile had no translate-from for them. The line
+    exists so the owner can decide between fixing the translator and editing the
+    profile, instead of wondering why nothing is being translated.
+    """
+    from subtitles.tools.translate.availability import translation_available
+
+    availability = translation_available()
+    if availability.available:
+        return []
+
+    issues = []
+    profiles = database.execute(
+        select(TableLanguagesProfiles.name, TableLanguagesProfiles.items)).all()
+    for profile in profiles:
+        try:
+            stored = json.loads(profile.items)
+        except (TypeError, ValueError):
+            continue
+        # The settings page stores the profile's items as a bare list. An
+        # object with an items key is read tolerantly, but nothing writes that
+        # shape; treating it as the only one meant no profile was ever named.
+        entries = stored.get('items') if isinstance(stored, dict) else stored
+        if not isinstance(entries, list):
+            continue
+        if not any(isinstance(entry, dict) and entry.get('translate_from')
+                   for entry in entries):
+            continue
+        issues.append({
+            'object': profile.name,
+            'issue': f'This languages profile translates some languages from another one, '
+                     f'and translation is unavailable: {availability.reason}. Those languages '
+                     f'are searched on providers instead of being translated.'})
+    return issues
+
+
+def _host_allowlist_issues():
+    """The request-host check's items: the wildcard switch and refused hosts.
+
+    Never raises: a health check that throws takes the whole page with it.
+    """
+    try:
+        from app.host_allowlist import health_issues
+        return health_issues()
+    except Exception:
+        logging.exception("BAZARR could not report the request-host health issues")
+        return []
 
 
 def _postprocessing_command_issues():

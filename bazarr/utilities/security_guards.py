@@ -12,9 +12,7 @@ from leaking to *arbitrary public* hosts and to keep request-controlled file
 paths inside their intended areas.
 """
 import hmac
-import ipaddress
 import os
-import socket
 from urllib.parse import urlparse
 
 # Mirrors subliminal_patch.core.SUBTITLE_EXTENSIONS (kept local to avoid a heavy
@@ -22,10 +20,6 @@ from urllib.parse import urlparse
 SUBTITLE_FILE_EXTENSIONS = (
     ".srt", ".sub", ".smi", ".txt", ".ssa", ".ass", ".mpl", ".vtt",
 )
-
-# Domains that Plex itself owns; sending a Plex token to these is expected
-# (covers plex.tv and the *.plex.direct TLS hostnames used for remote access).
-_PLEX_OWNED_SUFFIXES = (".plex.tv", ".plex.direct")
 
 
 def api_key_matches(provided, expected) -> bool:
@@ -39,53 +33,60 @@ def api_key_matches(provided, expected) -> bool:
     return hmac.compare_digest(str(provided), str(expected))
 
 
-def is_trusted_plex_target(uri, trusted_hosts=()) -> bool:
-    """True if it is safe to send the Plex token to ``uri``.
+def normalized_origin(uri):
+    """(scheme, host, port) of an http(s) address, or None.
 
-    Trusted = a Plex-owned domain (plex.tv / *.plex.direct), an explicitly
-    configured host (the user's own server), or any host that resolves only to
-    loopback / link-local / RFC1918 addresses (a home Plex). Any other public
-    destination is refused so the token cannot be exfiltrated.
+    The three parts that decide which server a request reaches, with the
+    scheme's default port filled in. Plex destinations are compared on exactly
+    this triple, so a path or query never hides a different server and a bare
+    hostname never passes for the address it was taken from.
+
+    Anything a URL parser can read two ways is refused outright: a backslash,
+    whitespace or a control character ends the authority for one parser and not
+    for another, and userinfo hides the real host from whichever parser reads
+    the text after the last ``@``. The HTTP library's own parser has to agree
+    on the host and the port before an origin is returned.
     """
-    if not uri:
-        return False
-
-    parsed = urlparse(uri if "://" in uri else "https://" + uri)
-    if parsed.scheme not in ("http", "https"):
-        return False
-
-    host = parsed.hostname
-    if not host:
-        return False
-    host = host.lower().rstrip(".")
-
-    if host == "plex.tv" or host.endswith(_PLEX_OWNED_SUFFIXES):
-        return True
-
-    if host in {h.lower() for h in trusted_hosts if h}:
-        return True
-
+    if not uri or not isinstance(uri, str):
+        return None
+    if any(character in uri for character in ("\\", "@")) or any(
+            ord(character) < 33 or ord(character) == 127 for character in uri):
+        return None
+    try:
+        parsed = urlparse(uri if "://" in uri else "https://" + uri)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return None
+        if parsed.username or parsed.password:
+            return None
+    except ValueError:
+        # A malformed address, a bracketed IPv6 literal without its closing
+        # bracket among them, raises out of the parser itself: that is not an
+        # origin any credential goes to, so the caller hears None rather than
+        # an unhandled error from a route that asked.
+        return None
     try:
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError:
-        return False
-
+        return None
+    from urllib3.util import parse_url
     try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-    except (socket.gaierror, UnicodeError, ValueError, OSError):
-        return False
-    if not infos:
-        return False
-
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        # Any single public address makes the destination untrusted.
-        if not (ip.is_private or ip.is_loopback or ip.is_link_local):
-            return False
-    return True
+        library_parsed = parse_url(uri if "://" in uri else "https://" + uri)
+        library_host = library_parsed.host
+        library_port = library_parsed.port
+    except ValueError:
+        return None
+    if library_host is None:
+        return None
+    # A bracketed IPv6 literal is the one host the two parsers spell
+    # differently, so the brackets come off both sides before the hosts are
+    # compared; an address that only matches with them on is still the same
+    # server.
+    if (library_host.lower().rstrip(".").strip("[]")
+            != parsed.hostname.lower().rstrip(".").strip("[]")):
+        return None
+    if library_port is not None and library_port != port:
+        return None
+    return parsed.scheme, parsed.hostname.lower().rstrip("."), port
 
 
 def subtitle_path_within_area(subtitle_path, video_path,

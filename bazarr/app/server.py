@@ -17,21 +17,14 @@ from .ui import ui_bp
 from .get_args import args
 from .config import settings, base_url
 from .database import close_database
-from .app import BACKEND_HOST_ENV, create_app, supervisor_token, trusted_proxy_value
+from .app import BACKEND_HOST_ENV, create_app, supervisor_token, waitress_server_options
+from .host_allowlist import announce_code
 
 app = create_app()
 from compat import register as register_compat  # noqa: E402
 register_compat(app, base_url=base_url)
 app.register_blueprint(api_bp, url_prefix=base_url.rstrip('/') + '/api')
 app.register_blueprint(ui_bp, url_prefix=base_url.rstrip('/'))
-
-# Waitress spools a request body to disk before any route sees it, and its own
-# default ceiling is 1 GiB. The largest upload a route accepts is a 150 MiB
-# subtitle file, and each upload route refuses its own excess, so this is the
-# backstop for every other path, including a request that never authenticates.
-# In the image, docker/supervisor.py refuses a body at this ceiling in front of
-# it, because waitress's own refusal would not reach the page.
-MAX_REQUEST_BODY_SIZE = 256 * 1024 * 1024  # 256 MiB
 
 
 class Server:
@@ -59,16 +52,6 @@ class Server:
 
     def configure_server(self):
         try:
-            # Trust X-Forwarded-* only from general.trusted_proxies, which
-            # defaults to 127.0.0.1 (the supervisor proxy in
-            # docker/supervisor.py). Direct clients that inject these headers
-            # are untrusted and Waitress strips them. The compat endpoint
-            # reads X-Forwarded-Host/Proto for download-link construction;
-            # trusting arbitrary client values would let an attacker forge
-            # stream URLs and exfiltrate the Api-Key. A reverse proxy in
-            # another container has to be named in that setting, otherwise its
-            # HTTPS reads as http here and every client shares one login
-            # rate-limit bucket under the proxy's address.
             # Thread count: measured on a live 4-instance install, the old
             # inherited threads=100 accounted for 100 of 123 process threads
             # at idle for a single-user UI whose heavy work runs in background
@@ -80,26 +63,18 @@ class Server:
             # dozen parked tabs with ample headroom for bursts, and waitress
             # queues rather than drops beyond it. Configurable (4..100) for
             # larger installs via general.web_server_threads.
-            # trusted_proxy_headers is only legal alongside a trusted_proxy:
-            # waitress raises ValueError for the pair, and that escapes this
-            # OSError handler and the import of this module, so an operator who
-            # clears the setting would get a boot loop fixable only by editing
-            # config.yaml. With no proxy trusted, waitress strips every
-            # forwarded header anyway, which is the intent.
-            proxy_options = {}
-            trusted_proxy = trusted_proxy_value()
-            if trusted_proxy:
-                proxy_options = {'trusted_proxy': trusted_proxy,
-                                 'trusted_proxy_headers': {'x-forwarded-host',
-                                                           'x-forwarded-proto',
-                                                           'x-forwarded-for'}}
-
+            # The forwarded headers are parsed in create_app, not by the
+            # server: the request-host gate there needs both hostnames a
+            # forwarded request carried, the one in the Host header and the
+            # one general.trusted_proxy's address named in X-Forwarded-Host.
+            # The server passes no proxy options of its own, so a trusted
+            # proxy's headers reach the app, which clears them for every
+            # other peer itself.
             self.server = create_server(app,
                                         host=self.address,
                                         port=self.port,
                                         threads=settings.general.web_server_threads,
-                                        max_request_body_size=MAX_REQUEST_BODY_SIZE,
-                                        **proxy_options)
+                                        **waitress_server_options())
             self.connected = True
         except OSError as error:
             if error.errno == errno.EADDRNOTAVAIL:
@@ -177,6 +152,12 @@ class Server:
     def restart(self):
         self.close_all()
         restart_bazarr()
+
+
+# The one-time code an operator enters on the refused-host page is announced
+# to the console at boot, so a hostname refused right after a restart has one
+# to use. It appears only on the console, never in bazarr.log.
+announce_code()
 
 
 webserver = Server()

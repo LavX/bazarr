@@ -177,17 +177,22 @@ def test_native_auth_checks_each_instance_key_without_proxy_or_session_fallback(
 
 @pytest.mark.parametrize("method", ["get", "post", "session"])
 def test_authenticated_sportarr_requests_do_not_follow_redirects(method):
+    import requests
+
     with _server(_native_status) as (target_port, target_calls):
         location = f"http://127.0.0.1:{target_port}/api/system/status"
         with _server(lambda *a: (307, {}, {"Location": location})) as (port, received):
+            # A redirect is refused before the next hop is contacted: the key
+            # never follows it, whatever the caller asks for.
             if method == "session":
                 from sportarr.http_session import sportarr_session
-                response = sportarr_session().get(
-                    f"http://127.0.0.1:{port}/api/system/status", timeout=2,
-                    headers={"X-Api-Key": "fixture-secret"}, allow_redirects=True)
+                with pytest.raises(requests.exceptions.TooManyRedirects):
+                    sportarr_session().get(
+                        f"http://127.0.0.1:{port}/api/system/status", timeout=2,
+                        headers={"X-Api-Key": "fixture-secret"}, allow_redirects=True)
             else:
-                response = getattr(_client(port=port), method)("/api/system/status")
-            assert response.status_code == 307
+                with pytest.raises(requests.exceptions.TooManyRedirects):
+                    getattr(_client(port=port), method)("/api/system/status")
             assert received == [("/api/system/status", "fixture-secret")]
         assert target_calls == []
 
@@ -339,8 +344,9 @@ def test_sportarr_crud_through_existing_http_wrappers(schema_session, monkeypatc
         response = client.post(f"/system/arr-instances/{instance_id}/test", headers=headers,
                                json={"port": port})
         assert response.status_code == 200
-        assert response.json == {"ok": True, "version": "4.1.6.1116", "app_name": "Sportarr"}
-        assert received == [("/api/system/status", "fixture-secret")]
+        assert response.json["ok"] is False
+        assert response.json["error"] == "reenter_key"
+        assert received == [], "the stored key never reached the new address"
         response = client.post("/system/arr-instances/test", headers=headers,
                                json={"kind": "sportarr", "port": port, "api_key": "wrong-key"})
         assert response.status_code == 200

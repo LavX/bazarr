@@ -3348,7 +3348,13 @@ def test_the_url_must_point_at_this_job_s_service(constructed_workflow):
     )
     covered, problems = _read_workflow()
     assert _PG_FILE not in covered
-    assert any("db.example.com" in problem for problem in problems)
+    variable, _, _, consequence = _REQUIRES_SERVICE[_PG_FILE]
+    assert problems == [
+        f"{_PG_FILE} runs in job 'backend', where {consequence}. "
+        f"{variable} points at db.example.com, which is not a service "
+        "container of this job, so whether anything answers is decided "
+        "outside the workflow"
+    ]
 
 
 # ---------------------------------------------------------------------------

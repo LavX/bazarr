@@ -9,45 +9,48 @@ from retry.api import retry
 from app.config import settings
 
 
-def generate_autopulse_config(decrypted_token=None):
+def generate_autopulse_config():
     """
     Generate complete Autopulse configuration for Plex integration by requesting
     a configuration template from Autopulse and adding Plex-specific details.
-    
+
     This function uses the new Autopulse /api/config-template endpoint with the
-    'bazarr' trigger type for improved integration. The response contains a 
+    'bazarr' trigger type for improved integration. The response contains a
     complete configuration with placeholders that are replaced with actual values.
+
+    The configuration pairs the account token with a server address, so it is
+    built only from a verification result: an address plex.tv lists for the
+    signed-in account and the exact credential that listing was verified with.
+    Without one, generation refuses rather than embedding the token next to an
+    address nobody verified.
     """
     try:
         # Get Plex configuration - OAuth required for this feature
-        server_url = settings.plex.get('server_url', '')
+        if settings.plex.get('auth_method', 'apikey') != 'oauth':
+            return None
+
+        from media_servers.plex_account import verified_server_addresses
+        server_addresses, status, verified_token = verified_server_addresses(settings)
+        if (status != 'ok' or not server_addresses
+                or not verified_token or not verified_token.strip()):
+            logging.warning("BAZARR has no verified Plex server address for the Autopulse "
+                            "configuration; the account token is embedded only with an "
+                            "address plex.tv lists")
+            return None
+        server_url = server_addresses[0]
         server_name = settings.plex.get('server_name', '')
-        auth_method = settings.plex.get('auth_method', 'apikey')
-        
-        # Only proceed if OAuth is configured
-        if auth_method != 'oauth':
-            return None
-            
-        # Use provided token or get decrypted token from OAuth system
-        if not decrypted_token:
-            from api.plex.oauth import get_decrypted_token
-            decrypted_token = get_decrypted_token()
-            
-        if not decrypted_token or not server_url:
-            logging.warning("BAZARR missing required Plex OAuth configuration for Autopulse")
-            return None
-        
+
         # Get configuration template from Autopulse (required)
         autopulse_template = _get_autopulse_template()
-        
+
         if not autopulse_template:
             logging.error("BAZARR Autopulse template API unavailable - please ensure Autopulse is running and supports the template API")
             return None
-        
+
         # Generate Plex-specific configuration using template
         logging.info("BAZARR using dynamic Autopulse template for config generation")
-        return _generate_config_from_template(autopulse_template, server_url, decrypted_token, server_name)
-            
+        return _generate_config_from_template(autopulse_template, server_url, verified_token, server_name)
+
     except Exception as e:
         logging.error(f"BAZARR error generating Autopulse config: {str(e)}")  # noqa: G004
         return None

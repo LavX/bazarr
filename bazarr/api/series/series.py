@@ -94,6 +94,7 @@ class Series(Resource):
         episodeMissingCount = select(TableEpisodes.series_id,
                                      func.count(TableEpisodes.id).label('episodeMissingCount')) \
             .select_from(TableEpisodes) \
+            .join(TableShows, TableShows.id == TableEpisodes.series_id) \
             .where(reduce(operator.and_, episodes_missing_conditions)) \
             .group_by(TableEpisodes.series_id)\
             .subquery()

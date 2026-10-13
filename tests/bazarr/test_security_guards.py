@@ -9,7 +9,7 @@ import pytest
 from utilities.security_guards import (
     api_key_matches,
     is_subtitle_path_extension,
-    is_trusted_plex_target,
+    normalized_origin,
     subtitle_path_within_area,
 )
 
@@ -39,61 +39,48 @@ def test_api_key_matches_prefix_is_not_enough():
     assert api_key_matches("abc", "abc123") is False
 
 
-# --- is_trusted_plex_target (Finding 1: don't leak the token) ----------------
+# --- normalized_origin (the origin a Plex credential may be sent to) ---------
 
-@pytest.mark.parametrize("uri", [
-    "http://127.0.0.1:32400",
-    "https://192.168.1.50:32400",
-    "http://10.5.5.5",
-    "http://172.16.0.9:32400",
-    "https://[::1]:32400",
-])
-def test_trusted_plex_local_targets(uri):
-    # The common case: home Plex on loopback / LAN must stay allowed.
-    assert is_trusted_plex_target(uri) is True
+def test_normalized_origin_reads_scheme_host_port():
+    assert normalized_origin("https://plex.example:32400/path?query") == \
+        ("https", "plex.example", 32400)
 
 
-@pytest.mark.parametrize("uri", [
-    "http://8.8.8.8",
-    "https://1.2.3.4:32400",
-])
-def test_untrusted_public_ip_rejected(uri):
-    # A public, non-Plex destination would exfiltrate the token -> reject.
-    assert is_trusted_plex_target(uri) is False
+def test_normalized_origin_fills_the_default_port():
+    assert normalized_origin("http://plex.example") == ("http", "plex.example", 80)
+    assert normalized_origin("plex.example") == ("https", "plex.example", 443)
+
+
+def test_normalized_origin_strips_the_ipv6_brackets_both_parsers_keep():
+    """A bracketed IPv6 literal is the one host two URL parsers spell
+    differently, so the brackets come off before the hosts are compared: an
+    address that only matches with them on is still the same server."""
+    assert normalized_origin("http://[2001:db8::1]:32400") == \
+        ("http", "2001:db8::1", 32400)
+    assert normalized_origin("http://[fe80::1]:32400") == ("http", "fe80::1", 32400)
 
 
 @pytest.mark.parametrize("uri", [
-    "https://plex.tv",
-    "https://app.plex.tv",
-    "https://abc123.plex.direct:32400",
+    "https://attacker.example\\@plex.example",
+    "https://user:pass@plex.example",
+    "https://plex.example:0x150",
+    "ftp://plex.example",
+    "",
 ])
-def test_plex_owned_domains_trusted(uri):
-    assert is_trusted_plex_target(uri) is True
+def test_normalized_origin_refuses_what_two_parsers_read_differently(uri):
+    assert normalized_origin(uri) is None
 
 
-def test_configured_host_trusted_even_if_public():
-    # The user's own configured Plex server (possibly a public hostname) is fine.
-    assert is_trusted_plex_target(
-        "https://myplex.example.com:32400",
-        trusted_hosts=("myplex.example.com",),
-    ) is True
-
-
-def test_unknown_public_host_not_in_trustlist_rejected():
-    assert is_trusted_plex_target(
-        "https://evil.example.com",
-        trusted_hosts=("myplex.example.com",),
-    ) is False
-
-
-@pytest.mark.parametrize("uri", ["", "ftp://127.0.0.1", "file:///etc/passwd", "127.0.0.1:32400"])
-def test_trusted_plex_bad_scheme_or_empty(uri):
-    # bare host (no scheme) defaults to https and is allowed if local; the
-    # explicitly bad schemes and empty string must be rejected.
-    if uri == "127.0.0.1:32400":
-        assert is_trusted_plex_target(uri) is True
-    else:
-        assert is_trusted_plex_target(uri) is False
+@pytest.mark.parametrize("uri", [
+    "http://[::1",
+    "https://[fe80::1",
+    "http://]::1[",
+])
+def test_normalized_origin_answers_none_for_a_url_the_parser_itself_rejects(uri):
+    """A malformed bracketed host raises out of the URL parser before any
+    comparison runs, so the guard answers None and the route that asked
+    refuses the address rather than failing on an unhandled error."""
+    assert normalized_origin(uri) is None
 
 
 # --- subtitle_path_within_area (Finding 3: contain PATCH /api/subtitles) ------

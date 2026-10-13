@@ -20,6 +20,7 @@ import {
   faUpload,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useEditorTranslationAvailability } from "@/apis/hooks";
 
 type ToolbarAction =
   | "save"
@@ -80,6 +81,11 @@ export default function EditorToolbar({
   onToggleBookmarkFilter,
   onShowShortcuts,
 }: EditorToolbarProps) {
+  // The editor's own gate answer, not the configured engine's: the toolbar's
+  // translate posts to the editor endpoint, which asks about the AI Subtitle
+  // Translator service whatever the settings page selected.
+  const translation = useEditorTranslationAvailability();
+
   return (
     <Group
       role="toolbar"
@@ -305,12 +311,32 @@ export default function EditorToolbar({
               <FontAwesomeIcon icon={faBook} />
             </ActionIcon>
           </Tooltip>
-          <Tooltip label="AI Translate (Alt+T)" position="bottom" withArrow>
+          <Tooltip
+            label={
+              translation.available
+                ? "AI Translate (Alt+T)"
+                : translation.reason
+            }
+            position="bottom"
+            withArrow
+          >
             <ActionIcon
               size="sm"
               variant="subtle"
               color={translating ? "violet" : "gray"}
-              onClick={() => onAction("translate")}
+              // A natively disabled button never fires the pointer events a
+              // tooltip needs, so the reason would never show. The closed gate
+              // travels as data-disabled with a guarded click instead: the
+              // tooltip opens and the click does nothing.
+              data-disabled={!translation.available || undefined}
+              style={{
+                opacity: translation.available ? undefined : 0.5,
+                cursor: translation.available ? undefined : "not-allowed",
+              }}
+              onClick={() => {
+                if (!translation.available) return;
+                onAction("translate");
+              }}
               aria-label="AI Translate"
             >
               <FontAwesomeIcon

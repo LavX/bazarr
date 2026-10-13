@@ -4,12 +4,13 @@
  * one, such as a real one the suite is pointed at, skips these tests.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { openDiscover } from "@e2e/lib/discover";
 
 test.describe("Discover without a library", { tag: ["@discover"] }, () => {
   test.beforeEach(async ({ api }) => {
     // The app's own test for "no library": no enabled instance of any kind.
-    const response = await api.get("/api/system/arr-instances");
+    const response = await api.get(appPath("/api/system/arr-instances"));
     expect(response.ok()).toBe(true);
     const instances = (await response.json()) as { enabled: boolean }[];
     test.skip(
@@ -48,7 +49,12 @@ test.describe("Discover without a library", { tag: ["@discover"] }, () => {
 
     const connect = page.getByRole("link", { name: "Connect a library" });
     await expect(connect).toBeVisible();
-    await expect(connect).toHaveAttribute("href", "/settings/connections");
+    // The app serves its links under the base it is served under, so the
+    // suite reads the href the same way it builds every other URL.
+    await expect(connect).toHaveAttribute(
+      "href",
+      appPath("/settings/connections"),
+    );
     await expect(
       page.getByText("No Sonarr or Radarr instance is connected yet."),
     ).toBeVisible();

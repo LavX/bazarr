@@ -83,10 +83,26 @@ def test_save_settings_resets_compat_pool_for_dynamic_provider_hub_config(monkey
         "compat.service",
         SimpleNamespace(reset_compat_pool=record_compat_pool_reset),
     )
+    # The registration the state carries for the plugin: an active install
+    # whose manifest declares the solver address it is configured with and no
+    # secret, so the save configuring the address passes the destination rule
+    # on the data it declares rather than on the state having no reader.
     monkeypatch.setitem(
         sys.modules,
         "provider_hub.state",
-        SimpleNamespace(active_installations=lambda: [SimpleNamespace(provider_id=provider_id)]),
+        SimpleNamespace(
+            load_state=lambda: {"installations": {provider_id: {
+                "provider_id": provider_id,
+                "state": "active",
+                "active_version": "1.0.0",
+                "manifest": {
+                    "config_schema": {"type": "object", "properties": {
+                        "flaresolverr_url": {"type": "string", "format": "uri"},
+                    }},
+                },
+            }}},
+            active_installations=lambda: [SimpleNamespace(provider_id=provider_id)],
+        ),
     )
 
     try:
@@ -99,6 +115,963 @@ def test_save_settings_resets_compat_pool_for_dynamic_provider_hub_config(monkey
         assert config.settings[provider_id]["flaresolverr_url"] == "http://solver:8191"
         assert reset_calls == ["http://solver:8191"]
         assert executed
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_plugin_settings_save_needs_the_key_again_to_move_the_address(monkeypatch):
+    """A plugin's stored key reaches the address its section names, so moving
+    one of the fields its manifest declares as a destination is refused unless
+    the same submission types the key again or clears it, the rule the media
+    server settings follow."""
+    from app import config
+
+    provider_id = "zimuku"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The registration the state carries for the plugin: the captcha solver's
+    # address, and the write-only token it is sent with.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(load_state=lambda: {"installations": {provider_id: {
+            "provider_id": provider_id,
+            "state": "active",
+            "manifest": {
+                "config_schema": {"type": "object", "properties": {
+                    "captcha_solver_url": {"type": "string", "format": "uri"},
+                    "captcha_solver_token": {"type": "string"},
+                }},
+                "secret_fields": ["captcha_solver_token"],
+            },
+        }}}),
+    )
+
+    config.settings.set(provider_id, {"captcha_solver_url": "https://old.example:8191",
+                                       "captcha_solver_token": "stored-token"})
+    try:
+        # Moving the solver's address alone leaves the stored token in place,
+        # available to whoever answers at the moved address.
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([("settings-zimuku-captcha_solver_url",
+                                   ["https://moved.example:8191"])])
+        assert "Re-enter the key to use a different address" in str(refusal.value)
+        assert config.settings[provider_id]["captcha_solver_url"] == "https://old.example:8191"
+
+        # Typed again, the move lands.
+        config.save_settings([("settings-zimuku-captcha_solver_url",
+                               ["https://moved.example:8191"]),
+                              ("settings-zimuku-captcha_solver_token", ["typed-again"])])
+        assert config.settings[provider_id]["captcha_solver_url"] == "https://moved.example:8191"
+        assert config.settings[provider_id]["captcha_solver_token"] == "typed-again"
+
+        # Explicitly cleared, the move lands too.
+        config.save_settings([("settings-zimuku-captcha_solver_url",
+                               ["https://moved2.example:8191"]),
+                              ("settings-zimuku-captcha_solver_token", [""])])
+        assert config.settings[provider_id]["captcha_solver_url"] == "https://moved2.example:8191"
+        assert config.settings[provider_id]["captcha_solver_token"] == ""
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_pending_restart_plugin_save_needs_the_key_again_to_move_the_address(monkeypatch):
+    """A plugin waiting for its restart is as installed as an active one: it
+    still holds its stored key, and its section still moves, so moving one of
+    the fields its manifest declares as a destination is refused unless the
+    same submission types the key again or clears it."""
+    from app import config
+
+    provider_id = "stagedhub"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The registration the state carries for a plugin that has not been
+    # restarted into its new version yet, which an active-only reading of the
+    # installations never sees: the solver address, and the token with it.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(
+            load_state=lambda: {"installations": {provider_id: {
+                "provider_id": provider_id,
+                "state": "staged",
+                "pending_restart": True,
+                "manifest": {
+                    "config_schema": {"type": "object", "properties": {
+                        "api_url": {"type": "string", "format": "uri"},
+                        "api_token": {"type": "string"},
+                    }},
+                    "secret_fields": ["api_token"],
+                },
+            }}},
+            active_installations=lambda: [],
+        ),
+    )
+
+    config.settings.set(provider_id, {"api_url": "https://old.example:9",
+                                      "api_token": "stored-token"})
+    try:
+        # Moving the address alone leaves the stored token in place, available
+        # to whoever answers at the moved address.
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url",
+                                   ["https://moved.example:9"])])
+        assert "Re-enter the key to use a different address" in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_schema_declared_plugin_secret_needs_the_key_again_to_move_the_address(monkeypatch):
+    """A manifest may declare a field a secret either way, in secret_fields or
+    with a secret attribute on its config_schema property, so a save moving the
+    destination of a plugin that uses the schema spelling is refused unless the
+    same submission types the key again or clears it."""
+    from app import config
+
+    provider_id = "schemahub"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    manifest = {
+        "config_schema": {"type": "object", "properties": {
+            "api_url": {"type": "string", "format": "uri"},
+            "api_token": {"type": "string", "secret": True},
+        }},
+    }
+    # The registration the state carries for the plugin: the address, and the
+    # token its schema declares write-only, the spelling the manifest
+    # validation tolerates alongside secret_fields.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(
+            load_state=lambda: {"installations": {provider_id: {
+                "provider_id": provider_id,
+                "state": "active",
+                "manifest": manifest,
+            }}},
+            active_installations=lambda: [SimpleNamespace(
+                provider_id=provider_id,
+                manifest=manifest,
+            )],
+        ),
+    )
+
+    config.settings.set(provider_id, {"api_url": "https://old.example:9",
+                                      "api_token": "stored-token"})
+    try:
+        # Moving the address alone leaves the stored token in place, available
+        # to whoever answers at the moved address.
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url",
+                                   ["https://moved.example:9"])])
+        assert "Re-enter the key to use a different address" in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_save_moving_a_plugin_address_without_readable_provider_data_is_refused(monkeypatch):
+    """The provider data needed to check an address change must be readable for
+    the move to pass: a state that cannot be read refuses the move for every
+    section but Bazarr's own, and an installed row without readable manifest
+    data refuses it for its section, both outright, because the fields that
+    would need re-entry cannot be known."""
+    from app import config
+
+    provider_id = "unreadablehub"
+    executed = []
+    previous_proxy_url = config.settings.proxy.url
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+
+    def unreadable_state():
+        raise RuntimeError("synthetic state read failure")
+
+    # Nothing of the state can be read: no section's plugin data can be
+    # vouched for, not even whether a section has a plugin at all.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(load_state=unreadable_state,
+                        active_installations=unreadable_state),
+    )
+
+    config.settings.set(provider_id, {"api_url": "https://old.example:9"})
+    try:
+        # Moving the address is refused rather than read as a provider with no
+        # secrets, and nothing typed into the submission can answer for it.
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url",
+                                   ["https://moved.example:9"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+
+        # A section Bazarr declares for itself is vouched for by the settings
+        # validators, not the state, so the proxy url moves as freely as ever.
+        config.save_settings([("settings-proxy-url", ["http://proxy.example:8080"])])
+        assert config.settings.proxy.url == "http://proxy.example:8080"
+
+        # A row exists for the section but its manifest data could not be read:
+        # the same refusal, for the section the row belongs to.
+        monkeypatch.setitem(
+            sys.modules,
+            "provider_hub.state",
+            SimpleNamespace(
+                load_state=lambda: {"installations": {provider_id: {
+                    "provider_id": provider_id,
+                    "state": "active",
+                }}},
+                active_installations=lambda: [],
+            ),
+        )
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url",
+                                   ["https://moved.example:9"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+    finally:
+        config.settings.proxy.url = previous_proxy_url
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def _unreadable_state_module(monkeypatch, provider_id, installation):
+    """A provider_hub.state module whose one installation row is given."""
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(
+            load_state=lambda: {"installations": {provider_id: installation}},
+            active_installations=lambda: [],
+        ),
+    )
+
+
+def _plugin_save_environment(monkeypatch):
+    """The stubs a settings save needs to run without side effects."""
+    from app import config
+
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: None),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+
+
+def test_a_structurally_invalid_manifest_is_unreadable_not_declaration_free(monkeypatch):
+    """An installed row whose manifests carry none of the structure their
+    declarations are read from, `manifest: {}` among them, is a provider whose
+    fields cannot be vouched for, not a plugin without secrets: moving its
+    address is refused while its stored token stays stored, the same
+    fail-closed answer a row without readable manifest data gets. The
+    unfixed rule read the empty document as empty declarations and let the
+    move through with the kept token."""
+    from app import config
+
+    provider_id = "emptymanifesthub"
+    _plugin_save_environment(monkeypatch)
+    _unreadable_state_module(monkeypatch, provider_id, {
+        "provider_id": provider_id,
+        "state": "active",
+        "manifest": {},
+        "staged_manifest": {},
+    })
+
+    config.settings.set(provider_id, {"api_url": "https://old.example:9",
+                                       "api_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url",
+                                   ["https://moved.example:9"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+        assert config.settings[provider_id]["api_token"] == "stored-token"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_save_moving_a_uri_formatted_field_without_readable_provider_data_is_refused(monkeypatch):
+    """A field a manifest formats as a uri is a destination only the
+    declarations can name, so while they cannot be read no field can be
+    vouched for: moving the section's service_uri is refused with the token it
+    keeps stored, the same refusal a key-shaped move gets, rather than read as
+    a field the unreadable data says nothing about. A submission that changes
+    nothing is not refused, because nothing moves."""
+    from app import config
+
+    provider_id = "unreadableuri"
+    _plugin_save_environment(monkeypatch)
+    _unreadable_state_module(monkeypatch, provider_id, {
+        "provider_id": provider_id,
+        "state": "active",
+    })
+
+    config.settings.set(provider_id, {"service_uri": "https://old.example:1",
+                                       "api_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-service_uri",
+                                   ["https://moved.example:1"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["service_uri"] == "https://old.example:1"
+        assert config.settings[provider_id]["api_token"] == "stored-token"
+
+        # Nothing moves, so nothing is refused.
+        config.save_settings([(f"settings-{provider_id}-service_uri",
+                               ["https://old.example:1"])])
+        assert config.settings[provider_id]["service_uri"] == "https://old.example:1"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_an_unreadable_state_cannot_move_a_provider_section_a_validator_shares(monkeypatch):
+    """A provider section that shares a built-in validator's name is a
+    provider's section, not one of Bazarr's own: with the provider data
+    unreadable, a save moving its captcha solver address is refused rather
+    than exempted by the validator, because its stored token stays stored."""
+    from app import config
+
+    provider_id = "legendasdivx"
+    executed = []
+    previous_section = dict(config.settings.get(provider_id, {}))
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+
+    def unreadable_state():
+        raise RuntimeError("synthetic state read failure")
+
+    # Nothing of the state can be read, so nothing can say whether the section
+    # has a plugin, or which of its fields are secrets. The settings validators
+    # name the section, but a provider shares that name with them, and a
+    # plugin owns its section's credentials even when the data that would name
+    # them cannot be read.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(load_state=unreadable_state,
+                        active_installations=unreadable_state),
+    )
+
+    config.settings.set(provider_id, {"captcha_solver_url": "https://old.example:8191",
+                                       "captcha_solver_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-captcha_solver_url",
+                                   ["https://moved.example:8191"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["captcha_solver_url"] == "https://old.example:8191"
+        assert config.settings[provider_id]["captcha_solver_token"] == "stored-token"
+    finally:
+        config.settings.set(provider_id, previous_section)
+
+
+def test_a_malformed_installation_row_is_unreadable_not_absent(monkeypatch):
+    """An installation row that is not a dictionary is an installed provider
+    whose data cannot be read, not a section with no plugin: a save moving
+    its address is refused outright rather than checked as a provider with
+    no secrets."""
+    from app import config
+
+    provider_id = "malformedrowhub"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The registration the state carries for the plugin is a row no reader can
+    # make sense of, which is an installed plugin whose declared fields cannot
+    # be known, not a plugin without any.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(
+            load_state=lambda: {"installations": {provider_id: "not-a-dictionary"}},
+            active_installations=lambda: [],
+        ),
+    )
+
+    config.settings.set(provider_id, {"api_url": "https://old.example:9",
+                                      "api_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url",
+                                   ["https://moved.example:9"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+        assert config.settings[provider_id]["api_token"] == "stored-token"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_state_module_without_a_reader_vouches_for_no_section(monkeypatch):
+    """A state module with no reader is the state being unreadable, not the
+    state saying nothing is installed: no section's plugin data can be
+    vouched for, so a save moving a key-shaped destination in a section that
+    is not one of Bazarr's own is refused outright."""
+    from app import config
+
+    provider_id = "spongestatehub"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The state module answers nothing: no reader is the state being unreadable,
+    # so the save rule cannot know whether the section has a plugin, or which
+    # of its fields are secrets.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(active_installations=lambda: []),
+    )
+
+    config.settings.set(provider_id, {"api_url": "https://old.example:9",
+                                      "api_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url",
+                                   ["https://moved.example:9"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+        assert config.settings[provider_id]["api_token"] == "stored-token"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+@pytest.mark.parametrize('installations', [[], '', None])
+def test_a_malformed_installations_collection_is_unreadable_not_empty(monkeypatch, installations):
+    """An installations value that is not a mapping, a list, an empty string or
+    a null among them, is the state being unreadable rather than a state with
+    nothing installed: the provider rows that collection held cannot be
+    vouched away, so a save moving a key-shaped destination of a section it
+    held is refused outright, the same fail-closed answer a failed read
+    gives. The unfixed reader normalized every one of these shapes into an
+    empty mapping, so the move landed while the stored token stayed."""
+    from app import config
+
+    provider_id = "malformedcollectionhub"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The state answers with an installations value no reader can walk, which
+    # is the state being unreadable, not the state saying nothing is
+    # installed.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(load_state=lambda: {"installations": installations}),
+    )
+
+    config.settings.set(provider_id, {"api_url": "https://old.example:9",
+                                      "api_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url",
+                                   ["https://moved.example:9"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+        assert config.settings[provider_id]["api_token"] == "stored-token"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_plugin_key_kept_in_the_hubs_own_config_store_still_needs_the_key(monkeypatch):
+    """The Hub keeps each installation's own config next to the settings
+    section the save writes, and the provider reader sends the stored key to
+    the effective configuration across both, so the destination rule reads
+    both stores too: moving the section's address while the plugin's token
+    sits in the Hub's own config store is refused, the same move a token in
+    the section is refused. The unfixed check read the section only, so the
+    token followed the moved address."""
+    from app import config
+
+    provider_id = "ownstorehub"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The registration the state carries for the plugin: the address lives in
+    # the settings section, and the token lives in the Hub's own config
+    # store, the second place a settings-only check never reads.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(load_state=lambda: {"installations": {provider_id: {
+            "provider_id": provider_id,
+            "state": "active",
+            "manifest": {
+                "config_schema": {"type": "object", "properties": {
+                    "captcha_solver_url": {"type": "string", "format": "uri"},
+                    "captcha_solver_token": {"type": "string"},
+                }},
+                "secret_fields": ["captcha_solver_token"],
+            },
+            "config": {"captcha_solver_token": "stored-hub-token"},
+        }}}),
+    )
+
+    config.settings.set(provider_id, {"captcha_solver_url": "https://old.example:8191"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-captcha_solver_url",
+                                   ["https://moved.example:8191"])])
+        assert "Re-enter the key to use a different address" in str(refusal.value)
+        assert config.settings[provider_id]["captcha_solver_url"] == "https://old.example:8191"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_uri_field_only_a_staged_update_declares_still_needs_the_key(monkeypatch):
+    """A pending update swaps the manifest in when it activates, so the
+    declarations a save answers to are the union of the active and the staged
+    manifest: a URI field only the staged version declares can take the
+    retained token once the update activates, so moving it now asks for the
+    key again. The unfixed reader consulted the active manifest only, so the
+    move landed with the token kept."""
+    from app import config
+
+    provider_id = "stagedunionhub"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The registration the state carries for a plugin with a real pending
+    # update: the active manifest declares the token but not the field it
+    # will send it to, and the staged manifest declares that field a uri.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(load_state=lambda: {"installations": {provider_id: {
+            "provider_id": provider_id,
+            "state": "staged",
+            "pending_restart": True,
+            "active_version": "1.0.0",
+            "manifest": {
+                "config_schema": {"type": "object", "properties": {
+                    "service_uri": {"type": "string"},
+                    "api_token": {"type": "string"},
+                }},
+                "secret_fields": ["api_token"],
+            },
+            "staged_manifest": {
+                "config_schema": {"type": "object", "properties": {
+                    "service_uri": {"type": "string", "format": "uri"},
+                    "api_token": {"type": "string"},
+                }},
+                "secret_fields": ["api_token"],
+            },
+        }}}),
+    )
+
+    config.settings.set(provider_id, {"service_uri": "https://old.example:9",
+                                      "api_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-service_uri",
+                                   ["https://moved.example:9"])])
+        assert "Re-enter the key to use a different address" in str(refusal.value)
+        assert config.settings[provider_id]["service_uri"] == "https://old.example:9"
+        assert config.settings[provider_id]["api_token"] == "stored-token"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_clear_reaching_the_manifests_default_destination_is_a_move(monkeypatch):
+    """A sentinel clear empties the section's value and the provider reader
+    then sends the stored key to the manifest's default destination, so the
+    comparison reads the effective destination after that fallback, sentinel
+    clears included: clearing the address while the token stays stored is
+    refused exactly the way a typed move is. The unfixed comparison skipped
+    the normalized clear, so the token followed a default address the save
+    never named."""
+    from app import config
+
+    provider_id = "cleardefaulthub"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The registration the state carries for the plugin: the solver's
+    # address, the token it is sent with, and the default a cleared address
+    # falls back to.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(load_state=lambda: {"installations": {provider_id: {
+            "provider_id": provider_id,
+            "state": "active",
+            "manifest": {
+                "config_schema": {"type": "object", "properties": {
+                    "captcha_solver_url": {"type": "string", "format": "uri",
+                                           "default": "https://default.example:8191"},
+                    "captcha_solver_token": {"type": "string"},
+                }},
+                "secret_fields": ["captcha_solver_token"],
+            },
+        }}}),
+    )
+
+    config.settings.set(provider_id, {"captcha_solver_url": "https://old.example:8191",
+                                      "captcha_solver_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-captcha_solver_url",
+                                   ["null"])])
+        assert "Re-enter the key to use a different address" in str(refusal.value)
+        assert config.settings[provider_id]["captcha_solver_url"] == "https://old.example:8191"
+        assert config.settings[provider_id]["captcha_solver_token"] == "stored-token"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_an_empty_hub_value_blocks_the_default_a_settings_move_would_reach(monkeypatch):
+    """Key presence is read the way the provider reader reads it: the
+    installation's own config holding a field as an empty string is a present
+    value that blocks the manifest's default, not an absent one that falls
+    back to it. A settings save that moves the field to that default while the
+    plugin's token stays retained moves the effective destination from the
+    empty address to the default one, so it is refused the same way a typed
+    move is. The unfixed comparison treated the empty value as absent and the
+    save landed with the kept token."""
+    from app import config
+
+    provider_id = "emptyhubvalue"
+    saved = []
+
+    # A write that reached the writer. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: None),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The registration the state carries for the plugin: the installation's
+    # own config holds the address as an empty string, so the reader's default
+    # never applies to it, and it holds the token a moved address would carry.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(load_state=lambda: {"installations": {provider_id: {
+            "provider_id": provider_id,
+            "state": "active",
+            "manifest": {
+                "config_schema": {"type": "object", "properties": {
+                    "service_uri": {"type": "string", "format": "uri",
+                                    "default": "https://default.example:9"},
+                    "api_token": {"type": "string"},
+                }},
+                "secret_fields": ["api_token"],
+            },
+            "config": {"service_uri": "", "api_token": "stored-hub-token"},
+        }}}),
+    )
+    monkeypatch.setattr(config, "_save_settings_with_native",
+                        lambda items, **_kwargs: saved.append(items))
+
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-service_uri",
+                                   ["https://default.example:9"])])
+        assert "Re-enter the key to use a different address" in str(refusal.value)
+        assert saved == [], "the refused save reached no writer"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_secret_stored_while_a_save_moves_the_address_is_caught_under_the_lock(monkeypatch):
+    """The destination rules read the stored settings, so they run inside the
+    write locks, where the checked settings and the written settings are one
+    state: a second save storing the plugin's secret inside the first save's
+    check-to-write window is seen by the first save's check under the lock,
+    and the moved address cannot keep the secret the first check never saw.
+    The unfixed order lands the move and leaves the stored secret following
+    the moved address."""
+    from app import config
+    from discover import metadata as discover_metadata
+
+    provider_id = "latecomerhub"
+    executed = []
+
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    # The registration the state carries for the plugin: the captcha solver's
+    # address, and the write-only token it is sent with.
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(load_state=lambda: {"installations": {provider_id: {
+            "provider_id": provider_id,
+            "state": "active",
+            "manifest": {
+                "config_schema": {"type": "object", "properties": {
+                    "captcha_solver_url": {"type": "string", "format": "uri"},
+                    "captcha_solver_token": {"type": "string"},
+                }},
+                "secret_fields": ["captcha_solver_token"],
+            },
+        }}}),
+    )
+
+    # No secret is stored, so a check made now passes the move.
+    config.settings.set(provider_id, {"captcha_solver_url": "https://old.example:8191"})
+    # The config lock is wrapped so its first entry runs a second save inline,
+    # before the real lock is taken: config.py imports CONFIG_LOCK at call time,
+    # so the wrapper is the lock both saves acquire, and the second save stores
+    # the plugin's secret exactly inside the first save's check-to-write
+    # window. The second save submits no destination, so it is never blocked.
+    real_lock = discover_metadata.CONFIG_LOCK
+    entered = []
+
+    class _PausedLock:
+        def __enter__(self):
+            if not entered:
+                entered.append(True)
+                config.save_settings(
+                    [(f"settings-{provider_id}-captcha_solver_token", ["late-token"])])
+            return real_lock.__enter__()
+
+        def __exit__(self, *_exception):
+            return real_lock.__exit__(*_exception)
+
+    monkeypatch.setattr(discover_metadata, "CONFIG_LOCK", _PausedLock())
+
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-captcha_solver_url",
+                                   ["https://moved.example:8191"])])
+        assert "Re-enter the key to use a different address" in str(refusal.value)
+        assert config.settings[provider_id]["captcha_solver_url"] == "https://old.example:8191"
+        assert config.settings[provider_id]["captcha_solver_token"] == "late-token"
     finally:
         config.settings.unset(provider_id.upper(), force=True)
 
@@ -1475,3 +2448,258 @@ def test_a_section_a_save_created_survives_the_reload_of_a_later_refused_save(me
     env.config.restore_persisted_settings()
 
     assert env.settings.newhub.api_token == "kept-token"
+
+
+def _plugin_save_stubs(monkeypatch, provider_id, installation=None):
+    """The stubs a plugin settings save needs: a write that reached disk, and
+    the registration the state carries for the plugin, with the installation
+    row the destination rule reads its own config store from. No installation
+    means the real state module serves the state, from the file the test
+    wrote."""
+    from app import config
+
+    executed = []
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: None),
+    )
+    if installation is not None:
+        monkeypatch.setitem(
+            sys.modules,
+            "provider_hub.state",
+            SimpleNamespace(
+                load_state=lambda: {"installations": {provider_id: installation}},
+                active_installations=lambda: [],
+            ),
+        )
+    return executed
+
+
+def test_clearing_the_settings_token_while_moving_the_address_keeps_the_hubs_token_in_view(monkeypatch):
+    """The effective credential is built across both of a plugin's stores, the
+    settings section first and the installation's own config next, so a save
+    that clears the section's token while moving its address leaves the Hub's
+    token effective, and the move is refused until that token is cleared too.
+    The unfixed rule skipped both stored checks whenever the submission carried
+    the field, whatever value it carried, so the Hub's token followed the moved
+    address with nothing asked for it."""
+    from app import config
+
+    provider_id = "clearhub"
+    _plugin_save_stubs(monkeypatch, provider_id, {
+        "provider_id": provider_id,
+        "state": "active",
+        "manifest": {
+            "config_schema": {"type": "object", "properties": {
+                "solver_url": {"type": "string", "format": "uri"},
+                "solver_token": {"type": "string"},
+            }},
+            "secret_fields": ["solver_token"],
+        },
+        "config": {"solver_token": "hub-side-token"},
+    })
+
+    config.settings.set(provider_id, {"solver_url": "https://old.example:8191",
+                                       "solver_token": "section-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-solver_url",
+                                   ["https://moved.example:8191"]),
+                                  (f"settings-{provider_id}-solver_token", [""])])
+        assert "Re-enter the key to use a different address" in str(refusal.value)
+        assert config.settings[provider_id]["solver_url"] == "https://old.example:8191"
+        assert config.settings[provider_id]["solver_token"] == "section-token"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_malformed_state_document_refuses_a_plugin_address_move(monkeypatch, tmp_path):
+    """The state document is read strictly for the destination rule: a
+    document whose root is not an object is the state being unreadable, not an
+    empty installation inventory, so a move that would leave a stored key
+    following the moved address is refused, the same fail-closed answer a
+    state that cannot be read at all gets. The unfixed reader answered a
+    default state for a malformed document, and the move was checked against
+    an installation list that no longer existed."""
+    from app import config
+
+    provider_id = "rawstatehub"
+    state_path = tmp_path / "provider_hub" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    # A raw malformed document, not a state the loader would produce: its
+    # root is an array, so no installation inventory can be read from it.
+    state_path.write_text("[]")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    _plugin_save_stubs(monkeypatch, provider_id)
+
+    config.settings.set(provider_id, {"api_url": "https://old.example:9",
+                                      "api_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url",
+                                   ["https://moved.example:9"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_sentinel_clear_of_a_plugin_address_without_readable_provider_data_is_refused(monkeypatch):
+    """A field submitted as one of the writer's empty spellings clears the
+    stored address, and with the plugin's data unreadable the default the
+    cleared field falls back to cannot be checked, so the clear is refused the
+    same way a move is: the stored key would follow whichever address the
+    fallback selects. The unfixed rule ignored values that normalize to
+    nothing, so the clear went through."""
+    from app import config
+
+    provider_id = "nullclearhub"
+    _plugin_save_stubs(monkeypatch, provider_id, {
+        "provider_id": provider_id,
+        "state": "active",
+    })
+
+    config.settings.set(provider_id, {"api_url": "https://old.example:9",
+                                      "api_token": "stored-token"})
+    try:
+        with pytest.raises(ValidationError) as refusal:
+            config.save_settings([(f"settings-{provider_id}-api_url", ["null"])])
+        assert "The provider data needed to check this address change could not be read" \
+            in str(refusal.value)
+        assert config.settings[provider_id]["api_url"] == "https://old.example:9"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)
+
+
+def test_a_hub_config_save_checks_and_writes_inside_the_boundary_the_settings_save_uses(
+        monkeypatch, tmp_path):
+    """The Hub's own save path for a plugin's config and the settings save
+    share one boundary, the config lock the settings save commits under: the
+    Hub save's destination check runs inside it, so a settings save that lands
+    a token in the section while the Hub save is between its check and its
+    write is seen by a check that runs after it, and the move a stored key
+    would follow is refused. The unfixed order checked before the write with
+    no lock, so a token a concurrent settings save stored for the old address
+    travelled to the moved one with nothing asked for it."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import provider_hub.state
+
+    from app import config
+    from provider_hub.service import update_provider
+
+    provider_id = "boundaryhub"
+    state_path = tmp_path / "provider_hub" / "state.json"
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    state = provider_hub.state.default_state()
+    state["installations"][provider_id] = {
+        "provider_id": provider_id,
+        "state": "active",
+        "active_version": "1.0.0",
+        "pending_restart": False,
+        "manifest": {
+            "config_schema": {"type": "object", "properties": {
+                "api_url": {"type": "string", "format": "uri"},
+                "api_token": {"type": "string"},
+            }},
+            "secret_fields": ["api_token"],
+        },
+        "config": {"api_url": "https://old.example:9"},
+    }
+    provider_hub.state.save_state(state)
+
+    from discover import metadata
+
+    real_config_lock = metadata.CONFIG_LOCK
+
+    settings_save_inside = threading.Event()
+    release = threading.Event()
+    the_check_ran = threading.Event()
+    at_the_boundary = threading.Event()
+
+    class _SignallingLock:
+        """The config lock as the Hub save sees it, reporting the save
+        waiting at the boundary the settings save commits under."""
+
+        def __enter__(self):
+            at_the_boundary.set()
+            return real_config_lock.__enter__()
+
+        def __exit__(self, *_exception):
+            return real_config_lock.__exit__(*_exception)
+
+    real_save = config._save_settings_with_native
+
+    def paused_save(*args, **kwargs):
+        settings_save_inside.set()
+        assert release.wait(10)
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(config, "_save_settings_with_native", paused_save)
+
+    real_check = config.refuse_unverified_provider_hub_config_move
+
+    def signalling_check(provider_id_checked, submitted):
+        try:
+            return real_check(provider_id_checked, submitted)
+        finally:
+            the_check_ran.set()
+
+    monkeypatch.setattr(config, "refuse_unverified_provider_hub_config_move", signalling_check)
+
+    # Both saves read the state through the real module, whose file the test
+    # wrote above, so they see the one installation row.
+    _plugin_save_stubs(monkeypatch, provider_id)
+
+    def store_the_token():
+        config.save_settings([(f"settings-{provider_id}-api_token", ["typed-token"])])
+
+    def move_the_address():
+        try:
+            update_provider(provider_id, config={"api_url": "https://moved.example:9"})
+            return None
+        except ValueError as error:
+            return error
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            settings_save = pool.submit(store_the_token)
+            assert settings_save_inside.wait(10), 'the settings save reached its write'
+            monkeypatch.setattr(metadata, "CONFIG_LOCK", _SignallingLock())
+            hub_save = pool.submit(move_the_address)
+            # The unfixed order runs the check with no lock at all, so it
+            # reports through the check; the fixed order waits at the
+            # boundary first, so it reports through the lock.
+            deadline = time.monotonic() + 10
+            while not (the_check_ran.is_set() or at_the_boundary.is_set()):
+                assert time.monotonic() < deadline, \
+                    'the hub save reached neither its check nor the boundary'
+                time.sleep(0.01)
+            release.set()
+            settings_save.result(timeout=10)
+            outcome = hub_save.result(timeout=10)
+
+        assert isinstance(outcome, ValueError), \
+            'the move a settings save stored a token for was refused'
+        assert "Re-enter the key to use a different address" in str(outcome)
+        assert provider_hub.state.load_state()["installations"][provider_id][
+            "config"]["api_url"] == "https://old.example:9"
+        assert config.settings[provider_id]["api_token"] == "typed-token"
+    finally:
+        config.settings.unset(provider_id.upper(), force=True)

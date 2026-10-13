@@ -1068,3 +1068,90 @@ def test_saving_a_rotation_setting_reapplies_the_limits(monkeypatch, key, submit
     live_config.save_settings([(key, [submitted])])
 
     assert applied == ([key] if applies else [])
+
+
+def test_the_provider_failure_line_reaches_the_file_redacted_and_on_one_line(monkeypatch, tmp_path):
+    """The one line a provider failure now writes includes the exception's
+    message, which can carry a URL with credentials in it, so it has to pass
+    the same redaction as any other record, and stay a single line."""
+    import logging as _logging
+
+    from app import get_providers
+    from app.logger import FileHandlerFormatter
+    from subliminal.exceptions import DownloadLimitExceeded
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    names = ["fixture_provider"]
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", names)
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: names)
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+
+    handler = _logging.Handler()
+    handler.setLevel(_logging.WARNING)
+    formatted = []
+    handler.setFormatter(FileHandlerFormatter())
+    handler.emit = lambda record: formatted.append(handler.format(record))
+    root = _logging.getLogger()
+    root.addHandler(handler)
+    try:
+        error = DownloadLimitExceeded(
+            "quota reached, details at https://example.invalid/quota?apikey=SECRET123")
+        get_providers.provider_throttle("fixture_provider", error, operation="search")
+    finally:
+        root.removeHandler(handler)
+
+    assert len(formatted) == 1
+    line = formatted[0]
+    assert "SECRET123" not in line
+    assert "apikey=(removed)" in line
+    assert "\n" not in line
+    assert "Not using it" in line
+
+
+def test_a_plugin_class_name_that_is_not_an_identifier_never_reaches_the_line(monkeypatch, tmp_path):
+    """A plugin supplies the remote class name, and the file formatter does
+    not escape newlines, so a name carrying one would split the one line
+    across two physical lines and let a forged record masquerade as a real
+    one. The name is refused instead, falling back the way the search-failure
+    path does, and the line the real provider_throttle writes stays one
+    line through the real formatter."""
+    import logging as _logging
+
+    from app import get_providers
+    from app.logger import FileHandlerFormatter
+    from provider_hub.worker import WorkerError
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    names = ["fixture_provider"]
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", names)
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: names)
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+
+    handler = _logging.Handler()
+    handler.setLevel(_logging.WARNING)
+    formatted = []
+    handler.setFormatter(FileHandlerFormatter())
+    handler.emit = lambda record: formatted.append(handler.format(record))
+    root = _logging.getLogger()
+    root.addHandler(handler)
+    try:
+        error = WorkerError("plugin fixture failure", remote_class_name="Key\nERROR | forged line",
+                            code="provider")
+        get_providers.provider_throttle("fixture_provider", error, operation="search")
+    finally:
+        root.removeHandler(handler)
+
+    assert len(formatted) == 1
+    line = formatted[0]
+    assert "\n" not in line
+    assert "forged" not in line
+    assert "UnknownError" in line
+    assert "Not using it" in line

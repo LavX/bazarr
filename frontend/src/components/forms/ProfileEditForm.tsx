@@ -1,6 +1,7 @@
 import React, { FunctionComponent, useCallback, useMemo } from "react";
 import {
   Accordion,
+  Alert,
   Button,
   Checkbox,
   Divider,
@@ -17,6 +18,7 @@ import {
 import { useForm } from "@mantine/form";
 import { faTrash } from "@fortawesome/free-solid-svg-icons";
 import { ColumnDef } from "@tanstack/react-table";
+import { useTranslationAvailability } from "@/apis/hooks";
 import { Action, Selector, SelectorOption } from "@/components";
 import ChipInput from "@/components/inputs/ChipInput";
 import SimpleTable from "@/components/tables/SimpleTable";
@@ -199,6 +201,7 @@ const ProfileEditForm: FunctionComponent<Props> = ({
   profile,
 }) => {
   const modals = useModals();
+  const translation = useTranslationAvailability();
 
   const form = useForm({
     initialValues: profile,
@@ -507,6 +510,13 @@ const ProfileEditForm: FunctionComponent<Props> = ({
         >
           <Accordion.Item value="Languages">
             <Stack>
+              {!translation.available && (
+                <Alert color="yellow">
+                  Translation is unavailable: {translation.reason}. A language
+                  with a Translate From source is searched on providers instead
+                  of being translated.
+                </Alert>
+              )}
               <SimpleTable
                 columns={columns}
                 data={form.values.items}
@@ -581,3 +591,5 @@ export const ProfileEditModal = withModal(
     size: "xl",
   },
 );
+
+export default ProfileEditForm;

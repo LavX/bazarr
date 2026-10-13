@@ -2,6 +2,7 @@
 """Destination persistence and the encrypted credential boundary."""
 
 import json
+import logging
 from contextlib import contextmanager
 from uuid import UUID, uuid4
 
@@ -79,6 +80,20 @@ class MediaServerInstanceRepository:
         row = self.get(instance_id)
         if row is None:
             return None
+        try:
+            return decrypt_secret(row.api_key)
+        except ValueError:
+            raise MediaServerError('missing_credentials') from None
+
+    def snapshot_api_key(self, row):
+        """The row's own stored key as plaintext, read from the row itself.
+
+        The probe routes decide on the row they fetched, and the credential
+        one sends is that same snapshot's, never a fresh read: an
+        address-and-key replacement landing after the fetch cannot pair the
+        new key with the address the request already had.
+        """
+        from secret_store import decrypt_secret
         try:
             return decrypt_secret(row.api_key)
         except ValueError:
@@ -176,7 +191,7 @@ class MediaServerInstanceRepository:
             self.session.flush()
         return True
 
-    def snapshot(self, instance_id, settings):
+    def snapshot(self, instance_id, settings, *, hold_account_row=False):
         row = self.get(instance_id)
         if row is None:
             return None
@@ -191,15 +206,54 @@ class MediaServerInstanceRepository:
                                      api_key=key, path_mappings=mappings, options=parse_options(row.options)))
         except MediaServerError as exc:
             error = error or exc.code
+        # The refresh workers send the signed-in account's token to this row's
+        # address, so the account row reaches them only while plex.tv lists
+        # that address for the credential the row would actually send, and
+        # only with the URI plex.tv listed for it rather than the stored
+        # spelling. The row is the account's by the credential it holds, not
+        # by any setting a save can write, so a one-field save switching the
+        # method or emptying the recorded owner cannot lift the rule; the row
+        # and the settings can disagree while a token replacement has not
+        # carried onto the row yet, and that mismatch holds the refresh rather
+        # than sending a credential plex.tv was never asked about, and so does
+        # an empty one. ``sendable`` is kept apart from ``enabled``, which stays
+        # what the user switched, so a held refresh reads as held and not as a
+        # destination somebody disabled. ``hold_account_row`` skips the
+        # consult, which can reach plex.tv: a caller that must not hold its
+        # lock for a network ask gets the account's row held instead, and the
+        # read path asks plex.tv outside that lock and releases the row once
+        # the answer says the credential may be sent; a row held that way is
+        # waiting rather than refused, so it is not the warning's to say.
+        sendable = True
+        url = row.url
+        if row.kind == 'plex':
+            section = getattr(settings, 'plex', None)
+            if section is not None:
+                from .plex_account import account_credential, account_owned_row, account_row_uri
+                if account_owned_row(section, row, key or None):
+                    settings_credential = account_credential(section)
+                    listed = (None if hold_account_row else
+                              account_row_uri(settings, row.url, credential=key or None))
+                    sendable = (bool(row.api_key) and bool(settings_credential)
+                                and (key or '') == settings_credential
+                                and listed is not None)
+                    if sendable:
+                        url = listed
+                    if not sendable and not hold_account_row:
+                        logging.info('BAZARR is holding the Plex account refreshes while plex.tv '
+                                     'does not list the saved server address for the signed-in '
+                                     'account; choose the server again on the Plex card')
         return ConnectionSnapshot(row.id, row.kind, row.name, bool(row.enabled),
                                   getattr(settings.general, 'use_' + row.kind) is True,
-                                  row.url, key, bool(row.verify_ssl),
+                                  url, key, bool(row.verify_ssl),
                                   tuple(tuple(sorted(item.items())) for item in mappings),
                                   bool(row.refresh_movies), bool(row.refresh_episodes),
-                                  json.dumps(parse_options(row.options)), row.revision, error)
+                                  json.dumps(parse_options(row.options)), row.revision, error,
+                                  sendable=sendable)
 
-    def snapshots(self, settings, *, kinds=None):
-        return [self.snapshot(row.id, settings) for row in self.list() if kinds is None or row.kind in kinds]
+    def snapshots(self, settings, *, kinds=None, hold_account_row=False):
+        return [self.snapshot(row.id, settings, hold_account_row=hold_account_row)
+                for row in self.list() if kinds is None or row.kind in kinds]
 
 
 def to_safe_dict(row):

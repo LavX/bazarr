@@ -93,6 +93,10 @@ class ConnectionSnapshot:
     options_json: str = '{}'
     revision: int = 1
     configuration_error: str | None = None
+    # Whether the stored credential may be sent to this destination at all,
+    # decided by the destination rule rather than by the user's switches. Kept
+    # apart from `enabled` so a held refresh is not read as a disabled instance.
+    sendable: bool = True
 
     @property
     def enabled(self):

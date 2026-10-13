@@ -21,6 +21,11 @@ class CustomLanguage:
     official_alpha3 = "por"
     name = "Portuguese (Brazil)"
     iso = "BR"
+    # The tag a translated file is named with when it targets this language.
+    # None names the file with the subzero language's own basename, as before;
+    # a language whose region is a UN M.49 code has no such basename (no
+    # babelfish country or script exists for it), so it names the tag here.
+    regional_tag = None
     _scripts = []
     _possible_matches = ("pt-br", "pob", "pb", "brazilian", "brasil", "brazil")
     _extensions = (".pt-br", ".pob", ".pb")
@@ -224,15 +229,20 @@ class LatinAmericanSpanish(CustomLanguage):
     name = "Spanish (Latino)"
     iso = "MX"  # Not fair, but ok
     _scripts = ("419",)
+    # The IETF tag for Latin American Spanish (UN M.49 region 419): the tag a
+    # translation names its file with, since no babelfish country or script
+    # exists for the region and no subzero language can carry it as a basename.
+    regional_tag = "es-419"
     _possible_matches = (
         "es-la", "spa-la", "spl", "mx", "latin", "mexic", "argent", "latam",
     )
-    _extensions = (".es-la", ".spl", ".spa-la", ".ea", ".es-mx", ".lat", ".es.ar")
+    _extensions = (".es-la", ".spl", ".spa-la", ".ea", ".es-mx", ".lat", ".es.ar", ".es-419")
     _extensions_forced = (
         ".es-la.forced", ".spl.forced", ".spa-la.forced", ".ea.forced", ".es-mx.forced", ".lat.forced", ".es.ar.forced",
+        ".es-419.forced",
     )
     _extensions_hi = (
-        ".es-la.hi", ".spl.hi", ".spa-la.hi", ".ea.hi", ".es-mx.hi", ".lat.hi", ".es.ar.hi",
-        ".es-la.cc", ".spl.cc", ".spa-la.cc", ".ea.cc", ".es-mx.cc", ".lat.cc", ".es.ar.cc",
-        ".es-la.sdh", ".spl.sdh", ".spa-la.sdh", ".ea.sdh", ".es-mx.sdh", ".lat.sdh", ".es.ar.sdh",
+        ".es-la.hi", ".spl.hi", ".spa-la.hi", ".ea.hi", ".es-mx.hi", ".lat.hi", ".es.ar.hi", ".es-419.hi",
+        ".es-la.cc", ".spl.cc", ".spa-la.cc", ".ea.cc", ".es-mx.cc", ".lat.cc", ".es.ar.cc", ".es-419.cc",
+        ".es-la.sdh", ".spl.sdh", ".spa-la.sdh", ".ea.sdh", ".es-mx.sdh", ".lat.sdh", ".es.ar.sdh", ".es-419.sdh",
     )

@@ -9,6 +9,8 @@ request, call these, and commit.
 """
 import pytest
 
+from test_media_server_http import http_fixture as http_fixture
+
 pytestmark = pytest.mark.usefixtures('scheduler_runtime')
 
 
@@ -819,3 +821,716 @@ def test_sportarr_is_never_switched_off_by_an_instance_delete(schema_session, mo
     monkeypatch.setattr(app_config.settings.general, "use_sportarr", True)
     assert service.switch_off_kind_without_instances(schema_session, "sportarr") is False
     assert app_config.settings.general.use_sportarr is True
+
+
+# --------------------------------------- the stored key never follows a new address
+
+REENTER_KEY = "Re-enter the key to use a different address"
+
+
+class _Probe:
+    """An injectable HTTP getter that records where each request went."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, url, **kwargs):
+        self.calls.append((url, (kwargs.get("headers") or {}).get("X-Api-Key")))
+        from types import SimpleNamespace
+        return SimpleNamespace(status_code=200,
+                               json=lambda: {"version": "4.0.0.0", "appName": "Sonarr"})
+
+
+def _instance_with_key(session, **connection):
+    from arr_instances import service
+
+    created, _ = service.create_instance(
+        session, dict({"kind": "sonarr", "name": "Main", "api_key": "stored",
+                       "ip": "10.0.0.2", "port": 8989}, **connection))
+    return created
+
+
+def test_a_by_id_test_refuses_a_moved_address_without_the_key(schema_session):
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session)
+    probe = _Probe()
+    body, status = service.test_connection_for_instance(
+        schema_session, created["id"], {"ip": "10.0.0.9"}, http_get=probe)
+
+    assert status == 200
+    assert body["ok"] is False
+    assert body["error"] == "reenter_key"
+    assert body["message"] == REENTER_KEY
+    assert probe.calls == [], "the stored key never reached the new address"
+
+
+def test_a_by_id_test_refuses_turning_verification_off_without_the_key(schema_session):
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session, verify_ssl=True)
+    probe = _Probe()
+    for args in ({"verify_ssl": False}, {"ssl": True}, {"port": 9090},
+                 {"base_url": "/sonarr"}):
+        probe.calls.clear()
+        body, status = service.test_connection_for_instance(
+            schema_session, created["id"], args, http_get=probe)
+        assert status == 200, args
+        assert body["error"] == "reenter_key", args
+        assert probe.calls == [], args
+
+
+def test_a_by_id_test_allows_turning_verification_back_on(schema_session):
+    """Turning verification back on only hardens the connection, so the stored
+    key may follow it without being typed again."""
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session, verify_ssl=False)
+    probe = _Probe()
+    body, status = service.test_connection_for_instance(
+        schema_session, created["id"], {"verify_ssl": True}, http_get=probe)
+
+    assert status == 200
+    assert body["ok"] is True
+    assert probe.calls == [("http://10.0.0.2:8989/api/v3/system/status", "stored")]
+
+
+def test_a_by_id_test_compares_the_values_the_writer_would_use(schema_session):
+    """A port arriving as a string of the stored number is not a move."""
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session)
+    probe = _Probe()
+    body, status = service.test_connection_for_instance(
+        schema_session, created["id"], {"port": "8989"}, http_get=probe)
+
+    assert status == 200
+    assert body["ok"] is True
+    assert probe.calls == [("http://10.0.0.2:8989/api/v3/system/status", "stored")]
+
+
+@pytest.mark.parametrize("stored,submitted", [("/sonarr/", "/sonarr"),
+                                              ("/sonarr", "/sonarr/")])
+def test_equivalent_base_url_spellings_are_not_a_destination_change(schema_session,
+                                                                    stored, submitted):
+    """The client builds the request URL with the leading slash added and the
+    trailing one dropped, and the edit form normalizes the same way, so a
+    stored '/sonarr/' and a submitted '/sonarr' reach the same endpoint: the
+    comparison reads the spellings the client would send, and neither a
+    by-id test nor a save asks for the key again over them. The unfixed
+    comparison read the raw strings, so the stored key was asked for again
+    for a move the connection never made, and the edit form stayed in its
+    keep-current-key mode with no explanation."""
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session, base_url=stored)
+    probe = _Probe()
+    body, status = service.test_connection_for_instance(
+        schema_session, created["id"], {"base_url": submitted}, http_get=probe)
+
+    assert status == 200
+    assert body["ok"] is True, body
+    assert probe.calls == [("http://10.0.0.2:8989/sonarr/api/v3/system/status", "stored")]
+
+    updated, status = service.update_instance(schema_session, created["id"],
+                                              {"base_url": submitted})
+    assert status == 200, updated
+    assert updated["api_key_set"] is True, "the stored key was kept for the same path"
+
+
+@pytest.mark.parametrize("stored,submitted", [("/sonarr/", "/sonarr"),
+                                              ("/sonarr", "/sonarr/")])
+def test_the_edit_routes_save_keeps_the_key_for_equivalent_base_url_spellings(
+        arr_instance_api, stored, submitted):
+    """The PATCH the edit form sends for a kept key, on the route that
+    carries it: a trailing slash the client drops is not a destination move,
+    so the save lands and the stored key stays stored."""
+    created = arr_instance_api.post(
+        ARR_ROOT, json={"kind": "sonarr", "name": "Main", "api_key": "stored",
+                        "ip": "10.0.0.2", "port": 8989, "base_url": stored},
+        headers=ARR_HEADERS).json
+
+    response = arr_instance_api.patch(f"{ARR_ROOT}/{created['id']}",
+                                      json={"base_url": submitted}, headers=ARR_HEADERS)
+
+    assert response.status_code == 200, response.json
+    assert response.json["base_url"] == submitted
+    assert response.json["api_key_set"] is True, "the stored key was kept"
+
+
+def test_a_by_id_test_still_probes_the_stored_connection(schema_session):
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session)
+    probe = _Probe()
+    body, status = service.test_connection_for_instance(
+        schema_session, created["id"],
+        {"ip": "10.0.0.2", "port": 8989, "ssl": False, "verify_ssl": False,
+         "http_timeout": 30},
+        http_get=probe)
+
+    assert status == 200
+    assert body["ok"] is True and body["version"] == "4.0.0.0"
+    assert probe.calls == [("http://10.0.0.2:8989/api/v3/system/status", "stored")]
+
+
+def test_a_by_id_test_without_a_stored_key_probes_freely(schema_session):
+    from arr_instances import service
+
+    created, _ = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "Bare", "ip": "10.0.0.2"})
+    probe = _Probe()
+    body, status = service.test_connection_for_instance(
+        schema_session, created["id"], {"ip": "10.0.0.9"}, http_get=probe)
+
+    assert status == 200
+    assert body["ok"] is True
+    assert probe.calls == [("http://10.0.0.9:8989/api/v3/system/status", "")]
+
+
+def test_a_save_refuses_a_moved_address_without_the_key(schema_session):
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session)
+    body, status = service.update_instance(
+        schema_session, created["id"], {"ip": "10.0.0.9"})
+
+    assert status == 400
+    assert body["error"] == "reenter_key"
+    assert body["message"] == REENTER_KEY
+    saved, _ = service.get_instance(schema_session, created["id"])
+    assert saved["ip"] == "10.0.0.2"
+
+
+def test_a_save_refuses_turning_verification_off_without_the_key(schema_session):
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session, verify_ssl=True)
+    body, status = service.update_instance(
+        schema_session, created["id"], {"verify_ssl": False})
+
+    assert status == 400
+    assert body["error"] == "reenter_key"
+    assert body["message"] == REENTER_KEY
+    saved, _ = service.get_instance(schema_session, created["id"])
+    assert saved["verify_ssl"] is True
+
+
+def test_a_save_allows_turning_verification_back_on(schema_session):
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session, verify_ssl=False)
+    body, status = service.update_instance(
+        schema_session, created["id"], {"verify_ssl": True})
+
+    assert status == 200
+    assert body["verify_ssl"] is True
+    from arr_instances.repository import ArrInstanceRepository
+    assert ArrInstanceRepository(schema_session).get_decrypted_api_key(created["id"]) == "stored"
+
+
+def test_a_save_with_an_empty_typed_key_still_refuses_the_move(schema_session):
+    """An empty key does not replace the stored one, so it cannot move it."""
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session)
+    body, status = service.update_instance(
+        schema_session, created["id"], {"ip": "10.0.0.9", "api_key": ""})
+
+    assert status == 400
+    assert body["error"] == "reenter_key"
+    saved, _ = service.get_instance(schema_session, created["id"])
+    assert saved["ip"] == "10.0.0.2"
+
+
+def test_a_save_with_the_key_typed_again_moves_the_instance(schema_session):
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository
+
+    created = _instance_with_key(schema_session)
+    body, status = service.update_instance(
+        schema_session, created["id"], {"ip": "10.0.0.9", "api_key": "again"})
+
+    assert status == 200
+    assert body["ip"] == "10.0.0.9"
+    assert ArrInstanceRepository(schema_session).get_decrypted_api_key(created["id"]) == "again"
+
+
+def test_a_save_that_clears_the_key_may_move_the_instance(schema_session):
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session)
+    body, status = service.update_instance(
+        schema_session, created["id"], {"ip": "10.0.0.9", "clear_api_key": True})
+
+    assert status == 200
+    assert body["ip"] == "10.0.0.9"
+    assert body["api_key_set"] is False
+
+
+def test_a_save_without_a_stored_key_moves_freely(schema_session):
+    from arr_instances import service
+
+    created, _ = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "Bare"})
+    body, status = service.update_instance(
+        schema_session, created["id"], {"ip": "10.0.0.9", "verify_ssl": True})
+    assert status == 200
+    assert body["ip"] == "10.0.0.9" and body["verify_ssl"] is True
+
+
+def test_a_save_of_the_stored_address_is_not_a_move(schema_session):
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session)
+    body, status = service.update_instance(
+        schema_session, created["id"],
+        {"ip": "10.0.0.2", "port": 8989, "http_timeout": 90})
+
+    assert status == 200
+    assert body["http_timeout"] == 90
+    assert body["ip"] == "10.0.0.2"
+
+
+def test_a_by_id_test_with_an_empty_base_url_override_keeps_the_saved_prefix(schema_session):
+    """The probe's client keeps the saved prefix when its base_url override is
+    empty, and the comparison uses that same fallback: an empty submission is
+    the saved connection, not a move to the root, so the stored key probes the
+    saved address unchanged. The unfixed comparison read the empty override as
+    the root and refused a move the submission never made."""
+    from arr_instances import service
+
+    created = _instance_with_key(schema_session, base_url="/sonarr")
+    probe = _Probe()
+    body, status = service.test_connection_for_instance(
+        schema_session, created["id"], {"base_url": ""}, http_get=probe)
+
+    assert status == 200
+    assert body["ok"] is True, body
+    assert probe.calls == [("http://10.0.0.2:8989/sonarr/api/v3/system/status", "stored")]
+
+
+# ---------------------- the same rule through the HTTP routes the modal uses
+
+ARR_HEADERS = {"X-API-KEY": "synthetic-bazarr-key"}
+ARR_ROOT = "/api/system/arr-instances"
+
+
+@pytest.fixture
+def arr_instance_api(schema_session, monkeypatch):
+    from flask import Flask
+
+    from api import api_bp
+    from api.system import arr_instances as resource
+    from app.config import settings as app_settings
+    from arr_instances import service
+
+    monkeypatch.setitem(app_settings.auth, "apikey", "synthetic-bazarr-key")
+    monkeypatch.setattr(resource, "database", schema_session)
+    monkeypatch.setattr(service, "refresh_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "event_stream", lambda **event: None)
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    return app.test_client()
+
+
+@pytest.fixture
+def recorded_clients(monkeypatch):
+    """Every client the routes build, so a test sees where a key would go."""
+    from types import SimpleNamespace
+
+    from arr_instances import client as client_module
+
+    calls = []
+
+    class _RecordingFactory:
+        def __init__(self, repository=None):
+            self._repository = repository
+
+        def from_params(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(test_connection=lambda: {"ok": True, "version": "4.0.0.0"})
+
+    monkeypatch.setattr(client_module, "ArrClientFactory", _RecordingFactory)
+    return calls
+
+
+def _saved_with_key(arr_instance_api):
+    created = arr_instance_api.post(
+        ARR_ROOT, json={"kind": "sonarr", "name": "Main", "api_key": "stored",
+                        "ip": "10.0.0.2", "port": 8989}, headers=ARR_HEADERS)
+    assert created.status_code == 201, created.json
+    return created.json
+
+
+def test_the_update_route_refuses_a_moved_address_and_keeps_the_row(arr_instance_api):
+    created = _saved_with_key(arr_instance_api)
+    path = f"{ARR_ROOT}/{created['id']}"
+
+    response = arr_instance_api.patch(path, json={"ip": "10.0.0.9"}, headers=ARR_HEADERS)
+
+    assert response.status_code == 400
+    assert response.json["error"] == "reenter_key"
+    assert response.json["message"] == REENTER_KEY
+    saved = arr_instance_api.get(path, headers=ARR_HEADERS).json
+    assert saved["ip"] == "10.0.0.2" and saved["api_key_set"] is True
+
+
+def test_the_by_id_test_route_refuses_a_moved_address_with_no_probe(arr_instance_api,
+                                                                    recorded_clients):
+    created = _saved_with_key(arr_instance_api)
+
+    response = arr_instance_api.post(f"{ARR_ROOT}/{created['id']}/test",
+                                     json={"ip": "10.0.0.9"}, headers=ARR_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json["ok"] is False
+    assert response.json["error"] == "reenter_key"
+    assert recorded_clients == [], "the stored key never reached the new address"
+
+
+def test_the_by_id_test_route_still_probes_the_stored_connection(arr_instance_api,
+                                                                 recorded_clients):
+    created = _saved_with_key(arr_instance_api)
+
+    response = arr_instance_api.post(f"{ARR_ROOT}/{created['id']}/test",
+                                     json={"ip": "10.0.0.2", "port": 8989},
+                                     headers=ARR_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert len(recorded_clients) == 1
+    assert recorded_clients[0]["ip"] == "10.0.0.2"
+    assert recorded_clients[0]["api_key"] == "stored"
+
+
+def test_a_moved_address_saves_and_tests_with_the_key_typed_again(
+        arr_instance_api, recorded_clients):
+    """The edit modal's Replace mode: the typed key travels with the typed
+    address, through the same routes the modal calls."""
+    created = _saved_with_key(arr_instance_api)
+    path = f"{ARR_ROOT}/{created['id']}"
+
+    tested = arr_instance_api.post(f"{ARR_ROOT}/test",
+                                   json={"kind": "sonarr", "ip": "10.0.0.9", "port": 8989,
+                                         "api_key": "typed-again"}, headers=ARR_HEADERS)
+    assert tested.status_code == 200 and tested.json["ok"] is True
+    assert recorded_clients[-1]["api_key"] == "typed-again"
+
+    saved = arr_instance_api.patch(path, json={"ip": "10.0.0.9", "api_key": "typed-again"},
+                                   headers=ARR_HEADERS)
+    assert saved.status_code == 200, saved.json
+    assert saved.json["ip"] == "10.0.0.9" and saved.json["api_key_set"] is True
+    listed = arr_instance_api.get(path, headers=ARR_HEADERS).json
+    assert listed["ip"] == "10.0.0.9"
+
+
+def test_a_save_that_paused_before_its_write_keeps_the_key_a_later_save_stored(
+        arr_instance_api, schema_session, monkeypatch):
+    """The check and the write share the boundary the settings save commits
+    under, and the row is re-read inside it: a second save storing the key
+    inside the first save's check-to-write window is seen by the first save's
+    re-read, so the move is refused and the later key stays at the address its
+    own save typed it for. The unfixed order checks before the write, so the
+    move landed with the key the second save stored following it."""
+    from arr_instances import repository, service
+
+    created = arr_instance_api.post(
+        ARR_ROOT, json={"kind": "sonarr", "name": "Bare", "ip": "10.0.0.2", "port": 8989},
+        headers=ARR_HEADERS).json
+    assert created["api_key_set"] is False
+    path = f"{ARR_ROOT}/{created['id']}"
+    landed = []
+
+    def land_the_key():
+        # The second save lands inside the window wherever this head leaves
+        # one: at the fixed head its entry into the write boundary runs it
+        # before the real lock is taken, and at the unfixed head the row's
+        # write runs it between the check and the write.
+        if landed:
+            return
+        landed.append(True)
+        service.update_instance(schema_session, created["id"], {"api_key": "late-key"})
+
+    from discover import metadata as discover_metadata
+
+    real_lock = discover_metadata.CONFIG_LOCK
+
+    class _PausedLock:
+        def __enter__(self):
+            land_the_key()
+            return real_lock.__enter__()
+
+        def __exit__(self, *_exception):
+            return real_lock.__exit__(*_exception)
+
+    monkeypatch.setattr(discover_metadata, "CONFIG_LOCK", _PausedLock())
+
+    real_update = repository.ArrInstanceRepository.update
+
+    def update_with_a_late_key(self, instance_id, **fields):
+        land_the_key()
+        return real_update(self, instance_id, **fields)
+
+    monkeypatch.setattr(repository.ArrInstanceRepository, "update", update_with_a_late_key)
+
+    response = arr_instance_api.patch(path, json={"ip": "10.0.0.9"}, headers=ARR_HEADERS)
+
+    assert response.status_code == 400, response.json
+    assert response.json["error"] == "reenter_key"
+    assert response.json["message"] == REENTER_KEY
+    saved = arr_instance_api.get(path, headers=ARR_HEADERS).json
+    assert saved["ip"] == "10.0.0.2", 'the move the second save\'s key enabled never landed'
+    assert saved["api_key_set"] is True, 'the key the second save stored is kept'
+
+
+def test_a_scalar_settings_save_needs_the_default_instances_key_again(schema_session,
+                                                                       monkeypatch):
+    """The scalar connection settings mirror the kind's default instance, its
+    key included, and the paths that still read them send that mirrored key to
+    the address they build. A save that moves one of them is refused unless it
+    types the key again, and the instance row is untouched by either: it is
+    the row that owns the connection, not the scalar settings."""
+    from app import config as app_config
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository
+
+    created, _ = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "Main", "api_key": "stored",
+                         "ip": "10.0.0.2", "port": 8989})
+    monkeypatch.setattr(app_config.settings.general, "use_sonarr", True)
+    # What the default instance's mirror carries onto the scalar settings in
+    # production: the stored key the rule protects. Without it there is no
+    # key to re-enter, and the move needs no refusal.
+    monkeypatch.setattr(app_config.settings.sonarr, "apikey", "stored")
+    # The writer is stubbed out, so no runtime restart or outbound call can
+    # follow from a save, and the refusal is all this test observes.
+    saved = []
+    monkeypatch.setattr(app_config, "_save_settings_with_native",
+                        lambda items, **_kwargs: saved.append(items))
+
+    with pytest.raises(Exception) as refusal:
+        app_config.save_settings([("settings-sonarr-ip", ["moved.example"])])
+    assert "Re-enter the key to use a different address" in str(refusal.value)
+    assert saved == [], "the refused save reached no writer"
+
+    # The key typed again is all the move needs.
+    app_config.save_settings([("settings-sonarr-ip", ["moved.example"]),
+                              ("settings-sonarr-apikey", ["typed-again"])])
+    assert saved, "the save with the key typed again was not refused"
+
+    row = ArrInstanceRepository(schema_session).get(created["id"])
+    assert row.ip == "10.0.0.2", "the instance row keeps the address it was saved with"
+    assert row.port == 8989
+
+
+@pytest.mark.parametrize("clear", [[""], ["null"]])
+def test_a_scalar_settings_save_with_no_retained_key_moves_the_address(
+        schema_session, monkeypatch, clear):
+    """The scalar guard protects the key the scalar settings still carry: a
+    save that clears the stored key moves the address with it, because after
+    the save there is no key left for the moved address to send, and with no
+    stored key at all there is nothing to re-enter either."""
+    from app import config as app_config
+    from app.config import settings as app_settings
+    from arr_instances import service
+
+    created, _ = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "Main", "api_key": "stored",
+                         "ip": "10.0.0.2", "port": 8989})
+    monkeypatch.setattr(app_config.settings.general, "use_sonarr", True)
+    monkeypatch.setattr(app_settings.sonarr, "apikey", "stored-key")
+    saved = []
+    monkeypatch.setattr(app_config, "_save_settings_with_native",
+                        lambda items, **_kwargs: saved.append(items))
+
+    app_config.save_settings([("settings-sonarr-ip", ["moved.example"]),
+                              ("settings-sonarr-apikey", clear)])
+    assert saved, "a move that clears the stored key was not refused"
+
+    monkeypatch.setattr(app_settings.sonarr, "apikey", "")
+    app_config.save_settings([("settings-sonarr-ip", ["moved.example"])])
+    assert saved, "a move with no stored key at all was not refused"
+
+
+_DEFAULTS = {"ssl": False, "ip": "127.0.0.1", "port": 8989, "base_url": "/"}
+
+
+@pytest.mark.parametrize("field,stored", [("ssl", True), ("ip", "10.0.0.2"),
+                                          ("port", 8990), ("base_url", "/tv")])
+@pytest.mark.parametrize("spelling", ["null", "None", "undefined"])
+def test_a_scalar_settings_save_clearing_a_destination_field_still_moves_the_address(
+        schema_session, monkeypatch, field, stored, spelling):
+    """An empty spelling clears the stored value, and the cleared field falls
+    back to the default the client applies, so the effective destination moves
+    from the stored address to the default one while the mirrored key stays
+    stored: the same re-enter refusal a typed move gets, not a silent move the
+    cleared field makes."""
+    from app import config as app_config
+    from app.config import settings as app_settings
+    from arr_instances import service
+
+    service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "Main", "api_key": "stored",
+                         "ip": "10.0.0.2", "port": 8989})
+    monkeypatch.setattr(app_config.settings.general, "use_sonarr", True)
+    monkeypatch.setattr(app_settings.sonarr, "apikey", "stored")
+    monkeypatch.setattr(app_settings.sonarr, field, stored)
+    saved = []
+    monkeypatch.setattr(app_config, "_save_settings_with_native",
+                        lambda items, **_kwargs: saved.append(items))
+
+    with pytest.raises(Exception) as refusal:
+        app_config.save_settings([(f"settings-sonarr-{field}", [spelling])])
+    assert "Re-enter the key to use a different address" in str(refusal.value)
+    assert saved == [], "the refused save reached no writer"
+    assert app_settings.sonarr.get(field) == stored, "the refused save changed nothing"
+
+    # A field already sitting at the default it falls back to moves nothing:
+    # the clear keeps the destination where it is, key included.
+    monkeypatch.setattr(app_settings.sonarr, field, _DEFAULTS[field])
+    app_config.save_settings([(f"settings-sonarr-{field}", [spelling])])
+    assert saved, "a clear that reaches the default the field already had was refused"
+
+
+# The same two answers the direct rows prove, on the HTTP route the settings
+# page saves through, so the form values the route parses and the validator
+# defaults the guard compares are the ones production runs with.
+
+
+@pytest.fixture
+def arr_settings_api(schema_session, monkeypatch):
+    """The settings save route, on a real app, with the writer recorded rather
+    than run and the saved-change announcement collected."""
+    from api import api_bp
+    from api.system import settings as settings_endpoint
+    from app import config as app_config
+    from app import database as app_database
+    from flask import Flask
+
+    saved = []
+    monkeypatch.setitem(app_config.settings.auth, "apikey", "synthetic-bazarr-key")
+    monkeypatch.setattr(app_database, "database", schema_session)
+    monkeypatch.setattr(app_config, "_save_settings_with_native",
+                        lambda items, **_kwargs: saved.append(items))
+    monkeypatch.setattr(settings_endpoint, "event_stream", lambda *_args, **_kwargs: None)
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    return app.test_client(), saved
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+@pytest.mark.parametrize("spelling", ["null", "None", "undefined"])
+def test_a_settings_route_clear_of_a_moved_destination_field_is_refused_with_persistence_kept(
+        arr_settings_api, monkeypatch, kind, spelling):
+    """The scalar clear the guard refuses, proven through the route: the
+    empty spelling arrives as a form value, the route parses it the way the
+    writer does, and the clear that would move the stored key to the default
+    address is answered with the re-enter refusal, nothing written and the
+    stored settings unchanged."""
+    from app import config as app_config
+
+    client, saved = arr_settings_api
+    section = getattr(app_config.settings, kind)
+    monkeypatch.setattr(app_config.settings.general, f"use_{kind}", True)
+    monkeypatch.setattr(section, "apikey", "stored-key")
+    monkeypatch.setattr(section, "ip", "10.0.0.2")
+
+    response = client.post("/api/system/settings",
+                           data={f"settings-{kind}-ip": spelling},
+                           headers={"X-API-KEY": "synthetic-bazarr-key"})
+
+    assert response.status_code == 406
+    assert "Re-enter the key to use a different address" in response.get_data(as_text=True)
+    assert saved == [], "the refused save reached no writer"
+    assert section.get("ip") == "10.0.0.2", "the refused save changed nothing"
+    assert section.get("apikey") == "stored-key", "the stored key is untouched"
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_settings_route_clear_of_a_field_already_at_its_default_saves(
+        arr_settings_api, monkeypatch, kind):
+    """A field already sitting at the default a clear falls back to moves
+    nothing, so the route saves it: the clear arrives through the same form
+    parsing, the guard reads the validator's own default, and the save
+    reaches the writer instead of being refused."""
+    from app import config as app_config
+
+    client, saved = arr_settings_api
+    section = getattr(app_config.settings, kind)
+    monkeypatch.setattr(app_config.settings.general, f"use_{kind}", True)
+    monkeypatch.setattr(section, "apikey", "stored-key")
+    monkeypatch.setattr(section, "ip", "127.0.0.1")
+
+    response = client.post("/api/system/settings",
+                           data={f"settings-{kind}-ip": "null"},
+                           headers={"X-API-KEY": "synthetic-bazarr-key"})
+
+    assert response.status_code == 204
+    assert saved, "the clear that moved nothing was refused"
+
+
+@pytest.mark.parametrize("section", ["plex", "sonarr", "radarr"])
+@pytest.mark.parametrize("spelling", ["null", "None", "undefined", "0"])
+def test_turning_certificate_verification_off_by_an_unwritten_spelling_still_needs_the_key(
+        monkeypatch, section, spelling):
+    """verify_ssl spelled the way the writer maps to empty, or to zero, is the
+    same off switch as 'false': the settings rules read the value the writer
+    would store, not the truthy string the request submitted, so the stored key
+    never travels unverified just because the switch was spelled oddly."""
+    from app import config as app_config
+    from app.config import settings as app_settings
+
+    sect = getattr(app_settings, section)
+    if section == "plex":
+        monkeypatch.setattr(sect, "auth_method", "apikey")
+    monkeypatch.setattr(sect, "apikey", "stored-key")
+    monkeypatch.setattr(sect, "verify_ssl", True)
+    assert app_config._plex_writer_value("verify_ssl", [spelling]) is not True, \
+        "the value the writer would store is not on"
+    saved = []
+    monkeypatch.setattr(app_config, "_save_settings_with_native",
+                        lambda items, **_kwargs: saved.append(items))
+
+    with pytest.raises(Exception) as refusal:
+        app_config.save_settings([(f"settings-{section}-verify_ssl", [spelling])])
+    assert "Re-enter the key to use a different address" in str(refusal.value)
+    assert saved == [], "the refused save reached no writer"
+    assert sect.get("verify_ssl") is True, "verification is still on"
+    assert sect.get("apikey") == "stored-key", "the stored key is untouched"
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr", "sportarr"])
+def test_every_arr_session_refuses_to_follow_a_redirect_with_the_key(kind, http_fixture):
+    """The shared per-kind sessions carry the instance's API key, so a server
+    that answers with a redirect is not the instance the key belongs to: the
+    next hop is never contacted, on a GET or a POST."""
+    import requests
+    from radarr.http_session import radarr_session
+    from sonarr.http_session import sonarr_session
+    from sportarr.http_session import sportarr_session
+
+    sessions = {"sonarr": sonarr_session, "radarr": radarr_session,
+                "sportarr": sportarr_session}
+    target, target_records = http_fixture([])
+    redirect = [(302, b"", {"Location": target + "/stolen"})]
+    redirector, first_records = http_fixture([*redirect, *redirect])
+    session = sessions[kind]()
+    url = redirector + "/api/v3/system/status"
+
+    # A refusal is either a raised redirect cap or the redirect handed back
+    # unanswered; both leave the second origin untouched.
+    try:
+        response = session.get(url, headers={"X-Api-Key": "arr-key"}, timeout=5, verify=False)
+        assert response.history == []
+    except requests.exceptions.TooManyRedirects:
+        pass
+    try:
+        response = session.post(url, json={}, headers={"X-Api-Key": "arr-key"},
+                                timeout=5, verify=False)
+        assert response.history == []
+    except requests.exceptions.TooManyRedirects:
+        pass
+
+    assert target_records == [], "the API key never reached the second origin"
+    assert len(first_records) == 2, "each request was answered by the first origin only"

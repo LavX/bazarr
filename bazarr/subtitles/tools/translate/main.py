@@ -1,20 +1,16 @@
 # coding=utf-8
 
 import logging
-import os
 
 
-from subliminal_patch.core import get_subtitle_path
-from subzero.language import Language
-
-from .core.translator_utils import validate_translation_params, convert_language_codes, get_title
+from .core.translator_utils import (validate_translation_params, convert_language_codes, get_title,
+                                    translated_destination_path)
 from .failure_record import clear_failed_translation, record_failed_translation
 from .services.translator_factory import TranslatorFactory
 from languages.get_languages import alpha3_from_alpha2
 from app.config import settings
 from app import activity
 from app.jobs_queue import jobs_queue, JobCancelled
-from subtitles.indexer.utils import get_subtitle_destination_path
 
 
 def _failure_record_media_id(media_type, radarr_id, sonarr_episode_id, sports_operation):
@@ -88,20 +84,12 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
 
         logging.debug(f'BAZARR is translating in {lang_obj} this subtitles {source_srt_file}')  # noqa: G004
 
-        dest_srt_file_if_alongside_video = get_subtitle_path(
-            video_path,
-            language=lang_obj if isinstance(lang_obj, Language) else lang_obj.subzero_language(),
-            extension='.srt',
-            forced_tag=forced,
-            hi_tag=hi
-        )
-
-        # Resolved as a write target, not a lookup: the file does not exist yet on a
-        # first translation, and the lookup helper answered None for custom folders.
-        dest_srt_file = get_subtitle_destination_path(
-            file=video_path,
-            subtitle=os.path.basename(dest_srt_file_if_alongside_video)
-        )
+        # Both naming sites resolve the destination through one helper: this
+        # write path and the sports operation binding, whose bound destination
+        # the sports write guard compares against this one. The name carries
+        # the regional tag when the target is a custom language that has one,
+        # with the forced and HI tags in their usual place behind it.
+        dest_srt_file = translated_destination_path(video_path, to_lang, forced, hi)
 
         # The stored setting is what the factory gets. Every spelling of "no
         # translator" is normalized to 'none' at boot and at save time, and the
@@ -182,7 +170,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         clear_failed_translation(arr_instance_id, media_type,
                                  _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
                                                           sports_operation),
-                                 from_lang, to_lang)
+                                 from_lang, to_lang, forced, hi)
 
         # Get current job name (which batch.py already set with title) and mark as done
         completion_label = 'Partially translated' if partial_detail else 'Translated'
@@ -205,7 +193,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         record_failed_translation(arr_instance_id, media_type,
                                   _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
                                                            sports_operation),
-                                  from_lang, to_lang)
+                                  from_lang, to_lang, forced, hi)
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
             fail_name = current_name.replace('Translating', 'Failed')

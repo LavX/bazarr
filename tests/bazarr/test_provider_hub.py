@@ -99,6 +99,14 @@ def _manifest(**overrides):
     return manifest
 
 
+def _manifest_with_region(**overrides):
+    """The standard test manifest plus a declared plain `region` field, for
+    the tests that PATCH one through the update route."""
+    manifest = _manifest(**overrides)
+    manifest["config_schema"]["properties"]["region"] = {"type": "string"}
+    return manifest
+
+
 def _provider_zip(manifest, file_payloads, *, manifest_name="provider.json", prefix=""):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -1888,8 +1896,217 @@ def test_provider_hub_uninstall_stages_active_removal_and_discards_staged_update
     assert installation["staged_manifest"] is None
 
 
-def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, monkeypatch):
-    from provider_hub.service import SECRET_PLACEHOLDER, runtime_provider_configs, update_provider
+def test_provider_hub_config_is_write_only_with_descriptor(tmp_path, monkeypatch):
+    """The Provider Hub installation API never returns a secret's value or
+    the old asterisk placeholder: a configured secret comes back empty with a
+    sibling descriptor, an absent key keeps the stored value, an explicit
+    empty value clears it, and a new value replaces it."""
+    from provider_hub.service import (
+        SECRET_PLACEHOLDER,
+        get_provider,
+        runtime_provider_configs,
+        update_provider,
+    )
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest_with_region(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    secret_value = "real-secret-value-1234"  # pragma: allowlist secret
+    redacted = update_provider(
+        "examplehub",
+        enabled=True,
+        config={"api_key": secret_value, "region": "eu"},
+    )
+
+    assert redacted["enabled"] is True
+    # Write-only: the value is empty and the descriptor says how it ends.
+    assert redacted["config"]["api_key"] == ""
+    descriptor = redacted["config"]["__secret_fields"]["api_key"]
+    assert descriptor == {"configured": True, "last_four": "1234"}
+    assert secret_value not in json.dumps(redacted)
+    assert SECRET_PLACEHOLDER not in json.dumps(redacted)
+    assert runtime_provider_configs()["examplehub"]["api_key"] == secret_value
+
+    # An absent key keeps the stored value; a non-secret field updates.
+    redacted = update_provider("examplehub", config={"region": "us"})
+    assert runtime_provider_configs()["examplehub"] == {
+        "api_key": secret_value,
+        "region": "us",
+    }
+
+    # The descriptor the API echoes back is never stored as config.
+    update_provider(
+        "examplehub",
+        config={"__secret_fields": {"api_key": {"configured": True}}, "region": "de"},
+    )
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert "__secret_fields" not in stored
+    assert stored["region"] == "de"
+
+    # An explicit empty value clears the stored secret.
+    cleared = update_provider("examplehub", config={"api_key": ""})
+    assert cleared["config"]["__secret_fields"]["api_key"] == {"configured": False}
+    assert runtime_provider_configs()["examplehub"]["api_key"] == ""
+    assert get_provider("examplehub")["config"]["api_key"] == ""
+
+    # A new value replaces it.
+    update_provider("examplehub", config={"api_key": "replacement-secret-value-5678"})  # pragma: allowlist secret
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "replacement-secret-value-5678"  # pragma: allowlist secret
+
+
+def test_an_empty_collection_in_a_stored_secret_is_delivered_to_the_worker_as_empty_text(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """An empty list an earlier write left in a stored installation config
+    is not a credential: the worker config build reads it as an empty
+    string, so the plugin's setup logic cannot treat the leftover
+    collection as a present value."""
+    from provider_hub.service import runtime_provider_configs
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {"api_key": [], "region": "eu"},
+        }
+    }
+    save_state(state)
+
+    configs = runtime_provider_configs()
+    assert configs["examplehub"]["api_key"] == ""
+    assert configs["examplehub"]["region"] == "eu"
+
+
+def test_manifest_secret_fields_honours_secret_true():
+    """A field declared secret only through `secret: true` in the config
+    schema is a secret field too, matching what the frontend renders as a
+    password input."""
+    from provider_hub.service import _manifest_secret_fields
+
+    installation = {
+        "manifest": {
+            "secret_fields": ["api_key"],
+            "config_schema": {
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string"},
+                    "solver_token": {"type": "string", "secret": True},
+                    "plain_url": {"type": "string"},
+                },
+            },
+        },
+    }
+
+    assert _manifest_secret_fields(installation) == {"api_key", "solver_token"}
+
+
+def test_update_provider_with_failing_encrypter_stores_nothing(tmp_path, monkeypatch):
+    """A credential that cannot be encrypted is not stored: the save is
+    refused with the reason, the Hub state is not written at all, and the
+    enabled toggle travelling with the request does not stay behind in
+    Bazarr's own settings store either."""
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest_with_region(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    enabled_calls = []
+    monkeypatch.setattr(
+        "provider_hub.service._set_bazarr_provider_enabled",
+        lambda provider_id, enabled: enabled_calls.append((provider_id, enabled)) or True,
+    )
+
+    def broken_encrypt(value, master_key=None):
+        raise RuntimeError("key unavailable")
+
+    monkeypatch.setattr("secret_store.encrypt_secret", broken_encrypt)
+
+    with pytest.raises(ValueError) as error:
+        update_provider("examplehub", enabled=True,
+                        config={"api_key": "unit-secret", "region": "eu"})  # pragma: allowlist secret
+
+    assert "could not be encrypted" in str(error.value).lower()
+
+    # Nothing was stored, in the secret or in the rest of the request: the
+    # encryption happens before anything persists, so the toggle never
+    # reached the settings store either.
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert stored == {}
+    assert enabled_calls == []
+    assert "unit-secret" not in json.dumps(load_state())
+
+
+def test_runtime_config_omits_provider_with_undecryptable_secret(tmp_path, monkeypatch):
+    """A stored secret that will not decrypt never reaches the worker as the
+    credential: the provider is left out of the runtime configs and the
+    installation says the credential has to be re-entered."""
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import runtime_provider_configs
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload", "region": "eu"},
+        }
+    }
+    save_state(state)
+
+    configs = runtime_provider_configs()
+
+    assert "examplehub" not in configs
+    assert "tampered-payload" not in json.dumps(configs)
+    installation = load_state()["installations"]["examplehub"]
+    assert installation["last_error"] == "Stored credential could not be decrypted; re-enter it"
+
+
+def test_a_reentered_credential_clears_the_decrypt_failed_note(tmp_path, monkeypatch):
+    """Re-entering a working credential ends the re-enter-it note: the
+    installation stops asking for the key the moment its stored config
+    decrypts again, and the provider returns to the runtime configs."""
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import runtime_provider_configs, update_provider
     from provider_hub.state import load_state, save_state
 
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
@@ -1907,33 +2124,1381 @@ def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, 
     }
     save_state(state)
 
-    redacted = update_provider(
-        "examplehub",
-        enabled=True,
-        config={"api_key": "real-secret", "region": "eu"},  # pragma: allowlist secret
+    # A credential that will not decrypt parks the note on the installation.
+    update_provider("examplehub",
+                    config={"api_key": SECRET_MARKER_PREFIX + "tampered-payload"})
+    runtime_provider_configs()
+    installation = load_state()["installations"]["examplehub"]
+    assert installation["last_error"] == "Stored credential could not be decrypted; re-enter it"
+
+    # Re-entering it clears the note and restores the provider.
+    update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+    installation = load_state()["installations"]["examplehub"]
+    assert installation.get("last_error") is None
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "unit-fresh-secret"
+
+
+def test_a_schema_change_cannot_expose_a_retained_secret(tmp_path, monkeypatch):
+    """A newer version that drops a secret field from its schema does not
+    make the retained value visible again: the persisted registration keeps
+    it redacted in the installation API and out of the worker config."""
+    from secret_store.crypto import encrypt_secret
+
+    from provider_hub.service import list_providers, runtime_provider_configs
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    # The current schema (v2) knows only region; the earlier version's
+    # legacy_token value is still stored, and the persisted registration
+    # still names it.
+    state_file.write_text(json.dumps({
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "2.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": {
+                    "provider_id": "examplehub",
+                    "version": "2.0.0",
+                    "config_schema": {"properties": {"region": {"type": "string"}}},
+                },
+                "config": {"legacy_token": encrypt_secret("unit-legacy-secret"),
+                           "region": "eu"},
+            }
+        },
+        "plugin_secret_paths": ["examplehub.legacy_token"],
+        "jobs": [],
+    }), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    # The installation API redacts the retained value, with a descriptor.
+    providers = list_providers()
+    installation = next(p for p in providers if p["provider_id"] == "examplehub")
+    assert installation["config"]["legacy_token"] == ""
+    assert installation["config"]["__secret_fields"]["legacy_token"]["configured"] is True
+    assert "unit-legacy-secret" not in json.dumps(providers)
+    # The worker config leaves the undeclared retained field out entirely.
+    configs = runtime_provider_configs()
+    assert "legacy_token" not in configs["examplehub"]
+    assert configs["examplehub"]["region"] == "eu"
+
+
+def test_a_decrypt_failed_provider_is_blocked_from_searches(tmp_path, monkeypatch):
+    """A provider whose stored credential will not decrypt is out of the
+    searches completely: no runtime config, no rebuild from the
+    installation row, not selected for the pool, and not admitted by a
+    stale cached search, so no worker request occurs for it."""
+    from types import SimpleNamespace
+
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+    update_provider("examplehub",
+                    config={"api_key": SECRET_MARKER_PREFIX + "tampered-payload"})
+
+    from app import get_providers
+
+    # Configuration: neither the runtime configs nor the installation-row
+    # rebuild carries it, so the pool has nothing to build a request from.
+    assert "examplehub" not in get_providers.get_providers_auth()
+
+    # Selection and admission, against a settings tree that has it enabled.
+    with monkeypatch.context() as context:
+        context.setattr(
+            get_providers, "settings",
+            SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+        context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+        context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+        assert "examplehub" not in (get_providers.get_providers() or [])
+        assert get_providers.provider_is_usable("examplehub") is False
+    # The control: the same fake settings with a working credential keeps
+    # the provider selectable, so the block above is the credential's.
+    with monkeypatch.context() as context:
+        context.setattr(
+            get_providers, "settings",
+            SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+        context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+        context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+        update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+        assert "examplehub" in (get_providers.get_providers() or [])
+        assert get_providers.provider_is_usable("examplehub") is True
+
+
+def test_removed_plugin_keeps_registered_secret_paths(tmp_path, monkeypatch):
+    """Removing a plugin deletes its installation row but keeps its secret
+    paths in the persisted set, so the value still decrypts and stays
+    write-only. The set starts empty: the installation's own row is what
+    persists the path, which is exactly the registration the removal must
+    survive."""
+    from provider_hub.service import remove_installation, update_provider
+    from provider_hub.state import load_state
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps(
+            {
+                "installations": {
+                    "examplehub": {
+                        "provider_id": "examplehub",
+                        "name": "Example Hub Provider",
+                        "active_version": "1.0.0",
+                        "state": "active",
+                        "pending_restart": False,
+                        "manifest": _manifest(provider_id="examplehub"),
+                    }
+                },
+                "plugin_secret_paths": [],
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
     )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
 
-    assert redacted["enabled"] is True
-    assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
-    assert redacted["config"]["region"] == "eu"
-    assert "real-secret" not in json.dumps(redacted)
-    assert runtime_provider_configs()["examplehub"]["api_key"] == "real-secret"  # pragma: allowlist secret
+    # Configuring the plugin persists its manifest's secret path.
+    update_provider("examplehub", config={"api_key": "unit-secret"})  # pragma: allowlist secret
+    assert "examplehub.api_key" in (load_state().get("plugin_secret_paths") or [])
 
-    redacted = update_provider(
-        "examplehub",
-        config={"api_key": SECRET_PLACEHOLDER, "region": "us"},
-    )
+    from provider_hub.service import activate_staged_installations
 
-    assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
-    assert redacted["config"]["region"] == "us"
-    assert runtime_provider_configs()["examplehub"] == {
-        "api_key": "real-secret",  # pragma: allowlist secret
-        "region": "us",
+    assert remove_installation("examplehub") is True
+    # The row goes at the next restart, and the restart's own state write
+    # keeps the persisted paths.
+    activate_staged_installations()
+
+    state = load_state()
+    assert "examplehub" not in (state.get("installations") or {})
+    persisted_paths = state.get("plugin_secret_paths") or []
+    assert "examplehub.api_key" in persisted_paths
+
+
+# The registry must stay hermetic around the retained-field tests: the
+# runtime plugin paths live for the whole process, and one test's
+# registrations must not decide another test's field classification.
+@pytest.fixture
+def isolated_plugin_registry():
+    from secret_store import registry
+
+    saved_paths = set(registry.plugin_secret_paths())
+    registry.reset_plugin_secret_paths()
+    yield registry
+    registry.reset_plugin_secret_paths(saved_paths)
+
+
+class _EmptyScanSettings:
+    """A settings stand-in for the boot registry loader: no sections at
+    all, so the leftover scan finds nothing and the loader registers only
+    what state.json names."""
+
+    def as_dict(self):
+        return {}
+
+
+def _write_state(tmp_path, state):
+    state_file = tmp_path / "state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    return state_file
+
+
+def test_update_provider_rejects_a_non_string_secret(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The Hub API refuses a new secret value that is not text. A number or
+    a boolean in a secret slot is exactly the shape an older save coerced
+    typed tokens into, and accepting it would store a credential that
+    neither encrypts at rest nor masks in the API. Nothing is stored, and a
+    text value still stores encrypted."""
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state, save_state
+    from secret_store.crypto import is_encrypted
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    for bad in (12345, 1.5, True):
+        with pytest.raises(ValueError):
+            update_provider("examplehub", config={"api_key": bad})
+    assert load_state()["installations"]["examplehub"]["config"] == {}
+
+    # The refusal is the credential's, not the field's: text still stores.
+    update_provider("examplehub", config={"api_key": "unit-text-secret"})  # pragma: allowlist secret
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert is_encrypted(stored["api_key"])
+
+
+def test_updating_a_retained_secret_field_stores_it_encrypted(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A PATCH to a field the current schema dropped but the registry still
+    calls a secret is stored encrypted, not written verbatim in the clear
+    until the next boot, and the installation API keeps redacting it with
+    a descriptor."""
+    from provider_hub.service import update_provider
+    from secret_store.crypto import encrypt_secret, is_encrypted
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "2.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": {
+                    "provider_id": "examplehub",
+                    "version": "2.0.0",
+                    "config_schema": {"properties": {"region": {"type": "string"}}},
+                },
+                "config": {"legacy_token": encrypt_secret("unit-old-secret"),  # pragma: allowlist secret
+                           "region": "eu"},
+            }
+        },
+        "plugin_secret_paths": ["examplehub.legacy_token"],
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    update_provider("examplehub", config={"legacy_token": "unit-fresh-secret"})  # pragma: allowlist secret
+
+    stored = json.loads(state_file.read_text(encoding="utf-8"))["installations"]["examplehub"]["config"]
+    assert is_encrypted(stored["legacy_token"])
+    assert stored["region"] == "eu"
+    from provider_hub.service import get_provider
+    provider = get_provider("examplehub")
+    assert provider["config"]["legacy_token"] == ""
+    assert provider["config"]["__secret_fields"]["legacy_token"]["configured"] is True
+    assert "unit-fresh-secret" not in json.dumps(provider)
+
+
+def test_a_staged_schema_cannot_put_a_retained_secret_in_the_active_worker(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A field only the staged version declares never reaches the current
+    worker: the exclusion filters against the active manifest alone, so an
+    update waiting for a restart does not hand the plugin a credential its
+    running code does not read. Ciphertext of that field does not block the
+    provider either, because a retained field counts as undecryptable only
+    when the active manifest declares it."""
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                     runtime_provider_configs)
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "2.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": {
+                    "provider_id": "examplehub",
+                    "version": "2.0.0",
+                    "config_schema": {"properties": {"region": {"type": "string"}}},
+                },
+                "staged_manifest": {
+                    "provider_id": "examplehub",
+                    "version": "3.0.0",
+                    "config_schema": {"properties": {
+                        "region": {"type": "string"},
+                        "legacy_token": {"type": "string", "secret": True},
+                    }},
+                },
+                "config": {"legacy_token": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+            }
+        },
+        "plugin_secret_paths": ["examplehub.legacy_token"],
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    configs = runtime_provider_configs()
+    assert "examplehub" in configs
+    assert "legacy_token" not in configs["examplehub"]
+    assert configs["examplehub"]["region"] == "eu"
+    assert decrypt_blocked_provider_ids() == set()
+
+
+def test_a_pre_registry_installations_retained_secret_is_covered(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A pre-registry upgrade: a stored legacy credential no current
+    manifest declares and no persisted registration names is discovered
+    from the installation config itself, registered and persisted at boot,
+    encrypted in state.json, redacted by the installation API and kept out
+    of the worker config."""
+    from provider_hub import service
+    from provider_hub.state import load_state
+    from secret_store.crypto import is_encrypted
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "2.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": {
+                    "provider_id": "examplehub",
+                    "version": "2.0.0",
+                    "config_schema": {"properties": {"region": {"type": "string"}}},
+                },
+                "config": {"legacy_token": "unit-legacy-secret", "region": "eu"},  # pragma: allowlist secret
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    # The boot: the loader discovers the field, the boot-migration encrypts
+    # it once the master key is durable.
+    isolated_plugin_registry.load_plugin_secret_paths(_EmptyScanSettings())
+    assert isolated_plugin_registry.is_plugin_secret("examplehub.legacy_token")
+    isolated_plugin_registry.migrate_installation_config_secrets()
+    state = load_state()
+    assert "examplehub.legacy_token" in (state.get("plugin_secret_paths") or [])
+    stored = state["installations"]["examplehub"]["config"]
+    assert is_encrypted(stored["legacy_token"])
+    assert stored["region"] == "eu"
+
+    # The installation API redacts it; the worker config leaves it out.
+    providers = service.list_providers()
+    installation = next(p for p in providers if p["provider_id"] == "examplehub")
+    assert installation["config"]["legacy_token"] == ""
+    assert installation["config"]["__secret_fields"]["legacy_token"]["configured"] is True
+    assert "unit-legacy-secret" not in json.dumps(providers)
+    configs = service.runtime_provider_configs()
+    assert "legacy_token" not in configs["examplehub"]
+    assert configs["examplehub"]["region"] == "eu"
+
+
+def test_a_settings_section_value_satisfies_a_blocked_provider(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A provider whose stored credential will not decrypt is unblocked the
+    moment its own settings section supplies a live value for the field:
+    the worker config is laid over that section, so the plugin runs on the
+    section's value. With no section value the provider stays out of the
+    runtime configs, the selection and the admission."""
+    from types import SimpleNamespace
+
+    from app import get_providers
+    from app.config import settings
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      runtime_provider_configs)
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # No section value: blocked in every direction.
+        assert "examplehub" not in runtime_provider_configs()
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" not in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is False
+
+        # The section supplies a working value: the block lifts, the stored
+        # side keeps serving the rest of the config, and the provider is
+        # selectable and admissible again.
+        settings.set("examplehub", {"api_key": "unit-live-secret"})  # pragma: allowlist secret
+        configs = runtime_provider_configs()
+        assert "examplehub" in configs
+        assert "api_key" not in configs["examplehub"]
+        assert configs["examplehub"]["region"] == "eu"
+        assert decrypt_blocked_provider_ids() == set()
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is True
+    finally:
+        from app.config import remove_settings_section
+        remove_settings_section("examplehub")
+
+
+def test_an_empty_section_collection_does_not_unblock_a_decrypt_failed_provider(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """An empty list or dict at the field is an absent credential, not a
+    supplied one, so it must not lift the decrypt block: the provider stays
+    out of the runtime configs, the selection and the admission until a
+    real value is supplied."""
+    from types import SimpleNamespace
+
+    from app import get_providers
+    from app.config import remove_settings_section, settings
+    from provider_hub import service
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      runtime_provider_configs)
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # No section value at all: blocked in every direction.
+        assert "examplehub" not in runtime_provider_configs()
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+
+        # The section holds an empty collection at the field: an absent
+        # value, so the block stands in every direction.
+        for empty in ([], {}):
+            settings.set("examplehub", {"api_key": empty})
+            assert "examplehub" not in runtime_provider_configs()
+            assert decrypt_blocked_provider_ids() == {"examplehub"}
+            with monkeypatch.context() as context:
+                context.setattr(
+                    get_providers, "settings",
+                    SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+                context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+                context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+                assert "examplehub" not in (get_providers.get_providers() or [])
+                assert get_providers.provider_is_usable("examplehub") is False
+
+        # A real value in the section is a supplied credential: the block
+        # lifts and the provider is searched again.
+        settings.set("examplehub", {"api_key": "unit-live-secret"})  # pragma: allowlist secret
+        assert "examplehub" in runtime_provider_configs()
+        assert decrypt_blocked_provider_ids() == set()
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is True
+    finally:
+        remove_settings_section("examplehub")
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_a_failed_settings_section_credential_blocks_selection_and_admission(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A credential in the plugin's own config.yaml section that failed to
+    decrypt at boot is withheld from the overlay, so with no working stored
+    value behind it the provider is left out of configuration, selection
+    and admission, exactly like a broken stored credential. A working
+    stored value for the same declared field satisfies it."""
+    from types import SimpleNamespace
+
+    from app import get_providers
+    from provider_hub import service
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      update_provider)
+    from secret_store.migration import reset_decrypt_failures
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    # The post-boot state of a failed section credential: the live value is
+    # withheld as empty and its path is in the failure set.
+    from secret_store.migration import _FAILED_DECRYPT_PATHS
+    _FAILED_DECRYPT_PATHS.add("examplehub.api_key")
+
+    try:
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        # Configuration: the withheld empty value is never laid over the
+        # stored config, and the broken credential travels nowhere.
+        auth = get_providers.get_providers_auth()
+        assert "api_key" not in auth["examplehub"]
+        assert "tampered" not in json.dumps(auth)
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" not in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is False
+
+        # A working stored value for the same declared field satisfies the
+        # failed section credential: the overlay is empty, the stored one
+        # stands, and the provider is searched again.
+        update_provider("examplehub", config={"api_key": "unit-stored-secret"})  # pragma: allowlist secret
+        assert decrypt_blocked_provider_ids() == set()
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is True
+        assert get_providers.get_providers_auth()["examplehub"]["api_key"] == "unit-stored-secret"
+    finally:
+        reset_decrypt_failures()
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_the_blocked_set_is_cached_and_invalidated_by_a_state_mutation(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The admission gate runs before every provider call, so the blocked
+    set is computed once per state.json version: repeated calls do not
+    re-read and re-walk the file, and a mutation that fixes a credential
+    invalidates the cache on the spot."""
+    from provider_hub import service
+    from provider_hub.service import decrypt_blocked_provider_ids, update_provider
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    assert decrypt_blocked_provider_ids() == {"examplehub"}
+
+    # The cached answer: no re-walk of the state behind it.
+    original = service._effective_installation_config
+    calls = []
+
+    def counting(installation, state=None):
+        calls.append(installation.get("provider_id"))
+        return original(installation, state)
+
+    monkeypatch.setattr(service, "_effective_installation_config", counting)
+    try:
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        assert calls == []
+
+        # A mutation invalidates the cache: the next call recomputes.
+        update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+        assert decrypt_blocked_provider_ids() == set()
+        assert calls == ["examplehub"]
+    finally:
+        monkeypatch.setattr(service, "_effective_installation_config", original)
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_a_cache_hit_never_loads_state(tmp_path, monkeypatch, isolated_plugin_registry):
+    """The cache key is read before anything else, so a hit answers without
+    loading and parsing state.json: the admission gate runs before every
+    provider call, and the file read it saved was the point of the cache."""
+    from provider_hub import service
+    from provider_hub.service import decrypt_blocked_provider_ids
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # The first call computes and caches under the state's identity.
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+
+        original = service.load_state
+        loads = []
+
+        def counting():
+            loads.append(1)
+            return original()
+
+        monkeypatch.setattr(service, "load_state", counting)
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        assert loads == []
+    finally:
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_a_save_during_the_cache_computation_is_not_cached(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A credential corrected while the gate is computing its answer must not
+    have the pre-save answer cached under the post-save state identity: the
+    provider would stay out of searches until some other write, exactly what
+    the correction was supposed to end. The answer computed from the
+    pre-save state is served for that one call and never stored."""
+    from provider_hub import service
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      update_provider)
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    original_load = service.load_state
+    saved = {"done": False}
+
+    def load_then_save():
+        state = original_load()
+        if not saved["done"]:
+            saved["done"] = True
+            # The correction lands while the gate holds the pre-save state.
+            update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+        return state
+
+    monkeypatch.setattr(service, "load_state", load_then_save)
+    try:
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        # The next call sees the corrected state, not the stale answer.
+        assert decrypt_blocked_provider_ids() == set()
+    finally:
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_the_update_path_refuses_to_encrypt_under_a_memory_only_master_key(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The Hub update path makes the master key durable before any secret it
+    encrypts is committed. Without that, a settings write that keeps failing
+    would leave ciphertext in state.json under a key that exists only in
+    memory, and a restart would mint a different one: a credential no boot
+    can ever open. The refusal is the existing could-not-be-encrypted one,
+    and nothing is stored."""
+    from provider_hub.state import load_state
+    from secret_store import crypto
+    from provider_hub.service import update_provider
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    # A master key that exists only in this process's memory: the boot has
+    # not written it to disk, and the settings write that would keeps
+    # failing.
+    monkeypatch.setattr(crypto, "_unpersisted_master_keys", set())
+    original_get_master_key = crypto.get_master_key
+
+    def memory_only_key(settings_obj=None):
+        key = original_get_master_key(settings_obj)
+        crypto._unpersisted_master_keys.add(key)
+        return key
+
+    monkeypatch.setattr(crypto, "get_master_key", memory_only_key)
+    monkeypatch.setattr("app.config.write_config", lambda: False)
+
+    with pytest.raises(ValueError) as refused:
+        update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+    assert "could not be encrypted" in str(refused.value)
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert stored == {"region": "eu"}
+    assert "enc:v1:" not in json.dumps(stored)
+
+
+def test_the_update_route_refuses_config_keys_no_manifest_declares(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A PATCH can only write fields a manifest declares or the registry
+    names. An undeclared key would sit in plaintext in state, the API
+    response and the worker config until the next boot's discovery
+    disagreed with what this write did, so the route refuses it, and the
+    refusal is atomic: a declared field in the same request is not applied
+    either."""
+    from provider_hub.state import load_state
+    from provider_hub.service import update_provider
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                "config": {"region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    with pytest.raises(ValueError) as refused:
+        update_provider("examplehub", config={"undeclared_token": "unit-value"})  # pragma: allowlist secret
+    assert "not declared" in str(refused.value)
+
+    before = load_state()["installations"]["examplehub"]["config"]
+    with pytest.raises(ValueError):
+        update_provider("examplehub", config={"region": "us", "undeclared_token": "unit-value"})  # pragma: allowlist secret
+    assert load_state()["installations"]["examplehub"]["config"] == before
+    assert "undeclared_token" not in json.dumps(before)
+
+    # A declared plain field and a declared secret still store, together.
+    provider = update_provider("examplehub", config={"region": "us", "api_key": "unit-text-secret"})  # pragma: allowlist secret
+    assert provider["config"]["region"] == "us"
+    assert load_state()["installations"]["examplehub"]["config"]["region"] == "us"
+
+
+def test_a_mixed_case_secret_key_is_stored_under_its_canonical_name(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A PATCH naming a declared secret with the wrong case (API_KEY for
+    api_key) is canonicalized before classification, encryption and
+    storage, the same lowercase spelling the manifest declares and the
+    reader walks. Stored as typed it would sit beside the declared field
+    in plaintext under its mixed-case name, and the redaction, which
+    answers for the declared name, would hand it back as it stood."""
+    from provider_hub.service import runtime_provider_configs, update_provider
+    from provider_hub.state import load_state
+    from secret_store.crypto import decrypt_secret, is_encrypted
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                "config": {"region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    provider = update_provider("examplehub", config={"API_KEY": "unit-secret-value"})  # pragma: allowlist secret
+
+    # Stored under the canonical name only, encrypted at rest.
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert "API_KEY" not in stored
+    assert is_encrypted(stored["api_key"])
+    assert decrypt_secret(stored["api_key"]) == "unit-secret-value"  # pragma: allowlist secret
+    # The reader treats the key the way the writer does: the redaction
+    # answers for the canonical name, and no value comes back under
+    # either spelling.
+    assert provider["config"]["api_key"] == ""
+    assert "API_KEY" not in provider["config"]
+    assert "unit-secret-value" not in json.dumps(provider)  # pragma: allowlist secret
+    # The worker receives the decrypted credential under the canonical
+    # name.
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "unit-secret-value"  # pragma: allowlist secret
+
+
+def test_a_persisted_mixed_case_credential_is_never_served_or_stored_as_it_stood(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A credential an earlier version persisted under a mixed-case alias
+    of a declared secret field (API_KEY for api_key) is the credential the
+    canonical name answers for. The installation API never returns it,
+    whatever spelling it sits under, and the next update canonicalizes it
+    away: an update that replaces the credential drops the alias with the
+    old value, and one that touches nothing related moves the alias's
+    value under the canonical name, encrypted. The alias never survives
+    to ride another response."""
+    from provider_hub.service import get_provider, update_provider
+    from provider_hub.state import load_state
+    from secret_store.crypto import decrypt_secret, is_encrypted
+
+    alias_state = {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                "config": {"region": "eu", "API_KEY": "unit-alias-secret"},
+            }
+        },
+        "jobs": [],
     }
 
-    update_provider("examplehub", config={"api_key": "new-secret"})  # pragma: allowlist secret
+    # The redaction answers for every spelling: the stored alias value
+    # never comes back.
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, alias_state)))
+    served = get_provider("examplehub")["config"]
+    assert served["API_KEY"] == ""
+    assert served["api_key"] == ""
+    assert "unit-alias-secret" not in json.dumps(served)  # pragma: allowlist secret
 
-    assert runtime_provider_configs()["examplehub"]["api_key"] == "new-secret"  # pragma: allowlist secret
+    # An update that replaces the credential stores the canonical writer's
+    # value and drops the alias with it.
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, alias_state)))
+    update_provider("examplehub", config={"api_key": "unit-new-secret"})  # pragma: allowlist secret
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert "API_KEY" not in stored
+    assert is_encrypted(stored["api_key"])
+    assert decrypt_secret(stored["api_key"]) == "unit-new-secret"  # pragma: allowlist secret
+    assert "unit-alias-secret" not in json.dumps(get_provider("examplehub"))  # pragma: allowlist secret
+
+    # An unrelated update canonicalizes the alias away too: the stored
+    # value moves under the canonical name, encrypted at rest.
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, alias_state)))
+    update_provider("examplehub", config={"region": "us"})
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert stored["region"] == "us"
+    assert set(stored) == {"region", "api_key"}
+    assert is_encrypted(stored["api_key"])
+    assert decrypt_secret(stored["api_key"]) == "unit-alias-secret"  # pragma: allowlist secret
+
+
+def test_an_unrelated_update_encrypts_a_stored_non_text_alias(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A stored alias holding a non-string scalar (a typed token an older
+    save coerced into a number) moves under the canonical name as the typed
+    text it stands for, encrypted: the move is a write to a secret slot, so
+    the canonical secret name never holds plaintext after it, and the
+    worker receives the decrypted token rather than a bare number."""
+    from provider_hub.service import runtime_provider_configs, update_provider
+    from provider_hub.state import load_state
+    from secret_store.crypto import decrypt_secret, is_encrypted
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                "config": {"region": "eu", "API_KEY": 12345678901234567},
+            }
+        },
+        "jobs": [],
+    })))
+
+    update_provider("examplehub", config={"region": "us"})
+
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert "API_KEY" not in stored
+    assert stored["region"] == "us"
+    assert is_encrypted(stored["api_key"])
+    assert decrypt_secret(stored["api_key"]) == "12345678901234567"
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "12345678901234567"
+
+
+def test_a_mixed_case_alias_colliding_with_a_canonical_value_keeps_the_canonical(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The stored alias never displaces the canonical value: whichever
+    order the config holds them in, the value the canonical writer
+    exposes is the one that stays and the alias drops."""
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state
+    from secret_store.crypto import decrypt_secret, encrypt_secret
+
+    for stored_config in ({"region": "eu", "API_KEY": "unit-alias-left",
+                           "api_key": encrypt_secret("unit-canonical")},
+                          {"region": "eu", "api_key": encrypt_secret("unit-canonical"),
+                           "API_KEY": "unit-alias-left"}):
+        monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, {
+            "installations": {
+                "examplehub": {
+                    "provider_id": "examplehub",
+                    "name": "Example Hub Provider",
+                    "active_version": "1.0.0",
+                    "state": "active",
+                    "pending_restart": False,
+                    "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                    "config": dict(stored_config),
+                }
+            },
+            "jobs": [],
+        })))
+
+        update_provider("examplehub", config={"region": "us"})
+
+        stored = load_state()["installations"]["examplehub"]["config"]
+        assert set(stored) == {"region", "api_key"}
+        assert stored["region"] == "us"
+        assert decrypt_secret(stored["api_key"]) == "unit-canonical"  # pragma: allowlist secret
+
+
+def test_a_lifted_block_clears_the_stale_re_enter_it_note(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The re-enter-it note is the echo of the block, so it goes when the
+    block lifts on its own: a settings-section value starts covering the
+    field, the provider is searched again, and the installation stops
+    asking for a credential it already has. While the block stands, the
+    note stays."""
+    from app.config import remove_settings_section, settings
+    from provider_hub import service
+    from provider_hub.service import (DECRYPT_FAILED_MESSAGE,
+                                      runtime_provider_configs)
+    from provider_hub.state import load_state
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+                "last_error": DECRYPT_FAILED_MESSAGE,
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # Blocked: out of the runtime configs, and the note stands.
+        assert "examplehub" not in runtime_provider_configs()
+        assert load_state()["installations"]["examplehub"]["last_error"] == DECRYPT_FAILED_MESSAGE
+
+        # The settings section starts supplying the credential: the block
+        # lifts, the provider is admitted, and the note is cleared with it.
+        settings.set("examplehub", {"api_key": "unit-live-secret"})  # pragma: allowlist secret
+        configs = runtime_provider_configs()
+        assert "examplehub" in configs
+        assert "api_key" not in configs["examplehub"]
+        assert load_state()["installations"]["examplehub"]["last_error"] is None
+    finally:
+        remove_settings_section("examplehub")
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_the_settings_overlay_covers_a_pending_restart_installation(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A pending update keeps the active version running, and the runtime
+    configs admit it with its settings-section value standing in for a
+    credential the stored config can no longer supply. The overlay walks the
+    same active-version population with the active manifest, so the
+    replacement actually reaches the worker; a field only the staged schema
+    declares never does, because the code that is running is the active
+    version's."""
+    from app import get_providers
+    from app.config import remove_settings_section, settings
+    from provider_hub import service
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      runtime_provider_configs)
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": True,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "staged_manifest": _manifest(
+                    version="2.0.0",
+                    config_schema={
+                        "type": "object",
+                        "properties": {
+                            "api_key": {"type": "string", "secret": True},
+                            "staged_only_token": {"type": "string", "secret": True},
+                        },
+                    },
+                    secret_fields=["api_key", "staged_only_token"],
+                    dependencies={"requirements": []},
+                ),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # The section supplies the replacement, so the provider is admitted.
+        settings.set("examplehub", {"api_key": "unit-live-secret",  # pragma: allowlist secret
+                                    "staged_only_token": "unit-staged-value"})
+        assert "examplehub" in runtime_provider_configs()
+        assert decrypt_blocked_provider_ids() == set()
+
+        auth = get_providers.get_providers_auth()
+        assert auth["examplehub"]["api_key"] == "unit-live-secret"
+        # A field only the staged version declares is never overlaid: the
+        # active code does not read it.
+        assert "staged_only_token" not in auth["examplehub"]
+        assert "tampered" not in json.dumps(auth)
+    finally:
+        remove_settings_section("examplehub")
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_stage_install_local_persists_plugin_secret_paths(tmp_path, monkeypatch):
+    """Installing a plugin registers its schema's secret paths in the live
+    registry and in the persisted set, so the plugin's credentials are
+    write-only from the moment it is configured."""
+    from provider_hub.service import stage_install_local
+    from provider_hub.state import load_state
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="locallyinstalled",
+        name="Locally Installed",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    package = _provider_zip(manifest, file_payloads, prefix="locallyinstalled/")
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    from secret_store import registry
+
+    saved_paths = set(registry.plugin_secret_paths())
+    registry.reset_plugin_secret_paths()
+    try:
+        stage_install_local(package)
+
+        # The manifest's api_key is a declared secret, so it is registered in
+        # the live registry and persisted with the installation.
+        assert registry.is_plugin_secret("locallyinstalled.api_key")
+        persisted_paths = load_state().get("plugin_secret_paths") or []
+        assert "locallyinstalled.api_key" in persisted_paths
+    finally:
+        registry.reset_plugin_secret_paths(saved_paths)
+
+
+def test_stage_install_local_repairs_a_malformed_persisted_path_set(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A persisted plugin_secret_paths that is not a list survives a boot
+    that discovers nothing (the boot only rewrites the set when it has a
+    path to add), so the next plugin installation is what meets the
+    value. That installation reads the persisted set through the shared
+    persisted-path validator rather than iterating the raw value: it does
+    not break on the malformed shape, and its write repairs the set to
+    the valid union of what it held and what it adds."""
+    from provider_hub.service import stage_install_local
+    from provider_hub.state import load_state
+    from secret_store.registry import load_plugin_secret_paths
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="locallyinstalled",
+        name="Locally Installed",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    package = _provider_zip(manifest, file_payloads, prefix="locallyinstalled/")
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({
+        "installations": {}, "jobs": [], "plugin_secret_paths": 42,
+    }), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    # The boot discovers no paths, so the malformed value survives it.
+    load_plugin_secret_paths(_EmptyScanSettings())
+    assert load_state()["plugin_secret_paths"] == 42
+
+    stage_install_local(package)
+
+    # The credentialed installation neither broke on the value nor kept
+    # it: the set is the valid union now.
+    assert isolated_plugin_registry.is_plugin_secret("locallyinstalled.api_key")
+    assert load_state()["plugin_secret_paths"] == ["locallyinstalled.api_key"]
+
+
+def test_a_hub_config_save_moving_a_declared_destination_asks_for_the_key_again(tmp_path, monkeypatch):
+    """The Hub's update path writes the installation's own config, the second
+    of a plugin's two config stores, so it follows the same destination rule
+    the settings save follows: moving a field the manifest formats as a uri is
+    refused while the plugin's stored key is retained, in whichever store it
+    sits, and the refusal carries the same re-enter message the settings path
+    returns. The unfixed path wrote the move with the kept token."""
+    from flask import Flask
+
+    import api.provider_hub.provider_hub as hub_api
+    from provider_hub.service import SECRET_PLACEHOLDER
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"api_url": "https://old.example:9", "api_token": "stored-token"},
+        "manifest": {
+            "provider_id": "examplehub",
+            "version": "1.0.0",
+            "config_schema": {"type": "object", "properties": {
+                "api_url": {"type": "string", "format": "uri"},
+                "api_token": {"type": "string"},
+            }},
+            "secret_fields": ["api_token"],
+        },
+    }
+    save_state(state)
+
+    app = Flask(__name__)
+
+    def patch_config(config):
+        # The route answers a tuple on its refusals and the provider on success.
+        with app.test_request_context("/api/provider-hub/providers/examplehub", method="PATCH",
+                                      json={"config": config}):
+            result = hub_api.ProviderHubProvider.patch.__wrapped__(
+                hub_api.ProviderHubProvider(), "examplehub")
+        return result if isinstance(result, tuple) else (result, 200)
+
+    body, status = patch_config({"api_url": "https://moved.example:9"})
+    assert status == 400
+    assert body == "Re-enter the key to use a different address"
+    assert load_state()["installations"]["examplehub"]["config"]["api_url"] == "https://old.example:9"
+
+    # The placeholder keeps the stored token, so the move is still refused.
+    body, status = patch_config({"api_url": "https://moved.example:9",
+                                 "api_token": SECRET_PLACEHOLDER})
+    assert status == 400
+    assert body == "Re-enter the key to use a different address"
+    assert load_state()["installations"]["examplehub"]["config"]["api_url"] == "https://old.example:9"
+
+    # Typed again, the move lands, the way the settings path lets it, and the
+    # answer carries the token the way the installation API hands a stored
+    # secret back: write-only, an empty value with the descriptor.
+    body, status = patch_config({"api_url": "https://moved.example:9",
+                                 "api_token": "typed-again"})
+    assert status == 200
+    assert body["config"]["api_url"] == "https://moved.example:9"
+    assert body["config"]["api_token"] == ""
+    assert body["config"]["__secret_fields"]["api_token"]["configured"] is True
+
+
+def test_a_structurally_invalid_manifest_refuses_a_hub_config_move(tmp_path, monkeypatch):
+    """An installed row whose manifests carry none of the structure their
+    declarations are read from, `manifest: {}` among them, is a provider whose
+    fields cannot be vouched for, not a plugin without secrets: the Hub's own
+    save path refuses the address move with the token still stored, the same
+    fail-closed answer a row without readable manifest data gets. The
+    unfixed rule read the empty document as empty declarations and wrote the
+    move with the kept token."""
+    from provider_hub.state import load_state, save_state
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"api_url": "https://old.example:9", "api_token": "stored-token"},
+        "manifest": {},
+        "staged_manifest": {},
+    }
+    save_state(state)
+
+    body, status = _patch_provider_config({"api_url": "https://moved.example:9"})
+
+    assert status == 400, body
+    assert body == ("The provider data needed to check this address change "
+                    "could not be read, so the address was not changed")
+    assert load_state()["installations"]["examplehub"]["config"]["api_url"] == "https://old.example:9"
+
+
+def test_a_hub_config_save_moving_a_uri_formatted_field_without_readable_provider_data_is_refused(
+        tmp_path, monkeypatch):
+    """A field a manifest formats as a uri is a destination only the
+    declarations can name, so while they cannot be read no field can be
+    vouched for: the Hub's own save path refuses the service_uri move with the
+    token still stored, the same refusal a key-shaped move gets, rather than
+    reading it as a field the unreadable data says nothing about. A
+    submission that changes nothing is not refused by the move rule, because
+    nothing moves; the write layer still refuses every field a row without a
+    manifest cannot declare, so the submission never writes."""
+    from provider_hub.service import SECRET_PLACEHOLDER
+    from provider_hub.state import load_state, save_state
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"service_uri": "https://old.example:1", "api_token": "stored-token"},
+    }
+    save_state(state)
+
+    body, status = _patch_provider_config({"service_uri": "https://moved.example:1"})
+
+    assert status == 400, body
+    assert body == ("The provider data needed to check this address change "
+                    "could not be read, so the address was not changed")
+    assert load_state()["installations"]["examplehub"]["config"]["service_uri"] == "https://old.example:1"
+
+    # Nothing moves, so the move rule does not refuse the submission: the
+    # placeholder keeps the stored token the way a value that changes nothing
+    # does. The write layer still refuses it, because a row without a
+    # manifest cannot declare the field it is asked to keep, so no field a
+    # manifest-less row holds can be written back, and the state is left
+    # exactly as it was.
+    body, status = _patch_provider_config({"service_uri": "https://old.example:1",
+                                           "api_token": SECRET_PLACEHOLDER})
+    assert status == 400, body
+    assert body == ("The configuration field service_uri is not declared by the "
+                    "provider's manifest, so the configuration was not saved.")
+    assert load_state()["installations"]["examplehub"]["config"]["service_uri"] == "https://old.example:1"
+    assert load_state()["installations"]["examplehub"]["config"]["api_token"] == "stored-token"
+
+
+def test_a_hub_save_storing_an_empty_uri_blocks_the_default_it_reaches_back_to(
+        tmp_path, monkeypatch):
+    """Key presence is read the way the provider reader reads it on the Hub's
+    own save path too: a field the manifest gives a default to reaches that
+    default only while the key is absent from the installation's config, so
+    storing an empty string moves the effective destination from the default
+    to the empty address, and the move is refused while the token stays
+    retained. The unfixed comparison treated the empty value as absent, so
+    the save landed with the kept token."""
+    from provider_hub.state import load_state, save_state
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"api_token": "stored-token"},
+        "manifest": {
+            "provider_id": "examplehub",
+            "version": "1.0.0",
+            "config_schema": {"type": "object", "properties": {
+                "service_uri": {"type": "string", "format": "uri",
+                                "default": "https://default.example:9"},
+                "api_token": {"type": "string"},
+            }},
+            "secret_fields": ["api_token"],
+        },
+    }
+    save_state(state)
+
+    body, status = _patch_provider_config({"service_uri": ""})
+
+    assert status == 400, body
+    assert body == "Re-enter the key to use a different address"
+    assert load_state()["installations"]["examplehub"]["config"] == {"api_token": "stored-token"}
 
 
 def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkeypatch):
@@ -1950,7 +3515,7 @@ def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkey
             "active_version": "1.0.0",
             "state": "active",
             "pending_restart": False,
-            "manifest": _manifest(dependencies={"requirements": []}),
+            "manifest": _manifest_with_region(dependencies={"requirements": []}),
             "config": {},
         }
     }
@@ -2280,8 +3845,8 @@ def test_list_catalog_auto_refreshes_unchecked_sources(tmp_path, monkeypatch):
     from provider_hub.service import list_catalog
 
     def fake_get(url, timeout, **_kwargs):
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "d" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
         return _FakeResponse(
             {
                 "providers": [
@@ -2322,8 +3887,8 @@ def test_catalog_refresh_fetches_github_catalog_entries(tmp_path, monkeypatch):
 
     def fake_get(url, timeout, **_kwargs):
         calls.append((url, timeout))
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "d" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
         if "LavX/bazarr-provider-catalog" in url:
             return _FakeResponse({"providers": []})
         return _FakeResponse({"providers": [{"manifest": _manifest(provider_id="cataloghub")} ]})
@@ -2341,7 +3906,9 @@ def test_catalog_refresh_fetches_github_catalog_entries(tmp_path, monkeypatch):
     catalog = list_catalog()
     assert catalog["entries"][0]["provider_id"] == "cataloghub"
     assert catalog["entries"][0]["trusted"] is False
-    assert any(call[0].endswith("/repos/example/providers/commits/main") for call in calls)
+    assert "https://github.com/example/providers/info/refs?service=git-upload-pack" in [
+        call[0] for call in calls
+    ]
     assert (
         "https://raw.githubusercontent.com/example/providers/" + ("d" * 40) + "/catalog.json",
         30,
@@ -2353,8 +3920,8 @@ def test_catalog_refresh_prunes_stale_entries_for_successful_source(tmp_path, mo
     from provider_hub.service import list_catalog, refresh_catalog
 
     def fake_get(url, timeout, **_kwargs):
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "d" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
         if "LavX/bazarr-provider-catalog" in url:
             return _FakeResponse({"providers": []})
         return _FakeResponse({"providers": [{"manifest": _manifest(provider_id="freshhub")} ]})
@@ -3184,8 +4751,11 @@ def test_refresh_catalog_uses_dev_ref_when_set(tmp_path, monkeypatch):
 
     def fake_get(url, timeout, **_kwargs):
         calls.append(url)
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "f" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([
+                ("a" * 40, "refs/heads/main"),
+                ("f" * 40, "refs/heads/feat/test-branch"),
+            ]))
         return _FakeResponse({"providers": []})
 
     monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
@@ -3203,10 +4773,11 @@ def test_refresh_catalog_uses_dev_ref_when_set(tmp_path, monkeypatch):
     update_catalog_source("community", dev_ref="feat/test-branch")
     refresh_catalog()
 
-    assert any(
-        url.endswith("/repos/example/providers/commits/feat/test-branch")
-        for url in calls
-    ), f"calls were: {calls}"
+    from provider_hub.state import load_state
+
+    assert load_state()["catalog_sources"]["community"]["resolved_commit"] == "f" * 40, (
+        f"calls were: {calls}"
+    )
 
 
 def test_refresh_catalog_reports_network_errors_for_users(tmp_path, monkeypatch):
@@ -3252,8 +4823,11 @@ def test_patch_catalog_source_updates_dev_ref(tmp_path, monkeypatch):
     )
 
     def fake_get(url, timeout, **_kwargs):
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "9" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([
+                ("9" * 40, "refs/heads/main"),
+                ("9" * 40, "refs/heads/feat/branch"),
+            ]))
         return _FakeResponse({"providers": []})
 
     monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
@@ -3516,8 +5090,8 @@ def test_refresh_catalog_records_summary(tmp_path, monkeypatch):
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
 
     def fake_get(url, timeout, **_kwargs):
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "f" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("f" * 40, "refs/heads/main")]))
         return _FakeResponse({"providers": []})
 
     monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
@@ -3752,32 +5326,42 @@ def test_runtime_provider_configs_includes_pending_restart_with_active_version(
 ):
     from provider_hub import service
     from provider_hub.state import load_state, save_state
+    from secret_store import registry
 
-    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
-    state = load_state()
-    state["installations"]["examplehub"] = {
-        "provider_id": "examplehub",
-        "name": "Example",
-        "active_version": "1.0.0",
-        "state": "staged",
-        "pending_restart": True,
-        "config": {"api_key": "abc"},
-        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
-    }
-    state["installations"]["nokey"] = {
-        "provider_id": "nokey",
-        "active_version": None,
-        "state": "staged",
-        "pending_restart": True,
-        "config": {},
-        "manifest": {"provider_id": "nokey", "version": "1.0.0"},
-    }
-    save_state(state)
+    # The manifest declares no schema at all, so nothing in this config is a
+    # secret: keep earlier tests' registrations out, or this fixture's
+    # api_key would be judged as a retained field the schema does not
+    # declare and excluded from the worker config.
+    saved_paths = set(registry.plugin_secret_paths())
+    registry.reset_plugin_secret_paths()
+    try:
+        monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+        state = load_state()
+        state["installations"]["examplehub"] = {
+            "provider_id": "examplehub",
+            "name": "Example",
+            "active_version": "1.0.0",
+            "state": "staged",
+            "pending_restart": True,
+            "config": {"api_key": "abc"},
+            "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+        }
+        state["installations"]["nokey"] = {
+            "provider_id": "nokey",
+            "active_version": None,
+            "state": "staged",
+            "pending_restart": True,
+            "config": {},
+            "manifest": {"provider_id": "nokey", "version": "1.0.0"},
+        }
+        save_state(state)
 
-    configs = service.runtime_provider_configs()
-    assert "examplehub" in configs
-    assert configs["examplehub"].get("api_key") == "abc"
-    assert "nokey" not in configs
+        configs = service.runtime_provider_configs()
+        assert "examplehub" in configs
+        assert configs["examplehub"].get("api_key") == "abc"
+        assert "nokey" not in configs
+    finally:
+        registry.reset_plugin_secret_paths(saved_paths)
 
 
 def test_remove_catalog_source_purges_catalog_entries(tmp_path, monkeypatch):
@@ -5088,11 +6672,9 @@ class _FakeGitHub:
         monkeypatch.setattr("provider_hub.service.requests.get", self.get)
 
     def get(self, url, timeout, **_kwargs):
-        if url.startswith(_OFFICIAL_REPO_API + "/commits/"):
-            return _GitHubAnswer({"sha": self.heads[url.rsplit("/", 1)[1]]})
-        if url == _OFFICIAL_REPO_API + "/git/matching-refs/heads/":
-            return _GitHubAnswer([{"ref": f"refs/heads/{name}", "object": {"sha": sha}}
-                                  for name, sha in self.heads.items()])
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement(
+                [(sha, f"refs/heads/{name}") for name, sha in self.heads.items()]))
         if url.startswith(_OFFICIAL_REPO_API + "/compare/"):
             base, head = url.rsplit("/", 1)[1].split("...")
             self.compares.append((base, head))
@@ -5430,10 +7012,10 @@ def test_one_source_failing_does_not_block_other_sources(tmp_path, monkeypatch):
                                  "catalog_url": f"https://github.com/{repo}/catalog/blob/main/catalog.json"})
 
     def get(url, timeout, **_kwargs):
-        if url.startswith("https://api.github.com/repos/broken/catalog/"):
+        if url.startswith("https://github.com/broken/catalog/"):
             raise requests.exceptions.ConnectionError("could not reach GitHub")
-        if url == "https://api.github.com/repos/live/catalog/commits/main":
-            return _FakeResponse({"sha": live_commit})
+        if url == "https://github.com/live/catalog/info/refs?service=git-upload-pack":
+            return _AdvertisementResponse(_git_advertisement([(live_commit, "refs/heads/main")]))
         if url == f"https://raw.githubusercontent.com/live/catalog/{live_commit}/catalog.json":
             return _FakeResponse({"providers": [
                 {"manifest": community("live", "livehub", "2.0.0", live_commit)}]})
@@ -5453,3 +7035,1403 @@ def test_one_source_failing_does_not_block_other_sources(tmp_path, monkeypatch):
     live = state["catalog_sources"]["live"]
     assert (live["last_error"], live["resolved_commit"]) == (None, live_commit)
     assert set(state["catalog_entries"]) == {"broken:brokenhub:1.0.0", "live:livehub:2.0.0"}
+
+
+# Catalog ref resolution over the git smart-HTTP protocol: the ref
+# advertisement every git client reads, parsed with bounds, plus the
+# unchanged-commit skip that ends a refresh after the advertisement.
+
+_OFFICIAL_AD = "https://github.com/LavX/bazarr-provider-catalog/info/refs?service=git-upload-pack"
+_COMMUNITY_AD = "https://github.com/community/catalog/info/refs?service=git-upload-pack"
+
+_FROZEN_NOW = "2026-10-08T12:00:00Z"
+_OLD_CHECK = "2020-01-01T00:00:00Z"
+
+
+def _seed_a_successful_check(tmp_path, monkeypatch, source):
+    """Seed an old successful check on ``source`` and freeze the clock, so a
+    refresh that records a fresh check at the current time is provable."""
+    from provider_hub.state import load_state, save_state
+
+    state = load_state()
+    state["catalog_sources"][source]["last_checked_at"] = _OLD_CHECK
+    state["catalog_sources"][source]["last_error"] = None
+    save_state(state)
+    monkeypatch.setattr("provider_hub.service.utcnow_iso", lambda: _FROZEN_NOW)
+
+
+def _pkt_line(payload: bytes) -> bytes:
+    return ("%04x" % (len(payload) + 4)).encode("ascii") + payload
+
+
+def _git_advertisement(refs) -> bytes:
+    """A protocol v0 ref advertisement body: the service banner, a flush, one
+    ``<sha> <ref>`` line per entry (the first carrying the symref capability a
+    real server sends), then the closing flush."""
+    body = [_pkt_line(b"# service=git-upload-pack\n"), b"0000"]
+    for index, (sha, name) in enumerate(refs):
+        capabilities = b"\0symref=HEAD:refs/heads/main agent=git/2.43.0" if index == 0 else b""
+        body.append(_pkt_line(f"{sha} {name}".encode("utf-8") + capabilities + b"\n"))
+    body.append(b"0000")
+    return b"".join(body)
+
+
+class _AdvertisementResponse(_FakeResponse):
+    def __init__(self, content=b"", content_type="application/x-git-upload-pack-advertisement",
+                 status_code=200, content_length=None):
+        super().__init__(content=content)
+        self.status_code = status_code
+        self.headers = {"Content-Type": content_type}
+        if content_length is None:
+            content_length = len(content)
+        if content_length:
+            self.headers["Content-Length"] = str(content_length)
+        self.closed = False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            raise requests.exceptions.HTTPError(f"HTTP {self.status_code}", response=self)
+
+    def close(self):
+        self.closed = True
+
+    def iter_content(self, chunk_size=None):
+        yield self.content
+
+
+def test_advertisement_parser_reads_heads_and_peeled_tags_only():
+    from provider_hub.service import _parse_git_ref_advertisement
+
+    body = _git_advertisement([
+        ("a" * 40, "refs/heads/main"),
+        ("b" * 40, "refs/heads/feature/slash-bearing"),
+        ("c" * 40, "refs/tags/v1.0.0"),
+        ("d" * 40, "refs/tags/v1.0.0^{}"),
+        ("e" * 40, "refs/pull/1/head"),
+        ("f" * 40, "refs/remotes/origin/old"),
+        ("0" * 40, "HEAD"),
+    ])
+
+    refs = _parse_git_ref_advertisement(body)
+
+    assert refs == {
+        "refs/heads/main": "a" * 40,
+        "refs/heads/feature/slash-bearing": "b" * 40,
+        "refs/tags/v1.0.0": "d" * 40,
+    }
+
+
+def test_advertisement_parser_accepts_a_real_shaped_body_with_pull_refs():
+    from provider_hub.service import _parse_git_ref_advertisement
+
+    # Not a capture: the capture lives in the fixture parsed by the test
+    # below. This synthetic body stresses the parser with a large block of
+    # namespaces it must skip, the shape a busy repository advertises.
+    refs = [(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]
+    for number in range(1, 155):
+        refs.append(("%040x" % number, f"refs/pull/{number}/head"))
+        refs.append(("%040x" % (number + 1000), f"refs/pull/{number}/merge"))
+    refs.append(("c" * 40, "refs/tags/v2.7.1"))
+    refs.append(("d" * 40, "refs/tags/v2.7.1^{}"))
+
+    parsed = _parse_git_ref_advertisement(_git_advertisement(refs))
+
+    assert parsed == {
+        "refs/heads/main": _MAIN,
+        "refs/heads/beta": _BETA,
+        "refs/tags/v2.7.1": "d" * 40,
+    }
+
+
+_ADVERTISEMENT_BANNER_FLUSH = _pkt_line(b"# service=git-upload-pack\n") + b"0000"
+
+
+@pytest.mark.parametrize("body", [
+    b"",
+    b"0001",
+    b"0003",
+    b"zzzzjunk",
+    # A complete receive-pack advertisement: the exact service line is the
+    # rule that rejects it, not a missing closing flush.
+    _pkt_line(b"# service=git-receive-pack\n") + b"0000"
+    + _pkt_line((_MAIN + " refs/heads/main\n").encode()) + b"0000",
+    _pkt_line(b"# service=git-upload-pack\n") + b"0000" + _pkt_line(b"not a ref line\n"),
+    _pkt_line(b"# service=git-upload-pack\n") + b"0000" + _pkt_line(b"deadbeef refs/heads/main\n"),
+    _git_advertisement([(_MAIN, "refs/heads/main")])[:-6],
+    _git_advertisement([(_MAIN, "refs/heads/main")])[:-3],
+    # No closing flush: the ref list was cut off after a complete line.
+    _git_advertisement([(_MAIN, "refs/heads/main")])[:-4],
+    # Data appended after the closing flush.
+    _git_advertisement([(_MAIN, "refs/heads/main")])
+    + _pkt_line((_BETA + " refs/heads/beta\n").encode()),
+    # A ref line before the service banner: the protocol's first pkt-line
+    # is the service banner, and both flushes cannot legitimize it after.
+    _pkt_line((_MAIN + " refs/heads/main\n").encode())
+    + _pkt_line(b"# service=git-upload-pack\n") + b"0000" + b"0000",
+    # Length prefixes int(..., 16) tolerates when the regex is gone. Each
+    # reads as 61 against the 57-byte ref line that follows it, so without
+    # the regex the body parses clean instead of failing closed.
+    *(_ADVERTISEMENT_BANNER_FLUSH + bad_prefix
+       + (_MAIN + " refs/heads/main\n").encode() + b"0000"
+       for bad_prefix in (b" 03d", b"0x3d", b"+03d", b"0_3d")),
+    # A well-formed ref line whose 65,517-byte payload is over the bound.
+    _ADVERTISEMENT_BANNER_FLUSH
+    + _pkt_line((_MAIN + " refs/heads/main" + "-" * 65460 + "\n").encode()) + b"0000",
+    # The empty-repository marker with a real ref line after it: the marker
+    # is only the whole advertisement git sends for a repository with no refs.
+    _ADVERTISEMENT_BANNER_FLUSH
+    + _pkt_line(b"0" * 40 + b" capabilities^{}\0agent=git/2.43.0\n")
+    + _pkt_line((_MAIN + " refs/heads/main\n").encode()) + b"0000",
+    # A flush before the banner.
+    b"0000" + _pkt_line(b"# service=git-upload-pack\n"),
+    # A ref line after a second flush closed the list early.
+    _pkt_line(b"# service=git-upload-pack\n") + b"0000" + b"0000"
+    + _pkt_line((_MAIN + " refs/heads/main\n").encode()) + b"0000",
+])
+def test_advertisement_parser_fails_closed_on_malformed_bodies(body):
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    with pytest.raises(CatalogSourceError):
+        _parse_git_ref_advertisement(body)
+
+
+def test_advertisement_parser_rejects_a_ref_advertised_at_two_commits():
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    body = _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/main")])
+
+    with pytest.raises(CatalogSourceError):
+        _parse_git_ref_advertisement(body)
+
+
+def test_advertisement_parser_peels_only_a_tag_advertised_on_the_line_before():
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    # A peeled line that does not follow its own tag line.
+    not_after_its_tag = _git_advertisement([
+        (_MAIN, "refs/heads/main"),
+        ("a" * 40, "refs/tags/v1.0.0"),
+        ("b" * 40, "refs/tags/v2.0.0^{}"),
+    ])
+    # A peel that does not directly follow its own tag: v1, then v2, then
+    # the v1 peel, which is out of order even though v1 was advertised.
+    out_of_order_peel = _git_advertisement([
+        ("a" * 40, "refs/tags/v1"),
+        ("b" * 40, "refs/tags/v2"),
+        ("c" * 40, "refs/tags/v1^{}"),
+    ])
+    # A peeled line for a branch, which must never override its sha.
+    peel_of_a_branch = _git_advertisement([
+        (_MAIN, "refs/heads/main"),
+        (_BETA, "refs/heads/main^{}"),
+    ])
+    # A peeled line whose tag was never advertised.
+    peel_without_a_tag = _git_advertisement([("b" * 40, "refs/tags/v2.0.0^{}")])
+
+    for body in (not_after_its_tag, out_of_order_peel, peel_of_a_branch, peel_without_a_tag):
+        with pytest.raises(CatalogSourceError):
+            _parse_git_ref_advertisement(body)
+
+
+def test_advertisement_parser_rejects_a_tag_peeled_at_two_commits():
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    body = _git_advertisement([
+        ("a" * 40, "refs/tags/v1.0.0"),
+        ("b" * 40, "refs/tags/v1.0.0^{}"),
+        ("a" * 40, "refs/tags/v1.0.0"),
+        ("c" * 40, "refs/tags/v1.0.0^{}"),
+    ])
+
+    with pytest.raises(CatalogSourceError):
+        _parse_git_ref_advertisement(body)
+
+
+class _StreamingAdvertisement:
+    """A streamed advertisement answer that counts the chunks it gave out."""
+
+    def __init__(self, chunks, content_length=None):
+        self.headers = {"Content-Type": "application/x-git-upload-pack-advertisement"}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+        self.status_code = 200
+        self._chunks = chunks
+        self.consumed = 0
+        self.closed = False
+
+    def raise_for_status(self):
+        return None
+
+    def close(self):
+        self.closed = True
+
+    def iter_content(self, chunk_size=None):
+        for chunk in self._chunks:
+            self.consumed += 1
+            yield chunk
+
+
+def test_an_oversized_advertisement_stops_reading_early(monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError
+
+    chunks = [b"\0" * (2 * 1024 * 1024) for _ in range(20)]
+    response = _StreamingAdvertisement(chunks)
+    streams = []
+
+    def fake_get(url, timeout, stream=None, **_kwargs):
+        streams.append(stream)
+        return response
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+
+    with pytest.raises(CatalogSourceError):
+        service._fetch_git_ref_advertisement("owner", "repo")
+
+    # The 10 MB cap stopped the download at the sixth 2 MB chunk of twenty,
+    # the advertisement was streamed, and the response was closed.
+    assert streams == [True]
+    assert response.consumed == 6
+    assert response.closed
+
+
+def test_an_advertisement_content_length_over_the_cap_is_never_read(monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError
+
+    chunks = [b"\0" * (2 * 1024 * 1024) for _ in range(20)]
+    response = _StreamingAdvertisement(chunks, content_length=20 * 1024 * 1024)
+    streams = []
+
+    def fake_get(url, timeout, stream=None, **_kwargs):
+        streams.append(stream)
+        return response
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+
+    with pytest.raises(CatalogSourceError):
+        service._fetch_git_ref_advertisement("owner", "repo")
+
+    assert streams == [True]
+    assert response.consumed == 0
+    assert response.closed
+
+
+def _streamed_github_error(body, content_encoding=None):
+    """A requests response over a live urllib3 stream, the way the real
+    advertisement fetch receives an error: preloaded nowhere, decoded only on
+    an explicit read."""
+    import io
+    import urllib3
+    import requests
+
+    headers = {"Content-Encoding": content_encoding} if content_encoding else {}
+    response = requests.Response()
+    response.status_code = 403
+    response.headers = dict(headers)
+    response.raw = urllib3.HTTPResponse(
+        body=io.BytesIO(body), headers=headers, status=403,
+        preload_content=False, decode_content=False,
+    )
+    return response
+
+
+def _spy_on_close(response):
+    """Replace a response's close with one that records its calls.
+
+    The raw side of a consumed response closes itself at end-of-file, so
+    ``response.raw.closed`` is true whether or not anything called close.
+    Recording the calls is the only way to tell the two apart."""
+    import requests
+
+    calls = []
+    original_close = requests.Response.close.__get__(response)
+
+    def spy_close():
+        calls.append(1)
+        original_close()
+
+    response.close = spy_close
+    return calls
+
+
+def test_a_streamed_secondary_rate_limit_body_survives_the_close(monkeypatch):
+    import requests
+    from provider_hub import service
+    from provider_hub.service import _fetch_git_ref_advertisement
+
+    # A streamed 403 whose only rate-limit evidence is the body: the JSON
+    # secondary-rate-limit message, with no rate-limit headers. The body is
+    # retained and the response closed before the error mapper runs, so the
+    # mapper must see the retained slice, not a misclassified plain access
+    # denial.
+    body = (b'{"message": "You have exceeded a secondary rate limit. Please '
+            b'wait a few minutes before you try again."}')
+    response = _streamed_github_error(body)
+    close_calls = _spy_on_close(response)
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, stream=None: response,
+    )
+
+    with pytest.raises(requests.exceptions.HTTPError) as caught:
+        _fetch_git_ref_advertisement("owner", "repo")
+
+    assert "temporarily limited" in service._catalog_source_error_message(caught.value)
+    assert response.raw.closed
+    assert close_calls
+
+
+def test_a_gzip_encoded_secondary_rate_limit_body_is_decoded_before_retention(monkeypatch):
+    import gzip
+    import requests
+    from provider_hub import service
+    from provider_hub.service import _fetch_git_ref_advertisement
+
+    # requests asks GitHub for gzip on every request, and the advertisement
+    # stream is opened with decode_content=False, so the raw stream carries
+    # compressed bytes. A secondary rate limit sent gzip-encoded must still
+    # be read as its JSON message, not classified as a plain access denial,
+    # and the response must be closed either way.
+    body = (b'{"message": "You have exceeded a secondary rate limit. Please '
+            b'wait a few minutes before you try again."}')
+    response = _streamed_github_error(gzip.compress(body), content_encoding="gzip")
+    close_calls = _spy_on_close(response)
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, stream=None: response,
+    )
+
+    with pytest.raises(requests.exceptions.HTTPError) as caught:
+        _fetch_git_ref_advertisement("owner", "repo")
+
+    assert "temporarily limited" in service._catalog_source_error_message(caught.value)
+    assert response.raw.closed
+    assert close_calls
+
+
+class _ChunkedRaw:
+    """The raw side of a Transfer-Encoding: chunked answer: stream() hands
+    out one HTTP chunk at a time, running the content decoding incrementally
+    across the chunks the way urllib3 does. It never closes itself, so its
+    closed flag moves only when something calls close."""
+
+    def __init__(self, chunks, gzip_encoded=False):
+        self._chunks = chunks
+        self._gzip_encoded = gzip_encoded
+        self.closed = False
+
+    def stream(self, amt, decode_content=None):
+        import zlib
+
+        decoder = (zlib.decompressobj(16 + zlib.MAX_WBITS)
+                   if self._gzip_encoded and decode_content else None)
+        for chunk in self._chunks:
+            yield decoder.decompress(chunk) if decoder is not None else chunk
+
+    def close(self):
+        self.closed = True
+
+
+def _chunked_github_error(pieces, gzip_encoded=False):
+    """A requests response whose raw stream yields its 403 body one HTTP
+    chunk at a time, the shape a chunked denial arrives in on a live
+    connection: the first read does not carry the whole body."""
+    import requests
+
+    response = requests.Response()
+    response.status_code = 403
+    response.headers = {"Content-Encoding": "gzip"} if gzip_encoded else {}
+    response.raw = _ChunkedRaw(pieces, gzip_encoded=gzip_encoded)
+    return response
+
+
+_SECONDARY_RATE_LIMIT_BODY = (b'{"message": "You have exceeded a secondary '
+                              b'rate limit. Please wait a few minutes before '
+                              b'you try again."}')
+
+
+@pytest.mark.parametrize("gzip_encoded", [False, True])
+def test_a_chunked_secondary_rate_limit_body_is_retained_across_chunks(monkeypatch, gzip_encoded):
+    import gzip
+    import requests
+    from provider_hub import service
+    from provider_hub.service import _fetch_git_ref_advertisement
+
+    # A chunked 403 does not arrive as one read: the raw stream yields one
+    # HTTP chunk at a time, and the first chunk stops inside the message.
+    # The retention must accumulate the decoded chunks until it has the
+    # body, or the mapper sees a cut-off body and reports a plain access
+    # denial instead of the secondary rate limit.
+    body = _SECONDARY_RATE_LIMIT_BODY
+    split = 40
+    encoded = gzip.compress(body) if gzip_encoded else body
+    response = _chunked_github_error([encoded[:split], encoded[split:]], gzip_encoded=gzip_encoded)
+    close_calls = _spy_on_close(response)
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, stream=None: response,
+    )
+
+    with pytest.raises(requests.exceptions.HTTPError) as caught:
+        _fetch_git_ref_advertisement("owner", "repo")
+
+    assert "temporarily limited" in service._catalog_source_error_message(caught.value)
+    assert close_calls
+
+
+def test_advertisement_parser_reads_the_captured_catalog_advertisement():
+    from provider_hub.service import _parse_git_ref_advertisement
+
+    # Captured 2026-10-07 from the public catalog repository's own
+    # advertisement, the response every git ls-remote reads:
+    # https://github.com/LavX/bazarr-provider-catalog/info/refs?service=git-upload-pack
+    body = (Path(__file__).parent / "fixtures" / "provider_hub"
+            / "catalog_info_refs_v0.bin").read_bytes()
+
+    refs = _parse_git_ref_advertisement(body)
+
+    assert refs["refs/heads/main"] == "be946567da192b9b9f05a18ef43acf9bb7668620"
+    assert refs["refs/heads/beta"] == "7bcd0a3a82fa068496111993f08ef93f7f33182e"
+    assert b"refs/pull/" in body
+    assert all(name.startswith(("refs/heads/", "refs/tags/")) for name in refs)
+
+
+def test_advertisement_parser_fails_closed_on_an_oversized_body():
+    from provider_hub.service import (
+        _GIT_ADVERTISEMENT_MAX_BYTES,
+        _parse_git_ref_advertisement,
+        CatalogSourceError,
+    )
+
+    with pytest.raises(CatalogSourceError):
+        _parse_git_ref_advertisement(b"\0" * (_GIT_ADVERTISEMENT_MAX_BYTES + 1))
+
+
+def test_advertisement_parser_accepts_a_line_at_the_exact_payload_bound():
+    from provider_hub.service import _PKT_LINE_MAX_PAYLOAD, _parse_git_ref_advertisement
+
+    # A well-formed ref line whose payload is exactly 65,516 bytes: the
+    # bound rejects only what is over it, not the boundary itself.
+    name = "refs/heads/main" + "-" * (_PKT_LINE_MAX_PAYLOAD - 57)
+    body = _ADVERTISEMENT_BANNER_FLUSH + _pkt_line((_MAIN + " " + name + "\n").encode()) + b"0000"
+
+    assert _parse_git_ref_advertisement(body) == {name: _MAIN}
+
+
+def test_advertisement_parser_accepts_the_empty_repository_advertisement(monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    # git's documented advertisement for a repository with no refs: one
+    # line, the all-zero sha and the capabilities peel.
+    body = (_ADVERTISEMENT_BANNER_FLUSH
+            + _pkt_line(b"0" * 40 + b" capabilities^{}"
+                        + b"\0symref=HEAD:refs/heads/main agent=git/2.43.0\n")
+            + b"0000")
+
+    assert _parse_git_ref_advertisement(body) == {}
+
+    # No branch is advertised, so the resolver reports the missing branch
+    # instead of blaming GitHub's framing.
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(body),
+    )
+    with pytest.raises(CatalogSourceError, match="did not advertise 'main'"):
+        service._resolve_github_ref("owner", "repo", "main")
+
+
+def test_resolve_github_ref_short_circuits_a_full_sha_without_a_request(monkeypatch):
+    from provider_hub import service
+
+    def unexpected(url, timeout, **_kwargs):
+        raise AssertionError(f"the 40-hex short-circuit must not call GitHub: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", unexpected)
+
+    assert service._resolve_github_ref("owner", "repo", "A" * 40) == "a" * 40
+
+
+def test_resolve_github_ref_reads_heads_first_and_peeled_tags_second(monkeypatch):
+    from provider_hub import service
+
+    body = _git_advertisement([
+        ("a" * 40, "refs/heads/main"),
+        ("b" * 40, "refs/tags/main"),
+        ("c" * 40, "refs/tags/v1.0.0"),
+        ("d" * 40, "refs/tags/v1.0.0^{}"),
+    ])
+    calls = []
+    answers = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append((url, timeout))
+        answer = _AdvertisementResponse(body)
+        answers.append(answer)
+        return answer
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+
+    assert service._resolve_github_ref("owner", "repo", "main") == "a" * 40
+    assert service._resolve_github_ref("owner", "repo", "v1.0.0") == "d" * 40
+    # A successful resolve closes its advertisement response too, not only
+    # the error path.
+    assert [answer.closed for answer in answers] == [True, True]
+    assert calls == [
+        ("https://github.com/owner/repo/info/refs?service=git-upload-pack", 20),
+        ("https://github.com/owner/repo/info/refs?service=git-upload-pack", 20),
+    ]
+
+
+def test_resolve_github_ref_fails_closed_on_a_ref_the_advertisement_lacks(monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([(_MAIN, "refs/heads/main")])),
+    )
+
+    with pytest.raises(CatalogSourceError, match="branch name or a tag name"):
+        service._resolve_github_ref("owner", "repo", "v2.0.0")
+
+
+@pytest.mark.parametrize("content_type", [
+    "text/html",
+    "text/plain; marker=x-git-upload-pack-advertisement",
+    "application/x-git-upload-pack-advertisement-malicious",
+    "application/octet-stream",
+])
+def test_resolve_github_ref_fails_closed_on_a_non_git_content_type(monkeypatch, content_type):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([(_MAIN, "refs/heads/main")]), content_type=content_type),
+    )
+
+    with pytest.raises(CatalogSourceError):
+        service._resolve_github_ref("owner", "repo", "main")
+
+
+def test_the_advertisement_content_type_allows_parameters(monkeypatch):
+    from provider_hub import service
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([(_MAIN, "refs/heads/main")]),
+            content_type="application/x-git-upload-pack-advertisement; charset=utf-8"),
+    )
+
+    assert service._resolve_github_ref("owner", "repo", "main") == _MAIN
+
+
+@pytest.mark.parametrize("failure, expected", [
+    # github.com answers an anonymous request for a missing or private
+    # repository with 401, so it means the same as a 404 here.
+    (401, "GitHub does not have this catalog source"),
+    (429, "temporarily limited"),
+    (503, "GitHub returned HTTP 503 while refreshing this catalog source."),
+    ("timeout", "Could not reach GitHub while refreshing this catalog source."),
+    ("connection", "Could not reach GitHub while refreshing this catalog source."),
+])
+def test_advertisement_failures_keep_the_refresh_messages(
+    tmp_path, monkeypatch, failure, expected
+):
+    import requests
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    def fake_get(url, timeout, **_kwargs):
+        if url == _OFFICIAL_AD:
+            if failure == "timeout":
+                raise requests.exceptions.Timeout("advertisement timed out")
+            if failure == "connection":
+                raise requests.exceptions.ConnectionError("connection reset")
+            return _AdvertisementResponse(status_code=failure)
+        if url.startswith("https://api.github.com/"):
+            # The REST commits call is gone: a refresh must never ask it.
+            raise AssertionError(f"a refresh must not use the REST API: {url}")
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    refresh_catalog(source_ids={"official"})
+
+    assert expected in load_state()["catalog_sources"]["official"]["last_error"]
+
+
+def test_advertisement_404_is_a_hard_error(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(status_code=404),
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    refresh_catalog(source_ids={"official"})
+
+    last_error = load_state()["catalog_sources"]["official"]["last_error"]
+    assert "does not have" in last_error
+    assert "temporarily" not in last_error
+
+
+def test_refresh_skips_the_catalog_fetch_when_the_commit_is_unchanged(tmp_path, monkeypatch):
+    from provider_hub.service import list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(_git_advertisement([("c" * 40, "refs/heads/main")]))
+        raise AssertionError(f"an unchanged commit must not be fetched: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_entry("community", _manifest()))
+    _seed_a_successful_check(tmp_path, monkeypatch, "community")
+
+    result = refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD]
+    source = load_state()["catalog_sources"]["community"]
+    assert source["resolved_commit"] == "c" * 40
+    assert source["last_error"] is None
+    # The skip records a fresh check at the current time, not the old one.
+    assert source["last_checked_at"] == _FROZEN_NOW
+    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+    # A skip keeps the stored entries, so the summary reports them, not zero.
+    assert result["entries"] == 1
+    job = list_jobs()[-1]
+    assert job["message"] == "Refreshed 1 source(s), 1 entries"
+    assert job["details"]["entries"] == 1
+
+
+def test_a_skipped_source_never_prunes_entries(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([("c" * 40, "refs/heads/main")]))
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_entry("community", _manifest(provider_id="stalehub")))
+
+    refresh_catalog(source_ids={"community"})
+
+    # Only the advertisement was asked, the refresh recorded no error, and
+    # the stored entry was kept: a skip is a success that prunes nothing.
+    assert calls == [_COMMUNITY_AD]
+    source = load_state()["catalog_sources"]["community"]
+    assert source["last_error"] is None
+    assert "community:stalehub:1.0.0" in load_state()["catalog_entries"]
+
+
+def test_refresh_fetches_when_the_unchanged_commit_has_no_entries(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    raw_url = "https://raw.githubusercontent.com/community/catalog/" + "c" * 40 + "/catalog.json"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(_git_advertisement([("c" * 40, "refs/heads/main")]))
+        if url == raw_url:
+            return _FakeResponse({"providers": []})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"))
+    _seed_a_successful_check(tmp_path, monkeypatch, "community")
+
+    refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD, raw_url]
+    source = load_state()["catalog_sources"]["community"]
+    assert source["last_error"] is None
+    # A fetch that found no entries still records a fresh check.
+    assert source["last_checked_at"] == _FROZEN_NOW
+
+
+def test_refresh_fetches_when_the_advertised_commit_moved(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    raw_url = "https://raw.githubusercontent.com/community/catalog/" + "d" * 40 + "/catalog.json"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if url == raw_url:
+            return _FakeResponse({"providers": []})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD, raw_url]
+    assert load_state()["catalog_sources"]["community"]["resolved_commit"] == "d" * 40
+
+
+def test_a_user_source_on_a_dev_ref_skips_like_any_user_source(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    community = _community_source("community")
+    community["community"]["dev_ref"] = "feat/x"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([("c" * 40, "refs/heads/feat/x")]))
+        raise AssertionError(f"an unchanged dev ref must not be fetched: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=community, entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD]
+    assert load_state()["catalog_sources"]["community"]["last_error"] is None
+
+
+def test_a_source_pinned_to_a_full_sha_still_fetches_raw(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    raw_url = "https://raw.githubusercontent.com/community/catalog/" + "c" * 40 + "/catalog.json"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == raw_url:
+            return _FakeResponse({"providers": [{"manifest": _manifest()}]})
+        raise AssertionError(f"a pinned commit needs no advertisement: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    pinned = _community_source("community")
+    pinned["community"]["dev_ref"] = "c" * 40
+    _hub_state(tmp_path, monkeypatch, sources=pinned, entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    # The skip needs an advertised sha equal to the stored commit. A
+    # pinned source has no advertisement, so it still fetches raw, and a
+    # deleted, renamed or private repository keeps showing at refresh.
+    assert calls == [raw_url]
+    source = load_state()["catalog_sources"]["community"]
+    assert source["last_error"] is None
+    assert source["resolved_commit"] == "c" * 40
+    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+
+
+def test_a_short_sha_failure_keeps_the_cached_catalog(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError, refresh_catalog
+    from provider_hub.state import load_state
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([("c" * 40, "refs/heads/main")])),
+    )
+    short = _community_source("community")
+    short["community"]["dev_ref"] = "abc1234"
+    _hub_state(tmp_path, monkeypatch, sources=short, entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    source = load_state()["catalog_sources"]["community"]
+    # The resolver's advice reaches the user verbatim through the refresh's
+    # error mapping, and the stored entries and commit survive it, so the
+    # cached catalog stays visible and usable.
+    with pytest.raises(CatalogSourceError) as caught:
+        service._resolve_github_ref("community", "catalog", "abc1234")
+    expected = service._catalog_source_error_message(caught.value)
+    assert "full commit SHA" in expected
+    assert source["last_error"] == expected
+    assert source["resolved_commit"] == "c" * 40
+    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+
+
+def test_a_malformed_advertisement_failure_keeps_the_cached_catalog(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(b"zzzzjunk"),
+    )
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    source = load_state()["catalog_sources"]["community"]
+    assert source["last_error"] == "GitHub sent a malformed ref advertisement"
+    assert source["resolved_commit"] == "c" * 40
+    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+
+
+def test_a_trust_failure_on_the_skip_path_fails_the_refresh_not_the_source(
+    tmp_path, monkeypatch
+):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")])),
+    )
+
+    def broken_trust(source, commit, previous_commit, ancestry):
+        raise RuntimeError("trust machinery broke")
+
+    monkeypatch.setattr(service, "_set_official_trust", broken_trust)
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()))
+    state = load_state()
+    state["catalog_sources"]["official"]["resolved_commit"] = _MAIN
+    save_state(state)
+    before = load_state()
+
+    with pytest.raises(RuntimeError):
+        service.refresh_catalog(source_ids={"official"})
+
+    # The trust update runs outside the fetch on the skip path too, so its
+    # failure propagates like on the fetch path instead of marking a source
+    # failed after its success fields were already written. The one-write
+    # refresh leaves the catalog exactly as it was (the failed job record is
+    # the only thing written).
+    after = load_state()
+    assert after["catalog_sources"] == before["catalog_sources"]
+    assert after["catalog_entries"] == before["catalog_entries"]
+    assert after["catalog_sources"]["official"]["last_error"] is None
+
+
+def test_an_official_source_on_main_skips_an_unchanged_commit(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        raise AssertionError(f"an unchanged official commit on main must not be fetched: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()))
+    from provider_hub.state import load_state as _load, save_state
+    state = _load()
+    state["catalog_sources"]["official"]["resolved_commit"] = _MAIN
+    state["catalog_sources"]["official"]["last_checked_at"] = _OLD_CHECK
+    save_state(state)
+    monkeypatch.setattr("provider_hub.service.utcnow_iso", lambda: _FROZEN_NOW)
+
+    # The official skip's kept entry still counts toward the refresh summary.
+    assert refresh_catalog()["entries"] == 1
+
+    assert calls == [_OFFICIAL_AD]
+    official = load_state()["catalog_sources"]["official"]
+    assert official["last_error"] is None
+    # The official skip records a fresh check at the current time.
+    assert official["last_checked_at"] == _FROZEN_NOW
+    assert (official["trusted"], official["trust_reason"]) == (True, "default branch")
+    assert list(load_state()["catalog_entries"]) == ["official:examplehub:1.0.0"]
+
+
+def test_an_unchanged_refresh_with_a_trusted_install_costs_one_advertisement(
+    tmp_path, monkeypatch
+):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        raise AssertionError(f"an unchanged commit must not be fetched: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()),
+               installations=_installed(_official_manifest(), trusted=True))
+    state = load_state()
+    official = state["catalog_sources"]["official"]
+    official["resolved_commit"] = _MAIN
+    official["provider_ids"] = ["examplehub"]
+    state["trust_cache"] = {
+        "heads": {"main": _MAIN, "beta": _BETA},
+        "answers": {_MAIN: {"main": True, "beta": False}},
+    }
+    save_state(state)
+
+    refresh_catalog()
+
+    # The skip means no raw fetch, and the installed-trust recheck reuses the
+    # advertisement the resolve step already read: one request in total.
+    assert calls == [_OFFICIAL_AD]
+    official = load_state()["catalog_sources"]["official"]
+    assert official["last_error"] is None
+    assert official["trusted"] is True
+
+
+def test_a_community_advertisement_never_feeds_official_ancestry(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    # Only the official repository's advertisement may answer the ancestry
+    # check. A community source that sorts after the official one and
+    # advertises its own main and beta must not become the heads the
+    # installed-trust recheck compares against.
+    community_ad = "https://github.com/zcommunity/catalog/info/refs?service=git-upload-pack"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(_git_advertisement([
+                (_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        if url == community_ad:
+            return _AdvertisementResponse(_git_advertisement([
+                ("a" * 40, "refs/heads/main"), ("b" * 40, "refs/heads/beta")]))
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(
+        tmp_path, monkeypatch,
+        sources=_community_source("zcommunity", resolved_commit="a" * 40),
+        entries={**_entry("official", _official_manifest()),
+                 **_entry("zcommunity", _manifest(provider_id="communityhub", name="Community Hub"))},
+        installations=_installed(_official_manifest(), trusted=True),
+    )
+    state = load_state()
+    state["catalog_sources"]["official"]["resolved_commit"] = _MAIN
+    state["trust_cache"] = {
+        "heads": {"main": _MAIN, "beta": _BETA},
+        "answers": {_MAIN: {"main": True, "beta": False}},
+    }
+    save_state(state)
+
+    # Each source's skip counts exactly its own kept entry, so the community
+    # advertisement adds one to the official source's one.
+    assert refresh_catalog()["entries"] == 2
+
+    # Both sources skip on their stored commits, so the refresh reads each
+    # advertisement once: no raw catalog fetch and no compare call, whose
+    # answers the trust cache already holds for the current official heads.
+    # The install stays trusted and the official heads stay official.
+    assert calls == [_OFFICIAL_AD, community_ad]
+    after = load_state()
+    assert after["installations"]["examplehub"]["trusted"] is True
+    assert after["trust_cache"]["heads"] == {"main": _MAIN, "beta": _BETA}
+
+
+def test_an_untrusted_official_commit_never_skips_the_published_ids_rebuild(
+    tmp_path, monkeypatch
+):
+    from provider_hub import service
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    # The last trusted refresh published examplehub. Then the source sat on
+    # a feature dev_ref at a commit outside main and beta, untrusted, and the
+    # repository fast-forwarded that commit onto main before the dev_ref was
+    # cleared.
+    fast_forwarded = _OLD_MAIN
+    raw_url = (f"https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"
+               f"{fast_forwarded}/catalog.json")
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(_git_advertisement([
+                (fast_forwarded, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        if url == raw_url:
+            return _GitHubAnswer({"providers": [
+                {"manifest": _official_manifest(commit=fast_forwarded)},
+                {"manifest": _official_manifest("newhub", commit=fast_forwarded)},
+            ]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()))
+    state = load_state()
+    official = state["catalog_sources"]["official"]
+    official["resolved_commit"] = fast_forwarded
+    official["trusted"] = False
+    official["trust_reason"] = "outside main and beta"
+    official["provider_ids"] = ["examplehub"]
+    save_state(state)
+
+    refresh_catalog()
+
+    # The dev_ref is gone and main's head equals the stored commit, but the
+    # stored verdict is untrusted, so the skip is refused: the catalog is
+    # fetched again and the id the fast-forwarded commit published is
+    # reserved again.
+    official = load_state()["catalog_sources"]["official"]
+    assert calls == [_OFFICIAL_AD, raw_url]
+    assert official["trusted"] is True
+    assert official["provider_ids"] == ["examplehub", "newhub"]
+    assert "newhub" in service._reserved_provider_ids(load_state())
+
+
+@pytest.mark.parametrize("dev_ref, advertised", [
+    # A branch name resolving through the advertisement: the pinned-SHA guard
+    # cannot be what blocks this skip.
+    ("feat/x", [(_OLD_MAIN, "refs/heads/feat/x"),
+                (_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]),
+    (_OLD_MAIN, [(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]),
+])
+def test_an_official_source_with_a_dev_ref_never_skips_the_fetch(
+    tmp_path, monkeypatch, dev_ref, advertised
+):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement(advertised))
+        if url.startswith(_OFFICIAL_REPO_API + "/compare/"):
+            return _GitHubAnswer({"status": "behind"})
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=dev_ref,
+               entries=_entry("official", _official_manifest(commit=_OLD_MAIN)))
+    state = load_state()
+    state["catalog_sources"]["official"]["resolved_commit"] = _OLD_MAIN
+    save_state(state)
+
+    refresh_catalog()
+
+    # A dev_ref never skips, branch name or pinned commit alike: the catalog
+    # is fetched again at the stored commit, the trust verdict is re-derived
+    # from the graph, and the recheck reuses the advertisement the resolve
+    # step read, so it too costs a single advertisement request.
+    assert any(url.startswith("https://raw.githubusercontent.com/") for url in calls)
+    assert any("/compare/" in url for url in calls)
+    assert calls.count(_OFFICIAL_AD) == 1
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (True, "ancestor of main")
+
+
+def test_ancestry_heads_come_from_the_ref_advertisement(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    def fake_get(url, timeout, **_kwargs):
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        if url.startswith(_OFFICIAL_REPO_API + "/compare/"):
+            return _GitHubAnswer({"status": "behind"})
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OLD_MAIN)
+
+    refresh_catalog()
+
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (True, "ancestor of main")
+
+
+def test_a_one_branch_advertisement_cannot_verify_trust(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([(_MAIN, "refs/heads/main")]))
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OLD_MAIN)
+
+    refresh_catalog()
+
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (
+        False, "could not verify: GitHub did not list main and beta")
+
+
+@pytest.mark.parametrize("failure, expected", [
+    # github.com answers an anonymous request for a missing or private
+    # repository with 401, so it lists no branches, like a 404.
+    (401, "could not verify: GitHub did not list main and beta"),
+    (404, "could not verify: GitHub did not list main and beta"),
+    (403, "could not verify: rate limited"),
+    (429, "could not verify: rate limited"),
+    (503, "could not verify: GitHub returned HTTP 503"),
+    ("timeout", "could not verify: GitHub could not be reached"),
+    ("reset", "could not verify: GitHub could not be reached"),
+    ("malformed", "could not verify: GitHub could not be reached"),
+])
+def test_ancestry_failures_keep_the_base_reason_strings(tmp_path, monkeypatch, failure, expected):
+    import requests
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    def fake_get(url, timeout, **_kwargs):
+        if url == _OFFICIAL_AD:
+            if failure == "timeout":
+                raise requests.exceptions.Timeout("advertisement timed out")
+            if failure == "reset":
+                raise requests.exceptions.ConnectionError("connection reset")
+            if failure == "malformed":
+                return _AdvertisementResponse(b"not an advertisement", content_type="text/html")
+            return _AdvertisementResponse(status_code=failure)
+        if url.startswith("https://raw.githubusercontent.com/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OLD_MAIN)
+
+    refresh_catalog()
+
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (False, expected)
+
+
+def test_updating_a_dev_ref_keeps_the_resolved_commit_and_the_skip(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog, update_catalog_source
+    from provider_hub.state import load_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(_git_advertisement([
+                ("c" * 40, "refs/heads/feat/x"),
+                ("c" * 40, "refs/heads/feat/y"),
+            ]))
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    community = _community_source("community")
+    community["community"]["dev_ref"] = "feat/x"
+    _hub_state(tmp_path, monkeypatch, sources=community, entries=_entry("community", _manifest()))
+
+    # A dev_ref change keeps the stored commit: update_catalog_source cannot
+    # change the source URL, and raw content at a fixed commit never changes,
+    # so a new ref that resolves to the same commit still skips, and the
+    # official trust input (previous_commit) keeps its value.
+    update_catalog_source("community", dev_ref="feat/y")
+    assert load_state()["catalog_sources"]["community"]["resolved_commit"] == "c" * 40
+
+    refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD]
+    assert load_state()["catalog_sources"]["community"]["last_error"] is None
+
+
+def test_an_official_source_on_an_untrusted_url_ref_never_skips(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    staging = "9" * 40
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(_git_advertisement([(staging, "refs/heads/staging")]))
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    # load_state rebuilds the official record from this constant, and drops
+    # any stored url, so the only way its ref is not a trusted branch is the
+    # official catalog itself moving off main or beta.
+    monkeypatch.setattr(
+        "provider_hub.state.OFFICIAL_CATALOG_URL",
+        "https://github.com/LavX/bazarr-provider-catalog/blob/staging/catalog.json")
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()))
+    state = load_state()
+    state["catalog_sources"]["official"]["resolved_commit"] = staging
+    save_state(state)
+
+    refresh_catalog()
+
+    # The URL's ref is not a trusted branch, so the skip never applies: the
+    # catalog is fetched again at the same commit.
+    assert f"https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/{staging}/catalog.json" in calls
+    assert load_state()["catalog_sources"]["official"]["last_error"] is None
+
+
+def test_compare_calls_still_run_for_a_commit_not_yet_checked(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    compares = []
+
+    def fake_get(url, timeout, **_kwargs):
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        if url.startswith(_OFFICIAL_REPO_API + "/compare/"):
+            compares.append(url)
+            return _GitHubAnswer({"status": "behind"})
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OLD_MAIN)
+
+    # The heads did not move between the two refreshes; the second refresh
+    # still re-asks nothing, but a commit never checked before is compared.
+    refresh_catalog()
+    assert compares
+    saved = load_state()
+    saved["trust_cache"]["answers"].pop(_OLD_MAIN)
+    from provider_hub.state import save_state
+    save_state(saved)
+    compares.clear()
+    refresh_catalog()
+
+    assert compares
+
+
+def _patch_provider_config(config):
+    """The provider config route, answered as (body, status)."""
+    from flask import Flask
+
+    import api.provider_hub.provider_hub as hub_api
+    app = Flask(__name__)
+
+    with app.test_request_context("/api/provider-hub/providers/examplehub", method="PATCH",
+                                  json={"config": config}):
+        result = hub_api.ProviderHubProvider.patch.__wrapped__(
+            hub_api.ProviderHubProvider(), "examplehub")
+    return result if isinstance(result, tuple) else (result, 200)
+
+
+def test_a_hub_key_replacement_does_not_vouch_for_the_settings_stores_copy(tmp_path, monkeypatch):
+    """The Hub's own save path writes the installation's config, the second of
+    a plugin's two stores, and the reader sends the settings section's value
+    first: a Hub save that replaces the Hub's token while the section still
+    holds one moves the address under the section's old token, so the move is
+    refused until the section's copy is cleared too. The unfixed rule skipped
+    both stored checks whenever the submission typed a value, so the token
+    that stayed effective was never asked for again."""
+    from app.config import remove_settings_section, settings
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"api_url": "https://old.example:9"},
+        "manifest": {
+            "provider_id": "examplehub",
+            "version": "1.0.0",
+            "config_schema": {"type": "object", "properties": {
+                "api_url": {"type": "string", "format": "uri"},
+                "api_token": {"type": "string"},
+            }},
+            "secret_fields": ["api_token"],
+        },
+    }
+    save_state(state)
+    settings.set("examplehub", {"api_token": "settings-side-token"})
+
+    try:
+        body, status = _patch_provider_config({"api_url": "https://moved.example:9",
+                                                "api_token": "typed-again"})
+        assert status == 400, body
+        assert body == "Re-enter the key to use a different address"
+        assert load_state()["installations"]["examplehub"]["config"]["api_url"] \
+            == "https://old.example:9", 'the refused move was not written'
+
+        # The section's copy is what the moved address would have received, so
+        # clearing it lets the typed replacement travel with the move.
+        settings.set("examplehub", {"api_token": ""})
+        body, status = _patch_provider_config({"api_url": "https://moved.example:9",
+                                                "api_token": "typed-again"})
+        assert status == 200, body
+        assert body["config"]["api_url"] == "https://moved.example:9"
+    finally:
+        remove_settings_section("examplehub")
+
+
+def test_a_malformed_state_document_refuses_a_hub_config_move(tmp_path, monkeypatch):
+    """The state document is read strictly for the destination rule: a
+    document whose root is not an object is the state being unreadable, not an
+    empty installation inventory, so the Hub's own save path refuses a
+    destination move the same fail-closed way the settings path does. The
+    unfixed reader answered a default state for a malformed document, and the
+    move was checked against an installation list that no longer existed."""
+    from app.config import remove_settings_section, settings
+
+    state_path = tmp_path / "provider_hub" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    # A raw malformed document, not a state the loader would produce: its
+    # root is an array, so no installation inventory can be read from it.
+    state_path.write_text("[]")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    settings.set("examplehub", {"api_url": "https://old.example:9",
+                                "api_token": "settings-side-token"})
+
+    try:
+        body, status = _patch_provider_config({"api_url": "https://moved.example:9"})
+        assert status == 400, body
+        assert body == ("The provider data needed to check this address change "
+                        "could not be read, so the address was not changed")
+    finally:
+        remove_settings_section("examplehub")

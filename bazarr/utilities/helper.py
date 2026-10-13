@@ -25,6 +25,12 @@ def _is_legacy_md5(stored_hash):
 
 
 def _verify_password(pw, stored_hash):
+    if not stored_hash:
+        # An empty stored hash authenticates nothing: the boot secret pass
+        # withholds a credential that will not decrypt as an empty string,
+        # and an empty auth.password must never turn into a login that
+        # accepts the empty password.
+        return False
     if stored_hash.startswith('pbkdf2:'):
         try:
             _, salt_hex, hash_hex = stored_hash.split(':', 2)

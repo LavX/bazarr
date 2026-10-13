@@ -1,8 +1,14 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+/* eslint-disable camelcase -- the status fixture uses the server's field name. */
+import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import DetailPane from "@/pages/SubtitleEditor/DetailPane";
 import type { Cue } from "@/pages/SubtitleEditor/types";
+import { customRender as render, waitFor } from "@/tests";
+import server from "@/tests/mocks/node";
 
 const noop = () => {
   /* noop */
@@ -213,6 +219,122 @@ describe("DetailPane", () => {
       const aiBtn = screen.getByTitle("Translate this cue");
       expect(aiBtn).toBeDisabled();
       expect(aiBtn).toHaveTextContent("...");
+    });
+  });
+
+  describe("AI translate and the translation gate", () => {
+    function renderWithReference() {
+      render(
+        <DetailPane
+          {...defaultProps}
+          cue={makeCue()}
+          referenceText="Ref"
+          onTranslateLine={noop}
+          onUseReference={noop}
+        />,
+      );
+    }
+
+    // The hook treats an unanswered status as available, so an assertion that
+    // runs before the fixture's answer arrives tests the loading state, not
+    // the gate: settle the query first, the way the profile form does.
+    async function waitForTheStatusToSettle() {
+      await waitFor(() =>
+        expect(
+          queryClient.getQueryState([QueryKeys.System, "status"])?.status,
+        ).toBe("success"),
+      );
+    }
+
+    it("disables the line translate with the reason when the gate is closed", async () => {
+      server.use(
+        http.get("/api/system/status", () =>
+          HttpResponse.json({
+            data: {
+              editor_translation_availability: {
+                available: false,
+                reason: "No translator is configured",
+              },
+            },
+          }),
+        ),
+      );
+      renderWithReference();
+
+      const aiBtn = await screen.findByTitle(
+        "Translate this cue: No translator is configured",
+      );
+      expect(aiBtn).toBeDisabled();
+    });
+
+    it("keeps the line translate enabled when the gate is open", async () => {
+      server.use(
+        http.get("/api/system/status", () =>
+          HttpResponse.json({
+            data: {
+              editor_translation_availability: {
+                available: true,
+                reason: "",
+              },
+            },
+          }),
+        ),
+      );
+      renderWithReference();
+
+      expect(await screen.findByTitle("Translate this cue")).toBeEnabled();
+    });
+
+    it("reads the editor's own answer, not the configured engine's", async () => {
+      // The configured engine is switched off, but the editor translates
+      // through the AI Subtitle Translator service, which is configured: the
+      // button has to stay enabled, because its endpoint accepts the job.
+      server.use(
+        http.get("/api/system/status", () =>
+          HttpResponse.json({
+            data: {
+              translation_availability: {
+                available: false,
+                reason: "No translator is configured",
+              },
+              editor_translation_availability: {
+                available: true,
+                reason: "",
+              },
+            },
+          }),
+        ),
+      );
+      renderWithReference();
+
+      await waitForTheStatusToSettle();
+      expect(await screen.findByTitle("Translate this cue")).toBeEnabled();
+    });
+
+    it("disables the line translate when only the editor's service cannot run", async () => {
+      // The other direction: the configured engine can translate, but the
+      // editor's service has no URL, so the button it enabled before this fix
+      // would answer 409 on its endpoint.
+      server.use(
+        http.get("/api/system/status", () =>
+          HttpResponse.json({
+            data: {
+              translation_availability: { available: true, reason: "" },
+              editor_translation_availability: {
+                available: false,
+                reason:
+                  "The AI Subtitle Translator service URL is not configured",
+              },
+            },
+          }),
+        ),
+      );
+      renderWithReference();
+
+      const aiBtn = await screen.findByTitle(
+        "Translate this cue: The AI Subtitle Translator service URL is not configured",
+      );
+      expect(aiBtn).toBeDisabled();
     });
   });
 

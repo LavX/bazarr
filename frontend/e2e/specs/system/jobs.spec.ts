@@ -10,6 +10,7 @@
  * with no library, finishes at once.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { liveChannel, waitForJob } from "@e2e/lib/jobs";
 import { completeOnboarding } from "@e2e/lib/shared";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
@@ -33,7 +34,7 @@ test.beforeEach(async ({ page, bazarr }) => {
 /** Opens the app and waits until finished jobs will be announced to it. */
 async function openApp(page: Page) {
   const channel = liveChannel(page);
-  await page.goto("/");
+  await page.goto(appPath("/"));
   await channel;
 }
 
@@ -52,7 +53,7 @@ test.describe("jobs", { tag: ["@jobs", "@stateful"] }, () => {
   }) => {
     await openApp(page);
 
-    const refused = await api.post("/api/provider-hub/installations", {
+    const refused = await api.post(appPath("/api/provider-hub/installations"), {
       data: { manifest: { provider_id: "e2e-missing", name: "E2E Missing" } },
     });
     expect(refused.status()).toBe(400);
@@ -64,15 +65,18 @@ test.describe("jobs", { tag: ["@jobs", "@stateful"] }, () => {
     // over the bottom controls, where the Jobs Manager button lives.
     await page.getByRole("button", { name: "Jobs Manager" }).click();
 
-    const queued = await api.post("/api/provider-hub/installations/local", {
-      multipart: {
-        file: {
-          name: "e2e-broken.zip",
-          mimeType: "application/zip",
-          buffer: emptyZip(),
+    const queued = await api.post(
+      appPath("/api/provider-hub/installations/local"),
+      {
+        multipart: {
+          file: {
+            name: "e2e-broken.zip",
+            mimeType: "application/zip",
+            buffer: emptyZip(),
+          },
         },
       },
-    });
+    );
     expect(queued.status()).toBe(202);
     const { job_id } = (await queued.json()) as { job_id: number };
     const job = await waitForJob(api, job_id, "failed");
@@ -115,7 +119,7 @@ test.describe("jobs", { tag: ["@jobs", "@stateful"] }, () => {
         tag: null,
       },
     ]);
-    const saved = await api.post("/api/system/settings", {
+    const saved = await api.post(appPath("/api/system/settings"), {
       multipart: { "languages-profiles": profiles },
     });
     expect(saved.ok()).toBe(true);
@@ -123,7 +127,9 @@ test.describe("jobs", { tag: ["@jobs", "@stateful"] }, () => {
     const name = "Recalculating missing subtitles";
     await expect
       .poll(async () => {
-        const response = await api.get("/api/system/jobs?status=completed");
+        const response = await api.get(
+          appPath("/api/system/jobs?status=completed"),
+        );
         const { data } = (await response.json()) as {
           data: { job_name: string }[];
         };

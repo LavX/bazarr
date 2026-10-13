@@ -68,9 +68,9 @@ jobs:
           python3 packaging/test_marketplaces.py
 
       - name: Validate final stable tag
-        if: github.event_name == 'workflow_run'
+        if: github.event_name != 'pull_request'
         env:
-          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
         run: |
           set -euo pipefail
           if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -79,12 +79,12 @@ jobs:
           fi
 
       - name: Resolve release lock
-        if: github.event_name == 'workflow_run'
+        if: github.event_name != 'pull_request'
         id: lock
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
         run: |
           set -euo pipefail
           lock="packaging/releases/${RELEASE_TAG#v}.json"
@@ -242,7 +242,10 @@ jobs:
           done
 
       - name: Upload resolved lock
-        if: github.event_name == 'workflow_run' && steps.lock.outputs.resolved == 'true'
+        # Only the lock step sets resolved, and it never runs on the pull request path, so the
+        # output alone gates the upload. A dispatch resolution is not proposed automatically,
+        # and the artifact is how its lock reaches the hand-opened lock pull request.
+        if: steps.lock.outputs.resolved == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: resolved-lock-${{ github.run_id }}

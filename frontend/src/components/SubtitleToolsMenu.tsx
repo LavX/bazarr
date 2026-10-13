@@ -23,7 +23,11 @@ import {
   IconDefinition,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useSubtitleAction } from "@/apis/hooks";
+import {
+  useSubtitleAction,
+  useTranslationAvailability,
+  useTranslationRefusal,
+} from "@/apis/hooks";
 import { ColorToolModal } from "@/components/forms/ColorToolForm";
 import { FrameRateModal } from "@/components/forms/FrameRateForm";
 import { TimeOffsetModal } from "@/components/forms/TimeOffsetForm";
@@ -199,6 +203,14 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   embeddedTrack = false,
 }) => {
   const { mutate, mutateAsync } = useSubtitleAction();
+  // The translate-from items call the mutation directly, so a closed gate has
+  // to disable them with its reason: the 409 is reported nowhere else, and a
+  // click that fails invisibly is worse than the failed job it replaced.
+  const translation = useTranslationAvailability();
+  // The disabled state above reads a cached status, which can still say the
+  // gate is open when the server answers otherwise: the 409 itself has to
+  // show the reason and refetch that status.
+  const showTranslationRefusal = useTranslationRefusal();
 
   const process = useCallback(
     (action: string) => {
@@ -306,37 +318,49 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
               return (
                 <Menu.Item
                   key={itemKey}
+                  disabled={!translation.available}
                   leftSection={<FontAwesomeIcon icon={faLanguage} />}
                   onClick={async () => {
-                    await mutateAsync({
-                      action: "translate",
-                      form: {
-                        id: mediaId!,
-                        type: mediaType!,
-                        language: missingLanguage!.code2,
-                        // Empty string tells backend to extract the embedded track
-                        path: source.path ?? "",
-                        forced: toPython(missingLanguage!.forced),
-                        hi: toPython(missingLanguage!.hi),
-                        from_language: sourceIsEmbedded
-                          ? source.code2
-                          : undefined,
-                        // Identify which embedded source track to extract by its
-                        // own hi/forced variant (the source may differ from the
-                        // output subtitle's variant).
-                        from_hi: sourceIsEmbedded
-                          ? toPython(source.hi)
-                          : undefined,
-                        from_forced: sourceIsEmbedded
-                          ? toPython(source.forced)
-                          : undefined,
-                        // eslint-disable-next-line camelcase
-                        arr_instance_id: arrInstanceId,
-                      },
-                    });
+                    try {
+                      await mutateAsync({
+                        action: "translate",
+                        form: {
+                          id: mediaId!,
+                          type: mediaType!,
+                          language: missingLanguage!.code2,
+                          // Empty string tells backend to extract the embedded track
+                          path: source.path ?? "",
+                          forced: toPython(missingLanguage!.forced),
+                          hi: toPython(missingLanguage!.hi),
+                          from_language: sourceIsEmbedded
+                            ? source.code2
+                            : undefined,
+                          // Identify which embedded source track to extract by its
+                          // own hi/forced variant (the source may differ from the
+                          // output subtitle's variant).
+                          from_hi: sourceIsEmbedded
+                            ? toPython(source.hi)
+                            : undefined,
+                          from_forced: sourceIsEmbedded
+                            ? toPython(source.forced)
+                            : undefined,
+                          // eslint-disable-next-line camelcase
+                          arr_instance_id: arrInstanceId,
+                        },
+                      });
+                    } catch (error) {
+                      // A stale status can leave the item clickable while the
+                      // gate is closed: a 409 says so here. Every other
+                      // failure keeps its own toast from the shared client.
+                      showTranslationRefusal(error);
+                    }
                   }}
                 >
-                  {label}
+                  {/* A disabled item cannot carry a tooltip, so the reason
+                      travels as a label suffix instead. */}
+                  {translation.available
+                    ? label
+                    : `${label} (${translation.reason})`}
                 </Menu.Item>
               );
             })}
