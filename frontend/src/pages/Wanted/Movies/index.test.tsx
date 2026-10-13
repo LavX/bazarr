@@ -134,6 +134,45 @@ describe("Wanted Movies", () => {
     expect(screen.getByText("Tags: Drama")).toBeInTheDocument();
   });
 
+  it("offers a tag that only a later page carries", async () => {
+    const user = userEvent.setup();
+    const untagged = Array.from({ length: 55 }, (_, index) => ({
+      title: `Movie ${index + 1}`,
+      id: 901 + index,
+      radarrId: 1,
+      missing_subtitles: [],
+    }));
+    const lateTagged = {
+      title: "The Late Tag",
+      id: 999,
+      radarrId: 1,
+      tags: ["Late Tag"],
+      missing_subtitles: [],
+    };
+    const all = [...untagged, lateTagged];
+    server.use(
+      http.get("/api/movies/wanted", ({ request }) => {
+        const { searchParams } = new URL(request.url);
+        const length = Number(searchParams.get("length"));
+        const start = Number(searchParams.get("start"));
+        return HttpResponse.json({
+          data: length === -1 ? all : all.slice(start, start + length),
+          total: all.length,
+        });
+      }),
+    );
+
+    customRender(<WantedMoviesView />);
+    await screen.findByRole("link", { name: "Movie 1" });
+    expect(screen.queryByText("The Late Tag")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+    const listbox = await openSelect(user, "Filter by tags...");
+    expect(
+      within(listbox).getByRole("option", { name: "Late Tag", hidden: true }),
+    ).toBeInTheDocument();
+  });
+
   it("keeps the Wanted tags filter visible when no tags are available", async () => {
     const user = userEvent.setup();
     server.use(

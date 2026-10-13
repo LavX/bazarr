@@ -29,6 +29,7 @@ import {
   faVolumeXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useQuery } from "@tanstack/react-query";
 import { ColumnDef, Row } from "@tanstack/react-table";
 import { useIsAnyActionRunning } from "@/apis/hooks";
 import { useAppTitle } from "@/apis/hooks/site";
@@ -92,14 +93,28 @@ function WantedView<T extends Wanted.Base>({
   const modals = useModals();
   const [selectedRows, setSelectedRows] = useState<Row<T>[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  // The tag options cannot come from the page on screen: rows beyond it can
+  // carry tags the user must still be able to select, and an untagged first
+  // page is not an empty library. Read every row through the all-rows entry
+  // the query exposes, which shares the cache entry a filter activates, and
+  // fetch it only while the panel offering the choices is open.
+  const tagQuery = useQuery({
+    ...query.allRows,
+    enabled:
+      query.allRows.enabled && filtersOpen && onTagValuesChange !== undefined,
+  });
   const tagOptions = useMemo(
     () =>
       Array.from(
-        new Set((query.data?.data ?? []).flatMap((item) => item.tags ?? [])),
+        new Set(
+          (tagQuery.data?.data ?? query.data?.data ?? []).flatMap(
+            (item) => item.tags ?? [],
+          ),
+        ),
       )
         .sort((a, b) => a.localeCompare(b))
         .map((tag) => ({ value: tag, label: tag })),
-    [query.data?.data],
+    [tagQuery.data, query.data],
   );
 
   useDocumentTitle(`Wanted ${name} - ${useAppTitle()}`);

@@ -25,6 +25,15 @@ export type UsePaginationQueryResult<T extends object> = UseQueryResult<
     page: number;
     fetchAll: boolean;
   };
+  // The all-rows entry behind this result: the exact key and fetcher its
+  // fetchAll mode uses, plus the same enabled gate, so a view can read every
+  // row (the tag filter's options) without paginating and share the cache
+  // entry an active filter switches to instead of requesting the rows twice.
+  allRows: {
+    queryKey: QueryKey;
+    queryFn: () => Promise<DataWrapperWithTotal<T>>;
+    enabled: boolean;
+  };
 };
 
 export function usePaginationQuery<
@@ -72,11 +81,12 @@ export function usePaginationQuery<
 
   const start = fetchAll ? 0 : page * pageSize;
   const length = fetchAll ? -1 : pageSize;
+  const allRowsKey = [...queryKey, QueryKeys.Range, { all: true }];
 
   const results = useQuery({
     enabled,
     queryKey: fetchAll
-      ? [...queryKey, QueryKeys.Range, { all: true }]
+      ? allRowsKey
       : [...queryKey, QueryKeys.Range, { start, size: pageSize }],
 
     queryFn: () => {
@@ -160,6 +170,11 @@ export function usePaginationQuery<
     controls: {
       gotoPage,
       setPageSize,
+    },
+    allRows: {
+      queryKey: allRowsKey,
+      queryFn: () => queryFn({ start: 0, length: -1 }),
+      enabled,
     },
   };
 }

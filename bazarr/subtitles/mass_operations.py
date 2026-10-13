@@ -1197,6 +1197,7 @@ def _process_media_action(items, action, job_id):
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(items))
 
     searched_series = set()
+    searched_movies = set()
     for i, item in enumerate(items, start=1):
         item_type = item.get('type')
         jobs_queue.update_job_progress(
@@ -1282,11 +1283,38 @@ def _process_media_action(items, action, job_id):
                     if not radarr_id:
                         skipped += 1
                         continue
-                    # Keep the selected movies inside this cancellable batch
-                    # job instead of enqueuing one independent job per movie.
-                    movies_download_subtitles(
-                        radarr_id, job_id=job_id, job_sub_function=True,
-                        arr_instance_id=item.get('arr_instance_id'))
+                    # A selection can repeat a movie, and another request may
+                    # already have this movie queued or running. Inline
+                    # searches need the deduplication previously supplied by
+                    # the queue, or two searches race file by file and spend
+                    # provider quota twice. The claim also publishes this
+                    # batch's own inline run, so a Search on the movie's page
+                    # follows this job instead of starting a second one. The
+                    # kwargs mirror the ones the movie route's self-queue
+                    # binds.
+                    movie_key = (item.get('arr_instance_id'), radarr_id)
+                    if movie_key in searched_movies:
+                        skipped += 1
+                        continue
+                    claim = {'no': radarr_id, 'job_sub_function': False,
+                             'arr_instance_id': item.get('arr_instance_id')}
+                    owner = jobs_queue.claim_inline_job('subtitles.mass_download.movies',
+                                                        'movies_download_subtitles',
+                                                        kwargs=claim, job_id=job_id)
+                    if owner != job_id:
+                        skipped += 1
+                        continue
+                    searched_movies.add(movie_key)
+                    try:
+                        # Keep the selected movies inside this cancellable
+                        # batch job instead of enqueuing one independent job
+                        # per movie.
+                        movies_download_subtitles(
+                            radarr_id, job_id=job_id, job_sub_function=True,
+                            arr_instance_id=item.get('arr_instance_id'))
+                    finally:
+                        jobs_queue.release_inline_job('subtitles.mass_download.movies',
+                                                     'movies_download_subtitles', kwargs=claim)
                 elif item_type in ('sports', 'sportsLeague'):
                     searched = _search_sports(item, job_id)
                     if not searched:
