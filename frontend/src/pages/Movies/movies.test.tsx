@@ -219,6 +219,30 @@ describe("Movies subtitles filter", () => {
     ).toBeInTheDocument();
   });
 
+  it("restores every movie when Clear all resets the Subtitles filter", async () => {
+    const user = userEvent.setup();
+    customRender(<MovieView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    await openFilters(user);
+    await pickSubtitles(user, "Complete");
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
+    );
+
+    await user.click(within(band()).getByRole("button", { name: "Clear all" }));
+
+    await screen.findByRole("link", { name: "Northern Light" });
+    expect(
+      screen.getByRole("link", { name: "Glass Harbour" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Remove filter: Subtitles: Complete",
+      }),
+    ).toBeNull();
+  });
+
   // The subtitles filter narrows on top of the other filters rather than
   // replacing them: Missing some AND a title search keep only the rows that
   // satisfy both, and the shown count reflects the intersection.
