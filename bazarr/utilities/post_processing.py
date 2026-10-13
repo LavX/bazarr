@@ -14,7 +14,7 @@ _PLACEHOLDER = re.compile(r'{{(\w+)}}')
 # The $ forms a shell used to expand: a command or parameter substitution
 # $(...) ${...} $name, and the special parameters $@ $# $? $$ $! $* $- $0
 # onwards, which arrive as a literal argument without a shell.
-_POSIX_EXPANSION = re.compile(r'\$[({\w@#?$!*0-9-]')
+_POSIX_EXPANSION = re.compile(r'\$[({\w@#?$!*-]')
 _WINDOWS_VARIABLE = re.compile(r'%[^%"\s]+%')
 _POSIX_ASSIGNMENT = re.compile(r'[ \t]*[A-Za-z_]\w*=')
 # nice accepts its adjustment as a bare positional operand, so a number there
