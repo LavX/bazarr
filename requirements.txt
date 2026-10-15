@@ -10,7 +10,7 @@ beautifulsoup4==4.15.0
 cachetools>=7.2.0
 certifi==2026.7.22
 chardet==7.6.0
-charset-normalizer==3.5.1
+charset-normalizer==3.5.2
 click-option-group>=0.5.9
 # Ceiling, not a floor: subliminal_patch CFSession relies on cloudscraper to
 # solve Cloudflare v1 challenges and captchas, so a release that drops that
