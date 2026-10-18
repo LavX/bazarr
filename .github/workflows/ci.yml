@@ -850,6 +850,7 @@ jobs:
             tests/bazarr/test_history_blacklist_scope.py \
             tests/bazarr/test_history_metrics_postgres.py \
             tests/bazarr/test_movies_history_scoping.py \
+            tests/bazarr/test_list_subtitle_scores.py \
             tests/bazarr/test_threading_scope.py \
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_job_module_identity.py \

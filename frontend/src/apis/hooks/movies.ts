@@ -45,12 +45,14 @@ export function useMovies() {
   return query;
 }
 
-export function useMoviesPagination(fetchAll = false) {
+export function useMoviesPagination(fetchAll = false, includeScores = false) {
   return usePaginationQuery(
     [QueryKeys.Movies],
-    (param) => api.movies.moviesBy(param),
+    (param) => api.movies.moviesBy(param, includeScores),
     true,
     fetchAll,
+    true,
+    includeScores,
   );
 }
 

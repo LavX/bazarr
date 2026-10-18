@@ -67,12 +67,14 @@ export function useSeries() {
   return query;
 }
 
-export function useSeriesPagination(fetchAll = false) {
+export function useSeriesPagination(fetchAll = false, includeScores = false) {
   return usePaginationQuery(
     [QueryKeys.Series],
-    (param) => api.series.seriesBy(param),
+    (param) => api.series.seriesBy(param, includeScores),
     true,
     fetchAll,
+    true,
+    includeScores,
   );
 }
 

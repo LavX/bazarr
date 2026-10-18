@@ -5,4 +5,5 @@ export { default as InstanceBadge } from "./InstanceBadge";
 export { default as Language } from "./Language";
 export { default as LanguageProfile } from "./LanguageProfile";
 export { default as ReleaseMismatchBadge } from "./ReleaseMismatchBadge";
+export { default as ScorePill } from "./ScorePill";
 export { default as SportsJobFeedback } from "./SportsJobFeedback";

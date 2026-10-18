@@ -28,11 +28,13 @@ class MovieApi extends BaseApi {
     return response.data;
   }
 
-  async moviesBy(params: Parameter.Range) {
-    const response = await this.get<DataWrapperWithTotal<Item.Movie>>(
-      "",
-      params,
-    );
+  async moviesBy(params: Parameter.Range, includeScores = false) {
+    // scores=1 is opt-in: it asks the backend to compute and attach each movie's
+    // lowest_subtitle_score, which the list score filter and column read.
+    const response = await this.get<DataWrapperWithTotal<Item.Movie>>("", {
+      ...params,
+      ...(includeScores ? { scores: 1 } : {}),
+    });
     return response;
   }
 

@@ -14,11 +14,13 @@ class SeriesApi extends BaseApi {
     return response.data;
   }
 
-  async seriesBy(params: Parameter.Range) {
-    const response = await this.get<DataWrapperWithTotal<Item.Series>>(
-      "",
-      params,
-    );
+  async seriesBy(params: Parameter.Range, includeScores = false) {
+    // scores=1 is opt-in: it asks the backend to compute and attach each series'
+    // lowest_subtitle_score, which the list score filter and column read.
+    const response = await this.get<DataWrapperWithTotal<Item.Series>>("", {
+      ...params,
+      ...(includeScores ? { scores: 1 } : {}),
+    });
     return response;
   }
 

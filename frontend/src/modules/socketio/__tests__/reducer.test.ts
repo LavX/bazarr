@@ -119,6 +119,7 @@ describe("series reducer", () => {
     });
     expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [QueryKeys.Series],
+      predicate: expect.any(Function),
     });
   });
 
@@ -148,6 +149,7 @@ describe("movie reducer", () => {
     });
     expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [QueryKeys.Movies],
+      predicate: expect.any(Function),
     });
   });
 
