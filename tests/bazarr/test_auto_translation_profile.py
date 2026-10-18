@@ -464,3 +464,109 @@ def test_wanted_series_translation_uses_exact_profile_variant():
     assert len(expected) == 1
     assert expected[0].path.endswith('episode.hu.forced.srt')
     assert expected[0].version is None
+
+
+def test_wanted_series_does_not_queue_over_a_subtitle_already_on_disk(tmp_path):
+    """The index can still call a language missing after its file landed. The
+    wanted scan must not queue a translation over that file: it is the
+    provider's and is the better track."""
+    from subtitles.wanted.series import _wanted_episode
+
+    video = tmp_path / 'episode.mkv'
+    destination = tmp_path / 'episode.hu.forced.srt'
+    destination.write_text('already here')
+    episode = SimpleNamespace(
+        audio_language='English',
+        failedAttempts='[]',
+        missing_subtitles="['hu:forced']",
+        path=str(video),
+        profileId=1,
+        sceneName='Scene.Name',
+        sonarrEpisodeId=20,
+        sonarrSeriesId=10,
+        subtitles="[['fr', '/subs/source.fr.srt', 100]]",
+        title='Episode title',
+    )
+
+    with (
+        patch('subtitles.wanted.series.get_audio_profile_languages',
+              return_value=[{'name': 'English'}]),
+        patch('subtitles.wanted.series.get_profiles_list') as mock_profiles,
+        patch('subtitles.wanted.series._find_existing_subtitle_path',
+              return_value='/subs/source.fr.srt'),
+        patch('subtitles.wanted.series.path_mappings') as mock_path_mappings,
+        patch('subtitles.wanted.series.settings') as mock_settings,
+        patch('subtitles.wanted.series.database') as mock_database,
+        patch('subtitles.wanted.series.jobs_queue') as mock_jobs_queue,
+        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
+        patch('subtitles.wanted.series.generate_subtitles', return_value=[]),
+    ):
+        mock_profiles.return_value = {'items': [
+            {'language': 'hu', 'translate_from': 'fr', 'forced': 'True', 'hi': 'False'},
+        ]}
+        mock_path_mappings.path_replace.side_effect = lambda value: value
+        mock_settings.translator.min_source_score = 0
+        mock_database.execute.return_value.first.side_effect = [
+            None,
+            None,
+            SimpleNamespace(sonarrSeriesId=10, season=1, episode=1,
+                            imdbId='tt1', tvdbId='1'),
+        ]
+        mock_jobs_queue._is_an_existing_job.return_value = False
+
+        _wanted_episode(episode, providers_list=[])
+
+    mock_translate.assert_not_called()
+    assert destination.read_text() == 'already here'
+
+
+def test_wanted_movie_does_not_queue_over_a_subtitle_already_on_disk(tmp_path):
+    """Same guard on the movie scan: a provider file the index has not seen
+    yet ends the translation for that target."""
+    from subtitles.wanted.movies import _wanted_movie
+
+    video = tmp_path / 'movie.mkv'
+    destination = tmp_path / 'movie.hu.srt'
+    destination.write_text('already here')
+    movie = SimpleNamespace(
+        arr_instance_id=2,
+        audio_language='English',
+        failedAttempts='[]',
+        missing_subtitles="['hu']",
+        path=str(video),
+        profileId=1,
+        radarrId=30,
+        sceneName='Scene.Name',
+        subtitles="[['fr', '/subs/source.fr.srt', 100]]",
+        title='Movie title',
+    )
+
+    with (
+        patch('subtitles.wanted.movies.get_audio_profile_languages',
+              return_value=[{'name': 'English'}]),
+        patch('subtitles.wanted.movies.get_profiles_list') as mock_profiles,
+        patch('subtitles.wanted.movies._find_existing_subtitle_path',
+              return_value='/subs/source.fr.srt'),
+        patch('subtitles.wanted.movies.path_mappings') as mock_path_mappings,
+        patch('subtitles.wanted.movies.settings') as mock_settings,
+        patch('subtitles.wanted.movies.database') as mock_database,
+        patch('subtitles.wanted.movies.jobs_queue') as mock_jobs_queue,
+        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
+        patch('subtitles.wanted.movies.generate_subtitles', return_value=[]),
+    ):
+        mock_profiles.return_value = {'items': [
+            {'language': 'hu', 'translate_from': 'fr', 'forced': 'False', 'hi': 'False'},
+        ]}
+        mock_path_mappings.path_replace_movie.side_effect = lambda value: value
+        mock_settings.translator.min_source_score = 0
+        mock_database.execute.return_value.first.side_effect = [
+            None,
+            None,
+            SimpleNamespace(imdbId='tt1', tmdbId='2'),
+        ]
+        mock_jobs_queue._is_an_existing_job.return_value = False
+
+        _wanted_movie(movie, providers_list=[])
+
+    mock_translate.assert_not_called()
+    assert destination.read_text() == 'already here'

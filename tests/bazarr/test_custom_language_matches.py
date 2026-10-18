@@ -40,10 +40,18 @@ def test_chinese_traditional_matches_traditional_titles(chinese_traditional, nam
     "pob",
     "简繁中文",
     "简体中文",
+    "Dutch",
     "",
 ])
 def test_chinese_traditional_rejects_other_titles(chinese_traditional, name):
     assert chinese_traditional.ffprobe_found({"name": name}) is False
+
+
+@pytest.mark.parametrize("name", ["TC", "Traditional Chinese (TC)", "Movie.TC.1080p"])
+def test_the_short_tc_token_matches_only_as_a_word(chinese_traditional, name):
+    # "tc" as a plain substring classified "Dutch" as Traditional Chinese;
+    # it still matches the title tokens it was added for.
+    assert chinese_traditional.ffprobe_found({"name": name}) is True
 
 
 def test_brazilian_portuguese_still_matches_its_own_titles(brazilian_portuguese):

@@ -15,7 +15,7 @@ from threading import Thread, Lock, RLock
 from app import activity
 from app.event_handler import event_stream
 from app.config import settings
-from secret_store.scrub import scrub_text
+from secret_store.scrub import scrub_text, scrub_value
 
 # The package directory, i.e. the one holding subtitles/, sonarr/, app/ and the
 # rest. add_job_from_function derives a job's module from its filename relative
@@ -479,12 +479,13 @@ class JobsQueue:
         how to run and a ``label`` for its button, plus whatever that kind
         needs, for example ``{"kind": "discover.save", "label": "Save",
         "ticket": 12}``. The completion notification and the Jobs drawer show
-        it; nothing else about the job is exposed.
+        it; nothing else about the job is exposed. It is scrubbed like every
+        other job text: a filename a provider chose can carry a credential.
         """
         with self._queue_lock:
             for job in self.jobs_running_queue:
                 if job.job_id == job_id:
-                    job.action = dict(action)
+                    job.action = scrub_value(dict(action))
                     return True
         return False
 

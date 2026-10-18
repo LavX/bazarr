@@ -11,9 +11,12 @@ provider that named the key it rejected. The shapes are ``Bearer <token>``,
 
 VALUES covers the exact credentials this install holds: every at-rest secret
 value in the settings tree plus every Provider Hub installation credential,
-decrypted. An exact value is masked wherever it appears, label or no label,
-which is what covers the shapes no pattern knows - a self-hosted provider's
-key, a webhook URL that carries its token, a password a plugin quoted back.
+decrypted. An exact value is masked in text (logs, payloads, messages), label
+or no label, which is what covers the shapes no pattern knows - a self-hosted
+provider's key, a webhook URL that carries its token, a password a plugin
+quoted back. In a Provider Hub state document it is masked only in the fields
+that carry free text: the rest of that document is structure, and a username
+that equals a provider id must not be rewritten to the mask.
 
 Both stay cheap on ordinary text: the value set compiles to one alternation,
 rebuilt only when the live credentials change, and text with nothing to mask
@@ -22,6 +25,7 @@ comes back unchanged after a bounded scan.
 
 import logging
 import re
+from threading import RLock, local
 from typing import Any, Iterable, Mapping
 
 from .crypto import decrypt_secret
@@ -47,11 +51,15 @@ _OPENROUTER_KEY_RE = re.compile(r'\bsk-or-v1-[0-9a-fA-F]{64}\b')
 
 
 def _mask_bearer(match):
-    """Mask a Bearer token, keeping the scheme. A token with no digit and no
-    punctuation ("Bearer authentication") is prose about a credential, not
-    one, and stays."""
+    """Mask a Bearer token, keeping the scheme.
+
+    Prose about a credential ("Bearer authentication is required") stays, and
+    so does a short word. A token of sixteen characters or more is masked
+    whether or not it carries a digit: a real token can be all letters, and a
+    prose word that long after "Bearer" does not exist in practice.
+    """
     token = match.group(2)
-    if not any(character.isdigit() or character in '-._~+/=' for character in token):
+    if len(token) < 16 and not any(character.isdigit() or character in '-._~+/=' for character in token):
         return match.group(0)
     return match.group(1) + MASK
 
@@ -78,9 +86,26 @@ _VALUES_RE: 're.Pattern[str] | None' = None
 # migration is what covers those containers.
 _CREDENTIAL_CONTAINERS = frozenset({'config'})
 
-# A refresh re-entering itself (a settings write triggered from a decryption
-# inside one) answers with the set it already has instead of recursing.
-_refresh_depth = 0
+# The state fields that carry free text: what a worker, a provider or a raised
+# error said. An exact credential value is masked only in these, because the
+# rest of the document is structure. A username that happens to equal a
+# provider id ("opensubtitles") would otherwise rename the installation and
+# its manifest to the mask on the next boot. The pattern shapes are masked
+# everywhere: no identifier is shaped like a Bearer token or an API key.
+_STATE_TEXT_FIELDS = frozenset({
+    'message', 'error', 'last_error', 'detail', 'details', 'reason',
+    'stderr', 'stdout', 'output', 'traceback', 'activity', 'notes',
+    'trust_note', 'log',
+})
+
+# Refreshes are serialized so the registration order matches the collection
+# order: a slow refresh that started before a settings write must not publish
+# its older set after the write's own refresh. A refresh re-entering itself
+# (a settings write triggered from a decryption inside one, on the same
+# thread) answers with the set it already has instead of recursing; other
+# threads wait for the lock and then collect for real.
+_refresh_lock = RLock()
+_refresh_local = local()
 
 
 def registered_secret_values() -> frozenset[str]:
@@ -131,15 +156,26 @@ def scrub_text(text: str) -> str:
     if not isinstance(text, str) or not text:
         return text
 
-    for pattern, replacement in _PATTERNS:
-        if pattern.search(text):
-            text = pattern.sub(replacement, text)
+    text = _mask_patterns(text)
 
     values = _SECRET_VALUES
     if values and any(value in text for value in values):
         regex = _VALUES_RE
         if regex is not None:
             text = regex.sub(MASK, text)
+    return text
+
+
+def _mask_patterns(text: str) -> str:
+    """The text with the credential shapes masked, registered values untouched.
+
+    The state scrub applies this to every string in a Provider Hub document
+    and the exact-value layer only to its free-text fields: a shape is never a
+    legitimate identifier, an exact value can be one.
+    """
+    for pattern, replacement in _PATTERNS:
+        if pattern.search(text):
+            text = pattern.sub(replacement, text)
     return text
 
 
@@ -227,18 +263,16 @@ def collect_hub_secret_values(state=None) -> set[str]:
     A stored value that will not decrypt is skipped with a warning rather
     than raised: it stays covered at rest by the migration's refusal, and
     collecting the scrub set must not be what keeps the boot from
-    finishing. ``state`` is the document a caller already read, so a writer
-    can collect without a second read; None loads it.
+    finishing. A document that cannot be read at all is different: it raises
+    so the caller keeps the set it already registered instead of publishing
+    a collection that is missing every Hub value. ``state`` is the document
+    a caller already read, so a writer can collect without a second read;
+    None loads it.
     """
     values: set[str] = set()
     if state is None:
-        try:
-            from provider_hub.state import load_state
-            state = load_state()
-        except Exception as error:
-            logger.warning("The Provider Hub state could not be read to collect the "
-                           "credentials to scrub: %s", type(error).__name__)
-            return values
+        from provider_hub.state import load_state
+        state = load_state()
     installations = state.get("installations") if isinstance(state, dict) else None
     if not isinstance(installations, dict):
         return values
@@ -275,61 +309,71 @@ def refresh_secret_values(settings_obj=None, state=None) -> int:
     user just entered is masked in the same process that stores it. Never
     raises: a read that fails leaves the previous set in place, because
     refusing a boot or a save over the scrub set would be worse than a
-    credential that is not yet registered."""
-    global _refresh_depth
-    if _refresh_depth:
-        return len(_SECRET_VALUES)
-    _refresh_depth += 1
-    try:
-        if settings_obj is None:
-            from app.config import settings as settings_obj
-        values = collect_settings_secret_values(settings_obj)
-        values |= collect_hub_secret_values(state)
-    except Exception as error:
-        logger.warning("The credential values to scrub could not be collected: %s",
-                       type(error).__name__)
-        return len(_SECRET_VALUES)
-    finally:
-        _refresh_depth -= 1
-    return register_secret_values(values)
+    credential that is not yet registered.
+
+    Refreshes are serialized, so a collection that started before a settings
+    write cannot publish its older set after the write's own refresh. A
+    refresh that re-enters itself on the same thread (a settings write
+    triggered from a decryption inside one) answers with the current set.
+    """
+    with _refresh_lock:
+        if getattr(_refresh_local, 'depth', 0):
+            return len(_SECRET_VALUES)
+        _refresh_local.depth = 1
+        try:
+            if settings_obj is None:
+                from app.config import settings as settings_obj
+            values = collect_settings_secret_values(settings_obj)
+            values |= collect_hub_secret_values(state)
+        except Exception as error:
+            logger.warning("The credential values to scrub could not be collected: %s",
+                           type(error).__name__)
+            return len(_SECRET_VALUES)
+        finally:
+            _refresh_local.depth = 0
+        return register_secret_values(values)
 
 
 def scrub_state_secrets(state) -> bool:
     """Mask every registered credential and known shape in a Provider Hub
     state document, in place. Returns True when it masked something.
 
-    Every string is a candidate, bars the credential containers, because a
-    diagnostic field a leak lands in is not known ahead of time. The
-    patterns mask what they recognise; the registered values mask the rest.
+    The credential shapes are masked in every string, because no identifier
+    looks like one. An exact registered value is masked only in the free-text
+    fields (``_STATE_TEXT_FIELDS``), because the rest of the document is
+    structure: an install whose username equals its provider id would
+    otherwise have its installation and manifest ids rewritten to the mask.
+    Credential containers are always left alone; the migration covers them.
     """
     if not isinstance(state, dict):
         return False
     changed = False
 
-    def walk(node):
+    def walk(node, in_text):
         nonlocal changed
         if isinstance(node, dict):
             for key, value in list(node.items()):
                 if key in _CREDENTIAL_CONTAINERS:
                     continue
+                text_field = in_text or (isinstance(key, str) and key in _STATE_TEXT_FIELDS)
                 if isinstance(value, str):
-                    masked = scrub_text(value)
+                    masked = scrub_text(value) if text_field else _mask_patterns(value)
                     if masked != value:
                         node[key] = masked
                         changed = True
                 elif isinstance(value, (dict, list)):
-                    walk(value)
+                    walk(value, text_field)
         else:
             for index, value in enumerate(node):
                 if isinstance(value, str):
-                    masked = scrub_text(value)
+                    masked = scrub_text(value) if in_text else _mask_patterns(value)
                     if masked != value:
                         node[index] = masked
                         changed = True
                 elif isinstance(value, (dict, list)):
-                    walk(value)
+                    walk(value, in_text)
 
-    walk(state)
+    walk(state, False)
     return changed
 
 

@@ -8,6 +8,7 @@ feeds them: a settings tree and a Provider Hub state document.
 """
 
 import json
+import threading
 import time
 
 import pytest
@@ -191,6 +192,108 @@ def test_state_diagnostics_are_masked_and_credential_containers_are_not(scrub_re
 def test_a_clean_state_document_reports_no_change():
     state = {"installations": {}, "jobs": [{"message": "Worker health check passed"}]}
     assert scrub_state_secrets(state) is False
+
+
+def test_a_bearer_prose_is_left_alone_and_a_long_letter_token_is_masked():
+    prose = "Authorization: Bearer authentication is required"
+    assert scrub_text(prose) == prose
+    # A real token can be all letters. Sixteen characters is past any prose
+    # word that follows "Bearer", so length alone decides there.
+    assert scrub_text("Authorization: Bearer abcdefghijklmnop") == "Authorization: Bearer ***"
+
+
+def test_a_state_identifier_that_equals_a_credential_is_not_masked(scrub_registry):
+    """A username can equal a provider id ("opensubtitles"). The exact-value
+    layer masks what a worker said, never the document's structure: masking
+    there renamed the installation and its manifest to the mask on the next
+    boot."""
+    scrub_registry(["opensubtitles"])
+    state = {
+        "installations": {
+            "opensubtitles": {
+                "provider_id": "opensubtitles",
+                "manifest": {"id": "opensubtitles"},
+                "last_error": "login refused for opensubtitles",
+            }
+        },
+        "plugin_secret_paths": ["opensubtitles.api_key"],
+        "catalog_sources": {"catalog": {"url": "https://github.com/opensubtitles/catalog"}},
+    }
+    assert scrub_state_secrets(state) is True
+    assert state["installations"]["opensubtitles"]["provider_id"] == "opensubtitles"
+    assert state["installations"]["opensubtitles"]["manifest"]["id"] == "opensubtitles"
+    assert state["plugin_secret_paths"] == ["opensubtitles.api_key"]
+    assert state["catalog_sources"]["catalog"]["url"] == "https://github.com/opensubtitles/catalog"
+    # The diagnostic field still masks it.
+    assert state["installations"]["opensubtitles"]["last_error"] == "login refused for ***"
+
+
+def test_a_state_shape_is_masked_even_outside_a_text_field(scrub_registry):
+    """Pattern shapes never occur in legitimate identifiers, so they are
+    masked everywhere in the document; only exact values are field-limited."""
+    scrub_registry(["opensubtitles"])
+    state = {"catalog_sources": {"s": {"resolved_commit": "Bearer abcdefghijklmnop"}}}
+    assert scrub_state_secrets(state) is True
+    assert state["catalog_sources"]["s"]["resolved_commit"] == "Bearer ***"
+
+
+def test_a_failed_state_read_keeps_the_previous_values(scrub_registry, monkeypatch):
+    """An unreadable state document must not publish a set missing every Hub
+    credential: the refresh answers with the set it already had."""
+    import provider_hub.state
+
+    scrub_registry([FAKE_KEY])
+
+    def unavailable(*args, **kwargs):
+        raise OSError("state unreadable")
+
+    monkeypatch.setattr(provider_hub.state, "load_state", unavailable)
+    count = refresh_secret_values({"sonarr": {"apikey": ANOTHER_FAKE_KEY}})
+
+    assert count == 1
+    assert scrub_text(FAKE_KEY) == MASK
+
+
+def test_a_refresh_waits_for_the_one_in_progress_instead_of_skipping(scrub_registry, monkeypatch):
+    """A refresh that starts while another is collecting must wait and then
+    collect for real. Answering with the earlier set let a credential saved in
+    between stay unmasked until some later refresh."""
+    import secret_store.scrub as scrub
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_collect(state=None):
+        started.set()
+        release.wait(2)
+        return set()
+
+    scrub_registry([FAKE_KEY])
+    monkeypatch.setattr(scrub, "collect_hub_secret_values", slow_collect)
+    first = threading.Thread(target=scrub.refresh_secret_values,
+                             kwargs={"settings_obj": {"sonarr": {"apikey": FAKE_KEY}}})
+    first.start()
+    assert started.wait(2)
+
+    entered = threading.Event()
+    results = []
+
+    def second_refresh():
+        entered.set()
+        results.append(scrub.refresh_secret_values(
+            {"sonarr": {"apikey": ANOTHER_FAKE_KEY}}))
+
+    second = threading.Thread(target=second_refresh)
+    second.start()
+    assert entered.wait(2)
+    time.sleep(0.05)
+    assert second.is_alive(), "the second refresh returned the in-progress set instead of waiting"
+
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert results == [1]
+    assert scrub_text(ANOTHER_FAKE_KEY) == MASK
 
 
 def test_a_settings_write_rebuilds_the_registered_values(monkeypatch):

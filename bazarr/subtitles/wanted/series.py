@@ -170,16 +170,24 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                             translated_destination_path,
                         )
                         from subtitles.tools.translate.main import translate_subtitles_file
+                        destination = translated_destination_path(
+                            video_path, lang_code, translate_cfg['forced'], translate_cfg['hi'])
+                        # A file at the destination is a subtitle the index
+                        # still calls missing: the provider's, landed after the
+                        # last index pass. It is the better track, and a
+                        # translation would replace it, so this target is
+                        # served already and queues nothing.
+                        if os.path.isfile(destination):
+                            logging.info(
+                                "BAZARR auto-translate (wanted-scan) skipped: %s is already "
+                                "on disk for %s", lang_code, video_path,
+                            )
+                            continue
                         # The queueing sighting: a subtitle that lands at this
                         # destination before the job writes is the provider's,
                         # and the job refuses to replace it. Captured here so
                         # the guard covers the wait itself, not only the write.
-                        expected_versions = capture_subtitle_versions(
-                            video_path,
-                            (translated_destination_path(video_path, lang_code,
-                                                         translate_cfg['forced'],
-                                                         translate_cfg['hi']),),
-                        )
+                        expected_versions = capture_subtitle_versions(video_path, (destination,))
                         translate_kwargs = dict(
                             video_path=video_path,
                             source_srt_file=source_srt,

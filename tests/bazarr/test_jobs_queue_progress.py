@@ -192,6 +192,33 @@ def test_a_failed_jobs_message_is_scrubbed_before_the_socket_and_the_api(scrub_r
         assert key not in str(job.error)
 
 
+def test_a_job_action_is_scrubbed_before_the_socket_and_the_api(scrub_registry):
+    """A discover download offers Save with the provider-chosen filename in
+    the action. That name is the provider's text and can echo a credential,
+    and the action is stored, sent and read back like any other job text."""
+    from pytest import MonkeyPatch
+    from test_sportarr_workflows import private_queue
+
+    key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+    scrub_registry([key])
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        queue.feed_jobs_pending_queue("Example", __name__, "noop")
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+
+        assert queue.set_job_action(job.job_id, {
+            "kind": "discover.save",
+            "label": "Save",
+            "ticket": job.job_id,
+            "filename": f"Show.S01E01.{key}.srt",
+        }) is True
+
+    assert job.action["filename"] == "Show.S01E01.***.srt"
+    assert job.action["kind"] == "discover.save"
+    assert key not in str(job.action)
+
+
 def test_the_jobs_list_sends_last_run_time_as_utc():
     # The drawer showed "2 hours ago" for a job that had just finished: the
     # time went out without an offset and the browser read it as its own local
