@@ -12,7 +12,7 @@ import logging
 
 import srt
 import pysubs2
-from sportarr.profile_hooks import sports_write_kwargs, finish_translation
+from sportarr.profile_hooks import finish_translation
 from sportarr.connection import check_cancelled
 from subtitles.tools.subsync_engines import staged_subtitle_write
 from media_servers.events import publication_callback
@@ -29,7 +29,8 @@ from utilities.path_mappings import path_mappings  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from app.jobs_queue import JobCancelled, jobs_queue
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
-from ..core.translator_utils import add_translator_info, get_description, create_process_result
+from ..core.translator_utils import (add_translator_info, get_description, create_process_result,
+                                     translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
 DEFAULT_GEMINI_BATCH_SIZE = 300
@@ -54,7 +55,8 @@ class GeminiTranslatorService:
 
     def __init__(self, source_srt_file, dest_srt_file, to_lang, media_type, sonarr_series_id, sonarr_episode_id,
                  radarr_id, forced, hi, video_path, from_lang, orig_to_lang,
-                 arr_instance_id=None, sports_operation=None, cancel=None, **kwargs):
+                 arr_instance_id=None, sports_operation=None, cancel=None,
+                 expected_destination_versions=(), **kwargs):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.to_lang = to_lang
@@ -74,6 +76,10 @@ class GeminiTranslatorService:
         self.sonarr_episode_id = sonarr_episode_id
         self.radarr_id = radarr_id
         self.orig_to_lang = orig_to_lang
+        # The destination's versions as the queueing sighting found them; an
+        # empty tuple means this translation was not queued by an auto path and
+        # may replace whatever sits at the destination.
+        self.expected_destination_versions = tuple(expected_destination_versions or ())
 
         self.gemini_api_key = None
         self.api_keys = []
@@ -125,7 +131,7 @@ class GeminiTranslatorService:
                                                                            'translate', self.arr_instance_id),
                                        source_paths=(self.source_srt_file,),
                                            before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
-                                           **sports_write_kwargs(self, job_id)) as temporary:
+                                           **translation_write_kwargs(self, job_id)) as temporary:
                     self.output_file = temporary
                     if self.sports_operation:
                         self.progress_file = temporary + '.progress'

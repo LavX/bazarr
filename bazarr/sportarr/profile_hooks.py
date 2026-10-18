@@ -466,6 +466,10 @@ def translate_from_existing(context, target_code, cancel=None, translation_gate=
         arr_instance_id=context.arr_instance_id,
         sports_operation=bound,
         embedded_source=None,
+        # The operation bound the destination and its versions when it was
+        # created, which already covers the queueing wait (see
+        # sports_write_kwargs); this parameter stays empty here.
+        expected_destination_versions=(),
     )
     # Guard: skip if an identical translate job is already pending or running,
     # the way the series and movies wanted scans do. The kwargs have to name

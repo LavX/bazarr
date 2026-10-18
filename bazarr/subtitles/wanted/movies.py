@@ -159,7 +159,21 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                         )
                     ).first()
                     try:
+                        from subtitles.tools.subsync_engines import capture_subtitle_versions
+                        from subtitles.tools.translate.core.translator_utils import (
+                            translated_destination_path,
+                        )
                         from subtitles.tools.translate.main import translate_subtitles_file
+                        # The queueing sighting: a subtitle that lands at this
+                        # destination before the job writes is the provider's,
+                        # and the job refuses to replace it. Captured here so
+                        # the guard covers the wait itself, not only the write.
+                        expected_versions = capture_subtitle_versions(
+                            video_path,
+                            (translated_destination_path(video_path, lang_code,
+                                                         translate_cfg['forced'],
+                                                         translate_cfg['hi']),),
+                        )
                         translate_kwargs = dict(
                             video_path=video_path,
                             source_srt_file=source_srt,
@@ -175,6 +189,7 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                             arr_instance_id=arr_instance_id,
                             sports_operation=None,
                             embedded_source=None,
+                            expected_destination_versions=expected_versions,
                         )
                         # Guard: skip if an identical translate job is already
                         # pending or running. Why: history guard (action=6) only

@@ -21,11 +21,12 @@ from unittest.mock import Mock
 
 import pytest
 import sqlalchemy as sa
-
 from test_sportarr_kind_migration import migration_engine
 from test_sportarr_indexer import indexed_library
 from test_sportarr_manual import manual_library
 from test_sportarr_profile_hooks import profile_library
+
+pytestmark = pytest.mark.usefixtures('languages_loaded')
 
 _PROFILE = {"items": [{"language": "hu", "translate_from": "en", "forced": "False", "hi": "False"}]}
 
