@@ -240,7 +240,7 @@ def test_startup_requirements_probe_uses_security_patched_dependency_versions():
     requirements = (repo_root / "requirements.txt").read_text()
 
     expected_versions = {
-        "cryptography": ("cryptography", ">=50.0.1"),
+        "cryptography": ("cryptography", ">=50.0.2"),
         "dynaconf": ("dynaconf", "==3.3.5"),
         "urllib3": ("urllib3", "==2.8.0"),
     }
@@ -500,12 +500,12 @@ def test_cryptography_security_floor_repairs_old_installs_once(monkeypatch, inst
 
     def install(missing):
         repairs.append(missing)
-        installed_version[0] = '50.0.1'
+        installed_version[0] = '50.0.2'
         return True
 
     monkeypatch.setattr(requirements, 'install_requirements', install)
     monkeypatch.setattr(requirements, 'restart_after_requirements_install', lambda: restarts.append(True))
-    needs_repair = installed in ['48.0.0', '49.0.0', '50.0.0']
+    needs_repair = installed in ['48.0.0', '49.0.0', '50.0.0', '50.0.1']
     assert requirements.missing_runtime_requirements() == (['cryptography'] if needs_repair else [])
     assert requirements.ensure_requirements() is needs_repair
     assert repairs == ([['cryptography']] if needs_repair else [])
