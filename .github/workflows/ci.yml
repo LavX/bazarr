@@ -509,6 +509,7 @@ jobs:
             tests/bazarr/test_config.py \
             tests/bazarr/test_config_save.py \
             tests/bazarr/test_container_hardening.py \
+            tests/bazarr/test_custom_language_matches.py \
             tests/bazarr/test_installer_backup.py \
             tests/bazarr/test_embedded_history_indexer.py \
             tests/bazarr/test_encryption.py \
@@ -548,6 +549,7 @@ jobs:
             tests/bazarr/test_secret_store_e2e.py \
             tests/bazarr/test_secret_store_migration.py \
             tests/bazarr/test_secret_store_registry.py \
+            tests/bazarr/test_secret_store_scrub.py \
             tests/bazarr/test_signalr_client.py \
             tests/bazarr/test_sonarr_sync_episodes.py \
             tests/bazarr/test_sql_profiler.py \
@@ -561,6 +563,7 @@ jobs:
             tests/bazarr/test_system_logs_api.py \
             tests/bazarr/test_tracemalloc_dumper.py \
             tests/bazarr/test_translate_availability.py \
+            tests/bazarr/test_translate_destination_guard.py \
             tests/bazarr/test_translate_failure_record.py \
             tests/bazarr/test_translate_job_media_name.py \
             tests/bazarr/test_translate_surface_refusals.py \
