@@ -503,19 +503,21 @@ def _canonical_embedded_language(language):
     return base
 
 
-def _subtitle_file_identity(path):
-    """A subtitle file's identity across path mappings.
+def _subtitle_file_name(path):
+    """Return a subtitle path's file name and whether it is a Windows path.
 
     History rows and the indexed subtitles column can carry the same file under
     different mapped folders or separator styles: a translation logs the
     globally mapped path while the indexer records the instance's, and one side
     can be a Windows path where the other is the mapped Linux path. The file
     name is what stays stable, so the score lookup compares that, split on both
-    separators and folded case, the way Windows resolves names: a name that
-    reached the history through a Windows mapping and one that reached the
-    index through a Linux mapping must still meet.
+    separators. Windows resolves names case-insensitively, so a name that
+    reached one side through a Windows path matches the other side's name
+    whatever its case; two Unix names that differ only by case are two files on
+    a case-sensitive filesystem and stay apart.
     """
-    return str(path).replace('\\', '/').rsplit('/', 1)[-1].casefold()
+    text = str(path)
+    return text.replace('\\', '/').rsplit('/', 1)[-1], '\\' in text
 
 
 def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
@@ -533,8 +535,9 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
 
     ``subtitles_by_id`` maps id -> raw ``subtitles`` column. Paths compare by
     their file name, the identity that survives the path mappings a history row
-    and the indexer can apply to the same file. One grouped, ordered history
-    query runs for the whole page (no per-item query).
+    and the indexer can apply to the same file; Windows names also match
+    case-insensitively, while Unix names keep their case. One grouped, ordered
+    history query runs for the whole page (no per-item query).
     """
     ids = list(subtitles_by_id.keys())
     if not ids:
@@ -545,12 +548,13 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
     current_paths = {}
     embedded_langs = {}
     for item_id, raw in subtitles_by_id.items():
-        paths = set()
+        paths = {}
         langs = set()
         if raw:
             for entry in ast.literal_eval(raw):
                 if entry[1]:
-                    paths.add(_subtitle_file_identity(entry[1]))
+                    name, windows = _subtitle_file_name(entry[1])
+                    paths[name] = paths.get(name, False) or windows
                 else:
                     langs.add(_canonical_embedded_language(entry[0]))
         current_paths[item_id] = paths
@@ -584,10 +588,21 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
                 continue
             key = (row.item_id, 'embedded', row.language)
         else:
-            identity = _subtitle_file_identity(row.subtitles_path)
-            if identity not in current_paths.get(row.item_id, ()):
-                continue
-            key = (row.item_id, 'file', identity)
+            name, windows = _subtitle_file_name(row.subtitles_path)
+            names = current_paths.get(row.item_id, {})
+            if name in names:
+                current_name = name
+            else:
+                folded = [other for other in names if other.casefold() == name.casefold()]
+                # A Windows path resolves its name case-insensitively; two Unix
+                # paths that differ only by case are two different files.
+                if not folded or not (windows or any(names[other] for other in folded)):
+                    continue
+                current_name = sorted(folded)[0]
+            # The current file is the canonical identity: a row that matched it
+            # by exact name and one that matched it case-insensitively belong to
+            # the same subtitle, so the newest one wins.
+            key = (row.item_id, 'file', current_name)
         if key in seen:
             continue
         seen.add(key)

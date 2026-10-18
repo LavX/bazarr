@@ -113,45 +113,53 @@ def test_movies_scores_match_a_mapped_translation_of_the_same_file(schema_sessio
 
 def test_movies_scores_match_windows_paths_under_different_roots(schema_session, monkeypatch):
     movies = _prepare_movies(monkeypatch, schema_session)
-    # A Linux host stores a Windows instance's paths unchanged: both separator
-    # styles must reduce to the same file name.
-    _add_movie(schema_session, 100, r"[['de', 'X:\\TV\\movie100.de.srt', 100]]")
-    _add_movie_history(schema_session, 1, 100, 1, r"X:\TV\movie100.de.srt", "de", 90, 100)
-    _add_movie_history(schema_session, 2, 100, 6, r"Y:\TV\movie100.de.srt", "de", 50, 100)
+    # A Linux host stores a Windows instance's paths unchanged. Windows names
+    # resolve case-insensitively, so two roots and casings name the same file
+    # and the newer translation shadows the download's score.
+    _add_movie(schema_session, 100, r"[['de', 'X:\\TV\\Movie.DE.srt', 100]]")
+    _add_movie_history(schema_session, 1, 100, 1, r"X:\TV\movie.de.srt", "de", 90, 100)
+    _add_movie_history(schema_session, 2, 100, 6, r"Y:\tv\movie.de.srt", "de", 50, 100)
 
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 
     assert result["data"][0]["lowest_subtitle_score"] is None
 
 
-def test_subtitle_file_identity_normalizes_both_separator_styles():
-    from api.utils import _subtitle_file_identity
+def test_subtitle_file_name_splits_both_separator_styles():
+    from api.utils import _subtitle_file_name
 
-    assert _subtitle_file_identity(r"X:\TV\Show\episode.de.srt") == "episode.de.srt"
-    assert _subtitle_file_identity(r"\\server\share\tv\episode.de.srt") == "episode.de.srt"
-    assert _subtitle_file_identity("/tv/Show/episode.de.srt") == "episode.de.srt"
-    # Windows resolves names case-insensitively even when a Linux host stores
-    # them, so two mapped roots with different casing name the same file.
-    assert _subtitle_file_identity(r"X:\TV\Movie.EN.srt") == _subtitle_file_identity(
-        r"Y:\tv\movie.en.srt")
-    # One side can be a Windows path and the other the mapped Linux path for
-    # the same file; both must reduce to the same identity.
-    assert _subtitle_file_identity(r"X:\TV\Movie.EN.srt") == _subtitle_file_identity(
-        "/media/tv/Movie.EN.srt")
+    assert _subtitle_file_name(r"X:\TV\Show\episode.de.srt") == ("episode.de.srt", True)
+    assert _subtitle_file_name(r"\\server\share\tv\episode.de.srt") == ("episode.de.srt", True)
+    assert _subtitle_file_name("/tv/Show/episode.de.srt") == ("episode.de.srt", False)
 
 
 def test_movies_scores_match_mixed_windows_and_linux_paths(schema_session, monkeypatch):
     movies = _prepare_movies(monkeypatch, schema_session)
     # The index holds the Windows remote path, the translation history the
-    # mapped Linux path for the same file. The translation replaced the
-    # download, so the old provider score must not survive.
+    # mapped Linux path for the same file, with different casing. The Windows
+    # side resolves the name case-insensitively, so the newer translation
+    # shadows the download's score.
     _add_movie(schema_session, 100, r"[['de', 'X:\\TV\\Movie.DE.srt', 100]]")
     _add_movie_history(schema_session, 1, 100, 1, r"X:\TV\Movie.DE.srt", "de", 90, 100)
-    _add_movie_history(schema_session, 2, 100, 6, "/media/tv/Movie.DE.srt", "de", 50, 100)
+    _add_movie_history(schema_session, 2, 100, 6, "/media/tv/movie.de.srt", "de", 50, 100)
 
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 
     assert result["data"][0]["lowest_subtitle_score"] is None
+
+
+def test_movies_case_distinct_unix_subtitles_stay_distinct(schema_session, monkeypatch):
+    movies = _prepare_movies(monkeypatch, schema_session)
+    # Two different files on a case-sensitive filesystem. Each keeps its own
+    # history row, so the lower score counts.
+    _add_movie(schema_session, 100,
+               "[['en', '/tv/Movie.EN.srt', 100], ['en', '/tv/movie.en.srt', 100]]")
+    _add_movie_history(schema_session, 1, 100, 1, "/tv/Movie.EN.srt", "en", 40, 100)
+    _add_movie_history(schema_session, 2, 100, 1, "/tv/movie.en.srt", "en", 90, 100)
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 40.0
 
 
 def test_movies_ignores_history_for_deleted_subtitle_path(schema_session, monkeypatch):
