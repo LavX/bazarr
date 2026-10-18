@@ -179,13 +179,15 @@ def hls_client(request, schema_session, monkeypatch, tmp_path):
 
         scopes = (None, 1) if instance_id == 1 else (2,)
         for scope in scopes:
-            cache_dir = Path(editor._hls_cache_dir(
-                media_type, 50, scope, 0, 0.0, video_path.stat().st_mtime,
-            ))
-            cache_dir.mkdir(parents=True)
-            (cache_dir / "playlist.m3u8").write_text(manifest)
-            for filename in ("init.mp4", "segment_000000.m4s", "segment_000001.m4s"):
-                (cache_dir / filename).write_bytes(f"instance-{instance_id}:{filename}".encode())
+            for native_hls in (False, True):
+                cache_dir = Path(editor._hls_cache_dir(
+                    media_type, 50, scope, 0, 0.0, video_path.stat().st_mtime,
+                    native_hls=native_hls,
+                ))
+                cache_dir.mkdir(parents=True)
+                (cache_dir / "playlist.m3u8").write_text(manifest)
+                for filename in ("init.mp4", "segment_000000.m4s", "segment_000001.m4s"):
+                    (cache_dir / filename).write_bytes(f"instance-{instance_id}:{filename}".encode())
     schema_session.flush()
 
     app = Flask(__name__)

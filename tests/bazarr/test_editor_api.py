@@ -152,7 +152,8 @@ SubRow = namedtuple('SubRow', ['subtitles'])
 
 def _make_probe_json(video_codec='h264', audio_codec='aac',
                      width=1920, height=1080, duration='3600.5',
-                     audio_lang='eng', audio_channels=6):
+                     audio_lang='eng', audio_channels=6, video_pix_fmt='yuv420p',
+                     video_profile=None):
     """Build a fake ffprobe JSON structure."""
     return {
         'format': {'duration': duration},
@@ -160,6 +161,8 @@ def _make_probe_json(video_codec='h264', audio_codec='aac',
             {
                 'codec_type': 'video',
                 'codec_name': video_codec,
+                'pix_fmt': video_pix_fmt,
+                'profile': video_profile,
                 'width': width,
                 'height': height,
             },
@@ -393,10 +396,49 @@ class TestHlsCommandBuilding:
 
         assert cmd[:4] == ['/usr/bin/ffmpeg', '-ss', '3533.35', '-i']
         assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
         assert '-tag:v' not in cmd
 
-    def test_zero_start_keeps_hevc_stream_copy(self, tmp_path):
-        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3')
+    def test_zero_start_keeps_hevc_stream_copy_for_native(self, tmp_path):
+        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3',
+                                 video_pix_fmt='yuv420p10le',
+                                 video_profile='Main 10')
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=0,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+            native_hls=True,
+        )
+
+        assert '-ss' not in cmd
+        assert _value_after(cmd, '-c:v') == 'copy'
+        assert _value_after(cmd, '-tag:v') == 'hvc1'
+        assert '-pix_fmt' not in cmd
+
+    def test_zero_start_transcodes_unknown_hevc_profile_for_native(self, tmp_path):
+        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3',
+                                 video_pix_fmt='yuv420p10le')
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=0,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+            native_hls=True,
+        )
+
+        assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
+        assert '-tag:v' not in cmd
+
+    def test_zero_start_transcodes_hevc_for_mse(self, tmp_path):
+        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3',
+                                 video_pix_fmt='yuv420p10le',
+                                 video_profile='Main 10')
         cmd = editor_module._build_hls_ffmpeg_command(
             ffmpeg='/usr/bin/ffmpeg',
             video_path='/video/movie.mkv',
@@ -407,8 +449,47 @@ class TestHlsCommandBuilding:
         )
 
         assert '-ss' not in cmd
-        assert _value_after(cmd, '-c:v') == 'copy'
-        assert _value_after(cmd, '-tag:v') == 'hvc1'
+        assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
+        assert '-tag:v' not in cmd
+
+    def test_zero_start_transcodes_ten_bit_h264(self, tmp_path):
+        probe = _make_probe_json(video_codec='h264', audio_codec='aac',
+                                 video_pix_fmt='yuv420p10le')
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=0,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+        )
+
+        assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
+        assert '-tag:v' not in cmd
+
+    def test_zero_start_transcodes_h264_with_unknown_pixel_format(self, tmp_path):
+        probe = _make_probe_json(video_codec='h264', audio_codec='aac',
+                                 video_pix_fmt=None)
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=0,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+        )
+
+        assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
+        assert '-tag:v' not in cmd
+
+    def test_cache_dir_separates_native_and_mse_sessions(self):
+        mse = editor_module._hls_cache_dir('movie', 50, None, 0, 0.0, 1)
+        native = editor_module._hls_cache_dir('movie', 50, None, 0, 0.0, 1,
+                                              native_hls=True)
+        assert mse != native
 
 
 def _value_after(items, key):
@@ -1641,13 +1722,16 @@ class TestEditorHlsStreamToken:
         video_path = tmp_path / 'video.mkv'
         video_path.write_bytes(b'video bytes')
         monkeypatch.setattr(editor_module, 'HLS_CACHE_DIR', str(tmp_path / 'hls'))
-        cache_dir = Path(editor_module._hls_cache_dir('movie', 50, None, 0, 0.0,
-                                                     video_path.stat().st_mtime))
-        cache_dir.mkdir(parents=True)
-        (cache_dir / 'playlist.m3u8').write_text(self.MANIFEST)
-        (cache_dir / 'init.mp4').write_bytes(b'init bytes')
-        (cache_dir / 'segment_000000.m4s').write_bytes(b'segment zero')
-        (cache_dir / 'segment_000001.m4s').write_bytes(b'segment one')
+        for native_hls in (False, True):
+            cache_dir = Path(editor_module._hls_cache_dir(
+                'movie', 50, None, 0, 0.0, video_path.stat().st_mtime,
+                native_hls=native_hls))
+            cache_dir.mkdir(parents=True)
+            mode = b'native' if native_hls else b'mse'
+            (cache_dir / 'playlist.m3u8').write_text(self.MANIFEST)
+            (cache_dir / 'init.mp4').write_bytes(b'init ' + mode)
+            (cache_dir / 'segment_000000.m4s').write_bytes(b'segment zero ' + mode)
+            (cache_dir / 'segment_000001.m4s').write_bytes(b'segment one ' + mode)
         monkeypatch.setattr(editor_module, '_resolve_video_path', lambda *a, **k: str(video_path))
         monkeypatch.setattr(editor_module, '_spawn_hls_encoder', lambda *a, **k: None)
         monkeypatch.setattr(editor_module, '_touch_hls_session', lambda *a, **k: None)
@@ -1712,6 +1796,13 @@ class TestEditorHlsStreamToken:
         assert response.status_code == 206
         assert response.headers['Cache-Control'] == 'no-store'
         assert b''.join(response.response) == b'segm'
+
+    def test_segment_bytes_come_from_the_mode_cache(self, hls_env):
+        native = self._get('segment_000000.m4s', query='?st=token-one')
+        mse = self._get('segment_000000.m4s')
+        assert b'native' in b''.join(native.response)
+        assert b'mse' in b''.join(mse.response)
+        assert b'native' not in b''.join(mse.response)
 
     def test_init_segment_response_is_never_cacheable(self, hls_env):
         response = self._get('init.mp4', query='?st=token-one')
