@@ -410,3 +410,125 @@ def test_failed_request_ends_the_job_without_the_key(queued_gemini, monkeypatch,
     assert fixture.destination.read_text() == "Previous destination"
     for text in messages + [str(fixture.job.progress_message), str(fixture.job.error), caplog.text]:
         _assert_no_key_window(text)
+
+
+def _gemini_batch_response(lines):
+    response = gemini_translator.requests.Response()
+    response.status_code = 200
+    response._content = json.dumps(
+        {"candidates": [{"content": {"parts": [{"text": json.dumps(lines)}]}}]}).encode()
+    return response
+
+
+def _batch_service(mocker, lines):
+    service = _build_service()
+    service.job_id = "job-1"
+    service.current_api_key = "key-1"
+    service.calls = []
+
+    def _request(*args, **kwargs):
+        service.calls.append(1)
+        return _gemini_batch_response(lines)
+
+    mocker.patch.object(gemini_translator.requests, "request", side_effect=_request)
+    mocker.patch.object(gemini_translator.jobs_queue, "update_job_progress")
+    return service
+
+
+def _three_cue_batch():
+    batch = [
+        {"index": "0", "content": "one"},
+        {"index": "1", "content": "two"},
+        {"index": "2", "content": "three"},
+    ]
+    translated = [SimpleNamespace(content="one"), SimpleNamespace(content="two"), SimpleNamespace(content="three")]
+    return batch, translated
+
+
+def test_a_short_batch_keeps_the_returned_cues_and_reports_partial(mocker):
+    """The reported failure: Gemini answers 249 of 252 cues. The cues it did
+    return are valid by index, so the batch is kept and the item degrades to a
+    partial translation instead of failing."""
+    service = _batch_service(mocker, [
+        {"index": "0", "content": "een"},
+        {"index": "1", "content": "twee"},
+    ])
+    batch, translated = _three_cue_batch()
+
+    service._process_batch(batch, translated, 3)
+
+    assert [line.content for line in translated] == ["een", "twee", "three"]
+    assert service.partial_error == (
+        "Gemini returned 2 of 3 cues for one batch; the rest keep the source text.")
+    assert len(service.calls) == 1
+    assert batch == []
+
+
+def test_an_index_outside_the_batch_is_dropped_instead_of_written(mocker):
+    """An invented index must not reach another batch's cue. It is dropped like
+    a missing cue, and the rest of the batch is still used."""
+    service = _batch_service(mocker, [
+        {"index": "0", "content": "een"},
+        {"index": "7", "content": "zeven"},
+    ])
+    batch, translated = _three_cue_batch()
+
+    service._process_batch(batch, translated, 3)
+
+    assert [line.content for line in translated] == ["een", "two", "three"]
+    assert "1 of 3 cues" in service.partial_error
+    assert len(service.calls) == 1
+
+
+def test_an_empty_translation_keeps_the_source_cue_and_reports_partial(mocker):
+    service = _batch_service(mocker, [
+        {"index": "0", "content": "een"},
+        {"index": "1", "content": "   "},
+        {"index": "2", "content": "drie"},
+    ])
+    batch, translated = _three_cue_batch()
+
+    service._process_batch(batch, translated, 3)
+
+    assert [line.content for line in translated] == ["een", "two", "drie"]
+    assert "2 of 3 cues" in service.partial_error
+
+
+def test_a_complete_batch_is_not_marked_partial(mocker):
+    service = _batch_service(mocker, [
+        {"index": "0", "content": "een"},
+        {"index": "1", "content": "twee"},
+        {"index": "2", "content": "drie"},
+    ])
+    batch, translated = _three_cue_batch()
+
+    service._process_batch(batch, translated, 3)
+
+    assert [line.content for line in translated] == ["een", "twee", "drie"]
+    assert service.partial_error is None
+
+
+def test_a_sports_batch_still_requires_every_cue(mocker):
+    """A sports translation must be complete: a short answer is retried and
+    then refused, rather than published as a partial track."""
+    service = _batch_service(mocker, [
+        {"index": "0", "content": "een"},
+    ])
+    service.sports_operation = object()
+    batch, translated = _three_cue_batch()
+
+    with pytest.raises(ValueError, match="one usable translation per requested cue"):
+        service._process_batch(batch, translated, 3)
+
+    assert len(service.calls) == 4
+    assert service.partial_error is None
+
+
+def test_a_non_list_reply_is_retried_and_then_refused(mocker):
+    service = _batch_service(mocker, {"not": "a list"})
+    batch, translated = _three_cue_batch()
+
+    with pytest.raises(ValueError, match="did not return a list"):
+        service._process_batch(batch, translated, 3)
+
+    assert len(service.calls) == 4
