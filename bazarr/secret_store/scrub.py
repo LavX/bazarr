@@ -73,11 +73,12 @@ _PATTERNS = (
     (_OPENROUTER_KEY_RE, MASK),
 )
 
-# The exact credential values currently masked. Replaced as a set by
-# register_secret_values, so a rotated or removed credential stops being
-# masked the moment the live set no longer holds it.
-_SECRET_VALUES: frozenset[str] = frozenset()
-_VALUES_RE: 're.Pattern[str] | None' = None
+# The exact credential values currently masked, with the regex that masks
+# them, as one immutable pair. Published by a single assignment in
+# register_secret_values: a reader that caught the new set with the old regex
+# would return the credential unchanged, which is exactly the leak this layer
+# exists to prevent.
+_VALUE_STATE: 'tuple[frozenset[str], re.Pattern[str] | None]' = (frozenset(), None)
 
 # The credential containers a Provider Hub state document holds. Values under
 # these keys are a plugin's own stored credentials, encrypted at rest by the
@@ -110,7 +111,7 @@ _refresh_local = local()
 
 def registered_secret_values() -> frozenset[str]:
     """The exact credential values currently masked in text."""
-    return _SECRET_VALUES
+    return _VALUE_STATE[0]
 
 
 def register_secret_values(values: Iterable[Any]) -> int:
@@ -120,8 +121,11 @@ def register_secret_values(values: Iterable[Any]) -> int:
     ``_MIN_VALUE_LENGTH``, one that is already just the mask, and one that is
     ciphertext are skipped: none of them is a plaintext credential a leak
     could carry, and masking a short one would redact ordinary text.
+
+    The set and its regex are published together, in one assignment, so no
+    reader can see the new values behind the old regex.
     """
-    global _SECRET_VALUES, _VALUES_RE
+    global _VALUE_STATE
     cleaned = set()
     for value in values or ():
         if not isinstance(value, str):
@@ -132,12 +136,13 @@ def register_secret_values(values: Iterable[Any]) -> int:
                 and not text.startswith('enc:v1:')
                 ):
             cleaned.add(text)
-    _SECRET_VALUES = frozenset(cleaned)
+    registered = frozenset(cleaned)
     # Longest first: a credential that contains another is masked whole
     # rather than in pieces.
-    ordered = sorted(_SECRET_VALUES, key=len, reverse=True)
-    _VALUES_RE = re.compile('|'.join(re.escape(value) for value in ordered)) if ordered else None
-    return len(_SECRET_VALUES)
+    ordered = sorted(registered, key=len, reverse=True)
+    regex = re.compile('|'.join(re.escape(value) for value in ordered)) if ordered else None
+    _VALUE_STATE = (registered, regex)
+    return len(registered)
 
 
 def clear_secret_values() -> None:
@@ -158,11 +163,9 @@ def scrub_text(text: str) -> str:
 
     text = _mask_patterns(text)
 
-    values = _SECRET_VALUES
-    if values and any(value in text for value in values):
-        regex = _VALUES_RE
-        if regex is not None:
-            text = regex.sub(MASK, text)
+    values, regex = _VALUE_STATE
+    if values and regex is not None and any(value in text for value in values):
+        text = regex.sub(MASK, text)
     return text
 
 
@@ -271,11 +274,14 @@ def collect_hub_secret_values(state=None) -> set[str]:
     """
     values: set[str] = set()
     if state is None:
-        from provider_hub.state import load_state
-        state = load_state()
+        from provider_hub.state import load_state_strict
+        state = load_state_strict()
     installations = state.get("installations") if isinstance(state, dict) else None
     if not isinstance(installations, dict):
-        return values
+        # A document whose inventory is not an object is unreadable, not an
+        # empty inventory: raising keeps the caller's current set instead of
+        # publishing one that is missing every Hub credential.
+        raise ValueError("the Provider Hub state installations are not an object")
     for provider_id, installation in installations.items():
         if not isinstance(installation, dict):
             continue
@@ -318,7 +324,7 @@ def refresh_secret_values(settings_obj=None, state=None) -> int:
     """
     with _refresh_lock:
         if getattr(_refresh_local, 'depth', 0):
-            return len(_SECRET_VALUES)
+            return len(_VALUE_STATE[0])
         _refresh_local.depth = 1
         try:
             if settings_obj is None:
@@ -328,7 +334,7 @@ def refresh_secret_values(settings_obj=None, state=None) -> int:
         except Exception as error:
             logger.warning("The credential values to scrub could not be collected: %s",
                            type(error).__name__)
-            return len(_SECRET_VALUES)
+            return len(_VALUE_STATE[0])
         finally:
             _refresh_local.depth = 0
         return register_secret_values(values)

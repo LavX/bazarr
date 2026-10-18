@@ -247,7 +247,7 @@ def test_a_failed_state_read_keeps_the_previous_values(scrub_registry, monkeypat
     def unavailable(*args, **kwargs):
         raise OSError("state unreadable")
 
-    monkeypatch.setattr(provider_hub.state, "load_state", unavailable)
+    monkeypatch.setattr(provider_hub.state, "load_state_strict", unavailable)
     count = refresh_secret_values({"sonarr": {"apikey": ANOTHER_FAKE_KEY}})
 
     assert count == 1
@@ -294,6 +294,69 @@ def test_a_refresh_waits_for_the_one_in_progress_instead_of_skipping(scrub_regis
     second.join(5)
     assert results == [1]
     assert scrub_text(ANOTHER_FAKE_KEY) == MASK
+
+
+def test_the_registry_publishes_values_and_their_regex_together(scrub_registry):
+    """A reader that sees a new value must see the regex that masks it: the
+    set and the pattern are one assignment, so there is no window where the
+    value is registered and the pattern does not cover it yet."""
+    import secret_store.scrub as scrub
+
+    scrub_registry([FAKE_KEY, ANOTHER_FAKE_KEY])
+    values, regex = scrub._VALUE_STATE
+    assert values == {FAKE_KEY, ANOTHER_FAKE_KEY}
+    assert regex is not None
+    assert all(regex.search(value) for value in values)
+
+
+def test_a_non_object_state_document_keeps_the_previous_values(scrub_registry, tmp_path, monkeypatch):
+    """A valid JSON document with a non-object root is unreadable state, not
+    an empty inventory: the refresh must keep the set it already had."""
+    scrub_registry([FAKE_KEY])
+    state_path = tmp_path / "state.json"
+    state_path.write_text("[]", encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+
+    count = refresh_secret_values({"sonarr": {"apikey": ANOTHER_FAKE_KEY}})
+
+    assert count == 1
+    assert scrub_text(FAKE_KEY) == MASK
+
+
+def test_a_rolled_back_save_refreshes_the_registered_values(monkeypatch):
+    """A refused save registers the credential it proposed; the caller then
+    restores the saved settings. The registry has to follow that restore, or
+    the active credential stops being masked."""
+    import app.config
+
+    calls = []
+    monkeypatch.setattr("secret_store.scrub.refresh_secret_values",
+                        lambda *args, **kwargs: calls.append(True) or 0)
+    monkeypatch.setattr(app.config.settings, "reload", lambda: None)
+    monkeypatch.setattr(app.config, "migrate_legacy_plex_encryption", lambda settings: None)
+    monkeypatch.setattr(app.config, "decrypt_settings_in_place", lambda settings: None)
+
+    app.config.restore_persisted_settings()
+
+    assert calls
+
+
+def test_a_settings_write_refreshes_even_when_it_raises(monkeypatch):
+    """A save whose follow-up failed has still written the credential to
+    disk, and a failed one is rolled back after the call: the refresh cannot
+    hang off the return value."""
+    import app.config
+
+    calls = []
+    monkeypatch.setattr("secret_store.scrub.refresh_secret_values",
+                        lambda *args, **kwargs: calls.append(True) or 0)
+    monkeypatch.setattr(app.config, "_write_config",
+                        lambda **kwargs: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(OSError):
+        app.config.write_config()
+
+    assert calls
 
 
 def test_a_settings_write_rebuilds_the_registered_values(monkeypatch):

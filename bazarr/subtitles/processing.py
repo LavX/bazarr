@@ -209,12 +209,13 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
             item_forced = item.get('forced') == 'True'
             item_hi = item.get('hi') == 'True'
             destination = translated_destination_path(video_path, target_lang, item_forced, item_hi)
-            # The missing list is the indexer's view, and the file a provider
-            # download just landed may not be in it yet. A subtitle already
-            # sitting at this destination is that file, and the translation
-            # would replace it: this target is served, and the next scan sees
-            # it that way once the indexer catches up.
-            if os.path.isfile(destination):
+            expected_destination_versions = capture_subtitle_versions(video_path, (destination,))
+            # The capture holds the media write lock, so this answers for the
+            # instant it recorded: a subtitle already at the destination is the
+            # provider's, landed after the last index pass, and the better
+            # track. The missing list is the indexer's view and does not know
+            # it yet; a translation would replace it.
+            if expected_destination_versions[0].version is not None:
                 logging.info(
                     'BAZARR auto-translate skipped: %s is already on disk for %s',
                     target_code, video_path,
@@ -241,7 +242,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 # The queueing sighting: a subtitle that lands here before the
                 # job writes is the provider's, and the job refuses to replace
                 # it (see translate_subtitles_file).
-                expected_destination_versions=capture_subtitle_versions(video_path, (destination,)),
+                expected_destination_versions=expected_destination_versions,
             )
     except Exception:
         logging.exception('BAZARR error in _trigger_auto_translation')

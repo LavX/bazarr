@@ -131,6 +131,62 @@ def test_downloaded_subtitle_target_already_on_disk_is_not_queued(tmp_path, capl
             if 'auto-translate skipped' in record.getMessage()]
 
 
+def test_downloaded_subtitle_target_captured_as_present_is_not_queued(caplog):
+    """The skip decision comes from the capture itself, not a separate isfile
+    check: a file landing in between cannot become the job's baseline."""
+    from subtitles.processing import _trigger_auto_translation
+
+    mock_database = Mock()
+    mock_database.execute.return_value.first.return_value = SimpleNamespace(
+        sonarrSeriesId=10,
+        season=1,
+        episode=1,
+        imdbId='tt1',
+        tvdbId='1',
+        profileId=1,
+    )
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch('subtitles.processing.settings') as mock_settings,
+        patch('app.database.get_profile_id', return_value=1),
+        patch('app.database.get_profiles_list') as mock_profiles,
+        patch('app.database.database', mock_database),
+        patch('subtitles.download.check_missing_languages') as mock_missing,
+        patch('subtitles.processing.alpha2_from_alpha3', return_value='hu'),
+        patch('subtitles.tools.subsync_engines.capture_subtitle_versions') as mock_capture,
+        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
+    ):
+        mock_settings.translator.min_source_score = 90
+        mock_profiles.return_value = {
+            'items': [
+                {
+                    'language': 'hu',
+                    'translate_from': 'en',
+                    'forced': 'False',
+                    'hi': 'False',
+                }
+            ]
+        }
+        mock_missing.return_value = [_missing_language('hun')]
+        mock_capture.return_value = (SimpleNamespace(path='/video/episode.hu.srt',
+                                                     version=('dev', 1, 10, 1, 1)),)
+
+        _trigger_auto_translation(
+            downloaded_lang='en',
+            subtitle_path='/subs/source.en.srt',
+            video_path='/video/episode.mkv',
+            media_type='series',
+            series_id=10,
+            episode_id=20,
+            source_score_percent=100,
+        )
+
+    mock_translate.assert_not_called()
+    assert [record for record in caplog.records
+            if 'auto-translate skipped' in record.getMessage()]
+
+
 @pytest.mark.parametrize('profile', [
     None,
     {'items': []},
@@ -518,6 +574,59 @@ def test_wanted_series_does_not_queue_over_a_subtitle_already_on_disk(tmp_path):
 
     mock_translate.assert_not_called()
     assert destination.read_text() == 'already here'
+
+
+def test_wanted_series_skips_a_destination_the_sighting_captured_as_present():
+    """Same rule, pinned at the capture: whatever the capture saw is the
+    baseline, so a file that was there when the sighting held the lock is
+    never translated over."""
+    from subtitles.wanted.series import _wanted_episode
+
+    episode = SimpleNamespace(
+        audio_language='English',
+        failedAttempts='[]',
+        missing_subtitles="['hu:forced']",
+        path='/series/episode.mkv',
+        profileId=1,
+        sceneName='Scene.Name',
+        sonarrEpisodeId=20,
+        sonarrSeriesId=10,
+        subtitles="[['fr', '/subs/source.fr.srt', 100]]",
+        title='Episode title',
+    )
+
+    with (
+        patch('subtitles.wanted.series.get_audio_profile_languages',
+              return_value=[{'name': 'English'}]),
+        patch('subtitles.wanted.series.get_profiles_list') as mock_profiles,
+        patch('subtitles.wanted.series._find_existing_subtitle_path',
+              return_value='/subs/source.fr.srt'),
+        patch('subtitles.wanted.series.path_mappings') as mock_path_mappings,
+        patch('subtitles.wanted.series.settings') as mock_settings,
+        patch('subtitles.wanted.series.database') as mock_database,
+        patch('subtitles.wanted.series.jobs_queue') as mock_jobs_queue,
+        patch('subtitles.tools.subsync_engines.capture_subtitle_versions') as mock_capture,
+        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
+        patch('subtitles.wanted.series.generate_subtitles', return_value=[]),
+    ):
+        mock_profiles.return_value = {'items': [
+            {'language': 'hu', 'translate_from': 'fr', 'forced': 'True', 'hi': 'False'},
+        ]}
+        mock_path_mappings.path_replace.side_effect = lambda value: value
+        mock_settings.translator.min_source_score = 0
+        mock_database.execute.return_value.first.side_effect = [
+            None,
+            None,
+            SimpleNamespace(sonarrSeriesId=10, season=1, episode=1,
+                            imdbId='tt1', tvdbId='1'),
+        ]
+        mock_jobs_queue._is_an_existing_job.return_value = False
+        mock_capture.return_value = (SimpleNamespace(path='/series/episode.hu.forced.srt',
+                                                     version=('dev', 1, 10, 1, 1)),)
+
+        _wanted_episode(episode, providers_list=[])
+
+    mock_translate.assert_not_called()
 
 
 def test_wanted_movie_does_not_queue_over_a_subtitle_already_on_disk(tmp_path):

@@ -481,11 +481,19 @@ class JobsQueue:
         "ticket": 12}``. The completion notification and the Jobs drawer show
         it; nothing else about the job is exposed. It is scrubbed like every
         other job text: a filename a provider chose can carry a credential.
+        ``kind`` is dispatch, not text, so it is kept as given: a credential
+        that happens to equal a handler name must not stop the frontend
+        finding that handler.
         """
+        action = dict(action)
+        kind = action.get('kind')
+        scrubbed = scrub_value(action)
+        if kind is not None:
+            scrubbed['kind'] = kind
         with self._queue_lock:
             for job in self.jobs_running_queue:
                 if job.job_id == job_id:
-                    job.action = scrub_value(dict(action))
+                    job.action = scrubbed
                     return True
         return False
 
