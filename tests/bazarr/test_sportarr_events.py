@@ -1017,6 +1017,53 @@ def test_listing_batches_owned_sync_state_with_bounded_queries(library, monkeypa
     assert sum('table_history_sports' in statement for statement in statements) == 1
 
 
+def test_populated_event_listing_attaches_sync_status(library, monkeypatch, tmp_path):
+    """A populated events listing answered 400 once its row gained a fourth
+    column: add_sync_status unpacked the row positionally. It reads the row's
+    fields by name now, so this drives the real listing and then adds one
+    more column to prove the next one cannot break it again."""
+    from app.config import settings
+    from app.database import TableArrInstances, TableSportsEvents, TableSportsLeagues
+    from sportarr import library as views, sync_status
+
+    session, _ = library
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    monkeypatch.setattr(sync_status, 'jobs_queue', SimpleNamespace(
+        jobs_running_queue=[], jobs_pending_queue=[]))
+    owner_folder = tmp_path / 'owner'
+    owner_folder.mkdir()
+    (owner_folder / 'event-1.en.srt').write_text('subtitle')
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(
+        path_mappings=json.dumps([['/sports', str(owner_folder)]])))
+    session.execute(sa.insert(TableSportsEvents).values(
+        id=901, arr_instance_id=1, league_id=51, sportarrEventId=901, file_id=901,
+        path='/sports/event-1.mkv', title='Event',
+        subtitles=str([['en', '/sports/event-1.en.srt']])))
+
+    listing = views.list_events(session, 51, 1)
+    assert listing['total'] == 1
+    state = listing['data'][0]['sync_status']['en']
+    assert state['synced'] is False
+    assert state['lastSyncTimestamp'] is None
+
+    # One column beyond what the query selects today: the event and its path
+    # mappings are read by name, so the row's arity is none of this
+    # consumer's business.
+    rows = session.execute(
+        sa.select(TableSportsEvents, TableSportsLeagues.profileId,
+                  TableArrInstances.path_mappings,
+                  TableSportsLeagues.tags.label('league_tags'),
+                  sa.literal('later').label('column_added_after_the_tags'))
+        .join(TableSportsLeagues, (TableSportsEvents.league_id == TableSportsLeagues.id) &
+              (TableSportsEvents.arr_instance_id == TableSportsLeagues.arr_instance_id))
+        .join(TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id)
+        .where(TableArrInstances.kind == 'sportarr')).all()
+    data = [{'subtitles': [['en', '/sports/event-1.en.srt']],
+             'mapped_path': str(owner_folder / 'event-1.mkv')}]
+    sync_status.add_sync_status(session, rows, data)
+    assert data[0]['sync_status']['en']['synced'] is False
+
+
 @pytest.mark.parametrize('first', [51, 53])
 def test_cross_league_move_preserves_owned_event_history(library, monkeypatch, first):
     from app.database import TableSportsLeagues, TableHistorySports, TableBlacklistSports

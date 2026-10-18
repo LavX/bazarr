@@ -237,7 +237,7 @@ export function toSportsWantedRow(
     ...event,
     title: event.title,
     monitored: true,
-    tags: [],
+    tags: event.tags ?? [],
     sceneName: event.sceneName ?? undefined,
     hearing_impaired: false,
     missing_subtitles: (event.missing_subtitles ?? []).map(toSubtitle),

@@ -24,11 +24,13 @@ import {
   faFilter,
   faSearch,
   faServer,
+  faTag,
   faTimes,
   faVolumeUp,
   faVolumeXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useQuery } from "@tanstack/react-query";
 import { ColumnDef, Row } from "@tanstack/react-table";
 import { useAudioLanguages } from "@/apis/hooks";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
@@ -71,6 +73,8 @@ interface Props<T extends Item.Base = Item.Base> {
   instanceOptions?: { value: string; label: string }[];
   instanceValues?: string[];
   onInstanceValuesChange?: (values: string[]) => void;
+  tagValues?: string[];
+  onTagValuesChange?: (values: string[]) => void;
   enableRowSelection?: boolean;
   onSelectionChanged?: (selections: T[]) => void;
   selectionToolbar?: ReactNode;
@@ -96,6 +100,8 @@ function ItemView<T extends Item.Base>({
   instanceOptions,
   instanceValues = [],
   onInstanceValuesChange,
+  tagValues = [],
+  onTagValuesChange,
   enableRowSelection,
   onSelectionChanged,
   selectionToolbar,
@@ -114,6 +120,29 @@ function ItemView<T extends Item.Base>({
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
     [audioLangs],
+  );
+  // The tag options cannot come from the page on screen: rows beyond it can
+  // carry tags the user must still be able to select, and an untagged first
+  // page is not an empty library. Read every row through the all-rows entry
+  // the query exposes, which shares the cache entry a filter activates, and
+  // fetch it only while the panel offering the choices is open.
+  const tagQuery = useQuery({
+    ...query.allRows,
+    enabled:
+      query.allRows.enabled && filtersOpen && onTagValuesChange !== undefined,
+  });
+  const tagOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (tagQuery.data?.data ?? query.data?.data ?? []).flatMap(
+            (item) => item.tags ?? [],
+          ),
+        ),
+      )
+        .sort((a, b) => a.localeCompare(b))
+        .map((tag) => ({ value: tag, label: tag })),
+    [tagQuery.data, query.data],
   );
 
   const dataFilter = useCallback(
@@ -148,6 +177,12 @@ function ItemView<T extends Item.Base>({
           return false;
         }
       }
+      if (
+        tagValues.length > 0 &&
+        !tagValues.some((tag) => item.tags?.includes(tag))
+      ) {
+        return false;
+      }
       if (subtitlesFilter !== "any" && subtitlesStatus) {
         // "untracked" matches neither group, so it is dropped whenever the
         // filter narrows to "complete" or "missing".
@@ -162,6 +197,7 @@ function ItemView<T extends Item.Base>({
       audioLanguages,
       excludeLanguages,
       instanceValues,
+      tagValues,
       subtitlesFilter,
       subtitlesStatus,
     ],
@@ -172,6 +208,7 @@ function ItemView<T extends Item.Base>({
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0 ||
     instanceValues.length > 0 ||
+    tagValues.length > 0 ||
     subtitlesFilter !== "any";
 
   // Compute active filter count (excluding search which is always visible)
@@ -181,6 +218,7 @@ function ItemView<T extends Item.Base>({
     if (excludeLanguages.length > 0) count++;
     if (searchValue.length > 0) count++;
     if (instanceValues.length > 0) count++;
+    if (tagValues.length > 0) count++;
     if (subtitlesFilter !== "any") count++;
     return count;
   }, [
@@ -188,6 +226,7 @@ function ItemView<T extends Item.Base>({
     excludeLanguages,
     searchValue,
     instanceValues,
+    tagValues,
     subtitlesFilter,
   ]);
 
@@ -244,6 +283,15 @@ function ItemView<T extends Item.Base>({
       });
     }
 
+    if (tagValues.length > 0 && onTagValuesChange) {
+      chips.push({
+        key: "tags",
+        label: `Tags: ${tagValues.join(", ")}`,
+        color: "violet",
+        onRemove: () => onTagValuesChange([]),
+      });
+    }
+
     if (subtitlesFilter !== "any" && onSubtitlesFilterChange) {
       const name =
         SUBTITLES_FILTER_OPTIONS.find((o) => o.value === subtitlesFilter)
@@ -262,6 +310,7 @@ function ItemView<T extends Item.Base>({
     audioLanguages,
     excludeLanguages,
     instanceValues,
+    tagValues,
     subtitlesFilter,
     instanceOptions,
     langOptions,
@@ -269,6 +318,7 @@ function ItemView<T extends Item.Base>({
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onInstanceValuesChange,
+    onTagValuesChange,
     onSubtitlesFilterChange,
   ]);
 
@@ -277,12 +327,14 @@ function ItemView<T extends Item.Base>({
     onAudioLanguagesChange?.([]);
     onExcludeLanguagesChange?.([]);
     onInstanceValuesChange?.([]);
+    onTagValuesChange?.([]);
     onSubtitlesFilterChange?.("any");
   }, [
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onInstanceValuesChange,
+    onTagValuesChange,
     onSubtitlesFilterChange,
   ]);
 
@@ -290,6 +342,7 @@ function ItemView<T extends Item.Base>({
     onAudioLanguagesChange !== undefined ||
     onExcludeLanguagesChange !== undefined ||
     showInstanceFilter ||
+    onTagValuesChange !== undefined ||
     showSubtitlesFilter;
 
   // The band's left side is never empty. While rows are selected it holds the
@@ -569,6 +622,37 @@ function ItemView<T extends Item.Base>({
                   data={instanceOptions}
                   value={instanceValues}
                   onChange={onInstanceValuesChange}
+                  clearable
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
+            {onTagValuesChange !== undefined && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon icon={faTag} size="xs" opacity={0.6} />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Tags
+                  </Text>
+                </Group>
+                <MultiSelect
+                  placeholder={
+                    tagValues.length > 0
+                      ? undefined
+                      : tagOptions.length > 0
+                        ? "Filter by tags..."
+                        : "No tags available"
+                  }
+                  data={tagOptions}
+                  value={tagValues}
+                  onChange={onTagValuesChange}
+                  searchable
                   clearable
                   size="sm"
                   maxDropdownHeight={250}
