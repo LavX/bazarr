@@ -4,7 +4,6 @@ import ast
 import contextlib
 import hmac
 import logging
-import os
 
 from functools import wraps
 from flask import g, jsonify, request, abort, after_this_request
@@ -508,16 +507,15 @@ def _subtitle_file_identity(path):
     """A subtitle file's identity across path mappings.
 
     History rows and the indexed subtitles column can carry the same file under
-    different mapped folders: a translation logs the globally mapped path while
-    the indexer records the instance's. The file name is what stays stable, so
-    the score lookup compares that instead of the full path. Both separators
-    split the name, because a Linux host stores the Windows-style paths of a
-    Windows instance unchanged, and such names fold case: Windows resolves them
-    case-insensitively wherever the app runs.
+    different mapped folders or separator styles: a translation logs the
+    globally mapped path while the indexer records the instance's, and one side
+    can be a Windows path where the other is the mapped Linux path. The file
+    name is what stays stable, so the score lookup compares that, split on both
+    separators and folded case, the way Windows resolves names: a name that
+    reached the history through a Windows mapping and one that reached the
+    index through a Linux mapping must still meet.
     """
-    text = str(path)
-    name = text.replace('\\', '/').rsplit('/', 1)[-1]
-    return name.casefold() if '\\' in text else os.path.normcase(name)
+    return str(path).replace('\\', '/').rsplit('/', 1)[-1].casefold()
 
 
 def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
