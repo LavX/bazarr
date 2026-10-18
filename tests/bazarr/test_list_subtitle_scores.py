@@ -130,6 +130,7 @@ def test_subtitle_file_name_splits_both_separator_styles():
 
     assert _subtitle_file_name(r"X:\TV\Show\episode.de.srt") == ("episode.de.srt", True)
     assert _subtitle_file_name(r"\\server\share\tv\episode.de.srt") == ("episode.de.srt", True)
+    assert _subtitle_file_name("X:/TV/Show/episode.de.srt") == ("episode.de.srt", True)
     assert _subtitle_file_name("/tv/Show/episode.de.srt") == ("episode.de.srt", False)
 
 
@@ -160,6 +161,23 @@ def test_movies_case_distinct_unix_subtitles_stay_distinct(schema_session, monke
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 
     assert result["data"][0]["lowest_subtitle_score"] == 40.0
+
+
+@pytest.mark.parametrize("current, history", [
+    # Drive-letter Windows paths can use forward slashes, and the mapping can
+    # turn either side into a Linux path with different casing.
+    ("X:/TV/Movie.DE.srt", "/media/tv/movie.de.srt"),
+    ("/media/tv/Movie.DE.srt", "X:/TV/movie.de.srt"),
+])
+def test_movies_scores_match_forward_slash_windows_paths(schema_session, monkeypatch, current, history):
+    movies = _prepare_movies(monkeypatch, schema_session)
+    _add_movie(schema_session, 100, f"[['de', '{current}', 100]]")
+    _add_movie_history(schema_session, 1, 100, 1, current, "de", 90, 100)
+    _add_movie_history(schema_session, 2, 100, 6, history, "de", 50, 100)
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] is None
 
 
 def test_movies_ignores_history_for_deleted_subtitle_path(schema_session, monkeypatch):

@@ -4,6 +4,7 @@ import ast
 import contextlib
 import hmac
 import logging
+import re
 
 from functools import wraps
 from flask import g, jsonify, request, abort, after_this_request
@@ -503,6 +504,11 @@ def _canonical_embedded_language(language):
     return base
 
 
+# A Windows path: a drive letter followed by either separator, a UNC prefix, or
+# any path carrying a backslash, which Unix paths never do.
+_WINDOWS_PATH = re.compile(r'^(?:[A-Za-z]:[\\/]|//)')
+
+
 def _subtitle_file_name(path):
     """Return a subtitle path's file name and whether it is a Windows path.
 
@@ -517,7 +523,10 @@ def _subtitle_file_name(path):
     a case-sensitive filesystem and stay apart.
     """
     text = str(path)
-    return text.replace('\\', '/').rsplit('/', 1)[-1], '\\' in text
+    name = text.replace('\\', '/').rsplit('/', 1)[-1]
+    # A drive letter or a UNC prefix is Windows whichever separator it uses.
+    windows = '\\' in text or bool(_WINDOWS_PATH.match(text))
+    return name, windows
 
 
 def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
