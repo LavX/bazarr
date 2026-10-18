@@ -16,7 +16,7 @@ import api from "@/apis/raw";
 export const JOB_FALLBACK_POLL_MS = 5000;
 
 const JOBS_KEY = [QueryKeys.System, QueryKeys.Jobs];
-const TERMINAL = new Set(["completed", "failed"]);
+const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
 type JobRecord = System.Jobs;
 
@@ -30,7 +30,7 @@ export class JobFailedError extends Error {
   }
 }
 
-// A job that ended at Stop is recorded as completed and flagged as stopped.
+// A job that ended at Stop is recorded as cancelled (and flagged stopped).
 // It did not finish, so it is not reported as done.
 export class JobStoppedError extends Error {
   readonly jobId: number;
@@ -71,7 +71,9 @@ function settle(jobId: number, job: JobRecord | undefined) {
   for (const waiter of list) {
     if (job?.status === "failed") {
       waiter.reject(new JobFailedError(job));
-    } else if (job?.stopped) {
+    } else if (job?.status === "cancelled" || job?.stopped) {
+      // The status is the stop; the flag says the same on a row recorded
+      // while a stopped job still read as completed.
       waiter.reject(new JobStoppedError(job));
     } else {
       waiter.resolve(job);

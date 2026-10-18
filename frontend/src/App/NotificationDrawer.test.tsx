@@ -142,6 +142,31 @@ describe("NotificationDrawer job cards", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders a cancelled job under the Stopped heading, counted with stopped ones", async () => {
+    const drawer = await openDrawer(
+      job({
+        job_name: "Downloading subtitles with Bazarr",
+        status: "cancelled",
+        progress_message: "Cancelled by user",
+      }),
+      job({
+        job_name: "Syncing sports library with Sportarr (Main)",
+        stopped: true,
+        progress_message: "Cancelled by user",
+      }),
+    );
+    expect(
+      within(drawer).queryByRole("heading", { name: "Completed" }),
+    ).toBeNull();
+    expect(
+      within(drawer).getByRole("heading", { name: "Stopped" }),
+    ).toBeInTheDocument();
+    expect(within(drawer).getByText("2 jobs")).toBeInTheDocument();
+    // Neither carries the completed ring, and both name the stop.
+    expect(ringPercent(drawer)).toBeNull();
+    expect(within(drawer).getAllByText("Cancelled by user")).toHaveLength(2);
+  });
+
   it("counts stopped jobs in their own group, not the Completed one", async () => {
     const drawer = await openDrawer(
       job({ job_name: "Synced series with Sonarr" }),

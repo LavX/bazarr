@@ -471,7 +471,8 @@ export function useSportsJob(id?: number | null, owner?: number) {
     refetchInterval: (query) =>
       query.state.status === "error" ||
       query.state.data?.status === "completed" ||
-      query.state.data?.status === "failed"
+      query.state.data?.status === "failed" ||
+      query.state.data?.status === "cancelled"
         ? false
         : 1000,
   });

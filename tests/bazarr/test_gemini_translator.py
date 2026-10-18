@@ -226,7 +226,7 @@ def _record_cancellation_state(fixture, record_property):
     record_property("temporary_files_remaining", len(list(fixture.source.parent.glob(".bazarr-write-*"))))
     record_property("job_cancelled", fixture.job.cancelled)
     assert fixture.job.cancelled
-    assert fixture.job.status == "completed"
+    assert fixture.job.status == "cancelled"
     assert fixture.job.progress_message == "Cancelled by user"
     assert fixture.destination.read_text() == "Previous destination"
     assert "Source text" in fixture.source.read_text()

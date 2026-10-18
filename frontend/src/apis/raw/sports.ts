@@ -128,7 +128,7 @@ export interface SportsJob {
 export interface SportsJobStatus {
   job_id: number;
   arr_instance_id: number;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
   cancelled: boolean;
   message: string;
   result: {

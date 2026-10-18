@@ -228,3 +228,89 @@ def test_starting_a_job_never_formats_or_logs_its_arguments(caplog):
         assert payload.formatted == 0
         assert "sk-fixture-key" not in caplog.text
         assert f"Running job Example (id {job.job_id}): {__name__}.argument_heavy_job" in caplog.text
+
+
+# Fixture job bodies for the cancelled-status tests. _run_job resolves them by
+# module and name exactly as it does any production job.
+def cancelled_job(job_id=None, queue=None):
+    queue.cancel_running_job(job_id)
+    # The next checkpoint is where a stop is honoured.
+    queue.update_job_progress(job_id, progress_value=1, progress_max=2,
+                              progress_message="Working")
+    return "finished anyway"
+
+
+def finished_quietly(job_id=None):
+    return "done"
+
+
+def test_a_stopped_job_reports_a_cancelled_status_the_event_carries_too():
+    """A stop used to be recorded as completed plus a flag, so anything
+    reading the API directly saw a stopped job as done. The status now says
+    what happened, the terminal event carries it, and the row shares the
+    completed history: one cap, and the one queue the drawer's Clear empties.
+    """
+    from pytest import MonkeyPatch
+    import app.jobs_queue as module
+    from test_sportarr_workflows import private_queue
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        events = []
+        monkeypatch.setattr(module, "event_stream", lambda **kwargs: events.append(kwargs["payload"]))
+        monkeypatch.setattr(module.activity, "finish", lambda *args, **kwargs: None)
+
+        job_id = queue.feed_jobs_pending_queue("Example", __name__, "cancelled_job", kwargs={"queue": queue})
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+
+        assert queue._run_job(job) is False
+
+        assert job.status == "cancelled" and job.stopped is True
+        assert job.progress_message == "Cancelled by user"
+        assert events[-1]["status"] == "cancelled"
+        assert [(row["job_id"], row["status"]) for row in queue.list_jobs_from_queue(status="cancelled")] \
+            == [(job_id, "cancelled")]
+        # The two terminal statuses share a deque, so 'completed' does not
+        # answer the stopped row.
+        assert queue.list_jobs_from_queue(status="completed") == []
+        assert [row["job_id"] for row in queue.list_jobs_from_queue()] == [job_id]
+        assert not queue.jobs_failed_queue and not queue.jobs_running_queue
+
+
+def test_a_stop_after_the_job_finished_neither_rewrites_nor_resurrects_it():
+    from pytest import MonkeyPatch
+    import app.jobs_queue as module
+    from test_sportarr_workflows import private_queue
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        monkeypatch.setattr(module, "event_stream", lambda **kwargs: None)
+        monkeypatch.setattr(module.activity, "finish", lambda *args, **kwargs: None)
+
+        job_id = queue.feed_jobs_pending_queue("Example", __name__, "finished_quietly", kwargs={})
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+
+        assert queue._run_job(job) is True
+
+        # Stop only looks at the running queue, so the finished row is left
+        # exactly as it ended and no cancelled row takes its place.
+        assert queue.cancel_running_job(job_id) is False
+        row = queue.list_jobs_from_queue(job_id=job_id)[0]
+        assert row["status"] == "completed" and row["stopped"] is False
+        assert queue.list_jobs_from_queue(status="cancelled") == []
+
+
+def test_the_jobs_api_offers_the_cancelled_status():
+    from api.system.jobs import SystemJobs
+
+    status_arg = next(arg for arg in SystemJobs.get_request_parser.args if arg.name == 'status')
+    assert 'cancelled' in status_arg.choices
+
+    job = _make_job()
+    job.status = "cancelled"
+    job.stopped = True
+    from flask_restx import marshal
+    sent = marshal([vars(job)], SystemJobs.get_response_model)[0]
+    assert sent["status"] == "cancelled" and sent["stopped"] is True

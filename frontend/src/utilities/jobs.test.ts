@@ -92,6 +92,20 @@ describe("waitForJob", () => {
     await expect(waitForJob(client, 6)).rejects.toThrow("Job 6 was stopped");
   });
 
+  it("rejects a job the queue reports cancelled, flag or no flag", async () => {
+    // The backend names the stop in the status itself; the flag is kept for
+    // rows recorded while a stopped job still read as completed.
+    client.setQueryData(JOBS_KEY, [
+      job(7, "cancelled", {
+        // eslint-disable-next-line camelcase
+        progress_message: "Cancelled by user",
+      }),
+    ]);
+
+    await expect(waitForJob(client, 7)).rejects.toBeInstanceOf(JobStoppedError);
+    await expect(waitForJob(client, 7)).rejects.toThrow("Job 7 was stopped");
+  });
+
   it("reads the reason from the job's error, not its progress message", async () => {
     client.setQueryData(JOBS_KEY, [
       {

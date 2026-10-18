@@ -133,8 +133,10 @@ class Job:
     :type retryable: bool
     :ivar retry_of: The id of the failed job this one retries, or None.
     :type retry_of: int, optional
-    :ivar stopped: Whether the job ended at Stop instead of finishing. It is still recorded as completed.
-        ``cancelled`` only records that Stop was pressed, and a job past its last checkpoint finishes anyway.
+    :ivar stopped: Whether the job ended at Stop instead of finishing, which its ``cancelled`` status
+        says as well. The flag is kept for consumers that keyed on it while a stopped job still read as
+        completed. ``cancelled`` alone only records that Stop was pressed, and a job past its last
+        checkpoint finishes anyway, with status ``completed``.
     :type stopped: bool
     :ivar origin: Who started the job: ``"user"`` for one an authenticated request enqueued, ``"scheduled"``
         for one the scheduler's task pool enqueued, None when nothing knows. Sent with the job, so the
@@ -325,7 +327,7 @@ class JobsQueue:
         :param job_id: Optional; The unique ID of the job to filter the results.
         :type job_id: int
         :param status: Optional; The status of jobs to filter the results. Expected
-            values are 'pending', 'running', 'failed', or 'completed'.
+            values are 'pending', 'running', 'failed', 'completed', or 'cancelled'.
         :type status: str
         :return: A list of dictionaries with job details that match the given filters.
             If no matches are found, an empty list is returned.
@@ -333,10 +335,21 @@ class JobsQueue:
         """
         queues = self.jobs_pending_queue + self.jobs_running_queue + self.jobs_failed_queue + self.jobs_completed_queue
         if status:
+            terminal = status in ('completed', 'cancelled')
+            name = f'jobs_{status}_queue'
+            if status == 'cancelled':
+                # A stopped job is recorded as cancelled and kept on the
+                # completed deque: one terminal history, one cap, and the one
+                # queue the drawer's Stopped group clears.
+                name = 'jobs_completed_queue'
             try:
-                queues = self.__dict__[f'jobs_{status}_queue']
+                queues = self.__dict__[name]
             except KeyError:
                 return []
+            if terminal:
+                # Two statuses share the one deque, so the row's own status
+                # tells them apart: 'completed' does not answer a stopped job.
+                queues = [job for job in queues if job.status == status]
 
         if job_id:
             return [vars(job) for job in queues if job.job_id == job_id]
@@ -931,7 +944,10 @@ class JobsQueue:
             job.job_returned_value = getattr(module, job.func)(*job.args, **job.kwargs)
         except JobCancelled:
             logging.info(f"Job {job.job_name} ({job.job_id}) was cancelled by user")  # noqa: G004
-            job.status = 'completed'
+            # A terminal status of its own: anything reading the API directly
+            # used to see a stopped job as completed, and a waiter keyed on
+            # completed could count a stop as a finish.
+            job.status = 'cancelled'
             job.stopped = True
             job.progress_message = "Cancelled by user"
             job.last_run_time = datetime.now(timezone.utc)
@@ -975,7 +991,7 @@ class JobsQueue:
                 # progress_value being None forces frontend to fetch a full job payload
                 payload = {
                     "job_id": job.job_id,
-                    "status": job.status,  # 'completed' or 'failed'
+                    "status": job.status,  # 'completed', 'cancelled' or 'failed'
                     "progress_value": None,  # Trigger frontend API call to update the whole job payload
                     "error": job.error,
                     "action": job.action,
