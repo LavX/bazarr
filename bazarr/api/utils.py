@@ -4,6 +4,7 @@ import ast
 import contextlib
 import hmac
 import logging
+import os
 
 from functools import wraps
 from flask import g, jsonify, request, abort, after_this_request
@@ -13,7 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from app import activity
 from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
-from app.database import get_audio_profile_languages, get_desired_languages
+from app.database import get_audio_profile_languages, get_desired_languages, select
 from utilities.path_mappings import path_mappings
 
 None_Keys = ['null', 'undefined', '', None]
@@ -469,3 +470,138 @@ def postprocess(item):
         item['fanart'] = _proxy_image(item['fanart'])
 
     return item
+
+
+def chunked(items, size=900):
+    """Yield ``items`` in successive lists of at most ``size`` entries.
+
+    Used to keep an ``IN (...)`` clause within SQLite's bound-parameter limit
+    (999 on older builds) when a fetchAll id list can grow with the library.
+    Postgres has no such limit, so a single large batch would work there, but
+    chunking is behaviour-equivalent for both back ends.
+    """
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def _canonical_embedded_language(language):
+    """Reduce a possibly multi-variant embedded language code to the
+    hi-priority single variant that action-7 history rows store.
+
+    The raw ``subtitles`` column can hold a combined code like
+    ``"en:hi:forced"`` for a track that is both HI and forced, while
+    ``_log_embedded_history_movie`` writes the canonical single variant
+    ``"en:hi"``. Applying the same reduction here (base, plus ``":hi"`` when HI,
+    else ``":forced"`` when forced, else the base) lets the two match.
+    """
+    parts = str(language).split(':')
+    base = parts[0]
+    variants = set(parts[1:])
+    if 'hi' in variants:
+        return base + ':hi'
+    if 'forced' in variants:
+        return base + ':forced'
+    return base
+
+
+def _subtitle_file_identity(path):
+    """A subtitle file's identity across path mappings.
+
+    History rows and the indexed subtitles column can carry the same file under
+    different mapped folders: a translation logs the globally mapped path while
+    the indexer records the instance's. The file name is what stays stable, so
+    the score lookup compares that instead of the full path. Both separators
+    split the name, because a Linux host stores the Windows-style paths of a
+    Windows instance unchanged.
+    """
+    return os.path.normcase(str(path).replace('\\', '/').rsplit('/', 1)[-1])
+
+
+def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
+    """Lowest current-subtitle score (0-100 %) for each item id.
+
+    Mirrors what the detail pages show. For every item, per current subtitle:
+      * file subtitles -> the newest replacement/deletion record for a current
+        file; only downloads (action 1/2/3) supply a score. Sync (5) preserves it;
+      * embedded tracks -> the newest source record (action 7) whose language
+        the item still has as an embedded track (a subtitles entry with an
+        empty path).
+    Each counted record scores ``round(score * 100 / score_out_of, 2)``; records
+    without a usable score/score_out_of are skipped. The item's value is the
+    minimum over the counted records, absent from the result when nothing counts.
+
+    ``subtitles_by_id`` maps id -> raw ``subtitles`` column. Paths compare by
+    their file name, the identity that survives the path mappings a history row
+    and the indexer can apply to the same file. One grouped, ordered history
+    query runs for the whole page (no per-item query).
+    """
+    ids = list(subtitles_by_id.keys())
+    if not ids:
+        return {}
+
+    # Current file-subtitle paths and embedded-track languages per item, read
+    # straight from the raw subtitles column.
+    current_paths = {}
+    embedded_langs = {}
+    for item_id, raw in subtitles_by_id.items():
+        paths = set()
+        langs = set()
+        if raw:
+            for entry in ast.literal_eval(raw):
+                if entry[1]:
+                    paths.add(_subtitle_file_identity(entry[1]))
+                else:
+                    langs.add(_canonical_embedded_language(entry[0]))
+        current_paths[item_id] = paths
+        embedded_langs[item_id] = langs
+
+    # Chunk the id list so the IN (...) clause stays within SQLite's
+    # bound-parameter limit for large libraries. Each id lives in exactly one
+    # chunk, so every row for a given item keeps its timestamp/id ordering and
+    # the newest-record-wins seen-set below still holds across the merge.
+    rows = []
+    for chunk in chunked(ids):
+        rows.extend(db.execute(
+            select(id_column.label('item_id'),
+                   history_table.action,
+                   history_table.language,
+                   history_table.subtitles_path,
+                   history_table.score,
+                   history_table.score_out_of)
+            .where(id_column.in_(chunk))
+            .where(history_table.action.in_([0, 1, 2, 3, 4, 6, 7]))
+            .order_by(history_table.timestamp.desc(), history_table.id.desc())
+        ).all())
+
+    lowest = {}
+    # (item_id, kind, key) already resolved: the newest record wins, so an older
+    # record for the same subtitle is ignored even when the newest had no score.
+    seen = set()
+    for row in rows:
+        if row.action == 7:
+            if row.language not in embedded_langs.get(row.item_id, ()):
+                continue
+            key = (row.item_id, 'embedded', row.language)
+        else:
+            identity = _subtitle_file_identity(row.subtitles_path)
+            if identity not in current_paths.get(row.item_id, ()):
+                continue
+            key = (row.item_id, 'file', identity)
+        if key in seen:
+            continue
+        seen.add(key)
+        # Uploads/translations may carry a synthetic score, but they replace
+        # the downloaded file and must also shadow its old provider score.
+        if row.action not in (1, 2, 3, 7) or row.score is None:
+            continue
+        if row.score == 0:
+            # Older history writers leave score_out_of unset for a real zero.
+            percent = 0.0
+        elif not row.score_out_of:
+            continue
+        else:
+            percent = round(row.score * 100 / row.score_out_of, 2)
+        current = lowest.get(row.item_id)
+        if current is None or percent < current:
+            lowest[row.item_id] = percent
+    return lowest

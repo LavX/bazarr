@@ -22,6 +22,7 @@ import {
   faClosedCaptioning,
   faEraser,
   faFilter,
+  faPercent,
   faSearch,
   faServer,
   faTag,
@@ -54,6 +55,15 @@ const SUBTITLES_FILTER_OPTIONS: { value: SubtitlesFilter; label: string }[] = [
   { value: "missing", label: "Missing some" },
 ];
 
+// Score filter. "any" does not filter; the others narrow by the item's lowest
+// current-subtitle score. "full" keeps a perfect 100 %; "notFull" keeps
+// anything short of it; "belowThreshold" keeps anything under the configured
+// acceptance threshold. A row with no known score (null) belongs to none of
+// them, so it drops out whenever the filter narrows, the way an untracked row
+// does in the subtitles filter. What the score is differs by kind, so the page
+// supplies `scoreValue` to read it and `scoreThreshold` for the threshold group.
+export type ScoreFilter = "any" | "full" | "notFull" | "belowThreshold";
+
 interface Props<T extends Item.Base = Item.Base> {
   query: UsePaginationQueryResult<T>;
   columns: ColumnDef<T>[];
@@ -68,6 +78,15 @@ interface Props<T extends Item.Base = Item.Base> {
   subtitlesFilter?: SubtitlesFilter;
   onSubtitlesFilterChange?: (value: SubtitlesFilter) => void;
   subtitlesStatus?: (item: T) => SubtitlesStatus;
+  // Score filter (Phase 3): only wired when the page supplies both the change
+  // handler and `scoreValue` (the item's lowest current-subtitle score, or null
+  // when none is known). `scoreThreshold` is the configured acceptance
+  // threshold; undefined until settings load, when the "below threshold" label
+  // drops its number.
+  scoreFilter?: ScoreFilter;
+  onScoreFilterChange?: (value: ScoreFilter) => void;
+  scoreValue?: (item: T) => number | null;
+  scoreThreshold?: number;
   // Instance filter (#156): options are this kind's instances; values are the
   // selected arr_instance_ids (as strings). Only wired when >1 instance exists.
   instanceOptions?: { value: string; label: string }[];
@@ -97,6 +116,10 @@ function ItemView<T extends Item.Base>({
   subtitlesFilter = "any",
   onSubtitlesFilterChange,
   subtitlesStatus,
+  scoreFilter = "any",
+  onScoreFilterChange,
+  scoreValue,
+  scoreThreshold,
   instanceOptions,
   instanceValues = [],
   onInstanceValuesChange,
@@ -114,6 +137,8 @@ function ItemView<T extends Item.Base>({
     instanceOptions.length > 1;
   const showSubtitlesFilter =
     onSubtitlesFilterChange !== undefined && subtitlesStatus !== undefined;
+  const showScoreFilter =
+    onScoreFilterChange !== undefined && scoreValue !== undefined;
   const { data: audioLangs = [] } = useAudioLanguages();
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -143,6 +168,24 @@ function ItemView<T extends Item.Base>({
         .sort((a, b) => a.localeCompare(b))
         .map((tag) => ({ value: tag, label: tag })),
     [tagQuery.data, query.data],
+  );
+
+  // The threshold label tracks the live setting; before it loads the option
+  // keeps its name without a number.
+  const scoreFilterOptions = useMemo<{ value: ScoreFilter; label: string }[]>(
+    () => [
+      { value: "any", label: "Any" },
+      { value: "full", label: "Full (100%)" },
+      { value: "notFull", label: "Not full (< 100%)" },
+      {
+        value: "belowThreshold",
+        label:
+          scoreThreshold != null
+            ? `Below threshold (< ${scoreThreshold}%)`
+            : "Below threshold",
+      },
+    ],
+    [scoreThreshold],
   );
 
   const dataFilter = useCallback(
@@ -190,6 +233,28 @@ function ItemView<T extends Item.Base>({
           return false;
         }
       }
+      // The score predicate waits until the scored read answers: while the
+      // query client hands back the previous scoreless list, every row would
+      // look unknown and the table would empty for the length of the request.
+      if (scoreFilter !== "any" && scoreValue && !query.isPlaceholderData) {
+        const score = scoreValue(item);
+        // A null score (no current subtitle with a known score) belongs to no
+        // narrowing group, so it drops out whenever the filter narrows.
+        if (score == null) return false;
+        // Hash matches and other boosted matches can score above 100; they are
+        // full, not outside every group.
+        if (scoreFilter === "full" && score < 100) return false;
+        if (scoreFilter === "notFull" && score >= 100) return false;
+        // Before the threshold setting loads it is unknown, so the group keeps
+        // every scored row rather than emptying the table.
+        if (
+          scoreFilter === "belowThreshold" &&
+          scoreThreshold != null &&
+          score >= scoreThreshold
+        ) {
+          return false;
+        }
+      }
       return true;
     },
     [
@@ -200,6 +265,10 @@ function ItemView<T extends Item.Base>({
       tagValues,
       subtitlesFilter,
       subtitlesStatus,
+      scoreFilter,
+      scoreValue,
+      scoreThreshold,
+      query.isPlaceholderData,
     ],
   );
 
@@ -209,7 +278,8 @@ function ItemView<T extends Item.Base>({
     excludeLanguages.length > 0 ||
     instanceValues.length > 0 ||
     tagValues.length > 0 ||
-    subtitlesFilter !== "any";
+    subtitlesFilter !== "any" ||
+    scoreFilter !== "any";
 
   // Compute active filter count (excluding search which is always visible)
   const activeFilterCount = useMemo(() => {
@@ -220,6 +290,7 @@ function ItemView<T extends Item.Base>({
     if (instanceValues.length > 0) count++;
     if (tagValues.length > 0) count++;
     if (subtitlesFilter !== "any") count++;
+    if (scoreFilter !== "any") count++;
     return count;
   }, [
     audioLanguages,
@@ -228,6 +299,7 @@ function ItemView<T extends Item.Base>({
     instanceValues,
     tagValues,
     subtitlesFilter,
+    scoreFilter,
   ]);
 
   const activeFilterChips = useMemo(() => {
@@ -304,6 +376,18 @@ function ItemView<T extends Item.Base>({
       });
     }
 
+    if (scoreFilter !== "any" && onScoreFilterChange) {
+      const name =
+        scoreFilterOptions.find((o) => o.value === scoreFilter)?.label ??
+        scoreFilter;
+      chips.push({
+        key: "score",
+        label: `Score: ${name}`,
+        color: "indigo",
+        onRemove: () => onScoreFilterChange("any"),
+      });
+    }
+
     return chips;
   }, [
     searchValue,
@@ -312,6 +396,8 @@ function ItemView<T extends Item.Base>({
     instanceValues,
     tagValues,
     subtitlesFilter,
+    scoreFilter,
+    scoreFilterOptions,
     instanceOptions,
     langOptions,
     onSearchChange,
@@ -320,6 +406,7 @@ function ItemView<T extends Item.Base>({
     onInstanceValuesChange,
     onTagValuesChange,
     onSubtitlesFilterChange,
+    onScoreFilterChange,
   ]);
 
   const clearAllFilters = useCallback(() => {
@@ -329,6 +416,7 @@ function ItemView<T extends Item.Base>({
     onInstanceValuesChange?.([]);
     onTagValuesChange?.([]);
     onSubtitlesFilterChange?.("any");
+    onScoreFilterChange?.("any");
   }, [
     onSearchChange,
     onAudioLanguagesChange,
@@ -336,6 +424,7 @@ function ItemView<T extends Item.Base>({
     onInstanceValuesChange,
     onTagValuesChange,
     onSubtitlesFilterChange,
+    onScoreFilterChange,
   ]);
 
   const hasAnyFilterControl =
@@ -343,7 +432,8 @@ function ItemView<T extends Item.Base>({
     onExcludeLanguagesChange !== undefined ||
     showInstanceFilter ||
     onTagValuesChange !== undefined ||
-    showSubtitlesFilter;
+    showSubtitlesFilter ||
+    showScoreFilter;
 
   // The band's left side is never empty. While rows are selected it holds the
   // batch tools; otherwise it says how many rows there are and which filters
@@ -683,6 +773,34 @@ function ItemView<T extends Item.Base>({
                   onChange={(value) =>
                     onSubtitlesFilterChange?.(
                       (value as SubtitlesFilter | null) ?? "any",
+                    )
+                  }
+                  allowDeselect={false}
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
+            {showScoreFilter && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon icon={faPercent} size="xs" opacity={0.6} />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Score
+                  </Text>
+                </Group>
+                <Select
+                  aria-label="Score"
+                  data={scoreFilterOptions}
+                  value={scoreFilter}
+                  onChange={(value) =>
+                    onScoreFilterChange?.(
+                      (value as ScoreFilter | null) ?? "any",
                     )
                   }
                   allowDeselect={false}

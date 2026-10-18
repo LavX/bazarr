@@ -1,0 +1,51 @@
+// Tinted score pill, one band per quality range. The tints mirror the app's
+// badge variants (highlight / warning / missing in assets/badge.module.scss) so
+// the pill reads as part of the same family, but it carries its own classes: the
+// themed Badge neutralises Mantine's `light` variant, and "missing" (a dashed
+// red) means an absent subtitle, not a low score.
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--bz-radius-sm);
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.green {
+  background: rgba(105, 219, 124, 0.12);
+  color: #69db7c;
+  border: 1px solid rgba(105, 219, 124, 0.2);
+}
+
+.yellow {
+  background: rgba(230, 138, 0, 0.12);
+  color: #ffd54f;
+  border: 1px solid rgba(230, 138, 0, 0.2);
+}
+
+.red {
+  background: rgba(255, 107, 107, 0.1);
+  color: #ff8787;
+  border: 1px solid rgba(255, 107, 107, 0.3);
+}
+
+@include mantine.light {
+  .green {
+    color: #2b8a3e;
+    border-color: rgba(105, 219, 124, 0.28);
+  }
+
+  .yellow {
+    color: #995c00;
+    border-color: rgba(230, 138, 0, 0.28);
+  }
+
+  .red {
+    color: #e03131;
+    border-color: rgba(255, 107, 107, 0.4);
+  }
+}
