@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+import pytest
 from flask import Flask
 
 
@@ -278,3 +279,83 @@ def test_series_without_scored_subtitles_returns_null(schema_session, monkeypatc
     result = _get_series(series, "/api/series?id[]=501&scores=1")
 
     assert result["data"][0]["lowest_subtitle_score"] is None
+
+
+@pytest.fixture(params=['movie', 'series'])
+def scored_media(request, monkeypatch, schema_session):
+    """Exercise the same history changes through both public list endpoints."""
+    if request.param == 'movie':
+        api = _prepare_movies(monkeypatch, schema_session)
+        path = '/movies/movie100.en.srt'
+        _add_movie(schema_session, 100, repr([['en', path, 100]]))
+
+        def add(history_id, action, score, score_out_of, language='en', subtitles_path=path):
+            _add_movie_history(schema_session, history_id, 100, action,
+                               subtitles_path, language, score, score_out_of)
+
+        def score():
+            return _get_movies(api, '/api/movies?id[]=100&scores=1')['data'][0]['lowest_subtitle_score']
+
+        def add_full_other_subtitle():
+            from app.database import TableMovies
+            item = schema_session.get(TableMovies, 100)
+            item.subtitles = repr([['en', path, 100], ['es', '/movies/movie100.es.srt', 100]])
+            schema_session.flush()
+            add(3, 1, 100, 100, 'es', '/movies/movie100.es.srt')
+    else:
+        api = _prepare_series(monkeypatch, schema_session)
+        path = '/series/show501/s01e01.en.srt'
+        _add_series(schema_session, 501)
+        _add_episode(schema_session, 601, 501, 1, 1, repr([['en', path, 100]]))
+
+        def add(history_id, action, score, score_out_of, language='en', subtitles_path=path):
+            _add_episode_history(schema_session, history_id, 501, 601, action,
+                                 subtitles_path, language, score, score_out_of)
+
+        def score():
+            return _get_series(api, '/api/series?id[]=501&scores=1')['data'][0]['lowest_subtitle_score']
+
+        def add_full_other_subtitle():
+            _add_episode(schema_session, 602, 501, 1, 2,
+                         repr([['en', '/series/show501/s01e02.en.srt', 100]]))
+            _add_episode_history(schema_session, 3, 501, 602, 1,
+                                 '/series/show501/s01e02.en.srt', 'en', 100, 100)
+
+    return add, score, add_full_other_subtitle
+
+
+@pytest.mark.parametrize('action', [0, 4, 6], ids=['delete-then-reindex', 'upload', 'translation'])
+def test_latest_replacement_shadows_download_score(scored_media, action):
+    add, score, _ = scored_media
+    add(1, 1, 90, 100)
+    # Upload/translation can store a synthetic 100, but the detail page treats
+    # these replacements as having no provider-match score.
+    add(2, action, 100 if action in (4, 6) else None, 100 if action in (4, 6) else None)
+    assert score() is None
+
+
+@pytest.mark.parametrize('action', [0, 4, 6], ids=['deletion', 'upload', 'translation'])
+def test_later_download_restores_score(scored_media, action):
+    add, score, _ = scored_media
+    add(1, 1, 90, 100)
+    add(2, action, None, None)
+    add(3, 2, 95, 100)
+    assert score() == 95.0
+
+
+@pytest.mark.parametrize('score_out_of', [100, None], ids=['with-denominator', 'legacy-zero'])
+@pytest.mark.parametrize('with_full_other', [False, True], ids=['only-zero', 'zero-and-full'])
+def test_zero_score_is_preserved(scored_media, score_out_of, with_full_other):
+    add, score, add_full_other = scored_media
+    add(1, 1, 90, 100)
+    add(2, 1, 0, score_out_of)
+    if with_full_other:
+        add_full_other()
+    assert score() == 0.0
+
+
+def test_sync_preserves_download_score(scored_media):
+    add, score, _ = scored_media
+    add(1, 1, 90, 100)
+    add(2, 5, None, None)
+    assert score() == 90.0

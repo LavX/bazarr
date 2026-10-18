@@ -2,6 +2,7 @@ import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { scheduleEpisodesHistoryRefresh } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
+import { scheduleSubtitleScoresRefresh } from "@/apis/queries/subtitleScores";
 import api from "@/apis/raw";
 import { notifyJobOutcome, resetJobNotifications } from "@/modules/jobs";
 import { LOG } from "@/utilities/console";
@@ -113,6 +114,8 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       // a large show would otherwise refetch the heaviest query on the page
       // hundreds of times over.
       update: (ids) => {
+        // Current subtitle membership can change without a history write.
+        scheduleSubtitleScoresRefresh(queryClient, QueryKeys.Series);
         // Currently invalidate episodes is impossible because we don't directly fetch episodes (we fetch episodes by series id)
         // So we need to invalidate series instead
         // TODO: Make a query for episodes and invalidate that instead
@@ -135,6 +138,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       },
       delete: (ids) => {
         LOG("info", "Invalidating episodes", ids);
+        scheduleSubtitleScoresRefresh(queryClient, QueryKeys.Series);
         ids.forEach((id) => {
           const episode = queryClient.getQueryData<Item.Episode>([
             QueryKeys.Episodes,
@@ -213,6 +217,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     {
       key: "movie-history",
       any: () => {
+        scheduleSubtitleScoresRefresh(queryClient, QueryKeys.Movies);
         void queryClient.invalidateQueries({
           queryKey: [QueryKeys.Movies, QueryKeys.History],
         });
@@ -236,6 +241,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
         });
       },
       any: () => {
+        scheduleSubtitleScoresRefresh(queryClient, QueryKeys.Series);
         void queryClient.invalidateQueries({
           queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
         });

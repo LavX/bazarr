@@ -507,8 +507,8 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
     """Lowest current-subtitle score (0-100 %) for each item id.
 
     Mirrors what the detail pages show. For every item, per current subtitle:
-      * file subtitles -> the newest download history record (action 1/2/3)
-        whose subtitles_path is still among the item's current subtitle files;
+      * file subtitles -> the newest replacement/deletion record for a current
+        path; only downloads (action 1/2/3) supply a score. Sync (5) preserves it;
       * embedded tracks -> the newest source record (action 7) whose language
         the item still has as an embedded track (a subtitles entry with an
         empty path).
@@ -554,7 +554,7 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
                    history_table.score,
                    history_table.score_out_of)
             .where(id_column.in_(chunk))
-            .where(history_table.action.in_([1, 2, 3, 7]))
+            .where(history_table.action.in_([0, 1, 2, 3, 4, 6, 7]))
             .order_by(history_table.timestamp.desc(), history_table.id.desc())
         ).all())
 
@@ -574,9 +574,17 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
         if key in seen:
             continue
         seen.add(key)
-        if not row.score or not row.score_out_of:
+        # Uploads/translations may carry a synthetic score, but they replace
+        # the downloaded file and must also shadow its old provider score.
+        if row.action not in (1, 2, 3, 7) or row.score is None:
             continue
-        percent = round(row.score * 100 / row.score_out_of, 2)
+        if row.score == 0:
+            # Older history writers leave score_out_of unset for a real zero.
+            percent = 0.0
+        elif not row.score_out_of:
+            continue
+        else:
+            percent = round(row.score * 100 / row.score_out_of, 2)
         current = lowest.get(row.item_id)
         if current is None or percent < current:
             lowest[row.item_id] = percent
