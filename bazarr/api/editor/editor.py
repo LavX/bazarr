@@ -37,7 +37,7 @@ HLS_CACHE_DIR = os.path.join(args.config_dir, 'cache', 'hls')
 
 # Bump this whenever the HLS encoding strategy changes in a way that makes
 # existing cache directories unsafe to reuse.
-HLS_CACHE_VERSION = 'hls-v2'
+HLS_CACHE_VERSION = 'hls-v3'
 
 # Idle TTL after which an HLS cache directory becomes eligible for eviction.
 # Each request to the playlist or any segment refreshes the directory's atime,
@@ -365,12 +365,17 @@ def _resolve_or_abort():
     return (video_path,)
 
 
-def _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track_idx, start_time_sec, mtime):
+def _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track_idx, start_time_sec, mtime,
+                   native_hls=False):
     """Stable cache dir per (media, audio track, start time, file mtime) tuple.
 
     start_time_sec lets callers spawn fresh sessions that begin somewhere other
     than the start of the file (e.g., after a track switch at minute 30). Each
     distinct start point gets its own cache so concurrent sessions don't race.
+
+    The playback mode is part of the key: native HLS (Safari, iOS) can play an
+    HEVC copy, while an MSE client (hls.js) needs H.264, and the two must not
+    share a session that was encoded for the other.
 
     The start time is keyed at millisecond precision (3 decimals). Truncating
     to whole seconds would let a request for 30.789 reuse an already-finished
@@ -379,8 +384,8 @@ def _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track_idx, start
     (startSec + video.currentTime) would drift by up to ~999 ms.
     """
     raw = (
-        f"{HLS_CACHE_VERSION}:{media_type}:{media_id}:{arr_instance_id or ''}:{audio_track_idx}:"
-        f"{start_time_sec:.3f}:{int(mtime)}"
+        f"{HLS_CACHE_VERSION}:{'native' if native_hls else 'mse'}:{media_type}:{media_id}:"
+        f"{arr_instance_id or ''}:{audio_track_idx}:{start_time_sec:.3f}:{int(mtime)}"
     )
     key = hashlib.md5(raw.encode()).hexdigest()[:16]
     return os.path.join(HLS_CACHE_DIR, key)
@@ -648,17 +653,42 @@ def _build_hls_ffmpeg_command(
     start_time_sec,
     cache_dir,
     probe_data,
+    native_hls=False,
 ):
-    """Build the ffmpeg command used for one editor HLS session."""
+    """Build the ffmpeg command used for one editor HLS session.
+
+    A zero-start session copies the video when the client can play it: H.264
+    always, HEVC only for native HLS (Safari, iOS). An MSE client such as
+    hls.js in Chromium cannot decode HEVC, and a 10-bit H.264 is not safe
+    either, so those are transcoded instead of copied. Sessions that start
+    later already transcode to make the seek frame-accurate.
+    """
     video_codec = None
+    video_pix_fmt = None
+    video_profile = None
     if probe_data:
         for stream in probe_data.get('streams', []):
             if stream.get('codec_type') == 'video':
                 video_codec = stream.get('codec_name', '').lower()
+                video_pix_fmt = (stream.get('pix_fmt') or '').lower()
+                video_profile = (stream.get('profile') or '').lower()
                 break
 
     exact_start = start_time_sec > 0
-    if exact_start:
+    # A missing pixel format does not prove the stream is 8-bit 4:2:0, so only
+    # the known playable formats are copied; everything else is transcoded.
+    copyable_h264 = (
+        video_codec in ('h264', 'avc')
+        and video_pix_fmt in ('yuv420p', 'yuvj420p', 'nv12')
+    )
+    # Native HLS can play the common HEVC profiles; other profiles (Main 12,
+    # 4:2:2, 4:4:4 and unknown metadata) are safer transcoded.
+    copyable_hevc = (
+        video_codec in ('hevc', 'h265')
+        and native_hls
+        and video_profile in ('main', 'main 10')
+    )
+    if exact_start or not (copyable_h264 or copyable_hevc):
         video_args = [
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
@@ -666,24 +696,18 @@ def _build_hls_ffmpeg_command(
             '-g', '48',
             '-keyint_min', '48',
             '-sc_threshold', '0',
+            # libx264 inherits the source pixel format unless it is forced, so
+            # a 10-bit source would otherwise stay High 10 and remain
+            # unplayable in Chromium.
+            '-pix_fmt', 'yuv420p',
         ]
         extra_video_tags = []
-    elif video_codec in ('h264', 'avc'):
+    elif copyable_h264:
         video_args = ['-c:v', 'copy']
         extra_video_tags = []
-    elif video_codec in ('hevc', 'h265'):
+    else:
         video_args = ['-c:v', 'copy']
         extra_video_tags = ['-tag:v', 'hvc1']
-    else:
-        video_args = [
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-crf', '28',
-            '-g', '48',
-            '-keyint_min', '48',
-            '-sc_threshold', '0',
-        ]
-        extra_video_tags = []
 
     has_audio = False
     if probe_data:
@@ -778,7 +802,8 @@ def _wait_for_hls_encoder(cache_dir, process, video_path, encoding_marker):
         pass
 
 
-def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir, player=None):
+def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir, player=None,
+                       native_hls=False):
     """Start ffmpeg writing HLS to cache_dir, with a thread waiting on it.
 
     start_time_sec is applied as an input seek (-ss before -i). Sessions that
@@ -827,6 +852,7 @@ def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir, p
         ffmpeg = _get_ffmpeg()
         cmd = _build_hls_ffmpeg_command(
             ffmpeg, video_path, audio_track_idx, start_time_sec, cache_dir, probe_data,
+            native_hls=native_hls,
         )
 
         # The marker goes down before ffmpeg starts, so a concurrent request
@@ -922,6 +948,11 @@ class EditorHls(Resource):
         if not player or not HLS_PLAYER_RE.fullmatch(player):
             player = None
 
+        # A request authenticated by a stream token comes from the native HLS
+        # player (Safari, iOS), which can decode HEVC. Everything else goes
+        # through hls.js and gets H.264 when the source would not be playable.
+        native_hls = bool(getattr(g, 'editor_hls_stream_token', None))
+
         resolved = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
         if isinstance(resolved, tuple):
             return resolved
@@ -934,7 +965,8 @@ class EditorHls(Resource):
         except OSError:
             return 'Video file not accessible', 404
 
-        cache_dir = _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track, start_time_sec, mtime)
+        cache_dir = _hls_cache_dir(media_type, media_id, arr_instance_id, audio_track, start_time_sec,
+                                   mtime, native_hls=native_hls)
 
         # Defense-in-depth: the filename regex above already blocks path
         # traversal, but we also normalise via realpath (resolves symlinks,
@@ -953,7 +985,8 @@ class EditorHls(Resource):
             # Idle encoders and stale directories are handled by the
             # background reaper, which does not depend on requests arriving.
             try:
-                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir, player=player)
+                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir, player=player,
+                                   native_hls=native_hls)
             except Exception:
                 logger.exception('Failed to spawn HLS encoder for %s', video_path)
                 return 'ffmpeg not available', 500
@@ -1030,7 +1063,8 @@ class EditorHls(Resource):
             # requested, for example during a long pause. Encode it again
             # instead of answering 404 for the rest of the session.
             try:
-                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir, player=player)
+                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir, player=player,
+                                   native_hls=native_hls)
             except Exception:
                 logger.exception('Failed to respawn HLS encoder for %s', video_path)
         if not os.path.isfile(target):
