@@ -644,6 +644,58 @@ class _HostCheckState:
         return self._allowed_hosts
 
 
+class _BaseUrlState:
+    """The base URL from config.yaml, refreshed as the file changes.
+
+    The front listener serves whatever base_url the browser is told: its
+    routing, its refusal page and the path its refusal notices take to the
+    backend all hang off the prefix. The backend rewrites config.yaml on a
+    settings save and the base URL can change there through the UI, which
+    restarts the backend in place, not this listener, so a prefix captured
+    at startup would go stale while the process lives. The read is keyed the
+    same way as the host check's (nanosecond mtime, size and inode, so a
+    rewrite inside one coarse-mtime tick still reads fresh); a read that
+    fails or one without a general section keeps the last good value.
+    """
+
+    def __init__(self, config_dir: str):
+        self._path = _config_yaml(config_dir)
+        self._stamp = None
+        self._base = ""  # stripped prefix, "" when unset
+
+    def refresh(self) -> None:
+        try:
+            info = self._path.stat()
+            stamp = (info.st_mtime_ns, info.st_size, info.st_ino)
+        except OSError:
+            return
+        if stamp == self._stamp:
+            return
+        try:
+            with open(self._path, encoding="utf-8") as handle:
+                config = yaml.safe_load(handle) or {}
+        except Exception as error:
+            print(f"[supervisor] Could not read config.yaml for the base URL: {error}")
+            return
+        general = config.get("general") if isinstance(config, dict) else None
+        if not isinstance(general, dict):
+            return
+        self._base = str(general.get("base_url") or "").strip().strip("/")
+        self._stamp = stamp
+
+    def base(self) -> str:
+        """The stripped base prefix, e.g. "bazarr", or "" when unset."""
+        return self._base
+
+    def prefix(self) -> str:
+        """The base prefix with its leading slash, or "" when unset."""
+        return f"/{self._base}" if self._base else ""
+
+    def base_url(self) -> str:
+        """The setting as the browser sees it, "/" when unset."""
+        return f"/{self._base}" if self._base else "/"
+
+
 def host_check_decision(request_host, remote, forwarded_host, auth_type, trusted_proxy,
                         allowed_hosts, environ=None):
     """(allowed, refused hostnames): the same rule the backend applies.
@@ -939,6 +991,16 @@ class _RefusalReporter:
             # and a console that serves quietly after its restart still
             # pays what the console before it claimed.
             self.start_drain()
+
+    def resolved_notice_path(self) -> str:
+        """The path a notice is posted to, resolved at delivery time.
+
+        The middleware hands a resolver, not a literal: the base URL the
+        path hangs off can change while this process lives, and a notice
+        under a dead prefix would never reach the backend.
+        """
+        path = self.notice_path
+        return path() if callable(path) else path
 
     def _recover_unpaid_ownership(self):
         """The unpaid window ownership the shared record still holds.
@@ -2855,7 +2917,7 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     delivered = False
     reached = False
     try:
-        async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
+        async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.resolved_notice_path()}",
                                 headers={TOKEN_HEADER: token},
                                 data=data,
                                 allow_redirects=False) as response:
@@ -3091,7 +3153,7 @@ def _print_due_refusal_summary_for_active_reporter() -> None:
         _print_due_refusal_summary(_active_reporter)
 
 
-def create_host_check_middleware(config_dir: str, base_url: str = "/"):
+def create_host_check_middleware(config_dir: str, base_state: _BaseUrlState | None = None):
     """The front listener's share of the request-host check.
 
     The backend applies the same policy behind its own listener, but between
@@ -3107,18 +3169,32 @@ def create_host_check_middleware(config_dir: str, base_url: str = "/"):
     judged by its hostname like everything else. The Host header itself is
     what a request is judged by: the web library's own fallback to the
     socket address would admit a request that carried no hostname.
+
+    The approval path and the refusal page's form action follow the live
+    base URL: the prefix can change through the UI while this process lives,
+    and a submission under the new prefix has to stay open or the page it
+    came from would lead back to a refusal.
     """
     global _active_reporter
     state = _HostCheckState(config_dir)
-    base = str(base_url or "").strip().strip("/")
-    prefix = f"/{base}" if base else ""
+    base_state = base_state or _BaseUrlState(config_dir)
     segment = host_policy.APPROVAL_SEGMENT
-    approval_paths = {f"/{segment}"} if not prefix else {f"{prefix}/{segment}", f"/{segment}"}
-    reporter = _RefusalReporter(f"{prefix}/_supervisor/host_refusal")
+
+    def _notice_path() -> str:
+        # Resolved when a notice is delivered, from the live base URL: the
+        # prefix can change while this process lives, and a notice under a
+        # dead prefix would never reach the backend.
+        base_state.refresh()
+        return f"{base_state.prefix()}/_supervisor/host_refusal"
+
+    reporter = _RefusalReporter(_notice_path)
     _active_reporter = reporter
 
     @web.middleware
     async def host_check_middleware(request: web.Request, handler):
+        base_state.refresh()
+        prefix = base_state.prefix()
+        approval_paths = {f"/{segment}"} if not prefix else {f"{prefix}/{segment}", f"/{segment}"}
         if request.method == "POST" and request.path in approval_paths:
             return await handler(request)
         state.refresh()
@@ -3149,7 +3225,6 @@ def create_host_check_middleware(config_dir: str, base_url: str = "/"):
 
     host_check_middleware.reporter = reporter
     host_check_middleware.state = state
-    host_check_middleware.approval_paths = approval_paths
     return host_check_middleware
 
 
@@ -3558,26 +3633,29 @@ def _build_static_allowlist(static_root: Path) -> "dict[str, str]":
     return mapping
 
 
-def create_static_handler(config_dir: str, backend: BackendManager | None = None):
+def create_static_handler(config_dir: str, backend: BackendManager | None = None,
+                          base_state: _BaseUrlState | None = None):
     static_root = STATIC_DIR.resolve()
     # Trust anchor: enumerated at startup from the filesystem, never from user input.
     # Dict values are the trusted absolute asset paths; dict.get(user_key) yields
     # a value that CodeQL's taint tracker treats as untainted (comes from dict
     # population, not from the tainted key).
     ALLOWED_ASSETS: "dict[str, str]" = _build_static_allowlist(static_root)
-    _config = _read_bazarr_config(config_dir)
-    _startup_base_url = _config.get("baseUrl", "/") or "/"
-    _base_prefix = _startup_base_url.strip("/")  # e.g. "bazarr", or "" when not set
+    base_state = base_state or _BaseUrlState(config_dir)
 
     async def static_handler(request: web.Request) -> web.StreamResponse:
         """Serve static frontend files, fallback to index.html for SPA routing."""
         path = request.path.lstrip("/")
+        base_state.refresh()
+        base_prefix = base_state.base()
 
         # When base_url is set (e.g. /bazarr), the browser resolves ./assets/...
         # relative to <base href="/bazarr/"> and requests /bazarr/assets/....
         # Strip the prefix before the allowlist lookup so the file is found.
-        if _base_prefix and path.startswith(_base_prefix + "/"):
-            path = path[len(_base_prefix) + 1:]
+        # The prefix is read live: it can change through the UI while this
+        # process lives.
+        if base_prefix and path.startswith(base_prefix + "/"):
+            path = path[len(base_prefix) + 1:]
 
         # Dict .get() with a tainted key returns a value sourced from the trusted
         # dict population. No taint flows from `path` into `safe_path`.
@@ -3603,7 +3681,7 @@ def create_static_handler(config_dir: str, backend: BackendManager | None = None
         if backend and state == BackendManager.STATE_STARTING:
             return web.Response(
                 status=503,
-                text=_get_startup_html(status, _startup_base_url),
+                text=_get_startup_html(status, base_state.base_url()),
                 content_type="text/html",
                 headers={"Cache-Control": "no-store"},
             )
@@ -3659,10 +3737,10 @@ def create_supervisor_sse_handler(backend: BackendManager):
 
 
 def create_app(config_dir: str, backend: BackendManager) -> web.Application:
-    config = _read_bazarr_config(config_dir)
-    base = config.get("baseUrl", "/").strip("/")
+    base_state = _BaseUrlState(config_dir)
+    base_state.refresh()
 
-    host_check = create_host_check_middleware(config_dir, config.get("baseUrl", "/"))
+    host_check = create_host_check_middleware(config_dir, base_state)
     app = web.Application(middlewares=[host_check])
 
     # The delivery worker of the host check above outlives the routes: stop
@@ -3675,35 +3753,58 @@ def create_app(config_dir: str, backend: BackendManager) -> web.Application:
     # Supervisor-handled endpoints (not proxied)
     status_handler = create_supervisor_status_handler(backend)
     sse_handler = create_supervisor_sse_handler(backend)
-    app.router.add_route("GET", "/_supervisor/status", status_handler)
-    app.router.add_route("GET", "/_supervisor/events", sse_handler)
-    if base:
-        app.router.add_route("GET", f"/{base}/_supervisor/status", status_handler)
-        app.router.add_route("GET", f"/{base}/_supervisor/events", sse_handler)
+    static_handler = create_static_handler(config_dir, backend, base_state)
 
     # The approval endpoint for a refused hostname: not proxied by any
-    # PROXY_PREFIXES, so it gets its own route to the backend, at the base and
-    # at the root (a prefix-stripping proxy reaches the root one), and the
-    # host check above leaves exactly the one submission open. The backend
-    # rewrites config.yaml to add the hostname, so the cached read of it does
-    # not survive the answer.
+    # PROXY_PREFIXES, so it gets its own branch, at the base and at the root
+    # (a prefix-stripping proxy reaches the root one), and the host check
+    # above leaves exactly the one submission open. The backend rewrites
+    # config.yaml to add the hostname, so the cached read of it does not
+    # survive the answer.
     async def approval_proxy(request: web.Request) -> web.StreamResponse:
         response = await proxy_handler(request)
         host_check.state.invalidate()
         return response
 
-    for path in sorted(host_check.approval_paths):
-        app.router.add_route("POST", path, approval_proxy)
+    # One dispatcher rather than a table of pre-registered routes: the base
+    # URL is part of the paths the front listener serves (the status and
+    # events endpoints, the approval endpoint, the API and image prefixes),
+    # and it can change through the UI while this process lives. The backend
+    # restarts in place under the new base, but a route table is frozen at
+    # startup, so a table built for the old base would keep answering for it
+    # while every POST under the new one fell to the GET-only static
+    # catch-all's 405. So the live prefix is stripped here, at request time,
+    # and the request is served exactly as it would have been at the root,
+    # the shape a prefix-stripping front proxy produces.
+    async def dispatch_handler(request: web.Request) -> web.StreamResponse:
+        base_state.refresh()
+        # The raw path, the same string the router matched against: a
+        # percent-encoded prefix never matched a registered route and must
+        # not start matching one now.
+        path = request.rel_url.path_safe
+        prefix = base_state.prefix()
+        if prefix and (path == prefix or path.startswith(prefix + "/")):
+            path = path[len(prefix):] or "/"
 
-    # API/image proxy routes: register both root and base_url-prefixed versions
-    # so deployments with general.base_url (e.g. /bazarr) work correctly
-    for prefix in PROXY_PREFIXES:
-        app.router.add_route("*", prefix + "{path:.*}", proxy_handler)
-        if base:
-            app.router.add_route("*", f"/{base}{prefix}" + "{path:.*}", proxy_handler)
+        method = request.method
+        if method in ("GET", "HEAD"):
+            if path == "/_supervisor/status":
+                return await status_handler(request)
+            if path == "/_supervisor/events":
+                return await sse_handler(request)
+        elif method == "POST" and path == f"/{host_policy.APPROVAL_SEGMENT}":
+            return await approval_proxy(request)
+        for candidate in PROXY_PREFIXES:
+            if path.startswith(candidate):
+                return await proxy_handler(request)
+        if method in ("GET", "HEAD"):
+            return await static_handler(request)
+        # Every other path was answered by the GET-only static catch-all,
+        # so any other method on it was, and stays, a method error naming
+        # the one method it allows.
+        raise web.HTTPMethodNotAllowed(method, ("GET",))
 
-    # Static file catch-all
-    app.router.add_route("GET", "/{path:.*}", create_static_handler(config_dir, backend))
+    app.router.add_route("*", "/{path:.*}", dispatch_handler)
 
     return app
 

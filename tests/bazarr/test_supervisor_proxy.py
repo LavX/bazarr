@@ -32,7 +32,8 @@ async def _static_marker(request):
 @pytest.mark.asyncio
 async def test_backup_download_path_is_proxied_to_backend(monkeypatch, tmp_path):
     monkeypatch.setattr(supervisor, "proxy_handler", _proxy_marker)
-    monkeypatch.setattr(supervisor, "create_static_handler", lambda config_dir, backend=None: _static_marker)
+    monkeypatch.setattr(supervisor, "create_static_handler",
+                        lambda config_dir, backend=None, base_state=None: _static_marker)
 
     app = supervisor.create_app(str(tmp_path), _Backend())
     request = make_mocked_request(
@@ -42,8 +43,9 @@ async def test_backup_download_path_is_proxied_to_backend(monkeypatch, tmp_path)
     )
 
     match_info = await app.router.resolve(request)
+    response = await match_info.handler(request)
 
-    assert match_info.handler is _proxy_marker
+    assert response.text == "proxied"
 
 
 @pytest.mark.asyncio
@@ -836,3 +838,167 @@ async def test_an_answer_cut_short_reaches_the_client_cut_short(monkeypatch, tmp
         await runner.cleanup()
 
     assert response.status == 200
+
+
+# --- the base URL is read live, not captured at startup -----------------------
+#
+# The UI writes general.base_url and the backend restarts in place under the
+# new prefix, while the front listener keeps running. Everything the listener
+# serves hangs off that prefix (the status and events endpoints, the approval
+# endpoint, the API and image prefixes, and the strip before the static
+# allowlist lookup), so all of it follows the file rather than a startup copy.
+
+def _write_base_config(tmp_path, base):
+    (tmp_path / "config").mkdir(exist_ok=True)
+    config_file = tmp_path / "config" / "config.yaml"
+    config_file.write_text(
+        f"general:\n  base_url: {base}\nauth: {{}}\n", encoding="utf-8")
+    return config_file
+
+
+@pytest.mark.asyncio
+async def test_a_base_url_change_is_picked_up_by_the_running_listener(monkeypatch, tmp_path):
+    # The red shape of this test: with the base frozen at startup, the POST
+    # under the new prefix resolved to the GET-only static catch-all's 405
+    # and the status endpoint under the new prefix fell through to the proxy.
+    config_file = _write_base_config(tmp_path, "/bazarr")
+    monkeypatch.setattr(supervisor, "proxy_handler", _proxy_marker)
+    app = supervisor.create_app(str(tmp_path), _Backend())
+
+    # The UI wrote the new base and the backend restarted under it.
+    config_file.write_text("general:\n  base_url: /newbase\nauth: {}\n", encoding="utf-8")
+
+    request = make_mocked_request("POST", "/newbase/api/system/status", app=app)
+    match_info = await app.router.resolve(request)
+    response = await match_info.handler(request)
+
+    assert response.text == "proxied"
+
+    status_request = make_mocked_request("GET", "/newbase/_supervisor/status", app=app)
+    status_info = await app.router.resolve(status_request)
+    status_response = await status_info.handler(status_request)
+
+    assert json.loads(status_response.text) == {"state": "running", "stage_index": 0}
+
+
+@pytest.mark.asyncio
+async def test_the_old_base_stops_answering_after_a_base_url_change(monkeypatch, tmp_path):
+    config_file = _write_base_config(tmp_path, "/bazarr")
+    monkeypatch.setattr(supervisor, "proxy_handler", _proxy_marker)
+    app = supervisor.create_app(str(tmp_path), _Backend())
+    config_file.write_text("general:\n  base_url: /newbase\nauth: {}\n", encoding="utf-8")
+
+    request = make_mocked_request("POST", "/bazarr/api/system/status", app=app)
+    match_info = await app.router.resolve(request)
+
+    with pytest.raises(web.HTTPMethodNotAllowed) as refused:
+        await match_info.handler(request)
+
+    assert refused.value.allowed_methods == frozenset({"GET"})
+
+
+@pytest.mark.asyncio
+async def test_a_multi_segment_base_url_serves_its_endpoints_and_prefixes(monkeypatch, tmp_path):
+    _write_base_config(tmp_path, "/apps/bazarr")
+    monkeypatch.setattr(supervisor, "proxy_handler", _proxy_marker)
+    app = supervisor.create_app(str(tmp_path), _Backend())
+
+    request = make_mocked_request("POST", "/apps/bazarr/api/system/status", app=app)
+    match_info = await app.router.resolve(request)
+
+    assert (await match_info.handler(request)).text == "proxied"
+
+    status_request = make_mocked_request("GET", "/apps/bazarr/_supervisor/status", app=app)
+    status_info = await app.router.resolve(status_request)
+    status_response = await status_info.handler(status_request)
+
+    assert json.loads(status_response.text)["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_static_assets_follow_a_base_url_change(monkeypatch, tmp_path):
+    static_root = tmp_path / "static"
+    (static_root / "assets").mkdir(parents=True)
+    (static_root / "assets" / "app.js").write_text("console.log(1)\n", encoding="utf-8")
+    (static_root / "index.html").write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(supervisor, "STATIC_DIR", static_root)
+    config_file = _write_base_config(tmp_path, "/bazarr")
+
+    handler = supervisor.create_static_handler(str(tmp_path), _Backend(state="running"))
+
+    before = await handler(make_mocked_request("GET", "/bazarr/assets/app.js"))
+    assert isinstance(before, web.FileResponse)
+    assert before.status == 200
+
+    config_file.write_text("general:\n  base_url: /newbase\nauth: {}\n", encoding="utf-8")
+
+    after = await handler(make_mocked_request("GET", "/newbase/assets/app.js"))
+    assert isinstance(after, web.FileResponse)
+    assert after.status == 200
+
+
+@pytest.mark.asyncio
+async def test_the_host_check_follows_a_base_url_change(monkeypatch, tmp_path):
+    config_file = _write_base_config(tmp_path, "/bazarr")
+    monkeypatch.setattr(supervisor, "proxy_handler", _proxy_marker)
+    app = supervisor.create_app(str(tmp_path), _Backend())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        config_file.write_text("general:\n  base_url: /newbase\nauth: {}\n", encoding="utf-8")
+        foreign = {"Host": "attacker.example.com:6767"}
+        refused = await client.get("/newbase/", headers=foreign)
+        body = await refused.text()
+        approval = await client.post("/newbase/host-approval", headers=foreign)
+        approval_body = await approval.text()
+    finally:
+        await client.close()
+
+    assert refused.status == 421
+    assert 'action="/newbase/host-approval"' in body
+    # The one POST the refusal page submits stays open under the new prefix.
+    assert approval.status == 200
+    assert approval_body == "proxied"
+
+
+@pytest.mark.asyncio
+async def test_refusal_notices_follow_a_base_url_change(monkeypatch, tmp_path):
+    config_file = _write_base_config(tmp_path, "/bazarr")
+    app = supervisor.create_app(str(tmp_path), _Backend())
+    reporter = app.middlewares[0].reporter
+
+    assert reporter.resolved_notice_path() == "/bazarr/_supervisor/host_refusal"
+
+    config_file.write_text("general:\n  base_url: /newbase\nauth: {}\n", encoding="utf-8")
+
+    assert reporter.resolved_notice_path() == "/newbase/_supervisor/host_refusal"
+
+
+def test_the_base_url_state_keeps_the_last_good_value(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config_file = config_dir / "config.yaml"
+    config_file.write_text("general:\n  base_url: /bazarr/\n", encoding="utf-8")
+
+    state = supervisor._BaseUrlState(str(tmp_path))
+    state.refresh()
+
+    assert state.base() == "bazarr"
+    assert state.prefix() == "/bazarr"
+    assert state.base_url() == "/bazarr"
+
+    # A write in flight (no general section yet) keeps the last good value.
+    config_file.write_text("", encoding="utf-8")
+    state.refresh()
+    assert state.base() == "bazarr"
+
+    # The finished write is picked up without a restart.
+    config_file.write_text("general:\n  base_url: /newbase\n", encoding="utf-8")
+    state.refresh()
+    assert state.base() == "newbase"
+
+    # A config without the setting reads as no base at all.
+    config_file.write_text("general: {}\n", encoding="utf-8")
+    state.refresh()
+    assert state.base() == ""
+    assert state.base_url() == "/"
