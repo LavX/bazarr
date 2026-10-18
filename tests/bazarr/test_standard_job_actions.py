@@ -684,7 +684,7 @@ def bundle_files(hub_install, version):
 
 
 def assert_stopped(job):
-    assert job["status"] == "completed"
+    assert job["status"] == "cancelled"
     assert job["progress_message"] == "Cancelled by user"
 
 
@@ -940,7 +940,7 @@ def test_the_spooled_package_is_removed_when_its_install_ends(queue, package_upl
     job = run_next(queue)
 
     assert read == [b"PK package"]
-    assert job["status"] == ("failed" if outcome == "failed" else "completed")
+    assert job["status"] == {"failed": "failed", "stopped": "cancelled"}.get(outcome, "completed")
     if outcome == "failed":
         assert job["error"]["message"] == ("Could not install local.zip: "
                                            "uploaded package is not a valid .zip archive")
@@ -1135,7 +1135,7 @@ def test_stop_reaches_a_running_sports_download(queue, monkeypatch):
     manual_jobs.sports_manually_download_subtitle(61, {"subtitle": "cached"}, 1)
     job = run_next(queue)
 
-    assert job["status"] == "completed"
+    assert job["status"] == "cancelled"
     assert job["progress_message"] == "Cancelled by user"
     assert job["job_name"] == "Manually downloading Subtitles for Final"
     assert job["job_returned_value"] is None

@@ -53,6 +53,14 @@ describe("whenJobFinishes", () => {
     expect(done).toHaveBeenCalledWith("failed");
   });
 
+  it("treats a cancelled job as finished", () => {
+    const client = new QueryClient();
+    const done = vi.fn();
+    whenJobFinishes(client, 7, done);
+    setJob(client, 7, "cancelled");
+    expect(done).toHaveBeenCalledWith("cancelled");
+  });
+
   it("fires at once for a job that finished before the watch started", () => {
     const client = new QueryClient();
     setJob(client, 7, "completed");

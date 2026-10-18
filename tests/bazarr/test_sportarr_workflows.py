@@ -845,7 +845,7 @@ def test_batch_cancellation_before_publication_has_no_result(
     monkeypatch.setattr(workflows, "search_event", cancel_before_search)
     monkeypatch.setattr(automatic, "_provider_result", provider)
     assert not queue._run_job(job)
-    assert reached == [True] and job.cancelled and job.status == "completed"
+    assert reached == [True] and job.cancelled and job.status == "cancelled"
     assert job.job_returned_value is None
     assert workflows.sports_job_status(session, job_id, 1)["result"] is None
     assert {
@@ -1319,7 +1319,7 @@ def test_a_running_scheduled_sync_stops_when_its_owner_goes_away(
     queue.jobs_running_queue.append(job)
     assert queue._run_job(job) is False
     assert job.cancelled and job.stopped
-    assert job.status == "completed" and job.progress_message == "Cancelled by user"
+    assert job.status == "cancelled" and job.progress_message == "Cancelled by user"
     assert reached == []
     assert not queue.jobs_failed_queue
 
@@ -1359,7 +1359,7 @@ def test_a_scheduled_sync_whose_owner_goes_away_before_the_sweep_ends_cancelled(
     with caplog.at_level(logging.ERROR):
         assert queue._run_job(job) is False
     assert job.stopped and job.error is None
-    assert job.status == "completed" and job.progress_message == "Cancelled by user"
+    assert job.status == "cancelled" and job.progress_message == "Cancelled by user"
     assert reached == []
     assert not queue.jobs_failed_queue
     assert not [record for record in caplog.records if record.levelno >= logging.ERROR]

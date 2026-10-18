@@ -363,9 +363,10 @@ def test_optional_sync_failure_or_skip_keeps_the_successful_upload(upload_flow, 
         flow.release_engine.set()
         sync_thread.join(2)
         # The upload stays completed either way. A sync that failed is its own
-        # job, and it now fails instead of reading as completed; a cancelled or
-        # skipped one completes.
-        assert sync_job.status == ("failed" if outcome == "failure" else "completed")
+        # job, and it now fails instead of reading as completed; a cancelled
+        # one reports cancelled and a skipped one completes.
+        assert sync_job.status == ("failed" if outcome == "failure" else
+                                   "cancelled" if outcome == "cancel" else "completed")
         if outcome == "cancel":
             assert sync_job.progress_message == "Cancelled by user"
         assert sync_job.job_returned_value is not True
@@ -994,7 +995,7 @@ def test_review_terminal_job_releases_publication_lease(upload_flow, monkeypatch
     _, thread = flow.start()
     thread.join(3)
     assert not thread.is_alive()
-    assert job.status in ("completed", "failed")
+    assert job.status in ("completed", "failed", "cancelled")
     assert publication.state is None, "terminal Job kwargs retained the media coordinator"
 
 
@@ -1017,7 +1018,7 @@ def test_review_partial_publication_refreshes_consumers_after_cancellation(uploa
     flow.release_engine.set()
     job, thread = flow.start()
     thread.join(3)
-    assert job.status == "completed" and job.cancelled
+    assert job.status == "cancelled" and job.cancelled
     assert flow.video.with_suffix(".en.ffsubsync.srt").is_file()
     assert sum("arr_client" in kwargs for _, kwargs in flow.notifications) == 2
     assert sum("arr_instance_id" in kwargs for _, kwargs in flow.notifications) == 1

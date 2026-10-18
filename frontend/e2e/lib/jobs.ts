@@ -6,7 +6,12 @@ import type { APIRequestContext, Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 import { appPath } from "./base";
 
-export type JobStatus = "pending" | "running" | "failed" | "completed";
+export type JobStatus =
+  | "pending"
+  | "running"
+  | "failed"
+  | "completed"
+  | "cancelled";
 
 export interface Job {
   job_id: number;
@@ -33,7 +38,7 @@ export async function getJob(
 export async function waitForJob(
   api: APIRequestContext,
   id: number,
-  status: "failed" | "completed",
+  status: JobStatus,
 ): Promise<Job> {
   await expect
     .poll(async () => (await getJob(api, id))?.status, {
