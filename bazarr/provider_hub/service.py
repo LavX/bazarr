@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from subliminal_patch.extensions import provider_registry
 
 from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KEY
+from secret_store.scrub import scrub_text, scrub_value
 
 from .manifest import validate_manifest
 from .bundle import verify_bundle_tree
@@ -152,6 +153,12 @@ def utcnow_iso() -> str:
 
 
 def _persist_job(job: dict[str, Any]) -> None:
+    # One row's message, error and details come from whatever raised, which
+    # for a plugin failure is the plugin's own words. The row is read by the
+    # API and, after a restart, by the boot that loads it, so it is scrubbed
+    # once here: no writer of a row has to remember to.
+    stored = scrub_value(job)
+
     def persist(state: dict[str, Any]) -> None:
         jobs = state.setdefault("jobs", [])
         if not isinstance(jobs, list):
@@ -161,11 +168,11 @@ def _persist_job(job: dict[str, Any]) -> None:
         replaced = False
         for index, existing in enumerate(jobs):
             if isinstance(existing, dict) and existing.get("id") == job_id:
-                jobs[index] = dict(job)
+                jobs[index] = dict(stored)
                 replaced = True
                 break
         if not replaced:
-            jobs.append(dict(job))
+            jobs.append(dict(stored))
         if len(jobs) > _JOB_LOG_LIMIT:
             del jobs[: len(jobs) - _JOB_LOG_LIMIT]
 
@@ -1278,7 +1285,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     source["last_checked_at"] = now
                     source["last_error"] = None
                 except Exception as error:
-                    source["last_error"] = _catalog_source_error_message(error)
+                    source["last_error"] = scrub_text(_catalog_source_error_message(error))
                     failed_sources.append(source.get("name") or source.get("id") or "?")
                     continue
                 if catalog is None:
@@ -1828,6 +1835,12 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
     if config is not None or enabled is not None:
         from . import runtime_status
         runtime_status.clear(provider_id)
+    if config is not None:
+        # The save just stored a credential (encrypted) and registered its
+        # path, so the scrub set is rebuilt now: whatever prints the value
+        # next, in this process, prints the mask.
+        from secret_store.scrub import refresh_secret_values
+        refresh_secret_values()
     return _redact_installation(provider)
 
 
@@ -2030,6 +2043,12 @@ def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None
 
 
 def _record_provider_last_error(provider_id: str, message: str | None) -> None:
+    # The message is an exception's text, which for a worker failure is the
+    # plugin's own words: it is stored in state, shown by the API and read
+    # by the next boot, so it is masked at this one write.
+    if message is not None:
+        message = scrub_text(message)
+
     def update_error(state: dict[str, Any]) -> None:
         provider = state.setdefault("installations", {}).get(provider_id)
         if not isinstance(provider, dict):
@@ -2121,7 +2140,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "details": result.payload,
             }
         except Exception as error:
-            message = str(error) or error.__class__.__name__
+            message = scrub_text(str(error) or error.__class__.__name__)
             _record_provider_last_error(provider_id, message)
             job.data["state"] = "failed"
             job.update(
@@ -2501,7 +2520,7 @@ def _failed_installation(
     source_id: str | None = None,
 ):
     existing = existing if isinstance(existing, dict) else {}
-    message = str(error)
+    message = scrub_text(str(error))
     if existing.get("active_version"):
         installation = dict(existing)
         installation["last_error"] = message
@@ -2873,7 +2892,7 @@ def activate_staged_installations() -> list[str]:
                 verify_bundle_tree(manifest, staged_bundle_path)
                 _smoke_validate_worker(manifest, staged_bundle_path, Path(staged_python_path))
             except Exception as error:
-                installation["last_error"] = str(error)
+                installation["last_error"] = scrub_text(str(error))
                 installation["staged_version"] = None
                 installation["staged_path"] = None
                 installation["staged_python_path"] = None

@@ -15,6 +15,7 @@ from threading import Thread, Lock, RLock
 from app import activity
 from app.event_handler import event_stream
 from app.config import settings
+from secret_store.scrub import scrub_text
 
 # The package directory, i.e. the one holding subtitles/, sonarr/, app/ and the
 # rest. add_job_from_function derives a job's module from its filename relative
@@ -567,6 +568,11 @@ class JobsQueue:
         :return: Dictionary containing the payload for the event stream.
         :rtype: dict
         """
+        # A progress message is built by app code out of a provider's or a
+        # plugin's own words, and a credential can be inside one: it is
+        # stored on the job, sent over the socket and read back by the API,
+        # so it is scrubbed once, here, before any of them.
+        progress_message = scrub_text(progress_message)
         payload = {"job_id": job.job_id, "status": job.status}
         progress_max_updated = False
 
@@ -944,7 +950,11 @@ class JobsQueue:
         except JobFailed as e:
             logging.debug(f"Job {job.job_name} ({job.job_id}) failed: {e}")  # noqa: G004
             job.job_returned_value = e.returned_value
-            job.error = {"reason": e.reason, "message": str(e)}
+            # The message is whatever the raising code built, often from a
+            # provider's own error body, so a credential can be inside it: it
+            # is stored on the job, sent over the socket and read by the API,
+            # so it is scrubbed once, here, before any of them.
+            job.error = {"reason": e.reason, "message": scrub_text(str(e))}
             if e.retryable is not None:
                 job.retryable = e.retryable
             self._mark_failed(job)

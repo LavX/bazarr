@@ -7,12 +7,25 @@ larger than ``progress_max`` (e.g. 5967%). The root logic defect is that a
 stale large value behind a freshly-set small max.
 """
 
+import pytest
+
 
 def _make_job(progress_max=0, progress_value=0):
     from app.jobs_queue import Job
     job = Job(job_id=1, job_name="x", module="m", func="f", progress_max=progress_max)
     job.progress_value = progress_value
     return job
+
+
+@pytest.fixture
+def scrub_registry():
+    """The live scrub value set saved, replaced and restored around one test."""
+    from secret_store.scrub import clear_secret_values, register_secret_values, registered_secret_values
+
+    previous = registered_secret_values()
+    clear_secret_values()
+    yield register_secret_values
+    register_secret_values(previous)
 
 
 class TestBuildProgressPayload:
@@ -49,6 +62,19 @@ class TestBuildProgressPayload:
         assert job.progress_value == 30
         assert job.progress_max == 58
         assert payload["progress_message"] == "Searching opensubtitles (2/58)"
+
+    def test_a_progress_message_is_scrubbed_before_the_socket_and_the_api(self, scrub_registry):
+        """A progress message is built by app code out of a provider's own
+        words. It goes to the drawer over the socket and to the API on the
+        next read, so the value is masked where the message is stored."""
+        from app.jobs_queue import JobsQueue
+        key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+        scrub_registry([key])
+        job = _make_job(progress_max=10, progress_value=0)
+        payload = JobsQueue._build_progress_payload(job, 1, 10, f"Logging in with {key}")
+        assert payload["progress_message"] == "Logging in with ***"
+        assert job.progress_message == "Logging in with ***"
+        assert key not in str(payload)
 
 
 def test_cancelled_jobs_stop_by_default_but_can_report_committed_results():
@@ -129,6 +155,41 @@ def test_a_job_outcome_carries_its_error_or_action_to_the_user(caplog):
         assert retried and queue.jobs_pending_queue[-1].retry_of == named.job_id
         assert queue.jobs_pending_queue[-1].kwargs == {}
         assert queue.retry_job(finished.job_id) is False
+
+
+def secret_failure(job_id=None):
+    from app.jobs_queue import JobFailed
+    raise JobFailed("Provider login failed for key sk-fake-provider-key-0123456789",  # pragma: allowlist secret
+                    reason="provider_error")
+
+
+def test_a_failed_jobs_message_is_scrubbed_before_the_socket_and_the_api(scrub_registry):
+    """A JobFailed message is often built from a provider's own error body,
+    which can name the credential it rejected. It goes to the drawer over the
+    socket and to the API on the next read, so the queue masks it once, where
+    the job's error is built."""
+    from pytest import MonkeyPatch
+    import app.jobs_queue as module
+    from test_sportarr_workflows import private_queue
+
+    key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+    scrub_registry([key])
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        events = []
+        monkeypatch.setattr(module, "event_stream", lambda **kwargs: events.append(kwargs["payload"]))
+        monkeypatch.setattr(module.activity, "finish", lambda *args, **kwargs: None)
+
+        queue.feed_jobs_pending_queue("Example", __name__, "secret_failure", retryable=True)
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+        queue._run_job(job)
+
+        assert job.status == "failed"
+        assert job.error == {"reason": "provider_error", "message": "Provider login failed for key ***"}
+        assert events[-1]["status"] == "failed"
+        assert events[-1]["error"] == job.error
+        assert key not in str(job.error)
 
 
 def test_the_jobs_list_sends_last_run_time_as_utc():

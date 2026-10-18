@@ -319,6 +319,33 @@ def test_a_non_os_error_round_trips_without_an_errno(error_worker):
     assert "fixture defect" in raised.value.remote_traceback
 
 
+def test_a_worker_error_is_scrubbed_when_the_host_rebuilds_it(error_worker):
+    """The runner cannot scrub: it deliberately imports no Bazarr module so it
+    can run under a provider venv. The host masks the message and the plugin's
+    traceback it rebuilds from the reply, both of which are log-bound and
+    API-bound."""
+    from secret_store.scrub import register_secret_values, registered_secret_values
+
+    key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+    previous = registered_secret_values()
+    register_secret_values([key, *previous])
+    try:
+        with pytest.raises(WorkerError) as raised:
+            error_worker.request("search", {"config": {"failure": "ValueError",
+                                                       "message": f"login failed for {key}"}}, timeout=5)
+    finally:
+        register_secret_values(previous)
+
+    error = raised.value
+    assert str(error) == "login failed for ***"
+    assert key not in str(error)
+    # The plugin's own traceback ends in the exception's text, so the key
+    # reaches it there too and is masked there too.
+    assert error.remote_traceback is not None
+    assert "login failed for ***" in error.remote_traceback
+    assert key not in error.remote_traceback
+
+
 def test_the_error_payload_carries_the_traceback_and_the_os_errno():
     from provider_hub import worker_runner
 
