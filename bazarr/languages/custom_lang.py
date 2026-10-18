@@ -155,6 +155,18 @@ class ChineseTraditional(CustomLanguage):
     # _scripts = (Script("Hant"),)
     # We'll use literals for now
     _scripts = ("Hant",)
+    # The base class default is the Brazilian Portuguese list, which left this
+    # subclass unable to detect a Traditional track by its ffprobe title and
+    # able to misdetect a track whose title happened to contain "pb" or
+    # "brasil". The tokens below mirror the conventions the _extensions and the
+    # catalog's embeddedsubtitles provider already encode. There is no bare
+    # "繁" and no "繁中": the mixed-script label "简繁中文" carries both, and
+    # this matcher is a plain substring test with no disambiguation step, so
+    # only unambiguous tokens qualify.
+    _possible_matches = (
+        "zh-tw", "zh-hant", "zhhant", "zht", "hant", "big5", "cht", "tc",
+        "traditional", "taiwan", "繁體", "繁体", "正體",
+    )
     _extensions = (
         ".cht", ".tc", ".zh-tw", ".zht", ".zh-hant", ".zhhant", ".zh_hant", ".hant", ".big5", ".traditional",
     )
