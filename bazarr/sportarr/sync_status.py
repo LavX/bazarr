@@ -15,7 +15,10 @@ from utilities.security_guards import subtitle_path_within_area
 def add_sync_status(session, rows, data):
     if not rows:
         return
-    identities = [(event.arr_instance_id, event.id) for event, _, _ in rows]
+    # The listing's row has grown columns before, so the event and its path
+    # mappings are read by the fields' names rather than by unpacking fixed
+    # positions: another column must not break the listing again.
+    identities = [(row.TableSportsEvents.arr_instance_id, row.TableSportsEvents.id) for row in rows]
     history = {
         (owner, event_id, path): timestamp
         for owner, event_id, path, timestamp in session.execute(
@@ -40,7 +43,8 @@ def add_sync_status(session, rows, data):
             active.setdefault((owner, event_id, path), state)
         elif 'sync' in (getattr(job, 'job_name', '') or '').lower():
             legacy.append((owner, event_id, job.job_name, state))
-    for (event, _, raw_mapping), result in zip(rows, data):
+    for row, result in zip(rows, data):
+        event, raw_mapping = row.TableSportsEvents, row.path_mappings
         mapping = read_sports_mappings(raw_mapping)
         states = result['sync_status'] = {}
         for item in result['subtitles']:

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 
 from subzero.language import Language
 
@@ -28,6 +29,10 @@ class CustomLanguage:
     regional_tag = None
     _scripts = []
     _possible_matches = ("pt-br", "pob", "pb", "brazilian", "brasil", "brazil")
+    # Tokens too short or too ordinary to be safe as a substring of any title:
+    # they match only as a whole word. "tc" as a substring otherwise
+    # classifies "Dutch" as Traditional Chinese.
+    _word_only_matches = ()
     _extensions = (".pt-br", ".pob", ".pb")
     _extensions_forced = (".pt-br.forced", ".pob.forced", ".pb.forced")
     _extensions_hi = (".pt-br.hi", ".pob.hi", ".pb.hi",
@@ -104,7 +109,16 @@ class CustomLanguage:
         if not name:
             return False
 
-        return any(ext in name for ext in self._possible_matches)
+        words = None
+        for token in self._possible_matches:
+            if token in self._word_only_matches:
+                if words is None:
+                    words = set(re.split(r'[^a-z0-9]+', name))
+                if token in words:
+                    return True
+            elif token in name:
+                return True
+        return False
 
     def language_found(self, language: Language):
         if str(language.country) == self.iso:
@@ -155,6 +169,21 @@ class ChineseTraditional(CustomLanguage):
     # _scripts = (Script("Hant"),)
     # We'll use literals for now
     _scripts = ("Hant",)
+    # The base class default is the Brazilian Portuguese list, which left this
+    # subclass unable to detect a Traditional track by its ffprobe title and
+    # able to misdetect a track whose title happened to contain "pb" or
+    # "brasil". The tokens below mirror the conventions the _extensions and the
+    # catalog's embeddedsubtitles provider already encode. There is no bare
+    # "繁" and no "繁中": the mixed-script label "简繁中文" carries both, and
+    # this matcher is a plain substring test with no disambiguation step, so
+    # only unambiguous tokens qualify.
+    _possible_matches = (
+        "zh-tw", "zh-hant", "zhhant", "zht", "hant", "big5", "cht", "tc",
+        "traditional", "taiwan", "繁體", "繁体", "正體",
+    )
+    # "tc" is the one two-letter token here, and a substring test would make
+    # "Dutch" Traditional Chinese. It matches as a word only ("TC", "TC.1080p").
+    _word_only_matches = ("tc",)
     _extensions = (
         ".cht", ".tc", ".zh-tw", ".zht", ".zh-hant", ".zhhant", ".zh_hant", ".hant", ".big5", ".traditional",
     )

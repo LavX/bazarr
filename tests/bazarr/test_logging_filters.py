@@ -147,6 +147,48 @@ def test_redaction_reaches_a_key_inside_a_logged_traceback():
     assert not [window for window in _eight_character_windows(GEMINI_SHAPED_KEY) if window in formatted]
 
 
+@pytest.fixture
+def scrub_registry():
+    """The live scrub value set saved, replaced and restored around one test."""
+    from secret_store.scrub import clear_secret_values, register_secret_values, registered_secret_values
+
+    previous = registered_secret_values()
+    clear_secret_values()
+    yield register_secret_values
+    register_secret_values(previous)
+
+
+def test_a_bearer_token_in_a_logged_request_is_masked():
+    from app.logger import FileHandlerFormatter
+
+    record = logging.LogRecord("urllib3.connectionpool", logging.DEBUG, "", 0,
+                               "Authorization: Bearer fake-bearer-token-9876", (), None)
+    assert FileHandlerFormatter('%(message)s|').format(record) == "Authorization: Bearer ***|"
+
+
+def test_a_registered_credential_is_masked_in_a_formatted_line(scrub_registry):
+    from app.logger import FileHandlerFormatter
+
+    key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+    scrub_registry([key])
+    record = logging.LogRecord("subliminal.providers", logging.ERROR, "", 0,
+                               f"login failed with {key}", (), None)
+    assert FileHandlerFormatter('%(levelname)s|%(message)s|').format(record) == "ERROR|login failed with ***|"
+
+
+def test_a_provider_workers_stderr_is_masked_when_the_host_logs_it(scrub_registry):
+    """worker.py drains a worker's stderr and logs each line, and the value is
+    whatever the plugin printed: for a refused login that is the credential."""
+    from app.logger import FileHandlerFormatter
+
+    key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+    scrub_registry([key])
+    record = logging.LogRecord("provider_hub.worker", logging.DEBUG, "", 0,
+                               f"provider-worker stderr: provider login failed with key {key}", (), None)
+    formatted = FileHandlerFormatter('%(name)s|%(message)s|').format(record)
+    assert formatted == "provider_hub.worker|provider-worker stderr: provider login failed with key ***|"
+
+
 # ---------------------------------------------------------------------------
 # Graded per-logger levels
 # ---------------------------------------------------------------------------

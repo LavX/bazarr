@@ -984,11 +984,213 @@ class TestProcessMediaActions:
     def test_search_missing_movies(self, mock_jobs_queue, mock_download):
         from subtitles.mass_operations import _process_media_action
 
+        mock_jobs_queue.claim_inline_job.return_value = 'test'
         items = [{'type': 'movie', 'radarrId': 10}]
         result = _process_media_action(items, action='search-missing', job_id='test')
 
-        mock_download.assert_called_once_with(10, arr_instance_id=None)
+        mock_download.assert_called_once_with(
+            10, job_id='test', job_sub_function=True, arr_instance_id=None)
         assert result['queued'] == 1
+        # The kwargs mirror the ones the movie route's self-queue binds, so
+        # this is the job a movie-page Search queued for the same movie.
+        mock_jobs_queue.claim_inline_job.assert_called_once_with(
+            'subtitles.mass_download.movies', 'movies_download_subtitles',
+            kwargs={'no': 10, 'job_sub_function': False, 'arr_instance_id': None}, job_id='test')
+        mock_jobs_queue.release_inline_job.assert_called_once_with(
+            'subtitles.mass_download.movies', 'movies_download_subtitles',
+            kwargs={'no': 10, 'job_sub_function': False, 'arr_instance_id': None})
+
+    @patch('subtitles.mass_operations.movies_download_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_search_missing_releases_a_movie_whose_search_failed_or_was_stopped(self, mock_jobs_queue,
+                                                                                mock_download):
+        from app.jobs_queue import JobCancelled, JobFailed
+        from subtitles.mass_operations import _process_media_action
+
+        items = [{'type': 'movie', 'radarrId': 10}]
+
+        # A movie whose directory is gone fails its item, and Stop raises out
+        # of the batch. The claim is released either way, or the movie could
+        # never be searched again this run.
+        mock_jobs_queue.claim_inline_job.return_value = 'test'
+        mock_download.side_effect = OSError('Movie path doesn\'t exists.')
+        with pytest.raises(JobFailed):
+            _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_jobs_queue.release_inline_job.assert_called_once_with(
+            'subtitles.mass_download.movies', 'movies_download_subtitles',
+            kwargs={'no': 10, 'job_sub_function': False, 'arr_instance_id': None})
+
+        mock_jobs_queue.reset_mock()
+        mock_jobs_queue.claim_inline_job.return_value = 'test'
+        mock_download.side_effect = JobCancelled('Job Search (test) was cancelled', job_id='test')
+        with pytest.raises(JobCancelled):
+            _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_jobs_queue.release_inline_job.assert_called_once_with(
+            'subtitles.mass_download.movies', 'movies_download_subtitles',
+            kwargs={'no': 10, 'job_sub_function': False, 'arr_instance_id': None})
+
+    @patch('subtitles.mass_operations.movies_download_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_search_missing_skips_a_movie_another_job_is_already_searching(self, mock_jobs_queue,
+                                                                          mock_download):
+        from subtitles.mass_operations import _process_media_action
+
+        mock_jobs_queue.claim_inline_job.return_value = 99
+        items = [{'type': 'movie', 'radarrId': 10, 'arr_instance_id': 7}]
+        result = _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_download.assert_not_called()
+        # Another job owns the search, so this batch leaves its claim alone.
+        mock_jobs_queue.release_inline_job.assert_not_called()
+        assert result == {'queued': 0, 'skipped': 1, 'errors': []}
+
+    @patch('subtitles.mass_operations.movies_download_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_search_missing_runs_one_search_for_a_movie_repeated_in_the_selection(self, mock_jobs_queue,
+                                                                                 mock_download):
+        from subtitles.mass_operations import _process_media_action
+
+        mock_jobs_queue.claim_inline_job.return_value = 'test'
+        items = [{'type': 'movie', 'radarrId': 10, 'arr_instance_id': 7},
+                 {'type': 'movie', 'radarrId': 10, 'arr_instance_id': 7}]
+        result = _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_download.assert_called_once_with(
+            10, job_id='test', job_sub_function=True, arr_instance_id=7)
+        # The repeated movie is skipped by the batch's own record of searched
+        # movies, before another claim is asked for.
+        mock_jobs_queue.claim_inline_job.assert_called_once()
+        assert result['queued'] == 1
+        assert result['skipped'] == 1
+
+    def test_the_batch_claim_matches_the_self_queued_movie_search(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from app import jobs_queue as jobs_module
+        from subtitles.mass_download import movies as movies_module
+
+        class NoThread:
+            def __init__(self, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(jobs_module, 'Thread', NoThread)
+        monkeypatch.setattr(jobs_module, 'event_stream', lambda **kwargs: None)
+        queue = jobs_module.JobsQueue()
+        monkeypatch.setattr(movies_module, 'jobs_queue', queue)
+        # The self-queue names the job from the movie's title.
+        monkeypatch.setattr(movies_module, 'database',
+                            MagicMock(scalar=MagicMock(return_value='Some Movie')))
+
+        claim = {'no': 42, 'job_sub_function': False, 'arr_instance_id': 7}
+
+        try:
+            # A movie-page Search queues the movie's search: the real function
+            # binding its own arguments, job_id and all.
+            movies_module.movies_download_subtitles(42, arr_instance_id=7)
+            queued = queue.jobs_pending_queue[0].job_id
+
+            # A batch that asks afterwards gets that job's id, not its own:
+            # the movie is already being searched.
+            assert queue.claim_inline_job('subtitles.mass_download.movies',
+                                          'movies_download_subtitles',
+                                          kwargs=claim, job_id=10) == queued
+
+            # A batch that claims first publishes its run: a Search that
+            # arrives for that movie follows the batch job instead of queueing
+            # a second search.
+            other = dict(claim, no=43)
+            assert queue.claim_inline_job('subtitles.mass_download.movies',
+                                          'movies_download_subtitles',
+                                          kwargs=other, job_id=10) == 10
+            movies_module.movies_download_subtitles(43, arr_instance_id=7)
+            assert len(queue.jobs_pending_queue) == 1
+
+            # Once the batch releases its claim, the movie's search queues again.
+            queue.release_inline_job('subtitles.mass_download.movies',
+                                     'movies_download_subtitles', kwargs=other)
+            movies_module.movies_download_subtitles(43, arr_instance_id=7)
+            assert len(queue.jobs_pending_queue) == 2
+        finally:
+            queue.jobs_pending_queue.clear()
+            queue._inline_claims.clear()
+
+    @patch('subtitles.mass_operations.movies_download_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_cancelled_movie_stops_the_batch_without_queuing_more_movies(self, mock_jobs_queue, mock_download):
+        from app.jobs_queue import JobCancelled
+        from subtitles.mass_operations import _process_media_action
+
+        mock_jobs_queue.claim_inline_job.return_value = 'test'
+        mock_download.side_effect = JobCancelled('batch stopped', job_id='test')
+        items = [
+            {'type': 'movie', 'radarrId': 10},
+            {'type': 'movie', 'radarrId': 11},
+        ]
+
+        with pytest.raises(JobCancelled):
+            _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_download.assert_called_once_with(
+            10, job_id='test', job_sub_function=True, arr_instance_id=None)
+
+    def test_inline_movie_search_keeps_progress_owned_by_the_batch_job(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from subtitles.mass_download import movies
+
+        movie = SimpleNamespace(
+            path='/movies/Example.mkv',
+            missing_subtitles='[]',
+            audio_language='[]',
+            radarrId=10,
+            sceneName='Example',
+            title='Example',
+            year='2025',
+            tags='[]',
+            monitored='True',
+            profileId=None,
+            arr_instance_id=None,
+            subtitles='[]',
+        )
+        progress = []
+        names = []
+
+        class Queue:
+            def add_job_from_function(self, *args, **kwargs):
+                pytest.fail('An inline movie search must not enqueue another job')
+
+            def update_job_progress(self, **kwargs):
+                progress.append(kwargs)
+
+            def update_job_name(self, **kwargs):
+                names.append(kwargs)
+
+        monkeypatch.setattr(movies, 'jobs_queue', Queue())
+        monkeypatch.setattr(
+            movies, 'database',
+            SimpleNamespace(execute=lambda _: SimpleNamespace(first=lambda: movie)),
+        )
+        monkeypatch.setattr(movies, 'get_exclusion_clause', lambda _: [])
+        monkeypatch.setattr(movies, 'get_audio_profile_languages', lambda _: [])
+        monkeypatch.setattr(movies, 'get_providers', lambda: [])
+        monkeypatch.setattr(
+            movies.path_mappings,
+            'path_replace_instance',
+            lambda path, owner, kind: '/movies/Example.mkv',
+        )
+        monkeypatch.setattr(movies.os.path, 'exists', lambda _: True)
+
+        movies.movies_download_subtitles(10, job_id=7, job_sub_function=True)
+
+        assert len(progress) == 2
+        assert all(update['job_id'] == 7 for update in progress)
+        assert all('progress_max' not in update and 'progress_value' not in update for update in progress)
+        assert names == []
 
     @patch('subtitles.mass_operations.series_scan_subtitles')
     @patch('subtitles.mass_operations.jobs_queue')

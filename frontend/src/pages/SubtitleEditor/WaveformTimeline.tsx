@@ -149,9 +149,11 @@ export default function WaveformTimeline({
     } else {
       setLoading(false);
       setWaveformError(
-        peaksJobStatus === "failed" && peaksJobMessage
-          ? peaksJobMessage
-          : "The waveform could not be generated.",
+        peaksJobStatus === "cancelled"
+          ? "The waveform generation was stopped."
+          : peaksJobStatus === "failed" && peaksJobMessage
+            ? peaksJobMessage
+            : "The waveform could not be generated.",
       );
     }
   }, [

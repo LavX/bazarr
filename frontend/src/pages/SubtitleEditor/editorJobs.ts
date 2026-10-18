@@ -16,7 +16,9 @@ import client from "@/apis/raw/client";
  */
 const MISSED_EVENT_RECHECK_MS = 30_000;
 
-export function useEditorJob(jobId: number | null | undefined) {
+export function useEditorJob(
+  jobId: number | null | undefined,
+): System.Jobs | null | undefined {
   const { data } = useSystemJobs();
   const cached = useMemo(
     () =>
@@ -48,8 +50,12 @@ export function useEditorJob(jobId: number | null | undefined) {
   return cached;
 }
 
-export function isTerminalJob(job: System.Jobs | undefined): boolean {
-  return job?.status === "completed" || job?.status === "failed";
+export function isTerminalJob(job: System.Jobs | null | undefined): boolean {
+  return (
+    job?.status === "completed" ||
+    job?.status === "failed" ||
+    job?.status === "cancelled"
+  );
 }
 
 /**

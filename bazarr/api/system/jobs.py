@@ -45,7 +45,8 @@ class SystemJobs(Resource):
         # are the only parts of its outcome that are sent. Null until then.
         'error': NullableRaw(),
         'action': NullableRaw(),
-        # Stop leaves a job completed, so this is what says it did not finish.
+        # Stop leaves a job cancelled, so its status already says it did not
+        # finish; the flag is kept for consumers that key on it.
         'stopped': fields.Boolean(),
         # Who started the job: 'user' or 'scheduled'. Null when nothing knows.
         'origin': NullableString(),
@@ -61,7 +62,7 @@ class SystemJobs(Resource):
     get_request_parser = reqparse.RequestParser()
     get_request_parser.add_argument('id', type=int, required=False, help='Job ID to return', default=None)
     get_request_parser.add_argument('status', type=str, required=False, help='Job status to return', default=None,
-                                    choices=['pending', 'running', 'failed', 'completed'])
+                                    choices=['pending', 'running', 'failed', 'completed', 'cancelled'])
 
     @authenticate
     @api_ns_system_jobs.doc(parser=get_request_parser)

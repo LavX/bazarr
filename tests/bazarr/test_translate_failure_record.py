@@ -17,6 +17,8 @@ from unittest.mock import Mock
 import pytest
 
 
+pytestmark = pytest.mark.usefixtures('languages_loaded')
+
 _PROFILE = {"items": [{"language": "hu", "translate_from": "en", "forced": "False", "hi": "False"}]}
 _PROFILE_FROM_FRENCH = {"items": [
     {"language": "hu", "translate_from": "fr", "forced": "False", "hi": "False"}]}

@@ -361,6 +361,33 @@ def manifest_secret_fields(manifest) -> set[str]:
 _manifest_secret_fields = manifest_secret_fields
 
 
+def installation_secret_fields(provider_id, installation, persisted_paths=None) -> set[str]:
+    """The credential field names one installation holds: everything the
+    current or staged schema declares secret, everything the live plugin
+    registry names for this provider, and everything the persisted registry
+    names (the loader runs first, so a historical field found in this same
+    boot is covered by the same pass).
+
+    The one definition of the question: the boot migration encrypts these
+    fields, the runtime decryption reads them, and the scrub registry takes
+    their values, so a field found by one is covered by all of them."""
+    if not isinstance(installation, dict):
+        return set()
+    fields = set()
+    for manifest in (installation.get("manifest"), installation.get("staged_manifest")):
+        if isinstance(manifest, dict):
+            fields |= manifest_secret_fields(manifest)
+    prefix = f"{str(provider_id).lower()}."
+    for path in plugin_secret_paths():
+        text = str(path).strip().lower()
+        if text.startswith(prefix) and "." not in text[len(prefix):]:
+            fields.add(text[len(prefix):])
+    for path in _valid_persisted_paths(persisted_paths):
+        if path.startswith(prefix) and "." not in path[len(prefix):]:
+            fields.add(path[len(prefix):])
+    return fields
+
+
 def _manifest_field_names(manifest) -> set[str]:
     """Every field name a manifest declares in its config_schema."""
     if not isinstance(manifest, dict):
@@ -961,26 +988,6 @@ def migrate_installation_config_secrets(state=None) -> None:
     if not isinstance(state, dict):
         state = {}
 
-    def _fields(provider_id, installation):
-        """The credential fields of one installation: everything the current
-        or staged schema declares secret, everything the persisted registry
-        names for this provider, and everything the runtime registry just
-        discovered (the loader runs first, so a historical field found in
-        this same boot is covered by the same write)."""
-        fields = set()
-        for manifest in (installation.get("manifest"), installation.get("staged_manifest")):
-            if isinstance(manifest, dict):
-                fields |= manifest_secret_fields(manifest)
-        prefix = f"{str(provider_id).lower()}."
-        for path in plugin_secret_paths():
-            text = str(path).strip().lower()
-            if text.startswith(prefix) and "." not in text[len(prefix):]:
-                fields.add(text[len(prefix):])
-        for path in _valid_persisted_paths(state.get("plugin_secret_paths")):
-            if path.startswith(prefix) and "." not in path[len(prefix):]:
-                fields.add(path[len(prefix):])
-        return fields
-
     try:
         plaintext = []
         canonicalize = []
@@ -993,7 +1000,8 @@ def migrate_installation_config_secrets(state=None) -> None:
                 config = installation.get("config")
                 if not isinstance(config, dict):
                     continue
-                for field in _fields(provider_id, installation):
+                for field in installation_secret_fields(provider_id, installation,
+                                                        state.get("plugin_secret_paths")):
                     variants = _case_variants(config, field)
                     if variants:
                         canonicalize.append((provider_id, field))

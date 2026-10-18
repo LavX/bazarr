@@ -7,12 +7,25 @@ larger than ``progress_max`` (e.g. 5967%). The root logic defect is that a
 stale large value behind a freshly-set small max.
 """
 
+import pytest
+
 
 def _make_job(progress_max=0, progress_value=0):
     from app.jobs_queue import Job
     job = Job(job_id=1, job_name="x", module="m", func="f", progress_max=progress_max)
     job.progress_value = progress_value
     return job
+
+
+@pytest.fixture
+def scrub_registry():
+    """The live scrub value set saved, replaced and restored around one test."""
+    from secret_store.scrub import clear_secret_values, register_secret_values, registered_secret_values
+
+    previous = registered_secret_values()
+    clear_secret_values()
+    yield register_secret_values
+    register_secret_values(previous)
 
 
 class TestBuildProgressPayload:
@@ -49,6 +62,19 @@ class TestBuildProgressPayload:
         assert job.progress_value == 30
         assert job.progress_max == 58
         assert payload["progress_message"] == "Searching opensubtitles (2/58)"
+
+    def test_a_progress_message_is_scrubbed_before_the_socket_and_the_api(self, scrub_registry):
+        """A progress message is built by app code out of a provider's own
+        words. It goes to the drawer over the socket and to the API on the
+        next read, so the value is masked where the message is stored."""
+        from app.jobs_queue import JobsQueue
+        key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+        scrub_registry([key])
+        job = _make_job(progress_max=10, progress_value=0)
+        payload = JobsQueue._build_progress_payload(job, 1, 10, f"Logging in with {key}")
+        assert payload["progress_message"] == "Logging in with ***"
+        assert job.progress_message == "Logging in with ***"
+        assert key not in str(payload)
 
 
 def test_cancelled_jobs_stop_by_default_but_can_report_committed_results():
@@ -129,6 +155,90 @@ def test_a_job_outcome_carries_its_error_or_action_to_the_user(caplog):
         assert retried and queue.jobs_pending_queue[-1].retry_of == named.job_id
         assert queue.jobs_pending_queue[-1].kwargs == {}
         assert queue.retry_job(finished.job_id) is False
+
+
+def secret_failure(job_id=None):
+    from app.jobs_queue import JobFailed
+    raise JobFailed("Provider login failed for key sk-fake-provider-key-0123456789",  # pragma: allowlist secret
+                    reason="provider_error")
+
+
+def test_a_failed_jobs_message_is_scrubbed_before_the_socket_and_the_api(scrub_registry):
+    """A JobFailed message is often built from a provider's own error body,
+    which can name the credential it rejected. It goes to the drawer over the
+    socket and to the API on the next read, so the queue masks it once, where
+    the job's error is built."""
+    from pytest import MonkeyPatch
+    import app.jobs_queue as module
+    from test_sportarr_workflows import private_queue
+
+    key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+    scrub_registry([key])
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        events = []
+        monkeypatch.setattr(module, "event_stream", lambda **kwargs: events.append(kwargs["payload"]))
+        monkeypatch.setattr(module.activity, "finish", lambda *args, **kwargs: None)
+
+        queue.feed_jobs_pending_queue("Example", __name__, "secret_failure", retryable=True)
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+        queue._run_job(job)
+
+        assert job.status == "failed"
+        assert job.error == {"reason": "provider_error", "message": "Provider login failed for key ***"}
+        assert events[-1]["status"] == "failed"
+        assert events[-1]["error"] == job.error
+        assert key not in str(job.error)
+
+
+def test_a_job_action_is_scrubbed_before_the_socket_and_the_api(scrub_registry):
+    """A discover download offers Save with the provider-chosen filename in
+    the action. That name is the provider's text and can echo a credential,
+    and the action is stored, sent and read back like any other job text."""
+    from pytest import MonkeyPatch
+    from test_sportarr_workflows import private_queue
+
+    key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+    scrub_registry([key])
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        queue.feed_jobs_pending_queue("Example", __name__, "noop")
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+
+        assert queue.set_job_action(job.job_id, {
+            "kind": "discover.save",
+            "label": "Save",
+            "ticket": job.job_id,
+            "filename": f"Show.S01E01.{key}.srt",
+        }) is True
+
+    assert job.action["filename"] == "Show.S01E01.***.srt"
+    assert job.action["kind"] == "discover.save"
+    assert key not in str(job.action)
+
+
+def test_a_job_action_keeps_its_handler_name_when_a_credential_matches_it(scrub_registry):
+    """``kind`` is dispatch: a credential that happens to equal a handler name
+    must not stop the frontend finding that handler."""
+    from pytest import MonkeyPatch
+    from test_sportarr_workflows import private_queue
+
+    scrub_registry(["discover.save"])
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        queue.feed_jobs_pending_queue("Example", __name__, "noop")
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+
+        assert queue.set_job_action(job.job_id, {
+            "kind": "discover.save", "label": "Save", "ticket": job.job_id,
+        }) is True
+
+    assert job.action["kind"] == "discover.save"
+    # The label is text and stays; nothing else in this row carried the value.
+    assert job.action["label"] == "Save"
 
 
 def test_the_jobs_list_sends_last_run_time_as_utc():
@@ -228,3 +338,89 @@ def test_starting_a_job_never_formats_or_logs_its_arguments(caplog):
         assert payload.formatted == 0
         assert "sk-fixture-key" not in caplog.text
         assert f"Running job Example (id {job.job_id}): {__name__}.argument_heavy_job" in caplog.text
+
+
+# Fixture job bodies for the cancelled-status tests. _run_job resolves them by
+# module and name exactly as it does any production job.
+def cancelled_job(job_id=None, queue=None):
+    queue.cancel_running_job(job_id)
+    # The next checkpoint is where a stop is honoured.
+    queue.update_job_progress(job_id, progress_value=1, progress_max=2,
+                              progress_message="Working")
+    return "finished anyway"
+
+
+def finished_quietly(job_id=None):
+    return "done"
+
+
+def test_a_stopped_job_reports_a_cancelled_status_the_event_carries_too():
+    """A stop used to be recorded as completed plus a flag, so anything
+    reading the API directly saw a stopped job as done. The status now says
+    what happened, the terminal event carries it, and the row shares the
+    completed history: one cap, and the one queue the drawer's Clear empties.
+    """
+    from pytest import MonkeyPatch
+    import app.jobs_queue as module
+    from test_sportarr_workflows import private_queue
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        events = []
+        monkeypatch.setattr(module, "event_stream", lambda **kwargs: events.append(kwargs["payload"]))
+        monkeypatch.setattr(module.activity, "finish", lambda *args, **kwargs: None)
+
+        job_id = queue.feed_jobs_pending_queue("Example", __name__, "cancelled_job", kwargs={"queue": queue})
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+
+        assert queue._run_job(job) is False
+
+        assert job.status == "cancelled" and job.stopped is True
+        assert job.progress_message == "Cancelled by user"
+        assert events[-1]["status"] == "cancelled"
+        assert [(row["job_id"], row["status"]) for row in queue.list_jobs_from_queue(status="cancelled")] \
+            == [(job_id, "cancelled")]
+        # The two terminal statuses share a deque, so 'completed' does not
+        # answer the stopped row.
+        assert queue.list_jobs_from_queue(status="completed") == []
+        assert [row["job_id"] for row in queue.list_jobs_from_queue()] == [job_id]
+        assert not queue.jobs_failed_queue and not queue.jobs_running_queue
+
+
+def test_a_stop_after_the_job_finished_neither_rewrites_nor_resurrects_it():
+    from pytest import MonkeyPatch
+    import app.jobs_queue as module
+    from test_sportarr_workflows import private_queue
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        monkeypatch.setattr(module, "event_stream", lambda **kwargs: None)
+        monkeypatch.setattr(module.activity, "finish", lambda *args, **kwargs: None)
+
+        job_id = queue.feed_jobs_pending_queue("Example", __name__, "finished_quietly", kwargs={})
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+
+        assert queue._run_job(job) is True
+
+        # Stop only looks at the running queue, so the finished row is left
+        # exactly as it ended and no cancelled row takes its place.
+        assert queue.cancel_running_job(job_id) is False
+        row = queue.list_jobs_from_queue(job_id=job_id)[0]
+        assert row["status"] == "completed" and row["stopped"] is False
+        assert queue.list_jobs_from_queue(status="cancelled") == []
+
+
+def test_the_jobs_api_offers_the_cancelled_status():
+    from api.system.jobs import SystemJobs
+
+    status_arg = next(arg for arg in SystemJobs.get_request_parser.args if arg.name == 'status')
+    assert 'cancelled' in status_arg.choices
+
+    job = _make_job()
+    job.status = "cancelled"
+    job.stopped = True
+    from flask_restx import marshal
+    sent = marshal([vars(job)], SystemJobs.get_response_model)[0]
+    assert sent["status"] == "cancelled" and sent["stopped"] is True

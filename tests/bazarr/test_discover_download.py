@@ -710,14 +710,15 @@ def test_stop_during_the_fetch_cancels_instead_of_offering_save(authenticated_cl
 
     monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle", stopped_meanwhile)
     job = run_queued_job(queued.json["job_id"])
-    assert job["status"] == "completed" and job["progress_message"] == "Cancelled by user"
+    assert job["status"] == "cancelled" and job["progress_message"] == "Cancelled by user"
     assert job["action"] is None
     assert authenticated_client.get("/api/discover/download", query_string={"job": job["job_id"]},
                                     headers=HEADERS).status_code == 404
-    # Completed alone reads as done, so the jobs API also says it was stopped.
+    # The status says the job was stopped, and the flag the drawer keyed on
+    # while stopped jobs still read as completed is carried beside it.
     listed = authenticated_client.get("/api/system/jobs", query_string={"id": job["job_id"]},
                                       headers=HEADERS).json["data"][0]
-    assert listed["status"] == "completed" and listed["stopped"] is True
+    assert listed["status"] == "cancelled" and listed["stopped"] is True
 
 
 def test_a_stop_after_the_file_is_kept_still_finishes_and_is_not_reported_stopped(
@@ -737,4 +738,7 @@ def test_a_stop_after_the_file_is_kept_still_finishes_and_is_not_reported_stoppe
     assert run_queued_job(queued.json["job_id"])["progress_message"] == "Ready to save"
     listed = authenticated_client.get("/api/system/jobs", query_string={"id": queued.json["job_id"]},
                                       headers=HEADERS).json["data"][0]
-    assert listed["action"]["kind"] == "discover.save" and listed["stopped"] is False
+    # A stop pressed past the last checkpoint neither rewrites the row nor
+    # resurrects it as cancelled.
+    assert listed["status"] == "completed" and listed["stopped"] is False
+    assert listed["action"]["kind"] == "discover.save"

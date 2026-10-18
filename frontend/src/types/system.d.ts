@@ -19,7 +19,7 @@ declare namespace System {
   interface Jobs {
     job_id: number;
     job_name: string;
-    status: string;
+    status: "pending" | "running" | "completed" | "failed" | "cancelled";
     last_run_time: string;
     is_progress: boolean;
     is_signalr: boolean;
@@ -30,7 +30,7 @@ declare namespace System {
     error?: JobError | null;
     /** What the user can do with a finished job, set by the job. */
     action?: JobAction | null;
-    /** The job ended at Stop instead of finishing. It still reads as completed. */
+    /** The job ended at Stop instead of finishing, which its "cancelled" status also says. Kept for consumers that keyed on the flag while a stopped job still read as completed. */
     stopped?: boolean;
     /** Who started the job: "user" for one an authenticated request enqueued, "scheduled" for the scheduler's own work. Null when nothing knows. */
     origin?: "user" | "scheduled" | null;

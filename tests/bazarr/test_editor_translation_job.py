@@ -199,7 +199,7 @@ def test_cancelling_the_job_cancels_the_remote_translation(queue, sidecar, monke
 
     job = _run(queue, job_id)
 
-    assert job.status == 'completed'
+    assert job.status == 'cancelled'
     assert job.progress_message == 'Cancelled by user'
     assert sidecar.deletes == ['http://sidecar:8765/api/v1/jobs/remote-1']
     assert editor.editor_translation_state(job_id)['status'] == 'cancelled'

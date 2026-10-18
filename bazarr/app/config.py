@@ -1026,8 +1026,20 @@ class MetadataFollowupError(SettingsFollowupError):
 
 def write_config(*, strict_metadata=False):
     from discover.metadata import CONFIG_LOCK
-    with CONFIG_LOCK:
-        return _write_config(strict_metadata=strict_metadata)
+    from secret_store.scrub import refresh_secret_values
+    try:
+        with CONFIG_LOCK:
+            return _write_config(strict_metadata=strict_metadata)
+    finally:
+        # Whatever the outcome, the registry follows the live store. A
+        # successful save entered or rotated a credential; a failed one is
+        # rolled back by the caller after this returns (and
+        # restore_persisted_settings refreshes again there). A save whose
+        # follow-up failed still wrote the credential, so the refresh cannot
+        # hang off the return value alone. Outside the lock: the refresh reads
+        # Provider Hub's state as well, and a settings save must not wait on
+        # the hub's write lock to finish.
+        refresh_secret_values(settings)
 
 
 # Why the last write_config call failed, when it failed: write_config answers
@@ -1252,6 +1264,16 @@ if not write_config():
 from secret_store.registry import migrate_installation_config_secrets  # noqa: E402
 
 migrate_installation_config_secrets()
+
+# Register the live credential values before anything can log, store or serve
+# them, and rewrite what an earlier version already left in state.json. The
+# scrub runs after the migration above for the same reason the migration runs
+# after the boot write: the credential containers are ciphertext by now, so a
+# scrub cannot mistake a stored credential for a leaked one.
+from secret_store.scrub import refresh_secret_values, scrub_persisted_secrets  # noqa: E402
+
+refresh_secret_values(settings)
+scrub_persisted_secrets()
 
 
 def get_settings():
@@ -1579,6 +1601,12 @@ def restore_persisted_settings():
     settings.reload()
     migrate_legacy_plex_encryption(settings)
     decrypt_settings_in_place(settings)
+    # The registry follows the live store: a refused save registered the
+    # credential it proposed, and this is where those values are put back as
+    # they were. Without this the restored credential would escape scrubbing
+    # until the next settings write or boot.
+    from secret_store.scrub import refresh_secret_values
+    refresh_secret_values(settings)
 
 
 _native_settings_save_lock = threading.RLock()

@@ -587,6 +587,19 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
             retryable: !!job.retryable,
           },
         });
+      } else if (job.status === "cancelled") {
+        // The user stopped the download, so the row must not sit in pending
+        // for a save that is never coming.
+        dispatch({
+          type: "download",
+          key,
+          feedback: {
+            ...feedback,
+            status: "failed",
+            message: job.progress_message || "The download was cancelled.",
+            retryable: true,
+          },
+        });
       }
     },
     [autoSave],

@@ -71,6 +71,7 @@ const SeriesView: FunctionComponent = () => {
   const [subtitlesFilter, setSubtitlesFilter] =
     useState<SubtitlesFilter>("any");
   const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
   const {
     multiInstance,
     nameById: instanceNameById,
@@ -614,6 +615,8 @@ const SeriesView: FunctionComponent = () => {
         instanceOptions={multiInstance ? instanceOptions : undefined}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}
+        tagValues={tagFilter}
+        onTagValuesChange={setTagFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}
