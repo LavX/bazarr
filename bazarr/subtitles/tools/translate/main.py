@@ -11,6 +11,8 @@ from languages.get_languages import alpha3_from_alpha2
 from app.config import settings
 from app import activity
 from app.jobs_queue import jobs_queue, JobCancelled
+from subtitles.tools.subsync_engines import (SubtitleDestinationChanged, SubtitleSourceChanged,
+                                            validate_subtitle_versions)
 
 
 def _failure_record_media_id(media_type, radarr_id, sonarr_episode_id, sports_operation):
@@ -27,14 +29,53 @@ def _failure_record_media_id(media_type, radarr_id, sonarr_episode_id, sports_op
     return radarr_id
 
 
+def _destination_race(error):
+    """Whether this failure is the queued destination moving under the job.
+
+    The write guard refuses a destination whose versions no longer match the
+    queueing sighting. OpenRouter wraps that refusal in its own service error,
+    so the cause chain is walked; the other translators re-raise it as it is.
+    """
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, (SubtitleSourceChanged, SubtitleDestinationChanged)):
+            return True
+        error = error.__cause__
+    return False
+
+
+def _report_destination_skip(job_id, from_lang, to_lang):
+    """A subtitle that arrived while this job waited is a skip, not a failure.
+
+    Nothing was published, so nothing holds the next scan back, and the job
+    drawer says what happened instead of telling the user a translation died.
+    """
+    logging.info('BAZARR translation skipped: the queued subtitle input or destination '
+                 'changed before this job wrote %s', to_lang)
+    current_name = jobs_queue.get_job_name(job_id)
+    if current_name and 'Translating' in current_name:
+        skip_name = current_name.replace('Translating', 'Skipped')
+    else:
+        skip_name = f'Skipped: {from_lang.upper()} → {to_lang.upper()}'
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=skip_name)
+
+
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
                              media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata,
-                             job_id=None, arr_instance_id=None, sports_operation=None, embedded_source=None):
+                             job_id=None, arr_instance_id=None, sports_operation=None, embedded_source=None,
+                             expected_destination_versions=()):
     """Translate a subtitle file, as a queued job.
 
     ``embedded_source`` names an embedded track to translate instead of a file:
     a dict with ``language`` (alpha2), ``hi`` and ``forced``. The track is
     extracted by the job, so the request that queues it returns at once.
+
+    ``expected_destination_versions`` is what the auto paths capture with
+    ``capture_subtitle_versions`` when they queue this job. The write refuses a
+    destination that moved since, so a subtitle that landed while the job
+    waited is not replaced, and the job reports that as a skip. A manual
+    translation passes nothing and may replace its destination.
     """
     if not job_id:
         # Build the label inline: add_job_from_function captures the frame,
@@ -91,6 +132,19 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         # with the forced and HI tags in their usual place behind it.
         dest_srt_file = translated_destination_path(video_path, to_lang, forced, hi)
 
+        # An auto path captures the destination's versions when it queues this
+        # job (see _trigger_auto_translation). A subtitle that landed since is
+        # the better one and this job publishes nothing: the check refuses the
+        # job before any AI work is done, and the write guard refuses again if
+        # the file lands mid-run. That second refusal is classified at the end
+        # of this function, where a job that did some work lands too.
+        if expected_destination_versions:
+            try:
+                validate_subtitle_versions(expected_destination_versions)
+            except (SubtitleSourceChanged, SubtitleDestinationChanged):
+                _report_destination_skip(job_id, from_lang, to_lang)
+                return None
+
         # The stored setting is what the factory gets. Every spelling of "no
         # translator" is normalized to 'none' at boot and at save time, and the
         # availability gate keeps any of them from reaching this job at all, so
@@ -115,6 +169,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             sonarr_episode_id=sonarr_episode_id,
             radarr_id=radarr_id,
             arr_instance_id=arr_instance_id,
+            expected_destination_versions=expected_destination_versions,
             **({'sports_operation': sports_operation, 'cancel': cancel} if sports_operation else {})
         )
 
@@ -185,6 +240,13 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     except JobCancelled:
         raise
     except Exception as e:
+        if expected_destination_versions and _destination_race(e):
+            # Only a job an auto path queued with the capture reports the
+            # moved destination as a skip. A sports operation's bound versions
+            # are its own contract and keep failing loudly there, and a manual
+            # translation is never silently dropped.
+            _report_destination_skip(job_id, from_lang, to_lang)
+            return None
         activity.note_publication(observed, outcome='failed', detail=str(e))
         logging.error(f'Translation failed: {str(e)}', exc_info=True)  # noqa: G004, G201
         # Nothing was published, so the next scan would offer the same doomed

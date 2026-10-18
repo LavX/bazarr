@@ -11,6 +11,9 @@ def _missing_language(alpha3, hi=False, forced=False):
     return SimpleNamespace(alpha3=alpha3, hi=hi, forced=forced)
 
 
+pytestmark = pytest.mark.usefixtures('languages_loaded')
+
+
 @pytest.mark.parametrize('source_score_percent', [90, 100, None])
 def test_downloaded_series_subtitle_queues_episode_translation(source_score_percent):
     from subtitles.processing import _trigger_auto_translation
@@ -59,6 +62,73 @@ def test_downloaded_series_subtitle_queues_episode_translation(source_score_perc
 
     mock_translate.assert_called_once()
     assert mock_translate.call_args.kwargs['media_type'] == 'episode'
+    # The queueing sighting: the destination did not exist when this job was
+    # queued, and the job refuses to publish over a subtitle that lands there
+    # before it writes.
+    expected = mock_translate.call_args.kwargs['expected_destination_versions']
+    assert len(expected) == 1
+    assert expected[0].path.endswith('episode.hu.srt')
+    assert expected[0].version is None
+
+
+def test_downloaded_subtitle_target_already_on_disk_is_not_queued(tmp_path, caplog):
+    """A target that is on disk but not indexed yet is still served.
+
+    The database's missing list is the indexer's view of the media, and the
+    download that just landed the target's file may not be in it yet. The
+    queueing sighting checks the exact destination so that file wins.
+    """
+    from subtitles.processing import _trigger_auto_translation
+
+    mock_database = Mock()
+    mock_database.execute.return_value.first.return_value = SimpleNamespace(
+        sonarrSeriesId=10,
+        season=1,
+        episode=1,
+        imdbId='tt1',
+        tvdbId='1',
+        profileId=1,
+    )
+    video_path = tmp_path / 'episode.mkv'
+    destination = tmp_path / 'episode.hu.srt'
+    destination.write_text('already here')
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch('subtitles.processing.settings') as mock_settings,
+        patch('app.database.get_profile_id', return_value=1),
+        patch('app.database.get_profiles_list') as mock_profiles,
+        patch('app.database.database', mock_database),
+        patch('subtitles.download.check_missing_languages') as mock_missing,
+        patch('subtitles.processing.alpha2_from_alpha3', return_value='hu'),
+        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
+    ):
+        mock_settings.translator.min_source_score = 90
+        mock_profiles.return_value = {
+            'items': [
+                {
+                    'language': 'hu',
+                    'translate_from': 'en',
+                    'forced': 'False',
+                    'hi': 'False',
+                }
+            ]
+        }
+        mock_missing.return_value = [_missing_language('hun')]
+
+        _trigger_auto_translation(
+            downloaded_lang='en',
+            subtitle_path=str(tmp_path / 'episode.en.srt'),
+            video_path=str(video_path),
+            media_type='series',
+            series_id=10,
+            episode_id=20,
+            source_score_percent=100,
+        )
+
+    mock_translate.assert_not_called()
+    assert [record for record in caplog.records
+            if 'auto-translate skipped' in record.getMessage()]
 
 
 @pytest.mark.parametrize('profile', [
@@ -388,3 +458,9 @@ def test_wanted_series_translation_uses_exact_profile_variant():
     assert translate_kwargs['forced'] is True
     assert translate_kwargs['hi'] is False
     assert translate_kwargs['media_type'] == 'episode'
+    # The wanted scan captures the destination's versions when it queues, so a
+    # subtitle that lands there while the job waits is not replaced.
+    expected = translate_kwargs['expected_destination_versions']
+    assert len(expected) == 1
+    assert expected[0].path.endswith('episode.hu.forced.srt')
+    assert expected[0].version is None

@@ -44,6 +44,25 @@ def schema_session():
 
 
 @pytest.fixture
+def languages_loaded(monkeypatch):
+    """Seed the module-level language table the naming lookups read.
+
+    create_languages_dict() normally runs at app startup off the database. The
+    auto-translate paths resolve a translation's destination when they queue,
+    so a test that reaches those paths needs the table the way boot leaves it.
+    """
+    from languages import get_languages
+
+    monkeypatch.setattr(get_languages, 'languages_dict', [
+        {'code2': 'de', 'code3': 'deu', 'name': 'German', 'code3b': 'deu'},
+        {'code2': 'en', 'code3': 'eng', 'name': 'English', 'code3b': 'eng'},
+        {'code2': 'fr', 'code3': 'fra', 'name': 'French', 'code3b': 'fra'},
+        {'code2': 'hu', 'code3': 'hun', 'name': 'Hungarian', 'code3b': 'hun'},
+        {'code2': 'nl', 'code3': 'nld', 'name': 'Dutch', 'code3b': 'nld'},
+    ], raising=False)
+
+
+@pytest.fixture
 def scheduler_runtime(schema_session, monkeypatch):
     """Give scheduler imports a real isolated repository without starting jobs.
 

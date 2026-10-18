@@ -3,7 +3,11 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 from sqlalchemy import insert, select
+
+
+pytestmark = pytest.mark.usefixtures('languages_loaded')
 
 
 def _seed_colliding_episodes(session):

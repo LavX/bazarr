@@ -90,6 +90,24 @@ def translated_destination_path(video_path, to_lang, forced, hi):
     )
 
 
+def translation_write_kwargs(translator, job_id):
+    """The staged_subtitle_write arguments this translation's own context adds.
+
+    A sports operation supplies its publication guard, its bound destination
+    versions and its cancel signal. An auto-queued translation supplies the
+    destination versions its queueing sighting captured, so a subtitle that
+    landed while the job waited is refused rather than replaced. The two
+    never mix: an operation binds its own versions, which already carry the
+    same guarantee from the moment it bound them.
+    """
+    if getattr(translator, 'sports_operation', None) is not None:
+        from sportarr.profile_hooks import sports_write_kwargs
+
+        return dict(sports_write_kwargs(translator, job_id))
+    captured = getattr(translator, 'expected_destination_versions', ())
+    return {'expected_versions': captured} if captured else {}
+
+
 def create_process_result(message, video_path, orig_to_lang, forced, hi, dest_srt_file, media_type, sports_context=None):
     """Create a ProcessSubtitlesResult object with common parameters."""
     if sports_context is not None:
