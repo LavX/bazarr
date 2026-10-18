@@ -144,7 +144,13 @@ class GeminiTranslatorService:
                     self._translate_with_gemini()
                     if self.sports_operation and (not os.path.isfile(temporary) or not os.path.getsize(temporary)):
                         raise RuntimeError("Gemini returned no translated text")
-                    add_translator_info(temporary, f"# Subtitles translated with {settings.translator.gemini_model} # ")
+                    # A partial file says so: the footer is the file's own claim
+                    # about itself, and it must not read as a full translation
+                    # while source-language cues remain.
+                    translated = 'partially translated' if self.partial_error else 'translated'
+                    add_translator_info(
+                        temporary,
+                        f"# Subtitles {translated} with {settings.translator.gemini_model} # ")
             except JobCancelled:
                 raise
             except Exception as e:
@@ -465,8 +471,9 @@ class GeminiTranslatorService:
                 translated_subtitle=translated_subtitle,
             )
             if written < len(batch):
-                # A short answer is the model stopping at its output limit, not
-                # a transport failure: retrying the same batch tends to
+                # A short answer has two causes: the model stopped at its output
+                # limit, or it left some cues without text. Neither is a
+                # transport failure, and retrying the same batch tends to
                 # reproduce it and burns the quota. The cues it did return are
                 # valid by index, so they are kept and the rest stay in the
                 # source language, the same partial contract Lingarr and

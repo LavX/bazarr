@@ -532,3 +532,107 @@ def test_a_non_list_reply_is_retried_and_then_refused(mocker):
         service._process_batch(batch, translated, 3)
 
     assert len(service.calls) == 4
+
+
+def test_an_in_range_index_from_another_batch_is_not_written(mocker):
+    """A cue index can exist in the file while belonging to a later batch.
+    Writing it here would overwrite a cue this batch never sent."""
+    service = _batch_service(mocker, [
+        {"index": "0", "content": "een"},
+        {"index": "2", "content": "drie"},
+    ])
+    batch = [{"index": "0", "content": "one"}, {"index": "1", "content": "two"}]
+    translated = [SimpleNamespace(content="one"), SimpleNamespace(content="two"), SimpleNamespace(content="three")]
+
+    service._process_batch(batch, translated, 3)
+
+    assert [line.content for line in translated] == ["een", "two", "three"]
+    assert "1 of 2 cues" in service.partial_error
+
+
+def test_a_duplicate_index_counts_once_and_keeps_the_last_text(mocker):
+    service = _batch_service(mocker, [
+        {"index": "0", "content": "een"},
+        {"index": "0", "content": "nog een"},
+    ])
+    batch = [{"index": "0", "content": "one"}, {"index": "1", "content": "two"}]
+    translated = [SimpleNamespace(content="one"), SimpleNamespace(content="two")]
+
+    service._process_batch(batch, translated, 2)
+
+    assert translated[0].content == "nog een"
+    assert translated[1].content == "two"
+    assert "1 of 2 cues" in service.partial_error
+
+
+def test_a_non_string_translation_keeps_the_source_cue(mocker):
+    service = _batch_service(mocker, [
+        {"index": "0", "content": "een"},
+        {"index": "1", "content": 7},
+    ])
+    batch, translated = _three_cue_batch()
+    batch, translated = batch[:2], translated[:2]
+
+    service._process_batch(batch, translated, 2)
+
+    assert [line.content for line in translated] == ["een", "two"]
+    assert "1 of 2 cues" in service.partial_error
+
+
+def test_the_partial_detail_is_reported_once_across_batches(mocker):
+    service = _build_service()
+    service.job_id = "job-1"
+    service.current_api_key = "key-1"
+    responses = [
+        _gemini_batch_response([{"index": "0", "content": "een"}]),
+        _gemini_batch_response([]),
+    ]
+    calls = []
+
+    def _request(*args, **kwargs):
+        calls.append(1)
+        return responses[len(calls) - 1]
+
+    mocker.patch.object(gemini_translator.requests, "request", side_effect=_request)
+    mocker.patch.object(gemini_translator.jobs_queue, "update_job_progress")
+
+    first_batch = [{"index": "0", "content": "one"}, {"index": "1", "content": "two"}]
+    first = [SimpleNamespace(content="one"), SimpleNamespace(content="two")]
+    service._process_batch(first_batch, first, 4)
+    second_batch = [{"index": "2", "content": "three"}, {"index": "3", "content": "four"}]
+    second = [SimpleNamespace(content="three"), SimpleNamespace(content="four")]
+    service._process_batch(second_batch, second, 4)
+
+    assert service.partial_error == (
+        "Gemini returned 1 of 2 cues for one batch; the rest keep the source text.")
+    assert len(calls) == 2
+
+
+def test_progress_counts_only_the_cues_written(mocker):
+    service = _batch_service(mocker, [
+        {"index": "0", "content": "een"},
+        {"index": "1", "content": "twee"},
+    ])
+    batch, translated = _three_cue_batch()
+
+    service._process_batch(batch, translated, 3)
+
+    assert service.current_progress == 2
+
+
+def test_a_partial_translation_publishes_the_source_cues_and_a_partial_footer(queued_gemini, monkeypatch):
+    """The published file carries the source text for the missing cue, and its
+    translator footer says partial, not translated."""
+    fixture = queued_gemini
+    monkeypatch.setattr(gemini_translator.settings.translator, "translator_info", True, raising=False)
+    monkeypatch.setattr(gemini_translator.settings.translator, "gemini_model", "gemini-2.0-flash", raising=False)
+    monkeypatch.setattr(gemini_translator.requests, "request",
+                        lambda *args, **kwargs: fixture.calls.append(True) or _gemini_batch_response([]))
+
+    fixture.service.translate(fixture.job.job_id)
+
+    published = list(gemini_translator.srt.parse(fixture.destination.read_text(encoding="utf-8")))
+    assert "Source text" in [cue.content for cue in published]
+    assert any("partially translated" in cue.content for cue in published)
+    assert fixture.service.partial_error == (
+        "Gemini returned 0 of 1 cues for one batch; the rest keep the source text.")
