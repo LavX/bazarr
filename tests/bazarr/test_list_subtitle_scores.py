@@ -130,6 +130,10 @@ def test_subtitle_file_identity_normalizes_both_separator_styles():
     assert _subtitle_file_identity(r"X:\TV\Show\episode.de.srt") == "episode.de.srt"
     assert _subtitle_file_identity(r"\\server\share\tv\episode.de.srt") == "episode.de.srt"
     assert _subtitle_file_identity("/tv/Show/episode.de.srt") == "episode.de.srt"
+    # Windows resolves names case-insensitively even when a Linux host stores
+    # them, so two mapped roots with different casing name the same file.
+    assert _subtitle_file_identity(r"X:\TV\Movie.EN.srt") == _subtitle_file_identity(
+        r"Y:\tv\movie.en.srt")
 
 
 def test_movies_ignores_history_for_deleted_subtitle_path(schema_session, monkeypatch):

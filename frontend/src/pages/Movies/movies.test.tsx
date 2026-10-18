@@ -465,6 +465,26 @@ describe("Movies score filter", () => {
     expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull();
   });
 
+  it("keeps the threshold option disabled until the threshold is known", async () => {
+    const user = userEvent.setup();
+    // The settings request fails, so no threshold is known: the option must
+    // not silently behave like Any.
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({}, { status: 500 }),
+      ),
+    );
+    customRender(<MovieView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    await openFilters(user);
+    await pickScore(user, "Below threshold");
+
+    expect(
+      screen.queryByRole("button", { name: /Remove filter: Score:/ }),
+    ).toBeNull();
+  });
+
   it("counts a score above 100 as full", async () => {
     const user = userEvent.setup();
     // Hash matches and boosted matches can score above 100; such a row is
@@ -675,10 +695,9 @@ describe("Movies score filter", () => {
   });
 
   // Before the threshold setting loads (or when it is absent) scoreThreshold is
-  // undefined, so the option is the plain "Below threshold" and ItemView's
-  // graceful fallback keeps every scored row, dropping only null-score rows
-  // rather than emptying the table.
-  it("keeps scored rows and drops only null-score rows under Below threshold when the threshold is unknown", async () => {
+  // undefined, so "Below threshold" cannot narrow anything: the option stays
+  // disabled rather than silently keeping every scored row.
+  it("keeps the threshold option disabled when the settings carry no threshold", async () => {
     server.use(
       http.get("/api/system/settings", () =>
         HttpResponse.json({ general: { theme: "auto" } }),
@@ -691,21 +710,11 @@ describe("Movies score filter", () => {
     await openFilters(user);
     await pickScore(user, "Below threshold");
 
-    // The null-score row is dropped by every narrowing group.
-    await waitFor(() =>
-      expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull(),
-    );
-    // Every scored row stays: with no threshold to compare against, none is
-    // considered "below".
+    // Without a threshold the option cannot narrow anything, so it is not
+    // selectable and no Score chip appears.
     expect(
-      screen.getByRole("link", { name: "Glass Harbour" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: "Northern Light" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: "Southern Cross" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /Remove filter: Score:/ }),
+    ).toBeNull();
   });
 });
 /* eslint-enable camelcase */

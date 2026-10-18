@@ -170,9 +170,12 @@ function ItemView<T extends Item.Base>({
     [tagQuery.data, query.data],
   );
 
-  // The threshold label tracks the live setting; before it loads the option
-  // keeps its name without a number.
-  const scoreFilterOptions = useMemo<{ value: ScoreFilter; label: string }[]>(
+  // The threshold label tracks the live setting. Until it is known (still
+  // loading, or the settings request failed) the option is disabled rather
+  // than silently keeping every scored row.
+  const scoreFilterOptions = useMemo<
+    { value: ScoreFilter; label: string; disabled?: boolean }[]
+  >(
     () => [
       { value: "any", label: "Any" },
       { value: "full", label: "Full (100%)" },
@@ -183,6 +186,7 @@ function ItemView<T extends Item.Base>({
           scoreThreshold != null
             ? `Below threshold (< ${scoreThreshold}%)`
             : "Below threshold",
+        disabled: scoreThreshold == null,
       },
     ],
     [scoreThreshold],

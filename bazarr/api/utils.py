@@ -512,9 +512,12 @@ def _subtitle_file_identity(path):
     the indexer records the instance's. The file name is what stays stable, so
     the score lookup compares that instead of the full path. Both separators
     split the name, because a Linux host stores the Windows-style paths of a
-    Windows instance unchanged.
+    Windows instance unchanged, and such names fold case: Windows resolves them
+    case-insensitively wherever the app runs.
     """
-    return os.path.normcase(str(path).replace('\\', '/').rsplit('/', 1)[-1])
+    text = str(path)
+    name = text.replace('\\', '/').rsplit('/', 1)[-1]
+    return name.casefold() if '\\' in text else os.path.normcase(name)
 
 
 def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
