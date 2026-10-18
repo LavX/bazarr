@@ -30,6 +30,7 @@ $cream: #fff8e1;
   inset: 0;
   z-index: 0;
   overflow: hidden;
+  pointer-events: none;
 }
 
 .backdrop {
@@ -58,6 +59,7 @@ $cream: #fff8e1;
   position: fixed;
   inset: 0;
   z-index: 1;
+  pointer-events: none;
   background:
     radial-gradient(
       ellipse at 50% 40%,
