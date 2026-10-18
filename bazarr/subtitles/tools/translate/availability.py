@@ -16,6 +16,7 @@ import logging
 from typing import NamedTuple
 
 from app.config import settings
+from .services.encryption import validate_encryption_key
 
 
 class TranslationAvailability(NamedTuple):
@@ -30,15 +31,21 @@ class TranslationAvailability(NamedTuple):
 NO_TRANSLATOR_SPELLINGS = (None, '', 'None', 'none')
 
 
-def translation_available():
+def translation_available(translator_type=None):
     """The configured translator's answer to "can you translate", with a reason.
 
     Every rule mirrors what the engine needs to run, not what the factory can
     build: a Google translation needs no credential, the AI services need their
     own URL and key, and anything the factory does not know is not a translator.
+
+    ``translator_type`` asks about one named engine rather than the configured
+    one. The subtitle editor translates through the AI Subtitle Translator
+    service whatever the settings page has selected, so it asks about that
+    engine and gets the answer that engine's own branch would give.
     """
     try:
-        translator_type = settings.translator.translator_type
+        if translator_type is None:
+            translator_type = settings.translator.translator_type
         if translator_type in NO_TRANSLATOR_SPELLINGS:
             return TranslationAvailability(False, 'No translator is configured')
         if translator_type == 'google_translate':
@@ -53,10 +60,23 @@ def translation_available():
                 return TranslationAvailability(False, 'The Lingarr engine has no URL configured')
             return TranslationAvailability(True, '')
         if translator_type == 'openrouter':
+            # The service URL is the one thing Bazarr cannot supply itself. The
+            # OpenRouter API key is not: the sidecar can hold its own. An
+            # encryption key that is not exactly 64 hexadecimal characters fails
+            # every job the client sends, before any request, so the gate
+            # refuses those shapes with the client's own rule. A blank
+            # encryption key is the sidecar's documented encryption-off mode and
+            # stays available; a well-formed key that does not match the
+            # sidecar's is a runtime refusal for the failure record, not
+            # something the gate can know.
             if not str(settings.translator.openrouter_url or '').strip():
                 return TranslationAvailability(False, 'The AI Subtitle Translator service URL is not configured')
-            if not str(settings.translator.openrouter_api_key or '').strip():
-                return TranslationAvailability(False, 'The AI Subtitle Translator API key is not configured')
+            encryption_key = settings.translator.openrouter_encryption_key
+            if encryption_key and (not isinstance(encryption_key, str)
+                                   or not validate_encryption_key(encryption_key)):
+                return TranslationAvailability(
+                    False,
+                    'The AI Subtitle Translator encryption key must be exactly 64 hexadecimal characters')
             return TranslationAvailability(True, '')
         return TranslationAvailability(False, 'Unknown translator type')
     except Exception as e:

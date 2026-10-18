@@ -198,7 +198,7 @@ class KtuvitProvider(Provider):
                         )
 
                     self.login_cookie = cookie_split[1].split(";")[0]
-                    logger.debug("Logged in with cookie: " + self.login_cookie)
+                    logger.debug("Logged in")
 
                     self.logged_in = True
 
@@ -269,7 +269,7 @@ class KtuvitProvider(Provider):
             return {}
 
         # search
-        logger.debug("Using IMDB ID %r", imdb_id)
+        logger.debug("Using the resolved IMDB ID")
 
         query = {
             "FilmName": title,
@@ -314,11 +314,7 @@ class KtuvitProvider(Provider):
             results_imdb_id = imdb_link.split("/")[-1]
 
             if results_imdb_id != imdb_id:
-                logger.debug(
-                    "Subtitles is for IMDB %r but actual IMDB ID is %r",
-                    results_imdb_id,
-                    imdb_id,
-                )
+                logger.debug("Subtitle result did not match the searched IMDB ID, skipping")
                 continue
 
             language = Language("heb")

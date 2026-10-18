@@ -13,14 +13,20 @@ every scan tick re-offered the same translation to a queue that refused it.
 
 # ruff: noqa: F401, F811
 
+import json
 import logging
 from collections import deque
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import pytest
+import sqlalchemy as sa
 from test_sportarr_kind_migration import migration_engine
 from test_sportarr_indexer import indexed_library
 from test_sportarr_manual import manual_library
 from test_sportarr_profile_hooks import profile_library
+
+pytestmark = pytest.mark.usefixtures('languages_loaded')
 
 _PROFILE = {"items": [{"language": "hu", "translate_from": "en", "forced": "False", "hi": "False"}]}
 
@@ -59,10 +65,65 @@ def test_a_recent_failure_answers_false_without_queueing(profile_library, monkey
     from sportarr.profile_hooks import translate_from_existing
     from subtitles.tools.translate import failure_record
 
-    failure_record.record_failed_translation(1, "sports", 61, "en", "hu")
+    failure_record.record_failed_translation(1, "sports", 61, "en", "hu", forced=False, hi=False)
 
     assert translate_from_existing(profile_library.base.context, "hu") is False
     assert _translation_jobs(profile_library.queue) == []
+
+
+def test_a_failed_variant_holds_back_only_that_variant(profile_library, monkeypatch):
+    from subtitles.indexer import sports
+    from subtitles.tools.translate import failure_record, main as translate_main
+    from app import database as db
+
+    lib = profile_library
+    failure_record.clear_failed_translations()
+    # The profile also wants the hearing-impaired variant of the translation.
+    items = json.loads(lib.session.get(db.TableLanguagesProfiles, 1).items)
+    items.append(dict(id=4, language="hu", hi="True", forced="False", translate_from="en"))
+    lib.session.execute(
+        sa.update(db.TableLanguagesProfiles)
+        .where(db.TableLanguagesProfiles.profileId == 1)
+        .values(items=json.dumps(items))
+    )
+    db.update_profile_id_list.invalidate()
+    sports.store_subtitles_sports(61, 1)
+    context = lib.service.resolve_event_in_session(lib.session, 61, 1)
+
+    # The job's own failure path, with the variant it was asked to translate.
+    operation = lib.hooks.capture_profile_operation(
+        context, lib.service.candidate_signature(context))
+    bound = operation.bind(
+        (str(lib.source),),
+        lib.hooks.translation_destination(context.mapped_path, "hu", False, True),
+        target="hu:hi", source_language="en", source_score=None,
+    )
+
+    def _refuse(*args, **kwargs):
+        raise ValueError("fixture translation failure")
+
+    monkeypatch.setattr(translate_main, "activity", Mock())
+    monkeypatch.setattr(translate_main, "validate_translation_params", _refuse)
+    # The real queue stays in place for the enqueue the plain-variant check
+    # performs afterwards; only the two rename helpers the failing job uses
+    # are silenced, since job 1 never entered the queue.
+    monkeypatch.setattr(translate_main.jobs_queue, "get_job_name", lambda job_id: None)
+    monkeypatch.setattr(translate_main.jobs_queue, "update_job_name", lambda **kwargs: None)
+    try:
+        with pytest.raises(ValueError):
+            translate_main.translate_subtitles_file(
+                video_path=context.mapped_path,
+                source_srt_file=str(lib.source),
+                from_lang="en", to_lang="hu", forced=False, hi=True,
+                media_type="sports", metadata=None, job_id=1,
+                sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None,
+                arr_instance_id=1, sports_operation=bound)
+
+        assert lib.hooks.translate_from_existing(context, "hu:hi") is False
+        assert lib.hooks.translate_from_existing(context, "hu") is True
+        assert len(_translation_jobs(lib.queue)) == 1
+    finally:
+        failure_record.clear_failed_translations()
 
 
 def _wanted_movie_row(arr_instance_id=1, radarr_id=30):

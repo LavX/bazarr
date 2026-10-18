@@ -1,9 +1,11 @@
 /* eslint-disable camelcase */
 
+import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { HttpResponse } from "msw";
-import { customRender, screen } from "@/tests";
+import { customRender, screen, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { openSelect } from "@/tests/select";
 import WantedMoviesView from ".";
 
 describe("Wanted Movies", () => {
@@ -89,5 +91,101 @@ describe("Wanted Movies", () => {
 
     const movieTitle = screen.queryByText("The Shawshank Redemption");
     expect(movieTitle).not.toBeInTheDocument();
+  });
+
+  it("filters wanted movies by any selected Radarr tag", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/movies/wanted", () =>
+        HttpResponse.json({
+          data: [
+            {
+              title: "The Shawshank Redemption",
+              id: 901,
+              radarrId: 1,
+              tags: ["Drama"],
+              missing_subtitles: [],
+            },
+            {
+              title: "The Godfather",
+              id: 902,
+              radarrId: 2,
+              tags: ["Crime"],
+              missing_subtitles: [],
+            },
+          ],
+          total: 2,
+        }),
+      ),
+    );
+
+    customRender(<WantedMoviesView />);
+    await screen.findByRole("link", { name: "The Godfather" });
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+    const listbox = await openSelect(user, "Filter by tags...");
+    await user.click(
+      within(listbox).getByRole("option", { name: "Drama", hidden: true }),
+    );
+
+    expect(
+      screen.getByRole("link", { name: "The Shawshank Redemption" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "The Godfather" })).toBeNull();
+    expect(screen.getByText("Tags: Drama")).toBeInTheDocument();
+  });
+
+  it("offers a tag that only a later page carries", async () => {
+    const user = userEvent.setup();
+    const untagged = Array.from({ length: 55 }, (_, index) => ({
+      title: `Movie ${index + 1}`,
+      id: 901 + index,
+      radarrId: 1,
+      missing_subtitles: [],
+    }));
+    const lateTagged = {
+      title: "The Late Tag",
+      id: 999,
+      radarrId: 1,
+      tags: ["Late Tag"],
+      missing_subtitles: [],
+    };
+    const all = [...untagged, lateTagged];
+    server.use(
+      http.get("/api/movies/wanted", ({ request }) => {
+        const { searchParams } = new URL(request.url);
+        const length = Number(searchParams.get("length"));
+        const start = Number(searchParams.get("start"));
+        return HttpResponse.json({
+          data: length === -1 ? all : all.slice(start, start + length),
+          total: all.length,
+        });
+      }),
+    );
+
+    customRender(<WantedMoviesView />);
+    await screen.findByRole("link", { name: "Movie 1" });
+    expect(screen.queryByText("The Late Tag")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+    const listbox = await openSelect(user, "Filter by tags...");
+    expect(
+      within(listbox).getByRole("option", { name: "Late Tag", hidden: true }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the Wanted tags filter visible when no tags are available", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/movies/wanted", () =>
+        HttpResponse.json({ data: [], total: 0 }),
+      ),
+    );
+    customRender(<WantedMoviesView />);
+    await screen.findByRole("table");
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+
+    expect(
+      screen.getByPlaceholderText("No tags available"),
+    ).toBeInTheDocument();
   });
 });

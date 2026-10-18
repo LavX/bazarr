@@ -13,7 +13,7 @@ import ast
 import json
 import logging
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.database import (
@@ -207,6 +207,85 @@ def whole_number(value):
     return int(value)
 
 
+# A stored key is never used with a destination the request changed: moving an
+# instance means typing its API key again.
+REENTER_KEY = "Re-enter the key to use a different address"
+
+
+def _normalized_base_url(value):
+    """The base URL the way the client builds it: the leading slash added and
+    the trailing one dropped, the same normalization the edit form applies, so
+    '/sonarr' and '/sonarr/' are one path everywhere a destination is
+    compared."""
+    base = value or "/"
+    if not base.startswith("/"):
+        base = f"/{base}"
+    if base.endswith("/"):
+        base = base[:-1]
+    return base
+
+
+def _destination_changed(args, row, *, probe=False):
+    """Whether these request values move the instance away from its stored address.
+
+    The comparison is on the connection each side would actually use, the
+    writer's own values for a save and the probe's own fallbacks for a test,
+    so a value that falls back to what is stored is not a change, and neither
+    is a field the request leaves out. ``ssl`` counts either way, and so does
+    ``verify_ssl`` when it turns certificate verification off: turning it back
+    on only makes the connection harder to sit in front of.
+    """
+    ip = args.get("ip")
+    if ip is not None:
+        effective_ip = row.ip if (probe and not ip) else ip
+        if effective_ip != (row.ip or ""):
+            return True
+    port = args.get("port")
+    if port is not None:
+        try:
+            effective_port = int(port)
+        except (TypeError, ValueError):
+            return True  # not a number: a value the writer cannot keep
+        if effective_port != int(row.port or 0):
+            return True
+    base_url = args.get("base_url")
+    if base_url is not None:
+        if probe and not base_url:
+            # The probe keeps the saved prefix when its override is empty,
+            # the same fallback the client it builds applies, so an empty
+            # submission is the saved connection and not a move to the root.
+            effective_base_url = row.base_url or "/"
+        else:
+            effective_base_url = base_url or "/"
+        # The client sends the path with its leading slash added and its
+        # trailing one dropped, so a stored spelling that only differs in
+        # those reaches the same endpoint: not a move.
+        if (_normalized_base_url(effective_base_url)
+                != _normalized_base_url(row.base_url or "/")):
+            return True
+    ssl = args.get("ssl")
+    if ssl is not None and bool(ssl) != bool(row.ssl):
+        return True
+    verify_ssl = args.get("verify_ssl")
+    if verify_ssl is not None and bool(row.verify_ssl) and not bool(verify_ssl):
+        return True
+    return False
+
+
+def _whole_or_none(value):
+    """int(value) the way the route parser reads a port or a timeout.
+
+    A direct service call can carry the raw form value, so this reads the same
+    values the parser reads: a whole number, never a boolean, and a float only
+    when it is whole.
+    """
+    if isinstance(value, bool):
+        raise ValueError("must be a whole number")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("must be a whole number")
+    return int(value)
+
+
 def _connection_arg_error(args):
     """Return a validation message for out-of-range connection args, else None.
 
@@ -215,11 +294,21 @@ def _connection_arg_error(args):
     A boolean is refused too, since Python counts True as 1.
     """
     port = args.get("port")
-    if port is not None and (isinstance(port, bool) or not (1 <= port <= 65535)):
-        return "port must be between 1 and 65535"
+    if port is not None:
+        try:
+            number = _whole_or_none(port)
+        except (TypeError, ValueError):
+            return "port must be between 1 and 65535"
+        if not 1 <= number <= 65535:
+            return "port must be between 1 and 65535"
     timeout = args.get("http_timeout")
-    if timeout is not None and (isinstance(timeout, bool) or timeout <= 0):
-        return "http_timeout must be a positive number of seconds"
+    if timeout is not None:
+        try:
+            number = _whole_or_none(timeout)
+        except (TypeError, ValueError):
+            return "http_timeout must be a positive number of seconds"
+        if number <= 0:
+            return "http_timeout must be a positive number of seconds"
     return None
 
 
@@ -279,6 +368,12 @@ def test_connection_for_instance(session, instance_id, args=None, http_get=None)
     arg_error = _connection_arg_error(args)
     if arg_error:
         return {"ok": False, "error": "invalid", "message": arg_error}, 400
+    if row.api_key and _destination_changed(args, row, probe=True):
+        # The stored key never follows an address the caller just typed. This
+        # route carries no key by design, so a test of a moved address is
+        # refused outright and the caller tests again with the key typed in.
+        return {"ok": False, "error": "reenter_key",
+                "message": REENTER_KEY}, 200
 
     def pick(key, fallback):
         value = args.get(key)
@@ -389,75 +484,96 @@ def update_instance(session, instance_id, args):
     arg_error = _connection_arg_error(args)
     if arg_error:
         return {"error": "invalid", "message": arg_error}, 400
-    repo = ArrInstanceRepository(session)
-    existing = repo.get(instance_id)
-    if existing is None:
-        return {"error": "not_found"}, 404
-    if existing.kind == 'sportarr':
-        from sportarr.db import needs_sports_transaction, sports_transaction
-        if needs_sports_transaction(session):
-            with sports_transaction(session) as transaction:
-                result = update_instance(transaction, instance_id, args)
-                if result[1] >= 400:
-                    transaction.rollback()
-            session.expire_all()
-            return result
+    # The check and the write share the boundary the settings save commits
+    # under, the account and config locks it holds, and the row is re-read
+    # inside it: a save that paused between its check and its write cannot
+    # land a move a second save's stored key enables, because the re-read
+    # sees the key the second save stored in the window, and the refusal
+    # names the same re-enter message the sequential path returns.
+    from discover.metadata import CONFIG_LOCK
+    from media_servers.plex_account import ACCOUNT_LOCK
+    with ACCOUNT_LOCK, CONFIG_LOCK:
+        repo = ArrInstanceRepository(session)
+        existing = repo.get(instance_id)
+        if existing is None:
+            return {"error": "not_found"}, 404
+        if existing.kind == 'sportarr':
+            from sportarr.db import needs_sports_transaction, sports_transaction
+            if needs_sports_transaction(session):
+                with sports_transaction(session) as transaction:
+                    result = update_instance(transaction, instance_id, args)
+                    if result[1] >= 400:
+                        transaction.rollback()
+                session.expire_all()
+                return result
 
-    kwargs = {}
-    if 'path_mappings' in args:
-        from utilities.path_mappings import validate_sports_mappings
-        try:
-            if existing.kind != 'sportarr':
-                raise ValueError('path_mappings require a Sportarr instance')
-            mappings = validate_sports_mappings(args['path_mappings'])
-            kwargs['path_mappings'] = json.dumps(mappings) if mappings else None
-        except ValueError as exc:
-            return {'error': 'invalid', 'message': str(exc)}, 400
-    for field in ("name", "ip", "port", "base_url", "ssl", "verify_ssl",
-                  "http_timeout", "enabled", "is_default"):
-        if args.get(field) is not None:
-            kwargs[field] = args[field]
-    if args.get("clear_api_key"):
-        kwargs["clear_api_key"] = True
-    elif args.get("api_key") is not None:
-        kwargs["api_key"] = args["api_key"]
+        kwargs = {}
+        if 'path_mappings' in args:
+            from utilities.path_mappings import validate_sports_mappings
+            try:
+                if existing.kind != 'sportarr':
+                    raise ValueError('path_mappings require a Sportarr instance')
+                mappings = validate_sports_mappings(args['path_mappings'])
+                kwargs['path_mappings'] = json.dumps(mappings) if mappings else None
+            except ValueError as exc:
+                return {'error': 'invalid', 'message': str(exc)}, 400
+        for field in ("name", "ip", "port", "base_url", "ssl", "verify_ssl",
+                      "http_timeout", "enabled", "is_default"):
+            if args.get(field) is not None:
+                kwargs[field] = args[field]
+        if args.get("clear_api_key"):
+            kwargs["clear_api_key"] = True
+        elif args.get("api_key") is not None:
+            kwargs["api_key"] = args["api_key"]
 
-    if args.get("subtitle_settings") is not None:
+        if args.get("subtitle_settings") is not None:
+            try:
+                ss_blob = validate_subtitle_settings(args.get("subtitle_settings"))
+            except ValueError as exc:
+                return {"error": "invalid", "message": str(exc)}, 400
+            kwargs["options"] = merge_subtitle_settings_into_options(existing.options, ss_blob)
+
+        if args.get("media_defaults") is not None:
+            try:
+                md_blob = validate_media_defaults(
+                    args.get("media_defaults"), known_profile_ids=_known_profile_ids(session))
+            except ValueError as exc:
+                return {"error": "invalid", "message": str(exc)}, 400
+            # Merge onto whatever the subtitle_settings edit above already produced,
+            # so a request carrying both blobs does not drop one of them.
+            kwargs["options"] = merge_media_defaults_into_options(
+                kwargs.get("options", existing.options), md_blob)
+
+        if args.get('sports_settings') is not None:
+            from sportarr.settings import merge_sports_settings
+            try:
+                if existing.kind != 'sportarr':
+                    raise ValueError('sports_settings require a Sportarr instance')
+                kwargs['options'] = merge_sports_settings(
+                    kwargs.get('options', existing.options), args['sports_settings'])
+            except ValueError as exc:
+                return {'error': 'invalid', 'message': str(exc)}, 400
+
+        # A save follows the same rule as a test: the stored key never follows an
+        # address the request changed, so moving the instance needs the key typed
+        # again rather than silently keeping it. The decision reads the same flags
+        # the writer acts on, so a replaced key (any non-empty value) and an
+        # explicit clear both move the address with no stored secret travelling,
+        # while an omitted or empty key keeps the stored one and is refused. It
+        # runs after the validations, so a body that cannot be saved anyway is
+        # answered as invalid rather than as a destination refusal.
+        if (existing.api_key and _destination_changed(args, existing)
+                and not (args.get("clear_api_key") or args.get("api_key"))):
+            return {"error": "reenter_key", "message": REENTER_KEY}, 400
+
         try:
-            ss_blob = validate_subtitle_settings(args.get("subtitle_settings"))
+            row = repo.update(instance_id, **kwargs)
         except ValueError as exc:
             return {"error": "invalid", "message": str(exc)}, 400
-        kwargs["options"] = merge_subtitle_settings_into_options(existing.options, ss_blob)
-
-    if args.get("media_defaults") is not None:
-        try:
-            md_blob = validate_media_defaults(
-                args.get("media_defaults"), known_profile_ids=_known_profile_ids(session))
-        except ValueError as exc:
-            return {"error": "invalid", "message": str(exc)}, 400
-        # Merge onto whatever the subtitle_settings edit above already produced,
-        # so a request carrying both blobs does not drop one of them.
-        kwargs["options"] = merge_media_defaults_into_options(
-            kwargs.get("options", existing.options), md_blob)
-
-    if args.get('sports_settings') is not None:
-        from sportarr.settings import merge_sports_settings
-        try:
-            if existing.kind != 'sportarr':
-                raise ValueError('sports_settings require a Sportarr instance')
-            kwargs['options'] = merge_sports_settings(
-                kwargs.get('options', existing.options), args['sports_settings'])
-        except ValueError as exc:
-            return {'error': 'invalid', 'message': str(exc)}, 400
-
-    try:
-        row = repo.update(instance_id, **kwargs)
-    except ValueError as exc:
-        return {"error": "invalid", "message": str(exc)}, 400
-    except IntegrityError:
-        session.rollback()
-        return {"error": "conflict", "message": _CONFLICT_MESSAGE}, 409
-    return to_safe_dict(row), 200
+        except IntegrityError:
+            session.rollback()
+            return {"error": "conflict", "message": _CONFLICT_MESSAGE}, 409
+        return to_safe_dict(row), 200
 
 
 def delete_instance(session, instance_id, remove_library=False):
@@ -845,13 +961,79 @@ def reconcile_sportarr_enable_flag(session):
 
 
 # The library tables the Discover summary and the library pages read, each
-# with the kind whose default instance takes over its rows. History and
-# blacklist rows are the provenance of an event, not library rows, and stay
-# as recorded.
+# with the kind whose default instance takes over its rows, the primary key
+# to write one row by (the rootfolder tables keep their own), and the column
+# naming the same external item inside one instance: the per-instance unique
+# index on that column is what a reassign can collide with. History and
+# blacklist rows are the provenance of an event, not library rows, so the
+# reconcile never writes them; the ones pointing at a row that merges follow
+# the foreign key cascade, the rule a library removal already relies on.
 _LIBRARY_OWNER_TABLES = (
-    ("sonarr", (TableShows, TableEpisodes, TableShowsRootfolder)),
-    ("radarr", (TableMovies, TableMoviesRootfolder)),
+    ("sonarr", (
+        (TableShows, TableShows.id, TableShows.sonarrSeriesId),
+        (TableEpisodes, TableEpisodes.id, TableEpisodes.sonarrEpisodeId),
+        (TableShowsRootfolder, TableShowsRootfolder.local_rootfolder_id,
+         TableShowsRootfolder.upstream_rootfolder_id),
+    )),
+    ("radarr", (
+        (TableMovies, TableMovies.id, TableMovies.tmdbId),
+        (TableMoviesRootfolder, TableMoviesRootfolder.local_rootfolder_id,
+         TableMoviesRootfolder.upstream_rootfolder_id),
+    )),
 )
+
+
+# A merged parent's children, with the child's column that points at it.
+# The foreign key cascade would delete them with the duplicate, so the
+# reconcile moves them to the winning row first: an episode of a duplicated
+# show that the default does not have is new under the winner, not a
+# duplicate of anything.
+_LIBRARY_OWNER_CHILDREN = {
+    TableShows: (TableEpisodes, TableEpisodes.series_id),
+}
+
+# A child's parent, the parent's primary key, and the child's column that
+# points at it. A child reassigns only once its parent already carries the
+# destination owner, so a parent that stayed behind with its deleted owner,
+# blocked by a collision on another of its per-instance unique indexes, keeps
+# its children with it: a child moved alone would sit under the destination
+# instance while its parent still named a deleted one, a mismatch no later
+# run repairs.
+_LIBRARY_OWNER_PARENTS = {
+    TableEpisodes: (TableShows, TableShows.id, TableEpisodes.series_id),
+}
+
+
+def _default_row_for_external_id(session, table, primary_key, identity, default_id,
+                                 external_id):
+    """The default instance's row for this external id, if it owns one.
+
+    The per-instance unique index on the identity column makes one such row
+    the most there can be, so the one lookup both answers the merge decision
+    and names the winning row a merged parent moves its children to. A NULL
+    id never matches: both engines treat NULLs as distinct under a unique
+    index, so a row with no external id always reassigns, never merges.
+    """
+    if default_id is None or external_id is None:
+        return None
+    return session.execute(select(primary_key).where(
+        table.arr_instance_id == default_id,
+        identity == external_id)).scalar()
+
+
+def _parent_has_destination_owner(session, parent_table, parent_key, destination_id,
+                                  parent_row_id):
+    """Whether the child's parent row already carries the destination owner.
+
+    A child whose parent stayed behind keeps its deleted owner too: moved
+    alone it would sit under the destination instance while its parent still
+    names a deleted one, a mismatch no later run repairs. A child with no
+    parent recorded is free to move; nothing holds it.
+    """
+    if parent_row_id is None:
+        return True
+    return session.execute(select(parent_table.arr_instance_id)
+                           .where(parent_key == parent_row_id)).scalar() == destination_id
 
 
 def reconcile_dangling_library_owners(session):
@@ -865,6 +1047,26 @@ def reconcile_dangling_library_owners(session):
     of its kind, or to no owner when the kind has none, so the pages, the
     totals and the rows themselves agree from the first read.
 
+    A reassign is not always possible: every library table carries a
+    per-instance unique index on the item's external id, and when the default
+    already owns a row for the same movie, episode, series or root folder, the
+    dangling duplicate would collide with it. One such collision rolled the
+    whole reconcile back at every boot, so the default's row wins instead:
+    the dangling duplicate is deleted, every other row is reassigned, one row
+    at a time, and a row that still cannot be written is logged and skipped
+    without taking the rest down with it. What merged or moved is no longer
+    dangling on the next boot.
+
+    Parentage carries two more rules. A merged show moves its episodes to the
+    winning show first, because the foreign key cascade would otherwise
+    delete them with the duplicate: each one then merges when the default
+    already has its episode id, and survives under the winner when it does
+    not. And an episode only reassigns once its show already carries the
+    destination owner, so a show that stayed behind with its deleted owner
+    keeps its episodes with it instead of leaving each one under an owner its
+    own show does not have; a held episode waits, and moves on a later boot
+    once its show arrives.
+
     Cheap when nothing dangles: one read of the instances and one
     distinct-owner scan per table, no default looked up and no row written.
     Idempotent, and never raises: the startup caller guards this.
@@ -872,13 +1074,13 @@ def reconcile_dangling_library_owners(session):
     known = set(session.execute(select(TableArrInstances.id)).scalars())
     for kind, tables in _LIBRARY_OWNER_TABLES:
         dangling = []
-        for table in tables:
+        for table, primary_key, identity in tables:
             owners = set(session.execute(
                 select(table.arr_instance_id).distinct()).scalars())
             missing = sorted(owner for owner in owners
                              if owner is not None and owner not in known)
             if missing:
-                dangling.append((table, missing))
+                dangling.append((table, primary_key, identity, missing))
         if not dangling:
             continue
         # The row flagged as this kind's default: it is enabled by definition
@@ -886,26 +1088,87 @@ def reconcile_dangling_library_owners(session):
         # default never takes a row.
         default = ArrInstanceRepository(session).get_default(kind)
         default_id = default.id if default is not None else None
-        for table, missing in dangling:
-            # The ORM-enabled update would also synchronize any loaded library
-            # rows: none are loaded at boot, and the fallback strategy SELECTs
-            # every row this writes, so skip the sync.
-            statement = update(table).values(arr_instance_id=default_id).execution_options(
-                synchronize_session=False)
-            moved = 0
+        for table, primary_key, identity, missing in dangling:
+            child_spec = _LIBRARY_OWNER_CHILDREN.get(table)
+            child = child_link = None
+            if child_spec is not None:
+                child, child_link = child_spec
+            parent = _LIBRARY_OWNER_PARENTS.get(table)
+            parent_table = parent_key = parent_link = None
+            if parent is not None:
+                parent_table, parent_key, parent_link = parent
+            moved = merged = held = 0
             for chunk in in_chunks(missing):
-                result = session.execute(
-                    statement.where(table.arr_instance_id.in_(chunk)))
-                moved += result.rowcount or 0
-            if not moved:
+                columns = [primary_key, identity]
+                if parent_table is not None:
+                    columns.append(parent_link)
+                rows = session.execute(
+                    select(*columns)
+                    .where(table.arr_instance_id.in_(chunk))).all()
+                for row in rows:
+                    row_id, external_id = row[0], row[1]
+                    parent_row_id = row[2] if parent_table is not None else None
+                    try:
+                        winner_id = _default_row_for_external_id(
+                            session, table, primary_key, identity, default_id, external_id)
+                        if winner_id is not None:
+                            if child is not None:
+                                # The foreign key cascade would otherwise
+                                # delete a merged parent's children with the
+                                # duplicate; see _LIBRARY_OWNER_CHILDREN. The
+                                # ORM sync is skipped for the same reason as
+                                # the reassign below.
+                                session.execute(
+                                    update(child)
+                                    .values({child_link.name: winner_id})
+                                    .where(child_link == row_id)
+                                    .execution_options(synchronize_session=False))
+                            session.execute(
+                                delete(table).where(primary_key == row_id))
+                            merged += 1
+                        elif (parent_table is None or _parent_has_destination_owner(
+                                session, parent_table, parent_key, default_id,
+                                parent_row_id)):
+                            # The ORM-enabled update would also synchronize
+                            # any loaded library rows: none are loaded at
+                            # boot, and the fallback strategy SELECTs every
+                            # row this writes, so skip the sync.
+                            session.execute(
+                                update(table).values(arr_instance_id=default_id)
+                                .where(primary_key == row_id)
+                                .execution_options(synchronize_session=False))
+                            moved += 1
+                        else:
+                            held += 1
+                    except Exception:
+                        # Rollback is a no-op under the AUTOCOMMIT engine; it
+                        # still resets the session so the next row's
+                        # statement can run.
+                        session.rollback()
+                        logging.exception(
+                            "Reconciling one dangling row on %s (id=%s) failed; "
+                            "the row keeps its deleted owner",
+                            table.__tablename__, row_id)
+            if not moved and not merged and not held:
                 continue
-            if default_id is not None:
+            if moved:
+                if default_id is not None:
+                    logging.info(
+                        "Reassigned %s rows on %s from a deleted instance to the "
+                        "default %s instance (id=%s)",
+                        moved, table.__tablename__, kind, default_id)
+                else:
+                    logging.info(
+                        "Cleared the deleted instance from %s rows on %s: "
+                        "%s has no default instance",
+                        moved, table.__tablename__, kind)
+            if merged:
                 logging.info(
-                    "Reassigned %s rows on %s from a deleted instance to the "
-                    "default %s instance (id=%s)",
-                    moved, table.__tablename__, kind, default_id)
-            else:
+                    "Merged %s rows on %s into the row the default %s "
+                    "instance already owned (id=%s)",
+                    merged, table.__tablename__, kind, default_id)
+            if held:
                 logging.info(
-                    "Cleared the deleted instance from %s rows on %s: "
-                    "%s has no default instance",
-                    moved, table.__tablename__, kind)
+                    "Held %s rows on %s back: their parent does not carry the "
+                    "destination owner yet",
+                    held, table.__tablename__)

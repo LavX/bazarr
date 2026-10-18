@@ -4,6 +4,7 @@
  */
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
+import { appPath } from "./base";
 
 export const INTENT = {
   library: "I run Sonarr, Radarr or Sportarr",
@@ -21,7 +22,7 @@ export function progress(page: Page) {
 }
 
 export async function openWelcome(page: Page) {
-  await page.goto("/setup");
+  await page.goto(appPath("/setup"));
   await expect(stepHeading(page, "Welcome to Bazarr+")).toBeVisible();
 }
 

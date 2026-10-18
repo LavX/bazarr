@@ -1,5 +1,6 @@
 import datetime
 import json
+import traceback
 from pathlib import Path
 import sys
 
@@ -21,11 +22,18 @@ def error_worker(tmp_path):
     bundle.mkdir()
     (bundle / "provider.py").write_text(
         """
+import builtins
+
 class ErrorProvider:
     def search(self, video, languages, config):
-        raise type(config["failure"], (RuntimeError,), {})(config["message"])
+        self._raise(config)
 
     def download(self, provider_payload, language, config):
+        self._raise(config)
+
+    def _raise(self, config):
+        if config.get("builtin"):
+            raise getattr(builtins, config["builtin"])(*config.get("args", []))
         raise type(config["failure"], (RuntimeError,), {})(config["message"])
 """,
         encoding="utf-8",
@@ -277,3 +285,158 @@ def test_an_exception_without_the_field_sends_nothing():
     from provider_hub import worker_runner
 
     assert worker_runner._retry_after(RuntimeError("upstream returned 500")) is None
+
+
+# The worker's error reply carries the plugin's own traceback, so the host can
+# log the plugin's cause instead of its own transport frame, and the errno of
+# an OSError the operating system raised, so a real file fault is not mistaken
+# for a plugin's refused login.
+
+def test_an_os_error_round_trips_with_its_errno(error_worker):
+    with pytest.raises(WorkerError) as raised:
+        error_worker.request("search", {"config": {"builtin": "PermissionError",
+                                                  "args": [13, "Permission denied"]}}, timeout=5)
+
+    error = raised.value
+    assert error.remote_class_name == "PermissionError"
+    assert error.code == "provider"
+    assert error.remote_errno == 13
+    # The plugin's own frame, not the host transport's.
+    assert error.remote_traceback is not None
+    assert "Permission denied" in error.remote_traceback
+    assert "provider.py" in error.remote_traceback
+    assert "_raise_worker_error" not in error.remote_traceback
+
+
+def test_a_non_os_error_round_trips_without_an_errno(error_worker):
+    with pytest.raises(WorkerError) as raised:
+        error_worker.request("search", {"config": {"failure": "KeyError", "message": "fixture defect"}},
+                             timeout=5)
+
+    assert raised.value.remote_class_name == "KeyError"
+    assert raised.value.remote_errno is None
+    assert raised.value.remote_traceback is not None
+    assert "fixture defect" in raised.value.remote_traceback
+
+
+def test_a_worker_error_is_scrubbed_when_the_host_rebuilds_it(error_worker):
+    """The runner cannot scrub: it deliberately imports no Bazarr module so it
+    can run under a provider venv. The host masks the message and the plugin's
+    traceback it rebuilds from the reply, both of which are log-bound and
+    API-bound."""
+    from secret_store.scrub import register_secret_values, registered_secret_values
+
+    key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+    previous = registered_secret_values()
+    register_secret_values([key, *previous])
+    try:
+        with pytest.raises(WorkerError) as raised:
+            error_worker.request("search", {"config": {"failure": "ValueError",
+                                                       "message": f"login failed for {key}"}}, timeout=5)
+    finally:
+        register_secret_values(previous)
+
+    error = raised.value
+    assert str(error) == "login failed for ***"
+    assert key not in str(error)
+    # The plugin's own traceback ends in the exception's text, so the key
+    # reaches it there too and is masked there too.
+    assert error.remote_traceback is not None
+    assert "login failed for ***" in error.remote_traceback
+    assert key not in error.remote_traceback
+
+
+def test_the_error_payload_carries_the_traceback_and_the_os_errno():
+    from provider_hub import worker_runner
+
+    try:
+        raise PermissionError(13, "Permission denied")
+    except PermissionError as error:
+        payload = worker_runner._error_payload(error)
+
+    assert payload["code"] == "provider"
+    assert payload["class_name"] == "PermissionError"
+    assert payload["errno"] == 13
+    assert "Permission denied" in payload["traceback"]
+    assert payload["traceback"].endswith("PermissionError: [Errno 13] Permission denied\n")
+
+
+@pytest.mark.parametrize("error", [
+    RuntimeError("fixture plugin failure"),
+    PermissionError("login refused"),
+], ids=lambda error: type(error).__name__)
+def test_the_error_payload_omits_the_errno_for_anything_else(error):
+    """A plugin raises PermissionError with a message of its own for a refused
+    login and never an errno; anything that is not an OSError the operating
+    system raised carries none either."""
+    from provider_hub import worker_runner
+
+    try:
+        raise error
+    except Exception as raised:
+        payload = worker_runner._error_payload(raised)
+
+    assert "errno" not in payload
+    assert payload["message"] == str(error)
+    assert str(error) in payload["traceback"]
+
+
+def test_the_error_payload_cuts_the_traceback_to_its_last_8000_characters():
+    """The reply is one line of JSON, so an exception with a message longer
+    than the window would otherwise overflow it; the raising frame is at the
+    end, which is the part that must survive the cut."""
+    from provider_hub import worker_runner
+
+    try:
+        raise RuntimeError("x" * 20000)
+    except RuntimeError as error:
+        payload = worker_runner._error_payload(error)
+        full = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+
+    assert len(full) > 8000
+    assert payload["traceback"] == full[-8000:]
+
+
+@pytest.mark.parametrize("traceback_value", [None, 5, [], True], ids=lambda value: type(value).__name__)
+def test_only_a_string_traceback_crosses_the_boundary(response_worker, traceback_value):
+    with pytest.raises(WorkerError) as raised:
+        response_worker({"ok": False, "error": {
+            "class_name": "KeyError", "code": "provider", "message": "defect",
+            "traceback": traceback_value,
+        }}).request("search", timeout=5)
+    assert raised.value.remote_traceback is None
+
+
+def test_a_string_traceback_crosses_the_boundary(response_worker):
+    with pytest.raises(WorkerError) as raised:
+        response_worker({"ok": False, "error": {
+            "class_name": "KeyError", "code": "provider", "message": "defect",
+            "traceback": "plugin fixture frame",
+        }}).request("search", timeout=5)
+    assert raised.value.remote_traceback == "plugin fixture frame"
+
+
+@pytest.mark.parametrize("errno_value", [None, "13", 13.0, True, []],
+                         ids=lambda value: type(value).__name__)
+def test_only_an_integer_errno_crosses_the_boundary(response_worker, errno_value):
+    with pytest.raises(WorkerError) as raised:
+        response_worker({"ok": False, "error": {
+            "class_name": "PermissionError", "code": "provider", "message": "denied",
+            "errno": errno_value,
+        }}).request("search", timeout=5)
+    assert raised.value.remote_errno is None
+
+
+def test_a_rebuilt_class_keeps_the_worker_error_with_its_fields(response_worker):
+    """A rebuilt exception carries the WorkerError as its __cause__, so the
+    plugin's traceback stays reachable from the exception the handlers see."""
+    with pytest.raises(DownloadLimitExceeded) as raised:
+        response_worker({"ok": False, "error": {
+            "class_name": "DownloadLimitExceeded", "code": "provider", "message": "quota",
+            "traceback": "plugin fixture frame",
+        }}).request("download", timeout=5)
+
+    cause = raised.value.__cause__
+    assert isinstance(cause, WorkerError)
+    assert cause.remote_traceback == "plugin fixture frame"
+    assert cause.remote_errno is None

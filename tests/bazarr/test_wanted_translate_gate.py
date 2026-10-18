@@ -14,6 +14,9 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures('languages_loaded')
 
 _PROFILE = {"items": [{"language": "hu", "translate_from": "en", "forced": "False", "hi": "False"}]}
 

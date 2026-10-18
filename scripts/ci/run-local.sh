@@ -25,6 +25,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# A background launch (nohup, a detached terminal) starts this script with SIGHUP
+# ignored, and every job it runs inherits that disposition. A signal ignored on
+# entry to a shell cannot be trapped again, so the installer's HUP trap never
+# engages and its tests fail however the suite itself was launched. Bash cannot
+# reset the disposition, so re-exec through python, which can, and land back here
+# with the marker set. Without python3 the launch runs as it did before.
+if [[ -z "${BAZARR_CI_SIGHUP_RESET:-}" ]] && command -v python3 >/dev/null; then
+  BAZARR_CI_SIGHUP_RESET=1 exec python3 "$ROOT/scripts/ci/reset_sighup.py" \
+    "$ROOT/scripts/ci/$(basename "${BASH_SOURCE[0]}")" "$@"
+fi
+
 MODE=all
 PYTHON_VERSION=""
 JOBS="$(nproc 2>/dev/null || echo 4)"

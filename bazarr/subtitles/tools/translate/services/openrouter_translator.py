@@ -4,7 +4,7 @@ import re
 import time
 import logging
 import pysubs2
-from sportarr.profile_hooks import sports_write_kwargs, finish_translation
+from sportarr.profile_hooks import finish_translation
 from sportarr.connection import check_cancelled
 from subtitles.tools.subsync_engines import staged_subtitle_write, SubtitleDestinationChanged
 from media_servers.events import publication_callback
@@ -22,7 +22,8 @@ from radarr.history import history_log_movie
 from sonarr.history import history_log
 from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 
-from ..core.translator_utils import add_translator_info, create_process_result, get_title
+from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
+                                     translation_write_kwargs)
 from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
@@ -253,7 +254,8 @@ class OpenRouterTranslatorService:
 
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
-                 radarr_id, arr_instance_id=None, sports_operation=None, cancel=None):
+                 radarr_id, arr_instance_id=None, sports_operation=None, cancel=None,
+                 expected_destination_versions=()):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -272,6 +274,10 @@ class OpenRouterTranslatorService:
         self.arr_instance_id = arr_instance_id
         self.sports_operation = sports_operation
         self.cancel = cancel
+        # The destination's versions as the queueing sighting found them; an
+        # empty tuple means this translation was not queued by an auto path and
+        # may replace whatever sits at the destination.
+        self.expected_destination_versions = tuple(expected_destination_versions or ())
         self.partial_error = None
         self.routing_error = None
         self.remote_job_id = None
@@ -325,7 +331,7 @@ class OpenRouterTranslatorService:
                                        source_paths=(self.source_srt_file,),
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
                                        allow_empty=not bool(self.sports_operation),
-                                       **sports_write_kwargs(self, job_id)) as temporary:
+                                       **translation_write_kwargs(self, job_id)) as temporary:
                 subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
                 lines_list: List[str] = [x.plaintext for x in subs]
                 lines_list_len = len(lines_list)

@@ -7,15 +7,20 @@ calls so they run fast and without any external dependencies.
 """
 
 import json
+import logging
 import os
 import struct  # noqa: F401
 import sys
+import threading
+import time
 import types
 from collections import namedtuple
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch, mock_open  # noqa: F401
 
 import pytest
+from flask import Blueprint, Flask, g, request
 
 _SYS_BEFORE = dict(sys.modules)
 
@@ -79,6 +84,8 @@ _fake_flask_restx.fields = MagicMock()
 # and `os.environ.__setitem__` rejects anything that is not a string.
 _api_utils_mock = MagicMock()
 _api_utils_mock.authenticate = lambda fn: fn
+_api_utils_mock.authenticate_header_only = lambda fn: fn
+_api_utils_mock.authenticate_header_or_stream_token = lambda fn: fn
 
 _patches = {
     'app.get_args': MagicMock(args=_mock_args),
@@ -123,6 +130,11 @@ from api.editor.editor import (  # noqa: E402
 # Re-import database and path_mappings as the module sees them
 from api.editor import editor as editor_module  # noqa: E402
 
+# The real token module the editor's own imports resolved to, kept alive
+# past the stub cleanup below: patching its settings is what moves the
+# signing key, because the editor holds the module's functions directly.
+_token_module = sys.modules['api.editor.stream_token']
+
 for _k in list(sys.modules):
     if _k not in _SYS_BEFORE:
         del sys.modules[_k]
@@ -140,7 +152,8 @@ SubRow = namedtuple('SubRow', ['subtitles'])
 
 def _make_probe_json(video_codec='h264', audio_codec='aac',
                      width=1920, height=1080, duration='3600.5',
-                     audio_lang='eng', audio_channels=6):
+                     audio_lang='eng', audio_channels=6, video_pix_fmt='yuv420p',
+                     video_profile=None):
     """Build a fake ffprobe JSON structure."""
     return {
         'format': {'duration': duration},
@@ -148,6 +161,8 @@ def _make_probe_json(video_codec='h264', audio_codec='aac',
             {
                 'codec_type': 'video',
                 'codec_name': video_codec,
+                'pix_fmt': video_pix_fmt,
+                'profile': video_profile,
                 'width': width,
                 'height': height,
             },
@@ -381,10 +396,49 @@ class TestHlsCommandBuilding:
 
         assert cmd[:4] == ['/usr/bin/ffmpeg', '-ss', '3533.35', '-i']
         assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
         assert '-tag:v' not in cmd
 
-    def test_zero_start_keeps_hevc_stream_copy(self, tmp_path):
-        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3')
+    def test_zero_start_keeps_hevc_stream_copy_for_native(self, tmp_path):
+        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3',
+                                 video_pix_fmt='yuv420p10le',
+                                 video_profile='Main 10')
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=0,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+            native_hls=True,
+        )
+
+        assert '-ss' not in cmd
+        assert _value_after(cmd, '-c:v') == 'copy'
+        assert _value_after(cmd, '-tag:v') == 'hvc1'
+        assert '-pix_fmt' not in cmd
+
+    def test_zero_start_transcodes_unknown_hevc_profile_for_native(self, tmp_path):
+        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3',
+                                 video_pix_fmt='yuv420p10le')
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=0,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+            native_hls=True,
+        )
+
+        assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
+        assert '-tag:v' not in cmd
+
+    def test_zero_start_transcodes_hevc_for_mse(self, tmp_path):
+        probe = _make_probe_json(video_codec='hevc', audio_codec='ac3',
+                                 video_pix_fmt='yuv420p10le',
+                                 video_profile='Main 10')
         cmd = editor_module._build_hls_ffmpeg_command(
             ffmpeg='/usr/bin/ffmpeg',
             video_path='/video/movie.mkv',
@@ -395,8 +449,47 @@ class TestHlsCommandBuilding:
         )
 
         assert '-ss' not in cmd
-        assert _value_after(cmd, '-c:v') == 'copy'
-        assert _value_after(cmd, '-tag:v') == 'hvc1'
+        assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
+        assert '-tag:v' not in cmd
+
+    def test_zero_start_transcodes_ten_bit_h264(self, tmp_path):
+        probe = _make_probe_json(video_codec='h264', audio_codec='aac',
+                                 video_pix_fmt='yuv420p10le')
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=0,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+        )
+
+        assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
+        assert '-tag:v' not in cmd
+
+    def test_zero_start_transcodes_h264_with_unknown_pixel_format(self, tmp_path):
+        probe = _make_probe_json(video_codec='h264', audio_codec='aac',
+                                 video_pix_fmt=None)
+        cmd = editor_module._build_hls_ffmpeg_command(
+            ffmpeg='/usr/bin/ffmpeg',
+            video_path='/video/movie.mkv',
+            audio_track_idx=0,
+            start_time_sec=0,
+            cache_dir=str(tmp_path),
+            probe_data=probe,
+        )
+
+        assert _value_after(cmd, '-c:v') == 'libx264'
+        assert _value_after(cmd, '-pix_fmt') == 'yuv420p'
+        assert '-tag:v' not in cmd
+
+    def test_cache_dir_separates_native_and_mse_sessions(self):
+        mse = editor_module._hls_cache_dir('movie', 50, None, 0, 0.0, 1)
+        native = editor_module._hls_cache_dir('movie', 50, None, 0, 0.0, 1,
+                                              native_hls=True)
+        assert mse != native
 
 
 def _value_after(items, key):
@@ -1314,3 +1407,647 @@ class TestEditorSubtitles:
             result = subs_resource.get()
 
         assert result[1] == 400
+
+
+# ---------------------------------------------------------------------------
+# Editor stream tokens (bazarr/api/editor/stream_token.py)
+# ---------------------------------------------------------------------------
+
+def _load_standalone(name, path, monkeypatch):
+    """Load one real module by file path, outside the stubbed api package.
+
+    The module is registered through `monkeypatch`, so it leaves sys.modules
+    when the test ends.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(sys.modules, name, module)
+    return module
+
+
+def _stream_token_settings(monkeypatch, apikey='token-test-key'):
+    settings = SimpleNamespace(auth=SimpleNamespace(apikey=apikey))
+    monkeypatch.setattr(_token_module, 'settings', settings)
+    return settings
+
+
+class TestStreamTokenLifetime:
+    """The lifetime rule: full duration plus 30 minutes, 1h..12h, 4h unknown."""
+
+    def test_minimum_lifetime_is_one_hour(self, monkeypatch):
+        _stream_token_settings(monkeypatch)
+        assert _token_module.stream_token_lifetime(600) == 3600
+        assert _token_module.stream_token_lifetime(0) == 3600
+
+    def test_lifetime_is_duration_plus_thirty_minutes(self, monkeypatch):
+        _stream_token_settings(monkeypatch)
+        assert _token_module.stream_token_lifetime(7200) == 9000
+
+    def test_maximum_lifetime_is_twelve_hours(self, monkeypatch):
+        _stream_token_settings(monkeypatch)
+        assert _token_module.stream_token_lifetime(200000) == 43200
+
+    def test_unknown_duration_is_four_hours(self, monkeypatch):
+        _stream_token_settings(monkeypatch)
+        assert _token_module.stream_token_lifetime(None) == 14400
+
+    def test_override_shortens_the_lifetime(self, monkeypatch):
+        _stream_token_settings(monkeypatch)
+        monkeypatch.setenv('BAZARR_EDITOR_STREAM_TOKEN_MAX_SECONDS', '360')
+        assert _token_module.stream_token_lifetime(7200) == 360
+        monkeypatch.setenv('BAZARR_EDITOR_STREAM_TOKEN_MAX_SECONDS', '180')
+        assert _token_module.stream_token_lifetime(7200) == 180
+
+    def test_override_above_the_rule_is_ignored(self, monkeypatch):
+        _stream_token_settings(monkeypatch)
+        monkeypatch.setenv('BAZARR_EDITOR_STREAM_TOKEN_MAX_SECONDS', '99999')
+        assert _token_module.stream_token_lifetime(7200) == 9000
+
+    @pytest.mark.parametrize('value', ['179', '60', '0', '-5', 'abc', '2.5', ''])
+    def test_override_below_180_or_not_an_integer_is_ignored(self, monkeypatch, value):
+        _stream_token_settings(monkeypatch)
+        monkeypatch.setenv('BAZARR_EDITOR_STREAM_TOKEN_MAX_SECONDS', value)
+        assert _token_module.stream_token_lifetime(7200) == 9000
+
+
+class TestStreamTokenMintVerify:
+    """Minting, scope binding, expiry and the signing key."""
+
+    def _mint(self, monkeypatch, **kwargs):
+        _stream_token_settings(monkeypatch)
+        params = {
+            'media_type': 'movie', 'media_id': 50, 'arr_instance_id': None,
+            'audio_track': 0, 'lifetime_seconds': 3600,
+        }
+        params.update(kwargs)
+        return _token_module.mint_stream_token(**params)
+
+    def test_round_trip_verifies_for_the_minted_scope(self, monkeypatch):
+        token = self._mint(monkeypatch)
+        assert _token_module.verify_stream_token(token, 'movie', 50, None, 0)
+
+    def test_token_binds_every_scope_field(self, monkeypatch):
+        token = self._mint(monkeypatch)
+        verify = _token_module.verify_stream_token
+        assert not verify(token, 'episode', 50, None, 0)
+        assert not verify(token, 'movie', 51, None, 0)
+        assert not verify(token, 'movie', 50, 2, 0)
+        assert not verify(token, 'movie', 50, None, 1)
+        assert not verify(token, 'movie', 50, None, None)
+
+    def test_token_binds_the_arr_instance(self, monkeypatch):
+        token = self._mint(monkeypatch, arr_instance_id=2)
+        assert _token_module.verify_stream_token(token, 'movie', 50, 2, 0)
+        assert not _token_module.verify_stream_token(token, 'movie', 50, None, 0)
+        assert not _token_module.verify_stream_token(token, 'movie', 50, 3, 0)
+
+    def test_expired_token_is_rejected(self, monkeypatch):
+        token = self._mint(monkeypatch, lifetime_seconds=-10)
+        assert not _token_module.verify_stream_token(token, 'movie', 50, None, 0)
+
+    def test_api_key_change_invalidates_every_token(self, monkeypatch):
+        token = self._mint(monkeypatch)
+        _stream_token_settings(monkeypatch, apikey='rotated-key')
+        assert not _token_module.verify_stream_token(token, 'movie', 50, None, 0)
+
+    def test_compat_stream_token_is_rejected(self, monkeypatch):
+        import base64
+        import hashlib as _hashlib
+        import hmac as _hmac
+        _stream_token_settings(monkeypatch)
+        # A token shaped like the compat endpoint's mint_stream_token output,
+        # signed with the compat secret rather than the editor's key.
+        payload = {'p': 'provider', 'i': '50', 'exp': int(time.time()) + 300, 't': 's'}
+        p_bytes = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
+        sig = _hmac.new(b'compat-secret-' + b'x' * 20, p_bytes, _hashlib.sha256).digest()
+        compat_token = base64.urlsafe_b64encode(p_bytes + b'.' + sig).decode().rstrip('=')
+        assert not _token_module.verify_stream_token(compat_token, 'movie', 50, None, 0)
+
+    def test_garbage_tokens_are_rejected(self, monkeypatch):
+        _stream_token_settings(monkeypatch)
+        verify = _token_module.verify_stream_token
+        for bad in ['', 'nonsense', '####', 'a.b', 'a' * 200]:
+            assert not verify(bad, 'movie', 50, None, 0)
+
+    def test_tampered_payload_is_refused(self, monkeypatch):
+        import base64
+        token = self._mint(monkeypatch)
+        padded = token + ('=' * (-len(token) % 4))
+        raw = base64.urlsafe_b64decode(padded.encode())
+        payload = json.loads(raw[:-33])
+        payload['i'] = 51
+        p_bytes = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
+        # The signature is untouched: it still covers the original payload.
+        forged = base64.urlsafe_b64encode(p_bytes + raw[-33:]).decode().rstrip('=')
+        assert not _token_module.verify_stream_token(forged, 'movie', 50, None, 0)
+        assert not _token_module.verify_stream_token(forged, 'movie', 51, None, 0)
+
+    def test_tampered_signature_is_refused(self, monkeypatch):
+        import base64
+        token = self._mint(monkeypatch)
+        padded = token + ('=' * (-len(token) % 4))
+        raw = bytearray(base64.urlsafe_b64decode(padded.encode()))
+        raw[-1] ^= 0x01
+        forged = base64.urlsafe_b64encode(bytes(raw)).decode().rstrip('=')
+        assert not _token_module.verify_stream_token(forged, 'movie', 50, None, 0)
+
+    def test_same_key_forgery_from_a_fresh_process_is_refused(self, monkeypatch):
+        _stream_token_settings(monkeypatch)
+        # A second import of the module generates its own per-process
+        # secret, so a token it mints under the same API key must not
+        # verify with the key of this module's process.
+        st = _load_standalone(
+            'fresh_stream_token_copy',
+            os.path.join(_bazarr_root, 'api', 'editor', 'stream_token.py'),
+            monkeypatch,
+        )
+        st.settings = SimpleNamespace(auth=SimpleNamespace(apikey='token-test-key'))
+        token = st.mint_stream_token(media_type='movie', media_id=50, arr_instance_id=None,
+                                     audio_track=0, lifetime_seconds=3600)
+        assert st.verify_stream_token(token, 'movie', 50, None, 0)
+        assert not _token_module.verify_stream_token(token, 'movie', 50, None, 0)
+
+    def test_correctly_signed_token_with_the_wrong_type_tag_is_refused(self, monkeypatch):
+        import base64
+        import hashlib as _hashlib
+        import hmac as _hmac
+        _stream_token_settings(monkeypatch)
+        # Signed with this process's own key, so only the type tag can fail:
+        # a compat endpoint token must not open the editor's HLS route.
+        payload = {'k': 's', 'm': 'movie', 'i': 50, 'a': None, 't': 0,
+                   'e': int(time.time()) + 300}
+        p_bytes = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
+        sig = _hmac.new(_token_module._signing_key(), p_bytes, _hashlib.sha256).digest()
+        token = base64.urlsafe_b64encode(p_bytes + b'.' + sig).decode().rstrip('=')
+        assert not _token_module.verify_stream_token(token, 'movie', 50, None, 0)
+
+    def test_eight_first_mints_released_together_all_verify(self, monkeypatch):
+        _stream_token_settings(monkeypatch)
+        # A freshly imported module, so the signing secret is brand new.
+        st = _load_standalone(
+            'barrier_fresh_stream_token',
+            os.path.join(_bazarr_root, 'api', 'editor', 'stream_token.py'),
+            monkeypatch,
+        )
+        st.settings = SimpleNamespace(auth=SimpleNamespace(apikey='barrier-key'))
+        workers = 8
+        barrier = threading.Barrier(workers)
+        results = []
+        errors = []
+
+        def mint_one():
+            try:
+                barrier.wait(timeout=10)
+                token = st.mint_stream_token(media_type='movie', media_id=50, arr_instance_id=None,
+                                             audio_track=0, lifetime_seconds=3600)
+                results.append(st.verify_stream_token(token, 'movie', 50, None, 0))
+            except Exception as e:  # pragma: no cover - reported below
+                errors.append(e)
+
+        threads = [threading.Thread(target=mint_one) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert errors == []
+        assert results == [True] * workers
+
+
+class TestEditorStreamTokenRoute:
+    """GET /api/editor/stream-token."""
+
+    def _get(self, query, monkeypatch, video_path='/video/test.mkv', probe=None):
+        monkeypatch.setattr(editor_module, '_resolve_video_path', lambda *a, **k: video_path)
+        if probe is None:
+            probe_fn = lambda _path: _make_probe_json(duration='12.3')  # noqa: E731
+        elif callable(probe):
+            probe_fn = probe
+        else:
+            probe_fn = lambda _path: probe  # noqa: E731
+        monkeypatch.setattr(editor_module, '_probe_video', probe_fn)
+        monkeypatch.setattr(os.path, 'isfile', lambda _path: True)
+        _stream_token_settings(monkeypatch)
+        app = Flask(__name__)
+        with app.test_request_context(f'/api/editor/stream-token{query}'):
+            return editor_module.EditorStreamToken().get()
+
+    def _headers(self, response):
+        return (response.headers.get('Cache-Control'),
+                response.headers.get('X-Bazarr-Stream-Token-Route'))
+
+    def test_returns_token_and_lifetime(self, monkeypatch):
+        response = self._get('?mediaType=movie&mediaId=50', monkeypatch)
+        assert response.status_code == 200
+        assert self._headers(response) == ('no-store', '1')
+        body = json.loads(response.get_data(as_text=True))
+        assert body['lifetime'] == 3600
+        assert _token_module.verify_stream_token(body['token'], 'movie', 50, None, 0)
+
+    def test_binds_the_requested_scope(self, monkeypatch):
+        response = self._get('?mediaType=episode&mediaId=7&arr_instance_id=2&audioTrack=3', monkeypatch)
+        body = json.loads(response.get_data(as_text=True))
+        assert _token_module.verify_stream_token(body['token'], 'episode', 7, 2, 3)
+        assert not _token_module.verify_stream_token(body['token'], 'episode', 7, None, 3)
+
+    def test_unknown_duration_mints_four_hours(self, monkeypatch):
+        probe = {'format': {}, 'streams': []}
+        response = self._get('?mediaType=movie&mediaId=50', monkeypatch, probe=probe)
+        body = json.loads(response.get_data(as_text=True))
+        assert body['lifetime'] == 14400
+
+    @pytest.mark.parametrize('query, message, status', [
+        ('', 'mediaType must be one of "episode", "movie", "sports"', 400),
+        ('?mediaType=podcast&mediaId=50', 'mediaType must be one of "episode", "movie", "sports"', 400),
+        ('?mediaType=movie', 'mediaId is required', 400),
+        ('?mediaType=movie&mediaId=abc', 'mediaId must be an integer', 400),
+        ('?mediaType=movie&mediaId=50&audioTrack=abc', 'audioTrack must be an integer', 400),
+        ('?mediaType=movie&mediaId=50&audioTrack=-1', 'audioTrack must be >= 0', 400),
+        ('?mediaType=movie&mediaId=50&arr_instance_id=bad', 'arr_instance_id must be an integer', 400),
+    ])
+    def test_bad_parameters_carry_the_headers(self, monkeypatch, query, message, status):
+        response = self._get(query, monkeypatch)
+        assert response.status_code == status
+        assert self._headers(response) == ('no-store', '1')
+        assert json.loads(response.get_data(as_text=True))['message'] == message
+
+    def test_unresolvable_media_is_refused_with_the_headers(self, monkeypatch):
+        response = self._get('?mediaType=movie&mediaId=999', monkeypatch,
+                             video_path=('Movie not found', 404))
+        assert response.status_code == 404
+        assert self._headers(response) == ('no-store', '1')
+
+    def test_missing_video_file_is_refused_with_the_headers(self, monkeypatch):
+        monkeypatch.setattr(editor_module, '_resolve_video_path', lambda *a, **k: '/video/missing.mkv')
+        monkeypatch.setattr(os.path, 'isfile', lambda _path: False)
+        _stream_token_settings(monkeypatch)
+        app = Flask(__name__)
+        with app.test_request_context('/api/editor/stream-token?mediaType=movie&mediaId=50'):
+            response = editor_module.EditorStreamToken().get()
+        assert response.status_code == 404
+        assert self._headers(response) == ('no-store', '1')
+
+    def test_probe_failure_is_refused_with_the_headers(self, monkeypatch):
+        response = self._get('?mediaType=movie&mediaId=50', monkeypatch,
+                             probe=lambda _path: None)
+        assert response.status_code == 500
+        assert self._headers(response) == ('no-store', '1')
+
+    def test_probe_exception_is_refused_with_the_headers(self, monkeypatch):
+        def exploding_probe(_path):
+            raise RuntimeError('ffprobe crashed')
+
+        response = self._get('?mediaType=movie&mediaId=50', monkeypatch,
+                             probe=exploding_probe)
+        assert response.status_code == 500
+        assert self._headers(response) == ('no-store', '1')
+        assert json.loads(response.get_data(as_text=True))['message'] == (
+            'Failed to probe video file'
+        )
+
+
+class TestEditorHlsStreamToken:
+    """The HLS route accepting st and rewriting segment and map URIs with it."""
+
+    MANIFEST = (
+        '#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:4\n'
+        '#EXT-X-MAP:URI="init.mp4"\n'
+        '#EXTINF:4.000000,\nsegment_000000.m4s\n'
+        '#EXTINF:4.000000,\nsegment_000001.m4s\n#EXT-X-ENDLIST\n'
+    )
+
+    @pytest.fixture
+    def hls_env(self, tmp_path, monkeypatch):
+        video_path = tmp_path / 'video.mkv'
+        video_path.write_bytes(b'video bytes')
+        monkeypatch.setattr(editor_module, 'HLS_CACHE_DIR', str(tmp_path / 'hls'))
+        for native_hls in (False, True):
+            cache_dir = Path(editor_module._hls_cache_dir(
+                'movie', 50, None, 0, 0.0, video_path.stat().st_mtime,
+                native_hls=native_hls))
+            cache_dir.mkdir(parents=True)
+            mode = b'native' if native_hls else b'mse'
+            (cache_dir / 'playlist.m3u8').write_text(self.MANIFEST)
+            (cache_dir / 'init.mp4').write_bytes(b'init ' + mode)
+            (cache_dir / 'segment_000000.m4s').write_bytes(b'segment zero ' + mode)
+            (cache_dir / 'segment_000001.m4s').write_bytes(b'segment one ' + mode)
+        monkeypatch.setattr(editor_module, '_resolve_video_path', lambda *a, **k: str(video_path))
+        monkeypatch.setattr(editor_module, '_spawn_hls_encoder', lambda *a, **k: None)
+        monkeypatch.setattr(editor_module, '_touch_hls_session', lambda *a, **k: None)
+        monkeypatch.setattr(editor_module, '_wait_for_first_segment', lambda *a, **k: True)
+        return video_path
+
+    def _get(self, filename, query='', headers=None, monkeypatch=None, hls_env=None):
+        app = Flask(__name__)
+        url = f'/api/editor/hls/movie/50/0/0.000/{filename}{query}'
+        with app.test_request_context(url, headers=headers or {}):
+            # The handler echoes only a token the decorator verified; the
+            # direct call stands in for that verification here.
+            st = request.args.get('st')
+            if st:
+                g.editor_hls_stream_token = st
+            return editor_module.EditorHls().get(
+                media_type='movie', media_id=50, audio_track=0,
+                start_time='0.000', filename=filename,
+            )
+
+    def test_playlist_drops_a_st_the_route_did_not_verify(self, hls_env):
+        app = Flask(__name__)
+        # A st that merely rode along, malformed at that: the handler was
+        # reached with the header, and the playlist must not echo it.
+        url = '/api/editor/hls/movie/50/0/0.000/playlist.m3u8?st=abc%5Cq'
+        with app.test_request_context(url):
+            response = editor_module.EditorHls().get(
+                media_type='movie', media_id=50, audio_track=0,
+                start_time='0.000', filename='playlist.m3u8',
+            )
+        assert response.status_code == 200
+        # send_file answers in direct passthrough mode; the bytes are read
+        # the way the route's own range tests read them.
+        body = b''.join(response.response).decode()
+        assert 'st=' not in body
+        assert 'URI="init.mp4"' in body
+        assert 'segment_000000.m4s\n' in body
+
+    def test_playlist_with_st_rewrites_segment_and_map_uris(self, hls_env):
+        response = self._get('playlist.m3u8', query='?st=token-one')
+        assert response.status_code == 200
+        assert response.mimetype == 'application/vnd.apple.mpegurl'
+        body = response.get_data(as_text=True)
+        assert 'URI="init.mp4?st=token-one"' in body
+        assert 'segment_000000.m4s?st=token-one' in body
+        assert 'segment_000001.m4s?st=token-one' in body
+        assert 'apikey' not in body
+
+    def test_playlist_response_is_never_cacheable(self, hls_env):
+        for query in ('', '?st=token-one'):
+            response = self._get('playlist.m3u8', query=query)
+            assert response.headers['Cache-Control'] == 'no-store'
+
+    def test_segment_200_response_is_never_cacheable(self, hls_env):
+        response = self._get('segment_000000.m4s', query='?st=token-one')
+        assert response.status_code == 200
+        assert response.headers['Cache-Control'] == 'no-store'
+
+    def test_segment_206_response_is_never_cacheable(self, hls_env):
+        response = self._get('segment_000000.m4s', query='?st=token-one',
+                             headers={'Range': 'bytes=0-3'})
+        assert response.status_code == 206
+        assert response.headers['Cache-Control'] == 'no-store'
+        assert b''.join(response.response) == b'segm'
+
+    def test_segment_bytes_come_from_the_mode_cache(self, hls_env):
+        native = self._get('segment_000000.m4s', query='?st=token-one')
+        mse = self._get('segment_000000.m4s')
+        assert b'native' in b''.join(native.response)
+        assert b'mse' in b''.join(mse.response)
+        assert b'native' not in b''.join(mse.response)
+
+    def test_init_segment_response_is_never_cacheable(self, hls_env):
+        response = self._get('init.mp4', query='?st=token-one')
+        assert response.status_code == 200
+        assert response.headers['Cache-Control'] == 'no-store'
+
+
+class TestEditorHeaderOnlyAuth:
+    """The real decorators, loaded outside the stubbed api package."""
+
+    def _make_auth_app(self, monkeypatch, explode=False):
+        utils_path = os.path.join(_bazarr_root, 'api', 'utils.py')
+        token_path = os.path.join(_bazarr_root, 'api', 'editor', 'stream_token.py')
+        utils_mod = _load_standalone('standalone_api_utils', utils_path, monkeypatch)
+        token_mod = _load_standalone('standalone_editor_stream_token', token_path, monkeypatch)
+        api_key = 'header-only-key'
+        settings = SimpleNamespace(auth=SimpleNamespace(apikey=api_key))
+        monkeypatch.setattr(utils_mod, 'settings', settings)
+        monkeypatch.setattr(token_mod, 'settings', settings)
+
+        # The decorators import the token module lazily through the api
+        # package, so the standalone module is handed to them under the
+        # names that import resolves.
+        fake_api = types.ModuleType('api')
+        fake_editor = types.ModuleType('api.editor')
+        fake_editor.stream_token = token_mod
+        fake_api.editor = fake_editor
+        monkeypatch.setitem(sys.modules, 'api', fake_api)
+        monkeypatch.setitem(sys.modules, 'api.editor', fake_editor)
+
+        app = Flask(__name__)
+        app.config['TESTING'] = True
+        # The production wiring: the api package registers the no-store
+        # hook on the api blueprint, so the fixture registers it the same
+        # way, through the same registration function, instead of
+        # installing the hook by hand.
+        api_bp = Blueprint('api', __name__, url_prefix='/api')
+        utils_mod.register_editor_no_store(api_bp)
+        app.register_blueprint(api_bp)
+        if explode:
+            # The bare-500 path: the framework builds the answer from the
+            # unhandled exception, so no error handler of this test may
+            # intercept it. The two routes that explode sit on the same
+            # restx Api surface production serves them from: that surface's
+            # error handling is the one that builds the 500.
+            app.config['PROPAGATE_EXCEPTIONS'] = False
+            from flask_restx import Api, Namespace, Resource
+
+            namespace = Namespace('editor')
+            Api(app, doc=False).add_namespace(namespace, '/api/')
+
+            @namespace.route('editor/stream-token')
+            class StreamTokenRoute(Resource):
+                @utils_mod.authenticate_header_only
+                def get(self):
+                    raise RuntimeError('token route exploded')
+
+            @namespace.route(
+                'editor/hls/<string:media_type>/<int:media_id>'
+                '/<int:audio_track>/<string:filename>'
+            )
+            class HlsRoute(Resource):
+                @utils_mod.authenticate_header_or_stream_token
+                def get(self, media_type, media_id, audio_track, filename):
+                    raise RuntimeError('hls route exploded')
+        else:
+            @app.route('/api/editor/info')
+            @utils_mod.authenticate_header_only
+            def info():
+                return {'ok': True}
+
+            @app.route('/api/editor/sync', methods=['POST'])
+            @utils_mod.authenticate_header_only
+            def sync():
+                return {'ok': True}
+
+            @app.route('/api/editor/stream-token')
+            @utils_mod.authenticate_header_only
+            def stream_token():
+                return {'ok': True}
+
+            @app.route('/api/editor/hls/<string:media_type>/<int:media_id>/<int:audio_track>/<string:filename>')
+            @utils_mod.authenticate_header_or_stream_token
+            def hls(media_type, media_id, audio_track, filename):
+                return {'media': media_type, 'id': media_id, 'track': audio_track}
+
+        return app.test_client(), token_mod, api_key
+
+    @pytest.fixture
+    def auth_app(self, monkeypatch):
+        return self._make_auth_app(monkeypatch)
+
+    @pytest.fixture
+    def exploding_app(self, monkeypatch):
+        return self._make_auth_app(monkeypatch, explode=True)
+
+    def test_header_key_passes(self, auth_app):
+        client, _, api_key = auth_app
+        response = client.get('/api/editor/info', headers={'X-API-KEY': api_key})
+        assert response.status_code == 200
+
+    def test_query_key_is_refused_without_a_deprecation_warning(self, auth_app, caplog):
+        client, _, api_key = auth_app
+        caplog.set_level(logging.WARNING)
+        response = client.get('/api/editor/info', query_string={'apikey': api_key})
+        assert response.status_code == 401
+        assert 'deprecated' not in caplog.text
+
+    def test_form_key_is_refused(self, auth_app, caplog):
+        client, _, api_key = auth_app
+        caplog.set_level(logging.WARNING)
+        response = client.post('/api/editor/sync', data={'apikey': api_key},
+                               content_type='application/x-www-form-urlencoded')
+        assert response.status_code == 401
+        assert 'deprecated' not in caplog.text
+
+    def test_wrong_header_key_is_refused(self, auth_app):
+        client, _, _api_key = auth_app
+        response = client.get('/api/editor/info', headers={'X-API-KEY': 'wrong'})
+        assert response.status_code == 401
+
+    def test_a_valid_header_key_with_a_query_apikey_is_refused(self, auth_app):
+        client, _, api_key = auth_app
+        # A valid header credential does not buy the key a place in the
+        # URL: an apikey in the query is refused before either credential
+        # is read, so it can never ride along unrefused.
+        response = client.get('/api/editor/stream-token',
+                               query_string={'apikey': api_key},
+                               headers={'X-API-KEY': api_key})
+        assert response.status_code == 401
+
+    def test_a_valid_header_key_with_a_query_apikey_is_refused_on_the_hls_route(self, auth_app):
+        client, _, api_key = auth_app
+        response = client.get('/api/editor/hls/movie/50/0/playlist.m3u8',
+                              query_string={'apikey': api_key},
+                              headers={'X-API-KEY': api_key})
+        assert response.status_code == 401
+
+    def test_a_valid_stream_token_with_a_query_apikey_is_refused(self, auth_app):
+        client, token_mod, api_key = auth_app
+        token = token_mod.mint_stream_token(media_type='movie', media_id=50,
+                                            arr_instance_id=None, audio_track=0,
+                                            lifetime_seconds=3600)
+        response = client.get('/api/editor/hls/movie/50/0/playlist.m3u8',
+                              query_string={'st': token, 'apikey': api_key})
+        assert response.status_code == 401
+
+    def test_unauthorized_token_route_answer_carries_no_store_and_the_marker(self, auth_app):
+        client, _, _api_key = auth_app
+        response = client.get('/api/editor/stream-token')
+        assert response.status_code == 401
+        assert response.headers['Cache-Control'] == 'no-store'
+        assert response.headers['X-Bazarr-Stream-Token-Route'] == '1'
+
+    def test_valid_stream_token_passes_the_hls_route(self, auth_app):
+        client, token_mod, _api_key = auth_app
+        token = token_mod.mint_stream_token(media_type='movie', media_id=50,
+                                            arr_instance_id=None, audio_track=0,
+                                            lifetime_seconds=3600)
+        response = client.get(f'/api/editor/hls/movie/50/0/playlist.m3u8?st={token}')
+        assert response.status_code == 200
+        assert response.get_json() == {'media': 'movie', 'id': 50, 'track': 0}
+
+    def test_invalid_stream_token_is_refused(self, auth_app):
+        client, _, _api_key = auth_app
+        response = client.get('/api/editor/hls/movie/50/0/playlist.m3u8?st=nonsense')
+        assert response.status_code == 401
+
+    def test_expired_stream_token_is_refused(self, auth_app):
+        client, token_mod, _api_key = auth_app
+        token = token_mod.mint_stream_token(media_type='movie', media_id=50,
+                                            arr_instance_id=None, audio_track=0,
+                                            lifetime_seconds=-10)
+        response = client.get(f'/api/editor/hls/movie/50/0/playlist.m3u8?st={token}')
+        assert response.status_code == 401
+
+    def test_stream_token_for_another_scope_is_refused(self, auth_app):
+        client, token_mod, _api_key = auth_app
+        token = token_mod.mint_stream_token(media_type='episode', media_id=7,
+                                            arr_instance_id=None, audio_track=0,
+                                            lifetime_seconds=3600)
+        response = client.get(f'/api/editor/hls/movie/50/0/playlist.m3u8?st={token}')
+        assert response.status_code == 401
+
+    def test_stream_token_for_another_arr_instance_is_refused(self, auth_app):
+        client, token_mod, _api_key = auth_app
+        token = token_mod.mint_stream_token(media_type='movie', media_id=50,
+                                            arr_instance_id=1, audio_track=0,
+                                            lifetime_seconds=3600)
+        response = client.get(f'/api/editor/hls/movie/50/0/playlist.m3u8?st={token}')
+        assert response.status_code == 401
+        response = client.get(f'/api/editor/hls/movie/50/0/playlist.m3u8?arr_instance_id=1&st={token}')
+        assert response.status_code == 200
+
+    def test_api_key_rotation_refuses_outstanding_tokens(self, auth_app, monkeypatch):
+        client, token_mod, _api_key = auth_app
+        token = token_mod.mint_stream_token(media_type='movie', media_id=50,
+                                            arr_instance_id=None, audio_track=0,
+                                            lifetime_seconds=3600)
+        # A rotation changes the signing key: the outstanding token is refused.
+        token_mod.settings = SimpleNamespace(auth=SimpleNamespace(apikey='rotated'))
+        response = client.get(f'/api/editor/hls/movie/50/0/playlist.m3u8?st={token}')
+        assert response.status_code == 401
+
+    def test_options_and_unsupported_method_answers_carry_the_headers(self, auth_app):
+        # The router builds the automatic OPTIONS answer and the 405 of an
+        # unsupported method before any view is dispatched, so the
+        # decorators' no-store finalizer never sees them. The blueprint's
+        # app-wide hook, registered in the fixture the way production
+        # registers it, is what marks those answers, and the token route's
+        # router-built answers carry the route marker as well.
+        client, _, _api_key = auth_app
+        hls_path = '/api/editor/hls/movie/50/0/playlist.m3u8'
+        for path in ('/api/editor/stream-token', hls_path):
+            response = client.options(path)
+            assert response.status_code == 200
+            assert response.headers['Cache-Control'] == 'no-store'
+
+            response = client.post(path)
+            assert response.status_code == 405
+            assert response.headers['Cache-Control'] == 'no-store'
+
+        for method in ('options', 'post'):
+            response = getattr(client, method)('/api/editor/stream-token')
+            assert response.headers['X-Bazarr-Stream-Token-Route'] == '1'
+            response = getattr(client, method)(hls_path)
+            assert 'X-Bazarr-Stream-Token-Route' not in response.headers
+
+    def test_an_unhandled_error_in_the_token_route_is_no_store_and_marked(self, exploding_app):
+        client, _, api_key = exploding_app
+        response = client.get('/api/editor/stream-token', headers={'X-API-KEY': api_key})
+        assert response.status_code == 500
+        # The 500 the framework builds from the exception is no-store like
+        # every other answer of the route, and carries the marker too: the
+        # app-wide hook marks whatever the token route answers, whatever
+        # built the answer, so the frontend never mistakes this 500 for a
+        # reverse proxy answering while Bazarr is down.
+        assert response.headers['Cache-Control'] == 'no-store'
+        assert response.headers['X-Bazarr-Stream-Token-Route'] == '1'
+
+    def test_an_unhandled_error_in_the_hls_route_is_no_store(self, exploding_app):
+        client, _, api_key = exploding_app
+        response = client.get('/api/editor/hls/movie/50/0/playlist.m3u8',
+                              headers={'X-API-KEY': api_key})
+        assert response.status_code == 500
+        assert response.headers['Cache-Control'] == 'no-store'
+        assert 'X-Bazarr-Stream-Token-Route' not in response.headers
+

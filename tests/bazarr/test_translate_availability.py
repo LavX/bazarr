@@ -23,6 +23,7 @@ def _settings(translator_type, **overrides):
         lingarr_url='',
         openrouter_url='',
         openrouter_api_key='',
+        openrouter_encryption_key='',
     )
     for name, value in overrides.items():
         setattr(translator, name, value)
@@ -80,27 +81,91 @@ def test_lingarr_with_a_url_is_available(monkeypatch):
     assert availability.translation_available() == (True, '')
 
 
+# A placeholder 64-hex fixture built from a repeated fragment, exactly the
+# shape the client's own validator accepts.
+_HEX_KEY = '0123456789abcdef' * 4
+
+
 def test_openrouter_without_a_service_url_is_unavailable(monkeypatch):
-    availability = _availability(monkeypatch, 'openrouter', openrouter_api_key='fixture-key')
+    availability = _availability(monkeypatch, 'openrouter',
+                                  openrouter_encryption_key=_HEX_KEY, openrouter_api_key='fixture-key')
 
     assert availability.translation_available() == (
         False, 'The AI Subtitle Translator service URL is not configured')
 
 
-def test_openrouter_without_an_api_key_is_unavailable(monkeypatch):
+def test_openrouter_with_a_url_and_no_api_key_is_available(monkeypatch):
+    """The sidecar can hold its own OpenRouter key, so a Bazarr-side API key is
+    not something the gate can require: refusing here told sidecar-key users
+    translation was unavailable while their translations worked."""
     availability = _availability(
         monkeypatch, 'openrouter', openrouter_url='http://subtitle-translator:8765')
 
-    assert availability.translation_available() == (
-        False, 'The AI Subtitle Translator API key is not configured')
+    assert availability.translation_available() == (True, '')
 
 
-def test_openrouter_with_a_url_and_a_key_is_available(monkeypatch):
+def test_openrouter_with_a_sidecar_key_and_no_api_key_is_available(monkeypatch):
     availability = _availability(
         monkeypatch, 'openrouter',
-        openrouter_url='http://subtitle-translator:8765', openrouter_api_key='fixture-key')
+        openrouter_url='http://subtitle-translator:8765', openrouter_encryption_key=_HEX_KEY)
 
     assert availability.translation_available() == (True, '')
+
+
+def test_openrouter_with_a_blank_encryption_key_is_available(monkeypatch):
+    """The documented encryption-off sidecar mode: the field is left empty and
+    the sidecar checks no auth token, so a blank key is a configuration the
+    gate has no business refusing. A runtime refusal is the failure record's
+    answer, not the gate's."""
+    availability = _availability(
+        monkeypatch, 'openrouter', openrouter_url='http://subtitle-translator:8765',
+        openrouter_encryption_key='')
+
+    assert availability.translation_available() == (True, '')
+
+
+@pytest.mark.parametrize('key', [
+    'zz',
+    '0123456789abcdef',
+    '0' * 63 + ' ',
+    ' ' + '0' * 63,
+    5 * '0123456789abcdef' + 'g',
+    '0' * 64 + '\n',
+], ids=['not-hex', 'too-short', 'trailing-space', 'leading-space', 'non-hex-character',
+        'trailing-newline'])
+def test_openrouter_with_a_malformed_encryption_key_is_unavailable(monkeypatch, key):
+    """The client's encrypt_api_key raises on every job for a key that is not
+    exactly 64 hexadecimal characters, so the gate refuses the same shapes,
+    with the same rule the client applies. A trailing newline counts: the
+    shared rule is a full match, not 64 characters followed by anything
+    `$` accepts before a line end."""
+    availability = _availability(
+        monkeypatch, 'openrouter',
+        openrouter_url='http://subtitle-translator:8765', openrouter_encryption_key=key)
+
+    assert availability.translation_available() == (
+        False, 'The AI Subtitle Translator encryption key must be exactly 64 hexadecimal characters')
+
+
+def test_openrouter_with_an_uppercase_hex_key_is_available(monkeypatch):
+    availability = _availability(
+        monkeypatch, 'openrouter',
+        openrouter_url='http://subtitle-translator:8765',
+        openrouter_encryption_key='0123456789ABCDEF' * 4)
+
+    assert availability.translation_available() == (True, '')
+
+
+def test_a_named_engine_is_answered_whatever_is_configured(monkeypatch):
+    """The subtitle editor uses the AI Subtitle Translator service whatever the
+    settings page has selected, so it asks about that engine by name and the
+    configured type is not read."""
+    availability = _availability(monkeypatch, 'none', openrouter_url='http://subtitle-translator:8765')
+
+    answer = availability.translation_available('openrouter')
+
+    assert answer == (True, '')
+    assert availability.translation_available() == (False, 'No translator is configured')
 
 
 @pytest.mark.parametrize('translator_type', ['google', 'lingar', 'Google', 'open_router'])

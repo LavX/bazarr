@@ -15,6 +15,7 @@ from threading import Thread, Lock, RLock
 from app import activity
 from app.event_handler import event_stream
 from app.config import settings
+from secret_store.scrub import scrub_text, scrub_value
 
 # The package directory, i.e. the one holding subtitles/, sonarr/, app/ and the
 # rest. add_job_from_function derives a job's module from its filename relative
@@ -133,8 +134,10 @@ class Job:
     :type retryable: bool
     :ivar retry_of: The id of the failed job this one retries, or None.
     :type retry_of: int, optional
-    :ivar stopped: Whether the job ended at Stop instead of finishing. It is still recorded as completed.
-        ``cancelled`` only records that Stop was pressed, and a job past its last checkpoint finishes anyway.
+    :ivar stopped: Whether the job ended at Stop instead of finishing, which its ``cancelled`` status
+        says as well. The flag is kept for consumers that keyed on it while a stopped job still read as
+        completed. ``cancelled`` alone only records that Stop was pressed, and a job past its last
+        checkpoint finishes anyway, with status ``completed``.
     :type stopped: bool
     :ivar origin: Who started the job: ``"user"`` for one an authenticated request enqueued, ``"scheduled"``
         for one the scheduler's task pool enqueued, None when nothing knows. Sent with the job, so the
@@ -325,7 +328,7 @@ class JobsQueue:
         :param job_id: Optional; The unique ID of the job to filter the results.
         :type job_id: int
         :param status: Optional; The status of jobs to filter the results. Expected
-            values are 'pending', 'running', 'failed', or 'completed'.
+            values are 'pending', 'running', 'failed', 'completed', or 'cancelled'.
         :type status: str
         :return: A list of dictionaries with job details that match the given filters.
             If no matches are found, an empty list is returned.
@@ -333,10 +336,21 @@ class JobsQueue:
         """
         queues = self.jobs_pending_queue + self.jobs_running_queue + self.jobs_failed_queue + self.jobs_completed_queue
         if status:
+            terminal = status in ('completed', 'cancelled')
+            name = f'jobs_{status}_queue'
+            if status == 'cancelled':
+                # A stopped job is recorded as cancelled and kept on the
+                # completed deque: one terminal history, one cap, and the one
+                # queue the drawer's Stopped group clears.
+                name = 'jobs_completed_queue'
             try:
-                queues = self.__dict__[f'jobs_{status}_queue']
+                queues = self.__dict__[name]
             except KeyError:
                 return []
+            if terminal:
+                # Two statuses share the one deque, so the row's own status
+                # tells them apart: 'completed' does not answer a stopped job.
+                queues = [job for job in queues if job.status == status]
 
         if job_id:
             return [vars(job) for job in queues if job.job_id == job_id]
@@ -465,12 +479,21 @@ class JobsQueue:
         how to run and a ``label`` for its button, plus whatever that kind
         needs, for example ``{"kind": "discover.save", "label": "Save",
         "ticket": 12}``. The completion notification and the Jobs drawer show
-        it; nothing else about the job is exposed.
+        it; nothing else about the job is exposed. It is scrubbed like every
+        other job text: a filename a provider chose can carry a credential.
+        ``kind`` is dispatch, not text, so it is kept as given: a credential
+        that happens to equal a handler name must not stop the frontend
+        finding that handler.
         """
+        action = dict(action)
+        kind = action.get('kind')
+        scrubbed = scrub_value(action)
+        if kind is not None:
+            scrubbed['kind'] = kind
         with self._queue_lock:
             for job in self.jobs_running_queue:
                 if job.job_id == job_id:
-                    job.action = dict(action)
+                    job.action = scrubbed
                     return True
         return False
 
@@ -567,6 +590,11 @@ class JobsQueue:
         :return: Dictionary containing the payload for the event stream.
         :rtype: dict
         """
+        # A progress message is built by app code out of a provider's or a
+        # plugin's own words, and a credential can be inside one: it is
+        # stored on the job, sent over the socket and read back by the API,
+        # so it is scrubbed once, here, before any of them.
+        progress_message = scrub_text(progress_message)
         payload = {"job_id": job.job_id, "status": job.status}
         progress_max_updated = False
 
@@ -931,7 +959,10 @@ class JobsQueue:
             job.job_returned_value = getattr(module, job.func)(*job.args, **job.kwargs)
         except JobCancelled:
             logging.info(f"Job {job.job_name} ({job.job_id}) was cancelled by user")  # noqa: G004
-            job.status = 'completed'
+            # A terminal status of its own: anything reading the API directly
+            # used to see a stopped job as completed, and a waiter keyed on
+            # completed could count a stop as a finish.
+            job.status = 'cancelled'
             job.stopped = True
             job.progress_message = "Cancelled by user"
             job.last_run_time = datetime.now(timezone.utc)
@@ -944,7 +975,11 @@ class JobsQueue:
         except JobFailed as e:
             logging.debug(f"Job {job.job_name} ({job.job_id}) failed: {e}")  # noqa: G004
             job.job_returned_value = e.returned_value
-            job.error = {"reason": e.reason, "message": str(e)}
+            # The message is whatever the raising code built, often from a
+            # provider's own error body, so a credential can be inside it: it
+            # is stored on the job, sent over the socket and read by the API,
+            # so it is scrubbed once, here, before any of them.
+            job.error = {"reason": e.reason, "message": scrub_text(str(e))}
             if e.retryable is not None:
                 job.retryable = e.retryable
             self._mark_failed(job)
@@ -975,7 +1010,7 @@ class JobsQueue:
                 # progress_value being None forces frontend to fetch a full job payload
                 payload = {
                     "job_id": job.job_id,
-                    "status": job.status,  # 'completed' or 'failed'
+                    "status": job.status,  # 'completed', 'cancelled' or 'failed'
                     "progress_value": None,  # Trigger frontend API call to update the whole job payload
                     "error": job.error,
                     "action": job.action,

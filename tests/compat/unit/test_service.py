@@ -368,6 +368,27 @@ def test_recording_a_rate_limit_does_not_sleep_inside_the_fanout(monkeypatch, tm
     assert recorded == "APIThrottled" and description == "10 minutes"
 
 
+def test_a_recorder_call_that_omits_announce_still_writes_the_visible_line(monkeypatch, tmp_path, caplog):
+    """The recorder stand-ins default the way provider_throttle itself does:
+    a caller that omits announce keeps the one WARNING line, instead of a
+    default of None dropping the record below the default filter where a
+    normal install would never see it."""
+    import logging
+    from app import get_providers
+    from subliminal_patch.exceptions import APIThrottled
+    name = "compat_omitted_announce"
+    _isolated_compat_pool(monkeypatch, tmp_path, [name])
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    recorder = service._throttle_recorder(service._pool_generation)
+
+    with caplog.at_level(logging.WARNING):
+        assert recorder(name, APIThrottled("slow down")) is True
+
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "Not using it for 10 minutes" in warnings[0].getMessage()
+
+
 def test_a_worker_that_blew_its_deadline_is_recorded_as_a_timeout(monkeypatch, tmp_path):
     """The transport cannot carry the provider's exception class, only a code.
     provider_search_failure honours that code, the throttle table did not, so

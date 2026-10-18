@@ -42,6 +42,8 @@ export interface SportsEventReference {
 export interface SportsEvent extends SportsEventReference {
   sceneName?: string;
   title: string;
+  /** Tags inherited from the owning Sportarr league, included on wanted rows. */
+  tags?: string[];
   eventDate: string | null;
   broadcastDate: string | null;
   hasFile: boolean;
@@ -128,7 +130,7 @@ export interface SportsJob {
 export interface SportsJobStatus {
   job_id: number;
   arr_instance_id: number;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
   cancelled: boolean;
   message: string;
   result: {

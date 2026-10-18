@@ -26,6 +26,14 @@ class TestValidateEncryptionKey:
     def test_mixed_case_hex(self):
         assert validate_encryption_key("aAbBcCdD" * 8) is True
 
+    def test_trailing_newline_is_rejected(self):
+        """`$` accepts a newline before it, so a 64-character match followed
+        by one passed while every caller assumed it held exactly 64
+        characters. The rule is a full match, so the newline counts against
+        the key."""
+        assert validate_encryption_key("a" * 64 + "\n") is False
+        assert validate_encryption_key("\n" + "a" * 64) is False
+
 
 class TestEncryptApiKey:
     KEY_HEX = "79866a5b6ef41b78681a7f774f6628fe66c49b0f0c96808cc3f48acbbfe1ac41"
@@ -66,6 +74,10 @@ class TestEncryptApiKey:
     def test_short_key_raises(self):
         with pytest.raises(ValueError):
             encrypt_api_key(self.API_KEY, "abcd1234")
+
+    def test_key_with_a_trailing_newline_raises(self):
+        with pytest.raises(ValueError):
+            encrypt_api_key(self.API_KEY, "a" * 64 + "\n")
 
 
 class TestGetApiKeyValue:
@@ -115,6 +127,17 @@ class TestGetApiKeyValue:
     def test_invalid_encryption_key_raises(self, mock_settings):
         mock_settings.translator.openrouter_api_key = self.API_KEY
         mock_settings.translator.openrouter_encryption_key = "not-valid-hex"
+        svc = self._make_service()
+        with pytest.raises(ValueError, match="Invalid encryption key format"):
+            svc._get_api_key_value()
+
+    @patch("subtitles.tools.translate.services.openrouter_translator.settings")
+    def test_key_with_a_trailing_newline_raises_the_client_error(self, mock_settings):
+        """bytes.fromhex used to skip the newline, so the job worked with a
+        65-character key. The shared rule is a full match now, so the client
+        refuses the same shape the gate refuses."""
+        mock_settings.translator.openrouter_api_key = self.API_KEY
+        mock_settings.translator.openrouter_encryption_key = "a" * 64 + "\n"
         svc = self._make_service()
         with pytest.raises(ValueError, match="Invalid encryption key format"):
             svc._get_api_key_value()

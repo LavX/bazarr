@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 
 from subzero.language import Language
 
@@ -21,8 +22,17 @@ class CustomLanguage:
     official_alpha3 = "por"
     name = "Portuguese (Brazil)"
     iso = "BR"
+    # The tag a translated file is named with when it targets this language.
+    # None names the file with the subzero language's own basename, as before;
+    # a language whose region is a UN M.49 code has no such basename (no
+    # babelfish country or script exists for it), so it names the tag here.
+    regional_tag = None
     _scripts = []
     _possible_matches = ("pt-br", "pob", "pb", "brazilian", "brasil", "brazil")
+    # Tokens too short or too ordinary to be safe as a substring of any title:
+    # they match only as a whole word. "tc" as a substring otherwise
+    # classifies "Dutch" as Traditional Chinese.
+    _word_only_matches = ()
     _extensions = (".pt-br", ".pob", ".pb")
     _extensions_forced = (".pt-br.forced", ".pob.forced", ".pb.forced")
     _extensions_hi = (".pt-br.hi", ".pob.hi", ".pb.hi",
@@ -99,7 +109,16 @@ class CustomLanguage:
         if not name:
             return False
 
-        return any(ext in name for ext in self._possible_matches)
+        words = None
+        for token in self._possible_matches:
+            if token in self._word_only_matches:
+                if words is None:
+                    words = set(re.split(r'[^a-z0-9]+', name))
+                if token in words:
+                    return True
+            elif token in name:
+                return True
+        return False
 
     def language_found(self, language: Language):
         if str(language.country) == self.iso:
@@ -150,6 +169,21 @@ class ChineseTraditional(CustomLanguage):
     # _scripts = (Script("Hant"),)
     # We'll use literals for now
     _scripts = ("Hant",)
+    # The base class default is the Brazilian Portuguese list, which left this
+    # subclass unable to detect a Traditional track by its ffprobe title and
+    # able to misdetect a track whose title happened to contain "pb" or
+    # "brasil". The tokens below mirror the conventions the _extensions and the
+    # catalog's embeddedsubtitles provider already encode. There is no bare
+    # "繁" and no "繁中": the mixed-script label "简繁中文" carries both, and
+    # this matcher is a plain substring test with no disambiguation step, so
+    # only unambiguous tokens qualify.
+    _possible_matches = (
+        "zh-tw", "zh-hant", "zhhant", "zht", "hant", "big5", "cht", "tc",
+        "traditional", "taiwan", "繁體", "繁体", "正體",
+    )
+    # "tc" is the one two-letter token here, and a substring test would make
+    # "Dutch" Traditional Chinese. It matches as a word only ("TC", "TC.1080p").
+    _word_only_matches = ("tc",)
     _extensions = (
         ".cht", ".tc", ".zh-tw", ".zht", ".zh-hant", ".zhhant", ".zh_hant", ".hant", ".big5", ".traditional",
     )
@@ -224,15 +258,20 @@ class LatinAmericanSpanish(CustomLanguage):
     name = "Spanish (Latino)"
     iso = "MX"  # Not fair, but ok
     _scripts = ("419",)
+    # The IETF tag for Latin American Spanish (UN M.49 region 419): the tag a
+    # translation names its file with, since no babelfish country or script
+    # exists for the region and no subzero language can carry it as a basename.
+    regional_tag = "es-419"
     _possible_matches = (
         "es-la", "spa-la", "spl", "mx", "latin", "mexic", "argent", "latam",
     )
-    _extensions = (".es-la", ".spl", ".spa-la", ".ea", ".es-mx", ".lat", ".es.ar")
+    _extensions = (".es-la", ".spl", ".spa-la", ".ea", ".es-mx", ".lat", ".es.ar", ".es-419")
     _extensions_forced = (
         ".es-la.forced", ".spl.forced", ".spa-la.forced", ".ea.forced", ".es-mx.forced", ".lat.forced", ".es.ar.forced",
+        ".es-419.forced",
     )
     _extensions_hi = (
-        ".es-la.hi", ".spl.hi", ".spa-la.hi", ".ea.hi", ".es-mx.hi", ".lat.hi", ".es.ar.hi",
-        ".es-la.cc", ".spl.cc", ".spa-la.cc", ".ea.cc", ".es-mx.cc", ".lat.cc", ".es.ar.cc",
-        ".es-la.sdh", ".spl.sdh", ".spa-la.sdh", ".ea.sdh", ".es-mx.sdh", ".lat.sdh", ".es.ar.sdh",
+        ".es-la.hi", ".spl.hi", ".spa-la.hi", ".ea.hi", ".es-mx.hi", ".lat.hi", ".es.ar.hi", ".es-419.hi",
+        ".es-la.cc", ".spl.cc", ".spa-la.cc", ".ea.cc", ".es-mx.cc", ".lat.cc", ".es.ar.cc", ".es-419.cc",
+        ".es-la.sdh", ".spl.sdh", ".spa-la.sdh", ".ea.sdh", ".es-mx.sdh", ".lat.sdh", ".es.ar.sdh", ".es-419.sdh",
     )

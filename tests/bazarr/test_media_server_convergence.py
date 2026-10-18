@@ -5,6 +5,7 @@ server, so an unreachable destination can be produced by stopping one.
 """
 import json
 import threading
+import time
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -631,7 +632,9 @@ def test_a_stored_blob_validation_never_saw_is_nothing_configured(stored):
 def plex_settings(**overrides):
     """The scalar Plex account, as a fresh install ships it."""
     section = dict(auth_method='apikey', ip='127.0.0.1', port=32400, ssl=False,
-                   apikey='', token='', server_url='', verify_ssl=False,
+                   apikey='', token='', server_url='', server_connections=[],
+                   server_machine_id='', server_name='', server_local=False,
+                   verify_ssl=False,
                    path_mappings=[], update_movie_library=True, update_series_library=True,
                    movie_library=[], series_library=[], sports_library=[], instance_id='')
     section.update(overrides)
@@ -639,7 +642,11 @@ def plex_settings(**overrides):
     # and write it back through the real config file.
     general = SimpleNamespace(use_emby=False, use_silo=False, use_jellyfin=False, use_plex=True,
                               secrets_encryption_key='synthetic-durable-key')
-    return SimpleNamespace(general=general, plex=SimpleNamespace(**section),
+    # The account routes read the section through .get, the way a Dynaconf
+    # section answers, so the stand-in has to too.
+    namespace = SimpleNamespace(**section)
+    namespace.get = lambda key, default=None: getattr(namespace, key, default)
+    return SimpleNamespace(general=general, plex=namespace,
                            emby=SimpleNamespace(url='', apikey='', verify_ssl=True, path_mappings=[]),
                            silo=SimpleNamespace(url='', apikey='', verify_ssl=True, path_mappings=[]),
                            jellyfin=SimpleNamespace(url='', apikey='', verify_ssl=True,
@@ -1227,6 +1234,135 @@ def test_a_code_that_is_not_a_refusal_is_still_a_fault(monkeypatch, caplog):
 
 # --- The real OAuth handlers, against a faked Plex ---------------------------
 
+PLEX_MACHINE = 'machine-abc'
+LISTED = 'https://listed.example:32400'
+UNLISTED = 'https://unlisted.example:32400'
+
+_SECTIONS = {'MediaContainer': {'Directory': [
+    {'key': '1', 'title': 'Movies', 'type': 'movie', 'count': 1, 'agent': 'tv.plex.agents.imdb',
+     'scanner': 'Plex Movie Scanner', 'language': 'en', 'uuid': 'uuid-1',
+     'updatedAt': 1, 'createdAt': 1}]}}
+
+
+class _PlexTV:
+    """One requests.get fake serving both plex.tv and the Plex server itself.
+
+    ``listing`` maps each account token to the addresses plex.tv lists for
+    ``machine``; ``status`` overrides the plex.tv answer's status. Every other
+    URL is answered from ``replies`` (an exact URL to ``(status, payload)``) and
+    recorded, so a test can see exactly where a credential went and how often
+    plex.tv was asked.
+    """
+
+    def __init__(self, listing=None, replies=None, status=200, machine=PLEX_MACHINE,
+                 content_type='application/json', body=None, xml=None):
+        self.listing = listing or {}
+        self.replies = replies or {}
+        self.status = status
+        self.machine = machine
+        self.content_type = content_type
+        self.body = body
+        self.xml = xml
+        self.tv_calls = 0
+        self.server_calls = []
+        self.redirect_flags = []
+
+    def __call__(self, url, **kwargs):
+        token = (kwargs.get('headers') or {}).get('X-Plex-Token')
+        self.redirect_flags.append(kwargs.get('allow_redirects'))
+        if 'plex.tv/pms/resources' in url:
+            self.tv_calls += 1
+            if self.body is not None:
+                return SimpleNamespace(
+                    status_code=self.status, headers={'content-type': self.content_type},
+                    raise_for_status=lambda: None, json=lambda: self.body, text=self.xml or '')
+            return SimpleNamespace(
+                status_code=self.status, headers={'content-type': self.content_type},
+                raise_for_status=lambda: None, text=self.xml or '',
+                json=lambda: [{'name': 'Attic', 'clientIdentifier': self.machine,
+                               'provides': 'server', 'owned': True,
+                               'connections': [{'uri': uri} for uri in self.listing.get(token, ())]}])
+        self.server_calls.append((url, token))
+        status, payload = self.replies.get(url, (200, {}))
+        return SimpleNamespace(status_code=status, headers={'content-type': 'application/json'},
+                               raise_for_status=lambda: None, json=lambda: payload)
+
+
+def plex_tv(monkeypatch, fake):
+    """Answer every plex.tv ask with ``fake`` and forget any remembered answer.
+
+    The requests module is patched itself, so one fake serves the plex.tv ask,
+    the server probes and the library fetches alike.
+    """
+    import requests
+
+    from media_servers import plex_account
+    plex_account.forget_plex_tv_answer()
+    monkeypatch.setattr(requests, 'get', fake)
+
+
+# A Plex root document, the least plexapi will construct a server from.
+_PLEX_ROOT = (b'<MediaContainer size="0" friendlyName="Attic" version="1.2.3">'
+              b'</MediaContainer>')
+
+
+@pytest.fixture
+def redirect_pair():
+    """Two local Plex origins; the first redirects one path to the second.
+
+    Everything else is answered as a Plex root document, and each origin
+    records the requests it received with the credential they arrived with, so
+    a test can prove the credential never crossed to the second origin.
+    """
+    def build(records, redirect_to, redirect_path):
+        class _RedirectHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def _serve(self):
+                records.append((self.path, self.headers.get('X-Plex-Token')))
+                if redirect_to is not None and self.path == redirect_path:
+                    self.send_response(302)
+                    self.send_header('Location', redirect_to + '/stolen')
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/xml')
+                self.send_header('Content-Length', str(len(_PLEX_ROOT)))
+                self.end_headers()
+                self.wfile.write(_PLEX_ROOT)
+
+            do_GET = _serve
+            do_POST = _serve
+
+        return _RedirectHandler
+
+    started = []
+
+    def start(redirect_to=None, redirect_path='/library/sections'):
+        records = []
+        server = ThreadingHTTPServer(('127.0.0.1', 0), build(records, redirect_to, redirect_path))
+        thread = threading.Thread(target=server.serve_forever,
+                                  kwargs={'poll_interval': 0.01}, daemon=True)
+        thread.start()
+        server.url = f'http://127.0.0.1:{server.server_address[1]}'
+        server.records = records
+        started.append((server, thread))
+        return server
+
+    def pair(redirect_path='/library/sections'):
+        target = start()
+        source = start(redirect_to=target.url, redirect_path=redirect_path)
+        return source, target
+
+    yield pair
+    for server, thread in started:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
 @pytest.fixture
 def plex_account_api(schema_session, monkeypatch):
     """The Plex account endpoints, on a real app, with plex.tv faked out."""
@@ -1261,9 +1397,11 @@ def test_the_oauth_pin_handler_creates_the_plex_destination(plex_account_api, mo
     client, config = plex_account_api
     monkeypatch.setattr(oauth.pin_cache, 'get', lambda pin: {'client_id': 'bazarr'})
     monkeypatch.setattr(oauth.pin_cache, 'delete', lambda pin: None)
-    monkeypatch.setattr(oauth.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
-        status_code=200, raise_for_status=lambda: None,
-        json=lambda: {'authToken': 'fresh-plex-token'}))
+    # One requests fake answers both the PIN check and the plex.tv server
+    # listing a selection is verified against.
+    plex_tv(monkeypatch, _PlexTV(
+        listing={'fresh-plex-token': ('https://plex.example:32400',)}, machine='abc',
+        replies={'https://plex.tv/api/v2/pins/123': (200, {'authToken': 'fresh-plex-token'})}))
 
     response = client.get('/api/plex/oauth/pin/123/check', headers=HEADERS)
     assert response.status_code == 200 and response.json['data']['authenticated'] is True
@@ -1289,6 +1427,9 @@ def test_selecting_a_server_moves_the_destination_and_signing_out_disables_it(
     config.plex.server_url = 'https://first.example:32400'
     row = sync_plex_instance(schema_session, config)
     repo = MediaServerInstanceRepository(schema_session)
+    # The selection is verified against plex.tv before it is stored.
+    plex_tv(monkeypatch, _PlexTV(
+        listing={'existing-token': ('https://second.example:32400',)}, machine='abc'))
 
     response = client.post('/api/plex/select-server', headers=HEADERS, json={
         'machineIdentifier': 'abc', 'name': 'Attic', 'uri': 'https://second.example:32400'})
@@ -1339,7 +1480,7 @@ def test_signing_back_in_through_the_handlers_switches_the_destination_on(
 
 
 def test_a_server_switch_leaves_a_hand_disabled_destination_disabled(
-        plex_account_api, schema_session):
+        plex_account_api, monkeypatch, schema_session):
     from media_servers.plex_account import sync_plex_instance
     from media_servers.repository import MediaServerInstanceRepository
     client, config = plex_account_api
@@ -1349,6 +1490,8 @@ def test_a_server_switch_leaves_a_hand_disabled_destination_disabled(
     row = sync_plex_instance(schema_session, config)
     repo = MediaServerInstanceRepository(schema_session)
     repo.update(row.id, enabled=False)
+    plex_tv(monkeypatch, _PlexTV(
+        listing={'token': ('https://second.example:32400',)}, machine='abc'))
 
     assert client.post('/api/plex/select-server', headers=HEADERS, json={
         'machineIdentifier': 'abc', 'name': 'Attic',
@@ -1589,3 +1732,1727 @@ def test_a_hand_added_row_survives_a_fresh_sign_in_after_a_disconnect(schema_ses
     assert kept.url == 'https://hand.example:32400'
     assert repo.get_decrypted_api_key(hand_added.id) == 'hand-key'
     assert bool(kept.enabled) is True and bool(kept.verify_ssl) is True
+
+
+# --- A stored Plex credential never follows a new address ----------------------
+
+def test_a_selection_plex_tv_does_not_list_is_refused_and_stores_nothing(
+        plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    config.plex.server_connections = [LISTED]
+    fake = _PlexTV(listing={'account-token': (LISTED,)},
+                  replies={LISTED + '/library/sections': (200, _SECTIONS)})
+    plex_tv(monkeypatch, fake)
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': PLEX_MACHINE, 'name': 'Attic', 'uri': UNLISTED})
+    assert response.status_code == 400
+    assert response.json['error_code'] == 'server_not_listed'
+    assert config.plex.server_url == LISTED
+    assert config.plex.server_connections == [LISTED]
+
+    # The library list still uses the stored address only, so the refusal sent
+    # the token nowhere new.
+    assert client.get('/api/plex/oauth/libraries', headers=HEADERS).status_code == 200
+    assert fake.server_calls and all(url.startswith(LISTED) for url, _ in fake.server_calls)
+
+
+def test_a_selection_with_one_unlisted_connection_is_refused_whole(
+        plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': PLEX_MACHINE, 'name': 'Attic', 'uri': LISTED,
+        'connections': [LISTED, UNLISTED]})
+    assert response.status_code == 400
+    assert response.json['error_code'] == 'server_not_listed'
+    assert config.plex.server_url == '' and config.plex.server_connections == []
+
+
+def test_a_selection_plex_tv_does_not_list_is_refused_and_sign_in_is_required(
+        plex_account_api, monkeypatch):
+    """Without a stored token there is nothing to verify a selection against."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = ''
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': PLEX_MACHINE, 'name': 'Attic', 'uri': LISTED})
+    assert response.status_code == 409
+    assert response.json['error_code'] == 'sign_in_required'
+    assert config.plex.server_url == ''
+
+
+def test_a_selection_is_stored_only_when_plex_tv_can_be_reached(plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    fake = _PlexTV(listing={'account-token': (LISTED,)}, status=503)
+    plex_tv(monkeypatch, fake)
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': PLEX_MACHINE, 'name': 'Attic', 'uri': LISTED})
+    assert response.status_code == 400
+    assert response.json['error_code'] == 'plex_unreachable'
+    assert config.plex.server_url == '' and config.plex.server_connections == []
+    assert fake.server_calls == []
+
+
+def test_a_listed_selection_is_stored(plex_account_api, monkeypatch, schema_session):
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': PLEX_MACHINE, 'name': 'Attic', 'uri': LISTED,
+        'connections': [LISTED]})
+    assert response.status_code == 200
+    assert config.plex.server_url == LISTED
+    assert config.plex.server_connections == [LISTED]
+    row, = MediaServerInstanceRepository(schema_session).list('plex')
+    assert row.url == LISTED
+
+
+def test_the_first_library_call_drops_a_stored_address_plex_tv_does_not_list(
+        plex_account_api, monkeypatch):
+    """An upgrade can leave a selection behind that plex.tv never checked.
+
+    The first use drops it: the token goes nowhere, and the card has to ask
+    the user to choose the server again.
+    """
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_name = 'Attic'
+    config.plex.server_url = UNLISTED
+    config.plex.server_connections = [UNLISTED]
+    fake = _PlexTV(listing={'account-token': ()})
+    plex_tv(monkeypatch, fake)
+
+    response = client.get('/api/plex/oauth/libraries', headers=HEADERS)
+    assert response.status_code == 200 and response.json == {'data': []}
+    assert fake.server_calls == [], 'the token was sent nowhere'
+    assert config.plex.server_url == ''
+    assert config.plex.server_machine_id == '' and config.plex.server_name == ''
+    assert config.plex.server_local is False and config.plex.server_connections == []
+
+
+def test_a_listed_stored_address_is_used_for_libraries(plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    config.plex.server_connections = [LISTED]
+    fake = _PlexTV(listing={'account-token': (LISTED,)}, replies={
+        LISTED + '/library/sections': (200, _SECTIONS),
+        LISTED + '/library/sections/1/all': (200, {'MediaContainer': {'size': 1}}),
+        LISTED + '/library/sections/1': (200, {'MediaContainer': {'Directory': [
+            {'Location': [{'path': '/media'}]}]}}),
+    })
+    plex_tv(monkeypatch, fake)
+
+    response = client.get('/api/plex/oauth/libraries', headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json['data'][0]['title'] == 'Movies'
+    assert fake.server_calls[0] == (LISTED + '/library/sections', 'account-token')
+
+
+def test_plex_tv_unreachable_sends_the_token_nowhere_and_retries_after_a_pause(
+        plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    fake = _PlexTV(listing={'account-token': (LISTED,)}, status=503)
+    plex_tv(monkeypatch, fake)
+    from media_servers import plex_account
+    clock = {'now': 0.0}
+    monkeypatch.setattr(plex_account, 'time',
+                        SimpleNamespace(monotonic=lambda: clock['now']))
+
+    for _ in range(2):
+        response = client.get('/api/plex/oauth/libraries', headers=HEADERS)
+        assert response.status_code == 200 and response.json == {'data': []}
+    # One ask is remembered briefly, so reading the destination does not block
+    # on a network call on every use while plex.tv is down.
+    assert fake.tv_calls == 1, 'an unreachable plex.tv is remembered briefly'
+    assert fake.server_calls == []
+    # The selection is kept for when plex.tv answers again, and the next use
+    # after the pause asks again.
+    clock['now'] += plex_account.UNREACHABLE_CACHE_SECONDS + 1
+    assert client.get('/api/plex/oauth/libraries', headers=HEADERS).json == {'data': []}
+    assert fake.tv_calls == 2, 'the next use after the pause asks again'
+    assert config.plex.server_url == LISTED
+
+
+def test_a_replaced_token_is_checked_again_before_it_goes_anywhere(
+        plex_account_api, monkeypatch):
+    """The remembered answer belongs to the credential that asked for it."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'first-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    fake = _PlexTV(listing={'first-token': (LISTED,)}, replies={
+        LISTED + '/library/sections': (200, _SECTIONS),
+        LISTED + '/library/sections/1/all': (200, {'MediaContainer': {'size': 1}}),
+        LISTED + '/library/sections/1': (200, {'MediaContainer': {'Directory': []}}),
+    })
+    plex_tv(monkeypatch, fake)
+    assert client.get('/api/plex/oauth/libraries', headers=HEADERS).json['data']
+
+    # The token is replaced without a restart, and plex.tv lists nothing for
+    # the new account.
+    config.plex.token = 'second-token'
+    fake.listing = {'second-token': ()}
+    fake.tv_calls = 0
+    fake.server_calls.clear()
+
+    assert client.get('/api/plex/oauth/libraries', headers=HEADERS).json == {'data': []}
+    assert fake.tv_calls == 1, 'the new credential asked plex.tv again'
+    assert fake.server_calls == [], 'the new token was sent nowhere'
+
+
+def test_plex_test_connection_sends_the_credential_only_to_a_verified_stored_origin(
+        plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    config.plex.server_connections = [LISTED]
+    # Under the sign-in method the address plex.ip names is not a destination
+    # the credential may go to: only what plex.tv lists for the account is.
+    config.plex.ip = '203.0.113.10'
+    fake = _PlexTV(listing={'account-token': (LISTED,)},
+                   replies={LISTED + '/identity': (200, {})})
+    plex_tv(monkeypatch, fake)
+
+    response = client.post('/api/plex/test-connection', headers=HEADERS, json={'uri': LISTED})
+    assert response.status_code == 200 and response.json == {'success': True}
+    assert fake.server_calls == [(LISTED + '/identity', 'account-token')]
+
+    for uri in ('https://listed.example:32401', 'http://listed.example:32400',
+                'https://203.0.113.10:32400'):
+        fake.server_calls.clear()
+        response = client.post('/api/plex/test-connection', headers=HEADERS, json={'uri': uri})
+        assert response.status_code == 400, uri
+        assert fake.server_calls == [], uri
+
+
+def test_plex_test_connection_under_the_api_key_method_trusts_only_the_stored_origin(
+        plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'server-key'
+    config.plex.ip = '203.0.113.10'
+    config.plex.port = 32400
+    config.plex.ssl = False
+    fake = _PlexTV(replies={'http://203.0.113.10:32400/identity': (200, {})})
+    plex_tv(monkeypatch, fake)
+
+    response = client.post('/api/plex/test-connection', headers=HEADERS,
+                           json={'uri': 'http://203.0.113.10:32400'})
+    assert response.status_code == 200 and response.json == {'success': True}
+
+    for uri in ('http://203.0.113.10:32401', 'https://203.0.113.10:32400'):
+        fake.server_calls.clear()
+        response = client.post('/api/plex/test-connection', headers=HEADERS, json={'uri': uri})
+        assert response.status_code == 400, uri
+        assert fake.server_calls == [], uri
+
+
+def test_a_method_switch_between_the_origin_check_and_the_send_cannot_swap_the_credential(
+        plex_account_api, monkeypatch):
+    """The origin the URI is checked against, the credential and the TLS
+    choice the request sends with are one snapshot under the account lock, so
+    a settings save switching the method while the test runs cannot make the
+    later credential read hand back the sign-in token for an origin the API
+    key settings checked."""
+    from media_servers import plex_account
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'server-key'
+    config.plex.ip = '203.0.113.10'
+    config.plex.port = 32400
+    config.plex.ssl = False
+    fake = _PlexTV(replies={'http://203.0.113.10:32400/identity': (200, {})})
+    plex_tv(monkeypatch, fake)
+
+    # The save lands once the route has read the configured address and
+    # before it reads the credential, the way a concurrent settings save
+    # switching to the sign-in method would: from then on the account holds
+    # the sign-in token.
+    real_account_url = plex_account.account_url
+
+    def switching_account_url(section):
+        url = real_account_url(section)
+        config.plex.auth_method = 'oauth'
+        config.plex.token = 'account-token'
+        return url
+
+    monkeypatch.setattr(plex_account, 'account_url', switching_account_url)
+
+    response = client.post('/api/plex/test-connection', headers=HEADERS,
+                           json={'uri': 'http://203.0.113.10:32400'})
+
+    # The request either refuses or sends the snapshot's own credential to
+    # the snapshot's own origin; the sign-in token the save switched in
+    # never follows the origin the API key settings checked.
+    assert fake.server_calls in ([], [('http://203.0.113.10:32400/identity', 'server-key')]), \
+        'the sign-in token followed the origin the API key settings checked'
+    assert (response.status_code == 200) == bool(fake.server_calls), \
+        'the request refused exactly when nothing was sent'
+
+
+def test_plex_test_connection_refuses_every_origin_while_plex_tv_cannot_be_reached(
+        plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}, status=503))
+
+    response = client.post('/api/plex/test-connection', headers=HEADERS, json={'uri': LISTED})
+    assert response.status_code == 400
+    assert 'could not be reached' in response.json['error']
+
+
+def test_a_settings_save_cannot_set_a_server_address_plex_tv_does_not_list(
+        plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    response = client.post('/api/system/settings',
+                           data={'settings-plex-server_url': UNLISTED}, headers=HEADERS)
+    assert response.status_code == 406
+    assert 'Plex does not list this address' in response.get_data(as_text=True)
+    assert config.plex.server_url == ''
+
+    response = client.post('/api/system/settings',
+                           data={'settings-plex-server_connections': UNLISTED}, headers=HEADERS)
+    assert response.status_code == 406
+    assert config.plex.server_connections == []
+
+
+def test_a_settings_save_of_an_address_plex_tv_lists_passes_the_destination_rule(
+        plex_account_api, monkeypatch):
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    app_config.save_settings([('settings-plex-server_url', [LISTED]),
+                              ('settings-plex-server_connections', [LISTED])])
+    assert saved, 'the save was not refused'
+
+
+def test_an_api_key_settings_save_needs_the_key_again_to_move_the_address(
+        plex_account_api, monkeypatch):
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'stored-plex-key'
+    config.plex.ip = 'plex.example'
+
+    response = client.post('/api/system/settings',
+                           data={'settings-plex-ip': 'moved.example'}, headers=HEADERS)
+    assert response.status_code == 406
+    assert 'Re-enter the key to use a different address' in response.get_data(as_text=True)
+    assert config.plex.ip == 'plex.example'
+
+    # With the key carried, the save passes the destination rule.
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+    app_config.save_settings([('settings-plex-ip', ['moved.example']),
+                              ('settings-plex-apikey', ['typed-again'])])
+    assert saved
+
+
+def test_the_account_row_reaches_refreshes_only_while_plex_tv_lists_its_address(
+        schema_session, monkeypatch):
+    """The refresh workers send the account token to the row's address, so the
+    row is dispatched to them only while plex.tv lists that address for the
+    signed-in account. The check runs once per credential per start and again
+    after every short pause while plex.tv does not answer."""
+    from media_servers import plex_account
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(auth_method='oauth', token='account-token',
+                           server_url='https://listed.example:32400')
+    config.plex.server_machine_id = 'machine-abc'
+    row = sync_plex_instance(schema_session, config)
+
+    def answer(status, uris):
+        import requests
+        plex_account.forget_plex_tv_answer()
+        monkeypatch.setattr(requests, 'get', lambda *_args, **_kwargs: SimpleNamespace(
+            status_code=status, headers={'content-type': 'application/json'},
+            json=lambda: [{'name': 'Attic', 'clientIdentifier': 'machine-abc',
+                           'provides': 'server', 'owned': True,
+                           'connections': [{'uri': uri} for uri in uris]}]))
+
+    answer(200, ('https://listed.example:32400',))
+    snapshot = repo.snapshot(row.id, config)
+    assert snapshot.enabled is True and snapshot.sendable is True
+    answer(503, ())
+    snapshot = repo.snapshot(row.id, config)
+    assert snapshot.enabled is True, 'the switch the user set is left alone'
+    assert snapshot.sendable is False, 'plex.tv unreachable: no token is sent'
+    answer(200, ())
+    snapshot = repo.snapshot(row.id, config)
+    assert snapshot.sendable is False, 'an unlisted address is not sent to'
+
+    # A token the settings no longer carry is never dispatched: the row would
+    # send its own credential, which plex.tv was never asked about. A failed
+    # row sync after a replacement is exactly this state.
+    config.plex.token = 'replaced-token'
+    answer(200, ('https://listed.example:32400',))
+    assert repo.snapshot(row.id, config).sendable is False, 'a row/settings mismatch holds the refresh'
+    # The sync carries the replacement onto the row, and the refresh resumes.
+    sync_plex_instance(schema_session, config)
+    assert repo.get_decrypted_api_key(row.id) == 'replaced-token'
+    assert repo.snapshot(row.id, config).sendable is True
+
+    # Clearing the credential without signing out holds it too.
+    config.plex.token = ''
+    plex_account.forget_plex_tv_answer()
+    assert repo.snapshot(row.id, config).sendable is False
+
+    # A row the account does not own is none of this rule's business: its key
+    # was typed with its address.
+    config.plex.token = 'account-token'
+    other = repo.create(kind='plex', name='Hand added', url='https://hand.example:32400',
+                        api_key='hand-key', enabled=True, verify_ssl=True, path_mappings=[])
+    answer(503, ())
+    other_snapshot = repo.snapshot(other.id, config)
+    assert other_snapshot.enabled is True and other_snapshot.sendable is True
+
+
+def test_a_url_two_parsers_read_differently_is_refused_everywhere(plex_account_api,
+                                                                  monkeypatch):
+    """A backslash authority names the listed host for one parser and another
+    host for the HTTP library, so the credential would follow it to the second.
+    It is refused by the picker, by the settings save and by the connection
+    test, and nothing is stored from it."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    config.plex.server_connections = [LISTED]
+    fake = _PlexTV(listing={'account-token': (LISTED,)},
+                   replies={LISTED + '/identity': (200, {})})
+    plex_tv(monkeypatch, fake)
+    sneaky = r'https://attacker.example\@' + LISTED
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': PLEX_MACHINE, 'name': 'Attic', 'uri': sneaky,
+        'connections': [sneaky, LISTED]})
+    assert response.status_code == 400
+    assert response.json['error_code'] == 'server_not_listed'
+    assert config.plex.server_url == LISTED
+    assert config.plex.server_connections == [LISTED]
+
+    response = client.post('/api/system/settings',
+                           data={'settings-plex-server_url': sneaky}, headers=HEADERS)
+    assert response.status_code == 406
+    assert config.plex.server_url == LISTED
+
+    response = client.post('/api/plex/test-connection', headers=HEADERS, json={'uri': sneaky})
+    assert response.status_code == 400
+    assert fake.server_calls == [], 'the token was sent nowhere'
+
+    # A stored selection built out of such a string is dropped at first use
+    # rather than connected to.
+    config.plex.server_url = sneaky
+    config.plex.server_connections = [sneaky]
+    plex_tv(monkeypatch, fake)
+    assert client.get('/api/plex/oauth/libraries', headers=HEADERS).json == {'data': []}
+    assert config.plex.server_url == '' and config.plex.server_connections == []
+    assert fake.server_calls == [], 'the token was sent nowhere'
+
+
+def test_a_mixed_case_settings_key_cannot_move_the_plex_address(plex_account_api, monkeypatch):
+    """The settings store is case-insensitive, so the guard parses keys the way
+    the writer does, and a mixed-case name cannot skip the destination rule."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    for key in ('settings-Plex-Server_Url', 'settings-plex-SERVER_URL'):
+        response = client.post('/api/system/settings',
+                               data={key: UNLISTED}, headers=HEADERS)
+        assert response.status_code == 406, key
+        assert 'Plex does not list this address' in response.get_data(as_text=True), key
+        assert config.plex.server_url == LISTED, key
+
+
+def test_switching_methods_cannot_move_the_address_past_the_other_rules_check(
+        plex_account_api, monkeypatch):
+    """The rule runs under the method the save will leave in place, so
+    submitting the API key method alongside a moved host does not skip the
+    check the API key method owes."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.apikey = 'old-key'
+    config.plex.ip = 'plex.example'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    response = client.post('/api/system/settings',
+                           data={'settings-plex-auth_method': 'apikey',
+                                 'settings-plex-ip': 'moved.example'}, headers=HEADERS)
+    assert response.status_code == 406
+    assert 'Re-enter the key to use a different address' in response.get_data(as_text=True)
+    assert config.plex.ip == 'plex.example'
+    assert config.plex.auth_method == 'oauth', 'the refused save changed nothing'
+
+
+def test_selecting_the_api_key_method_cannot_move_the_address_past_the_stored_token(
+        plex_account_api, monkeypatch):
+    """The plex.tv listing is owed whenever the sign-in token stays stored,
+    whatever method the save selects: the method that reads the token can be
+    switched back, so an address saved while it is retained is verified now
+    rather than only after the switch back."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    with pytest.raises(Exception) as refusal:
+        app_config.save_settings([('settings-plex-auth_method', ['apikey']),
+                                  ('settings-plex-server_url', [UNLISTED])])
+    assert 'Plex does not list this address' in str(refusal.value)
+    assert saved == [], 'the refused save reached no writer'
+
+    # An address plex.tv lists is stored, method switch and all.
+    app_config.save_settings([('settings-plex-auth_method', ['apikey']),
+                              ('settings-plex-server_url', [LISTED])])
+    assert saved, 'the save was refused'
+
+
+def test_a_method_change_drops_the_remembered_answer(plex_account_api, monkeypatch):
+    """The remembered plex.tv answer belongs to the credential and the method,
+    so switching methods asks again rather than trusting the other method's."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    fake = _PlexTV(listing={'account-token': (LISTED,)},
+                   replies={LISTED + '/library/sections': (200, _SECTIONS)})
+    plex_tv(monkeypatch, fake)
+    assert client.get('/api/plex/oauth/libraries', headers=HEADERS).json['data']
+    assert fake.tv_calls == 1
+
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'server-key'
+    fake.listing = {'server-key': (LISTED,)}
+    fake.tv_calls = 0
+    plex_tv(monkeypatch, fake)
+    assert client.get('/api/plex/oauth/libraries', headers=HEADERS).json['data']
+    assert fake.tv_calls == 1, 'the new method asked plex.tv again'
+
+
+@pytest.mark.parametrize('field,value', [('port', '32500'), ('ssl', 'true')])
+def test_the_api_key_method_needs_the_key_for_every_address_field(
+        plex_account_api, monkeypatch, field, value):
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'stored-plex-key'
+    config.plex.ip = 'plex.example'
+    config.plex.port = 32400
+    config.plex.ssl = False
+
+    response = client.post('/api/system/settings',
+                           data={f'settings-plex-{field}': value}, headers=HEADERS)
+    assert response.status_code == 406
+    assert 'Re-enter the key to use a different address' in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize('field,stored', [('ssl', True), ('ip', 'plex.example'),
+                                           ('port', 32500)])
+@pytest.mark.parametrize('spelling', ['null', 'None', 'undefined'])
+def test_an_empty_spelling_of_an_address_field_still_moves_the_address(
+        plex_account_api, monkeypatch, field, stored, spelling):
+    """An empty spelling clears the stored value, and the cleared field falls
+    back to the default the connection applies, so the effective destination
+    moves from the stored address to the default one while the stored key
+    stays stored: the same re-enter refusal a typed move gets, on the HTTP
+    route the settings page saves through. The unfixed rule skipped values
+    the writer normalizes to nothing, so the cleared field moved the address
+    with the key kept."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'stored-plex-key'
+    config.plex.ip = 'plex.example'
+    config.plex.port = 32400
+    config.plex.ssl = False
+    setattr(config.plex, field, stored)
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    response = client.post('/api/system/settings',
+                           data={f'settings-plex-{field}': spelling}, headers=HEADERS)
+
+    assert response.status_code == 406
+    assert 'Re-enter the key to use a different address' in response.get_data(as_text=True)
+    assert saved == [], 'the refused save reached no writer'
+    assert config.plex.get(field) == stored, "the refused save changed nothing"
+
+
+def test_turning_certificate_verification_off_under_the_sign_in_method_is_refused(
+        plex_account_api, monkeypatch):
+    """The sign-in token cannot be typed again, so it cannot be asked to travel
+    without certificate verification either; the account has to sign in again."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.verify_ssl = True
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    response = client.post('/api/system/settings',
+                           data={'settings-plex-verify_ssl': 'false'}, headers=HEADERS)
+    assert response.status_code == 406
+    assert 'Sign in to Plex again' in response.get_data(as_text=True)
+    assert config.plex.verify_ssl is True
+
+
+def test_switching_to_the_api_key_method_cannot_turn_verification_off_on_a_stored_token(
+        plex_account_api, monkeypatch):
+    """The stored sign-in token stays stored across a method switch, and the
+    method that reads it can be switched back, so turning certificate
+    verification off is refused while the token is there even when the save
+    switches to the API key method and keeps no key to re-enter."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.apikey = ''
+    config.plex.verify_ssl = True
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    with pytest.raises(Exception) as refusal:
+        app_config.save_settings([('settings-plex-auth_method', ['apikey']),
+                                  ('settings-plex-verify_ssl', ['false'])])
+    assert 'Sign in to Plex again' in str(refusal.value)
+    assert not saved, 'the refused save reached no writer'
+    assert config.plex.auth_method == 'oauth', 'the refused save changed nothing'
+    assert config.plex.verify_ssl is True
+
+
+@pytest.mark.parametrize('apikey,stored', [('typed-again', 'stored-plex-key'),
+                                           ('', 'stored-plex-key'),
+                                           ('typed-again', '')])
+def test_an_address_move_with_a_replaced_or_cleared_or_absent_key_passes(
+        plex_account_api, monkeypatch, apikey, stored):
+    """A replaced or explicitly cleared key travels no stored secret, and an
+    install with no key stored has nothing to re-enter."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = stored
+    config.plex.ip = 'plex.example'
+    plex_tv(monkeypatch, _PlexTV())
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    items = [('settings-plex-ip', ['moved.example'])]
+    if apikey is not None:
+        items.append(('settings-plex-apikey', [apikey]))
+    app_config.save_settings(items)
+    assert saved, 'the save was not refused'
+
+
+def test_an_address_move_keeping_a_stored_key_is_refused_even_partially_submitted(
+        plex_account_api, monkeypatch):
+    """An omitted key keeps the stored one, so the move is refused."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'stored-plex-key'
+    config.plex.ip = 'plex.example'
+    plex_tv(monkeypatch, _PlexTV())
+    with pytest.raises(Exception) as refusal:
+        app_config.save_settings([('settings-plex-ip', ['moved.example'])])
+    assert 'Re-enter the key' in str(refusal.value)
+
+
+def test_an_unlisted_fallback_is_skipped_and_removed_while_a_listed_primary_is_used(
+        plex_account_api, monkeypatch):
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    config.plex.server_connections = [LISTED, UNLISTED]
+    fake = _PlexTV(listing={'account-token': (LISTED,)}, replies={
+        LISTED + '/library/sections': (200, _SECTIONS),
+        LISTED + '/library/sections/1/all': (200, {'MediaContainer': {'size': 1}}),
+        LISTED + '/library/sections/1': (200, {'MediaContainer': {'Directory': [
+            {'Location': [{'path': '/media'}]}]}}),
+    })
+    plex_tv(monkeypatch, fake)
+
+    response = client.get('/api/plex/oauth/libraries', headers=HEADERS)
+    assert response.status_code == 200 and response.json['data']
+    assert all(url.startswith(LISTED) for url, _ in fake.server_calls), \
+        'the token went to the listed address only'
+    assert config.plex.server_connections == [LISTED], \
+        'the fallback plex.tv does not list is removed from the settings'
+
+
+def test_a_redirect_is_never_followed_with_the_token(plex_account_api, monkeypatch):
+    """Every credential-bearing request refuses to follow a redirect: a server
+    that answers with one is not the server the address was verified for."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    fake = _PlexTV(listing={'account-token': (LISTED,)},
+                   replies={LISTED + '/library/sections': (302, {})})
+    plex_tv(monkeypatch, fake)
+
+    assert client.get('/api/plex/oauth/libraries', headers=HEADERS).json == {'data': []}
+    assert fake.server_calls == [(LISTED + '/library/sections', 'account-token')]
+    assert fake.redirect_flags and all(flag is False for flag in fake.redirect_flags), \
+        'every credential-bearing request opted out of redirects'
+
+
+def test_an_unreadable_plex_tv_answer_sends_nothing_and_wipes_nothing(
+        plex_account_api, monkeypatch):
+    """A 200 that cannot be read (a captive portal, a proxy error page, JSON
+    that is not a list of resources) is plex.tv not answering: nothing is sent,
+    nothing is wiped, and the next use asks again."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = UNLISTED
+    config.plex.server_connections = [UNLISTED]
+
+    for content_type, body in (('text/html', '<html>captive portal</html>'),
+                                ('application/json', {'error': 'not a list'})):
+        fake = _PlexTV(listing={'account-token': (LISTED,)},
+                       content_type=content_type, body=body)
+        plex_tv(monkeypatch, fake)
+
+        response = client.get('/api/plex/oauth/libraries', headers=HEADERS)
+        assert response.status_code == 200 and response.json == {'data': []}
+        assert fake.server_calls == [], 'the token was sent nowhere'
+        assert config.plex.server_url == UNLISTED, 'the selection was kept'
+        assert config.plex.server_connections == [UNLISTED]
+
+
+def test_a_refused_credential_signs_in_again_without_wiping_the_selection(
+        plex_account_api, monkeypatch):
+    """A 401 or 403 from plex.tv answers sign-in-again: neither remembered nor
+    cleared, so a transient auth failure cannot drop the stored selection."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'expired-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    config.plex.server_connections = [LISTED]
+    fake = _PlexTV(listing={'account-token': (LISTED,)}, status=401)
+    plex_tv(monkeypatch, fake)
+
+    response = client.get('/api/plex/oauth/libraries', headers=HEADERS)
+    assert response.status_code == 200 and response.json == {'data': []}
+    assert config.plex.server_url == LISTED, 'the selection was kept'
+    assert client.get('/api/plex/oauth/libraries', headers=HEADERS).json == {'data': []}
+    assert fake.tv_calls == 2, 'a refused credential is not remembered'
+
+    response = client.post('/api/plex/test-connection', headers=HEADERS,
+                           json={'uri': LISTED})
+    assert response.status_code == 409
+    assert response.json['error_code'] == 'sign_in_required'
+
+
+def test_the_picker_refuses_connection_entries_that_are_not_strings(
+        plex_account_api, monkeypatch):
+    """Whatever a non-string entry would store was never checked against the
+    listing, so the whole selection is refused."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': PLEX_MACHINE, 'name': 'Attic', 'uri': LISTED,
+        'connections': [LISTED, {'uri': UNLISTED}]})
+    assert response.status_code == 400
+    assert response.json['error_code'] == 'server_not_listed'
+    assert config.plex.server_url == '' and config.plex.server_connections == []
+
+
+def test_a_settings_save_stores_the_address_plex_tv_listed(plex_account_api, monkeypatch):
+    """A submitted string that normalizes to a listed origin is stored as the
+    URI plex.tv returned, not as the caller's spelling of it."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    app_config.save_settings([('settings-plex-server_url', ['https://LISTED.example:32400']),
+                              ('settings-plex-server_connections', ['https://LISTED.example:32400'])])
+    assert saved, 'the save was not refused'
+    written = {key: list(values) for key, values in saved[0]}
+    assert written['settings-plex-server_url'] == [LISTED]
+    assert written['settings-plex-server_connections'] == [LISTED]
+
+
+# --- One credential, one address, one spelling --------------------------------
+
+def test_one_settings_name_submitted_twice_is_refused_whatever_its_spelling(
+        plex_account_api, monkeypatch):
+    """The store is case-insensitive, so two spellings of one name reach the
+    same stored key and the writer would apply the last of them after every
+    check had read only the first. A save that submits the name twice is
+    refused rather than silently preferring one of the values."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'stored-plex-key'
+    config.plex.ip = 'plex.example'
+    plex_tv(monkeypatch, _PlexTV())
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    for items in (
+            [('settings-plex-ip', ['plex.example']), ('settings-Plex-ip', ['evil.example'])],
+            [('settings-plex-verify_ssl', ['true']), ('settings-Plex-verify_ssl', ['false'])],
+            [('settings-plex-auth_method', ['oauth']), ('settings-Plex-auth_method', ['apikey']),
+             ('settings-plex-ip', ['evil.example'])],
+    ):
+        with pytest.raises(Exception) as refusal:
+            app_config.save_settings(list(items))
+        assert 'can only be submitted once' in str(refusal.value), items
+    assert saved == [], 'no refused save reached the writer'
+
+
+def test_switching_the_method_back_cannot_park_a_moved_host_on_a_kept_key(
+        plex_account_api, monkeypatch):
+    """The stored API key travels to the host, port and TLS settings whatever
+    method the save leaves in place, so moving the host under the sign-in
+    method is refused exactly as moving it under the API key method is: a later
+    save could switch the method back and the kept key would follow the moved
+    host. The writer is stubbed out, so each save is recorded on the settings
+    the way the writer would have stored it."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'stored-plex-key'
+    config.plex.ip = 'plex.example'
+    plex_tv(monkeypatch, _PlexTV())
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    app_config.save_settings([('settings-plex-auth_method', ['oauth'])])
+    config.plex.auth_method = 'oauth'
+    with pytest.raises(Exception) as refusal:
+        app_config.save_settings([('settings-plex-ip', ['evil.example'])])
+    assert 'Re-enter the key to use a different address' in str(refusal.value)
+    app_config.save_settings([('settings-plex-auth_method', ['apikey'])])
+    config.plex.auth_method = 'apikey'
+    assert config.plex.ip == 'plex.example', 'no save in between moved the host'
+    assert len(saved) == 2, 'the refused save in the middle reached no writer'
+
+
+@pytest.mark.parametrize('field,value', [('verify_ssl', 'true')])
+def test_turning_certificate_verification_on_under_the_api_key_needs_no_key(
+        plex_account_api, monkeypatch, field, value):
+    """Turning verification back on only hardens the connection, so the stored
+    key keeps travelling to the same address and needs no re-entry."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'stored-plex-key'
+    config.plex.ip = 'plex.example'
+    config.plex.verify_ssl = False
+    plex_tv(monkeypatch, _PlexTV())
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    app_config.save_settings([(f'settings-plex-{field}', [value])])
+    assert saved, 'the save was not refused'
+
+
+def test_turning_certificate_verification_off_under_the_api_key_needs_the_key(
+        plex_account_api, monkeypatch):
+    """Turning verification off hands the stored key to whatever answers in
+    place of the server, so it counts as moving the destination."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'stored-plex-key'
+    config.plex.verify_ssl = True
+    plex_tv(monkeypatch, _PlexTV())
+
+    with pytest.raises(Exception) as refusal:
+        app_config.save_settings([('settings-plex-verify_ssl', ['false'])])
+    assert 'Re-enter the key to use a different address' in str(refusal.value)
+
+
+def test_a_rotation_between_the_verification_and_the_send_cannot_swap_the_credential(
+        plex_account_api, monkeypatch):
+    """The route's own token read is stale the moment a sign-in lands, so the
+    credential the plex.tv listing was verified with is the one every send
+    carries: a stale one never reaches an address verified for a fresh one."""
+    client, config = plex_account_api
+    from api.plex import oauth
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'fresh-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    config.plex.server_connections = [LISTED]
+    fake = _PlexTV(listing={'fresh-token': (LISTED,)}, replies={
+        LISTED + '/library/sections': (200, _SECTIONS),
+        LISTED + '/library/sections/1/all': (200, {'MediaContainer': {'size': 1}}),
+        LISTED + '/library/sections/1': (200, {'MediaContainer': {'Directory': [
+            {'Location': [{'path': '/media'}]}]}}),
+    })
+    plex_tv(monkeypatch, fake)
+    # A sign-in landed between the route's first read and the verification.
+    monkeypatch.setattr(oauth, 'get_decrypted_token',
+                        lambda: 'stale-token' if fake.tv_calls == 0 else 'fresh-token')
+
+    response = client.get('/api/plex/oauth/libraries', headers=HEADERS)
+    assert response.status_code == 200 and response.json['data']
+    assert all(token == 'fresh-token' for _url, token in fake.server_calls), \
+        'the credential the listing was verified with is the one that was sent'
+    assert 'stale-token' not in [token for _url, token in fake.server_calls]
+
+
+def test_the_pooled_plex_session_refuses_a_redirect_on_every_verb(redirect_pair):
+    """Every path that talks to a Plex server shares this session, and its
+    credential never follows a redirect: a server that answers with one is
+    not the server the address was verified for, so the next hop is never
+    contacted."""
+    import requests
+    from plex.operations import _build_pooled_session
+    source, target = redirect_pair()
+    session = _build_pooled_session(verify=False)
+
+    with pytest.raises(requests.exceptions.TooManyRedirects):
+        session.get(source.url + '/library/sections',
+                    headers={'X-Plex-Token': 'account-token'}, timeout=5)
+    with pytest.raises(requests.exceptions.TooManyRedirects):
+        session.post(source.url + '/library/sections',
+                     headers={'X-Plex-Token': 'account-token'}, timeout=5)
+
+    assert target.records == [], 'the credential never reached the second origin'
+    assert len(source.records) == 2, 'each request was answered by the first origin only'
+
+
+def test_a_plex_probe_refuses_to_follow_a_redirect_to_another_origin(redirect_pair):
+    """The instance probe answers a redirect with a connection error rather
+    than letting the credential cross to the origin it names."""
+    from media_servers import service
+    source, target = redirect_pair()
+
+    result = service._plex_probe(source.url, 'account-token', False, False)
+
+    assert result == {'success': False, 'error_code': 'connection_error'}
+    assert target.records == [], 'the credential never reached the second origin'
+
+
+def test_a_plex_refresh_refuses_to_follow_a_redirect_to_another_origin(redirect_pair):
+    """A refresh whose section listing answers with a redirect fails with its
+    reason rather than sending the token to the origin the redirect names."""
+    from media_servers.http import MediaServerError
+    from plex.refresh import PlexRefreshClient
+    source, target = redirect_pair()
+
+    with PlexRefreshClient(snapshot('plex', url=source.url, apikey='account-token',
+                                   verify_ssl=False,
+                                   options={'movie_libraries': ['Movies']})) as client:
+        with pytest.raises(MediaServerError) as refusal:
+            client.refresh_library('movie')
+    assert str(refusal.value) == 'connection_error'
+    assert target.records == [], 'the credential never reached the second origin'
+
+
+def test_connecting_for_operations_refuses_to_follow_a_redirect_to_another_origin(
+        redirect_pair, monkeypatch):
+    """The account connection itself is refused rather than completed through
+    a redirect, and the origin the redirect names never sees the token."""
+    from plex import operations
+    source, target = redirect_pair(redirect_path='/')
+    config = plex_settings(auth_method='oauth', token='account-token',
+                           server_url=source.url, server_machine_id=PLEX_MACHINE)
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (source.url,)}))
+    monkeypatch.setattr(operations, 'settings', config)
+
+    with pytest.raises(Exception):
+        operations.get_plex_server()
+
+    assert target.records == [], 'the credential never reached the second origin'
+
+
+def test_an_account_row_destination_is_resolved_to_the_uri_plex_tv_listed(
+        schema_session, monkeypatch):
+    """The row's address is a legacy spelling of a listed origin, so what the
+    refresh workers and the probe are handed is the URI plex.tv itself
+    returned, never the stored spelling."""
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    stored = LISTED + '/legacy'
+    config = plex_settings(auth_method='oauth', token='account-token',
+                           server_url=stored)
+    config.plex.server_machine_id = 'machine-abc'
+    row = sync_plex_instance(schema_session, config)
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    snapshot = MediaServerInstanceRepository(schema_session).snapshot(row.id, config)
+
+    assert snapshot.sendable is True
+    assert snapshot.url == LISTED, 'the snapshot carries the URI plex.tv listed'
+
+
+def test_a_stored_selection_spelled_differently_is_rewritten_to_the_listed_uri(
+        plex_account_api, monkeypatch, schema_session):
+    """The selection and the row that reads it keep the URI plex.tv listed for
+    the same origin, so the refresh, probe and status paths all send to the
+    address plex.tv itself returned."""
+    import app.database
+    from media_servers.plex_account import (sync_plex_instance, verified_server_addresses)
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    stored = LISTED + '/legacy'
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = stored
+    row = sync_plex_instance(schema_session, config)
+    monkeypatch.setattr(app.database, 'database', schema_session)
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+    persisted = []
+
+    result = verified_server_addresses(
+        config, persist=lambda: persisted.append(True))
+
+    # The rewrite itself is asserted before the answer is unpacked, so a
+    # source that returns a differently shaped answer fails on the missing
+    # rewrite rather than on the unpack.
+    assert config.plex.server_url == LISTED, 'the selection was rewritten'
+    assert MediaServerInstanceRepository(schema_session).get(row.id).url == LISTED, \
+        'the row was rewritten with it'
+    assert result == ([LISTED], 'ok', 'account-token')
+    assert persisted, 'the rewritten selection was persisted'
+
+
+def test_the_status_page_probes_no_destination_the_rule_holds_back(
+        schema_session, monkeypatch):
+    """The version probe runs on the snapshot a refresh would be dispatched
+    with, so a destination the rule holds back is not probed either: its
+    credential is sent nowhere, not even by the status page."""
+    from media_servers import versions
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    config = plex_settings(auth_method='oauth', token='account-token',
+                           server_url=UNLISTED)
+    config.plex.server_machine_id = 'machine-abc'
+    row = sync_plex_instance(schema_session, config)
+    assert MediaServerInstanceRepository(schema_session).snapshot(row.id, config).sendable is False
+    probed = []
+    monkeypatch.setattr(versions, '_probe', lambda snap: probed.append(snap) or {'success': False})
+    versions.reset()
+
+    entries = versions.statuses(schema_session, config)
+
+    assert entries == [], 'a held destination has no version entry'
+    for _attempt in range(50):
+        with versions._lock:
+            busy = bool(versions._inflight)
+        if not busy:
+            break
+        time.sleep(0.02)
+    assert probed == [], 'no probe was scheduled for the held destination'
+
+
+def test_a_parseable_document_that_is_not_a_resource_listing_preserves_the_selection(
+        plex_account_api, monkeypatch):
+    """An XML answer whose root is not a resource listing is plex.tv not
+    answering, not plex.tv listing nothing: nothing is sent, and a stored
+    selection is kept rather than remembered as empty and dropped."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = UNLISTED
+    config.plex.server_connections = [UNLISTED]
+
+    fake = _PlexTV(listing={'account-token': (LISTED,)},
+                   content_type='application/xml', xml='<html>captive portal</html>')
+    plex_tv(monkeypatch, fake)
+
+    response = client.get('/api/plex/oauth/libraries', headers=HEADERS)
+    assert response.status_code == 200 and response.json == {'data': []}
+    assert fake.server_calls == [], 'the token was sent nowhere'
+    assert config.plex.server_url == UNLISTED, 'the selection was kept'
+    assert config.plex.server_connections == [UNLISTED]
+
+
+def test_a_listed_ipv6_address_keeps_its_selection_and_receives_the_token(
+        plex_account_api, monkeypatch):
+    """A bracketed IPv6 literal is the one host two URL parsers spell
+    differently, so the origin comparison strips the brackets: a stored IPv6
+    selection plex.tv also lists is used, not wiped."""
+    client, config = plex_account_api
+    address = 'http://[2001:db8::1]:32400'
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = address
+    config.plex.server_connections = [address]
+    fake = _PlexTV(listing={'account-token': (address,)}, replies={
+        address + '/library/sections': (200, _SECTIONS),
+        address + '/library/sections/1/all': (200, {'MediaContainer': {'size': 1}}),
+        address + '/library/sections/1': (200, {'MediaContainer': {'Directory': [
+            {'Location': [{'path': '/media'}]}]}}),
+    })
+    plex_tv(monkeypatch, fake)
+
+    response = client.get('/api/plex/oauth/libraries', headers=HEADERS)
+    assert response.status_code == 200 and response.json['data'], \
+        'the bracketed address was treated as listed'
+    assert config.plex.server_url == address, 'the selection was not wiped'
+    assert fake.server_calls, 'the token reached the listed IPv6 address'
+
+
+def test_a_held_account_snapshot_is_asked_again_once_plex_tv_recovers(
+        schema_session, monkeypatch):
+    """Snapshots are computed once and republished only by an instance write or
+    an account sync, so one plex.tv failure at the wrong moment must not hold
+    Plex refreshes until a restart: reading a held account snapshot asks
+    plex.tv again once the unreachable pause has passed, and a dispatch that
+    arrives after the answer runs rather than staying pending."""
+    import requests
+
+    from media_servers import plex_account, resolution
+    from media_servers.dispatcher import NativeConfiguration, RefreshDispatcher
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    config = plex_settings(auth_method='oauth', token='account-token', server_url=LISTED,
+                           movie_library=['Movies'])
+    config.plex.server_machine_id = PLEX_MACHINE
+    row = sync_plex_instance(schema_session, config)
+    repo = MediaServerInstanceRepository(schema_session)
+    clock = {'now': 1000.0}
+    monkeypatch.setattr(plex_account, 'time', SimpleNamespace(monotonic=lambda: clock['now']))
+    state = {'status': 503}
+
+    def fake(url, **_kwargs):
+        return SimpleNamespace(
+            status_code=state['status'], headers={'content-type': 'application/json'},
+            json=lambda: [{'name': 'Attic', 'clientIdentifier': PLEX_MACHINE,
+                           'provides': 'server', 'owned': True,
+                           'connections': [{'uri': LISTED}]}])
+
+    monkeypatch.setattr(requests, 'get', fake)
+    plex_account.forget_plex_tv_answer()
+
+    # The configuration is built while plex.tv does not answer.
+    configuration = NativeConfiguration(config, snapshots=repo.snapshots(config))
+    assert configuration.read(row.id)[1].sendable is False
+    # Still inside the short pause, the answer stays no.
+    assert configuration.read(row.id)[1].sendable is False
+
+    # plex.tv answers again, well past the unreachable pause.
+    state['status'] = 200
+    clock['now'] += 3600
+    revision, snapshot, _changing = configuration.read(row.id)
+    assert snapshot.sendable is True, 'the held snapshot was released'
+    assert snapshot.url == LISTED, 'the released snapshot carries the listed URI'
+    assert revision == snapshot.revision
+
+    # A refresh that arrives now dispatches instead of waiting for a restart.
+    client = _Recorder('plex', {resolution.LIBRARY})
+    dispatcher = RefreshDispatcher(configuration, client_factory=lambda *_args: client,
+                                   metadata_factory=lambda _event: metadata())
+    dispatcher.notify(mutation())
+    assert dispatcher.wait_idle(10, server=row.id)
+    assert dispatcher.status(row.id)['state'] == 'requested'
+
+
+def test_the_locked_initialization_holds_the_account_row_rather_than_asking_plex_tv(
+        schema_session, monkeypatch):
+    """get_native_configuration builds the saved snapshots while it holds the
+    one lock every dispatcher caller shares, so a plex.tv ask there would hold
+    the whole refresh machinery for the ask's whole timeout. The account's row
+    is published held instead, and the ask moves outside the locked
+    initialization: reading the row asks plex.tv and releases it once the
+    answer says the credential may be sent to the address plex.tv listed."""
+    import requests
+
+    from app import config as app_config, database as app_database
+    from app.database import TableMediaServerImports
+    from media_servers import dispatcher, plex_account
+    from media_servers.plex_account import sync_plex_instance
+    config = plex_settings(auth_method='oauth', token='account-token', server_url=LISTED)
+    config.plex.server_machine_id = PLEX_MACHINE
+    monkeypatch.setattr(app_config, 'settings', config)
+    monkeypatch.setattr(app_database, 'database', schema_session)
+    monkeypatch.setattr(dispatcher, '_configuration', None)
+    row = sync_plex_instance(schema_session, config)
+    schema_session.add(TableMediaServerImports(kind='plex'))
+    schema_session.flush()
+    asks = []
+
+    def fake(url, **_kwargs):
+        asks.append(url)
+        return SimpleNamespace(
+            status_code=200, headers={'content-type': 'application/json'},
+            json=lambda: [{'name': 'Attic', 'clientIdentifier': PLEX_MACHINE,
+                           'provides': 'server', 'owned': True,
+                           'connections': [{'uri': LISTED}]}])
+
+    monkeypatch.setattr(requests, 'get', fake)
+    plex_account.forget_plex_tv_answer()
+
+    native = dispatcher.get_native_configuration()
+
+    assert asks == [], 'the locked initialization asked plex.tv for nothing'
+    published, = native.list()
+    assert published.sendable is False, 'the account row is held until plex.tv has answered'
+    _revision, released, _changing = native.read(row.id)
+    assert asks, 'reading the row asks plex.tv outside the locked initialization'
+    assert released.sendable is True, 'the row was released once plex.tv answered'
+    assert released.url == LISTED, 'the released row carries the URI plex.tv listed'
+
+
+def test_reading_a_held_account_row_does_not_hold_the_shared_lock(
+        schema_session, monkeypatch):
+    """The held-row release can reach plex.tv, and that ask takes up to its
+    whole timeout: it runs without the lock every dispatcher caller shares,
+    so a read that arrives while the first one is still asking is answered
+    rather than blocked behind it, and the released row is published only
+    when the answer still finds it the current one."""
+    import requests
+
+    from media_servers import plex_account
+    from media_servers.dispatcher import NativeConfiguration
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    config = plex_settings(auth_method='oauth', token='account-token', server_url=LISTED,
+                           movie_library=['Movies'])
+    config.plex.server_machine_id = PLEX_MACHINE
+    row = sync_plex_instance(schema_session, config)
+    repo = MediaServerInstanceRepository(schema_session)
+    asking = threading.Event()
+    proceed = threading.Event()
+    asks = []
+    asks_lock = threading.Lock()
+
+    def fake(url, **_kwargs):
+        with asks_lock:
+            first = not asks
+            asks.append(url)
+        if first:
+            asking.set()
+            assert proceed.wait(10), 'the first ask was never let finish'
+        return SimpleNamespace(
+            status_code=200, headers={'content-type': 'application/json'},
+            json=lambda: [{'name': 'Attic', 'clientIdentifier': PLEX_MACHINE,
+                           'provides': 'server', 'owned': True,
+                           'connections': [{'uri': LISTED}]}])
+
+    monkeypatch.setattr(requests, 'get', fake)
+    plex_account.forget_plex_tv_answer()
+    configuration = NativeConfiguration(config, snapshots=repo.snapshots(config,
+                                                                         hold_account_row=True))
+    published, = configuration.list()
+    assert published.sendable is False, 'the account row starts out held'
+
+    first_read = []
+    reader = threading.Thread(target=lambda: first_read.append(configuration.read(row.id)))
+    reader.start()
+    assert asking.wait(10), 'reading the held row asked plex.tv'
+
+    # A second read that arrives while the first one is still asking is
+    # answered, not held behind the ask on the lock every caller shares.
+    second_read = []
+    arrived = threading.Thread(target=lambda: second_read.append(configuration.read(row.id)))
+    arrived.start()
+    arrived.join(5)
+    assert not arrived.is_alive(), 'a second read was blocked behind the plex.tv ask'
+    assert second_read[0][1].sendable is True, 'the second read released the row'
+
+    proceed.set()
+    reader.join(10)
+    assert not reader.is_alive()
+    _revision, released, _changing = first_read[0]
+    assert released.sendable is True and released.url == LISTED, \
+        'the first read answered with the released row'
+
+
+def test_an_older_verification_cannot_erase_a_newer_account_selection(
+        plex_account_api, monkeypatch):
+    """The plex.tv ask can outlast a sign-in landing in the meantime, so the
+    account and its selection are read once and written to only when they are
+    still what is stored: an older account's answer never clears or rewrites
+    the selection a newer account just made."""
+    import requests
+
+    from media_servers import plex_account
+    from media_servers.plex_account import verified_server_addresses
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'old-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = UNLISTED
+    config.plex.server_connections = [UNLISTED]
+    listings = {
+        'old-token': [],
+        'new-token': [{'name': 'Attic', 'clientIdentifier': 'machine-new',
+                       'provides': 'server', 'owned': True,
+                       'connections': [{'uri': LISTED}]}],
+    }
+
+    def plex_tv(url, **_kwargs):
+        token = _kwargs['headers'].get('X-Plex-Token')
+        if token == 'old-token':
+            # A newer sign-in lands while the older account's ask is in
+            # flight, and picks its own server.
+            config.plex.token = 'new-token'
+            config.plex.server_machine_id = 'machine-new'
+            config.plex.server_url = LISTED
+            config.plex.server_connections = [LISTED]
+        return SimpleNamespace(
+            status_code=200, headers={'content-type': 'application/json'},
+            json=lambda: listings[token])
+
+    monkeypatch.setattr(requests, 'get', plex_tv)
+    plex_account.forget_plex_tv_answer()
+
+    addresses, status, credential = verified_server_addresses(config, persist=lambda: None)
+
+    assert (addresses, status, credential) == ([LISTED], 'ok', 'new-token')
+    assert config.plex.server_url == LISTED, 'the newer selection was not erased'
+    assert config.plex.server_machine_id == 'machine-new'
+    assert config.plex.server_connections == [LISTED]
+
+
+def test_a_settings_save_changing_the_account_waits_for_an_older_verification(
+        schema_session, monkeypatch):
+    """A settings save that replaces the account credential is an account
+    transition too, so it runs under the account lock like every verification's
+    write phase: while an older verification is inside its write phase, past
+    its account check, the save waits for it, and the older account's answer
+    can no longer clear the selection the newer save just stored."""
+    import threading
+
+    import requests
+
+    from app import config as app_config, database as app_database
+    from app.config import settings as app_settings
+    from media_servers import plex_account
+    from media_servers.plex_account import verified_server_addresses
+    monkeypatch.setattr(app_database, 'database', schema_session)
+    for field, value in (('auth_method', 'oauth'), ('token', 'old-token'),
+                         ('server_machine_id', PLEX_MACHINE), ('server_url', UNLISTED)):
+        monkeypatch.setattr(app_settings.plex, field, value)
+    listings = {
+        'old-token': [],
+        'new-token': [{'name': 'Attic', 'clientIdentifier': PLEX_MACHINE,
+                       'provides': 'server', 'owned': True,
+                       'connections': [{'uri': LISTED}]}],
+    }
+    asked = threading.Event()
+    in_write_phase = threading.Event()
+    save_finished = threading.Event()
+    save_contended = threading.Event()
+
+    def plex_tv(url, **_kwargs):
+        token = _kwargs['headers'].get('X-Plex-Token')
+        if token == 'old-token':
+            asked.set()
+        return SimpleNamespace(
+            status_code=200, headers={'content-type': 'application/json'},
+            json=lambda: listings[token])
+
+    monkeypatch.setattr(requests, 'get', plex_tv)
+    plex_account.forget_plex_tv_answer()
+
+    # The older verification is held inside its write phase, past the account
+    # check it made under the lock and before the write that clears the
+    # selection plex.tv does not list for it. It resumes once the save has
+    # either finished writing, the unfixed order, or asked for the account
+    # lock the verification still holds, the fixed one. What its clear wipes
+    # is recorded: the older selection at the fixed head, the save's newer one
+    # at the unfixed head.
+    erased = []
+    original_clear = plex_account._clear_server_selection
+
+    def gated_clear(section, persist):
+        in_write_phase.set()
+        deadline = time.monotonic() + 10
+        while not (save_finished.is_set() or save_contended.is_set()):
+            assert time.monotonic() < deadline, \
+                'the save neither finished nor waited for the account lock'
+            time.sleep(0.01)
+        erased.append(getattr(section, 'server_url', '') or '')
+        return original_clear(section, persist)
+
+    monkeypatch.setattr(plex_account, '_clear_server_selection', gated_clear)
+
+    # The account lock is wrapped so the save's wait for it is visible here:
+    # the first entry is the verification itself, and a second one is the save
+    # waiting on the lock the verification holds.
+    real_lock = plex_account.ACCOUNT_LOCK
+    first_entry = []
+
+    class _ObservedLock:
+        def __enter__(self):
+            if first_entry:
+                save_contended.set()
+            else:
+                first_entry.append(True)
+            return real_lock.__enter__()
+
+        def __exit__(self, *exception):
+            return real_lock.__exit__(*exception)
+
+    monkeypatch.setattr(plex_account, 'ACCOUNT_LOCK', _ObservedLock())
+
+    verified = []
+    older = threading.Thread(target=lambda: verified.append(
+        verified_server_addresses(app_settings, persist=lambda: None)))
+    older.start()
+    assert asked.wait(10), 'the older verification asked plex.tv first'
+    assert in_write_phase.wait(10), 'the older verification reached its write phase'
+
+    # While the older verification is held past its check, the save changes
+    # the account and stores the newer selection.
+    app_config.save_settings([('settings-plex-token', ['new-token']),
+                              ('settings-plex-server_url', [LISTED])])
+    save_finished.set()
+    older.join(30)
+    assert not older.is_alive()
+    assert erased == [UNLISTED], \
+        'the older verification wiped its own selection, not the newer save\'s'
+    assert app_settings.plex.token == 'new-token', 'the newer credential was saved'
+    assert app_settings.plex.server_url == LISTED, \
+        'the selection the newer save stored survived the older verification'
+
+
+def test_a_settings_save_cannot_store_an_address_verified_for_a_replaced_account(
+        schema_session, monkeypatch):
+    """The plex.tv round-trip runs before the write locks, because no lock may
+    be held across it, so the guard carries what it verified into the locks
+    and confirms it there against the account as it is now stored: a second
+    save replacing the stored token while the first save's listing is in
+    flight makes the listing stale, and the first save is refused and asked
+    to try again rather than storing an address the newer account never had
+    verified. The unfixed order lands the move beside the newer token."""
+    from app import config as app_config, database as app_database
+    from app.config import settings as app_settings
+    from media_servers import plex_account
+    monkeypatch.setattr(app_database, 'database', schema_session)
+    for field, value in (('auth_method', 'oauth'), ('token', 'old-token'),
+                         ('server_machine_id', PLEX_MACHINE), ('server_url', '')):
+        monkeypatch.setattr(app_settings.plex, field, value)
+
+    # plex.tv lists the moved address for the account the first save verified
+    # with, so the listing itself succeeds and only its capture can go stale.
+    plex_tv(monkeypatch, _PlexTV(listing={'old-token': (LISTED,)}, machine=PLEX_MACHINE))
+
+    # The listing is wrapped so a second save lands inside it: config.py
+    # imports it at call time, so the patch is the one the first save asks,
+    # and the second save replaces the stored token before the listing
+    # answers, exactly inside the first save's check-to-write window. The
+    # second save carries no address, so it asks plex.tv for nothing and the
+    # wrapper never recurses.
+    original_listed = plex_account.remembered_listed
+
+    def listed_with_a_newer_save(method, credential, machine_id):
+        app_config.save_settings([('settings-plex-token', ['new-token'])])
+        return original_listed(method, credential, machine_id)
+
+    monkeypatch.setattr(plex_account, 'remembered_listed', listed_with_a_newer_save)
+
+    with pytest.raises(Exception) as refusal:
+        app_config.save_settings([('settings-plex-server_url', [LISTED])])
+    assert 'The Plex account changed while the server address was being verified' \
+        in str(refusal.value)
+    assert 'Try the save again' in str(refusal.value)
+    assert app_settings.plex.server_url == '', 'the stale verification stored nothing'
+    assert app_settings.plex.token == 'new-token', 'the newer save kept its write'
+
+
+def test_an_address_only_save_racing_the_verification_keeps_the_newer_address(
+        plex_account_api, monkeypatch):
+    """The account lock covers method and credential changes, but an
+    address-only save changes neither, so the verification rechecks the
+    selected URL and its connections before it writes or returns: an address
+    a save landed while plex.tv answered survives the older verification's
+    write rather than being rewritten from the earlier snapshot."""
+    import requests
+
+    from media_servers import plex_account
+    from media_servers.plex_account import verified_server_addresses
+    client, config = plex_account_api
+    newer = 'https://newer.example:32400'
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    config.plex.server_url = LISTED
+    config.plex.server_connections = [LISTED]
+
+    def plex_tv(url, **_kwargs):
+        # A save lands while the ask is in flight, moving the selection to
+        # another listed address without touching the credential or the
+        # server it was asked about.
+        config.plex.server_url = newer
+        config.plex.server_connections = [newer]
+        return SimpleNamespace(
+            status_code=200, headers={'content-type': 'application/json'},
+            json=lambda: [{'name': 'Attic', 'clientIdentifier': PLEX_MACHINE,
+                           'provides': 'server', 'owned': True,
+                           'connections': [{'uri': LISTED}, {'uri': newer}]}])
+
+    monkeypatch.setattr(requests, 'get', plex_tv)
+    plex_account.forget_plex_tv_answer()
+
+    addresses, status, credential = verified_server_addresses(config, persist=lambda: None)
+
+    assert (addresses, status, credential) == ([newer], 'ok', 'account-token')
+    assert config.plex.server_url == newer, \
+        'the newer address survived the older verification'
+    assert config.plex.server_connections == [newer], \
+        'the newer connections survived the older verification'
+
+
+def test_an_address_only_save_landing_after_the_check_waits_for_the_older_clear(
+        schema_session, monkeypatch):
+    """An address-only save is serialized with the verification's write phase:
+    held past its address check, at the clear its older answer is about to
+    make, the verification lets the save write only once its own write is
+    done, so the clear wipes the selection it was asked about and never the
+    newer address the save landed in under it."""
+    import threading
+
+    from app import config as app_config, database as app_database
+    from app.config import settings as app_settings
+    from media_servers import plex_account
+    from media_servers.plex_account import verified_server_addresses
+    monkeypatch.setattr(app_database, 'database', schema_session)
+    for field, value in (('auth_method', 'oauth'), ('token', 'account-token'),
+                         ('server_machine_id', PLEX_MACHINE), ('server_url', UNLISTED)):
+        monkeypatch.setattr(app_settings.plex, field, value)
+    in_write_phase = threading.Event()
+    save_finished = threading.Event()
+    save_contended = threading.Event()
+
+    # plex.tv lists only the newer address for this account's server, so the
+    # verification of the stored, unlisted one ends at its clear, and a save
+    # that moves the selection to the listed address is the interleave.
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}, machine=PLEX_MACHINE))
+
+    # The older verification is held inside its write phase, past its address
+    # check and at the clear itself. It resumes once the save has either
+    # finished writing, the unfixed order, or asked for the account lock the
+    # verification still holds, the fixed one. What its clear wipes is
+    # recorded: the older selection at the fixed head, the newer address the
+    # save landed at the unfixed head.
+    erased = []
+    original_clear = plex_account._clear_server_selection
+
+    def gated_clear(section, persist):
+        in_write_phase.set()
+        deadline = time.monotonic() + 10
+        while not (save_finished.is_set() or save_contended.is_set()):
+            assert time.monotonic() < deadline, \
+                'the save neither finished nor waited for the account lock'
+            time.sleep(0.01)
+        erased.append(getattr(section, 'server_url', '') or '')
+        return original_clear(section, persist)
+
+    monkeypatch.setattr(plex_account, '_clear_server_selection', gated_clear)
+
+    # The account lock is wrapped so the save's wait for it is visible here:
+    # the first entry is the verification itself, and a second one is the save
+    # waiting on the lock the verification holds.
+    real_lock = plex_account.ACCOUNT_LOCK
+    first_entry = []
+
+    class _ObservedLock:
+        def __enter__(self):
+            if first_entry:
+                save_contended.set()
+            else:
+                first_entry.append(True)
+            return real_lock.__enter__()
+
+        def __exit__(self, *exception):
+            return real_lock.__exit__(*exception)
+
+    monkeypatch.setattr(plex_account, 'ACCOUNT_LOCK', _ObservedLock())
+
+    older = threading.Thread(target=lambda: verified_server_addresses(
+        app_settings, persist=lambda: None))
+    older.start()
+    assert in_write_phase.wait(10), 'the older verification reached its clear'
+
+    # The save lands while the older verification is held at its clear, past
+    # the address check, and moves the selection without touching the
+    # credential or the server it was asked about.
+    app_config.save_settings([('settings-plex-server_url', [LISTED])])
+    save_finished.set()
+    older.join(30)
+    assert not older.is_alive()
+    assert erased == [UNLISTED], \
+        'the older verification wiped its own selection, not the newer save\'s'
+    assert app_settings.plex.server_url == LISTED, \
+        'the newer address survived the older verification'
+
+
+def test_the_picker_does_not_store_a_selection_the_account_changed_under(
+        plex_account_api, monkeypatch, schema_session):
+    """The picker verifies with the account it read, and a sign-in landing
+    while plex.tv answers moves the pick to the newer account rather than
+    storing an older account's choice beside a newer credential."""
+    import requests
+
+    from media_servers import plex_account
+    from media_servers.plex_account import sync_plex_instance
+    client, config = plex_account_api
+    older = 'https://older.example:32400'
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'old-token'
+    config.plex.server_machine_id = 'machine-old'
+    config.plex.server_url = older
+    sync_plex_instance(schema_session, config)
+    listings = {
+        'old-token': [{'name': 'Old', 'clientIdentifier': 'machine-old',
+                       'provides': 'server', 'owned': True,
+                       'connections': [{'uri': older}]}],
+        'new-token': [{'name': 'New', 'clientIdentifier': 'machine-new',
+                       'provides': 'server', 'owned': True,
+                       'connections': [{'uri': LISTED}]}],
+    }
+
+    def plex_tv(url, **_kwargs):
+        token = _kwargs['headers'].get('X-Plex-Token')
+        if token == 'old-token':
+            # A newer sign-in lands while the picker's ask is in flight.
+            config.plex.token = 'new-token'
+            config.plex.server_machine_id = 'machine-new'
+            config.plex.server_url = LISTED
+            config.plex.server_connections = [LISTED]
+        return SimpleNamespace(
+            status_code=200, headers={'content-type': 'application/json'},
+            json=lambda: listings[token])
+
+    monkeypatch.setattr(requests, 'get', plex_tv)
+    plex_account.forget_plex_tv_answer()
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': 'machine-old', 'name': 'Old', 'uri': older})
+
+    assert response.status_code == 400
+    assert response.json['error_code'] == 'server_not_listed', response.json
+    assert config.plex.server_url == LISTED, 'the newer selection was not erased'
+    assert config.plex.server_machine_id == 'machine-new'
+    assert config.plex.server_connections == [LISTED]
+
+
+def test_a_save_switching_to_the_sign_in_method_verifies_with_the_sign_in_token(
+        plex_account_api, monkeypatch):
+    """A save that switches the method checks a submitted address with the
+    credential the method it leaves in place reads, not the one the stored
+    method does: switching to the sign-in method verifies against the stored
+    token, so an address plex.tv lists for it is stored instead of being
+    checked against the API key and dropped at first use."""
+    from app import config as app_config
+    client, config = plex_account_api
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'stored-plex-key'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+    saved = []
+    monkeypatch.setattr(app_config, '_save_settings_with_native',
+                        lambda items, **_kwargs: saved.append(items))
+
+    app_config.save_settings([('settings-plex-auth_method', ['oauth']),
+                              ('settings-plex-server_url', [LISTED])])
+    assert saved, 'the save was not refused'
+    written = {key: list(values) for key, values in saved[0]}
+    assert written['settings-plex-server_url'] == [LISTED], \
+        'the address was stored as the URI plex.tv listed'
+
+
+def test_a_selection_url_no_parser_reads_plainly_is_refused_not_raised(
+        plex_account_api, monkeypatch):
+    """A malformed selection URL raises out of the URL parser itself, and the
+    picker answers its refusal rather than failing on an unhandled error."""
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_machine_id = PLEX_MACHINE
+    plex_tv(monkeypatch, _PlexTV(listing={'account-token': (LISTED,)}))
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': PLEX_MACHINE, 'name': 'Attic', 'uri': 'http://[::1'})
+
+    assert response.status_code == 400, 'the malformed URL was refused, not raised'
+    assert response.json['error_code'] == 'server_not_listed'
+    assert config.plex.server_url == '' and config.plex.server_connections == []
+

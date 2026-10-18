@@ -33,10 +33,10 @@ _TOKEN_TTL_SECONDS = 28 * 86400
 class TVDBv4Client:
     """Thread-safe TVDB v4 client with lazy JWT refresh.
 
-    Public surface is intentionally tiny - just search_by_imdb_id(). The
-    refine path uses the returned series_tvdb_id to hydrate via
-    subliminal's existing v1 get_series() for any fields v4's remoteid
-    search didn't include.
+    Public surface is intentionally tiny - search_by_imdb_id() and
+    get_series(). The refine path uses the returned series_tvdb_id to
+    hydrate through get_series() for any series fields v4's remoteid
+    search didn't include; nothing here calls the retired v1 API family.
     """
 
     def __init__(self):
@@ -103,6 +103,31 @@ class TVDBv4Client:
             return items[0] if items else None
         except Exception as e:
             logger.debug("TVDB v4 remoteid %s error: %s", s, e)
+            return None
+
+    def get_series(self, series_id) -> Optional[dict]:
+        """Return the series record for a TVDB series id, or None.
+
+        Hydration for the episode path: /search/remoteid's episode match
+        omits the series name, so the series fields come from
+        /series/{id}. Replaces the retired v1 get_series call the compat
+        endpoint used for the same purpose.
+        """
+        token = self._ensure_token()
+        if not token or not series_id:
+            return None
+        try:
+            r = self._session.get(
+                f"{_BASE_URL}/series/{int(series_id)}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                logger.debug("TVDB v4 series %s -> HTTP %s", series_id, r.status_code)
+                return None
+            return r.json().get("data")
+        except Exception as e:
+            logger.debug("TVDB v4 series %s error: %s", series_id, e)
             return None
 
     def get_episode(self, episode_id) -> Optional[dict]:

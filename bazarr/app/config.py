@@ -191,6 +191,19 @@ def check_parser_binary(value):
     return True
 
 
+def _allowed_hosts_from_config(value):
+    """The comma-separated form of general.allowed_hosts, as a list.
+
+    A config.yaml edited by hand names one hostname most naturally as a
+    scalar, and the validator would otherwise reset that to an empty list,
+    so the scalar is read as a one-entry list the same way the environment
+    variable is.
+    """
+    if isinstance(value, str):
+        return [entry.strip() for entry in value.split(',') if entry.strip()]
+    return value
+
+
 validators = [
     # general section
     Validator('general.flask_secret_key', must_exist=True, default=hexlify(os.urandom(16)).decode(),
@@ -220,6 +233,14 @@ validators = [
     # list matches no one and would silently trust less than the old hardcoded
     # default did.
     Validator('general.trusted_proxy', must_exist=True, default='127.0.0.1', is_type_of=str, cast=str),
+    # Hostnames the request-host check answers while no login is configured:
+    # exact names, *.example.com for a domain, or a lone '*' to answer every
+    # hostname (the health page names that switch). The default set (IP
+    # literals, localhost, single-label names and local-only suffixes) always
+    # applies; entries here add to it. The cast accepts the comma-separated
+    # string a hand edit writes, as _allowed_hosts_from_config does.
+    Validator('general.allowed_hosts', must_exist=True, default=[], is_type_of=list,
+              cast=_allowed_hosts_from_config),
     Validator('general.base_url', must_exist=True, default='', is_type_of=str),
     Validator('general.instance_name', must_exist=True, default='Bazarr+', is_type_of=str,
               apply_default_on_none=True),
@@ -928,6 +949,10 @@ from secret_store import (  # noqa: E402
     has_plaintext_secrets_on_disk,
     migrate_legacy_plex_encryption,
 )
+from secret_store.migration import (LAST_FOUR_MIN_LENGTH, clear_decrypt_failure_path,  # noqa: E402
+                                    decrypt_failure_paths, note_replaced_secret)
+from secret_store.registry import (SECRET_DESCRIPTOR_KEY, HubSecretRegistrationError,  # noqa: E402
+                                   at_rest_secret_paths, manifest_boolean_secret_paths)
 
 # Legacy Plex encryption (URLSafeSerializer + plex.encryption_key) used a
 # different at-rest format with no marker prefix. If we hand its
@@ -937,6 +962,22 @@ from secret_store import (  # noqa: E402
 # Migrate FIRST so the rest of the pipeline only sees plaintext.
 migrate_legacy_plex_encryption(settings)
 
+# Register the Provider Hub plugin secret paths before the boot secret
+# pass: the plaintext detection and the in-place decrypt below have to
+# walk them, or a plugin credential stays in the clear (and one left by a
+# removed plugin never decrypts). Reads state.json directly; the service
+# layer is not up while settings load.
+try:
+    from secret_store.registry import load_plugin_secret_paths
+    load_plugin_secret_paths(settings)
+except HubSecretRegistrationError:
+    # No covering of the plaintext plugin leftovers could be vouched for,
+    # so the boot does not complete while they stay readable. The broad
+    # catch below is for the failures the durable registrations survive.
+    raise
+except Exception:
+    logging.exception("Unable to load the Provider Hub plugin secret registry")
+
 # Detect plaintext credentials BEFORE decrypt_settings_in_place runs - it
 # is a passthrough on plaintext, so afterwards the in-memory state and
 # the on-disk state match for plaintext fields and write_config's
@@ -945,6 +986,30 @@ migrate_legacy_plex_encryption(settings)
 _force_first_save_migration = has_plaintext_secrets_on_disk(settings)
 
 decrypt_settings_in_place(settings)
+
+# A stored API key that will not decrypt is the one failure Bazarr can and
+# must repair itself: the key is Bazarr's own, the SPA sends it on every
+# request, and withheld as empty it locks the UI and the API out entirely,
+# with the remedy (a health issue the API serves) unreachable. Mint a fresh
+# key with the same generator the auth.apikey validator's default uses, end
+# the failure, and raise a health notice saying the key was replaced and
+# that the tools holding the old one must be updated. The boot write below
+# persists the fresh key encrypted, and its failure refuses the boot: an
+# unsaved key would serve this boot only, and a restart would mint another
+# while the stored one stays undecryptable. An empty key is NOT
+# regenerated: an install that stores an empty key keeps it, exactly as
+# before.
+_replaced_undecryptable_api_key = "auth.apikey" in decrypt_failure_paths()
+if _replaced_undecryptable_api_key:
+    settings.auth.apikey = hexlify(os.urandom(16)).decode()
+    clear_decrypt_failure_path("auth.apikey")
+    note_replaced_secret(
+        "auth.apikey",
+        "The stored API key could not be decrypted and was replaced. Update the "
+        "tools and scripts that use the API key."
+    )
+    logging.warning("The stored API key could not be decrypted and was replaced; "
+                    "update the tools that use it.")
 
 
 class MetadataPersistenceError(Exception):
@@ -961,8 +1026,26 @@ class MetadataFollowupError(SettingsFollowupError):
 
 def write_config(*, strict_metadata=False):
     from discover.metadata import CONFIG_LOCK
-    with CONFIG_LOCK:
-        return _write_config(strict_metadata=strict_metadata)
+    from secret_store.scrub import refresh_secret_values
+    try:
+        with CONFIG_LOCK:
+            return _write_config(strict_metadata=strict_metadata)
+    finally:
+        # Whatever the outcome, the registry follows the live store. A
+        # successful save entered or rotated a credential; a failed one is
+        # rolled back by the caller after this returns (and
+        # restore_persisted_settings refreshes again there). A save whose
+        # follow-up failed still wrote the credential, so the refresh cannot
+        # hang off the return value alone. Outside the lock: the refresh reads
+        # Provider Hub's state as well, and a settings save must not wait on
+        # the hub's write lock to finish.
+        refresh_secret_values(settings)
+
+
+# Why the last write_config call failed, when it failed: write_config answers
+# True/False, so the save path re-attaches this to its refusal instead of the
+# caller learning only that a save did not happen.
+_last_write_error: Exception | None = None
 
 
 def _write_config(*, strict_metadata=False):
@@ -971,6 +1054,7 @@ def _write_config(*, strict_metadata=False):
     # deterministic (per-payload salt + timestamp), so naive ciphertext
     # comparison would always diff and rewrite config.yaml on every save.
     global _force_first_save_migration
+    global _last_write_error
     in_memory_plaintext = {k.lower(): v for k, v in settings.as_dict().items()}
     on_disk_dict = {
         k.lower(): v for k, v in Dynaconf(
@@ -983,6 +1067,7 @@ def _write_config(*, strict_metadata=False):
     if in_memory_plaintext == on_disk_plaintext and not _force_first_save_migration:
         logging.debug("Nothing changed when comparing to config file. Skipping write to file.")
         mark_master_key_persisted(in_memory_plaintext.get("general", {}).get("secrets_encryption_key"))
+        _last_write_error = None
         return True
 
     forced_migration = _force_first_save_migration
@@ -991,10 +1076,17 @@ def _write_config(*, strict_metadata=False):
 
     try:
         encrypted_payload = encrypt_settings_dict(in_memory_plaintext)
+        # A credential whose decryption failed at boot is withheld as an
+        # empty value in the live settings; keep the on-disk ciphertext for
+        # it so this save does not overwrite recoverable bytes, unless the
+        # snapshot carries a re-entered value.
+        from secret_store.migration import preserve_recoverable_ciphertexts
+        preserve_recoverable_ciphertexts(encrypted_payload, in_memory_plaintext, on_disk_dict)
         write(settings_path=config_yaml_file + '.tmp',
               settings_data=encrypted_payload,
               merge=False)
     except Exception as error:
+        _last_write_error = error
         if strict_metadata:
             raise MetadataPersistenceError("Metadata settings could not be saved. Try again.") from None
         logging.exception(f"Exception raised while trying to save temporary settings file: {error}")  # noqa: G004
@@ -1003,6 +1095,7 @@ def _write_config(*, strict_metadata=False):
         try:
             move(config_yaml_file + '.tmp', config_yaml_file)
         except Exception as error:
+            _last_write_error = error
             if strict_metadata:
                 raise MetadataPersistenceError("Metadata settings could not be saved. Try again.") from None
             logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "  # noqa: G004
@@ -1018,7 +1111,16 @@ def _write_config(*, strict_metadata=False):
             # never retry, leaving credentials unencrypted on disk.
             if forced_migration:
                 _force_first_save_migration = False
+            _last_write_error = None
             mark_master_key_persisted(encrypted_payload.get("general", {}).get("secrets_encryption_key"))
+            # The write landed: a failed scalar path whose live value is
+            # non-empty was replaced by this write, so its failure is over
+            # no matter which writer set the value. Without this, only the
+            # settings API's save ended a failure, and a writer that set a
+            # credential directly kept the health issue asking for a
+            # re-entry that had already happened.
+            from secret_store.migration import clear_replaced_secret_paths
+            clear_replaced_secret_paths(in_memory_plaintext)
             return True
 
 
@@ -1059,6 +1161,7 @@ base_url = settings.general.base_url.rstrip('/')
 
 array_keys = ['excluded_tags',
               'exclude',
+              'allowed_hosts',
               'included_codecs',
               'subzero_mods',
               'excluded_series_types',
@@ -1126,8 +1229,51 @@ if hasattr(settings.translator, 'gemini_key'):
 
 migrate_retired_openrouter_model(settings)
 
-# save updated settings to file
-write_config()
+# save updated settings to file. The boot write is what carries the
+# encryption migration to disk, so while a plaintext credential remains
+# there its failure is not survivable: write_config keeps the migration
+# pending on failure, and the boot refuses instead of completing with the
+# credential readable in the clear. The next boot retries the rewrite once
+# the write works. The same write persists a replacement API key minted
+# for one that could not be decrypted, and that failure is not survivable
+# either: unwritten, this boot would serve a key nothing on disk holds,
+# and a restart would mint another while the stored one stays
+# undecryptable, so that boot refuses too.
+if not write_config():
+    if _force_first_save_migration:
+        raise RuntimeError(
+            "The settings file could not be rewritten, so the plaintext "
+            "credentials on disk could not be encrypted; startup does not "
+            "complete while they remain readable in the clear"
+        ) from _last_write_error
+    if _replaced_undecryptable_api_key:
+        raise RuntimeError(
+            "The settings file could not be rewritten, so the replacement "
+            "API key minted for the stored one that could not be decrypted "
+            "was not persisted; startup does not complete while the stored "
+            "API key remains undecryptable"
+        ) from _last_write_error
+
+# Plugin credentials held in Provider Hub's state.json encrypt only under a
+# master key that is durably saved: the boot write above just put this
+# process's key on disk, and encrypting before that (under a key that exists
+# only in memory) would commit ciphertext a failed write could leave with no
+# key that ever opens it. The migration raises when plaintext credentials
+# remain but cannot be encrypted, so a boot does not complete while they are
+# still readable in the clear.
+from secret_store.registry import migrate_installation_config_secrets  # noqa: E402
+
+migrate_installation_config_secrets()
+
+# Register the live credential values before anything can log, store or serve
+# them, and rewrite what an earlier version already left in state.json. The
+# scrub runs after the migration above for the same reason the migration runs
+# after the boot write: the credential containers are ciphertext by now, so a
+# scrub cannot mistake a stored credential for a leaked one.
+from secret_store.scrub import refresh_secret_values, scrub_persisted_secrets  # noqa: E402
+
+refresh_secret_values(settings)
+scrub_persisted_secrets()
 
 
 def get_settings():
@@ -1141,8 +1287,14 @@ def _get_settings():
     # with '***' (key still present so the wire shape is stable, value
     # hidden); USER_VISIBLE_SECRETS pass through unchanged because the
     # in-memory settings already hold their decrypted plaintext.
+    # Registered Provider Hub plugin secrets are write-only: an empty value
+    # plus a per-section descriptor that says one is configured and, for a
+    # long secret, how it ends.
     from secret_store import is_system_secret, is_write_only_secret  # noqa: PLC0415, RUF100
-    from secret_store.registry import IMPORT_ONLY_SECTIONS
+    from secret_store.migration import decrypt_failure_paths
+    from secret_store.registry import (IMPORT_ONLY_SECTIONS,
+                                        hidden_leftover_paths, is_plugin_secret)
+    hidden_paths = hidden_leftover_paths()
     settings_to_return = {}
     for k, v in settings.as_dict().items():
         if isinstance(v, dict):
@@ -1150,9 +1302,54 @@ def _get_settings():
             if k in IMPORT_ONLY_SECTIONS:
                 continue
             settings_to_return[k] = dict()
+            # The write-only descriptor map for this section. The key is not a
+            # valid plugin config-schema field name (manifest validation
+            # rejects a leading underscore), so it can never collide with a
+            # real field.
+            secret_descriptors = {}
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
                 if is_write_only_secret(full_path):
+                    continue
+                if is_plugin_secret(full_path):
+                    if full_path in decrypt_failure_paths():
+                        # The stored value would not decrypt at boot: say the
+                        # credential is there but must be re-entered, and give
+                        # nothing away.
+                        settings_to_return[k][subk] = ""
+                        secret_descriptors[subk.lower()] = {"configured": True,
+                                                            "decrypt_failed": True}
+                        continue
+                    if isinstance(subv, str) and subv:
+                        settings_to_return[k][subk] = ""
+                        descriptor = {"configured": True}
+                        if len(subv) >= LAST_FOUR_MIN_LENGTH:
+                            descriptor["last_four"] = subv[-4:]
+                        secret_descriptors[subk.lower()] = descriptor
+                        continue
+                    if isinstance(subv, (list, dict)) and not subv:
+                        # An empty collection an earlier write left at a
+                        # secret path reads exactly like an empty string:
+                        # the field is not a configured credential, and the
+                        # payload never carries the raw collection.
+                        settings_to_return[k][subk] = ""
+                        continue
+                    if subv not in (None, ""):
+                        # A non-string value in a secret slot (an older save
+                        # coerced a numeric-looking token): it is a stored
+                        # credential all the same, so it is withheld too,
+                        # with no last four to show for it.
+                        settings_to_return[k][subk] = ""
+                        secret_descriptors[subk.lower()] = {"configured": True}
+                        continue
+                    # An empty or missing value is not a configured secret;
+                    # it flows through the normal handling below.
+                if full_path in hidden_paths:
+                    # The leftover scan could not run and the fallback could
+                    # not register this path safely either, so the value is
+                    # withheld for this boot rather than handed out: the next
+                    # boot with the scan working covers it for real.
+                    settings_to_return[k][subk] = ""
                     continue
                 if k == "discover" and subk.lower() in {"tmdb_configured", "tmdb_token_stored",
                                                         "metadata_revision"}:
@@ -1169,6 +1366,8 @@ def _get_settings():
                     settings_to_return[k].update({subk: get_array_from(subv)})
                 else:
                     settings_to_return[k].update({subk: subv})
+            if secret_descriptors:
+                settings_to_return[k][SECRET_DESCRIPTOR_KEY] = secret_descriptors
     from discover.metadata import configuration, reader_token_stored
     metadata_config = configuration()
     # Two separate facts: metadata works at all, which the built-in key makes
@@ -1402,6 +1601,12 @@ def restore_persisted_settings():
     settings.reload()
     migrate_legacy_plex_encryption(settings)
     decrypt_settings_in_place(settings)
+    # The registry follows the live store: a refused save registered the
+    # credential it proposed, and this is where those values are put back as
+    # they were. Without this the restored credential would escape scrubbing
+    # until the next settings write or boot.
+    from secret_store.scrub import refresh_secret_values
+    refresh_secret_values(settings)
 
 
 _native_settings_save_lock = threading.RLock()
@@ -1445,6 +1650,17 @@ class _FollowUps:
 NATIVE_MASTER_KEYS = {'settings-general-use_' + kind
                       for kind in ('emby', 'jellyfin', 'plex', 'silo')}
 
+# What a settings save can change about the Plex account: the credential it
+# authenticates with, or the addresses its selection points at. Such a save
+# is an account transition, and it is serialized with every account handler
+# and every verification's write phase under the account lock, rather than
+# only the row sync that follows it. The addresses are serialized for the
+# verification's write too: it rechecks them under the lock right before it
+# clears or rewrites them, so a save landing between the two would otherwise
+# be wiped from the older answer's snapshot.
+PLEX_ACCOUNT_KEYS = {'settings-plex-auth_method', 'settings-plex-token', 'settings-plex-apikey',
+                     'settings-plex-server_url', 'settings-plex-server_connections'}
+
 
 def _save_settings_with_native(settings_items, *, strict_metadata=False, on_persisted=None):
     """Apply the media-server master-switch handling around a settings save."""
@@ -1463,12 +1679,806 @@ def _save_settings_with_native(settings_items, *, strict_metadata=False, on_pers
                     _settings_mapping(settings, 'general')['use_' + kind] = enabled
 
 
+def _canonical_settings_key(key):
+    """The one spelling of a settings-<section>-<field> name, or None.
+
+    The store underneath is case-insensitive, so two spellings of one name
+    reach the same stored key while each carries its own value past every
+    check that reads only the first of them.
+    """
+    if not isinstance(key, str):
+        return None
+    parts = key.split('-')
+    if len(parts) != 3 or parts[0] != 'settings':
+        return None
+    return f'settings-{parts[1].lower()}-{parts[2].lower()}'
+
+
+def _refuse_repeated_settings_items(items):
+    """Each settings-<section>-<field> name once, in its canonical spelling.
+
+    The writer applies submitted items in order, so two spellings of one name
+    would leave the last value in the store after every check had read only
+    the first. A save that submits the same name twice is refused instead of
+    silently preferring one of the values.
+    """
+    seen = set()
+    for index, (key, values) in enumerate(items):
+        canonical = _canonical_settings_key(key)
+        if canonical is None:
+            continue
+        if canonical in seen:
+            raise ValidationError('Each setting can only be submitted once')
+        seen.add(canonical)
+        items[index] = canonical, values
+    return items
+
+
+def _refuse_unverified_scalar_arr_destination(settings_items):
+    """The destination rule for the scalar Sonarr and Radarr settings.
+
+    The scalar connection settings mirror the kind's default instance, its key
+    included, and the paths that still read them (the status probe, the cover
+    proxy, the scalar filesystem, rootfolder and notify calls) send that
+    mirrored key to the address they build. A save that moves one of those
+    settings moves a stored key, so it is refused unless the save types the key
+    again, the same rule the instance's own edits follow. The refusal protects
+    a key that is still retained: a save that clears the stored key moves the
+    address with it, and with no key stored or left there is nothing the moved
+    address could take anywhere. Turning certificate verification off counts
+    as a move; turning it back on only hardens the connection.
+    """
+    for kind in ('sonarr', 'radarr'):
+        submitted = {}
+        for key, values in settings_items:
+            parts = key.split('-') if isinstance(key, str) else []
+            if len(parts) == 3 and parts[:2] == ['settings', kind]:
+                values = values if isinstance(values, list) else [values]
+                submitted.setdefault(parts[2].lower(), []).extend(values)
+        if not any(field in submitted
+                   for field in ('ip', 'port', 'base_url', 'ssl', 'verify_ssl')):
+            continue
+        typed = any(isinstance(value, str) and value.strip()
+                    for value in (_plex_writer_value('apikey', [item])
+                                  for item in submitted.get('apikey', [])))
+        if typed:
+            # The key typed again is all the move needs.
+            continue
+        if 'apikey' in submitted:
+            # The writer stores the submitted value, so a submitted key with
+            # no content, in any of the writer's empty spellings, clears the
+            # stored one: the save leaves no key for the moved address to
+            # send, and nothing is retained to protect.
+            continue
+        section = getattr(settings, kind, None)
+        if section is None:
+            continue
+        stored_key = section.get('apikey', '') or ''
+        if not (isinstance(stored_key, str) and stored_key.strip()):
+            # No key is retained, so there is nothing a moved address
+            # could take with it.
+            continue
+        changed = False
+        for field, fallback in (('ip', '127.0.0.1'),
+                                ('port', 8989 if kind == 'sonarr' else 7878),
+                                ('base_url', '/'), ('ssl', False)):
+            if field not in submitted:
+                continue
+            value = _plex_writer_value(field, submitted[field])
+            stored = section.get(field, fallback)
+            if stored is None:
+                stored = fallback
+            if value is None:
+                # An empty spelling clears the stored value, and the cleared
+                # field falls back to the default the client applies, so the
+                # destination the moved key is sent to is the default one: a
+                # move whenever the stored value was not that default already.
+                value = fallback
+            if value != stored:
+                changed = True
+        if 'verify_ssl' in submitted:
+            verify_ssl = _plex_writer_value('verify_ssl', submitted['verify_ssl'])
+            if section.get('verify_ssl', False) and not verify_ssl:
+                # Turning verification off hands the mirrored key to whatever
+                # answers in place of the server.
+                changed = True
+        if changed:
+            raise ValidationError('Re-enter the key to use a different address')
+
+
+def _usable_plugin_manifest(candidate):
+    """Whether an installed row's manifest document declares its config fields.
+
+    A manifest that carries none of the structure the declarations are read
+    from, a config_schema carrying its properties and a string list of
+    secret fields, is not a plugin whose fields can be vouched for:
+    ``manifest: {}`` declares nothing, so neither the fields formatted as a
+    uri nor the secrets can be known. Such a document is unusable the same way
+    a missing one is, never a plugin without secrets; only a document that
+    declares its fields, however few, says what its section's values are.
+    A config_schema that carries its properties declares them with or without
+    the ``type: object`` marker the manifest validator stamps on a schema at
+    install time: an installed row whose stored schema came without the
+    marker, an older write or another writer leaving it out, still says what
+    its section's values are, so the declarations are read from it rather than
+    the row being handed to the fail-closed rule a structureless document
+    gets.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    schema = candidate.get("config_schema")
+    if not isinstance(schema, dict):
+        return False
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return False
+    if any(not isinstance(field, str) or not isinstance(attribute, dict)
+           for field, attribute in properties.items()):
+        return False
+    secrets = candidate.get("secret_fields", [])
+    return isinstance(secrets, list) and all(isinstance(field, str) for field in secrets)
+
+
+def _installed_provider_hub_manifest_fields():
+    """What each installed plugin's manifests declare about its config fields.
+
+    Returns (declared, unreadable): declared maps provider_id to the config
+    fields its manifests format as a uri, the fields they declare
+    write-only, the default destinations a cleared field falls back to, and
+    the installation's own config store, and unreadable holds the providers
+    with an installed row whose manifest data could not be read. Every
+    installed state is read, not only the active ones, and the declarations
+    are the union of the active and the staged manifest, because a pending
+    update swaps the manifest in at activation and the token a save keeps
+    now travels to the addresses the staged one declares from then on. A
+    row whose manifests could not be read keeps its own config store in the
+    mapping too, with nothing declared beside it, so the Hub's own save path
+    can tell a change from nothing while the fields that would need re-entry
+    stay unknowable. Returns (None, None) when the state itself cannot be
+    read, a failed read, a state module with no reader, a state that is not
+    a mapping or an installations value that is not one: no section's plugin
+    data can then be vouched for, not even whether it has a plugin. A
+    document whose root is not an object is one of those unreadable states,
+    read through the strict reader rather than as an empty installation
+    inventory.
+    """
+    try:
+        state_module = sys.modules.get("provider_hub.state")
+        if state_module is None:
+            from provider_hub import state as state_module
+        # The strict reader tells a malformed state document, whose root is
+        # not an object, from an empty installation inventory: the plain
+        # reader answers a default for a malformed document, and the move
+        # would be checked against an installation list that no longer
+        # exists. A state module that only carries the plain reader still
+        # serves it, the same reader it always had.
+        load_state = getattr(state_module, "load_state_strict", None)
+        if not callable(load_state):
+            load_state = getattr(state_module, "load_state", None)
+        if not callable(load_state):
+            # A state module with no reader is the state being unreadable,
+            # not the state saying nothing is installed: no section's plugin
+            # data can be vouched for.
+            return None, None
+        state = load_state()
+        if not isinstance(state, dict):
+            # A state that is not a mapping is the state being unreadable, not
+            # the state saying nothing is installed: no section's plugin data
+            # can be vouched for.
+            return None, None
+        installations = state.get("installations")
+        if not isinstance(installations, dict):
+            # An installations value that is not a mapping, a list, an empty
+            # string or a null among them, is the state being unreadable
+            # rather than a state with nothing installed: the provider rows
+            # that collection held cannot be vouched away.
+            return None, None
+        declared = {}
+        unreadable = set()
+        for provider_key, item in installations.items():
+            if not isinstance(item, dict):
+                # A row that is not a dictionary is an installed provider
+                # whose data cannot be read, not a section with no plugin:
+                # it joins the unreadable set under its mapping key, so the
+                # save rule checks its section no differently than a row
+                # whose manifest data failed to read.
+                unreadable.add(str(provider_key).lower())
+                continue
+            provider_id = str(item.get("provider_id") or provider_key).lower()
+            hub_config = item.get("config") if isinstance(item.get("config"), dict) else {}
+            manifests = [candidate for candidate in (item.get("manifest"), item.get("staged_manifest"))
+                         if _usable_plugin_manifest(candidate)]
+            if not manifests:
+                # A row without a usable manifest, neither one that declares
+                # its fields nor one the structure check can read, is an
+                # installed plugin whose declared fields cannot be known, not
+                # a plugin without any: its section is handed to the save rule
+                # as unreadable, with only its own config store kept so a
+                # submission that changes nothing can still be told from one.
+                unreadable.add(provider_id)
+                declared[provider_id] = (set(), set(), {}, hub_config)
+                continue
+            uri_fields = set()
+            secrets = set()
+            defaults = {}
+            for manifest in manifests:
+                # The declarations are the union of the active and the staged
+                # manifest, because a pending update swaps the manifest in at
+                # activation and the token a save keeps now travels to the
+                # addresses the staged one declares from then on.
+                schema = manifest.get("config_schema")
+                properties = schema.get("properties") if isinstance(schema, dict) else None
+                secrets.update(field.lower() for field in manifest.get("secret_fields", [])
+                               if isinstance(field, str))
+                if isinstance(properties, dict):
+                    for field, attribute in properties.items():
+                        if not isinstance(field, str) or not isinstance(attribute, dict):
+                            continue
+                        if attribute.get("format") == "uri":
+                            uri_fields.add(field.lower())
+                        # A field may be declared a secret either way, in
+                        # secret_fields or with a secret attribute on its
+                        # property, a spelling the manifest validation
+                        # tolerates. Only an exact true counts, so no truthy
+                        # string stands in for it.
+                        if attribute.get("secret") is True:
+                            secrets.add(field.lower())
+                        if attribute.get("default") is not None:
+                            # The default destination a cleared or empty field
+                            # falls back to, the fallback the provider reader
+                            # applies; a pending update can still swap it, so
+                            # every manifest's default is kept.
+                            field_defaults = defaults.setdefault(field.lower(), [])
+                            if attribute["default"] not in field_defaults:
+                                field_defaults.append(attribute["default"])
+            hub_config = item.get("config") if isinstance(item.get("config"), dict) else {}
+            declared[provider_id] = (uri_fields, secrets, defaults, hub_config)
+        return declared, unreadable
+    except Exception:
+        logging.exception("Unable to inspect installed Provider Hub providers")
+        return None, None
+
+
+def _refuse_unverified_plugin_destination(settings_items):
+    """The destination rule for plugin settings.
+
+    A plugin keeps its configuration in two stores, the settings section a
+    settings save writes and the installation's own config the Hub's update
+    path writes, and its stored key reaches the effective configuration
+    across both on every search, so a save that moves one of its destination
+    fields is refused unless the moved address receives a credential the
+    same submission typed, the same rule the media server settings follow. A
+    destination field is one named url, host or endpoint, one ending in _url
+    or _host, or
+    one a manifest formats as a uri, the active or the staged one; the
+    secrets are the fields the manifests declare, in secret_fields or with a
+    secret attribute on the property. Every installed plugin counts, whatever
+    its state, because one that is inactive or waiting for its restart still
+    holds its stored key, and its section still moves. The plugin data needed
+    to check a section that cannot be read, a row without usable manifest
+    data or a state that cannot be read at all, refuses the move outright,
+    with no re-entry escape: the fields that would need re-entry cannot be
+    known, so any moved field is refused rather than read as a
+    provider with no secrets. A section Bazarr reserves for itself is vouched
+    for without the state instead, so the proxy url or a base_url moves as
+    freely as ever, but a provider's section is never one of them, not even
+    one a settings validator shares its name with, because a plugin owns its
+    section's credentials even when the data that would name them cannot be
+    read. A section with no installed row stays unmanaged, because an
+    uninstalled section has no plugin to send a retained key to.
+    """
+    submitted = {}
+    for key, values in settings_items:
+        parts = key.split('-') if isinstance(key, str) else []
+        if len(parts) != 3 or parts[0] != 'settings':
+            continue
+        values = values if isinstance(values, list) else [values]
+        submitted.setdefault(parts[1], {}).setdefault(parts[2], []).extend(values)
+    if not submitted:
+        return
+    declared, unreadable = _installed_provider_hub_manifest_fields()
+    own_sections = set()
+    if declared is None:
+        try:
+            from provider_hub.manifest import reserved_settings_sections
+            own_sections = reserved_settings_sections()
+        except Exception:
+            # The reserved sections could not be derived, so no section can be
+            # vouched for without the state: the exemption stays empty and
+            # every key-shaped destination move is refused, the fail-closed
+            # direction. A section wrongly refused can move again once the
+            # settings it needs are readable; a stored key wrongly followed to
+            # a new address cannot be taken back.
+            own_sections = set()
+    for provider_id, fields in submitted.items():
+        if declared is None and provider_id.lower() in own_sections:
+            # A section Bazarr reserves for itself needs no plugin data to be
+            # vouched for: the reserved sections are Bazarr's own with the
+            # provider-owned ids taken out, the same notion the pool overlay
+            # uses, so no provider's section is vouched for by a settings
+            # validator it shares a name with.
+            continue
+        unchecked = declared is None or provider_id in unreadable
+        if unchecked:
+            # The plugin data needed to check this section could not be read,
+            # so the fields that would need re-entry cannot be known: any
+            # field change is an uncertain one and refused rather than read as
+            # a provider with no secrets, until the declarations can be
+            # recovered. A field named like a destination is one, and a field
+            # the manifest formats as a uri is one, and only the manifest can
+            # tell which, so nothing that moves is allowed through,
+            # key-shaped or not, while a stored value the save does not clear
+            # could be the credential a moved destination would take with it:
+            # it sits in the section or in the installation's own config, and
+            # a state that cannot be read at all leaves that second store
+            # unknowable, so a retained credential cannot be ruled out there
+            # either. With nothing retained in either store there is nothing a
+            # moved address could take anywhere, the same answer a section
+            # with no stored key gives.
+            section = settings.get(provider_id, {}) if hasattr(settings, 'get') else {}
+            hub_config = (None if declared is None
+                          else declared.get(provider_id, (set(), set(), {}, {}))[3])
+            retained = (any(value not in (None, '') for value in section.values())
+                        or hub_config is None
+                        or any(value not in (None, '') for value in hub_config.values()))
+            if retained:
+                for field, values in fields.items():
+                    value = _plex_writer_value(field, values)
+                    stored = section.get(field, '')
+                    if value is None:
+                        # A field submitted as one of the writer's empty spellings
+                        # clears the stored address, and with the plugin data
+                        # unreadable the default the cleared field falls back to
+                        # cannot be checked, so a cleared address is refused the
+                        # same way a moved one is: the stored key would follow
+                        # whichever address the fallback selects.
+                        if stored not in (None, ''):
+                            raise ValidationError('The provider data needed to check this '
+                                                  'address change could not be read, so the '
+                                                  'address was not changed')
+                    elif value != stored:
+                        raise ValidationError('The provider data needed to check this '
+                                              'address change could not be read, so the '
+                                              'address was not changed')
+            continue
+        uri_fields, secrets, defaults, hub_config = declared.get(
+            provider_id, (set(), set(), {}, {}))
+        submitted_values = {field: _plex_writer_value(field, values)
+                            for field, values in fields.items()}
+        _refuse_plugin_destination_move(
+            submitted_values, uri_fields, secrets, defaults,
+            settings.get(provider_id, {}) if hasattr(settings, 'get') else {},
+            hub_config,
+            the_save_writes_the_settings_section=True)
+
+
+def _plugin_destination_reach(settings_value, hub_present, hub_value, fallbacks):
+    """The addresses a plugin's key can reach for one field, the way the
+    provider reader builds the effective configuration: the settings
+    section's value wins, the installation's own config answers next, and
+    the manifest's default applies only while the key is absent from that
+    config, the presence the reader itself keys on, so an empty value sitting
+    in it blocks the default rather than falling back to it, and a sentinel
+    clear that empties the section reaches the default rather than nothing.
+    More than one address while a pending update can still swap the default
+    a clear reaches; one value for a settled configuration.
+    """
+    if settings_value not in (None, ''):
+        return {settings_value}
+    if hub_present:
+        return {hub_value}
+    reached = {value for value in fallbacks if value not in (None, '')}
+    return reached or {''}
+
+
+def _credential_present(value):
+    """Whether a stored or submitted value is a credential someone holds."""
+    return isinstance(value, str) and value.strip()
+
+
+def _refuse_plugin_destination_move(submitted, uri_fields, secrets, defaults,
+                                    section, hub_config,
+                                    *, the_save_writes_the_settings_section):
+    """The one destination rule a plugin's two config stores and two save
+    paths follow.
+
+    A plugin keeps its configuration in two stores, the settings section a
+    settings save writes and the installation's own config the Hub's update
+    path writes, and the provider reader sends the stored key to the effective
+    configuration across both, so a save that moves one of its destination
+    fields is refused unless the moved address receives a credential this
+    submission typed. The credential the moved address receives is the
+    effective post-save one, the settings section's value first and the
+    installation's own config next, the same order the provider reader reads
+    them in: a typed key in the store this save replaces is not the one that
+    stays effective when the other store holds one, so the rule checks what
+    the reader would send rather than what the submission carried. The
+    comparison reads the effective destination after the fallback the reader
+    applies, sentinel clears included, so a clear that reaches a default the
+    stored address never had is a move the comparison sees, and it reads the
+    presence of the installation's own key the way the reader does, so an
+    empty value sitting in it is a present one that blocks the default rather
+    than an absent one that falls back to it. The two save paths differ only
+    in which of the two stores the submission replaces,
+    which is what the flag says; everything else is one rule, so the paths
+    cannot drift apart again.
+    """
+    destinations = [field for field in submitted
+                    if field in ('url', 'host', 'endpoint')
+                    or field.endswith('_url') or field.endswith('_host')
+                    or field in uri_fields]
+    if not destinations or not secrets:
+        return
+    moved = False
+    for field in destinations:
+        value = submitted[field]
+        hub_value = hub_config.get(field)
+        fallbacks = defaults.get(field, ())
+        hub_present = field in hub_config
+        before = _plugin_destination_reach(section.get(field, ''), hub_present, hub_value,
+                                            fallbacks)
+        if the_save_writes_the_settings_section:
+            after = _plugin_destination_reach(value, hub_present, hub_value, fallbacks)
+        else:
+            # The Hub's save writes the installation's own config, where a
+            # submitted key is present whatever it carries: the presence the
+            # reader's default fallback keys on, so an empty submission
+            # reaches the empty address rather than the default.
+            after = _plugin_destination_reach(section.get(field, ''), True, value, fallbacks)
+        if after != before:
+            moved = True
+    if not moved:
+        return
+    for secret in secrets:
+        typed = submitted.get(secret)
+        if the_save_writes_the_settings_section:
+            # The section after the save carries the submitted value, or the
+            # stored one when the submission leaves the field out.
+            section_value = typed if secret in submitted else (section.get(secret, '') or '')
+            hub_value = hub_config.get(secret, '') or ''
+            typed_now = secret in submitted and _credential_present(typed)
+        else:
+            from provider_hub.service import SECRET_PLACEHOLDER
+            if secret in submitted and typed != SECRET_PLACEHOLDER:
+                hub_value = typed
+                typed_now = _credential_present(typed)
+            else:
+                # The placeholder keeps the stored value, and an absent field
+                # leaves it where it is: neither types anything now.
+                hub_value = hub_config.get(secret, '') or ''
+                typed_now = False
+            section_value = section.get(secret, '') or ''
+        if _credential_present(section_value):
+            # The section's value is the one the moved address receives, and
+            # it was typed in this submission only when this submission is
+            # the settings save that typed it.
+            typed_now = typed_now and the_save_writes_the_settings_section
+        elif _credential_present(hub_value):
+            # The installation's own config answers when the section holds
+            # nothing, and it was typed in this submission only when this
+            # submission is the Hub save that typed it.
+            typed_now = typed_now and not the_save_writes_the_settings_section
+        else:
+            # No credential is retained anywhere, so the moved address
+            # receives nothing that needs re-entering.
+            continue
+        if not typed_now:
+            raise ValidationError('Re-enter the key to use a different address')
+
+
+def refuse_unverified_provider_hub_config_move(provider_id, submitted):
+    """The Hub's own save path for a plugin's config, the second of its two
+    stores: the same destination rule the settings save runs, one rule both
+    paths call, reading the effective configuration across both stores.
+    Moving a declared destination field is refused while the plugin's stored
+    key is retained in either store; plugin data that cannot be read refuses
+    the move outright, the same fail-closed answer the settings save gives.
+    The message shape is the same one the settings path returns, and each
+    path keeps its own protocol for carrying it.
+    """
+    declared, unreadable = _installed_provider_hub_manifest_fields()
+    if declared is None or provider_id in unreadable:
+        # The plugin data needed to check this section could not be read, so
+        # which fields are destinations cannot be known: while a stored value
+        # the save does not clear could be the credential a moved destination
+        # would take with it, every field change is an uncertain one and
+        # refused, until the declarations can be recovered. The submission is
+        # compared against the installation's own config where the row itself
+        # could still be read, so a value that changes nothing is not refused;
+        # a state that cannot be read at all leaves that store unknowable, so
+        # there a retained credential cannot be ruled out and every submitted
+        # value refuses. The placeholder keeps the stored value, so it
+        # changes nothing either way, and with nothing retained in either of
+        # the plugin's two stores there is nothing a moved address could take
+        # anywhere.
+        section = settings.get(provider_id, {}) if hasattr(settings, 'get') else {}
+        stored_config = ({} if declared is None
+                         else declared.get(provider_id, (set(), set(), {}, {}))[3])
+        retained = (any(value not in (None, '') for value in section.values())
+                    or declared is None
+                    or any(value not in (None, '') for value in stored_config.values()))
+        if retained:
+            from provider_hub.service import SECRET_PLACEHOLDER
+            for field, value in submitted.items():
+                if value == SECRET_PLACEHOLDER:
+                    continue
+                if value != stored_config.get(field):
+                    raise ValueError('The provider data needed to check this address change '
+                                     'could not be read, so the address was not changed')
+        return
+    uri_fields, secrets, defaults, hub_config = declared.get(
+        provider_id, (set(), set(), {}, {}))
+    section = settings.get(provider_id, {}) if hasattr(settings, 'get') else {}
+    try:
+        _refuse_plugin_destination_move(
+            submitted, uri_fields, secrets, defaults, section, hub_config,
+            the_save_writes_the_settings_section=False)
+    except ValidationError as error:
+        raise ValueError(str(error)) from None
+
+
+def _plex_destination_rule_items(settings_items):
+    """The Plex destination fields a settings save submits, flattened.
+
+    Keys are parsed exactly the way the settings writer parses them, including
+    the case it compares and the case it does not, so a mixed-case name reaches
+    the same section and field here as it does there. Returns {field: [values]}
+    with every field lowercased, because the store underneath is case-insensitive.
+    """
+    submitted = {}
+    for key, values in settings_items:
+        if not isinstance(key, str):
+            continue
+        parts = key.split('-')
+        if len(parts) != 3 or parts[0] != 'settings' or parts[1].lower() != 'plex':
+            continue
+        values = values if isinstance(values, list) else [values]
+        submitted.setdefault(parts[2].lower(), []).extend(values)
+    return submitted
+
+
+def _plex_writer_value(field, values):
+    """The value the settings writer would store, from one field's form values.
+
+    Mirrors the writer's own coercions, so the rule compares what will really
+    be written: a lone form value unwraps to a scalar, the writer's empty-value
+    spellings become None, its number casts and its 'true' and 'false' apply,
+    and only a string the writer keeps is compared as it is spelled.
+    """
+    if not values:
+        return None
+    value = values[0]
+    if isinstance(value, str):
+        if value in empty_values and value != '':
+            return None
+        if field not in str_keys:
+            for cast in (int, float):
+                try:
+                    return cast(value)
+                except ValueError:
+                    continue
+        if value == 'true':
+            return True
+        if value == 'false':
+            return False
+    return value
+
+
+def _refuse_unverified_plex_destination(settings_items):
+    """The Plex destination rule for settings saves.
+
+    A stored Plex credential is never sent to an address the save changed.
+    The sign-in token cannot be typed again, so a save that changes the
+    selected server address is accepted only when plex.tv lists it for the
+    selected server, exactly like the server picker, and what the save stores
+    is the URI plex.tv listed rather than the submitted string; nothing is
+    accepted while plex.tv cannot be reached. The listing is owed whenever
+    the token stays stored or the save submits one, whatever method the save
+    selects, because the method that reads the stored token can be switched
+    back. A save that turns certificate verification off is refused outright
+    while the sign-in token stays stored, whatever method the save switches
+    to, because the token cannot be retyped and the method that reads it can
+    be switched back. The stored API key travels to the host, port and TLS
+    settings whatever method the save leaves in place, since a later save can
+    switch the method back, so changing one of them needs the API key typed
+    again, unless the save replaces or clears the stored key; turning
+    certificate verification back on never needs it.
+
+    The rule runs in two halves. The plex.tv round-trip and the credential
+    and machine-id reads it needs stay before the write locks, because no
+    lock may be held across it, and they capture what the listing verified:
+    the credential it answered for, the machine id, and the addresses it
+    listed. Every gate that reads the stored settings is the locked half,
+    returned here for save_settings to run inside the account and config
+    locks, where the checked settings and the written settings are one
+    state: a save that paused between its check and its lock cannot land
+    what its check never saw. Under the locks the captured verification is
+    confirmed against the account as it is then stored, and the save is
+    refused when it no longer matches, because the listing answered for a
+    different account than the one the save would write beside.
+    """
+    submitted = _plex_destination_rule_items(settings_items)
+    if not submitted:
+        return None
+    if 'instance_id' in submitted:
+        # The row the account owns is recorded by the account itself, on every
+        # transition and at startup; a save that types in an owner would point
+        # the account's token at whichever row the request named.
+        raise ValidationError('The Plex destination is chosen by the signed-in account, '
+                              'not by this setting')
+
+    def credential_retained(section, field):
+        """Whether the save leaves this stored credential in place."""
+        if field in submitted:
+            # The writer stores the submitted value, so the stored credential
+            # is replaced by anything, and cleared by an empty one.
+            return False
+        value = section.get(field, '') or ''
+        return bool(value if isinstance(value, str) else '')
+
+    def addresses_to_verify(section):
+        """The submitted server addresses that differ from the stored ones."""
+        changed = []
+        for field in ('server_url', 'server_connections'):
+            if field not in submitted:
+                continue
+            submitted_values = [value for value in submitted[field]
+                                if isinstance(value, str) and value]
+            stored_raw = section.get(field, []) if field == 'server_connections' \
+                else section.get(field, '') or ''
+            if isinstance(stored_raw, (list, tuple)):
+                stored = [value for value in stored_raw if value]
+            else:
+                stored = [stored_raw] if isinstance(stored_raw, str) and stored_raw else []
+            if sorted(submitted_values) != sorted(stored):
+                changed.extend(submitted_values)
+        return changed
+
+    # The listing and the credential and machine-id reads it needs stay
+    # before the locks, because no lock may be held across a plex.tv
+    # round-trip. What it verified is carried into the locked half, which
+    # confirms it there: a save that paused between this check and its lock
+    # cannot land what this check never saw.
+    section = settings.plex
+    addresses = addresses_to_verify(section)
+    token_submitted = 'token' in submitted and any(
+        isinstance(value, str) and value.strip() for value in submitted['token'])
+    verified = None
+    if addresses and (credential_retained(section, 'token') or token_submitted):
+        # The listing is owed whenever the sign-in token stays stored or the
+        # save submits one, whatever method the save selects: the method that
+        # reads the stored token can be switched back, and the token cannot
+        # be typed again, so the address it would be sent to is verified now.
+        from media_servers.plex_account import (SIGN_IN_AGAIN, remembered_listed)
+        credential = (_plex_writer_value('token', submitted['token']) if token_submitted
+                      else (section.get('token', '') or ''))
+        machine_id = (_plex_writer_value('server_machine_id',
+                                         submitted.get('server_machine_id'))
+                      or section.get('server_machine_id', '') or '')
+        from utilities.security_guards import normalized_origin
+        listed = remembered_listed('oauth', credential, machine_id)
+        if listed is SIGN_IN_AGAIN:
+            raise ValidationError('Sign in to Plex to change the server address')
+        if listed is None:
+            raise ValidationError('Plex could not be reached to verify the server address')
+        origins, uris = listed
+        for address in addresses:
+            if normalized_origin(address) not in origins:
+                raise ValidationError('Plex does not list this address for the selected server')
+        verified = (credential, machine_id)
+        # Store the URI plex.tv listed for each connection, not the string
+        # the request submitted.
+        for index, (key, values) in enumerate(settings_items):
+            parts = key.split('-') if isinstance(key, str) else []
+            if (len(parts) != 3 or parts[0] != 'settings'
+                    or parts[1].lower() != 'plex'
+                    or parts[2].lower() not in ('server_url', 'server_connections')):
+                continue
+            if not isinstance(values, list):
+                values = [values]
+            listed_values = [uris[normalized_origin(value)] for value in values
+                             if isinstance(value, str) and value
+                             and normalized_origin(value) in uris]
+            if listed_values:
+                settings_items[index] = (key, listed_values)
+
+    def refuse_under_the_write_locks():
+        """The Plex gates that read the stored settings, under the write locks.
+
+        The lock boundary is where the checked settings and the written
+        settings are one state: a save that paused between its check and its
+        lock cannot land what its check never saw, so every gate that reads
+        the stored settings runs here, on the settings as they are now, and
+        the verification captured before the locks is confirmed against the
+        account as it is now stored.
+        """
+        section = settings.plex
+        method = str(_plex_writer_value('auth_method', submitted.get('auth_method'))
+                     or section.get('auth_method', 'apikey') or 'apikey').lower()
+
+        # The token-condition listing gate. The listing is owed whenever the
+        # sign-in token stays stored or the save submits one, whatever method
+        # the save selects, and a token that arrived after this save's check
+        # cannot have its addresses verified under the locks, where no
+        # plex.tv round-trip may run. The verification captured before the
+        # locks has to answer for the account as it is now stored instead,
+        # and the save is refused when it does not: the listing answered for
+        # a different credential than the one now stored, or for a server a
+        # newer selection has since replaced, so the verification is stale
+        # and the retry performs its own listing. An emptied machine id is
+        # the account's own clear dropping its selection, not a newer
+        # account: the address the save stores stays one plex.tv listed for
+        # the same credential, and the next use asks again for the account
+        # there now.
+        addresses = addresses_to_verify(section)
+        if addresses and (credential_retained(section, 'token') or token_submitted):
+            credential = (_plex_writer_value('token', submitted['token']) if token_submitted
+                          else (section.get('token', '') or ''))
+            machine_id = (_plex_writer_value('server_machine_id',
+                                             submitted.get('server_machine_id'))
+                          or section.get('server_machine_id', '') or '')
+            if (verified is None or credential != verified[0]
+                    or (machine_id and machine_id != verified[1])):
+                raise ValidationError('The Plex account changed while the server address was '
+                                      'being verified. Try the save again.')
+
+        # The sign-in token cannot be typed again, so the account server's
+        # certificate verification cannot be turned off while it stays stored,
+        # whatever method the save switches to: the method that reads it can be
+        # switched back, and the stored token would travel unverified. The
+        # submission is what says the field was sent at all: one of its empty
+        # spellings becomes None, which is verification off just as 'false' is.
+        if 'verify_ssl' in submitted:
+            verify_ssl = _plex_writer_value('verify_ssl', submitted['verify_ssl'])
+            if (section.get('verify_ssl', False) and not verify_ssl
+                    and (method == 'oauth' or credential_retained(section, 'token'))):
+                raise ValidationError('Sign in to Plex again to turn certificate verification '
+                                      'off for the account server')
+
+        # The stored API key is kept or retyped by the same save whatever method
+        # the save leaves in place, so the host, port and TLS settings owe it
+        # their re-entry whatever that method is: a later save can switch the
+        # method back and the stored key would follow the moved address.
+        key_changed = False
+        for field, fallback in (('ip', ''), ('port', 32400), ('ssl', False)):
+            if field not in submitted:
+                continue
+            value = _plex_writer_value(field, submitted[field])
+            stored = section.get(field, fallback)
+            if stored is None:
+                stored = fallback
+            if value is None:
+                # An empty spelling clears the stored value, and the cleared
+                # field falls back to the default the connection applies, so
+                # the destination the stored key is sent to is the default one:
+                # a move whenever the stored value was not that default
+                # already, the same refusal a typed move gets.
+                value = fallback
+            if value != stored:
+                key_changed = True
+        if 'verify_ssl' in submitted:
+            verify_ssl = _plex_writer_value('verify_ssl', submitted['verify_ssl'])
+            if section.get('verify_ssl', False) and not verify_ssl:
+                # Turning verification off hands the key to whatever answers in
+                # place of the server; turning it back on only hardens the
+                # connection and never needs the key again.
+                key_changed = True
+        if key_changed and credential_retained(section, 'apikey'):
+            raise ValidationError('Re-enter the key to use a different address')
+
+    return refuse_under_the_write_locks
+
+
 def save_settings(settings_items):
     from media_servers.http import MediaServerError, parse_verify_ssl
     from secret_store.registry import IMPORT_ONLY_SECTIONS
 
-    items = list(settings_items)
+    items = _refuse_repeated_settings_items(list(settings_items))
     validate_metadata_settings(items)
+    # The Plex guard runs its plex.tv round-trip before any lock is taken,
+    # because no lock may be held across it, and hands back the gates that
+    # read the stored settings for the locked half of the rule below.
+    plex_destination_lock_phase = _refuse_unverified_plex_destination(items)
 
     for index, (key, value) in enumerate(items):
         parts = key.lower().split('-')
@@ -1483,7 +2493,31 @@ def save_settings(settings_items):
                 raise ValidationError('Invalid native media server master switch') from None
 
     from discover.metadata import CONFIG_LOCK, invalidate_metadata
-    with CONFIG_LOCK:
+    # A save that changes the method, the credential or the selected addresses
+    # of the Plex account is an account transition, and every account
+    # transition and every verification's write phase runs under the account
+    # lock: the save takes it too, so an older verification can no longer
+    # write the account or the selection a newer save just changed while its
+    # own write phase holds the lock. It is entered before the config lock,
+    # the order every account handler already writes the config in, so the
+    # two locks never wait on each other the other way round.
+    account_lock = contextlib.nullcontext()
+    if any(key in PLEX_ACCOUNT_KEYS for key, _value in items):
+        from media_servers.plex_account import ACCOUNT_LOCK
+        account_lock = ACCOUNT_LOCK
+    with account_lock, CONFIG_LOCK:
+        # The destination checks read the stored settings, so they run inside
+        # the write boundary, where the checked settings and the written
+        # settings are one state: a save that paused between its check and
+        # its lock cannot land what its check never saw, and a secret a
+        # newer save stored inside that window is caught here rather than
+        # left following the moved address. The Plex guard's locked half
+        # confirms the verification its pre-lock round-trip captured against
+        # the account as it is now stored.
+        if plex_destination_lock_phase is not None:
+            plex_destination_lock_phase()
+        _refuse_unverified_scalar_arr_destination(items)
+        _refuse_unverified_plugin_destination(items)
         metadata_submitted = any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
                                  for key, _ in items)
         changed = False
@@ -1551,6 +2585,32 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     ]
     _require_provider_order_for_custom_routing(settings_items)
     _validate_postprocessing_command(settings_items)
+
+    def _registered_credential(key):
+        """Whether a submitted settings key names a registered at-rest
+        credential. The dotted path the registry knows is built from the
+        lowercased section and field, which is also the shape the settings
+        store itself is case-insensitive about."""
+        parts = key.split('-')
+        return (parts[0] == 'settings' and len(parts) == 3
+                and f"{parts[1].lower()}.{parts[2].lower()}" in at_rest_secret_paths())
+
+    # The type of a credential's value is checked before anything is applied.
+    # A repeated form key arrives as a list, and refusing it inside the loop
+    # below would leave the items earlier in the same request already applied
+    # in memory: the next unrelated save would write them, and the recoverable
+    # ciphertext the refusal was protecting would be gone. The single-value
+    # shape the loop unwraps is checked as unwrapped, and a list with more
+    # than one element is refused here, so a refusal is always atomic: every
+    # rejection a credential can cause happens before the first item of the
+    # request is applied.
+    for key, value in settings_items:
+        if not _registered_credential(key):
+            continue
+        checked = value[0] if isinstance(value, list) and len(value) == 1 else value
+        if not isinstance(checked, (str, type(None))):
+            raise ValidationError(f'{key.split("-")[-1]} must be text')
+
     configure_debug = False
     configure_log_rotation = False
     hi_extension_changed = False
@@ -1559,6 +2619,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     sonarr_changed = False
     radarr_changed = False
     sportarr_changed = False
+    plex_account_changed = False
     update_path_map = False
     configure_proxy = False
     exclusion_updated = False
@@ -1592,20 +2653,47 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         settings_keys = key.split('-')
 
+        if settings_keys[-1].startswith('__'):
+            # The settings API's own descriptor key and anything else the
+            # serializer reserves. A caller echoing one back must not be
+            # able to write it into the config, where _get_settings would
+            # hand it out again as if it were a setting.
+            continue
+
         if key in {'settings-discover-tmdb_access_token', 'settings-discover-locale'}:
             if key.endswith('tmdb_access_token') and value[0] == '***':
                 continue
             settings.discover[settings_keys[-1]] = value[0]
             continue
 
-        # Make sure that text based form values aren't passed as list
-        if isinstance(value, list) and len(value) == 1 and settings_keys[-1] not in array_keys:
+        # A registered credential is identified before any generic
+        # normalization below: every conversion that follows exists for
+        # ordinary settings and would mangle a credential. It keeps its
+        # string shape all the way to disk; a value that is not text is
+        # refused (the pre-validation pass already caught the shapes that
+        # reach here as lists, this is the backstop inside the loop, on the
+        # unwrapped value).
+        registered_credential = _registered_credential(key)
+
+        # Make sure that text based form values aren't passed as list. A
+        # registered credential unwraps its single element independently of
+        # array_keys: a secret named like an array-typed setting is still a
+        # scalar credential, and leaving it wrapped would push it into the
+        # generic array handling below that exists for ordinary settings.
+        if isinstance(value, list) and len(value) == 1 and (
+                registered_credential or settings_keys[-1] not in array_keys):
             value = value[0]
-            if value in empty_values and value != '':
+            if not registered_credential and value in empty_values and value != '':
+                # A sentinel like 'null' or 'undefined' is an empty ordinary
+                # setting. Typed into a credential it is the credential:
+                # stored as the literal text, never converted into a clear.
                 value = None
 
+        if registered_credential and not isinstance(value, (str, type(None))):
+            raise ValidationError(f'{settings_keys[2]} must be text')
+
         # try to cast string as integer or float
-        if isinstance(value, str) and settings_keys[-1] not in str_keys:
+        if not registered_credential and isinstance(value, str) and settings_keys[-1] not in str_keys:
             try:
                 value = int(value)
             except ValueError:
@@ -1615,22 +2703,35 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                     pass
 
         # Make sure empty language list are stored correctly
-        if (settings_keys[-1] in array_keys and settings_keys[-1] != 'openrouter_provider_order'
+        if (not registered_credential
+                and settings_keys[-1] in array_keys and settings_keys[-1] != 'openrouter_provider_order'
                 and value and value[0] in empty_values):
             value = []
 
         # Handle path mappings settings since they are array in array
-        if settings_keys[-1] in ['path_mappings', 'path_mappings_movie', 'path_mappings_sports']:
+        if not registered_credential and settings_keys[-1] in ['path_mappings', 'path_mappings_movie', 'path_mappings_sports']:
             value = [x.split(',') for x in value if isinstance(x, str)]
 
-        if value == 'true':
+        # A field the active manifest declares boolean is a toggle even
+        # when a registered credential owns its name: the submitted text
+        # "false" is the off state the worker reads, never a truthy string
+        # stored under the secret path.
+        boolean_toggle = (registered_credential
+                          and f"{settings_keys[1].lower()}.{settings_keys[2].lower()}"
+                          in manifest_boolean_secret_paths())
+        if value == 'true' and (not registered_credential or boolean_toggle):
             value = True
-        elif value == 'false':
+        elif value == 'false' and (not registered_credential or boolean_toggle):
             value = False
 
-        # Handle JSON strings for dict settings
-        if settings_keys[-1] in ['provider_priorities', 'provider_languages',
-                                'provider_score_modifiers', 'tiers'] and isinstance(value, str):
+        # Handle JSON strings for dict settings. A registered credential is
+        # never parsed: a secret field whose name collides with a dict-typed
+        # setting (a plugin secret named 'tiers' holding JSON text) is stored
+        # as the typed text, or the parsed dict would ride past both the
+        # encryption at rest and the API masking.
+        if (not registered_credential and settings_keys[-1] in [
+                'provider_priorities', 'provider_languages',
+                'provider_score_modifiers', 'tiers'] and isinstance(value, str)):
             try:
                 value = json.loads(value)
             except ValueError:
@@ -1706,6 +2807,15 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if key in ['settings-general-use_sonarr', 'settings-sonarr-ip', 'settings-sonarr-port',
                    'settings-sonarr-base_url', 'settings-sonarr-ssl', 'settings-sonarr-apikey']:
             sonarr_changed = True
+
+        if key in ('settings-plex-auth_method', 'settings-plex-token', 'settings-plex-apikey',
+                   'settings-plex-server_url'):
+            # Which credential the Plex account authenticates with, the
+            # credential itself, or the address its selection points at: what
+            # its destination row carries, so the row is re-synced once the
+            # save is on disk below, exactly as every account transition
+            # re-syncs it.
+            plex_account_changed = True
 
         if key in ['settings-general-use_radarr', 'settings-radarr-ip', 'settings-radarr-port',
                    'settings-radarr-base_url', 'settings-radarr-ssl', 'settings-radarr-apikey']:
@@ -1850,6 +2960,14 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         if settings_keys[0] == 'settings':
             if len(settings_keys) == 3:
+                # A save that carries a credential path ends its decrypt
+                # failure, whatever it carries: a new value replaces the
+                # credential and an explicit clear removes it, and from
+                # here on neither the descriptor nor the preserve pass may
+                # hold on to the old value. This runs before the write, so
+                # a refused save's reload from disk re-adds the failure if
+                # the stored ciphertext still will not decrypt.
+                clear_decrypt_failure_path(f"{settings_keys[1].lower()}.{settings_keys[2].lower()}")
                 _settings_mapping(settings, settings_keys[1])[settings_keys[2]] = value
             elif len(settings_keys) == 4:
                 section = _settings_mapping(settings, settings_keys[1])
@@ -1903,9 +3021,11 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             # the process would keep running values that reached no file, tell
             # the user they were saved, and revert them at the next restart.
             # Nothing about that is particular to a master switch, so the check
-            # covers every save rather than only those.
+            # covers every save rather than only those. The cause write_config
+            # swallowed (an encryption failure, a permission error) stays in
+            # the chain so the refusal says what happened.
             restore_persisted_settings()
-            raise ValidationError('Unable to save settings to disk')
+            raise ValidationError('Unable to save settings to disk') from _last_write_error
 
         # Before anything below can fail: the save is on disk now, and a failure
         # from here on must not be taken for an unsaved one, which would put the
@@ -2102,6 +3222,14 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             except Exception:
                 pass
 
+        if plex_account_changed:
+            with follow_ups.step():
+                # A save that changed the method, the credential or the selected
+                # address is an account transition for the row that carries it,
+                # and only now that the save is on disk: a refused or unwritten
+                # save changes nothing the row should follow.
+                _sync_plex_destination()
+
         if update_path_map:
             with follow_ups.step():
                 from utilities.path_mappings import path_mappings
@@ -2226,8 +3354,11 @@ def _sync_plex_destination():
     """Keep the Plex destination row in step with an account change here.
 
     The automatic API-key-to-OAuth migration swaps which credential the account
-    authenticates with, in both directions. A row still holding the other one
-    would refresh with a credential the account no longer has.
+    authenticates with, in both directions, and so does a settings save that
+    changes the method, the token, the API key or the selected server address.
+    A row still holding the other credential would refresh with one the
+    account no longer has, and a row still holding the previous address would
+    refresh the server the account no longer points at.
     """
     try:
         from media_servers.plex_account import sync_plex_account

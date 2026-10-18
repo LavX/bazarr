@@ -10,7 +10,8 @@ from subliminal.video import Episode, Movie, Video
 from subliminal_patch.core_persistent import list_all_subtitles_parallel
 
 from app.config import settings
-from app.get_providers import (CREDENTIAL_THROTTLE_REASONS, get_provider_language_hook,
+from app.get_providers import (CREDENTIAL_THROTTLE_REASONS, announce_provider_throttle,
+                               get_provider_language_hook,
                                get_providers_sorted, get_providers_auth,
                                provider_is_usable, provider_throttle)
 from . import auth, cache as C, response_mapper as M
@@ -39,8 +40,13 @@ _CLIENT_MOVIEHASH_PROVIDERS = (
 _SHOOTER_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}(?:;[0-9a-fA-F]{32}){3}$")
 
 
-def _record_throttle(name, exception, ids=None, language=None, sports_context=None):
+def _record_throttle(name, exception, ids=None, language=None, sports_context=None, operation=None,
+                     announce=True):
     """Record a provider failure without spending the fanout's wall clock.
+
+    ``announce`` defaults the way provider_throttle's own does, so a caller
+    that omits it keeps the visible line rather than losing it below the
+    default filter.
 
     provider_throttle sleeps between the first few rate-limit events, which is
     correct where it came from: the library search retries the same provider in
@@ -54,7 +60,8 @@ def _record_throttle(name, exception, ids=None, language=None, sports_context=No
     failure we had already classified correctly.
     """
     return provider_throttle(name, exception, ids=ids, language=language,
-                             sports_context=sports_context, wait=False)
+                             sports_context=sports_context, wait=False,
+                             operation=operation, announce=announce)
 
 
 def _throttle_recorder(generation):
@@ -78,17 +85,18 @@ def _throttle_recorder(generation):
     asks a bad provider once more, where the alternative keeps skipping one the
     user has just fixed.
     """
-    def record(name, exception, ids=None, language=None, sports_context=None):
+    def record(name, exception, ids=None, language=None, sports_context=None, operation=None, announce=True):
         if generation != _pool_generation and (
                 exception.__class__.__name__ in CREDENTIAL_THROTTLE_REASONS):
             logger.info("compat: not recording a %s backoff for %s, the configuration it "
                         "judged has already been replaced",
                         exception.__class__.__name__, name)
-            # What a no-wait record returns: there is no retry on this path
-            # either way, so the caller's handling is unchanged.
-            return True
+            # What a no-wait record returns when nothing was recorded: there is
+            # no retry on this path either way, and a download now announces
+            # only what its own calls recorded.
+            return False
         return _record_throttle(name, exception, ids=ids, language=language,
-                                sports_context=sports_context)
+                                sports_context=sports_context, operation=operation, announce=announce)
 
     return record
 
@@ -114,6 +122,10 @@ def _get_compat_pool(*, restore_available=False):
                 # adoption_gate keeps a provider that is serving out a backoff
                 # from being re-adopted into the pool behind that record's back.
                 throttle_callback=_throttle_recorder(_pool_generation),
+                # A Discover download announces the one line the same way the
+                # library pools do: once the download stops, naming the
+                # deadline the attempts recorded.
+                throttle_announce=announce_provider_throttle,
                 adoption_gate=provider_is_usable,
                 language_hook=get_provider_language_hook(),
                 language_equals=[],
@@ -481,9 +493,10 @@ def _build_video(imdb_id: str | None, season: int | None, episode: int | None,
 
     _apply_anidb_ids(v, series_anidb_id, series_anidb_episode_id)
 
-    # Library miss -> try OMDB/TVDB refiners (network, best-effort).
+    # Library miss -> try the TMDB/TVDB refiners (network, best-effort).
+    refine_reasons = []
     if not getattr(v, "title", None) and not getattr(v, "series", None):
-        _refine_from_imdb(v, media_type)
+        refine_reasons = _refine_from_imdb(v, media_type) or []
 
     # Refiner miss -> last-resort guessit title. Do NOT clobber a real value.
     if media_type == "episode":
@@ -494,41 +507,100 @@ def _build_video(imdb_id: str | None, season: int | None, episode: int | None,
             v.title = g_title
     if not getattr(v, "year", None) and g_year:
         v.year = g_year
+    # A still-nameless video with no hashes and no guessit title fans out
+    # to the whole pool with nothing to match on. Say so once, with the
+    # per-source outcomes, so an unresolvable or mistyped imdb id is
+    # diagnosable from the log instead of looking like provider failures.
+    # Hash-bearing searches keep an exact-match path, so they stay quiet.
+    if refine_reasons:
+        resolved = (getattr(v, "series", None) if media_type == "episode"
+                    else getattr(v, "title", None))
+        if not resolved and not g_title and not getattr(v, "hashes", None):
+            _id = (getattr(v, "series_imdb_id", None)
+                   or getattr(v, "imdb_id", None))
+            logger.warning(
+                "compat metadata unresolved: imdb_id=%s type=%s no_%s "
+                "reason=%s hash_present=False; the search pool has "
+                "nothing to match on for this id",
+                _id, media_type,
+                "series" if media_type == "episode" else "title",
+                ",".join(refine_reasons))
     return v
 
 
-def _refine_from_imdb(video, media_type: str) -> None:
-    """Best-effort network lookup to populate title/year/tvdb_id when the
-    local library doesn't know the imdb_id. Swallows all exceptions.
+def _refine_from_imdb(video, media_type: str) -> list:
+    """Best-effort network lookup to populate title/series/year/tvdb ids
+    when the local library doesn't know the imdb_id. Swallows all exceptions.
 
-    Episode resolution path (fastest first):
-      1. TVDB v4 by imdb_id - native episode support via /search/remoteid.
-         Works whether the client sent the series' imdb or the episode's.
-      2. OMDB bridge - translates episode-imdb to series-imdb via OMDB's
-         `seriesID` field, then hits subliminal's TVDB v1 by series imdb.
-      3. Subliminal's TVDB v1 series-imdb search - final fallback.
+    Returns one outcome code per source that was attempted ('v4=ok',
+    'v4=no_match', 'tmdb=ok', 'omdb=not_configured', ...), so the boundary
+    log can say which source failed and how. Every path resolves keyless:
+    TVDB v4 and TMDB both carry app-shipped keys, and OMDB runs only on
+    installs that configured a key, never as a requirement.
 
-    For movies we just hit OMDB directly (TVDB v4 also supports movies
-    but OMDB has better coverage for movie-imdb lookups in practice).
+    Episode resolution path:
+      1. TVDB v4 by imdb_id - native episode support via /search/remoteid,
+         whether the client sent the series' imdb or the episode's.
+      2. TMDB find - keyless, through the app's built-in TMDB key.
+      3. OMDB bridge (configured installs only) - translates the episode
+         imdb to the series' imdb via OMDB's `seriesID` field, then retries
+         TVDB v4 and TMDB with the parent id, which the indexes are far
+         more likely to carry than an episode's own id.
+
+    For movies: TMDB find first (keyless), then OMDB when a key exists.
     """
+    reasons = []
     if media_type == "episode":
-        if _tvdb_v4_episode_lookup(video):
-            return
+        if _tvdb_v4_episode_lookup(video) and getattr(video, "series", None):
+            return ["v4=ok"]
+        reasons.append("v4=partial" if getattr(video, "series_tvdb_id", None)
+                       else "v4=no_match")
+        if _tmdb_lookup_by_imdb(video, "episode"):
+            reasons.append("tmdb=ok")
+            return reasons
+        reasons.append("tmdb=no_match")
         series_imdb = _omdb_episode_to_series_imdb(video)
-        if series_imdb:
-            video.series_imdb_id = series_imdb
-        _tvdb_lookup_by_imdb(video)
+        if not series_imdb:
+            # A series-root record names the series itself (the client's
+            # id already was the series id), so no retry is left to do.
+            if getattr(video, "series", None):
+                reasons.append("omdb=ok")
+            else:
+                reasons.append("omdb=not_configured" if not _omdb_key()
+                               else "omdb=no_match")
+            return reasons
+        video.series_imdb_id = series_imdb
+        reasons.append("omdb=parent")
+        if _tvdb_v4_episode_lookup(video) and getattr(video, "series", None):
+            reasons.append("v4=parent_ok")
+            return reasons
+        if _tmdb_lookup_by_imdb(video, "episode"):
+            reasons.append("tmdb=parent_ok")
+        else:
+            reasons.append("tmdb=parent_no_match")
     else:
+        if _tmdb_lookup_by_imdb(video, "movie"):
+            return ["tmdb=ok"]
+        reasons.append("tmdb=no_match")
         _omdb_lookup_by_imdb(video)
+        if getattr(video, "title", None):
+            reasons.append("omdb=ok")
+        else:
+            reasons.append("omdb=not_configured" if not _omdb_key()
+                           else "omdb=no_match")
+    return reasons
 
 
 def _tvdb_v4_episode_lookup(video) -> bool:
     """Resolve an episode via TVDB v4's /search/remoteid endpoint.
 
     Returns True if we populated at least series_tvdb_id; False on any
-    failure or no-match. Hydrates series name/year from subliminal's v1
-    get_series() once we have the numeric series_tvdb_id, since v4's
-    search result omits series fields when the imdb maps to an episode.
+    failure or no-match. Hydrates series name/year from the v4 series
+    record once we have the numeric series_tvdb_id, since v4's search
+    result omits series fields when the imdb maps to an episode. Callers
+    that need a usable series name check video.series themselves: a True
+    return can carry ids without a name, and the chain continues on to
+    the other sources in that case.
     """
     try:
         from subliminal_patch.refiners import tvdb_v4
@@ -606,15 +678,16 @@ def _tvdb_v4_episode_lookup(video) -> bool:
         except (TypeError, ValueError):
             return False
 
-        # Hydrate series name/year via subliminal's v1 get_series if we
-        # don't have them yet (v4's episode match omits series fields).
+        # Hydrate series name/year via the v4 series record if we don't
+        # have them yet (the episode match omits series fields). The v1
+        # API family is retired even where its endpoints still answer,
+        # so nothing in this chain calls it any more.
         if not getattr(video, "series", None) or not getattr(video, "year", None):
             try:
-                from subliminal.refiners.tvdb import tvdb_client
-                s_data = tvdb_client.get_series(int(series_id))
+                s_data = tvdb_v4.get_client().get_series(int(series_id))
                 if s_data:
-                    if not getattr(video, "series", None):
-                        video.series = s_data.get("seriesName") or ""
+                    if not getattr(video, "series", None) and s_data.get("name"):
+                        video.series = s_data["name"]
                     if not getattr(video, "year", None):
                         fa = s_data.get("firstAired") or ""
                         try:
@@ -622,18 +695,141 @@ def _tvdb_v4_episode_lookup(video) -> bool:
                         except (TypeError, ValueError):
                             pass
             except Exception as e:
-                logger.debug("v1 get_series hydrate failed: %s", e)
+                logger.debug("v4 get_series hydrate failed: %s", e)
         return True
     except Exception as e:
         logger.debug("TVDB v4 episode lookup failed: %s", e)
         return False
 
 
+def _omdb_key() -> str:
+    """The configured OMDB key, or ''. Kept separate from the OMDB lookups
+    so the reason codes can distinguish not-configured from no-match
+    without spending a request."""
+    try:
+        from subliminal_patch.refiners.omdb import _resolve_omdb_apikey
+        return _resolve_omdb_apikey() or ""
+    except Exception:
+        return ""
+
+
+def _tmdb_lookup_by_imdb(video, media_type: str) -> bool:
+    """Resolve series/title through TMDB find, keyless: the app ships its
+    own read-only TMDB key (app.tmdb), the same one Discover authenticates
+    with, so library-miss searches resolve on any install with nothing
+    configured. Best-effort; never raises.
+
+    An episode imdb resolves through tv_episode_results -> the show's
+    /tv/{id} record (season and episode numbers included); a series imdb
+    through tv_results directly; a movie through movie_results. Success
+    means the video's series (title for movies) is populated.
+    """
+    try:
+        from app.tmdb import api_key
+        imdb = _tt(getattr(video, "series_imdb_id", None)
+                   or getattr(video, "imdb_id", None))
+        if not imdb:
+            return False
+        import requests
+        r = requests.get(
+            f"https://api.themoviedb.org/3/find/{imdb}",
+            params={"api_key": api_key(), "external_source": "imdb_id"},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            logger.debug("compat TMDB find %s -> HTTP %s", imdb, r.status_code)
+            return False
+        data = r.json()
+        if media_type == "episode":
+            episode = (data.get("tv_episode_results") or [None])[0]
+            if episode:
+                if not getattr(video, "season", None):
+                    try:
+                        sn = int(episode.get("season_number") or 0)
+                        if sn:
+                            video.season = sn
+                    except (TypeError, ValueError):
+                        pass
+                if not getattr(video, "episode", None):
+                    try:
+                        en = int(episode.get("episode_number") or 0)
+                        if en:
+                            video.episode = en
+                    except (TypeError, ValueError):
+                        pass
+                if not getattr(video, "title", None) and episode.get("name"):
+                    video.title = episode["name"]
+                show_id = episode.get("show_id")
+                if show_id:
+                    try:
+                        video.series_tmdb_id = int(show_id)
+                    except (TypeError, ValueError):
+                        pass
+                    if _tmdb_series_name(video, show_id):
+                        return True
+            series = (data.get("tv_results") or [None])[0]
+            if series and series.get("name"):
+                # The client sent a series id; name the series directly.
+                video.series = series["name"]
+                if not getattr(video, "year", None) and series.get("first_air_date"):
+                    try:
+                        video.year = int(str(series["first_air_date"])[:4])
+                    except (TypeError, ValueError):
+                        pass
+                return True
+            return False
+        movie = (data.get("movie_results") or [None])[0]
+        if movie:
+            if not getattr(video, "title", None) and movie.get("title"):
+                video.title = movie["title"]
+            if not getattr(video, "year", None) and movie.get("release_date"):
+                try:
+                    video.year = int(str(movie["release_date"])[:4])
+                except (TypeError, ValueError):
+                    pass
+        return bool(getattr(video, "title", None))
+    except Exception as e:
+        logger.debug("compat TMDB find failed: %s", e)
+        return False
+
+
+def _tmdb_series_name(video, show_id) -> bool:
+    """Hydrate the series name/year from TMDB's /tv/{id} record. Never raises."""
+    try:
+        from app.tmdb import api_key
+        import requests
+        r = requests.get(
+            f"https://api.themoviedb.org/3/tv/{show_id}",
+            params={"api_key": api_key()},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            logger.debug("compat TMDB tv %s -> HTTP %s", show_id, r.status_code)
+            return False
+        data = r.json() or {}
+        if not data.get("name"):
+            return False
+        if not getattr(video, "series", None):
+            video.series = data["name"]
+        if not getattr(video, "year", None) and data.get("first_air_date"):
+            try:
+                video.year = int(str(data["first_air_date"])[:4])
+            except (TypeError, ValueError):
+                pass
+        return True
+    except Exception as e:
+        logger.debug("compat TMDB tv lookup failed: %s", e)
+        return False
+
+
 def _omdb_episode_to_series_imdb(video) -> str | None:
     """When the client sends the episode's imdb_id, OMDB tells us the
     series' imdb_id via the `seriesID` field. Also populates year /
-    episode title as a side-effect. Returns the series imdb ('tt...') or
-    None on any failure / no-key. Safe to call without OMDB configured."""
+    episode title as a side-effect. A series-root record populates
+    video.series itself and returns None: the caller's id already was the
+    series id, so there is no parent to retry with. Returns the series
+    imdb ('tt...') or None on any failure / no-key. Safe to call without
+    OMDB configured."""
     try:
         from subliminal_patch.refiners.omdb import _resolve_omdb_apikey
         apikey = _resolve_omdb_apikey()
@@ -659,9 +855,13 @@ def _omdb_episode_to_series_imdb(video) -> str | None:
                 video.year = int(str(data.get("Year", ""))[:4])
             except (TypeError, ValueError):
                 pass
-        # Episode record carries the episode title; the series title we'll
-        # get from TVDB if we can.
-        if not getattr(video, "title", None):
+        # An episode record carries the episode title; the series title we
+        # get from TVDB or TMDB. A series record carries the series title
+        # itself, so it lands in video.series where providers read it.
+        if data.get("Type") == "series":
+            if not getattr(video, "series", None) and data.get("Title"):
+                video.series = data["Title"]
+        elif not getattr(video, "title", None):
             video.title = data.get("Title") or None
         # OMDB episode records carry Season / Episode numbers as strings;
         # populate them when the client didn't send season_number /
@@ -693,7 +893,9 @@ def _omdb_episode_to_series_imdb(video) -> str | None:
 
 def _omdb_lookup_by_imdb(video) -> None:
     """Query OMDB by imdb_id directly (`?i=tt...`) and populate title/year.
-    Requires settings.omdb.apikey or OMDB_API_KEY env. No-op without a key."""
+    Requires settings.omdb.apikey or OMDB_API_KEY env. No-op without a key;
+    TMDB find carries the keyless path, so this is extra coverage for
+    configured installs, never a requirement."""
     try:
         from subliminal_patch.refiners.omdb import _resolve_omdb_apikey
         apikey = _resolve_omdb_apikey()
@@ -720,45 +922,6 @@ def _omdb_lookup_by_imdb(video) -> None:
                 pass
     except Exception as e:
         logger.debug("compat OMDB-by-imdb lookup failed: %s", e)
-
-
-def _tvdb_lookup_by_imdb(video) -> None:
-    """Query TVDB with series_imdb_id (not series name). Populates
-    video.series_tvdb_id, video.series, video.year and the episode's tvdb_id
-    when available. Subliminal's stock TVDB refiner requires a series name,
-    which we don't have on library miss."""
-    try:
-        from subliminal.refiners.tvdb import tvdb_client
-        imdb = _tt(getattr(video, "series_imdb_id", None)
-                   or getattr(video, "imdb_id", None))
-        if not imdb:
-            return
-        # TVDB v1 search rejects bare numeric ids; always send tt-prefixed.
-        results = tvdb_client.search_series(imdb_id=imdb)
-        if not results:
-            return
-        series = results[0]
-        tvdb_id = series.get("id")
-        if not tvdb_id:
-            return
-        video.series_tvdb_id = int(tvdb_id)
-        if not getattr(video, "series", None):
-            video.series = series.get("seriesName") or ""
-        first_aired = series.get("firstAired") or ""
-        if first_aired and not getattr(video, "year", None):
-            try:
-                video.year = int(first_aired[:4])
-            except (TypeError, ValueError):
-                pass
-        if getattr(video, "season", None) and getattr(video, "episode", None):
-            ep = tvdb_client.get_series_episode(tvdb_id, int(video.season), int(video.episode))
-            if ep:
-                if not getattr(video, "tvdb_id", None):
-                    video.tvdb_id = ep.get("id")
-                if not getattr(video, "title", None):
-                    video.title = ep.get("episodeName") or None
-    except Exception as e:
-        logger.debug("compat TVDB-by-imdb lookup failed: %s", e)
 
 
 # Providers whose check() passes for a virtual video but that physically

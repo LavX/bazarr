@@ -9,6 +9,7 @@ import api from "@/apis/raw";
 const queryClientMock = vi.hoisted(() => ({
   getQueryData: vi.fn(),
   getQueryState: vi.fn(),
+  cancelQueries: vi.fn(),
   invalidateQueries: vi.fn(),
   setQueryData: vi.fn(),
 }));
@@ -76,6 +77,7 @@ describe("socketio reducer", () => {
   beforeEach(() => {
     queryClientMock.getQueryData.mockReset();
     queryClientMock.getQueryState.mockReset();
+    queryClientMock.cancelQueries.mockReset();
     queryClientMock.invalidateQueries.mockReset();
     queryClientMock.setQueryData.mockReset();
   });
@@ -104,6 +106,9 @@ describe("socketio reducer", () => {
       // check waits out the window a scheduled or microtask refresh would
       // land in, so it catches one that was only delayed.
       await vi.advanceTimersByTimeAsync(EPISODES_HISTORY_DEBOUNCE_MS);
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: [QueryKeys.Series, QueryKeys.Range, { scores: true }],
+      });
       expect(queryClientMock.invalidateQueries).not.toHaveBeenCalledWith({
         queryKey: episodesHistoryKey(501),
         exact: true,
@@ -114,14 +119,17 @@ describe("socketio reducer", () => {
     },
   );
 
-  it("falls back to the series list when an episode is not cached", () => {
+  it("falls back to the series list when an episode is not cached", async () => {
+    vi.useFakeTimers();
     queryClientMock.getQueryData.mockReturnValue(undefined);
 
     emitEpisode("update", [9001]);
 
     expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [QueryKeys.Series],
+      predicate: expect.any(Function),
     });
+    await vi.advanceTimersByTimeAsync(EPISODES_HISTORY_DEBOUNCE_MS);
   });
 
   it.each(["update", "delete"] as const)(

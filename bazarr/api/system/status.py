@@ -103,4 +103,24 @@ class SystemStatus(Resource):
         except Exception:
             system_status.update({'compat_active': False})
 
+        # The gate every translate action asks, with its reason, so the UI can
+        # disable its actions with the same answer the queue paths refuse with.
+        # The gate never raises: a configuration that cannot be read is just
+        # another unavailable translator.
+        from subtitles.tools.translate.availability import translation_available
+        availability = translation_available()
+        system_status.update({'translation_availability':
+                              {'available': availability.available,
+                               'reason': '' if availability.available else availability.reason}})
+        # The editor's own answer, next to it: the editor translates through
+        # the AI Subtitle Translator service whatever the settings page has
+        # selected, so its controls read this field and match the 409 its
+        # endpoint gives, instead of reading the configured engine's answer,
+        # which can differ in both directions.
+        editor_availability = translation_available('openrouter')
+        system_status.update({'editor_translation_availability':
+                              {'available': editor_availability.available,
+                               'reason': '' if editor_availability.available
+                               else editor_availability.reason}})
+
         return {'data': system_status}

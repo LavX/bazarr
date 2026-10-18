@@ -87,7 +87,7 @@ describe("standard job outcome notification", () => {
     expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
-  it("keeps quiet a completion with no known starter, one the scheduler ran, and a job that ended at Stop", () => {
+  it("keeps quiet a completion with no known starter, one the scheduler ran, a job that ended at Stop, and one cancelled outright", () => {
     rawRender(<AllProviders>{null}</AllProviders>);
     act(() => {
       notifyJobOutcome(
@@ -100,6 +100,13 @@ describe("standard job outcome notification", () => {
         job({
           origin: "user",
           stopped: true,
+          progress_message: "Cancelled by user",
+        }),
+      );
+      notifyJobOutcome(
+        job({
+          status: "cancelled",
+          origin: "user",
           progress_message: "Cancelled by user",
         }),
       );

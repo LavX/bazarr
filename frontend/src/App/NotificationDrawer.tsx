@@ -44,7 +44,8 @@ interface NotificationDrawerProps {
 
 // A job the user stopped never finished, so it must not wear the completed
 // ring; its card still shows the queue's "Cancelled by user" line. A progress
-// job keeps the partial ring it had already earned.
+// job keeps the partial ring it had already earned. Stopped rows arrive as
+// cancelled, or as completed with the flag, and both group as "stopped".
 function jobShowsRing(job: Jobs | undefined, status: string) {
   if (status === "pending") {
     return false;
@@ -170,10 +171,12 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
               (() => {
                 const grouped = (jobs as Jobs[]).reduce<Record<string, Jobs[]>>(
                   (acc, job) => {
-                    // A stopped job still reads as completed, but it never
-                    // finished, so it gets a group of its own.
+                    // A stopped job ends as cancelled, and a row recorded
+                    // while a stop still read as completed carries the flag,
+                    // so both never finished and get a group of their own.
                     const key =
-                      job?.status === "completed" && job?.stopped
+                      job?.status === "cancelled" ||
+                      (job?.status === "completed" && job?.stopped)
                         ? "stopped"
                         : (job?.status ?? "unknown");
                     (acc[key] ||= []).push(job);

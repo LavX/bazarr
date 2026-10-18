@@ -147,7 +147,7 @@ class WizdomProvider(Provider):
             return {}
 
         # search
-        logger.debug('Using IMDB ID %r', imdb_id)
+        logger.debug('Using the resolved IMDB ID')
         url = 'https://{}/api/releases/{}'.format(self.server_url, imdb_id)
         page_link = 'http://{}/{}/{}'.format(self.server_url, 'movies' if is_movie else 'series', imdb_id)
 
@@ -155,7 +155,7 @@ class WizdomProvider(Provider):
         logger.debug('Getting the list of subtitles')
         r = self.session.get(url)
         if r.status_code == 500:
-            logger.debug(f'No subtitles found for imdb id {imdb_id}')
+            logger.debug('No subtitles found for the searched IMDB ID')
             return []
         r.raise_for_status()
         try:

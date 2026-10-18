@@ -19,6 +19,7 @@ from typing import Any
 
 from . import WORKER_ABI_VERSION
 from . import runtime_status
+from secret_store.scrub import scrub_text
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +53,22 @@ def _json_default(obj):
 
 
 class WorkerError(RuntimeError):
-    """Raised when a provider worker fails or returns an error."""
+    """Raised when a provider worker fails or returns an error.
 
-    def __init__(self, message, *, remote_class_name=None, code=None, retryable=False):
+    ``remote_traceback`` is the plugin's own traceback from the error reply,
+    so a log can name the plugin's cause instead of the host transport's;
+    ``remote_errno`` is the errno of an OSError the operating system raised
+    inside the plugin, which distinguishes a real file fault from the
+    PermissionError the plugins raise themselves for a refused login."""
+
+    def __init__(self, message, *, remote_class_name=None, code=None, retryable=False,
+                 remote_traceback=None, remote_errno=None):
         super().__init__(message)
         self.remote_class_name = remote_class_name
         self.code = code
         self.retryable = retryable
+        self.remote_traceback = remote_traceback
+        self.remote_errno = remote_errno
 
 
 class RequestNotAdmitted(Exception):
@@ -86,7 +96,22 @@ def _raise_worker_error(payload):
     retryable = retryable if isinstance(retryable, bool) else False
     message = payload.get("message")
     message = message if isinstance(message, str) and message else code or "worker request failed"
-    error = WorkerError(message, remote_class_name=remote_name, code=code, retryable=retryable)
+    # The worker cannot scrub: its runner deliberately imports no Bazarr
+    # module so it can run under a provider venv. The host does it, and both
+    # the message and the plugin's traceback are log-bound and API-bound.
+    message = scrub_text(message)
+    # The plugin's own traceback and, for an OSError, its errno. Both optional:
+    # a reply without them, or a transport failure, is logged as before, with
+    # the class and message alone.
+    remote_traceback = payload.get("traceback")
+    remote_traceback = remote_traceback if isinstance(remote_traceback, str) and remote_traceback else None
+    if remote_traceback is not None:
+        remote_traceback = scrub_text(remote_traceback)
+    remote_errno = payload.get("errno")
+    remote_errno = (remote_errno if isinstance(remote_errno, int)
+                    and not isinstance(remote_errno, bool) else None)
+    error = WorkerError(message, remote_class_name=remote_name, code=code, retryable=retryable,
+                       remote_traceback=remote_traceback, remote_errno=remote_errno)
     if code != "provider":
         raise error
 

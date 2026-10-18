@@ -169,6 +169,10 @@ declare namespace Item {
       alternativeTitles: string[];
       poster: string;
       year: string;
+      // Lowest current-subtitle score (float percentage 0-100) across the item,
+      // present only when the list is requested with scores=1. null when the
+      // item has no current subtitle with a known score; absent otherwise.
+      lowest_subtitle_score?: number | null;
     };
 
   type Series = Base &

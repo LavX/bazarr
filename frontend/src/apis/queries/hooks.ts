@@ -25,6 +25,15 @@ export type UsePaginationQueryResult<T extends object> = UseQueryResult<
     page: number;
     fetchAll: boolean;
   };
+  // The all-rows entry behind this result: the exact key and fetcher its
+  // fetchAll mode uses, plus the same enabled gate, so a view can read every
+  // row (the tag filter's options) without paginating and share the cache
+  // entry an active filter switches to instead of requesting the rows twice.
+  allRows: {
+    queryKey: QueryKey;
+    queryFn: () => Promise<DataWrapperWithTotal<T>>;
+    enabled: boolean;
+  };
 };
 
 export function usePaginationQuery<
@@ -36,6 +45,12 @@ export function usePaginationQuery<
   cacheIndividual = true,
   fetchAll = false,
   enabled = true,
+  // When the caller opts into the extra score aggregate (scores=1), it belongs
+  // in the react-query key so the with-scores and without-scores reads are
+  // cached apart and toggling the score filter refetches. It rides the range
+  // key rather than the base key, which would break the [...queryKey, id]
+  // individual cache the detail pages read.
+  includeScores = false,
 ): UsePaginationQueryResult<TObject> {
   const client = useQueryClient();
 
@@ -72,12 +87,23 @@ export function usePaginationQuery<
 
   const start = fetchAll ? 0 : page * pageSize;
   const length = fetchAll ? -1 : pageSize;
+  const rangeKeyParams = fetchAll ? { all: true } : { start, size: pageSize };
+  // The all-rows entry the tag options read is the same range read, so it
+  // carries the score flag too and never shares a cache entry with the
+  // without-scores read.
+  const allRowsKey = [
+    ...queryKey,
+    QueryKeys.Range,
+    includeScores ? { all: true, scores: true } : { all: true },
+  ];
 
   const results = useQuery({
     enabled,
-    queryKey: fetchAll
-      ? [...queryKey, QueryKeys.Range, { all: true }]
-      : [...queryKey, QueryKeys.Range, { start, size: pageSize }],
+    queryKey: [
+      ...queryKey,
+      QueryKeys.Range,
+      includeScores ? { ...rangeKeyParams, scores: true } : rangeKeyParams,
+    ],
 
     queryFn: () => {
       const param: Parameter.Range = {
@@ -160,6 +186,11 @@ export function usePaginationQuery<
     controls: {
       gotoPage,
       setPageSize,
+    },
+    allRows: {
+      queryKey: allRowsKey,
+      queryFn: () => queryFn({ start: 0, length: -1 }),
+      enabled,
     },
   };
 }

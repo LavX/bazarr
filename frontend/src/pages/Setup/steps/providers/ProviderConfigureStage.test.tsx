@@ -1,3 +1,4 @@
+/* eslint-disable camelcase */
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -357,5 +358,329 @@ describe("ProviderConfigureStage", () => {
     expect(
       screen.getByRole("checkbox", { name: /subtitlecat/i }),
     ).not.toBeChecked();
+  });
+
+  // A plugin secret never reads back from the settings API: the section says
+  // it is configured through the descriptor instead. The wizard has to take
+  // that word for it, or a provider credentialed before the wizard demands
+  // its credential again, and saving would strip it.
+  it("shows a stored secret as configured and keeps it untouched on save", async () => {
+    const user = userEvent.setup();
+    setSettings(["opensubtitles"], {
+      opensubtitles: {
+        username: "alice",
+        password: "",
+        __secret_fields: {
+          password: { configured: true, last_four: "1a2b" },
+        },
+      },
+    });
+    settingsMutate.mockImplementation(
+      (_body: unknown, opts?: { onSuccess?: () => void }) => {
+        opts?.onSuccess?.();
+      },
+    );
+
+    customRender(
+      <ProviderConfigureStage onNext={onNext} onInstallMore={onInstallMore} />,
+    );
+
+    // The stored secret reads as an empty box with the descriptor's word for
+    // it beside it, not as a missing credential. A stored credential is
+    // replaced through an explicit action: the box is read-only until
+    // Replace is pressed.
+    expect(
+      await screen.findByText(/configured, ends in 1a2b/i),
+    ).toBeInTheDocument();
+    const storedInput = screen.getByLabelText("Password");
+    expect(storedInput).toHaveValue("");
+    expect(storedInput).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /replace/i }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    // Absent means unchanged: nothing about the secret is submitted.
+    expect(settingsMutate).toHaveBeenCalledTimes(1);
+    const payload = settingsMutate.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("settings-opensubtitles-password");
+    expect(onNext).toHaveBeenCalled();
+  });
+
+  // Clear is explicit: the button stages an empty value that the save
+  // submits as the clear, distinct from leaving the box untouched which
+  // keeps the stored secret.
+  it("clearing a stored secret submits an explicit clear", async () => {
+    const user = userEvent.setup();
+    // The secret is optional here, so clearing it is a valid end state.
+    setProviders([
+      {
+        provider_id: "secretvault",
+        name: "SecretVault",
+        state: "active",
+        manifest: {
+          id: "secretvault",
+          name: "SecretVault",
+          config_schema: {
+            properties: {
+              password: { type: "string", title: "Password", secret: true },
+            },
+          },
+        },
+      },
+    ]);
+    setSettings(["secretvault"], {
+      secretvault: {
+        password: "",
+        __secret_fields: {
+          password: { configured: true, last_four: "c0de" },
+        },
+      },
+    });
+    settingsMutate.mockImplementation(
+      (_body: unknown, opts?: { onSuccess?: () => void }) => {
+        opts?.onSuccess?.();
+      },
+    );
+
+    customRender(
+      <ProviderConfigureStage onNext={onNext} onInstallMore={onInstallMore} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /clear/i }));
+
+    expect(
+      screen.getByText(/will be cleared when you continue/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(settingsMutate).toHaveBeenCalledWith(
+      {
+        "settings-general-enabled_providers": ["secretvault"],
+        "settings-secretvault-password": "",
+      },
+      expect.anything(),
+    );
+    expect(onNext).toHaveBeenCalled();
+  });
+
+  // Only the Clear button stages the removal. Emptying the input by typing
+  // is editing, not clearing: the staged answer goes away, the stored secret
+  // stands, and the save submits nothing about it.
+  it("emptying a typed value unstages the field instead of clearing the key", async () => {
+    const user = userEvent.setup();
+    setSettings(["opensubtitles"], {
+      opensubtitles: {
+        username: "alice",
+        password: "",
+        __secret_fields: {
+          password: { configured: true, last_four: "c0de" },
+        },
+      },
+    });
+    settingsMutate.mockImplementation(
+      (_body: unknown, opts?: { onSuccess?: () => void }) => {
+        opts?.onSuccess?.();
+      },
+    );
+
+    customRender(
+      <ProviderConfigureStage onNext={onNext} onInstallMore={onInstallMore} />,
+    );
+
+    const input = screen.getByLabelText("Password");
+    // Typing is impossible until Replace is pressed.
+    await user.click(screen.getByRole("button", { name: /replace/i }));
+    await user.type(input, "a-typed-replacement");
+    expect(
+      screen.getByText(/replaces the stored key when you continue/i),
+    ).toBeInTheDocument();
+
+    // Typing and then emptying the box unstages the field: no clear is
+    // submitted, the stored key is kept.
+    await user.clear(input);
+    expect(screen.getByText(/configured, ends in c0de/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/will be cleared when you continue/i),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(settingsMutate).toHaveBeenCalledTimes(1);
+    const payload = settingsMutate.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("settings-opensubtitles-password");
+    expect(onNext).toHaveBeenCalled();
+  });
+
+  // Cancel takes a staged replacement back out and returns the field to
+  // Configured: the box locks again, and the save submits nothing about the
+  // secret.
+  it("cancel returns a staged replacement to Configured", async () => {
+    const user = userEvent.setup();
+    setSettings(["opensubtitles"], {
+      opensubtitles: {
+        username: "alice",
+        password: "",
+        __secret_fields: {
+          password: { configured: true, last_four: "c0de" },
+        },
+      },
+    });
+    settingsMutate.mockImplementation(
+      (_body: unknown, opts?: { onSuccess?: () => void }) => {
+        opts?.onSuccess?.();
+      },
+    );
+
+    customRender(
+      <ProviderConfigureStage onNext={onNext} onInstallMore={onInstallMore} />,
+    );
+
+    const input = screen.getByLabelText("Password");
+    await user.click(screen.getByRole("button", { name: /replace/i }));
+    await user.type(input, "unit-replacement");
+    expect(
+      screen.getByText(/replaces the stored key when you continue/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /cancel/i }));
+
+    expect(input).toBeDisabled();
+    expect(screen.getByText(/configured, ends in c0de/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/replaces the stored key when you continue/i),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(settingsMutate).toHaveBeenCalledTimes(1);
+    const payload = settingsMutate.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("settings-opensubtitles-password");
+    expect(onNext).toHaveBeenCalled();
+  });
+
+  // A replacement made only of spaces is not a credential: the input treats
+  // it as blank, the staged answer goes away, and the save submits nothing
+  // about the secret. Staging it as a clear would have saved the spaces.
+  it("treats a spaces-only replacement as blank instead of saving the spaces", async () => {
+    const user = userEvent.setup();
+    setSettings(["opensubtitles"], {
+      opensubtitles: {
+        username: "alice",
+        password: "",
+        __secret_fields: {
+          password: { configured: true, last_four: "c0de" },
+        },
+      },
+    });
+    settingsMutate.mockImplementation(
+      (_body: unknown, opts?: { onSuccess?: () => void }) => {
+        opts?.onSuccess?.();
+      },
+    );
+
+    customRender(
+      <ProviderConfigureStage onNext={onNext} onInstallMore={onInstallMore} />,
+    );
+
+    const input = screen.getByLabelText("Password");
+    await user.click(screen.getByRole("button", { name: /replace/i }));
+    await user.type(input, "   ");
+
+    // Nothing is staged: the box keeps the stored secret's word for it,
+    // and neither a replacement nor a clear is said.
+    expect(screen.getByText(/configured, ends in c0de/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/will be cleared when you continue/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/replaces the stored key when you continue/i),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(settingsMutate).toHaveBeenCalledTimes(1);
+    const payload = settingsMutate.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("settings-opensubtitles-password");
+    expect(onNext).toHaveBeenCalled();
+  });
+
+  // A stored credential that failed to decrypt is not usable: the gate
+  // demands a replacement before Continue proceeds, and the box says why.
+  it("demands a replacement for a credential that failed to decrypt", async () => {
+    const user = userEvent.setup();
+    setProviders([
+      {
+        provider_id: "secretvault",
+        name: "SecretVault",
+        state: "active",
+        manifest: {
+          id: "secretvault",
+          name: "SecretVault",
+          config_schema: {
+            required: ["password"],
+            properties: {
+              password: { type: "string", title: "Password", secret: true },
+            },
+          },
+        },
+      },
+    ]);
+    setSettings(["secretvault"], {
+      secretvault: {
+        password: "",
+        __secret_fields: {
+          password: { configured: true, decrypt_failed: true },
+        },
+      },
+    });
+    settingsMutate.mockImplementation(
+      (_body: unknown, opts?: { onSuccess?: () => void }) => {
+        opts?.onSuccess?.();
+      },
+    );
+
+    customRender(
+      <ProviderConfigureStage onNext={onNext} onInstallMore={onInstallMore} />,
+    );
+
+    expect(
+      await screen.findByText(/saved value could not be decrypted/i),
+    ).toBeInTheDocument();
+    // Like every stored credential, the failed one is read-only until
+    // Replace is pressed.
+    expect(screen.getByLabelText("Password")).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    // The configured flag is not enough: the credential is unusable, so the
+    // save is refused with the missing-credentials message.
+    expect(settingsMutate).not.toHaveBeenCalled();
+    expect(onNext).not.toHaveBeenCalled();
+    expect(screen.getByText(/secretvault needs password/i)).toBeInTheDocument();
+
+    // A replacement is what it takes: the staged replacement comes first in
+    // the text, so the reader is told it replaces the stored key, not asked
+    // to re-enter it again.
+    await user.click(screen.getByRole("button", { name: /replace/i }));
+    await user.type(screen.getByLabelText("Password"), "unit-replacement");
+    expect(
+      screen.getByText(/replaces the stored key when you continue/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/saved value could not be decrypted/i),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(settingsMutate).toHaveBeenCalledWith(
+      {
+        "settings-general-enabled_providers": ["secretvault"],
+        "settings-secretvault-password": "unit-replacement",
+      },
+      expect.anything(),
+    );
+    expect(onNext).toHaveBeenCalled();
   });
 });

@@ -7,23 +7,23 @@ apprise==2.0.1
 apscheduler==3.11.3
 babelfish==0.6.1
 beautifulsoup4==4.15.0
-cachetools>=7.2.0
+cachetools>=7.2.1
 certifi==2026.7.22
 chardet==7.6.0
-charset-normalizer==3.5.1
+charset-normalizer==3.5.2
 click-option-group>=0.5.9
 # Ceiling, not a floor: subliminal_patch CFSession relies on cloudscraper to
 # solve Cloudflare v1 challenges and captchas, so a release that drops that
 # support must not be picked up unattended. 1.2.71 is the newest release on
 # PyPI today, so this resolves to the latest version.
 cloudscraper<=1.2.71
-cryptography>=50.0.1
+cryptography>=50.0.2
 deathbycaptcha-official==4.7.1
 deep-translator==1.11.4
 dnspython==2.8.0
 dogpile.cache==1.5.0
 dynaconf==3.3.5
-emoji==2.15.0
+emoji==2.16.0
 enzyme==0.5.2
 fcache==0.6.0
 fese==0.3.0
@@ -66,7 +66,7 @@ semver==3.1.0
 # which we pin above at 1.2.1. Keeping it out of the normal resolve avoids the
 # ResolutionImpossible conflict and keeps Dependabot off the transitive pin.
 six==1.17.0
-sqlalchemy==2.1.1
+sqlalchemy==2.1.4
 srt==3.5.3
 subliminal[rar]==2.6.0
 textdistance==4.6.3

@@ -22,6 +22,20 @@ def _set_compat_secret(name: str, value: str) -> None:
     settings["compat_endpoint"][name] = value
 
 
+def _clear_compat_decrypt_failures() -> None:
+    """End any decrypt failure the compat secrets carry.
+
+    The regeneration above replaced whatever was stored, so once the new
+    values are on disk nothing here can fail to decrypt anymore. The
+    token is the only one of the three the boot failure set tracks (the
+    signing secrets are system secrets), but clearing all three costs
+    nothing and stays right if that ever changes."""
+    from secret_store.migration import clear_decrypt_failure_path
+
+    for name in ("token", "jwt_secret", "file_id_secret"):
+        clear_decrypt_failure_path(f"compat_endpoint.{name}")
+
+
 def regenerate_all_secrets(write_fn=None) -> str:
     """Atomic 3-way rotation + cache invalidate AFTER file_id_secret write (B9).
 
@@ -38,8 +52,11 @@ def regenerate_all_secrets(write_fn=None) -> str:
         write_fn("compat_endpoint.token", new_token)
         write_fn("compat_endpoint.jwt_secret", new_jwt)
         write_fn("compat_endpoint.file_id_secret", new_fid)
-    else:
-        write_config()
+        _clear_compat_decrypt_failures()
+    elif write_config() is True:
+        # Only a write that landed ends the failures: a refused write keeps
+        # the old ciphertext on disk, and its health issue with it.
+        _clear_compat_decrypt_failures()
     compat_region.invalidate(hard=True)
     compat_service.reset_compat_pool()
     from compat.file_id_store import reset_store
@@ -62,8 +79,15 @@ def ensure_secrets(write_fn=None) -> None:
             changed = True
             if write_fn is not None:
                 write_fn(f"compat_endpoint.{name}", new_val)
-    if changed and write_fn is None:
-        write_config()
+    if changed:
+        if write_fn is not None:
+            _clear_compat_decrypt_failures()
+        # A token the boot withheld as empty (it would not decrypt) counts as
+        # too short and is regenerated here; only a write that landed ends the
+        # failure, so the health issue stops asking for a re-entry that has
+        # already happened and survives nothing on a refused write.
+        elif write_config() is True:
+            _clear_compat_decrypt_failures()
 
 
 @api_ns_compat_admin.route("/system/compat/regenerate")

@@ -46,14 +46,25 @@ from .registry import (
     is_user_visible_secret,
     is_user_visible_secret_list,
 )
+from .scrub import (
+    MASK,
+    clear_secret_values,
+    refresh_secret_values,
+    register_secret_values,
+    scrub_persisted_secrets,
+    scrub_text,
+    scrub_value,
+)
 
 __all__ = [
+    "MASK",
     "SECRET_MARKER_PREFIX",
     "SYSTEM_SECRETS",
     "WRITE_ONLY_SECRETS",
     "is_write_only_secret",
     "USER_VISIBLE_SECRET_LISTS",
     "USER_VISIBLE_SECRETS",
+    "clear_secret_values",
     "decrypt_secret",
     "decrypt_settings_dict",
     "decrypt_settings_in_place",
@@ -67,4 +78,9 @@ __all__ = [
     "is_user_visible_secret_list",
     "migrate_legacy_plex_encryption",
     "persist_master_key",
+    "refresh_secret_values",
+    "register_secret_values",
+    "scrub_persisted_secrets",
+    "scrub_text",
+    "scrub_value",
 ]

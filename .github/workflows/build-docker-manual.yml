@@ -82,8 +82,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
-          cache: 'npm'
-          cache-dependency-path: "${{ env.UI_DIRECTORY }}/package-lock.json"
 
       - name: Install Dependencies
         run: npm ci
@@ -303,8 +301,8 @@ jobs:
             index,manifest:org.opencontainers.image.documentation=https://lavx.github.io/bazarr/guides/getting-started.html
           cache-from: |
             type=gha,scope=bazarr-deps
-            type=gha,scope=bazarr-main
-          cache-to: type=gha,mode=max,scope=bazarr-main
+            type=gha,scope=bazarr-manual
+          cache-to: type=gha,mode=max,scope=bazarr-manual
           build-args: |
             BAZARR_VERSION=${{ steps.version.outputs.fork_version }}
             BUILD_DATE=${{ steps.version.outputs.build_date }}

@@ -3,7 +3,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 
 const JOBS_KEY = [QueryKeys.System, QueryKeys.Jobs];
-const TERMINAL = new Set(["completed", "failed"]);
+const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
 // How often the job is asked for directly, in case its terminal socket event
 // never reaches the cache (a dropped socket, a failed refetch in the reducer).

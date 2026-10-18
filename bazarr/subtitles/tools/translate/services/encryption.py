@@ -4,12 +4,16 @@ import re
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-_HEX_64_RE = re.compile(r'^[0-9a-fA-F]{64}$')
+_HEX_64_RE = re.compile(r'[0-9a-fA-F]{64}')
 
 
 def validate_encryption_key(key_hex: str) -> bool:
-    """Check if key_hex is a valid 64-character hex string."""
-    return bool(_HEX_64_RE.match(key_hex))
+    """Check if key_hex is a valid 64-character hex string.
+
+    A full match, not a search: `$` accepts a trailing newline before it, so
+    64 hex characters followed by one passed while every caller assumed the
+    validated string held exactly 64."""
+    return bool(_HEX_64_RE.fullmatch(key_hex))
 
 
 def encrypt_api_key(api_key: str, encryption_key_hex: str) -> str:

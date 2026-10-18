@@ -11,6 +11,7 @@ import warnings
 from logging.handlers import TimedRotatingFileHandler
 from literals import (LOG_BACKUP_COUNT_DEFAULT, LOG_BACKUP_COUNT_MAX, LOG_BACKUP_COUNT_MIN,
                       LOG_MAX_FILE_SIZE_MB_DEFAULT, LOG_MAX_FILE_SIZE_MB_MAX, LOG_MAX_FILE_SIZE_MB_MIN)
+from secret_store.scrub import scrub_text
 from utilities.central import get_log_file_path
 
 from .config import settings
@@ -87,6 +88,10 @@ class FileHandlerFormatter(logging.Formatter):
         if record.exc_text:
             s = s.replace('\n', '') + '|'
 
+        # Registered credentials and the known token shapes first: a value
+        # the patterns below would mask from its label is already gone, and
+        # a value that arrives without one is masked here.
+        s = scrub_text(s)
         s = self.formatApikey(s)
         s = self.formatIPv4(s)
         s = self.formatPlexUrl(s)

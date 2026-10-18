@@ -144,7 +144,7 @@ def _capture_job_names(series_mod, monkeypatch):
 
 def _sonarr_warnings(caplog):
     return [r for r in caplog.records
-            if r.levelname == 'WARNING' and 'did not return episodes' in r.getMessage()]
+            if r.levelname == 'WARNING' and 'skipped the episode sync' in r.getMessage()]
 
 
 @pytest.mark.parametrize('sync_harness', [5], indirect=True)
@@ -266,6 +266,64 @@ def test_a_series_skipped_for_an_unreadable_episode_file_list_is_counted(
     assert len(warnings) == 1
     assert '1 of 5' in warnings[0].getMessage()
     assert 'Series ids: 2' in warnings[0].getMessage()
+    assert names == ['Synced series with Sonarr (1 skipped)']
+
+
+@pytest.mark.parametrize('sync_harness', [2], indirect=True)
+def test_an_empty_prefetched_episode_list_deletes_while_a_failed_one_keeps(
+        sync_harness, monkeypatch, schema_session, caplog):
+    """The bulk pre-fetch hands sync_episodes both answers, so both must keep
+    their meaning there: an empty list is a real answer and its stale rows go,
+    a None is a failed fetch whose rows stay while the series is counted
+    skipped. A falsy gate in the bulk loop would swallow the empty list and
+    the scheduled sync would never remove the stale rows, only direct calls
+    would.
+    """
+    import semver
+
+    import sonarr.sync.episodes as episodes_mod
+    from app.database import TableEpisodes
+
+    series_mod, shows, payloads, refs = sync_harness
+
+    schema_session.add_all([
+        TableEpisodes(id=704, series_id=None, sonarrEpisodeId=45, sonarrSeriesId=1,
+                      arr_instance_id=None, path="/series/alpha/s01e01.mkv", title="Gone",
+                      season=1, episode=1, monitored="True", subtitles="[]"),
+        TableEpisodes(id=705, series_id=None, sonarrEpisodeId=46, sonarrSeriesId=2,
+                      arr_instance_id=None, path="/series/beta/s01e01.mkv", title="Kept",
+                      season=1, episode=1, monitored="True", subtitles="[]"),
+    ])
+    schema_session.flush()
+
+    def _episodes(apikey_sonarr=None, series_id=None, arr_client=None):
+        return [] if series_id == 1 else None
+
+    monkeypatch.setattr(series_mod, 'get_episodes_from_sonarr_api', _episodes)
+    monkeypatch.setattr(series_mod, 'database', schema_session)
+    monkeypatch.setattr(episodes_mod, 'database', schema_session)
+    monkeypatch.setattr(episodes_mod, 'get_sonarr_info',
+                        SimpleNamespace(semver=lambda: semver.Version(*(4, 0, 9, 2421))))
+    monkeypatch.setattr(episodes_mod, 'sonarr_series_owner', lambda *a, **kw: (None, None))
+    monkeypatch.setattr(episodes_mod, 'forget_media_by_upstream', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod, 'event_stream', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'apikey', 'x', raising=False)
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'sync_only_monitored_series', False,
+                        raising=False)
+    names = _capture_job_names(series_mod, monkeypatch)
+
+    series_mod.update_series(job_id='job-1')
+
+    from sqlalchemy import select
+    remaining = schema_session.execute(select(TableEpisodes.id)).scalars().all()
+    assert remaining == [705], (
+        'the bulk path must delete the stale rows of the series that answered '
+        'an empty episode list and keep every row of the series whose fetch '
+        f'failed: {sorted(remaining)}')
+    warnings = _sonarr_warnings(caplog)
+    assert len(warnings) == 1
+    assert '1 of 2' in warnings[0].getMessage(), (
+        'the series whose fetch failed was not counted as skipped')
     assert names == ['Synced series with Sonarr (1 skipped)']
 
 

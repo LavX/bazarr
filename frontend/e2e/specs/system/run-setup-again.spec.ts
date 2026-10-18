@@ -4,13 +4,14 @@
  * off.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { completeOnboarding } from "@e2e/lib/shared";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
 import { INTENT, stepHeading } from "@e2e/lib/wizard";
 import type { APIRequestContext, Page } from "@playwright/test";
 
 async function setupComplete(api: APIRequestContext) {
-  const response = await api.get("/api/system/settings");
+  const response = await api.get(appPath("/api/system/settings"));
   expect(response.ok()).toBe(true);
   const settings = (await response.json()) as {
     general: { setup_complete: boolean };
@@ -19,7 +20,7 @@ async function setupComplete(api: APIRequestContext) {
 }
 
 async function runSetupAgain(page: Page) {
-  await page.goto("/settings/general");
+  await page.goto(appPath("/settings/general"));
   await page.getByRole("button", { name: "Run first-time setup" }).click();
   await expect(page).toHaveURL(/\/setup\/welcome$/);
   await expect(stepHeading(page, "Welcome to Bazarr+")).toBeVisible();
@@ -53,7 +54,7 @@ test.describe("run first-time setup", { tag: ["@wizard", "@stateful"] }, () => {
     // Setup finished somewhere else, say in another tab, and this browser
     // still remembers the Sonarr step it was on.
     await completeOnboarding(bazarr);
-    await page.goto("/settings/general");
+    await page.goto(appPath("/settings/general"));
     await expect(page).toHaveURL(/\/settings\/general$/);
 
     await runSetupAgain(page);

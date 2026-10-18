@@ -3,13 +3,14 @@
  * a fresh browser context is exactly a reader arriving after the upgrade.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { WHATS_NEW_SEEN_KEY, WHATS_NEW_VERSION } from "@e2e/lib/whatsNew";
 
 test.describe("What's New", { tag: ["@status"] }, () => {
   test("opens once on the first load, shows every slide and stays closed", async ({
     page,
   }) => {
-    await page.goto("/");
+    await page.goto(appPath("/"));
     const modal = page.getByRole("dialog", { name: "What's New" });
     await expect(modal).toBeVisible();
     await expect(

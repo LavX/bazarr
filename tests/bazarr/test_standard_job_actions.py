@@ -684,7 +684,7 @@ def bundle_files(hub_install, version):
 
 
 def assert_stopped(job):
-    assert job["status"] == "completed"
+    assert job["status"] == "cancelled"
     assert job["progress_message"] == "Cancelled by user"
 
 
@@ -733,8 +733,12 @@ def test_stopping_a_catalog_refresh_leaves_the_catalog_as_it_was(queue, tmp_path
     save_state(state)
     before = load_state()
 
-    def fetch(url, override_ref=None):
+    def fetch(url, override_ref=None, unchanged_commit=None, advertisement_sink=None):
+        # The real contract: the skip result only for an unchanged commit,
+        # a fetched catalog otherwise. Stop is pressed while it runs.
         press_stop(queue)
+        if unchanged_commit is not None:
+            return None, unchanged_commit
         return {"providers": [{"provider_id": "examplehub", "version": "1.0.0"}]}, "c" * 40
 
     monkeypatch.setattr(service, "_fetch_github_catalog", fetch)
@@ -743,6 +747,54 @@ def test_stopping_a_catalog_refresh_leaves_the_catalog_as_it_was(queue, tmp_path
 
     after = load_state()
     assert after["catalog_entries"] == before["catalog_entries"] == {}
+    assert after["catalog_sources"] == before["catalog_sources"]
+
+
+def test_stopping_a_catalog_refresh_during_a_skipped_source_leaves_the_catalog_as_it_was(
+    queue, tmp_path, monkeypatch
+):
+    from provider_hub import jobs as hub_jobs
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+    state = load_state()
+    state["catalog_sources"]["official"]["resolved_commit"] = "c" * 40
+    # The id sorts after "official", whose refresh runs first and takes the
+    # skip, so the stop is pressed while the official source skips and the
+    # checkpoint must still stop the next source before it is fetched.
+    state["catalog_sources"]["zextra"] = {
+        "id": "zextra", "name": "Zextra", "type": "github", "enabled": True,
+        "url": "https://github.com/owner/zextra/blob/main/catalog.json"}
+    state["catalog_entries"]["official:examplehub:1.0.0"] = {
+        "source": "official", "source_name": "official", "provider_id": "examplehub",
+        "name": "examplehub", "version": "1.0.0", "trusted": True}
+    save_state(state)
+    before = load_state()
+
+    fetches = []
+
+    def fetch(url, override_ref=None, unchanged_commit=None, advertisement_sink=None):
+        # Stop is pressed while the official source takes the skip, so the
+        # stop must still take effect at the next source's checkpoint: the
+        # checkpoint runs before every source, skipped ones included.
+        press_stop(queue)
+        fetches.append((url, unchanged_commit))
+        if unchanged_commit is not None:
+            return None, unchanged_commit
+        return {"providers": [{"provider_id": "examplehub", "version": "1.0.0"}]}, "c" * 40
+
+    monkeypatch.setattr(service, "_fetch_github_catalog", fetch)
+    hub_jobs.queue_catalog_refresh()
+    assert_stopped(run_next(queue))
+
+    # The official source took the skip: the fake saw the official URL with
+    # the stored commit and returned the skip result.
+    assert fetches == [(
+        "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json", "c" * 40)]
+
+    after = load_state()
+    assert after["catalog_entries"] == before["catalog_entries"]
     assert after["catalog_sources"] == before["catalog_sources"]
 
 
@@ -888,7 +940,7 @@ def test_the_spooled_package_is_removed_when_its_install_ends(queue, package_upl
     job = run_next(queue)
 
     assert read == [b"PK package"]
-    assert job["status"] == ("failed" if outcome == "failed" else "completed")
+    assert job["status"] == {"failed": "failed", "stopped": "cancelled"}.get(outcome, "completed")
     if outcome == "failed":
         assert job["error"]["message"] == ("Could not install local.zip: "
                                            "uploaded package is not a valid .zip archive")
@@ -1083,7 +1135,7 @@ def test_stop_reaches_a_running_sports_download(queue, monkeypatch):
     manual_jobs.sports_manually_download_subtitle(61, {"subtitle": "cached"}, 1)
     job = run_next(queue)
 
-    assert job["status"] == "completed"
+    assert job["status"] == "cancelled"
     assert job["progress_message"] == "Cancelled by user"
     assert job["job_name"] == "Manually downloading Subtitles for Final"
     assert job["job_returned_value"] is None

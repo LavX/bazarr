@@ -4,16 +4,17 @@ import ast
 import contextlib
 import hmac
 import logging
+import re
 
 from functools import wraps
-from flask import request, abort
+from flask import g, jsonify, request, abort, after_this_request
 from operator import itemgetter
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app import activity
 from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
-from app.database import get_audio_profile_languages, get_desired_languages
+from app.database import get_audio_profile_languages, get_desired_languages, select
 from utilities.path_mappings import path_mappings
 
 None_Keys = ['null', 'undefined', '', None]
@@ -115,6 +116,15 @@ def _subtitle_language_details(language_code):
 def _safe_apikey_compare(provided, expected):
     if not provided:
         return False
+    if not expected:
+        # An empty stored key authenticates nothing, by rule. The compare
+        # below would not give that rule by itself: compare_digest answers
+        # that two empty strings match, so a boot that withholds an
+        # undecryptable key as an empty string would otherwise pair with an
+        # empty presented key and let the request through. The guard is
+        # defense in depth on top of the presented-side check, which already
+        # refuses an empty or missing key before the stored one is read.
+        return False
     return hmac.compare_digest(str(provided), str(expected))
 
 
@@ -161,6 +171,169 @@ def authenticate(actual_method):
                 return actual_method(*args, **kwargs)
 
         return abort(401)
+
+    return wrapper
+
+
+def _never_cacheable(response):
+    """The response finalizer of the HLS and token routes: never cacheable.
+
+    It is registered before authentication, so it runs on every answer
+    those routes produce, including the 500 the framework builds from an
+    unhandled exception: no playlist, segment or token answer may be
+    stored by a cache. It adds no marker: the app-wide hook below is what
+    marks the token route's answers, so even that 500 carries the marker.
+    """
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+def editor_no_store(response):
+    """The app-wide response hook of the editor's no-store routes.
+
+    The finalizer above is registered only when a decorated view runs, but
+    the router itself answers an automatic OPTIONS request and refuses an
+    unsupported method with a 405 before any view is dispatched, so those
+    answers would otherwise carry no cache header at all. The hook is
+    scoped to the two routes the lane keeps no-store, the same way the
+    decorators scope them by path, and marks whatever those paths answer
+    with no-store, whatever built the answer. On the token route it also
+    restates the route marker, so the router-built OPTIONS and 405 and
+    even the unhandled-exception 500 reach the client marked, the way the
+    route's deliberate answers are marked. It is registered with the api
+    blueprint, so it runs after the finalizer and only re-states a header
+    a running view has already set.
+    """
+    path = request.path.rstrip('/')
+    if path.endswith('/api/editor/stream-token'):
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Bazarr-Stream-Token-Route'] = '1'
+    elif '/api/editor/hls/' in request.path:
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+def register_editor_no_store(blueprint):
+    """Register the no-store hook above on the api blueprint, app-wide.
+
+    Production calls this once from the api package, so the tests that
+    need the hook wire it the same way, through this registration, rather
+    than by installing the hook function by hand.
+    """
+    blueprint.after_app_request(editor_no_store)
+
+
+def _editor_unauthorized_response():
+    """The editor routes' 401: never cacheable, and marked on the token route.
+
+    The token route's marker tells the frontend that Bazarr itself answered,
+    rather than a reverse proxy returning the same status while Bazarr is
+    down or restarting.
+    """
+    response = jsonify({'message': 'Not authenticated'})
+    response.status_code = 401
+    response.headers['Cache-Control'] = 'no-store'
+    if request.path.rstrip('/').endswith('/api/editor/stream-token'):
+        response.headers['X-Bazarr-Stream-Token-Route'] = '1'
+    return response
+
+
+def _editor_request_carries_url_apikey():
+    """Whether the request carries an apikey outside the header.
+
+    The form is read only for the body types that carry form fields,
+    urlencoded and multipart, because reading request.form parses the
+    whole request for them. The answer says only that a key is present,
+    not that it is valid: the editor routes refuse an apikey in a URL or
+    a form whatever else the request presents, so a valid header
+    credential beside it changes nothing.
+    """
+    if 'apikey' in request.args:
+        return True
+    if request.mimetype not in ('application/x-www-form-urlencoded',
+                                'multipart/form-data'):
+        return False
+    return 'apikey' in request.form
+
+
+def authenticate_header_only(actual_method):
+    """Guard the editor routes: the API key in the header, nowhere else.
+
+    The editor routes exist for the frontend, which sends the key in the
+    X-API-KEY header. Keeping the query-string fallback there would let a
+    key regress into a URL unnoticed, so a script still passing apikey= in
+    a URL fails at once with a 401 instead of passing with a deprecation
+    warning nobody reads. The rest of the API keeps the fallback. The
+    refusal is checked before the header is read, so an apikey in the URL
+    is refused even beside a valid header key.
+    """
+    @wraps(actual_method)
+    def wrapper(*args, **kwargs):
+        if request.path.rstrip('/').endswith('/api/editor/stream-token'):
+            # Every answer of the token route is no-store, including one
+            # the framework builds from an unhandled exception. The
+            # finalizer is registered before authentication, so nothing
+            # this route produces can bypass it.
+            after_this_request(_never_cacheable)
+        if _editor_request_carries_url_apikey():
+            return _editor_unauthorized_response()
+        if _safe_apikey_compare(request.headers.get('X-API-KEY'), settings.auth.apikey):
+            with _user_request_scope():
+                return actual_method(*args, **kwargs)
+        return _editor_unauthorized_response()
+
+    return wrapper
+
+
+def authenticate_header_or_stream_token(actual_method):
+    """The HLS route's variant: the header, or a valid st in the query string.
+
+    A native player (Safari, iOS) cannot add headers to the segment requests
+    it makes itself, so the playlist URL it is given carries a media-scoped
+    stream token as st instead of the API key. The token is verified against
+    the route's own media type, media id, audio track and arr instance. An
+    apikey in the query or form is refused before either credential is read,
+    the same way the header-only routes refuse it.
+    """
+    @wraps(actual_method)
+    def wrapper(*args, **kwargs):
+        # Every answer of the HLS route is no-store, including one the
+        # framework builds from an unhandled exception. The finalizer is
+        # registered before authentication, so nothing this route produces
+        # can bypass it.
+        after_this_request(_never_cacheable)
+        if _editor_request_carries_url_apikey():
+            return _editor_unauthorized_response()
+        if _safe_apikey_compare(request.headers.get('X-API-KEY'), settings.auth.apikey):
+            with _user_request_scope():
+                return actual_method(*args, **kwargs)
+        token = request.args.get('st')
+        if token:
+            from api.editor import stream_token
+            arr_instance_id = request.args.get('arr_instance_id')
+            if arr_instance_id in (None, ''):
+                arr_instance_id = None
+            else:
+                try:
+                    arr_instance_id = int(arr_instance_id)
+                except (TypeError, ValueError):
+                    return _editor_unauthorized_response()
+            if stream_token.verify_stream_token(
+                token,
+                kwargs.get('media_type'),
+                kwargs.get('media_id'),
+                arr_instance_id,
+                kwargs.get('audio_track'),
+            ):
+                # The token was verified against this route's own scope, so
+                # the handler may echo it into the playlist it returns. Only
+                # the verified token reaches it: a st that merely rode along
+                # on a header-authenticated call is dropped, not echoed back
+                # into URIs unescaped.
+                g.editor_hls_stream_token = token
+                with _user_request_scope():
+                    return actual_method(*args, **kwargs)
+        return _editor_unauthorized_response()
 
     return wrapper
 
@@ -297,3 +470,163 @@ def postprocess(item):
         item['fanart'] = _proxy_image(item['fanart'])
 
     return item
+
+
+def chunked(items, size=900):
+    """Yield ``items`` in successive lists of at most ``size`` entries.
+
+    Used to keep an ``IN (...)`` clause within SQLite's bound-parameter limit
+    (999 on older builds) when a fetchAll id list can grow with the library.
+    Postgres has no such limit, so a single large batch would work there, but
+    chunking is behaviour-equivalent for both back ends.
+    """
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def _canonical_embedded_language(language):
+    """Reduce a possibly multi-variant embedded language code to the
+    hi-priority single variant that action-7 history rows store.
+
+    The raw ``subtitles`` column can hold a combined code like
+    ``"en:hi:forced"`` for a track that is both HI and forced, while
+    ``_log_embedded_history_movie`` writes the canonical single variant
+    ``"en:hi"``. Applying the same reduction here (base, plus ``":hi"`` when HI,
+    else ``":forced"`` when forced, else the base) lets the two match.
+    """
+    parts = str(language).split(':')
+    base = parts[0]
+    variants = set(parts[1:])
+    if 'hi' in variants:
+        return base + ':hi'
+    if 'forced' in variants:
+        return base + ':forced'
+    return base
+
+
+# A Windows path: a drive letter followed by either separator, a UNC prefix, or
+# any path carrying a backslash, which Unix paths never do.
+_WINDOWS_PATH = re.compile(r'^(?:[A-Za-z]:[\\/]|//)')
+
+
+def _subtitle_file_name(path):
+    """Return a subtitle path's file name and whether it is a Windows path.
+
+    History rows and the indexed subtitles column can carry the same file under
+    different mapped folders or separator styles: a translation logs the
+    globally mapped path while the indexer records the instance's, and one side
+    can be a Windows path where the other is the mapped Linux path. The file
+    name is what stays stable, so the score lookup compares that, split on both
+    separators. Windows resolves names case-insensitively, so a name that
+    reached one side through a Windows path matches the other side's name
+    whatever its case; two Unix names that differ only by case are two files on
+    a case-sensitive filesystem and stay apart.
+    """
+    text = str(path)
+    name = text.replace('\\', '/').rsplit('/', 1)[-1]
+    # A drive letter or a UNC prefix is Windows whichever separator it uses.
+    windows = '\\' in text or bool(_WINDOWS_PATH.match(text))
+    return name, windows
+
+
+def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
+    """Lowest current-subtitle score (0-100 %) for each item id.
+
+    Mirrors what the detail pages show. For every item, per current subtitle:
+      * file subtitles -> the newest replacement/deletion record for a current
+        file; only downloads (action 1/2/3) supply a score. Sync (5) preserves it;
+      * embedded tracks -> the newest source record (action 7) whose language
+        the item still has as an embedded track (a subtitles entry with an
+        empty path).
+    Each counted record scores ``round(score * 100 / score_out_of, 2)``; records
+    without a usable score/score_out_of are skipped. The item's value is the
+    minimum over the counted records, absent from the result when nothing counts.
+
+    ``subtitles_by_id`` maps id -> raw ``subtitles`` column. Paths compare by
+    their file name, the identity that survives the path mappings a history row
+    and the indexer can apply to the same file; Windows names also match
+    case-insensitively, while Unix names keep their case. One grouped, ordered
+    history query runs for the whole page (no per-item query).
+    """
+    ids = list(subtitles_by_id.keys())
+    if not ids:
+        return {}
+
+    # Current file-subtitle paths and embedded-track languages per item, read
+    # straight from the raw subtitles column.
+    current_paths = {}
+    embedded_langs = {}
+    for item_id, raw in subtitles_by_id.items():
+        paths = {}
+        langs = set()
+        if raw:
+            for entry in ast.literal_eval(raw):
+                if entry[1]:
+                    name, windows = _subtitle_file_name(entry[1])
+                    paths[name] = paths.get(name, False) or windows
+                else:
+                    langs.add(_canonical_embedded_language(entry[0]))
+        current_paths[item_id] = paths
+        embedded_langs[item_id] = langs
+
+    # Chunk the id list so the IN (...) clause stays within SQLite's
+    # bound-parameter limit for large libraries. Each id lives in exactly one
+    # chunk, so every row for a given item keeps its timestamp/id ordering and
+    # the newest-record-wins seen-set below still holds across the merge.
+    rows = []
+    for chunk in chunked(ids):
+        rows.extend(db.execute(
+            select(id_column.label('item_id'),
+                   history_table.action,
+                   history_table.language,
+                   history_table.subtitles_path,
+                   history_table.score,
+                   history_table.score_out_of)
+            .where(id_column.in_(chunk))
+            .where(history_table.action.in_([0, 1, 2, 3, 4, 6, 7]))
+            .order_by(history_table.timestamp.desc(), history_table.id.desc())
+        ).all())
+
+    lowest = {}
+    # (item_id, kind, key) already resolved: the newest record wins, so an older
+    # record for the same subtitle is ignored even when the newest had no score.
+    seen = set()
+    for row in rows:
+        if row.action == 7:
+            if row.language not in embedded_langs.get(row.item_id, ()):
+                continue
+            key = (row.item_id, 'embedded', row.language)
+        else:
+            name, windows = _subtitle_file_name(row.subtitles_path)
+            names = current_paths.get(row.item_id, {})
+            if name in names:
+                current_name = name
+            else:
+                folded = [other for other in names if other.casefold() == name.casefold()]
+                # A Windows path resolves its name case-insensitively; two Unix
+                # paths that differ only by case are two different files.
+                if not folded or not (windows or any(names[other] for other in folded)):
+                    continue
+                current_name = sorted(folded)[0]
+            # The current file is the canonical identity: a row that matched it
+            # by exact name and one that matched it case-insensitively belong to
+            # the same subtitle, so the newest one wins.
+            key = (row.item_id, 'file', current_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        # Uploads/translations may carry a synthetic score, but they replace
+        # the downloaded file and must also shadow its old provider score.
+        if row.action not in (1, 2, 3, 7) or row.score is None:
+            continue
+        if row.score == 0:
+            # Older history writers leave score_out_of unset for a real zero.
+            percent = 0.0
+        elif not row.score_out_of:
+            continue
+        else:
+            percent = round(row.score * 100 / row.score_out_of, 2)
+        current = lowest.get(row.item_id)
+        if current is None or percent < current:
+            lowest[row.item_id] = percent
+    return lowest

@@ -96,6 +96,52 @@ function storedValue(
   return (section as LooseObject)[fieldKey];
 }
 
+// The settings API never returns a plugin secret, so the section carries a
+// descriptor instead: `__secret_fields` says whether each one is configured
+// and, for a long one, how it ends. A shipped provider has no descriptor and
+// this returns undefined.
+interface SecretFieldDescriptor {
+  configured?: boolean;
+  last_four?: string;
+  decrypt_failed?: boolean;
+}
+function secretDescriptor(
+  settings: LooseObject | undefined,
+  providerId: string,
+  fieldKey: string,
+): SecretFieldDescriptor | undefined {
+  const section = settings?.[providerId];
+  if (!section || typeof section !== "object" || Array.isArray(section)) {
+    return undefined;
+  }
+  const descriptors = (section as LooseObject).__secret_fields;
+  if (
+    !descriptors ||
+    typeof descriptors !== "object" ||
+    Array.isArray(descriptors)
+  ) {
+    return undefined;
+  }
+  return (descriptors as LooseObject)[fieldKey.toLowerCase()] as
+    | SecretFieldDescriptor
+    | undefined;
+}
+
+// What the wizard says about a stored secret without ever reading it back:
+// the configured text, or undefined. A credential that failed to decrypt is
+// never reported as configured here; its own message goes beside the input,
+// and the Continue gate demands a replacement.
+function describeConfiguredSecret(
+  descriptor: SecretFieldDescriptor | undefined,
+): string | undefined {
+  if (descriptor?.configured === true && descriptor.decrypt_failed !== true) {
+    return descriptor.last_four
+      ? `Configured, ends in ${descriptor.last_four}`
+      : "Configured";
+  }
+  return undefined;
+}
+
 // Mirrors schemaToInputs() in Settings/Providers/index.tsx: turn a manifest's
 // config_schema.properties into the fields we render. Secret fields (or those
 // in manifest.secret_fields) become password inputs; booleans become
@@ -213,6 +259,10 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
   }, [answered, systemSettings]);
   // Keyed by `${providerId}::${fieldKey}` so different providers never collide.
   const [values, setValues] = useState<Record<string, string | boolean>>({});
+  // A stored secret is replaced through an explicit action, so per field the
+  // box stays read-only until Replace is pressed (Cancel discards the
+  // staged replacement and locks the box again). Keyed like `values`.
+  const [replacing, setReplacing] = useState<Record<string, boolean>>({});
   // Credentials are only marked once Continue has been pressed: every required
   // field would otherwise turn red the instant a provider is ticked, before
   // the reader has had a chance to type anything.
@@ -239,6 +289,33 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
     }));
   };
 
+  // Take a field back out of the staged answers, so it is submitted exactly
+  // as untouched (absent means unchanged on the backend).
+  const unsetValue = (providerId: string, fieldKey: string) => {
+    setValues((current) => {
+      const next = { ...current };
+      delete next[`${providerId}::${fieldKey}`];
+      return next;
+    });
+  };
+
+  const beginReplace = (providerId: string, fieldKey: string) => {
+    setReplacing((current) => ({
+      ...current,
+      [`${providerId}::${fieldKey}`]: true,
+    }));
+  };
+
+  // Cancel returns the field to Configured: the box locks again and the
+  // staged replacement, if any, goes away.
+  const cancelReplace = (providerId: string, fieldKey: string) => {
+    setReplacing((current) => ({
+      ...current,
+      [`${providerId}::${fieldKey}`]: false,
+    }));
+    unsetValue(providerId, fieldKey);
+  };
+
   // Every enabled provider's required credentials that are still blank, both
   // typed and already stored. The stage used to compute the required set only
   // to decide what to render: a provider could be ticked, left empty and saved
@@ -260,6 +337,23 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
           const typed = values[`${providerId}::${field.key}`];
           if (typed !== undefined) {
             return isBlank(typed);
+          }
+          // A stored secret never reads back as its value, so an empty box
+          // does not mean it is missing: the descriptor says whether it is
+          // there and usable. A credential that failed to decrypt is not
+          // usable and is asked for again.
+          if (field.type === "password") {
+            const descriptor = secretDescriptor(
+              systemSettings as LooseObject | undefined,
+              providerId,
+              field.key,
+            );
+            if (
+              descriptor?.configured === true &&
+              descriptor.decrypt_failed !== true
+            ) {
+              return false;
+            }
           }
           return isBlank(
             storedValue(
@@ -446,22 +540,131 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
                       ? `${providerLabel(provider)} needs this to search`
                       : undefined;
                   if (field.type === "password") {
+                    // The stored secret never reads back, so the empty box
+                    // carries the descriptor's word for it. Every action is
+                    // explicit, so continuing never wipes or keeps a key by
+                    // accident: untouched keeps the stored secret, only the
+                    // Clear button stages the removal (Undo takes it back),
+                    // a replacement needs Replace pressed first and Cancel
+                    // returns to Configured, and emptying the input by
+                    // typing unstages the field again.
+                    const descriptor = secretDescriptor(
+                      systemSettings as LooseObject | undefined,
+                      providerId,
+                      field.key,
+                    );
+                    // Only the truly empty value is the staged clear. A
+                    // spaces-only input is never a credential, so it never
+                    // reaches the staged answers (the input treats it as
+                    // blank), and saying it will clear the key while saving
+                    // the spaces would make the two forms disagree.
+                    const clearStaged =
+                      fieldValue !== undefined &&
+                      (fieldValue === "" || fieldValue === null);
+                    const replaceStaged =
+                      typeof fieldValue === "string" && fieldValue.length > 0;
+                    const decryptFailed = descriptor?.decrypt_failed === true;
+                    const locked =
+                      descriptor?.configured === true || decryptFailed;
+                    const replacingThis =
+                      replacing[`${providerId}::${field.key}`] === true;
+                    // The staged state is said first, because it is the
+                    // action the reader is in the middle of; the decrypt
+                    // failure shows only when nothing is staged, so a
+                    // replacement typed for a failed credential is still
+                    // said to replace the stored key.
+                    const helper: string[] = [];
+                    if (field.description) {
+                      helper.push(field.description);
+                    }
+                    if (clearStaged) {
+                      helper.push("Will be cleared when you continue.");
+                    } else if (replaceStaged) {
+                      helper.push("Replaces the stored key when you continue.");
+                    } else {
+                      const configuredText =
+                        describeConfiguredSecret(descriptor);
+                      if (configuredText) {
+                        helper.push(configuredText);
+                      }
+                    }
+                    if (decryptFailed && !clearStaged && !replaceStaged) {
+                      helper.push(
+                        "The saved value could not be decrypted. Re-enter it and save.",
+                      );
+                    }
                     return (
-                      <PasswordInput
-                        key={field.key}
-                        size="xs"
-                        label={field.label}
-                        description={field.description}
-                        error={fieldError}
-                        value={typeof fieldValue === "string" ? fieldValue : ""}
-                        onChange={(event) =>
-                          setValue(
-                            providerId,
-                            field.key,
-                            event.currentTarget.value,
-                          )
-                        }
-                      />
+                      <div key={field.key}>
+                        <PasswordInput
+                          size="xs"
+                          label={field.label}
+                          description={
+                            helper.length > 0 ? helper.join(" ") : undefined
+                          }
+                          error={fieldError}
+                          disabled={locked && !replacingThis}
+                          value={
+                            typeof fieldValue === "string" ? fieldValue : ""
+                          }
+                          onChange={(event) => {
+                            const next = event.currentTarget.value;
+                            if (isBlank(next)) {
+                              // An empty or spaces-only input is editing,
+                              // not clearing: the staged answer goes away
+                              // and the stored secret stands. A credential
+                              // made only of spaces is never what a reader
+                              // meant to save.
+                              unsetValue(providerId, field.key);
+                            } else {
+                              setValue(providerId, field.key, next);
+                            }
+                          }}
+                        />
+                        {locked &&
+                          !replacingThis &&
+                          !clearStaged &&
+                          !replaceStaged && (
+                            <Button
+                              size="compact-xs"
+                              variant="subtle"
+                              onClick={() =>
+                                beginReplace(providerId, field.key)
+                              }
+                            >
+                              Replace
+                            </Button>
+                          )}
+                        {(replacingThis || replaceStaged) && !clearStaged && (
+                          <Button
+                            size="compact-xs"
+                            variant="subtle"
+                            onClick={() => cancelReplace(providerId, field.key)}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                        {clearStaged && (
+                          <Button
+                            size="compact-xs"
+                            variant="subtle"
+                            onClick={() => unsetValue(providerId, field.key)}
+                          >
+                            Undo
+                          </Button>
+                        )}
+                        {descriptor?.configured === true &&
+                          fieldValue === undefined && (
+                            <Button
+                              size="compact-xs"
+                              variant="subtle"
+                              onClick={() =>
+                                setValue(providerId, field.key, "")
+                              }
+                            >
+                              Clear
+                            </Button>
+                          )}
+                      </div>
                     );
                   }
                   return (

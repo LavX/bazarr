@@ -6,8 +6,9 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import ItemView from "@/pages/views/ItemView";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { openSelect } from "@/tests/select";
 
 // Sports is the one library that reads a page until a filter starts and then
 // switches to a query for every row. Until that answers, the query client
@@ -34,6 +35,12 @@ const columns: ColumnDef<Item.Base>[] = [
   { header: "Name", accessorKey: "title" },
 ];
 
+// One row beyond the first page carries a tag, so the tag options cannot be
+// derived from the rows a page query has on screen.
+const lateTagged = leagues.map((league, index) =>
+  index === 40 ? { ...league, tags: ["Late Tag"] } : league,
+);
+
 function queryFor(phase: Phase) {
   const fetchAll = phase !== "page";
   const rows = phase === "settled" ? leagues : leagues.slice(0, 25);
@@ -49,6 +56,12 @@ function queryFor(phase: Phase) {
       fetchAll,
     },
     controls: { gotoPage: () => undefined, setPageSize: () => undefined },
+    allRows: {
+      queryKey: ["item-view", "all-rows"],
+      queryFn: () =>
+        Promise.resolve({ data: lateTagged, total: lateTagged.length }),
+      enabled: true,
+    },
   } as unknown as UsePaginationQueryResult<Item.Base>;
 }
 
@@ -116,5 +129,33 @@ describe("ItemView count", () => {
     const filtered = screen.getByText("2 of 60 leagues", onScreen);
     expect(filtered).toBeVisible();
     expect(screen.queryByText("60 leagues", onScreen)).toBeNull();
+  });
+});
+
+describe("ItemView tag options", () => {
+  beforeEach(() => {
+    server.use(
+      http.get("/api/system/languages/audio", () => HttpResponse.json([])),
+    );
+  });
+
+  it("offers a tag that only rows on a later page carry", async () => {
+    const user = userEvent.setup();
+    customRender(
+      <ItemView
+        query={queryFor("page")}
+        columns={columns}
+        itemNoun={{ one: "league", other: "leagues" }}
+        tagValues={[]}
+        onTagValuesChange={() => undefined}
+      />,
+    );
+    await screen.findByText("60 leagues", onScreen);
+
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+    const listbox = await openSelect(user, "Filter by tags...");
+    expect(
+      within(listbox).getByRole("option", { name: "Late Tag", hidden: true }),
+    ).toBeInTheDocument();
   });
 });

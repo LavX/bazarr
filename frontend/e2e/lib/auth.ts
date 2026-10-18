@@ -6,6 +6,7 @@
  */
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
+import { appPath } from "./base";
 
 export function credentials(): { username: string; password: string } | null {
   const username = process.env.BAZARR_E2E_USER;
@@ -23,7 +24,7 @@ export async function loginIfAsked(page: Page): Promise<void> {
   // By role: the label matches the "Toggle password visibility" button too,
   // and its required asterisk rules out an exact label match.
   const password = page.getByRole("textbox", { name: "Password" });
-  await page.goto("/");
+  await page.goto(appPath("/"));
   // The login form, or any screen the app opens on once no login is needed.
   await expect(password.or(page.getByRole("heading").first())).toBeVisible();
   if (!(await password.isVisible())) return;

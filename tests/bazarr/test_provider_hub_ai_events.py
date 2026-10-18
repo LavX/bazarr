@@ -401,7 +401,14 @@ def test_provider_updates_and_removal_clear_account_quota(tmp_path, monkeypatch)
             "active_version": "1.0.0",
             "state": "active",
             "enabled": True,
-            "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+            "manifest": {
+                "provider_id": "examplehub",
+                "version": "1.0.0",
+                "config_schema": {
+                    "type": "object",
+                    "properties": {"region": {"type": "string"}},
+                },
+            },
             "config": {},
         }
     }

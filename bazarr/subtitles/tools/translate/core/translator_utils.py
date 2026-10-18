@@ -6,13 +6,16 @@ import srt
 import datetime
 
 from typing import Union
+from types import SimpleNamespace
 
 from app.config import settings
 from subzero.language import Language
+from subliminal_patch.core import get_subtitle_path
 from subliminal_patch.score import MAX_SCORES
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.indexer.utils import get_subtitle_destination_path
 from utilities.path_mappings import path_mappings
 
 from app.database import TableShows, TableEpisodes, TableMovies, database, select
@@ -51,6 +54,58 @@ def convert_language_codes(to_lang, forced=False, hi=False):
         lang_obj = Language.rebuild(lang_obj, hi=True)
 
     return lang_obj, orig_to_lang
+
+
+def translated_destination_path(video_path, to_lang, forced, hi):
+    """The folder-resolved path a translation targeting ``to_lang`` writes to.
+
+    One resolution names the file everywhere it is named: the translate write
+    path computes its destination here, and the sports profile operation binds
+    its expected destination here too, because the sports write guard compares
+    the two and refuses a translation whose names disagree.
+
+    The name carries the regional tag when the target is a custom language
+    that has one (es-419 for Spanish Latino), never the language's internal
+    code, with the forced and HI tags in their usual place behind it.
+    """
+    lang_obj, _ = convert_language_codes(to_lang, forced, hi)
+    naming_language = lang_obj if isinstance(lang_obj, Language) else lang_obj.subzero_language()
+    custom_lang_obj = CustomLanguage.from_value(alpha3_from_alpha2(to_lang), "alpha3")
+    if custom_lang_obj is not None and custom_lang_obj.regional_tag is not None:
+        naming_language = SimpleNamespace(basename=custom_lang_obj.regional_tag)
+
+    dest_srt_file_if_alongside_video = get_subtitle_path(
+        video_path,
+        language=naming_language,
+        extension='.srt',
+        forced_tag=forced,
+        hi_tag=hi
+    )
+
+    # Resolved as a write target, not a lookup: the file does not exist yet on a
+    # first translation, and the lookup helper answered None for custom folders.
+    return get_subtitle_destination_path(
+        file=video_path,
+        subtitle=os.path.basename(dest_srt_file_if_alongside_video)
+    )
+
+
+def translation_write_kwargs(translator, job_id):
+    """The staged_subtitle_write arguments this translation's own context adds.
+
+    A sports operation supplies its publication guard, its bound destination
+    versions and its cancel signal. An auto-queued translation supplies the
+    destination versions its queueing sighting captured, so a subtitle that
+    landed while the job waited is refused rather than replaced. The two
+    never mix: an operation binds its own versions, which already carry the
+    same guarantee from the moment it bound them.
+    """
+    if getattr(translator, 'sports_operation', None) is not None:
+        from sportarr.profile_hooks import sports_write_kwargs
+
+        return dict(sports_write_kwargs(translator, job_id))
+    captured = getattr(translator, 'expected_destination_versions', ())
+    return {'expected_versions': captured} if captured else {}
 
 
 def create_process_result(message, video_path, orig_to_lang, forced, hi, dest_srt_file, media_type, sports_context=None):

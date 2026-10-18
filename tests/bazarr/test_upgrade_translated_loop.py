@@ -42,6 +42,8 @@ from app.database import (
     TableShows,
 )
 
+pytestmark = pytest.mark.usefixtures('languages_loaded')
+
 # The reported listing: 134 raw points out of the 180 a movie can score, which
 # the history API renders as 74.44%.
 LISTING_SCORE = 134

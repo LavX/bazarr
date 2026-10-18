@@ -12,7 +12,7 @@ import logging
 
 import srt
 import pysubs2
-from sportarr.profile_hooks import sports_write_kwargs, finish_translation
+from sportarr.profile_hooks import finish_translation
 from sportarr.connection import check_cancelled
 from subtitles.tools.subsync_engines import staged_subtitle_write
 from media_servers.events import publication_callback
@@ -29,7 +29,8 @@ from utilities.path_mappings import path_mappings  # noqa: F401
 from subtitles.processing import ProcessSubtitlesResult  # noqa: F401
 from app.jobs_queue import JobCancelled, jobs_queue
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
-from ..core.translator_utils import add_translator_info, get_description, create_process_result
+from ..core.translator_utils import (add_translator_info, get_description, create_process_result,
+                                     translation_write_kwargs)
 
 logger = logging.getLogger(__name__)
 DEFAULT_GEMINI_BATCH_SIZE = 300
@@ -54,7 +55,8 @@ class GeminiTranslatorService:
 
     def __init__(self, source_srt_file, dest_srt_file, to_lang, media_type, sonarr_series_id, sonarr_episode_id,
                  radarr_id, forced, hi, video_path, from_lang, orig_to_lang,
-                 arr_instance_id=None, sports_operation=None, cancel=None, **kwargs):
+                 arr_instance_id=None, sports_operation=None, cancel=None,
+                 expected_destination_versions=(), **kwargs):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.to_lang = to_lang
@@ -74,6 +76,10 @@ class GeminiTranslatorService:
         self.sonarr_episode_id = sonarr_episode_id
         self.radarr_id = radarr_id
         self.orig_to_lang = orig_to_lang
+        # The destination's versions as the queueing sighting found them; an
+        # empty tuple means this translation was not queued by an auto path and
+        # may replace whatever sits at the destination.
+        self.expected_destination_versions = tuple(expected_destination_versions or ())
 
         self.gemini_api_key = None
         self.api_keys = []
@@ -94,6 +100,10 @@ class GeminiTranslatorService:
         self.progress_file = None
         self.current_progress = 0
         self.job_id = None
+        # Set when a batch came back short: the cues it did return are kept and
+        # the rest stay in the source language, which the job reports as a
+        # partial translation instead of failing the item.
+        self.partial_error = None
 
     def translate(self, job_id):
         self.job_id = job_id
@@ -125,7 +135,7 @@ class GeminiTranslatorService:
                                                                            'translate', self.arr_instance_id),
                                        source_paths=(self.source_srt_file,),
                                            before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
-                                           **sports_write_kwargs(self, job_id)) as temporary:
+                                           **translation_write_kwargs(self, job_id)) as temporary:
                     self.output_file = temporary
                     if self.sports_operation:
                         self.progress_file = temporary + '.progress'
@@ -134,7 +144,13 @@ class GeminiTranslatorService:
                     self._translate_with_gemini()
                     if self.sports_operation and (not os.path.isfile(temporary) or not os.path.getsize(temporary)):
                         raise RuntimeError("Gemini returned no translated text")
-                    add_translator_info(temporary, f"# Subtitles translated with {settings.translator.gemini_model} # ")
+                    # A partial file says so: the footer is the file's own claim
+                    # about itself, and it must not read as a full translation
+                    # while source-language cues remain.
+                    translated = 'partially translated' if self.partial_error else 'translated'
+                    add_translator_info(
+                        temporary,
+                        f"# Subtitles {translated} with {settings.translator.gemini_model} # ")
             except JobCancelled:
                 raise
             except Exception as e:
@@ -151,6 +167,8 @@ class GeminiTranslatorService:
         else:
             message = (f"{language_from_alpha2(self.from_lang)} subtitles translated to "
                        f"{language_from_alpha3(self.to_lang)}.")
+            if self.partial_error:
+                message += f' Some lines may remain in the source language. {self.partial_error}'
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi,
                                            self.dest_srt_file, self.media_type,
                                            **({"sports_context": self.sports_operation.context}
@@ -420,34 +438,55 @@ class GeminiTranslatorService:
             result = clean_json_string(''.join(part['text'] for part in parts))
 
             translated_lines = json_tricks.loads(result)
+            if not isinstance(translated_lines, list):
+                # Nothing to realign by index: the reply is not the shape the
+                # batch asks for, so the retry below re-asks for it.
+                raise ValueError('Gemini did not return a list of translated cues')
+
+            # Keep the cues this batch actually asked for. A reply can come
+            # back short when the model stops at its output limit, and an entry
+            # whose index this batch did not send would write into another
+            # batch's cue. The first is a partial answer, the second is dropped
+            # the same way a missing cue is: the rest of the batch is still
+            # usable, and the cues without a usable translation keep the source
+            # text.
+            batch_indices = {item['index'] for item in batch}
+            usable = []
+            for item in translated_lines:
+                if (not isinstance(item, dict)
+                        or not isinstance(item.get('index'), str)
+                        or item['index'] not in batch_indices):
+                    continue
+                if not isinstance(item.get('content'), str) or not item['content'].strip():
+                    continue
+                usable.append(item)
+
             if self.sports_operation:
                 expected = {item['index'] for item in batch}
-                if (not isinstance(translated_lines, list)
-                        or any(not isinstance(item, dict)
-                               or not isinstance(item.get('index'), str)
-                               or not isinstance(item.get('content'), str)
-                               or not item['content'].strip() for item in translated_lines)
-                        or len(translated_lines) != len(expected)
-                        or {item['index'] for item in translated_lines} != expected):
+                if len(usable) != len(expected) or {item['index'] for item in usable} != expected:
                     raise ValueError('Gemini did not return one usable translation per requested cue')
-            chunk_size = len(translated_lines)
 
-            # Process translated lines
-            self._process_translated_lines(
-                translated_lines=translated_lines,
+            written = self._process_translated_lines(
+                translated_lines=usable,
                 translated_subtitle=translated_subtitle,
-                batch=batch,
             )
+            if written < len(batch):
+                # A short answer has two causes: the model stopped at its output
+                # limit, or it left some cues without text. Neither is a
+                # transport failure, and retrying the same batch tends to
+                # reproduce it and burns the quota. The cues it did return are
+                # valid by index, so they are kept and the rest stay in the
+                # source language, the same partial contract Lingarr and
+                # OpenRouter follow.
+                self._mark_partial(
+                    f'Gemini returned {written} of {len(batch)} cues for one batch; '
+                    'the rest keep the source text.')
+            chunk_size = written
 
             # Accurately calculate and display progress
             self.current_progress = self.current_progress + chunk_size
 
             jobs_queue.update_job_progress(job_id=self.job_id, progress_value=self.current_progress)
-
-            # Validate translated lines
-            if len(translated_lines) != len(batch):
-                raise ValueError(
-                    f"Gemini returned {len(translated_lines)} lines instead of expected {len(batch)} lines")
 
             # Clear the batch after successful processing
             batch.clear()
@@ -473,15 +512,20 @@ class GeminiTranslatorService:
     def _process_translated_lines(
             translated_lines: List[SubtitleObject],  # Changed from list[SubtitleObject]
             translated_subtitle: List[Subtitle],  # Changed from list[Subtitle]
-            batch: List[SubtitleObject],  # Changed from list[SubtitleObject]
     ):
         """
-        Process the translated lines and update the subtitle list.
+        Write the returned cues into the translated subtitle and report how many
+        of the batch's cues they covered.
+
+        The caller has already checked that every index belongs to the batch and
+        that every content is a usable string, so this only writes and counts.
 
         Args:
             translated_lines (List[SubtitleObject]): List of translated lines
             translated_subtitle (List[Subtitle]): List to store translated subtitles
-            batch (List[SubtitleObject]): Batch of subtitles to translate
+
+        Returns:
+            int: how many distinct cues of the batch were written
         """
 
         def _dominant_strong_direction(s: str) -> str:
@@ -499,15 +543,20 @@ class GeminiTranslatorService:
             ltr_count = count["L"] + count["LRE"] + count["LRI"]
             return "rtl" if rtl_count > ltr_count else "ltr"
 
+        written = set()
         for line in translated_lines:
-            if "content" not in line or "index" not in line:
-                break
-            if line["index"] not in [x["index"] for x in batch]:
-                raise Exception("Gemini has returned different indices.")
             if _dominant_strong_direction(line["content"]) == "rtl":
                 translated_subtitle[int(line["index"])].content = f"\u202b{line['content']}\u202c"
             else:
                 translated_subtitle[int(line["index"])].content = line["content"]
+            written.add(line["index"])
+        return len(written)
+
+    def _mark_partial(self, detail):
+        """Remember why a translation is partial, once, for the job's report."""
+        if not self.partial_error:
+            self.partial_error = ' '.join(str(detail).split())[:500]
+            logger.warning('Translation partially completed: %s', self.partial_error)
 
     def _translate_with_gemini(self):
         if not self.api_keys:

@@ -17,7 +17,11 @@ export default function SportsJobFeedback({
   const client = useQueryClient();
   const status = job.data;
   useEffect(() => {
-    if (status?.status === "completed" || status?.status === "failed") {
+    if (
+      status?.status === "completed" ||
+      status?.status === "failed" ||
+      status?.status === "cancelled"
+    ) {
       void client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
       void client.invalidateQueries({ queryKey: [QueryKeys.Badges] });
     }

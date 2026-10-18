@@ -30,13 +30,17 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
-import { useMovieModification, useMoviesPagination } from "@/apis/hooks";
+import {
+  useMovieModification,
+  useMoviesPagination,
+  useSystemSettings,
+} from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useAppTitle } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
-import { AudioList, InstanceBadge } from "@/components/bazarr";
+import { AudioList, InstanceBadge, ScorePill } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
@@ -50,7 +54,11 @@ import {
 } from "@/components/forms/MassTranslateForm";
 import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
-import ItemView from "@/pages/views/ItemView";
+import ItemView, {
+  ScoreFilter,
+  SubtitlesFilter,
+  SubtitlesStatus,
+} from "@/pages/views/ItemView";
 import { BuildKey, GetItemId } from "@/utilities";
 
 function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
@@ -64,7 +72,11 @@ const MovieView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [subtitlesFilter, setSubtitlesFilter] =
+    useState<SubtitlesFilter>("any");
+  const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("any");
   const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
   const {
     multiInstance,
     nameById: instanceNameById,
@@ -72,7 +84,27 @@ const MovieView: FunctionComponent = () => {
     options: instanceOptions,
   } = useArrInstanceLabels("radarr");
 
-  const query = useMoviesPagination(true);
+  // The acceptance threshold that labels the "below threshold" score group and
+  // drives it; undefined until settings load. Movies use the movie minimum.
+  const { data: settings } = useSystemSettings();
+  const scoreThreshold = settings?.general.minimum_score_movie;
+
+  const scoreValue = useCallback(
+    (movie: Item.Movie) => movie.lowest_subtitle_score ?? null,
+    [],
+  );
+
+  // A movie with no language profile has nothing to complete, so it is
+  // untracked and belongs to neither group. Otherwise it is complete when
+  // nothing is missing.
+  const subtitlesStatus = useCallback((movie: Item.Movie): SubtitlesStatus => {
+    if (movie.profileId == null) return "untracked";
+    return movie.missing_subtitles.length === 0 ? "complete" : "missing";
+  }, []);
+
+  // Ask the backend for the lowest-score aggregate only while the score filter
+  // is active, mirroring how the list already fetches all rows for filtering.
+  const query = useMoviesPagination(true, scoreFilter !== "any");
   const { data: upgradableData } = useUpgradableItems();
   const upgradableMovieKeys = useMemo(
     () =>
@@ -292,6 +324,21 @@ const MovieView: FunctionComponent = () => {
           );
         },
       },
+      // Lowest current-subtitle score, shown only while the score filter is
+      // narrowing the list. A dim dash marks a movie with no known score.
+      ...(scoreFilter !== "any"
+        ? [
+            {
+              id: "lowestScore",
+              header: "Lowest score",
+              cell: ({
+                row: {
+                  original: { lowest_subtitle_score: lowestScore },
+                },
+              }) => <ScorePill score={lowestScore} />,
+            } as ColumnDef<Item.Movie>,
+          ]
+        : []),
       {
         id: "actions",
         cell: ({ row }) => {
@@ -426,6 +473,7 @@ const MovieView: FunctionComponent = () => {
       multiInstance,
       instanceNameById,
       instanceDefaultId,
+      scoreFilter,
     ],
   );
 
@@ -564,9 +612,18 @@ const MovieView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        subtitlesFilter={subtitlesFilter}
+        onSubtitlesFilterChange={setSubtitlesFilter}
+        subtitlesStatus={subtitlesStatus}
+        scoreFilter={scoreFilter}
+        onScoreFilterChange={setScoreFilter}
+        scoreValue={scoreValue}
+        scoreThreshold={scoreThreshold}
         instanceOptions={multiInstance ? instanceOptions : undefined}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}
+        tagValues={tagFilter}
+        onTagValuesChange={setTagFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}

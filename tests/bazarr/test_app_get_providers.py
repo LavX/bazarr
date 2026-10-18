@@ -1,8 +1,18 @@
+import datetime
 import inspect
 import logging
+import socket
+from types import SimpleNamespace
 
 import pytest
+import requests
+from provider_hub.worker import WorkerError
+from subliminal.exceptions import (AuthenticationError, ConfigurationError, DownloadLimitExceeded,
+                                  ServiceUnavailable)
+from subliminal_patch import core as patch_core
 from subliminal_patch.core import Language
+from subliminal_patch.exceptions import (APIThrottled, ForbiddenError, IPAddressBlocked, SearchLimitReached,
+                                         TooManyRequests)
 
 from app import get_providers
 
@@ -307,7 +317,7 @@ class TestProviderHubSettingsOverlay:
 
         monkeypatch.setattr(
             hub_state,
-            "active_installations",
+            "running_installations",
             lambda: [self._installation(provider_id)],
         )
         monkeypatch.setattr(
@@ -354,6 +364,21 @@ class TestProviderHubSettingsOverlay:
             config.set("overlayhub", {})
 
         assert auth["overlayhub"]["apikey"] == "typed-into-the-settings-card"
+
+    def test_an_empty_section_collection_is_not_laid_into_the_worker_config(self, monkeypatch):
+        # An empty list or dict at a declared field is an absent value, not
+        # a supplied one: laying it over the stored config would hand the
+        # plugin the empty collection in place of its configured value.
+        config = get_providers.settings
+        for empty in ([], {}):
+            config.set("overlayhub", {"apikey": empty})
+            self._patch_hub(monkeypatch, "overlayhub", {"apikey": "stale-stored-key"})
+            try:
+                auth = get_providers.get_providers_auth()
+            finally:
+                config.set("overlayhub", {})
+
+            assert auth["overlayhub"]["apikey"] == "stale-stored-key"
 
 
 def test_concurrent_recorders_do_not_race_on_the_staging_file(monkeypatch, tmp_path):
@@ -545,3 +570,417 @@ def test_the_later_of_two_concurrent_deadlines_is_the_one_kept(monkeypatch, tmp_
     remaining = (until - datetime.datetime.now()).total_seconds()
     assert 3400 < remaining < 3700, "a shorter concurrent record replaced the longer one"
     assert description == "60 minutes"
+
+
+# A provider failure that takes the provider out of rotation is one WARNING
+# line, written where the backoff is decided: the provider, the operation,
+# the reason in words, and when the provider is used again. The backoff
+# itself does not move.
+
+
+def _throttle_test_state(monkeypatch, tmp_path, name="fixture_provider"):
+    """Isolated throttle state: the dat file lands in tmp_path, and no badge
+    event or hub registration escapes the test."""
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [name])
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: [name])
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+    return name
+
+
+# One row per expected condition, built-in form and plugin form, with the
+# backoff it earns today: the reason class the table stores, the words the
+# one line says, and the duration. The count gate holds only TooManyRequests,
+# ServiceUnavailable and APIThrottled: VALID_COUNT_EXCEPTIONS also lists the
+# requests timeout classes and socket.timeout, but as class objects, and the
+# gate compares a class-name string against that tuple, so a timeout never
+# matches and always records its backoff at once.
+_COUNT_GATED_REASONS = {"TooManyRequests", "ServiceUnavailable", "APIThrottled"}
+
+
+@pytest.mark.parametrize("error,words,description,seconds,reason", [
+    (DownloadLimitExceeded("fixture quota"), "download quota reached", "3 hours", 3 * 3600,
+     "DownloadLimitExceeded"),
+    (TooManyRequests("fixture rate"), "rate limited", "1 hour", 3600, "TooManyRequests"),
+    (APIThrottled("fixture throttle"), "rate limited", "10 minutes", 600, "APIThrottled"),
+    (ServiceUnavailable("fixture outage"), "service unavailable", "20 minutes", 1200, "ServiceUnavailable"),
+    (AuthenticationError("fixture auth"), "authentication failed", "12 hours", 12 * 3600, "AuthenticationError"),
+    (ConfigurationError("fixture config"), "configuration invalid", "12 hours", 12 * 3600, "ConfigurationError"),
+    (requests.exceptions.Timeout("fixture timeout"), "timed out", "1 hour", 3600, "Timeout"),
+    (socket.timeout("fixture socket timeout"), "timed out", "1 hour", 3600, "TimeoutError"),
+    (requests.exceptions.ConnectionError("fixture connection"), "connection failure", "10 minutes", 600,
+     "ConnectionError"),
+    (ForbiddenError("fixture refused"), "request refused by the provider", "10 minutes", 600, "ForbiddenError"),
+    (IPAddressBlocked("fixture blocked address"), "address blocked by the provider", "10 minutes", 600,
+     "IPAddressBlocked"),
+    (SearchLimitReached("fixture search limit"), "search limit reached", "10 minutes", 600, "SearchLimitReached"),
+    (WorkerError("fixture plugin quota", remote_class_name="DownloadLimitExceeded", code="provider"),
+     "download quota reached", "10 minutes", 600, "WorkerError"),
+    (WorkerError("fixture refused login", remote_class_name="PermissionError", code="provider"),
+     "access refused by the provider", "10 minutes", 600, "WorkerError"),
+    (WorkerError("fixture blocked", remote_class_name="IPAddressBlocked", code="provider"),
+     "address blocked by the provider", "10 minutes", 600, "WorkerError"),
+    (WorkerError("fixture search limit", remote_class_name="SearchLimitReached", code="provider"),
+     "search limit reached", "10 minutes", 600, "WorkerError"),
+    (WorkerError("fixture blocked by cloudflare", remote_class_name="CloudflareBlockedError", code="provider"),
+     "automated access blocked", "10 minutes", 600, "WorkerError"),
+    (WorkerError("fixture plugin timeout", remote_class_name="TimeoutError", code="provider"),
+     "timed out", "10 minutes", 600, "WorkerError"),
+    (WorkerError("fixture unreachable", remote_class_name="URLError", code="provider"),
+     "connection failure", "10 minutes", 600, "WorkerError"),
+    (WorkerError("fixture deadline", code="timeout"), "timed out", "1 hour", 3600, "Timeout"),
+])
+def test_an_expected_failure_writes_one_line_and_the_unchanged_backoff(
+        monkeypatch, tmp_path, caplog, error, words, description, seconds, reason):
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    if reason in _COUNT_GATED_REASONS:
+        # Counted classes record only on their fifth failure in two minutes;
+        # stand on the fourth so the row exercises the recording path.
+        get_providers.throttle_count[name] = {
+            "count": 4, "time": datetime.datetime.now() + datetime.timedelta(seconds=120)}
+
+    before = datetime.datetime.now()
+    with caplog.at_level(logging.WARNING):
+        assert get_providers.provider_throttle(name, error, operation="search") is True
+    after = datetime.datetime.now()
+
+    stored_reason, until, stored_description = get_providers.tp[name]
+    assert stored_reason == reason
+    assert stored_description == description
+    expected_delay = datetime.timedelta(seconds=seconds)
+    assert before + expected_delay <= until <= after + expected_delay, "the backoff moved"
+
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1, "an expected failure wrote more than its one line"
+    record = warnings[0]
+    assert record.exc_info is None
+    message = record.getMessage()
+    assert f"Provider {name} search failed: {words}" in message
+    assert "Not using it" in message
+    assert description in message
+    assert until.strftime("%y/%m/%d %H:%M") in message
+
+
+@pytest.mark.parametrize("error,words,class_name", [
+    (TooManyRequests("fixture rate"), "rate limited", "TooManyRequests"),
+    (ServiceUnavailable("fixture outage"), "service unavailable", "ServiceUnavailable"),
+    (APIThrottled("fixture throttle"), "rate limited", "APIThrottled"),
+], ids=["rate_limit", "service_unavailable", "api_throttle"])
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_a_count_gated_failure_writes_one_line_and_no_backoff(monkeypatch, tmp_path, caplog, operation, error,
+                                                               words, class_name):
+    """While the gate has not tripped, the one line says the reason in words
+    with its class, the attempt count and that the pool leaves the provider
+    out until its next refresh; the wait itself is the gate's timing and does
+    not change."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(get_providers.time, "sleep", lambda seconds: None)
+
+    with caplog.at_level(logging.WARNING):
+        assert get_providers.provider_throttle(name, error, operation=operation) is False
+
+    assert name not in get_providers.tp
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert f"Provider {name} {operation} failed: {words} ({class_name})" in message
+    assert "count 1 of 5" in message
+    assert "no backoff" in message
+    assert "next refresh" in message
+
+
+def test_a_no_wait_rate_limit_writes_the_throttling_line_only(monkeypatch, tmp_path, caplog):
+    """The compat pool never retries, so it records at once. The count line
+    drops below the default filter: the recorded-backoff line follows it."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.DEBUG):
+        assert get_providers.provider_throttle(name, TooManyRequests("fixture rate"), wait=False) is True
+
+    counted = [record for record in caplog.records if "recorded without waiting" in record.getMessage()]
+    assert len(counted) == 1
+    assert counted[0].levelno == logging.DEBUG
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "Not using it for 1 hour" in warnings[0].getMessage()
+
+
+def test_an_unannounced_backoff_waits_for_the_download_to_say_it(monkeypatch, tmp_path, caplog):
+    """A download's attempts all pass announce=False, so their recording stays
+    below the default filter; the one line comes once the download stops."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.DEBUG):
+        assert get_providers.provider_throttle(name, DownloadLimitExceeded("fixture quota"),
+                                               operation="download", announce=False) is True
+
+    assert name in get_providers.tp
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+    throttling = [record for record in caplog.records if "Throttling" in record.getMessage()]
+    assert len(throttling) == 1
+    assert throttling[0].levelno == logging.DEBUG
+
+
+def test_nothing_recorded_returns_false(monkeypatch, tmp_path):
+    """False is the caller's signal that there is nothing to announce: a
+    count-gate wait, a blacklist demand and a pickle cache reset record no
+    backoff."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(get_providers.time, "sleep", lambda seconds: None)
+    # The count gate.
+    assert get_providers.provider_throttle(name, TooManyRequests("fixture rate")) is False
+    # A blacklist demand.
+    blacklisted = []
+    monkeypatch.setattr(get_providers, "blacklist_log_movie",
+                        lambda *args, **kwargs: blacklisted.append(args))
+    error = get_providers.MustGetBlacklisted("fixture-id", "movie")
+    ids = {"radarrId": 7, "sonarrSeriesId": None, "sonarrEpisodeId": None, "arr_instance_id": None}
+    assert get_providers.provider_throttle(name, error, ids=ids, language=Language("eng")) is False
+    assert blacklisted == [(7, name, "fixture-id", "en")]
+    # A pickle cache reset. The region's backend is a memoized property that
+    # raises while unconfigured, so stand the whole backend in; an instance
+    # __dict__ entry shadows it and reading the property is what raises.
+    monkeypatch.setitem(get_providers.subliminal_cache_region.__dict__, "backend",
+                         SimpleNamespace(all_filenames=[]))
+    assert get_providers.provider_throttle(name, ValueError("unsupported pickle protocol 5")) is False
+    assert get_providers.tp == {}
+
+
+def test_the_announce_names_the_deadline_actually_in_force(monkeypatch, tmp_path, caplog):
+    """A download announces once, after its retries, reading the entry the
+    last attempt left: the deadline the pool will actually enforce."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    error = DownloadLimitExceeded("fixture quota")
+    assert get_providers.provider_throttle(name, error, operation="download", announce=False) is True
+    _reason, until, description = get_providers.tp[name]
+
+    with caplog.at_level(logging.WARNING):
+        get_providers.announce_provider_throttle(name, error, operation="download")
+
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    record = warnings[0]
+    assert record.exc_info is None
+    message = record.getMessage()
+    assert f"Provider {name} download failed: download quota reached" in message
+    assert "Not using it" in message
+    assert description in message
+    assert until.strftime("%y/%m/%d %H:%M") in message
+
+
+@pytest.mark.parametrize("entry", [
+    None,
+    ("DownloadLimitExceeded", datetime.datetime.now() - datetime.timedelta(minutes=1), "3 hours"),
+], ids=["no_entry", "expired_entry"])
+def test_the_announce_writes_nothing_without_a_live_entry(monkeypatch, tmp_path, caplog, entry):
+    """A download that recorded nothing announces nothing, and an expired
+    entry names no deadline in force."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    if entry is not None:
+        get_providers.tp[name] = entry
+
+    with caplog.at_level(logging.WARNING):
+        get_providers.announce_provider_throttle(name, DownloadLimitExceeded("fixture quota"),
+                                                 operation="download")
+
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+
+
+_CONNECTION_ERROR = requests.exceptions.ConnectionError("fixture connection")
+
+
+def _download_pool(monkeypatch, throttle_callback, throttle_announce, failures=patch_core.DOWNLOAD_TRIES,
+                   error=_CONNECTION_ERROR):
+    """A real pool over a fake registry, downloading from a provider that
+    fails with `error` on its first `failures` attempts and succeeds after
+    them."""
+    monkeypatch.setattr(patch_core, "DOWNLOAD_RETRY_SLEEP", 0.05)
+    attempts = []
+
+    class Provider:
+        languages = set()
+
+        def __init__(self, **kwargs):
+            pass
+
+        @classmethod
+        def check(cls, video):
+            return True
+
+        def initialize(self):
+            pass
+
+        def terminate(self):
+            pass
+
+        def download_subtitle(self, subtitle):
+            attempts.append(subtitle)
+            if len(attempts) <= failures:
+                raise error
+
+    monkeypatch.setattr(patch_core, "provider_registry", {"fixture_provider": Provider})
+    pool = patch_core.SZProviderPool(["fixture_provider"], {},
+                                     throttle_callback=throttle_callback,
+                                     throttle_announce=throttle_announce)
+    return pool, attempts
+
+
+class _MinutesPassWhileRetrying:
+    """Stand-in for the datetime module: every now() call moves the clock a
+    few minutes on, so each attempt's backoff lands in a different minute and
+    the deadline the last attempt recorded formats apart from the first's.
+    The tz argument the throttle map's midnight resets pass is accepted and
+    ignored: only the minutes between attempts matter here."""
+
+    step = datetime.timedelta(minutes=2)
+
+    def __init__(self):
+        self._now = datetime.datetime.now()
+        outer = self
+
+        class _DateTime:
+            @staticmethod
+            def now(tz=None):
+                outer._now += outer.step
+                return outer._now
+
+        self.datetime = _DateTime
+        self.timedelta = datetime.timedelta
+
+
+class _DownloadedSubtitle:
+    def __init__(self):
+        self.provider_name = "fixture_provider"
+        self.language = Language("eng")
+        self.sports_context = None
+
+    def is_valid(self):
+        return True
+
+    def normalize(self):
+        pass
+
+
+@pytest.mark.parametrize("error,words,description", [
+    (_CONNECTION_ERROR, "connection failure", "10 minutes"),
+    (requests.exceptions.Timeout("fixture timeout"), "timed out", "1 hour"),
+], ids=["connection_error", "requests_timeout"])
+def test_a_retried_download_writes_one_line_after_the_last_attempt(monkeypatch, tmp_path, caplog, error, words,
+                                                                   description):
+    """Every attempt still records its backoff, so the entry after the last
+    one is the deadline in force; the one line comes after the retries and
+    names it, not the first attempt's. The clock moves several minutes per
+    attempt so the two deadlines cannot format alike, and the retry class
+    here is the one the handler retries: requests' Timeout, a built-in
+    provider's own failure, with the real recording callback."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(get_providers, "datetime", _MinutesPassWhileRetrying())
+    deadlines = []
+    real_throttle = get_providers.provider_throttle
+
+    def recording_throttle(provider, throttle_error, **context):
+        recorded = real_throttle(provider, throttle_error, **context)
+        deadlines.append(get_providers.tp[provider][1])
+        return recorded
+
+    pool, attempts = _download_pool(monkeypatch, recording_throttle, get_providers.announce_provider_throttle,
+                                    error=error)
+
+    with caplog.at_level(logging.INFO):
+        assert pool.download_subtitle(_DownloadedSubtitle()) is False
+
+    assert len(attempts) == patch_core.DOWNLOAD_TRIES, "the retryable error did not keep its retries"
+    assert len(deadlines) == patch_core.DOWNLOAD_TRIES
+    first, last = deadlines[0], deadlines[-1]
+    assert last > first, "the retries left no time between attempts"
+    assert last.strftime("%y/%m/%d %H:%M") != first.strftime("%y/%m/%d %H:%M"), \
+        "the stubbed clock did not move the retries across a minute boundary"
+    stored_until = get_providers.tp[name][1]
+    assert stored_until == last
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1, "a retried download wrote more than its one line"
+    record = warnings[0]
+    assert record.exc_info is None
+    message = record.getMessage()
+    assert f"Provider {name} download failed: {words}" in message
+    assert f"Not using it for {description}" in message
+    assert last.strftime("%y/%m/%d %H:%M") in message
+    assert first.strftime("%y/%m/%d %H:%M") not in message, "the line named a deadline no longer in force"
+    # The one line already says the provider is out; the discard line stays
+    # below the default filter.
+    assert "Maximum retries" not in caplog.text
+
+
+def test_a_connection_failure_then_a_count_gated_rate_limit_writes_each_failure_its_own_line(
+        monkeypatch, tmp_path, caplog):
+    """The mixed sequence writes two WARNING lines, and both belong there:
+    the count gate's, for the rate limit it declined to record a backoff for,
+    and the download's one announce, for the backoff the connection failure
+    did record, naming that failure's exception and the deadline in force.
+    Pinned with the real recording callback and the real announce, so the two
+    lines are deliberate output rather than an accident of a stand-in."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(get_providers.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(patch_core, "DOWNLOAD_RETRY_SLEEP", 0)
+    attempts = []
+
+    class Provider:
+        languages = set()
+
+        def __init__(self, **kwargs):
+            pass
+
+        @classmethod
+        def check(cls, video):
+            return True
+
+        def initialize(self):
+            pass
+
+        def terminate(self):
+            pass
+
+        def download_subtitle(self, subtitle):
+            attempts.append(subtitle)
+            raise _CONNECTION_ERROR if len(attempts) == 1 else TooManyRequests("fixture rate")
+
+    monkeypatch.setattr(patch_core, "provider_registry", {"fixture_provider": Provider})
+    pool = patch_core.SZProviderPool(["fixture_provider"], {},
+                                     throttle_callback=get_providers.provider_throttle,
+                                     throttle_announce=get_providers.announce_provider_throttle)
+
+    with caplog.at_level(logging.WARNING):
+        assert pool.download_subtitle(_DownloadedSubtitle()) is False
+
+    assert len(attempts) == 2, "the second failure should have ended the retries"
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    gate_line, announce_line = warnings
+    assert "rate limited (TooManyRequests)" in gate_line
+    assert "count 1 of 5" in gate_line and "no backoff" in gate_line
+    assert "connection failure (ConnectionError)" in announce_line
+    assert "Not using it for 10 minutes" in announce_line
+    # The announce names the deadline the connection failure's record left.
+    _reason, until, _description = get_providers.tp[name]
+    assert until.strftime("%y/%m/%d %H:%M") in announce_line
+
+
+def test_a_download_that_recovers_still_writes_the_line_once(monkeypatch, tmp_path, caplog):
+    """A retry that succeeds leaves the failed attempt's backoff standing, so
+    the line is written with that deadline, once."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    pool, attempts = _download_pool(monkeypatch, get_providers.provider_throttle,
+                                    get_providers.announce_provider_throttle, failures=1)
+
+    with caplog.at_level(logging.INFO):
+        assert pool.download_subtitle(_DownloadedSubtitle()) is True
+
+    assert len(attempts) == 2
+    stored_until = get_providers.tp[name][1]
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert stored_until.strftime("%y/%m/%d %H:%M") in warnings[0].getMessage()

@@ -18,11 +18,8 @@ const KEY_IN_URL = [
 ];
 
 // Native HLS on Safari and iOS cannot add a header to the playlist and
-// segment requests the browser makes itself, so that one source still carries
-// the key until it gets a stream token of its own.
-const NATIVE_HLS_SOURCE =
-  "../VideoPreview.tsx: video.src = `${hlsUrl}${separator}apikey=${encodeURIComponent(apiKey)}`;";
-
+// segment requests the browser makes itself, so that source plays from a
+// media-scoped stream token. No editor URL carries the API key.
 describe("API key in editor URLs", () => {
   it("reads the editor sources", () => {
     expect(Object.keys(sources)).toEqual(
@@ -39,13 +36,13 @@ describe("API key in editor URLs", () => {
     ).toEqual([]);
   });
 
-  it("never builds the API key into a URL outside native HLS", () => {
+  it("never builds the API key into a URL", () => {
     const found = Object.entries(sources).flatMap(([file, text]) =>
       text
         .split("\n")
         .filter((line) => KEY_IN_URL.some((pattern) => pattern.test(line)))
         .map((line) => `${file}: ${line.trim()}`),
     );
-    expect(found).toEqual([NATIVE_HLS_SOURCE]);
+    expect(found).toEqual([]);
   });
 });

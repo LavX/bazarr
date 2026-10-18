@@ -8,6 +8,10 @@ import {
 import { faSpinner, faTimes } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { isAxiosError } from "axios";
+import {
+  useEditorTranslationAvailability,
+  useTranslationStatusRefetch,
+} from "@/apis/hooks";
 import { useLanguages } from "@/apis/hooks/languages";
 import { useTranslatorModels } from "@/apis/hooks/translator";
 import {
@@ -206,6 +210,12 @@ export default function TranslatePanel({
 
   const { data: modelsData } = useTranslatorModels(open);
   const { data: serverLanguages } = useLanguages();
+  // The panel's own gate answer, not the configured engine's: it posts to the
+  // editor endpoint, which asks about the AI Subtitle Translator service.
+  const translation = useEditorTranslationAvailability();
+  // The status re-read a 409 owes that answer: the Translate button reads it,
+  // and the endpoint's refusal means it can be stale.
+  const refetchTranslationStatus = useTranslationStatusRefetch();
 
   const languageOptions = useMemo(() => {
     if (!serverLanguages) return [];
@@ -345,6 +355,12 @@ export default function TranslatePanel({
     } catch (err) {
       setPhase("failed");
       onTranslatingChange?.(false);
+      // A 409 means the answer the Translate button read is stale: read the
+      // status again so the button Try Again returns is disabled. The reason
+      // stays inline, with no toast of its own.
+      if (isAxiosError(err) && err.response?.status === 409) {
+        refetchTranslationStatus();
+      }
       setErrorMsg(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (err as any)?.response?.data?.error ||
@@ -361,6 +377,7 @@ export default function TranslatePanel({
     mediaTitle,
     languageOptions,
     onTranslatingChange,
+    refetchTranslationStatus,
   ]);
 
   const handleCancel = useCallback(() => {
@@ -571,6 +588,11 @@ export default function TranslatePanel({
         {useRefCues ? " (from reference)" : " (editor cues)"}
       </div>
 
+      {/* The gate's reason while no translator can run */}
+      {!translation.available && (
+        <div style={styles.errorText}>{translation.reason}</div>
+      )}
+
       {/* Progress section */}
       {phase === "translating" && (
         <>
@@ -601,13 +623,14 @@ export default function TranslatePanel({
             type="button"
             style={{
               ...styles.btnPrimary,
-              ...((useRefCues
-                ? referenceCues!.length === 0
-                : cues.length === 0) || !targetLanguage
+              ...(!translation.available ||
+              (useRefCues ? referenceCues!.length === 0 : cues.length === 0) ||
+              !targetLanguage
                 ? { opacity: 0.5, cursor: "not-allowed" }
                 : {}),
             }}
             disabled={
+              !translation.available ||
               (useRefCues ? referenceCues!.length === 0 : cues.length === 0) ||
               !targetLanguage
             }

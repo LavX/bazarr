@@ -368,6 +368,7 @@ jobs:
             tests/bazarr/test_dependency_loading.py \
             tests/bazarr/test_signalrcore_compat.py \
             tests/bazarr/test_app_cors.py \
+            tests/bazarr/test_host_allowlist.py \
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_retired_provider_config_compat.py \
             tests/bazarr/test_standard_job_actions.py \
@@ -508,6 +509,7 @@ jobs:
             tests/bazarr/test_config.py \
             tests/bazarr/test_config_save.py \
             tests/bazarr/test_container_hardening.py \
+            tests/bazarr/test_custom_language_matches.py \
             tests/bazarr/test_installer_backup.py \
             tests/bazarr/test_embedded_history_indexer.py \
             tests/bazarr/test_encryption.py \
@@ -547,6 +549,7 @@ jobs:
             tests/bazarr/test_secret_store_e2e.py \
             tests/bazarr/test_secret_store_migration.py \
             tests/bazarr/test_secret_store_registry.py \
+            tests/bazarr/test_secret_store_scrub.py \
             tests/bazarr/test_signalr_client.py \
             tests/bazarr/test_sonarr_sync_episodes.py \
             tests/bazarr/test_sql_profiler.py \
@@ -560,8 +563,10 @@ jobs:
             tests/bazarr/test_system_logs_api.py \
             tests/bazarr/test_tracemalloc_dumper.py \
             tests/bazarr/test_translate_availability.py \
+            tests/bazarr/test_translate_destination_guard.py \
             tests/bazarr/test_translate_failure_record.py \
             tests/bazarr/test_translate_job_media_name.py \
+            tests/bazarr/test_translate_surface_refusals.py \
             tests/bazarr/test_translator_auth.py \
             tests/bazarr/test_upgrade_embedded_history.py \
             tests/bazarr/test_upgrade_subtitle_toggles.py \
@@ -845,6 +850,7 @@ jobs:
             tests/bazarr/test_history_blacklist_scope.py \
             tests/bazarr/test_history_metrics_postgres.py \
             tests/bazarr/test_movies_history_scoping.py \
+            tests/bazarr/test_list_subtitle_scores.py \
             tests/bazarr/test_threading_scope.py \
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_job_module_identity.py \

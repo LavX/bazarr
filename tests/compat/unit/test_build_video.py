@@ -305,3 +305,88 @@ def test_title_only_preserves_separate_episode_identity_in_worker_payload():
     worker = video_to_payload(video)
     assert worker["series_imdb_id"] == "tt1234567" and worker["imdb_id"] == "tt7654321"
     assert worker["tmdb_id"] == 401 and worker["title"] == "Home"
+
+
+def test_unresolved_imdb_search_warns_with_reason_codes(monkeypatch, caplog):
+    """An id nothing resolves, with no hashes and no filename title, fans
+    out to the pool with nothing to match on: one warning says which
+    source failed and how, so it's diagnosable from the log."""
+    from compat import service
+    import logging
+
+    monkeypatch.setattr(service, "_refine_from_imdb",
+                        lambda video, media_type: ["v4=no_match", "tmdb=no_match",
+                                                   "omdb=not_configured"])
+    with caplog.at_level(logging.WARNING, logger="bazarr.compat.service"):
+        video = service._build_video("tt0000000", 1, 1, "episode")
+    assert video.series in (None, "")
+    warning = [r for r in caplog.records if "compat metadata unresolved" in r.message]
+    assert len(warning) == 1
+    message = warning[0].getMessage()
+    assert "tt0000000" in message and "episode" in message
+    assert "no_series" in message and "hash_present=False" in message
+    assert "v4=no_match" in message and "tmdb=no_match" in message
+    assert "omdb=not_configured" in message
+
+
+def test_unresolved_movie_search_warns_with_reason_codes(monkeypatch, caplog):
+    from compat import service
+    import logging
+
+    monkeypatch.setattr(service, "_refine_from_imdb",
+                        lambda video, media_type: ["tmdb=no_match", "omdb=no_match"])
+    with caplog.at_level(logging.WARNING, logger="bazarr.compat.service"):
+        service._build_video("tt0000000", None, None, "movie")
+    warning = [r for r in caplog.records if "compat metadata unresolved" in r.message]
+    assert len(warning) == 1
+    message = warning[0].getMessage()
+    assert "tt0000000" in message and "movie" in message and "no_title" in message
+    assert "omdb=no_match" in message
+
+
+def test_unresolved_but_hash_present_stays_quiet(monkeypatch, caplog):
+    """A client-supplied hash keeps the exact-match path, so an unresolved
+    id with hashes never warns: the pool still has something to match on."""
+    from compat import service
+    import logging
+
+    monkeypatch.setattr(service, "_refine_from_imdb",
+                        lambda video, media_type: ["v4=no_match", "tmdb=no_match",
+                                                   "omdb=not_configured"])
+    with caplog.at_level(logging.WARNING, logger="bazarr.compat.service"):
+        video = service._build_video("tt0000000", 1, 1, "episode",
+                                     moviehash="0123456789abcdef")
+    assert video.hashes
+    assert not [r for r in caplog.records if "compat metadata unresolved" in r.message]
+
+
+def test_unresolved_but_filename_title_stays_quiet(monkeypatch, caplog):
+    """guessit salvaged a title from the query: the video is matchable, so
+    no boundary warning even though the refiner chain missed."""
+    from compat import service
+    import logging
+
+    monkeypatch.setattr(service, "_refine_from_imdb",
+                        lambda video, media_type: ["v4=no_match", "tmdb=no_match",
+                                                   "omdb=not_configured"])
+    with caplog.at_level(logging.WARNING, logger="bazarr.compat.service"):
+        video = service._build_video("tt0000000", 1, 1, "episode",
+                                     query="Example.Show.S01E01.1080p.mkv")
+    assert video.series == "Example Show"
+    assert not [r for r in caplog.records if "compat metadata unresolved" in r.message]
+
+
+def test_resolved_imdb_search_never_warns(monkeypatch, caplog):
+    """A search the refiner chain resolves stays quiet."""
+    from compat import service
+    import logging
+
+    def named(video, media_type):
+        video.series = "Chernobyl"
+        return ["v4=ok"]
+
+    monkeypatch.setattr(service, "_refine_from_imdb", named)
+    with caplog.at_level(logging.WARNING, logger="bazarr.compat.service"):
+        video = service._build_video("tt7366338", 1, 1, "episode")
+    assert video.series == "Chernobyl"
+    assert not [r for r in caplog.records if "compat metadata unresolved" in r.message]

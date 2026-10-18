@@ -59,7 +59,8 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                 path_replace_fn=path_mappings.path_replace,
             )
             if source_srt and translation_recently_failed(
-                    arr_instance_id, 'episode', episode.sonarrEpisodeId, translate_cfg['from'], lang_code):
+                    arr_instance_id, 'episode', episode.sonarrEpisodeId, translate_cfg['from'],
+                    lang_code, translate_cfg['forced'], translate_cfg['hi']):
                 # The last translation of this item died inside the job, so
                 # re-offering it would only queue another doomed job every
                 # scan; the hold expires and every settings save clears it.
@@ -164,7 +165,25 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                         )
                     ).first()
                     try:
+                        from subtitles.tools.subsync_engines import capture_subtitle_versions
+                        from subtitles.tools.translate.core.translator_utils import (
+                            translated_destination_path,
+                        )
                         from subtitles.tools.translate.main import translate_subtitles_file
+                        destination = translated_destination_path(
+                            video_path, lang_code, translate_cfg['forced'], translate_cfg['hi'])
+                        # The capture holds the media write lock, so it answers
+                        # for one instant: a subtitle already at the destination
+                        # is the provider's, landed after the last index pass,
+                        # and the better track. A translation would replace it,
+                        # so this target is served already and queues nothing.
+                        expected_versions = capture_subtitle_versions(video_path, (destination,))
+                        if expected_versions[0].version is not None:
+                            logging.info(
+                                "BAZARR auto-translate (wanted-scan) skipped: %s is already "
+                                "on disk for %s", lang_code, video_path,
+                            )
+                            continue
                         translate_kwargs = dict(
                             video_path=video_path,
                             source_srt_file=source_srt,
@@ -180,6 +199,7 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                             arr_instance_id=arr_instance_id,
                             sports_operation=None,
                             embedded_source=None,
+                            expected_destination_versions=expected_versions,
                         )
                         # Guard: skip if an identical translate job is already
                         # pending or running. Why: history guard (action=6) only

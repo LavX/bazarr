@@ -9,6 +9,7 @@ import {
   Indicator,
   MultiSelect,
   Paper,
+  Select,
   Stack,
   Text,
   TextInput,
@@ -18,20 +19,50 @@ import {
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import {
+  faClosedCaptioning,
   faEraser,
   faFilter,
+  faPercent,
   faSearch,
   faServer,
+  faTag,
   faTimes,
   faVolumeUp,
   faVolumeXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useQuery } from "@tanstack/react-query";
 import { ColumnDef, Row } from "@tanstack/react-table";
 import { useAudioLanguages } from "@/apis/hooks";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import { QueryPageTable, Toolbox } from "@/components";
 import styles from "./ItemView.module.scss";
+
+// Subtitle-completeness filter. "any" does not filter; "complete" keeps rows
+// with nothing missing; "missing" keeps rows still missing something. What
+// counts as complete differs by kind, so the page supplies `subtitlesStatus`
+// to classify a row.
+export type SubtitlesFilter = "any" | "complete" | "missing";
+
+// How a row sits against the completeness filter. "untracked" rows have no
+// subtitles to complete (no language profile, or nothing that can be missing),
+// so they belong to neither group and drop out whenever the filter narrows.
+export type SubtitlesStatus = "complete" | "missing" | "untracked";
+
+const SUBTITLES_FILTER_OPTIONS: { value: SubtitlesFilter; label: string }[] = [
+  { value: "any", label: "Any" },
+  { value: "complete", label: "Complete" },
+  { value: "missing", label: "Missing some" },
+];
+
+// Score filter. "any" does not filter; the others narrow by the item's lowest
+// current-subtitle score. "full" keeps a perfect 100 %; "notFull" keeps
+// anything short of it; "belowThreshold" keeps anything under the configured
+// acceptance threshold. A row with no known score (null) belongs to none of
+// them, so it drops out whenever the filter narrows, the way an untracked row
+// does in the subtitles filter. What the score is differs by kind, so the page
+// supplies `scoreValue` to read it and `scoreThreshold` for the threshold group.
+export type ScoreFilter = "any" | "full" | "notFull" | "belowThreshold";
 
 interface Props<T extends Item.Base = Item.Base> {
   query: UsePaginationQueryResult<T>;
@@ -42,11 +73,27 @@ interface Props<T extends Item.Base = Item.Base> {
   onAudioLanguagesChange?: (values: string[]) => void;
   excludeLanguages?: string[];
   onExcludeLanguagesChange?: (values: string[]) => void;
+  // Subtitle-completeness filter: only wired when the page supplies both the
+  // change handler and `subtitlesStatus`.
+  subtitlesFilter?: SubtitlesFilter;
+  onSubtitlesFilterChange?: (value: SubtitlesFilter) => void;
+  subtitlesStatus?: (item: T) => SubtitlesStatus;
+  // Score filter (Phase 3): only wired when the page supplies both the change
+  // handler and `scoreValue` (the item's lowest current-subtitle score, or null
+  // when none is known). `scoreThreshold` is the configured acceptance
+  // threshold; undefined until settings load, when the "below threshold" label
+  // drops its number.
+  scoreFilter?: ScoreFilter;
+  onScoreFilterChange?: (value: ScoreFilter) => void;
+  scoreValue?: (item: T) => number | null;
+  scoreThreshold?: number;
   // Instance filter (#156): options are this kind's instances; values are the
   // selected arr_instance_ids (as strings). Only wired when >1 instance exists.
   instanceOptions?: { value: string; label: string }[];
   instanceValues?: string[];
   onInstanceValuesChange?: (values: string[]) => void;
+  tagValues?: string[];
+  onTagValuesChange?: (values: string[]) => void;
   enableRowSelection?: boolean;
   onSelectionChanged?: (selections: T[]) => void;
   selectionToolbar?: ReactNode;
@@ -66,9 +113,18 @@ function ItemView<T extends Item.Base>({
   onAudioLanguagesChange,
   excludeLanguages = [],
   onExcludeLanguagesChange,
+  subtitlesFilter = "any",
+  onSubtitlesFilterChange,
+  subtitlesStatus,
+  scoreFilter = "any",
+  onScoreFilterChange,
+  scoreValue,
+  scoreThreshold,
   instanceOptions,
   instanceValues = [],
   onInstanceValuesChange,
+  tagValues = [],
+  onTagValuesChange,
   enableRowSelection,
   onSelectionChanged,
   selectionToolbar,
@@ -79,12 +135,61 @@ function ItemView<T extends Item.Base>({
     onInstanceValuesChange !== undefined &&
     instanceOptions !== undefined &&
     instanceOptions.length > 1;
+  const showSubtitlesFilter =
+    onSubtitlesFilterChange !== undefined && subtitlesStatus !== undefined;
+  const showScoreFilter =
+    onScoreFilterChange !== undefined && scoreValue !== undefined;
   const { data: audioLangs = [] } = useAudioLanguages();
   const [filtersOpen, setFiltersOpen] = useState(false);
 
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
     [audioLangs],
+  );
+  // The tag options cannot come from the page on screen: rows beyond it can
+  // carry tags the user must still be able to select, and an untagged first
+  // page is not an empty library. Read every row through the all-rows entry
+  // the query exposes, which shares the cache entry a filter activates, and
+  // fetch it only while the panel offering the choices is open.
+  const tagQuery = useQuery({
+    ...query.allRows,
+    enabled:
+      query.allRows.enabled && filtersOpen && onTagValuesChange !== undefined,
+  });
+  const tagOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (tagQuery.data?.data ?? query.data?.data ?? []).flatMap(
+            (item) => item.tags ?? [],
+          ),
+        ),
+      )
+        .sort((a, b) => a.localeCompare(b))
+        .map((tag) => ({ value: tag, label: tag })),
+    [tagQuery.data, query.data],
+  );
+
+  // The threshold label tracks the live setting. Until it is known (still
+  // loading, or the settings request failed) the option is disabled rather
+  // than silently keeping every scored row.
+  const scoreFilterOptions = useMemo<
+    { value: ScoreFilter; label: string; disabled?: boolean }[]
+  >(
+    () => [
+      { value: "any", label: "Any" },
+      { value: "full", label: "Full (100%)" },
+      { value: "notFull", label: "Not full (< 100%)" },
+      {
+        value: "belowThreshold",
+        label:
+          scoreThreshold != null
+            ? `Below threshold (< ${scoreThreshold}%)`
+            : "Below threshold",
+        disabled: scoreThreshold == null,
+      },
+    ],
+    [scoreThreshold],
   );
 
   const dataFilter = useCallback(
@@ -119,16 +224,66 @@ function ItemView<T extends Item.Base>({
           return false;
         }
       }
+      if (
+        tagValues.length > 0 &&
+        !tagValues.some((tag) => item.tags?.includes(tag))
+      ) {
+        return false;
+      }
+      if (subtitlesFilter !== "any" && subtitlesStatus) {
+        // "untracked" matches neither group, so it is dropped whenever the
+        // filter narrows to "complete" or "missing".
+        if (subtitlesStatus(item) !== subtitlesFilter) {
+          return false;
+        }
+      }
+      // The score predicate waits until the scored read answers: while the
+      // query client hands back the previous scoreless list, every row would
+      // look unknown and the table would empty for the length of the request.
+      if (scoreFilter !== "any" && scoreValue && !query.isPlaceholderData) {
+        const score = scoreValue(item);
+        // A null score (no current subtitle with a known score) belongs to no
+        // narrowing group, so it drops out whenever the filter narrows.
+        if (score == null) return false;
+        // Hash matches and other boosted matches can score above 100; they are
+        // full, not outside every group.
+        if (scoreFilter === "full" && score < 100) return false;
+        if (scoreFilter === "notFull" && score >= 100) return false;
+        // Before the threshold setting loads it is unknown, so the group keeps
+        // every scored row rather than emptying the table.
+        if (
+          scoreFilter === "belowThreshold" &&
+          scoreThreshold != null &&
+          score >= scoreThreshold
+        ) {
+          return false;
+        }
+      }
       return true;
     },
-    [searchValue, audioLanguages, excludeLanguages, instanceValues],
+    [
+      searchValue,
+      audioLanguages,
+      excludeLanguages,
+      instanceValues,
+      tagValues,
+      subtitlesFilter,
+      subtitlesStatus,
+      scoreFilter,
+      scoreValue,
+      scoreThreshold,
+      query.isPlaceholderData,
+    ],
   );
 
   const hasActiveFilter =
     searchValue.length > 0 ||
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0 ||
-    instanceValues.length > 0;
+    instanceValues.length > 0 ||
+    tagValues.length > 0 ||
+    subtitlesFilter !== "any" ||
+    scoreFilter !== "any";
 
   // Compute active filter count (excluding search which is always visible)
   const activeFilterCount = useMemo(() => {
@@ -137,8 +292,19 @@ function ItemView<T extends Item.Base>({
     if (excludeLanguages.length > 0) count++;
     if (searchValue.length > 0) count++;
     if (instanceValues.length > 0) count++;
+    if (tagValues.length > 0) count++;
+    if (subtitlesFilter !== "any") count++;
+    if (scoreFilter !== "any") count++;
     return count;
-  }, [audioLanguages, excludeLanguages, searchValue, instanceValues]);
+  }, [
+    audioLanguages,
+    excludeLanguages,
+    searchValue,
+    instanceValues,
+    tagValues,
+    subtitlesFilter,
+    scoreFilter,
+  ]);
 
   const activeFilterChips = useMemo(() => {
     const chips: {
@@ -193,18 +359,58 @@ function ItemView<T extends Item.Base>({
       });
     }
 
+    if (tagValues.length > 0 && onTagValuesChange) {
+      chips.push({
+        key: "tags",
+        label: `Tags: ${tagValues.join(", ")}`,
+        color: "violet",
+        onRemove: () => onTagValuesChange([]),
+      });
+    }
+
+    if (subtitlesFilter !== "any" && onSubtitlesFilterChange) {
+      const name =
+        SUBTITLES_FILTER_OPTIONS.find((o) => o.value === subtitlesFilter)
+          ?.label ?? subtitlesFilter;
+      chips.push({
+        key: "subtitles",
+        label: `Subtitles: ${name}`,
+        color: "cyan",
+        onRemove: () => onSubtitlesFilterChange("any"),
+      });
+    }
+
+    if (scoreFilter !== "any" && onScoreFilterChange) {
+      const name =
+        scoreFilterOptions.find((o) => o.value === scoreFilter)?.label ??
+        scoreFilter;
+      chips.push({
+        key: "score",
+        label: `Score: ${name}`,
+        color: "indigo",
+        onRemove: () => onScoreFilterChange("any"),
+      });
+    }
+
     return chips;
   }, [
     searchValue,
     audioLanguages,
     excludeLanguages,
     instanceValues,
+    tagValues,
+    subtitlesFilter,
+    scoreFilter,
+    scoreFilterOptions,
     instanceOptions,
     langOptions,
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onInstanceValuesChange,
+    onTagValuesChange,
+    onSubtitlesFilterChange,
+    onScoreFilterChange,
   ]);
 
   const clearAllFilters = useCallback(() => {
@@ -212,17 +418,26 @@ function ItemView<T extends Item.Base>({
     onAudioLanguagesChange?.([]);
     onExcludeLanguagesChange?.([]);
     onInstanceValuesChange?.([]);
+    onTagValuesChange?.([]);
+    onSubtitlesFilterChange?.("any");
+    onScoreFilterChange?.("any");
   }, [
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onInstanceValuesChange,
+    onTagValuesChange,
+    onSubtitlesFilterChange,
+    onScoreFilterChange,
   ]);
 
   const hasAnyFilterControl =
     onAudioLanguagesChange !== undefined ||
     onExcludeLanguagesChange !== undefined ||
-    showInstanceFilter;
+    showInstanceFilter ||
+    onTagValuesChange !== undefined ||
+    showSubtitlesFilter ||
+    showScoreFilter;
 
   // The band's left side is never empty. While rows are selected it holds the
   // batch tools; otherwise it says how many rows there are and which filters
@@ -502,6 +717,97 @@ function ItemView<T extends Item.Base>({
                   value={instanceValues}
                   onChange={onInstanceValuesChange}
                   clearable
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
+            {onTagValuesChange !== undefined && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon icon={faTag} size="xs" opacity={0.6} />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Tags
+                  </Text>
+                </Group>
+                <MultiSelect
+                  placeholder={
+                    tagValues.length > 0
+                      ? undefined
+                      : tagOptions.length > 0
+                        ? "Filter by tags..."
+                        : "No tags available"
+                  }
+                  data={tagOptions}
+                  value={tagValues}
+                  onChange={onTagValuesChange}
+                  searchable
+                  clearable
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
+            {showSubtitlesFilter && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon
+                    icon={faClosedCaptioning}
+                    size="xs"
+                    opacity={0.6}
+                  />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Subtitles
+                  </Text>
+                </Group>
+                <Select
+                  aria-label="Subtitles"
+                  data={SUBTITLES_FILTER_OPTIONS}
+                  value={subtitlesFilter}
+                  onChange={(value) =>
+                    onSubtitlesFilterChange?.(
+                      (value as SubtitlesFilter | null) ?? "any",
+                    )
+                  }
+                  allowDeselect={false}
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
+            {showScoreFilter && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon icon={faPercent} size="xs" opacity={0.6} />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Score
+                  </Text>
+                </Group>
+                <Select
+                  aria-label="Score"
+                  data={scoreFilterOptions}
+                  value={scoreFilter}
+                  onChange={(value) =>
+                    onScoreFilterChange?.(
+                      (value as ScoreFilter | null) ?? "any",
+                    )
+                  }
+                  allowDeselect={false}
                   size="sm"
                   maxDropdownHeight={250}
                   styles={{

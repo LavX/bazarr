@@ -85,6 +85,8 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                                   source_score_percent, forced, cancel)
     try:
         from app.database import get_profile_id, get_profiles_list
+        from subtitles.tools.subsync_engines import capture_subtitle_versions
+        from subtitles.tools.translate.core.translator_utils import translated_destination_path
         from subtitles.tools.translate.main import translate_subtitles_file
         from subtitles.download import check_missing_languages
         from app.database import (TableEpisodes, TableShows, TableMovies,
@@ -204,6 +206,21 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 )
                 continue
 
+            item_forced = item.get('forced') == 'True'
+            item_hi = item.get('hi') == 'True'
+            destination = translated_destination_path(video_path, target_lang, item_forced, item_hi)
+            expected_destination_versions = capture_subtitle_versions(video_path, (destination,))
+            # The capture holds the media write lock, so this answers for the
+            # instant it recorded: a subtitle already at the destination is the
+            # provider's, landed after the last index pass, and the better
+            # track. The missing list is the indexer's view and does not know
+            # it yet; a translation would replace it.
+            if expected_destination_versions[0].version is not None:
+                logging.info(
+                    'BAZARR auto-translate skipped: %s is already on disk for %s',
+                    target_code, video_path,
+                )
+                continue
             logging.info(
                 'BAZARR auto-translate queuing %s -> %s for %s',
                 downloaded_lang, target_lang, video_path,
@@ -214,14 +231,18 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 source_srt_file=subtitle_path,
                 from_lang=downloaded_lang,
                 to_lang=target_lang,
-                forced=item.get('forced') == 'True',
-                hi=item.get('hi') == 'True',
+                forced=item_forced,
+                hi=item_hi,
                 media_type=translate_media_type,
                 sonarr_series_id=series_id,
                 sonarr_episode_id=episode_id,
                 radarr_id=radarr_id,
                 metadata=translation_metadata,
                 arr_instance_id=arr_instance_id,
+                # The queueing sighting: a subtitle that lands here before the
+                # job writes is the provider's, and the job refuses to replace
+                # it (see translate_subtitles_file).
+                expected_destination_versions=expected_destination_versions,
             )
     except Exception:
         logging.exception('BAZARR error in _trigger_auto_translation')

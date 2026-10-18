@@ -32,13 +32,17 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
-import { useSeriesModification, useSeriesPagination } from "@/apis/hooks";
+import {
+  useSeriesModification,
+  useSeriesPagination,
+  useSystemSettings,
+} from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import { useAppTitle } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
-import { AudioList, InstanceBadge } from "@/components/bazarr";
+import { AudioList, InstanceBadge, ScorePill } from "@/components/bazarr";
 import LanguageProfileName from "@/components/bazarr/LanguageProfile";
 import { BatchModConfirmModal } from "@/components/forms/BatchModConfirmForm";
 import { ChangeProfileModal } from "@/components/forms/ChangeProfileForm";
@@ -51,7 +55,11 @@ import {
 } from "@/components/forms/MassTranslateForm";
 import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
-import ItemView from "@/pages/views/ItemView";
+import ItemView, {
+  ScoreFilter,
+  SubtitlesFilter,
+  SubtitlesStatus,
+} from "@/pages/views/ItemView";
 import { GetItemId } from "@/utilities";
 
 function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
@@ -65,7 +73,11 @@ const SeriesView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [subtitlesFilter, setSubtitlesFilter] =
+    useState<SubtitlesFilter>("any");
+  const [scoreFilter, setScoreFilter] = useState<ScoreFilter>("any");
   const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
   const {
     multiInstance,
     nameById: instanceNameById,
@@ -73,7 +85,31 @@ const SeriesView: FunctionComponent = () => {
     options: instanceOptions,
   } = useArrInstanceLabels("sonarr");
 
-  const query = useSeriesPagination(true);
+  // The acceptance threshold that labels the "below threshold" score group and
+  // drives it; undefined until settings load. Series use the episode minimum.
+  const { data: settings } = useSystemSettings();
+  const scoreThreshold = settings?.general.minimum_score;
+
+  const scoreValue = useCallback(
+    (series: Item.Series) => series.lowest_subtitle_score ?? null,
+    [],
+  );
+
+  // A series with no language profile, or with no episode files, has nothing to
+  // complete, so it is untracked and belongs to neither group. Otherwise it is
+  // complete when no episode is missing.
+  const subtitlesStatus = useCallback(
+    (series: Item.Series): SubtitlesStatus => {
+      if (series.profileId == null || series.episodeFileCount === 0)
+        return "untracked";
+      return series.episodeMissingCount === 0 ? "complete" : "missing";
+    },
+    [],
+  );
+
+  // Ask the backend for the lowest-score aggregate only while the score filter
+  // is active, mirroring how the list already fetches all rows for filtering.
+  const query = useSeriesPagination(true, scoreFilter !== "any");
   const { data: upgradableData } = useUpgradableItems();
   const upgradableSeriesKeys = useMemo(
     () =>
@@ -320,6 +356,21 @@ const SeriesView: FunctionComponent = () => {
           );
         },
       },
+      // Lowest current-subtitle score, shown only while the score filter is
+      // narrowing the list. A dim dash marks a series with no known score.
+      ...(scoreFilter !== "any"
+        ? [
+            {
+              id: "lowestScore",
+              header: "Lowest score",
+              cell: ({
+                row: {
+                  original: { lowest_subtitle_score: lowestScore },
+                },
+              }) => <ScorePill score={lowestScore} />,
+            } as ColumnDef<Item.Series>,
+          ]
+        : []),
       {
         id: "actions",
         cell: ({ row: { original } }) => {
@@ -453,6 +504,7 @@ const SeriesView: FunctionComponent = () => {
       multiInstance,
       instanceNameById,
       instanceDefaultId,
+      scoreFilter,
     ],
   );
 
@@ -591,9 +643,18 @@ const SeriesView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        subtitlesFilter={subtitlesFilter}
+        onSubtitlesFilterChange={setSubtitlesFilter}
+        subtitlesStatus={subtitlesStatus}
+        scoreFilter={scoreFilter}
+        onScoreFilterChange={setScoreFilter}
+        scoreValue={scoreValue}
+        scoreThreshold={scoreThreshold}
         instanceOptions={multiInstance ? instanceOptions : undefined}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}
+        tagValues={tagFilter}
+        onTagValuesChange={setTagFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}
