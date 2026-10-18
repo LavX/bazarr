@@ -22,11 +22,14 @@ $cream: #fff8e1;
   background-color: $navy;
 }
 
-// Stack of cross-fading backdrop layers.
+// Stack of cross-fading backdrop layers. Fixed so they keep covering the
+// viewport while the card scrolls on short screens, and clipped so the scaled
+// image below cannot add scrollable overflow and leave an uncovered strip.
 .backdrops {
-  position: absolute;
+  position: fixed;
   inset: 0;
   z-index: 0;
+  overflow: hidden;
 }
 
 .backdrop {
@@ -37,7 +40,8 @@ $cream: #fff8e1;
   // Light blur + gentle grade so the image reads clearly (Seerr-style) while
   // the glassmorphism card keeps the form legible on top.
   filter: blur(3px) brightness(0.98) saturate(1.18);
-  // Scale slightly up so the blur does not reveal hard edges.
+  // Scale slightly up so the blur does not reveal hard edges. The parent clips
+  // the scaled sides, so they cannot turn into page scroll.
   transform: scale(1.05);
   opacity: 0;
   transition: opacity 2s ease-in-out;
@@ -51,7 +55,7 @@ $cream: #fff8e1;
 // Dark gradient/vignette overlay on top of the backdrop image, always present
 // (also the fallback when no backdrops load).
 .overlay {
-  position: absolute;
+  position: fixed;
   inset: 0;
   z-index: 1;
   background:
@@ -71,7 +75,7 @@ $cream: #fff8e1;
 
 // Amber ambient glow, matching the app's atmospheric accents.
 .glow {
-  position: absolute;
+  position: fixed;
   inset: 0;
   z-index: 1;
   pointer-events: none;
