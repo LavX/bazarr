@@ -40,7 +40,7 @@ export interface WhatsNewSlide {
  * cutting a release. Kept as an explicit token so the wizard never has to parse the
  * fork's `version + YYMMDD` runtime string.
  */
-export const latestWhatsNewVersion = "2.7.1";
+export const latestWhatsNewVersion = "2.7.2";
 
 // v2.6.0 feature slides; v2.6.1 (a patch on the same line) leads with its
 // fix and keeps the whole Clockwork tour behind it.
@@ -95,6 +95,66 @@ const clockworkSlides: WhatsNewSlide[] = [
 ];
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
+  // v2.7.2 (a patch on the Atlas line) stands alone: the patch's own
+  // story is the tour.
+  "2.7.2": [
+    {
+      title: "Your logs stop carrying credentials",
+      body: "API keys, Bearer tokens and Google or OpenRouter key shapes are masked as *** in logs, job messages, errors and Provider Hub diagnostics. Stored secrets of normal length are masked too; values shorter than six characters are left alone so ordinary words are not redacted, while token shapes are still caught.",
+      icon: faShieldHalved,
+    },
+    {
+      title: "Unknown hostnames need your approval",
+      body: "While login is off, Bazarr+ answers only for hostnames it recognizes. Add a reverse-proxy or LAN name under Settings > General > Allowed Hosts; a refused request asks for a one-time approval code that is printed only in the console.",
+      icon: faServer,
+      cta: { label: "Open General settings", to: "/settings/general" },
+    },
+    {
+      title: "Editor playback no longer puts the API key in the URL",
+      body: "Safari and iOS playback uses a short-lived signed token in the playlist URL instead of the API key. The token covers one media item, instance and audio track, and a restart or key change invalidates it.",
+      icon: faShieldHalved,
+    },
+    {
+      title: "Plugin secrets are write-only",
+      body: "Provider Hub secrets are encrypted at rest and can be replaced but not read back. Changing the address a secret belongs to asks for the key again instead of sending the old one to a new host.",
+      icon: faStore,
+      cta: { label: "Open Providers", to: "/settings/providers" },
+    },
+    {
+      title: "An automatic translation cannot overwrite a fresh subtitle",
+      body: "If a provider delivers the target subtitle while an automatic translation is queued, the translation is skipped instead of replacing the newer file. The skip is reported as a skip, not a failure.",
+      icon: faClockRotateLeft,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "A short Gemini reply becomes a partial file",
+      body: "When Gemini returns fewer cues than the batch sent, the cues it did return are kept, the missing ones stay in the source language, and the file is marked partial. Sports translation still requires every cue.",
+      icon: faWandMagicSparkles,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "Stopped jobs report cancelled",
+      body: "A job you stop answers cancelled in the Jobs API and the drawer, with its own filter, instead of being recorded as completed. The completed history keeps it as one terminal entry.",
+      icon: faListCheck,
+    },
+    {
+      title: "Filter the library three ways",
+      body: "Movies and Series now filter by subtitle completeness, tags supplied by Sonarr, Radarr or Sportarr, and subtitle score (Full, Not full or Below threshold). The score column shows the lowest current-subtitle score while the filter is active.",
+      icon: faLayerGroup,
+      cta: { label: "Open your series", to: "/series" },
+    },
+    {
+      title: "HEVC preview plays in Chromium and Firefox",
+      body: "The editor preview transcodes 10-bit HEVC sources to 8-bit H.264 for Chromium and Firefox, so the picture starts instead of spinning. The native player path keeps the HEVC copy.",
+      icon: faGaugeHigh,
+    },
+    {
+      title: "Post-processing placeholders are refused everywhere",
+      body: "A placeholder is now rejected in every position a saved command executes, not only the program name. A command saved before this change that fails the check appears as a health issue and is refused until edited.",
+      icon: faSliders,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
+  ],
   // v2.7.1 (a patch on the Atlas line) stands alone, as v2.6.2 did:
   // the patch's own story is the tour.
   "2.7.1": [
