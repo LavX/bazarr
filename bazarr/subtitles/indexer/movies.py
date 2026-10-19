@@ -18,6 +18,7 @@ from subtitles.tools.subsync_engines import SyncOutputOwnerIndex, subtitle_write
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
+from subtitles.indexer.entries import embedded_entry
 from subtitles.indexer.utils import add_sync_engine_outputs, add_combined_outputs, guess_external_subtitles, \
     get_external_subtitles_path, normalize_subtitle_language_variant, subtitle_language_with_sync_modifier, \
     subtitle_language_with_combined_modifier
@@ -94,7 +95,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                                     forced=subtitle_forced,
                                     hi=subtitle_hi)
                                 logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
-                                actual_subtitles.append([lang, None, None])
+                                actual_subtitles.append(embedded_entry(lang, subtitle_codec))
                                 embedded_languages.append(lang)
                         except Exception as error:
                             logging.debug(f"BAZARR unable to index this unrecognized language: {subtitle_language} "  # noqa: G004

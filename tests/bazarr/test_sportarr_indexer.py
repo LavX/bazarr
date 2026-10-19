@@ -1600,3 +1600,39 @@ def test_missing_recompute_reads_every_stored_entry_shape(
 
     assert ast.literal_eval(row(session, 61).missing_subtitles) == ["de"]
     assert ast.literal_eval(row(session, 61).subtitles) == STORED_ENTRIES[shape]
+
+
+def test_embedded_tracks_store_their_codec_and_wanted_reads_them_back(indexed_library, monkeypatch):
+    """Each embedded entry carries the codec knowit reported, and the Wanted
+    recompute that profile saves and league profile changes run reads the four
+    element entries back without failing."""
+    from app import database as db
+    from sportarr import library
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    real = module.embedded_subtitles_from_metadata
+    # ffmpeg cannot encode a bitmap track from text, so the PGS stream is added
+    # to what the real probe of the fixture reports.
+    monkeypatch.setattr(module, "embedded_subtitles_from_metadata",
+                        lambda data: real(data) + [["deu", False, False, "PGS"]])
+    items = [
+        dict(id=i, language=language, hi="False", forced="False",
+             audio_exclude="False", audio_only_include="False")
+        for i, language in enumerate(("fr", "de", "zh"), 1)
+    ]
+    session.execute(
+        sa.insert(db.TableLanguagesProfiles).values(profileId=5, name="Sports", items=json.dumps(items))
+    )
+    db.update_profile_id_list.invalidate()
+    assert library.assign_profile(session, 51, 1, 5)
+
+    returned = module.store_subtitles_sports(61, 1)
+
+    stored = ast.literal_eval(row(session, 61).subtitles)
+    assert stored == returned
+    assert ["fr", None, None, "subrip"] in stored
+    assert ["de", None, None, "pgs"] in stored
+    assert ast.literal_eval(row(session, 61).missing_subtitles) == ["zh"]
+    library.refresh_league_profiles([51], 1)
+    assert ast.literal_eval(row(session, 61).missing_subtitles) == ["zh"]

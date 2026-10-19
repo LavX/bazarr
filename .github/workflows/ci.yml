@@ -705,6 +705,7 @@ jobs:
             tests/bazarr/test_provider_hub_worker_reaper.py \
             tests/bazarr/test_embedded_track_eligibility.py \
             tests/bazarr/test_settings_profile_deletion.py \
+            tests/bazarr/test_subtitle_entry_readers.py \
             tests/bazarr/test_upstream_db_adoption_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
@@ -742,6 +743,7 @@ jobs:
             tests/bazarr/test_sportarr_review_findings.py \
             tests/bazarr/test_sportarr_blacklist_recovery.py \
             tests/bazarr/test_sportarr_indexer.py \
+            tests/bazarr/test_embedded_codec_indexer.py \
             tests/bazarr/test_sportarr_sse.py \
             tests/bazarr/test_sportarr_subtitle_upload.py \
             tests/bazarr/test_provider_blacklist_instance_scope.py \
@@ -843,6 +845,7 @@ jobs:
             tests/bazarr/test_sportarr_review_guards.py \
             tests/bazarr/test_sportarr_output.py \
             tests/bazarr/test_sportarr_indexer_cancellation.py \
+            tests/bazarr/test_subtitle_entries.py \
             tests/bazarr/test_sportarr_scheduler_gate.py \
             tests/bazarr/test_sportarr_observability.py \
             tests/bazarr/test_sportarr_release_mismatch.py \

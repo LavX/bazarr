@@ -349,6 +349,7 @@ def test_postprocess_preserves_sync_language_modifier(monkeypatch):
         'forced': False,
         'hi': False,
         'file_size': 128,
+        'codec': None,
     }]
 
 

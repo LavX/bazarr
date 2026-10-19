@@ -64,6 +64,9 @@ interface Subtitle {
   forced: boolean;
   hi: boolean;
   path: string | null | undefined; // TODO: FIX ME!!!!!!
+  /** Embedded tracks only: knowit's format lowercased ("pgs", "subrip"), or
+   *  null when it is unknown or the row was indexed before it was stored. */
+  codec?: string | null;
 }
 
 interface AudioTrack {

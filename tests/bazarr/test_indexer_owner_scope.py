@@ -617,7 +617,9 @@ def test_an_embedded_track_with_no_codec_name_is_indexed(embedded_track_rows, mo
         stored = mv.store_subtitles_movie('/movies/m.mkv', '/local/m.mkv')
         table = TableMovies
 
-    expected = [['en', None, None]] if enabled else [['en', None, None], ['fr', None, None]]
+    unnamed = ['en', None, None, None]
+    named = ['fr', None, None, IGNORED_CODECS[switch].lower()]
+    expected = [unnamed] if enabled else [unnamed, named]
     assert stored == expected
     assert ast.literal_eval(_subs(session, table, 1)) == expected
-    assert logged == [language for language, _path, _size in expected]
+    assert logged == [language for language, _path, _size, _codec in expected]

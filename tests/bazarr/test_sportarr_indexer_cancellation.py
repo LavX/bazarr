@@ -143,7 +143,7 @@ def test_repair_stop_reaps_probe_and_retries_unchanged_metadata(
     assert processes["cwd"] != str(path)
     # The metadata has already committed. A later identical pass must index it.
     events.sync_events(51, 1)
-    assert ["fr", None, None] in ast.literal_eval(row(session, 61).subtitles)
+    assert ["fr", None, None, "subrip"] in ast.literal_eval(row(session, 61).subtitles)
     assert pickle.loads(row(session, 61).ffprobe_cache)["sports_indexed"]
     assert row(session, 62).subtitles == "[]"
     print(
@@ -210,12 +210,12 @@ def test_cancel_between_files_leaves_rest_of_batch_pending(
     monkeypatch.setattr(module, "notify", lambda ids: cancel.set())
     with pytest.raises(ValueError):
         module.refresh_sports_files([61, 63], 1, cancel=cancel)
-    assert ["fr", None, None] in ast.literal_eval(row(session, 61).subtitles)
+    assert ["fr", None, None, "subrip"] in ast.literal_eval(row(session, 61).subtitles)
     assert row(session, 63).subtitles == "[]" and row(session, 63).ffprobe_cache is None
     assert row(session, 62).subtitles == "[]"
     monkeypatch.setattr(module, "notify", lambda ids: None)
     module.refresh_sports_files([61, 63], 1)
-    assert ["fr", None, None] in ast.literal_eval(row(session, 63).subtitles)
+    assert ["fr", None, None, "subrip"] in ast.literal_eval(row(session, 63).subtitles)
 
 
 def test_manager_replaces_owner_while_analysis_is_blocked(indexed_library, monkeypatch):
@@ -274,7 +274,7 @@ def test_manager_replaces_owner_while_analysis_is_blocked(indexed_library, monke
         ):
             assert not os.path.exists(f"/proc/{pid}")
         eventually(lambda: bool(ast.literal_eval(row(session, 61).subtitles)))
-        assert ["fr", None, None] in ast.literal_eval(row(session, 61).subtitles)
+        assert ["fr", None, None, "subrip"] in ast.literal_eval(row(session, 61).subtitles)
     finally:
         release.touch()
         manager.stop()

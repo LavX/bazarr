@@ -1,6 +1,8 @@
 import React, {
+  createContext,
   forwardRef,
   FunctionComponent,
+  useContext,
   useEffect,
   useMemo,
   useState,
@@ -41,6 +43,7 @@ import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
+  describeEmbeddedTrack,
   getSubtitleSyncStatusPresentation,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
@@ -62,6 +65,28 @@ interface Props {
 
 type SportsSubtitleTuple = SportsEvent["subtitles"][number];
 
+// What the cells read from the table. The cells and the columns live at module
+// scope and take these from here. The page hands the table a new onIndex on
+// every render, and columns rebuilt from it are new component types, so each
+// refetch remounted every cell and closed any badge menu an event had open,
+// even on an event whose own subtitles had not changed.
+interface EventsTableValue {
+  disabled?: boolean;
+  indexingId?: number;
+  profile?: Language.Profile;
+  onIndex: (event: SportsEvent) => void;
+}
+
+const EventsTableContext = createContext<EventsTableValue | null>(null);
+
+function useEventsTable(): EventsTableValue {
+  const value = useContext(EventsTableContext);
+  if (value === null) {
+    throw new Error("Sports event cells render only inside the events table");
+  }
+  return value;
+}
+
 // Sports keeps a subtitle as a [language, path, size] tuple where episodes and
 // movies hold a Subtitle object, so the tuple is widened here rather than
 // teaching the shared menu a second shape. The language key carries the variant
@@ -70,6 +95,8 @@ type SportsSubtitleTuple = SportsEvent["subtitles"][number];
 export function toSportsSubtitle([
   language,
   path,
+  ,
+  codec,
 ]: SportsSubtitleTuple): Subtitle {
   const [code2, ...modifiers] = language.split(":");
   const lower = modifiers.map((modifier) => modifier.toLowerCase());
@@ -85,6 +112,7 @@ export function toSportsSubtitle([
     forced: lower.includes("forced"),
     hi: lower.includes("hi"),
     path,
+    codec: codec ?? null,
   };
 }
 
@@ -194,7 +222,7 @@ const EventSubtitleBadge: FunctionComponent<{
     <Badge
       variant="light"
       style={{ cursor: "pointer", whiteSpace: "nowrap" }}
-      title={subtitle.path || "Embedded"}
+      title={subtitle.path || describeEmbeddedTrack("Embedded", subtitle.codec)}
     >
       {subtitle.language ?? subtitle.code2}
     </Badge>
@@ -286,8 +314,8 @@ const EventSubtitleBadge: FunctionComponent<{
 // hook, and hook objects change identity every render.
 const EventSubtitles: FunctionComponent<{
   event: SportsEvent;
-  profile?: Language.Profile;
-}> = ({ event, profile }) => {
+}> = ({ event }) => {
+  const { profile } = useEventsTable();
   // The shared only-desired rule Series and Movies apply to their subtitle
   // lists. The events table used to render every stored tuple, so an embedded
   // track the operator explicitly hid on the other two pages stayed visible
@@ -439,17 +467,15 @@ export const EventSubtitleStatuses: FunctionComponent<{
   );
 };
 
-// Its own component rather than an inline cell. Built inline it needed the
-// modals and combine hooks in the columns useMemo deps, and those objects get a
-// new identity on every render, so the whole column set was rebuilt each time
-// and anything the row had opened, a menu or a modal, was unmounted underneath
+// Its own component so the modals and combine hooks live in the row. Those
+// objects get a new identity on every render, and a column set rebuilt from
+// them unmounted anything the row had opened, a menu or a modal, underneath
 // the user.
 const EventRowActions: FunctionComponent<{
   event: SportsEvent;
-  disabled?: boolean;
-  indexing: boolean;
-  onIndex: (event: SportsEvent) => void;
-}> = ({ event, disabled, indexing, onIndex }) => {
+}> = ({ event }) => {
+  const { disabled, indexingId, onIndex } = useEventsTable();
+  const indexing = indexingId === event.id;
   const modals = useModals();
   const combine = useCombineSubtitles();
 
@@ -506,6 +532,119 @@ const EventRowActions: FunctionComponent<{
   );
 };
 
+const columns: ColumnDef<SportsEvent>[] = [
+  {
+    // The real monitored state, which is what gates automatic search.
+    // This used to read hasFile, a literal True the serializer always
+    // sends, so every event looked monitored and the unmonitored
+    // branch was dead code. The file signal survives in the tooltip,
+    // though the events serializer keeps sending True for now.
+    id: "monitored",
+    cell: ({ row: { original } }) => (
+      <Tooltip
+        label={`${original.monitored ? "Monitored" : "Unmonitored"} in Sportarr${original.hasFile ? "" : ", no file"}`}
+      >
+        <FontAwesomeIcon
+          aria-label={original.monitored ? "Monitored" : "Unmonitored"}
+          icon={original.monitored ? faBookmark : farBookmark}
+        />
+      </Tooltip>
+    ),
+  },
+  {
+    // Grouped on a normalised season: unlike an episode, a sports event
+    // can legitimately have none, and grouping on a null key produces a
+    // group the expanded-row state can never address, so every row stays
+    // collapsed and the table looks empty.
+    header: "",
+    id: "season",
+    accessorFn: (row) => row.season ?? 0,
+    cell: ({ row: { original } }) => (
+      <Text span>
+        {original.season == null
+          ? "Unknown season"
+          : `Season ${original.season}`}
+      </Text>
+    ),
+  },
+  {
+    header: "Event",
+    id: "episode",
+    accessorFn: (row) => row.episode ?? 0,
+    cell: ({ row: { original } }) => (
+      <span className={tableStyles.episodeNumber}>
+        {original.episode ?? "-"}
+      </span>
+    ),
+  },
+  {
+    header: "Title",
+    accessorKey: "title",
+    cell: ({ row: { original } }) => {
+      const part =
+        original.partName ||
+        (original.partNumber && original.partNumber > 0
+          ? `Part ${original.partNumber}`
+          : null);
+      // Built as one string, not two adjacent JSX children: React would
+      // otherwise emit separate text nodes and the title would no longer
+      // be matchable (or selectable) as a single label.
+      const label = part ? `${original.title} (${part})` : original.title;
+      return (
+        <TextPopover text={original.sceneName}>
+          <Text className={`table-primary ${tableStyles.episodeTitle}`}>
+            {label}
+          </Text>
+        </TextPopover>
+      );
+    },
+  },
+  {
+    header: "Date",
+    accessorKey: "eventDate",
+    cell: ({ row: { original } }) => (
+      <Text size="sm" c="dimmed">
+        {(original.broadcastDate || original.eventDate)?.slice(0, 10) ||
+          "Unknown"}
+      </Text>
+    ),
+  },
+  {
+    header: "Audio",
+    accessorKey: "audio_language",
+    cell: ({ row: { original } }) => (
+      // The indexer reads these off the file and the table never showed
+      // them, though which audio an event carries is exactly what
+      // decides whether a subtitle is wanted. Bare codes here, not the
+      // Language.Info objects the episodes rows carry.
+      <AudioList
+        audios={(original.audio_language ?? []).map((code) => ({
+          code2: code,
+          name: code,
+        }))}
+      ></AudioList>
+    ),
+  },
+  {
+    header: "Subtitles",
+    accessorKey: "missing_subtitles",
+    cell: ({ row: { original } }) => <EventSubtitles event={original} />,
+  },
+  {
+    header: "Status",
+    cell: ({ row: { original } }) => <EventSubtitleStatuses event={original} />,
+  },
+  {
+    header: "Actions",
+    cell: ({ row: { original } }) => <EventRowActions event={original} />,
+  },
+];
+
+// The local event id, so a row keeps its id, and its mounted cells, when an
+// event sorted before it is added or removed. The default is the position in
+// the list.
+const getEventRowId = (event: SportsEvent) => String(event.id);
+
 // Mirrors the Episodes table: same grouping by season, same column order, same
 // icon actions. Sports events carry their subtitles as [language, path] tuples
 // rather than the Subtitle objects episodes use, so the cells render badges
@@ -525,128 +664,6 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
     const tableRef =
       ref as React.MutableRefObject<TableInstance<SportsEvent> | null>;
 
-    const columns = useMemo<ColumnDef<SportsEvent>[]>(
-      () => [
-        {
-          // The real monitored state, which is what gates automatic search.
-          // This used to read hasFile, a literal True the serializer always
-          // sends, so every event looked monitored and the unmonitored
-          // branch was dead code. The file signal survives in the tooltip,
-          // though the events serializer keeps sending True for now.
-          id: "monitored",
-          cell: ({ row: { original } }) => (
-            <Tooltip
-              label={`${original.monitored ? "Monitored" : "Unmonitored"} in Sportarr${original.hasFile ? "" : ", no file"}`}
-            >
-              <FontAwesomeIcon
-                aria-label={original.monitored ? "Monitored" : "Unmonitored"}
-                icon={original.monitored ? faBookmark : farBookmark}
-              />
-            </Tooltip>
-          ),
-        },
-        {
-          // Grouped on a normalised season: unlike an episode, a sports event
-          // can legitimately have none, and grouping on a null key produces a
-          // group the expanded-row state can never address, so every row stays
-          // collapsed and the table looks empty.
-          header: "",
-          id: "season",
-          accessorFn: (row) => row.season ?? 0,
-          cell: ({ row: { original } }) => (
-            <Text span>
-              {original.season == null
-                ? "Unknown season"
-                : `Season ${original.season}`}
-            </Text>
-          ),
-        },
-        {
-          header: "Event",
-          id: "episode",
-          accessorFn: (row) => row.episode ?? 0,
-          cell: ({ row: { original } }) => (
-            <span className={tableStyles.episodeNumber}>
-              {original.episode ?? "-"}
-            </span>
-          ),
-        },
-        {
-          header: "Title",
-          accessorKey: "title",
-          cell: ({ row: { original } }) => {
-            const part =
-              original.partName ||
-              (original.partNumber && original.partNumber > 0
-                ? `Part ${original.partNumber}`
-                : null);
-            // Built as one string, not two adjacent JSX children: React would
-            // otherwise emit separate text nodes and the title would no longer
-            // be matchable (or selectable) as a single label.
-            const label = part ? `${original.title} (${part})` : original.title;
-            return (
-              <TextPopover text={original.sceneName}>
-                <Text className={`table-primary ${tableStyles.episodeTitle}`}>
-                  {label}
-                </Text>
-              </TextPopover>
-            );
-          },
-        },
-        {
-          header: "Date",
-          accessorKey: "eventDate",
-          cell: ({ row: { original } }) => (
-            <Text size="sm" c="dimmed">
-              {(original.broadcastDate || original.eventDate)?.slice(0, 10) ||
-                "Unknown"}
-            </Text>
-          ),
-        },
-        {
-          header: "Audio",
-          accessorKey: "audio_language",
-          cell: ({ row: { original } }) => (
-            // The indexer reads these off the file and the table never showed
-            // them, though which audio an event carries is exactly what
-            // decides whether a subtitle is wanted. Bare codes here, not the
-            // Language.Info objects the episodes rows carry.
-            <AudioList
-              audios={(original.audio_language ?? []).map((code) => ({
-                code2: code,
-                name: code,
-              }))}
-            ></AudioList>
-          ),
-        },
-        {
-          header: "Subtitles",
-          accessorKey: "missing_subtitles",
-          cell: ({ row: { original } }) => (
-            <EventSubtitles event={original} profile={profile} />
-          ),
-        },
-        {
-          header: "Status",
-          cell: ({ row: { original } }) => (
-            <EventSubtitleStatuses event={original} />
-          ),
-        },
-        {
-          header: "Actions",
-          cell: ({ row: { original } }) => (
-            <EventRowActions
-              event={original}
-              disabled={disabled}
-              indexing={indexingId === original.id}
-              onIndex={onIndex}
-            />
-          ),
-        },
-      ],
-      [disabled, indexingId, onIndex, profile],
-    );
-
     const maxSeason = useMemo(
       () =>
         events?.reduce<number>(
@@ -660,21 +677,29 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
       tableRef?.current?.setExpanded(() => ({ [`season:${maxSeason}`]: true }));
     }, [tableRef, maxSeason]);
 
+    const tableValue = useMemo<EventsTableValue>(
+      () => ({ disabled, indexingId, profile, onIndex }),
+      [disabled, indexingId, profile, onIndex],
+    );
+
     return (
-      <GroupTable
-        columns={columns}
-        data={events ?? []}
-        instanceRef={tableRef}
-        onAllRowsExpandedChanged={onAllRowsExpandedChanged}
-        initialState={{
-          sorting: [
-            { id: "season", desc: true },
-            { id: "episode", desc: true },
-          ],
-          grouping: ["season"],
-        }}
-        tableStyles={{ emptyText: "No Event Found For This League" }}
-      ></GroupTable>
+      <EventsTableContext.Provider value={tableValue}>
+        <GroupTable
+          columns={columns}
+          data={events ?? []}
+          getRowId={getEventRowId}
+          instanceRef={tableRef}
+          onAllRowsExpandedChanged={onAllRowsExpandedChanged}
+          initialState={{
+            sorting: [
+              { id: "season", desc: true },
+              { id: "episode", desc: true },
+            ],
+            grouping: ["season"],
+          }}
+          tableStyles={{ emptyText: "No Event Found For This League" }}
+        ></GroupTable>
+      </EventsTableContext.Provider>
     );
   },
 );
