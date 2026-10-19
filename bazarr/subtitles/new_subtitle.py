@@ -40,6 +40,26 @@ class SubtitleFileExists(Exception):
         self.path = path
 
 
+def _default_file_mode():
+    """The mode a plain ``open(path, 'w')`` gives a new file: 0o666 less the umask.
+
+    mkstemp creates its file as 0o600, and a link or rename keeps that, so a
+    new subtitle would be unreadable to a media server running as another
+    user, where a downloaded one is not. The umask is read from /proc where
+    the kernel reports it, since setting it to read it back is process-wide.
+    """
+    try:
+        with open('/proc/self/status') as status:
+            for line in status:
+                if line.startswith('Umask:'):
+                    return 0o666 & ~int(line.split()[1], 8)
+    except (OSError, ValueError):
+        pass
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return 0o666 & ~mask
+
+
 def _discard(path):
     try:
         os.unlink(path)
@@ -108,6 +128,8 @@ def write_bytes_atomically(path, data, *, replace=True):
     fd, tmp_path = tempfile.mkstemp(dir=subtitle_dir)
     try:
         try:
+            if not replace:
+                os.fchmod(fd, _default_file_mode())
             _write_all(fd, data)
         finally:
             os.close(fd)
@@ -124,6 +146,8 @@ def copy_file_atomically(path, source, *, replace=True):
     """Copy ``source`` to ``path`` through a temporary name in the same folder."""
     fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path))
     try:
+        if not replace:
+            os.fchmod(fd, _default_file_mode())
         with os.fdopen(fd, 'wb') as target, open(source, 'rb') as origin:
             shutil.copyfileobj(origin, target)
         _publish(tmp_path, path, replace)

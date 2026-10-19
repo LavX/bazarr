@@ -163,3 +163,23 @@ def test_a_short_write_never_publishes_a_truncated_file(tmp_path, published, mon
 
     assert (tmp_path / "Film.hu.srt").read_bytes() == payload
     assert (tmp_path / "Film.de.srt").read_bytes() == payload
+
+
+def test_a_new_file_gets_the_mode_a_download_gets(tmp_path, published):
+    """mkstemp's 0600 would hide the file from a media server running as
+    another user; a new subtitle gets 0666 less the umask, like a download."""
+    from subtitles.new_subtitle import write_new_subtitle
+
+    source = tmp_path / "cache.sub"
+    source.write_bytes(b"pack")
+    previous = os.umask(0o022)
+    try:
+        write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(tmp_path / "Film.hu.idx"), b"i"),
+                                                         (str(tmp_path / "Film.hu.sub"), str(source))], "movie", 7)
+        (tmp_path / "plain.srt").write_bytes(b"download")
+    finally:
+        os.umask(previous)
+
+    modes = {name: oct((tmp_path / name).stat().st_mode & 0o777) for name in ("Film.hu.idx", "Film.hu.sub",
+                                                                              "plain.srt")}
+    assert modes == {"Film.hu.idx": "0o644", "Film.hu.sub": "0o644", "plain.srt": "0o644"}
