@@ -1,7 +1,7 @@
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
-import { http, HttpResponse } from "msw";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import GeneralStep from "./GeneralStep";
