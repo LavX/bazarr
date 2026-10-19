@@ -137,18 +137,23 @@
     box-shadow 0.2s ease;
 }
 
-.dotDone {
-  background: var(--mantine-primary-color-filled);
-  border-color: var(--mantine-primary-color-filled);
+// White numerals on the light filled shade, brand-6, came to 4.2:1 at 13px
+// semibold, under the 4.5:1 that size needs. brand-7 is 5.4:1. Dark mode is
+// already 7.5:1 on brand-8 and keeps it.
+.dotDone,
+.dotActive {
+  --dot-fill: var(--mantine-primary-color-filled);
+  background: var(--dot-fill);
+  border-color: var(--dot-fill);
   color: var(--mantine-color-white);
+
+  @include mantine.light {
+    --dot-fill: var(--mantine-color-brand-7);
+  }
 }
 
 .dotActive {
-  background: var(--mantine-primary-color-filled);
-  border-color: var(--mantine-primary-color-filled);
-  color: var(--mantine-color-white);
-  box-shadow: 0 0 0 4px
-    color-mix(in srgb, var(--mantine-primary-color-filled) 22%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--dot-fill) 22%, transparent);
 }
 
 .connector {

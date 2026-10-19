@@ -647,3 +647,24 @@ describe("focus indicators", () => {
     expect(focus).toMatch(/box-shadow: 0 0 0 1px var\(--bz-focus-ring\);/);
   });
 });
+
+describe("rail numerals", () => {
+  const wizardSource = readFileSync(
+    "src/pages/Setup/OnboardingWizard.module.scss",
+    "utf8",
+  );
+
+  it("fill the light-mode dots dark enough for white 13px numerals", () => {
+    const block = wizardSource.slice(wizardSource.indexOf(".dotDone,"));
+    const light = block.match(
+      /@include mantine\.light \{\s*--dot-fill: var\(--mantine-color-brand-(\d)\);/,
+    )?.[1];
+    expect(light).toBeDefined();
+    // 13px semibold is not large text, so it needs 4.5:1. brand-6 was 4.2:1.
+    expect(contrast("#ffffff", brandHex(light ?? ""))).toBeGreaterThanOrEqual(
+      4.5,
+    );
+    expect(block).toMatch(/background: var\(--dot-fill\);/);
+    expect(block).toMatch(/color: var\(--mantine-color-white\);/);
+  });
+});
