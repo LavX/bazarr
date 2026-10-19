@@ -417,7 +417,23 @@ def test_latest_replacement_shadows_download_score(scored_media, action):
     assert score() is None
 
 
-@pytest.mark.parametrize('action', [0, 4, 6], ids=['deletion', 'upload', 'translation'])
+def test_an_extraction_shadows_an_older_download_with_its_own_score(scored_media):
+    """An older download of the same file name must not lend its score to a
+    file extracted from an embedded track; the detail pages show the
+    extraction's own score."""
+    add, score, _ = scored_media
+    add(1, 1, 90, 100)
+    add(2, 8, 177, 180)
+    assert score() == 98.33
+
+
+def test_an_extraction_alone_is_scored(scored_media):
+    add, score, _ = scored_media
+    add(1, 8, 180, 180)
+    assert score() == 100.0
+
+
+@pytest.mark.parametrize('action', [0, 4, 6, 8], ids=['deletion', 'upload', 'translation', 'extraction'])
 def test_later_download_restores_score(scored_media, action):
     add, score, _ = scored_media
     add(1, 1, 90, 100)
