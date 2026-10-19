@@ -14,12 +14,14 @@ from app.event_handler import event_stream
 from arr_instances.resolution import scoped
 from utilities.path_mappings import path_mappings
 from utilities.binaries import get_binary
-from utilities.video_analyzer import (parse_video_metadata, _title_is_forced,
-                                      embedded_track_language)
+from utilities.video_analyzer import parse_video_metadata
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.tools.translate.main import translate_subtitles_file
+from subtitles.indexer.entries import normalize_codec
+from subtitles.tools.embedded_streams import (BITMAP_CONTAINERS, bitmap_family, is_bitmap_codec,
+                                              select_subtitle_stream, track_codec)
 
 logger = logging.getLogger(__name__)
 
@@ -398,38 +400,14 @@ def find_subtitle_by_language(subtitles, language_code, video_path, media_type="
     return None, None
 
 
-def extract_embedded_subtitle(
-    video_path, language_code2, media_type, hi=False, forced=False, arr_instance_id=None
-):
-    """Extract an embedded subtitle track from a video file using ffmpeg.
+def embedded_subtitle_tracks(video_path, media_type, arr_instance_id=None):
+    """The probed subtitle tracks of the media row behind ``video_path``.
 
-    Why: Isolates embedded-track extraction so callers (API and batch) share one
-    implementation with a deterministic cache key that encodes hi/forced flags.
-    What: Looks up video metadata, finds the matching subtitle stream, runs ffmpeg
-    to produce a .srt file, and caches it keyed by video hash + language + hi + forced.
-    Returns the path to the extracted .srt file, or None on failure.
-    Test: See tests/bazarr/test_embedded_subtitle_extraction.py, covers text codec,
-    bitmap rejection, cache hit, hi/forced key separation, and
-    tests/bazarr/test_embedded_extraction_instance_scope.py for the mapping.
-
-    ``arr_instance_id`` is the instance that owns the media (#156). The caller
-    maps the path forward with that instance's mapping, so the reverse has to
-    use the same one or the row lookup misses entirely; path_replace_reverse_instance
-    falls back to the global mapping when the instance has none, which is what
-    a None here relies on.
+    In stream order, so a position in the list is what ffmpeg's ``0:s:N``
+    names. None when the row, its probe or its subtitle list is missing. The
+    row is found by reversing ``video_path`` with the owning instance's
+    mapping, the one that mapped it forward (#156).
     """
-    if not language_code2:
-        logger.warning(
-            "extract_embedded_subtitle called with empty language_code2, skipping"
-        )
-        return None
-
-    target_alpha3 = alpha3_from_alpha2(language_code2)
-    if not target_alpha3:
-        logger.error(f"Cannot convert language code {language_code2} to alpha3")  # noqa: G004
-        return None
-
-    # Look up file metadata needed by parse_video_metadata
     if media_type == "sports":
         db_path = path_mappings.path_replace_reverse_instance(
             video_path, arr_instance_id, "sports")
@@ -496,67 +474,81 @@ def extract_embedded_subtitle(
     if not data:
         return None
 
-    # Find the subtitle provider (ffprobe or mediainfo)
-    cache_provider = None
-    if data.get("ffprobe") and "subtitle" in data["ffprobe"]:
-        cache_provider = "ffprobe"
-    elif data.get("mediainfo") and "subtitle" in data["mediainfo"]:
-        cache_provider = "mediainfo"
-    if not cache_provider:
+    # ffprobe or mediainfo, whichever parsed the file
+    for provider in ("ffprobe", "mediainfo"):
+        if data.get(provider) and "subtitle" in data[provider]:
+            return data[provider]["subtitle"]
+    return None
+
+
+def extract_embedded_subtitle(
+    video_path, language_code2, media_type, hi=False, forced=False, arr_instance_id=None,
+    exact=False, codec=None,
+):
+    """Extract an embedded subtitle track from a video file using ffmpeg.
+
+    Why: Isolates embedded-track extraction so callers (API and batch) share one
+    implementation with a deterministic cache key that encodes hi/forced flags.
+    What: Looks up video metadata, finds the matching subtitle stream, runs ffmpeg
+    to produce a .srt file, and caches it keyed by video hash + language + hi + forced.
+    Returns the path to the extracted .srt file, or None on failure.
+    Test: See tests/bazarr/test_embedded_subtitle_extraction.py, covers text codec,
+    bitmap rejection, cache hit, hi/forced key separation, and
+    tests/bazarr/test_embedded_extraction_instance_scope.py for the mapping.
+
+    ``arr_instance_id`` is the instance that owns the media (#156). The caller
+    maps the path forward with that instance's mapping, so the reverse has to
+    use the same one or the row lookup misses entirely; path_replace_reverse_instance
+    falls back to the global mapping when the instance has none, which is what
+    a None here relies on.
+
+    ``exact`` turns the language-only fallback off. Translate keeps it, so a
+    source whose flags drifted still translates; Extract to file and the tools
+    write the track a row names into a file named after that row, and another
+    track's text under that name would be wrong, so they pass True and get
+    None.
+
+    ``codec`` is the text codec the row showed. Two text tracks with one
+    language key and different codecs (an SRT and an ASS English) are two
+    rows, so a track of that codec is taken first, and cached under its own
+    name; without one the first matching text track is taken, as before. Two
+    tracks with one key and one codec cannot be told apart (the listing
+    stores no stream id) and resolve to the first.
+    """
+    if not language_code2:
+        logger.warning(
+            "extract_embedded_subtitle called with empty language_code2, skipping"
+        )
         return None
 
-    # Bitmap-based subtitle codecs that cannot be converted to SRT
-    bitmap_codecs = [
-        "pgs",
-        "vobsub",
-        "dvd_subtitle",
-        "dvbsub",
-        "hdmv_pgs_subtitle",
-        "dvd",
-    ]
+    target_alpha3 = alpha3_from_alpha2(language_code2)
+    if not target_alpha3:
+        logger.error(f"Cannot convert language code {language_code2} to alpha3")  # noqa: G004
+        return None
 
-    # Find the matching subtitle stream index using a two-pass approach:
-    # Pass 1: exact match on language + hi + forced disposition flags.
-    # Pass 2: fall back to first language-only match if no exact match found,
-    # so extraction never silently returns the wrong track.
+    tracks = embedded_subtitle_tracks(video_path, media_type, arr_instance_id)
+    if not tracks:
+        return None
+
+    # The track the row stands for: exact language, hi and forced first, then,
+    # unless ``exact``, the first text track in that language. Bitmap tracks
+    # are passed over here; extract_embedded_bitmap copies those out as they are.
     und_setting = settings.general.default_und_embedded_subtitles_lang
     und_default_language = alpha3_from_alpha2(und_setting) if und_setting else None
-
-    exact_track = None
-    fallback_track = None
-    track_id = 0
-    for track in data[cache_provider]["subtitle"]:
-        codec = (track.get("format") or track.get("name") or "").lower()
-        if any(bc in codec for bc in bitmap_codecs):
-            track_id += 1
-            continue
-
-        # Exactly the rule indexing used to decide this track exists. Walking
-        # the stream list a second time with different rules is how extraction
-        # ends up on a commentary track the user was never offered, or refuses
-        # a track the user was.
-        track_alpha3 = embedded_track_language(track, und_default_language)
-        if track_alpha3 is None:
-            track_id += 1
-            continue
-
-        if track_alpha3 == target_alpha3:
-            # knowit only reports forced from the disposition flag, so apply the
-            # same title heuristic used at indexing time, otherwise a forced
-            # request would extract a regular track named "Forced".
-            # See https://github.com/LavX/bazarr/issues/162
-            track_forced = track.get("forced", False) or _title_is_forced(track.get("name", ""))
-            if (
-                track.get("hearing_impaired", False) == hi
-                and track_forced == forced
-            ):
-                exact_track = track_id
-                break
-            if fallback_track is None:
-                fallback_track = track_id
-        track_id += 1
-
-    found_track = exact_track if exact_track is not None else fallback_track
+    text_codec = normalize_codec(codec)
+    if is_bitmap_codec(text_codec):
+        text_codec = None
+    found_track = None
+    if text_codec:
+        found_track = select_subtitle_stream(
+            tracks, target_alpha3, hi=hi, forced=forced, exact=exact,
+            und_default_language=und_default_language,
+            accept=lambda found: found == text_codec)
+    if found_track is None:
+        text_codec = None
+        found_track = select_subtitle_stream(
+            tracks, target_alpha3, hi=hi, forced=forced, exact=exact,
+            und_default_language=und_default_language)
 
     if found_track is None:
         logger.debug(
@@ -575,6 +567,9 @@ def extract_embedded_subtitle(
         suffix += ".hi"
     if forced:
         suffix += ".forced"
+    if text_codec:
+        # Another text track of the same key may be cached under the plain name.
+        suffix += "." + re.sub(r"[^a-z0-9]+", "-", text_codec).strip("-")
     output_path = os.path.join(
         extract_dir, f"{video_hash}.{language_code2}{suffix}.srt"
     )
@@ -729,3 +724,61 @@ def detect_language_from_content(srt_path):
     except Exception:
         pass
     return None
+
+
+def extract_embedded_bitmap(video_path, language_code2, media_type, work_dir, hi=False, forced=False,
+                            arr_instance_id=None, codec=None, before_copy=None):
+    """Copy an image-based embedded track out of the video as it is, into ``work_dir``.
+
+    PGS lands as a .sup, VobSub as an .idx and .sub pair and DVB as a Matroska
+    .mks: none of them can become text without OCR. ``codec`` is the codec the
+    row showed; when it names a bitmap family only a track of that family is
+    taken, so an SRT and a PGS track in the same language stay apart. Only the
+    track with exactly the requested HI and forced flags is taken, never
+    another variant of the language: the copy becomes that row's file.
+    ``before_copy`` is called with the chosen track's family before ffmpeg
+    reads the container, and may raise to stop the copy. Returns the written
+    paths (the .idx first for VobSub), or None when the language has no such
+    image-based track or ffmpeg fails.
+    """
+    target_alpha3 = alpha3_from_alpha2(language_code2) if language_code2 else None
+    if not target_alpha3:
+        return None
+    tracks = embedded_subtitle_tracks(video_path, media_type, arr_instance_id)
+    if not tracks:
+        return None
+    wanted = bitmap_family(codec)
+    und_setting = settings.general.default_und_embedded_subtitles_lang
+    index = select_subtitle_stream(
+        tracks, target_alpha3, hi=hi, forced=forced, exact=True,
+        und_default_language=alpha3_from_alpha2(und_setting) if und_setting else None,
+        accept=(lambda found: bitmap_family(found) == wanted) if wanted else is_bitmap_codec)
+    if index is None:
+        return None
+    family = bitmap_family(track_codec(tracks[index]))
+    if before_copy is not None:
+        before_copy(family)
+    try:
+        ffmpeg = get_binary("ffmpeg")
+    except Exception:
+        logger.error("ffmpeg binary not found, cannot extract embedded subtitles")
+        return None
+    extension, muxer = BITMAP_CONTAINERS[family]
+    output = os.path.join(work_dir, f"track{extension}")
+    command = [ffmpeg, "-nostdin", "-y", "-loglevel", "error", "-i", video_path,
+               "-map", f"0:s:{index}", "-c:s", "copy", "-f", muxer, output]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg timed out copying subtitle stream %s of %s", index, video_path)
+        return None
+    if result.returncode != 0 or not os.path.isfile(output) or not os.path.getsize(output):
+        logger.error("ffmpeg could not copy subtitle stream %s of %s: %s", index, video_path,
+                     result.stderr.strip())
+        return None
+    if family != "vobsub":
+        return [output]
+    from subtitles.tools.vobsub import write_vobsub_index
+    index_path = os.path.join(work_dir, "track.idx")
+    write_vobsub_index(video_path, index, output, index_path, language_code2)
+    return [index_path, output]
