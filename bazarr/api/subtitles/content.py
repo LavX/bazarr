@@ -90,6 +90,23 @@ def _request_arr_instance_id():
     return request.args.get('arr_instance_id', type=int)
 
 
+# ``?source=embedded`` asks the content and download routes for the track
+# inside the video instead of the file on disk (embedded_source.py).
+EMBEDDED_SOURCE = 'embedded'
+
+
+def _request_source():
+    """The ``source`` argument as sent, or None when there is none."""
+    source = request.args.get('source')
+    return source if isinstance(source, str) and source else None
+
+
+def _request_codec():
+    """The codec the row showed, as the embedded track actions already send it."""
+    codec = request.args.get('codec')
+    return codec.strip().lower() if isinstance(codec, str) and codec.strip() else None
+
+
 def _language_non_sync_modifiers(code):
     return sorted(
         modifier.lower()
@@ -149,6 +166,27 @@ def _subtitle_filename(video_name, suffix, ext):
     trusted directory.
     """
     return f'{video_name}.{secure_filename(f"{suffix}{ext}")}'
+
+
+def new_subtitle_filename(video_path, language, hi, forced, ext):
+    """The name a new subtitle file gets, the one a download would give it.
+
+    output_paths() names it as downloads and Extract to file do: the HI
+    Extension setting (hi, cc or sdh), forced before HI, and the IETF name of
+    a custom language (pb is pt-BR). A code the language table does not know,
+    which only a hand-written request sends, keeps <video>.<code>[.forced|.hi].
+    """
+    from languages import get_languages
+
+    # The table start-up loads; a process that never loaded it knows no code.
+    table = getattr(get_languages, 'languages_dict', None) or []
+    if any(item['code2'] == language for item in table):
+        from subtitles.tools.embedded_extract import output_paths
+
+        return os.path.basename(output_paths(video_path, language, hi, forced, (ext,))[0])
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    suffix = language + ('.forced' if forced else '.hi' if hi else '')
+    return _subtitle_filename(video_name, suffix, ext)
 
 
 def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=None):
@@ -873,6 +911,14 @@ def _get_media_metadata(media_type, media_id, arr_instance_id=None):
 
 def _get_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
     """Shared handler for episode and movie subtitle content."""
+    source = _request_source()
+    if source is not None:
+        if source != EMBEDDED_SOURCE:
+            return 'Unknown subtitle source', 400
+        # Imported here: embedded_source builds on this module's helpers.
+        from .embedded_source import get_embedded_content
+        return get_embedded_content(media_type, media_id, language_code, arr_instance_id,
+                                    codec=_request_codec())
     result = resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=arr_instance_id)
 
     # Error tuple: subtitle not found for this language
