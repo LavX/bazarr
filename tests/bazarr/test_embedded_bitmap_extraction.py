@@ -10,6 +10,7 @@ cannot load.
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -17,11 +18,12 @@ from ocr_fixtures import FIXTURES, mux_mkv
 
 SRT = "1\n00:00:01,000 --> 00:00:02,000\nHello there\n\n2\n00:00:03,000 --> 00:00:04,000\nBye\n\n"
 
-# What knowit reports for each stream, in stream order.
+# What knowit reports for each stream, in stream order. knowit names no
+# format for the DVB stream (test_the_tracks_are_what_knowit_reports).
 TRACKS = [
     {"format": "PGS", "language": "eng", "name": "", "forced": False, "hearing_impaired": False},
     {"format": "VobSub", "language": "hun", "name": "", "forced": False, "hearing_impaired": False},
-    {"format": "DVBSub", "language": "deu", "name": "", "forced": False, "hearing_impaired": False},
+    {"format": None, "language": "deu", "name": "", "forced": False, "hearing_impaired": False},
     {"format": "SubRip", "language": "eng", "name": "", "forced": False, "hearing_impaired": False},
 ]
 
@@ -46,9 +48,18 @@ def video(ffmpeg, tmp_path_factory):
 
 @pytest.fixture
 def batch(monkeypatch):
+    """The real probe lookup, fed TRACKS as the cached knowit answer of the
+    movie row behind any path."""
+    from types import SimpleNamespace
+
     import subtitles.tools.translate.batch as batch
 
-    monkeypatch.setattr(batch, "embedded_subtitle_tracks", lambda path, kind, owner=None: TRACKS)
+    row = SimpleNamespace(movie_file_id=1, episode_file_id=1, file_size=1, id=1)
+    monkeypatch.setattr(batch, "database", SimpleNamespace(
+        execute=lambda statement: SimpleNamespace(first=lambda: row)))
+    monkeypatch.setattr(batch.path_mappings, "path_replace_reverse_instance", lambda path, owner, kind: path)
+    monkeypatch.setattr(batch, "parse_video_metadata", lambda path, size, **kwargs: {
+        "ffprobe": {"subtitle": [dict(track) for track in TRACKS]}})
     monkeypatch.setattr(batch, "alpha3_from_alpha2", {"en": "eng", "hu": "hun", "de": "deu", "fr": "fra"}.get)
     monkeypatch.setattr(batch.settings.general, "default_und_embedded_subtitles_lang", "")
     # The tracks name their language by alpha3 already; no language table here.
@@ -214,3 +225,39 @@ def test_the_row_s_text_codec_picks_between_text_tracks_of_one_key(batch, ffmpeg
     # The ASS read did not take the plain key the other reads share.
     assert "From the ASS" in text(codec="ass")
     assert len(os.listdir(cache)) == 3
+
+
+def test_the_tracks_are_what_knowit_reports(video):
+    """TRACKS stands in for knowit's answer, so it must be knowit's answer:
+    no format for the DVB stream, which is what made DVB unreachable."""
+    from knowit.api import know
+
+    found = know(video_path=video, context={"provider": "ffmpeg", "ffmpeg": shutil.which("ffprobe")})
+
+    assert [track.get("format") for track in found["subtitle"]] == [track["format"] for track in TRACKS]
+
+
+def test_a_missing_format_is_filled_from_ffprobe_s_codec_name(batch, video):
+    tracks = batch.embedded_subtitle_tracks(video, "movie", 1)
+
+    assert [track["format"] for track in tracks] == ["PGS", "VobSub", "dvb_subtitle", "SubRip"]
+    assert TRACKS[2]["format"] is None, "the probe answer itself is never changed"
+
+
+def test_a_dvb_track_ahead_of_a_text_track_of_its_language_is_passed_over(batch, ffmpeg, tmp_path, monkeypatch):
+    """With no format the DVB stream read as text: a German row with no codec
+    ran the text extractor on it and got nothing."""
+    srt = tmp_path / "german.srt"
+    srt.write_text(SRT.replace("Hello there", "Guten Tag"))
+    sup = os.path.join(FIXTURES, "eng_hd.sup")
+    german = mux_mkv(ffmpeg, str(tmp_path / "German.mkv"), [(sup, "dvbsub", "deu"), (str(srt), "srt", "deu")])
+    monkeypatch.setattr(sys.modules[__name__], "TRACKS", [
+        dict(TRACKS[2]), {"format": "SubRip", "language": "deu", "name": "", "forced": False,
+                          "hearing_impaired": False}])
+    monkeypatch.setattr(batch, "extracted_subtitles_dir", lambda: str(tmp_path / "cache"))
+
+    text = batch.extract_embedded_subtitle(german, "de", "movie", exact=True)
+    assert text and "Guten Tag" in open(text).read()
+    work = tmp_path / "work"
+    work.mkdir()
+    assert batch.extract_embedded_bitmap(german, "de", "movie", str(work)) == [str(work / "track.mks")]
