@@ -10,7 +10,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
 REVISION = "f3b8d2a6c417"
-PREVIOUS = "a7d3e9c1f428"
+PREVIOUS = "3c1af7932284"
 # The table as the previous head left it, with the kind constraint the
 # downgrade has to keep through SQLite's table rebuild.
 BEFORE = """
