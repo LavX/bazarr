@@ -77,8 +77,12 @@ MOD_LABELS = {
 
 
 def apply_subtitle_mods(language, subtitle_path, mods, video_path,
-                         media_type=None, media_id=None, job_id=None, arr_instance_id=None):
+                         media_type=None, media_id=None, job_id=None, arr_instance_id=None,
+                         never_replace=False):
     """Job-aware wrapper for subtitles_apply_mods.
+
+    ``never_replace`` makes a mod that saves under another name (Remove HI)
+    refuse a file already at that name instead of replacing it.
 
     When called without a job_id, queues the work as a backend job and returns
     its id immediately. When called with a job_id (by the job queue consumer),
@@ -105,6 +109,7 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
         output_path = subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
                                            mods=mods, video_path=video_path,
                                            arr_instance_id=arr_instance_id, media_type=media_type,
+                                           never_replace=never_replace,
                                            **({'sports_event_id': media_id} if media_type == 'sports' else {}))
     except Exception as error:
         jobs_queue.update_job_name(
@@ -184,7 +189,7 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
 
 
 def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None, media_type=None,
-                         *, sports_event_id=None, cancel=None):
+                         *, sports_event_id=None, cancel=None, never_replace=False):
     destination = os.path.join(get_target_folder(video_path, create=False) or os.path.dirname(video_path), '.destination')
     with subtitle_write_locks(video_path, subtitle_path, destination, cancel=cancel):
         publication_guard = None
@@ -194,11 +199,11 @@ def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance
             publication_guard = sports_modification_guard(
                 sports_event_id, arr_instance_id, video_path, subtitle_path, cancel)
         return _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type,
-                                  publication_guard=publication_guard)
+                                  publication_guard=publication_guard, never_replace=never_replace)
 
 
 def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type=None,
-                       *, publication_guard=None):
+                       *, publication_guard=None, never_replace=False):
     # The mod list is user-chosen here, so only the keep-lyrics preference is
     # instance-relevant: resolve it against the media's owning instance (#227).
     # A None owner keeps the legacy global-only behaviour (single-instance).
@@ -240,17 +245,37 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
             )
         else:
             modded_subtitles_path = subtitle_path
+            modded_subtitles_path_if_alongside_video = subtitle_path
+        renamed = modded_subtitles_path != subtitle_path
 
         with (publication_guard(modded_subtitles_path) if publication_guard else nullcontext(),
               subtitle_mutation(video_path, subtitle_path, modded_subtitles_path)):
-            if os.path.exists(subtitle_path):
-                os.remove(subtitle_path)
+            if never_replace and renamed:
+                # Checked under the directory locks, so none of Bazarr+'s own
+                # writers can slip in, and the exclusive open below refuses a
+                # file another program creates meanwhile. The source is only
+                # removed once the result is written.
+                from subtitles.new_subtitle import SubtitleFileExists
 
-            if os.path.exists(modded_subtitles_path):
-                os.remove(modded_subtitles_path)
+                for taken in {modded_subtitles_path, modded_subtitles_path_if_alongside_video} - {subtitle_path}:
+                    if os.path.exists(taken):
+                        raise SubtitleFileExists(taken)
+                try:
+                    with open(modded_subtitles_path, 'xb') as f:
+                        f.write(content)
+                except FileExistsError:
+                    raise SubtitleFileExists(modded_subtitles_path) from None
+                if os.path.exists(subtitle_path):
+                    os.remove(subtitle_path)
+            else:
+                if os.path.exists(subtitle_path):
+                    os.remove(subtitle_path)
 
-            with open(modded_subtitles_path, 'wb') as f:
-                f.write(content)
+                if os.path.exists(modded_subtitles_path):
+                    os.remove(modded_subtitles_path)
+
+                with open(modded_subtitles_path, 'wb') as f:
+                    f.write(content)
 
             # The mod rewrote the subtitle, and Remove HI can rename it on the
             # way. Publish the file this leaves behind, here rather than at each

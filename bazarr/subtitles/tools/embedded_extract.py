@@ -464,20 +464,30 @@ def run_tool_on_embedded_track(action, media_type, media_id, arr_instance_id, la
         subtitle_path = materialise_track(track, codec, text_only=True)[0]
     except (ExtractionError, SubtitleFileExists) as error:
         raise JobFailed(str(error)) from error
-    # The request checked this name; a file may have appeared since.
+    # The request checked this name; a file may have appeared since. The mod
+    # checks it again under its own lock and never replaces it.
     replaced = existing_output(track.video_path,
                                [path for path in tool_output_paths(track, action) if path != subtitle_path])
     if replaced:
-        raise JobFailed(f"A subtitle file named {os.path.basename(replaced)} already exists. Use the tool on "
-                        f"that file's row instead. {os.path.basename(subtitle_path)} was extracted and kept.")
+        raise JobFailed(_taken_by_another_file(replaced, subtitle_path))
     if action == "sync":
         return _sync(track, subtitle_path, options or {}, job_id)
     from subtitles.tools.mods import apply_subtitle_mods
 
-    return apply_subtitle_mods(language=track.language, subtitle_path=subtitle_path, mods=[action],
-                               video_path=track.video_path, media_type=track.media_type,
-                               media_id=track.local_id if track.media_type == "sports" else track.media_id,
-                               job_id=job_id, arr_instance_id=track.arr_instance_id)
+    try:
+        return apply_subtitle_mods(language=track.language, subtitle_path=subtitle_path, mods=[action],
+                                   video_path=track.video_path, media_type=track.media_type,
+                                   media_id=track.local_id if track.media_type == "sports" else track.media_id,
+                                   job_id=job_id, arr_instance_id=track.arr_instance_id, never_replace=True)
+    except JobFailed as failure:
+        if isinstance(failure.__cause__, SubtitleFileExists):
+            raise JobFailed(_taken_by_another_file(failure.__cause__.path, subtitle_path)) from failure.__cause__
+        raise
+
+
+def _taken_by_another_file(taken, subtitle_path):
+    return (f"A subtitle file named {os.path.basename(taken)} already exists. Use the tool on that file's "
+            f"row instead. {os.path.basename(subtitle_path)} was extracted and kept.")
 
 
 def _sync(track, subtitle_path, options, job_id):

@@ -206,6 +206,9 @@ def jobs(monkeypatch):
         monkeypatch.setattr(module, "jobs_queue", queue)
     # The mod's own post-processing announces the change; no socket here.
     monkeypatch.setattr("app.event_handler.event_stream", lambda **kw: None)
+    # Remove HI reads the owner's keep-lyrics override; this owner has none,
+    # and a test run on its own must not need the global database.
+    monkeypatch.setattr("arr_instances.resolution._instance_subtitle_settings", lambda *a, **kw: {})
     return queue
 
 
@@ -339,3 +342,65 @@ def test_a_tool_runs_on_the_text_track_of_the_row_s_codec(library, jobs, monkeyp
     run_tool_on_embedded_track("OCR_fixes", "movie", 30, 1, "en", codec="ass", job_id=7)
 
     assert "English with sounds" in (film / "Film.en.srt").read_text()
+
+
+def test_remove_hi_never_replaces_a_plain_file_that_lands_after_the_job_s_check(library, jobs, monkeypatch):
+    """A download can land on Film.en.srt after the job's own check and before
+    the mod takes its lock. The mod refuses it under the lock, and keeps the
+    extracted file it read."""
+    from contextlib import contextmanager
+
+    import subtitles.tools.mods as mods
+    from app.jobs_queue import JobFailed
+    from subtitles.tools.embedded_extract import run_tool_on_embedded_track
+
+    _session, root, _events, published = library
+    film = root / "owner1/movies/Film (2020)"
+    real_locks = mods.subtitle_write_locks
+
+    @contextmanager
+    def download_lands_first(*args, **kwargs):
+        (film / "Film.en.srt").write_text("MY DOWNLOADED FILE")
+        with real_locks(*args, **kwargs) as states:
+            yield states
+
+    monkeypatch.setattr(mods, "subtitle_write_locks", download_lands_first)
+
+    with pytest.raises(JobFailed, match="Film.en.srt already exists.*Film.en.hi.srt was extracted and kept"):
+        run_tool_on_embedded_track("remove_HI", "movie", 30, 1, "en", hi=True, job_id=7)
+
+    assert (film / "Film.en.srt").read_text() == "MY DOWNLOADED FILE"
+    assert "[DOOR SLAMS]" in (film / "Film.en.hi.srt").read_text()
+    # Only the extraction was published, never a mod output.
+    assert [event.operation for event in published] == ["extract"]
+
+
+def test_the_mod_s_exclusive_write_refuses_a_file_created_after_its_check(library, jobs, tmp_path, monkeypatch):
+    """Another program can create the name between the mod's check and its
+    write: the exclusive open refuses it, and the source stays."""
+    import builtins
+
+    import subtitles.tools.mods as mods
+    from subtitles.new_subtitle import SubtitleFileExists
+
+    tmp_path = tmp_path / "loose"
+    tmp_path.mkdir()
+    video = tmp_path / "Film.mkv"
+    video.write_bytes(b"video")
+    source = tmp_path / "Film.en.hi.srt"
+    source.write_text(HEARING)
+    target = tmp_path / "Film.en.srt"
+    real_open = builtins.open
+
+    def racing_open(path, mode="r", *args, **kwargs):
+        if str(path) == str(target) and "x" in mode:
+            target.write_text("imported meanwhile")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", racing_open)
+    with pytest.raises(SubtitleFileExists):
+        mods.subtitles_apply_mods("en", str(source), ["remove_HI"], str(video), never_replace=True)
+    monkeypatch.setattr(builtins, "open", real_open)
+
+    assert target.read_text() == "imported meanwhile"
+    assert "[DOOR SLAMS]" in source.read_text()
