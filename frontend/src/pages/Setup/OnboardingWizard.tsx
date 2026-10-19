@@ -63,7 +63,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
   const stepBusy = useStepBusy();
   const navigate = useNavigate();
   const { stepKey } = useParams<{ stepKey?: string }>();
-  const mutation = useSettingsMutation();
+  const mutation = useSettingsMutation(false, { inlineErrors: true });
   const client = useQueryClient();
   const [leaving, setLeaving] = useState(false);
   const [leaveError, setLeaveError] = useState<string | null>(null);

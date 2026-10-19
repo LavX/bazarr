@@ -23,7 +23,7 @@ import type { WizardStepProps } from "./types";
  * writes nothing and advances, exactly like the media-server step.
  */
 const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
-  const settings = useSettingsMutation();
+  const settings = useSettingsMutation(false, { inlineErrors: true });
 
   // Held by the wizard so Back and forward do not empty the form. The key is
   // left out for the same reason it is on the arr steps: it is a credential.

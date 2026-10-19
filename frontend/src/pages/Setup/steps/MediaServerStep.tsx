@@ -51,7 +51,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     useOnboardingSelection();
 
   const { data: settings, isPending: settingsPending } = useSystemSettings();
-  const settingsMutation = useSettingsMutation();
+  const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
   // Which kind's switch write failed. The client keeps a restarting or
   // unreachable Bazarr+ out of its toasts, so it is said here or not at all.
   const [switchFailed, setSwitchFailed] = useState<MediaServerKind | null>(

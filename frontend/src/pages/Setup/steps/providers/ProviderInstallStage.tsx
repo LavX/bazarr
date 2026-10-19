@@ -176,7 +176,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   const install = useProviderHubInstall();
   const refreshCatalog = useProviderHubRefreshCatalog();
   const { restart } = useSystem();
-  const settingsMutation = useSettingsMutation();
+  const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
   const { data: systemSettings } = useSystemSettings();
 
   const [selected, setSelected] = useState<string[]>([]);

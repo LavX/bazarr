@@ -64,7 +64,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     isLoading: profilesLoading,
     isError: profilesFailed,
   } = useLanguageProfiles();
-  const settings = useSettingsMutation();
+  const settings = useSettingsMutation(false, { inlineErrors: true });
   // The client keeps a restarting or unreachable Bazarr+ out of its toasts,
   // so a write that fails that way said nothing at all unless it is said here.
   const [saveFailed, setSaveFailed] = useState(false);

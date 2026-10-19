@@ -5,7 +5,9 @@ import {
   useLanguages,
   useSettingsMutation,
 } from "@/apis/hooks";
+import { http, HttpResponse } from "msw";
 import { customRender, screen, waitFor } from "@/tests";
+import server from "@/tests/mocks/node";
 import LanguagesStep from "./LanguagesStep";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
@@ -245,6 +247,35 @@ describe("LanguagesStep", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /could not save your languages/i,
     );
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed save once, inline, with no toast", async () => {
+    // Through the real settings hook, not a mock of it: a 503 is the failure
+    // a restart mid-setup produces, and the hook's own "Save failed" toast
+    // would announce it a second time beside the inline alert.
+    const { useSettingsMutation: realSettingsMutation } =
+      await vi.importActual<typeof import("@/apis/hooks")>("@/apis/hooks");
+    mockedUseSettingsMutation.mockImplementation(realSettingsMutation);
+    server.use(
+      http.post(
+        "/api/system/settings",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    await user.click(screen.getByRole("combobox", { name: "Languages" }));
+    await user.click(await screen.findByText("English"));
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(1));
+    expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
+    expect(mockedUseSettingsMutation).toHaveBeenCalledWith(false, {
+      inlineErrors: true,
+    });
     expect(onNext).not.toHaveBeenCalled();
   });
 

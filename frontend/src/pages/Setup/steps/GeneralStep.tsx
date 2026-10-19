@@ -42,7 +42,7 @@ const CUSTOM_FOLDER_COPY: Record<string, { label: string; hint: string }> = {
  */
 const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const { data: settings } = useSystemSettings();
-  const mutation = useSettingsMutation();
+  const mutation = useSettingsMutation(false, { inlineErrors: true });
 
   const general = settings?.general;
 

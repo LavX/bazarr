@@ -134,7 +134,7 @@ function toPayload(draft: MediaServerDraft): SaveMediaServerInput {
  */
 export function useMediaServerSubmit() {
   const save = useSaveMediaServerInstance();
-  const settings = useSettingsMutation();
+  const settings = useSettingsMutation(false, { inlineErrors: true });
   const [isPending, setPending] = useState(false);
 
   const submit = useCallback(

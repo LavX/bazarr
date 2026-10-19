@@ -28,7 +28,7 @@ import type { WizardStepProps } from "./types";
  * bills for what it translates, and that a saved key replaces the engine.
  */
 const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
-  const settings = useSettingsMutation();
+  const settings = useSettingsMutation(false, { inlineErrors: true });
 
   const [apiKey, setApiKey] = useState("");
   const trimmedKey = apiKey.trim();

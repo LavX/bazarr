@@ -88,7 +88,18 @@ export function isSettingsFollowupError(error: unknown): boolean {
   );
 }
 
-export function useSettingsMutation(retryingMetadataRefresh = false) {
+interface SettingsMutationOptions {
+  // The caller says a failed write next to the control that made it, so the
+  // generic "Save failed" toast stays away. Both are announced as alerts, and
+  // the setup wizard read every failure out twice. A write that landed but
+  // could not be applied still toasts: that is news the caller does not have.
+  inlineErrors?: boolean;
+}
+
+export function useSettingsMutation(
+  retryingMetadataRefresh = false,
+  { inlineErrors = false }: SettingsMutationOptions = {},
+) {
   const client = useQueryClient();
   const retireMetadata = (changes: LooseObject, retrying = false) => {
     const names = Object.keys(changes);
@@ -195,6 +206,9 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
             "Your changes are saved, but applying some of them failed. The system log has the details.",
           ),
         );
+        return;
+      }
+      if (inlineErrors) {
         return;
       }
       showNotification(
