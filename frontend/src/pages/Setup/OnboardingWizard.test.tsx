@@ -1,5 +1,6 @@
 import userEvent, { UserEvent } from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
 import { customRender, screen, waitFor } from "@/tests";
@@ -492,5 +493,76 @@ describe("OnboardingWizardView", () => {
 
     await screen.findByRole("heading", { name: /^sonarr$/i });
     expect(screen.getByLabelText(/address/i)).toHaveValue("10.0.0.5");
+  });
+});
+
+// jsdom applies no stylesheet and computes no colour, so the indicators are
+// pinned where they are declared: the tokens and the rules that read them.
+const themeSource = readFileSync("src/assets/_bazarr.scss", "utf8");
+const inputSource = readFileSync("src/assets/input.module.scss", "utf8");
+
+function schemeBlock(scheme: "dark" | "light"): string {
+  const marker = `:root[data-mantine-color-scheme="${scheme}"] {`;
+  const at = themeSource.indexOf(marker);
+  return at < 0 ? "" : themeSource.slice(at, themeSource.indexOf("}", at));
+}
+
+function brandHex(shade: string): string {
+  return (
+    themeSource.match(
+      new RegExp(`\\$color-brand-${shade}: (#[0-9a-f]{6});`),
+    )?.[1] ?? ""
+  );
+}
+
+function luminance(hex: string): number {
+  const channels = [1, 3, 5].map(
+    (at) => parseInt(hex.slice(at, at + 2), 16) / 255,
+  );
+  const [r, g, b] = channels.map((c) =>
+    c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4,
+  );
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrast(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+function focusRingHex(scheme: "dark" | "light"): string {
+  const shade = schemeBlock(scheme).match(
+    /--bz-focus-ring: var\(--mantine-color-brand-(\d)\);/,
+  )?.[1];
+  return shade === undefined ? "" : brandHex(shade);
+}
+
+describe("focus indicators", () => {
+  it.each([
+    ["dark", ["#22223a", "#1a1a2e", "#121125"]],
+    ["light", ["#ffffff", "#f8f9fa", "#f1f3f5"]],
+  ] as const)(
+    "the %s focus ring clears 3:1 on every surface the wizard draws",
+    (scheme, surfaces) => {
+      const ring = focusRingHex(scheme);
+      expect(ring).toMatch(/^#[0-9a-f]{6}$/);
+      for (const surface of surfaces) {
+        // WCAG 2.2 SC 1.4.11. The dark ring was brand-8, 2.05:1 on the card.
+        expect(contrast(ring, surface)).toBeGreaterThanOrEqual(3);
+      }
+    },
+  );
+
+  it("draws Mantine's focus ring in the token, not the primary shade", () => {
+    expect(themeSource).toMatch(
+      /\.mantine-focus-auto:focus-visible,[\s\S]*?outline-color: var\(--bz-focus-ring\);/,
+    );
+  });
+
+  it("gives a focused input a visible indicator of its own", () => {
+    // Tab used to change only an overlay alpha, 0.06 to 0.07: 1.03:1.
+    const focus = inputSource.slice(inputSource.indexOf("&:focus,"));
+    expect(focus).toMatch(/border-color: var\(--bz-focus-ring\);/);
+    expect(focus).toMatch(/box-shadow: 0 0 0 1px var\(--bz-focus-ring\);/);
   });
 });

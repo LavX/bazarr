@@ -15,10 +15,20 @@
       background: var(--bz-hover-bg-emphasis);
     }
 
+    // The border is the indicator. Moving it from one near-transparent white
+    // to another measured 1.03:1, which is no indicator at all, so focus
+    // takes the ring colour and a second pixel of it.
     &:focus,
     &:focus-within {
       background: var(--bz-hover-bg-emphasis);
-      border-color: var(--bz-border-hover);
+      border-color: var(--bz-focus-ring);
+      box-shadow: 0 0 0 1px var(--bz-focus-ring);
+    }
+
+    &[data-error]:focus,
+    &[data-error]:focus-within {
+      border-color: var(--mantine-color-error);
+      box-shadow: 0 0 0 1px var(--mantine-color-error);
     }
   }
 }
