@@ -620,3 +620,128 @@ def test_sonarr_semver_preserves_build_number_on_nightly_or_ls_suffix(monkeypatc
     monkeypatch.setattr(info, "version", lambda: "5.0.0.689-prerelease.0")
     assert info.semver() == semver.Version(5, 0, 0, "689")
     assert info.supports_signalr_core() is True
+
+
+def _requirement_line(distribution):
+    repo_root = Path(__file__).resolve().parents[2]
+    for raw_line in (repo_root / "requirements.txt").read_text().splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if line and canonicalize_name(Requirement(re.split(r"\s+--", line, maxsplit=1)[0]).name) == \
+                canonicalize_name(distribution):
+            return line
+    return None
+
+
+def test_optional_requirements_match_requirements_txt_and_are_never_probed():
+    from app.requirements import OPTIONAL_RUNTIME_REQUIREMENTS, RUNTIME_IMPORTS, RUNTIME_REQUIREMENTS
+
+    for module, (distribution, spec) in OPTIONAL_RUNTIME_REQUIREMENTS.items():
+        line = _requirement_line(distribution)
+        assert line is not None, f"{distribution} is missing from requirements.txt"
+        requirement = Requirement(re.split(r"\s+--", line, maxsplit=1)[0])
+        assert requirement.specifier == SpecifierSet(spec)
+        assert module not in RUNTIME_IMPORTS
+        assert module not in RUNTIME_REQUIREMENTS
+
+
+@pytest.mark.parametrize("platform,machine,installs", [
+    ("linux", "x86_64", True),
+    ("linux", "aarch64", True),
+    ("linux", "armv7l", False),
+    ("linux", "i686", False),
+    ("win32", "AMD64", False),
+    ("darwin", "arm64", False),
+    ("freebsd14", "amd64", False),
+])
+def test_tesserocr_marker_limits_it_to_platforms_with_wheels(platform, machine, installs):
+    line = _requirement_line("tesserocr")
+    requirement = Requirement(re.split(r"\s+--", line, maxsplit=1)[0])
+
+    environment = {"sys_platform": platform, "platform_machine": machine,
+                   "platform_release": "6.8.0-45-generic"}
+    assert requirement.marker.evaluate(environment) is installs
+    assert "platform_release" not in str(requirement.marker)
+    assert line.endswith("--only-binary=tesserocr")
+
+
+def test_cysignals_is_held_at_the_release_tesserocr_can_import():
+    """tesserocr 2.11.0 asks for any cysignals, but imports a C function that
+    only 1.12.6 and later export: with 1.12.5, the last release with aarch64
+    wheels, it does not import."""
+    line = _requirement_line("cysignals")
+    # No --only-binary: aarch64 has no wheel of 1.12.6, so pip builds it there,
+    # and pip would apply the option to the whole file.
+    assert "--" not in line
+    requirement = Requirement(line)
+    tesserocr = Requirement(re.split(r"\s+--", _requirement_line("tesserocr"), maxsplit=1)[0])
+
+    assert "1.12.5" not in requirement.specifier and "1.12.6" in requirement.specifier
+    assert str(requirement.marker) == str(tesserocr.marker)
+
+
+def test_requirements_split_keeps_optional_lines_apart():
+    from app.requirements import split_requirement_lines
+
+    required, optional = split_requirement_lines(
+        "Pillow>=12.3.0 --only-binary=Pillow\n# tesserocr is optional\n"
+        'tesserocr==2.11.0; sys_platform == "linux" --only-binary=tesserocr\nsix==1.17.0\n')
+
+    assert optional == ['tesserocr==2.11.0; sys_platform == "linux" --only-binary=tesserocr']
+    assert required == ["Pillow>=12.3.0 --only-binary=Pillow", "# tesserocr is optional", "six==1.17.0"]
+
+
+def _capture_installs(monkeypatch, requirements, fail_on=()):
+    calls = []
+
+    def check_output(command, **kwargs):
+        body = ""
+        if "-r" in command:
+            body = Path(command[command.index("-r") + 1]).read_text()
+        calls.append((command, body))
+        # Comments, and command[0], the interpreter's path, may contain any name.
+        lines = "\n".join(line for line in body.splitlines() if not line.startswith("#"))
+        if any(marker in lines or marker in " ".join(command[1:]) for marker in fail_on):
+            raise subprocess.CalledProcessError(1, command, output="no wheel for this platform")
+        return b""
+
+    monkeypatch.setattr(requirements.subprocess, "check_output", check_output)
+    monkeypatch.setattr(requirements, "is_virtualenv", lambda: True)
+    monkeypatch.setattr(requirements.os.path, "expanduser", lambda path: "/home/bazarr")
+    return calls
+
+
+def test_optional_requirement_failure_does_not_stop_startup(monkeypatch, caplog):
+    from app import requirements
+
+    calls = _capture_installs(monkeypatch, requirements, fail_on=("tesserocr",))
+    exits = []
+    monkeypatch.setattr(requirements.os, "_exit", lambda code: exits.append(code))
+
+    assert requirements.install_requirements(["six"]) is True
+
+    assert exits == []
+    required_body = calls[0][1]
+    assert "Pillow" in required_body and "tesserocr==" not in required_body and "cysignals>=" not in required_body
+    assert calls[1][0][-1] == "signalrcore==1.0.2"
+    # Each optional line on its own, in file order.
+    assert [re.match(r"[\w.-]+", body).group() for _, body in calls[2:]] == ["cysignals", "tesserocr"]
+    assert "could not install the optional requirement tesserocr==" in caplog.text
+    assert "optional requirement cysignals" not in caplog.text
+
+
+def test_required_requirement_failure_still_exits_before_optional_ones(monkeypatch):
+    from app import requirements
+
+    calls = _capture_installs(monkeypatch, requirements, fail_on=("Pillow",))
+
+    class Exited(Exception):
+        pass
+
+    def exit_now(code):
+        raise Exited(code)
+
+    monkeypatch.setattr(requirements.os, "_exit", exit_now)
+
+    with pytest.raises(Exited):
+        requirements.install_requirements(["six"])
+    assert len(calls) == 1

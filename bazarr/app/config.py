@@ -754,6 +754,10 @@ validators = [
     Validator('subsync.output_mode', must_exist=True, default='overwrite', is_type_of=str,
               is_in=['overwrite', 'keep_all']),
 
+    # ocr section. Where Tesseract language packs are kept; empty means the
+    # tessdata folder in the config directory.
+    Validator('ocr.tessdata_dir', must_exist=True, default='', is_type_of=str, cast=str),
+
     # postgresql section
     Validator('postgresql.enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('postgresql.host', must_exist=True, default='localhost', is_type_of=str),

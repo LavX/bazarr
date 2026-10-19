@@ -277,6 +277,49 @@ jobs:
           echo "${ALL_TAGS}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+      # Same OCR smoke as the release build, for each platform this run builds.
+      - name: Build the OCR smoke image (linux/amd64)
+        if: contains(inputs.platforms, 'linux/amd64')
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: bazarr-ocr-smoke:amd64
+          cache-from: |
+            type=gha,scope=bazarr-deps
+            type=gha,scope=bazarr-manual
+          build-args: |
+            BAZARR_VERSION=${{ steps.version.outputs.fork_version }}
+            BUILD_DATE=${{ steps.version.outputs.build_date }}
+            VCS_REF=${{ github.sha }}
+
+      - name: OCR smoke test (linux/amd64)
+        if: contains(inputs.platforms, 'linux/amd64')
+        run: docker run --rm -i --platform linux/amd64 --entrypoint python bazarr-ocr-smoke:amd64 - < .github/scripts/ocr_image_smoke.py
+
+      - name: Build the OCR smoke image (linux/arm64)
+        if: contains(inputs.platforms, 'linux/arm64')
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          load: true
+          tags: bazarr-ocr-smoke:arm64
+          cache-from: |
+            type=gha,scope=bazarr-deps
+            type=gha,scope=bazarr-manual
+          build-args: |
+            BAZARR_VERSION=${{ steps.version.outputs.fork_version }}
+            BUILD_DATE=${{ steps.version.outputs.build_date }}
+            VCS_REF=${{ github.sha }}
+
+      - name: OCR smoke test (linux/arm64)
+        if: contains(inputs.platforms, 'linux/arm64')
+        run: docker run --rm -i --platform linux/arm64 --entrypoint python bazarr-ocr-smoke:arm64 - < .github/scripts/ocr_image_smoke.py
+
       - name: Build and Push Docker Image
         id: push
         uses: docker/build-push-action@v7

@@ -197,6 +197,17 @@ cd bazarr
 
 # Install Python dependencies
 pip install -r requirements.txt
+# OCR of image-based subtitles needs tesserocr and its cysignals dependency.
+# The requirements file installs them only on Linux x86_64 and ARM64 (glibc,
+# or musl on x86_64), and pip compiles cysignals on ARM64, which needs a C
+# compiler and the Python headers. On macOS 15 or later the file skips them;
+# add OCR by hand with `pip install tesserocr==2.11.0` (an Intel Mac compiles
+# cysignals too). Where tesserocr has no wheel, for example Alpine on ARM64 or
+# 32-bit Raspberry Pi OS on a 64-bit kernel, or where cysignals cannot be
+# compiled, pip stops at their lines. Install everything else instead, and
+# Bazarr+ runs with OCR unavailable:
+#   grep -Ev '^(cysignals|tesserocr)' requirements.txt > /tmp/requirements-no-ocr.txt
+#   pip install -r /tmp/requirements-no-ocr.txt
 # Only if you use PostgreSQL instead of the default SQLite: its driver is
 # kept in a separate file
 pip install -r postgres-requirements.txt
