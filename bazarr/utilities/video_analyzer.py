@@ -119,6 +119,10 @@ def embedded_subs_reader(file, file_size, episode_file_id=None, movie_file_id=No
     sports = {'sports_event_id': sports_event_id} if sports_event_id is not None else {}
     data = parse_video_metadata(file, file_size, episode_file_id, movie_file_id, use_cache=use_cache,
                                 arr_instance_id=arr_instance_id, **sports)
+    # None is a read that failed (no file, no parser binary, a probe error), not
+    # a file without tracks. Raise so the indexer keeps what it stored before.
+    if data is None:
+        raise OSError(f'Could not read the embedded subtitle tracks of {file}')
     return embedded_subtitles_from_metadata(data)
 
 

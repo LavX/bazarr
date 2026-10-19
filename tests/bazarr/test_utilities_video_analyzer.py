@@ -248,6 +248,20 @@ def test_embedded_subs_reader(mediainfo_data, video_file):
         assert ["zht", False, False, "SubRip"] in result
 
 
+def test_embedded_subs_reader_raises_when_the_file_could_not_be_read(video_file):
+    """parse_video_metadata answers None when ffprobe or mediainfo fails or is
+    missing. Read as an empty track list, the indexers stored the listing
+    without any embedded track and every embedded language became wanted."""
+    from unittest.mock import patch
+    with patch("utilities.video_analyzer.alpha3_from_alpha2", return_value=None):
+        with patch("utilities.video_analyzer.parse_video_metadata", return_value=None):
+            with pytest.raises(OSError):
+                video_analyzer.embedded_subs_reader(video_file, 1e6)
+        # A file read without any subtitle stream is still an empty list.
+        with patch("utilities.video_analyzer.parse_video_metadata", return_value={"ffprobe": {}, "mediainfo": {}}):
+            assert video_analyzer.embedded_subs_reader(video_file, 1e6) == []
+
+
 def test_embedded_audio_reader(mediainfo_data, video_file):
     from unittest.mock import patch
     with patch(
