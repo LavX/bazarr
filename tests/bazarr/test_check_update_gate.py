@@ -317,6 +317,30 @@ def test_a_fetch_made_while_the_advertisement_was_down_records_no_tags(github):
     assert github.api_calls() == [_BAZARR_API, _TRANSLATOR_API]
 
 
+
+@pytest.mark.parametrize("payload", [{}, {"message": "API rate limit exceeded"}, "releases", None])
+def test_a_releases_answer_that_is_not_a_list_is_a_failed_fetch(github, monkeypatch, payload):
+    _check()
+    github.tags[_BAZARR_AD].append((_V2, "refs/tags/v1.1.0"))
+    github.releases[_BAZARR_API].insert(0, _release("v1.1.0", "2026-10-10T00:00:00Z"))
+    original = github.get
+
+    def wrong_shape(url, **kwargs):
+        response = original(url, **kwargs)
+        if url == _BAZARR_API:
+            response.json = lambda: payload
+        return response
+
+    monkeypatch.setattr(requests, "get", wrong_shape)
+    _check()
+    monkeypatch.setattr(requests, "get", original)
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_BAZARR_API]
+    assert [r["name"] for r in _releases_txt()] == ["v1.1.0", "v1.0.0", "v0.1.0"]
+
 # The gate reuses releases.txt. When that file no longer holds what the
 # recorded fetch wrote, unchanged tags are not enough to skip the API.
 

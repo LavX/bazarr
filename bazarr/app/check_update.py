@@ -60,6 +60,9 @@ def _fetch_repo_releases(repo, label=None):
         except ValueError:
             logging.error(f"Error parsing JSON from Github releases response ({repo}). Skipping.")  # noqa: G004
             return None
+        if not isinstance(releases_data, list):
+            logging.error(f"Github releases response ({repo}) is not a list of releases. Skipping.")  # noqa: G004
+            return None
         for release in releases_data:
             download_link = None
             for asset in release.get('assets', []):
