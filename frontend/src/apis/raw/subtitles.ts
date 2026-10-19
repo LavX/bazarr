@@ -17,6 +17,11 @@ export interface SubtitleContentResponse {
   episodeUpstreamId?: number;
   arrInstanceId?: number;
   episodeTitle?: string;
+  // Set when the text came out of the video file (?source=embedded): the
+  // track's codec and the name Save gives the file next to the video.
+  source?: SubtitleSource;
+  codec?: string | null;
+  fileName?: string;
 }
 
 // "embedded" reads the track inside the video file instead of the file on
@@ -296,14 +301,20 @@ class SubtitlesApi extends BaseApi {
     mediaId: number,
     language: string,
     arrInstanceId?: number,
+    source?: SubtitleSource,
+    codec?: string,
   ) {
     // language is the viewer/editor language key ("en", "en:hi", ...).
     // mediaId is the upstream id for episodes and movies, the local event id
-    // for sports.
+    // for sports. source "embedded" streams the track inside the video, and
+    // codec picks between two text tracks that share one language key.
     const base = SUBTITLE_ROUTE_BASE[mediaType];
     return client.axios.get<Blob>(
       `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/download`,
-      { params: { arr_instance_id: arrInstanceId }, responseType: "blob" },
+      {
+        params: { arr_instance_id: arrInstanceId, source, codec },
+        responseType: "blob",
+      },
     );
   }
 
@@ -312,11 +323,14 @@ class SubtitlesApi extends BaseApi {
     mediaId: number,
     language: string,
     arrInstanceId?: number,
+    source?: SubtitleSource,
+    codec?: string,
   ) {
     const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
     const response = await client.axios.get<SubtitleContentResponse>(url, {
-      params: { arr_instance_id: arrInstanceId },
+      // undefined params are dropped, so a file read is unchanged.
+      params: { arr_instance_id: arrInstanceId, source, codec },
     });
     return {
       data: response.data,
@@ -387,6 +401,7 @@ class SubtitlesApi extends BaseApi {
     forced: boolean,
     hi: boolean,
     arrInstanceId?: number,
+    overwrite = false,
   ) {
     const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     // /sports/events/<id>/subtitles is the indexer's own POST, so creating a
@@ -404,6 +419,9 @@ class SubtitlesApi extends BaseApi {
         format,
         forced,
         hi,
+        // Only after the user confirmed the overwrite dialog: the server
+        // then replaces the file it refused with a 409 a moment ago.
+        ...(overwrite ? { overwrite: true } : {}),
       },
       {
         params: { arr_instance_id: arrInstanceId },

@@ -13,6 +13,7 @@ import {
   EmbeddedHiddenTrack,
   EmbeddedTrackForm,
   HiddenTrackMediaType,
+  SubtitleSource,
 } from "@/apis/raw/subtitles";
 import { notification } from "@/modules/notification";
 import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
@@ -485,8 +486,12 @@ export function useSubtitleContent(
   mediaId: number | undefined,
   language: string | undefined,
   arrInstanceId?: number,
+  source?: SubtitleSource,
+  codec?: string,
 ) {
   return useQuery({
+    // The source and the row's codec go last, so invalidating the key without
+    // them still reaches both the file and every embedded track of a language.
     queryKey: [
       QueryKeys.Subtitles,
       "content",
@@ -494,6 +499,8 @@ export function useSubtitleContent(
       mediaId,
       language,
       arrInstanceId,
+      source ?? null,
+      codec ?? null,
     ],
     queryFn: () => {
       if (!mediaType || mediaId === undefined || !language) {
@@ -504,18 +511,19 @@ export function useSubtitleContent(
         mediaId,
         language,
         arrInstanceId,
+        source,
+        codec,
       );
     },
     enabled: !!mediaType && mediaId !== undefined && !!language,
     staleTime: 5 * 60 * 1000,
     retry: (failureCount, error) => {
-      // Don't retry 404s (subtitle doesn't exist yet)
-
-      if (
-        "response" in error &&
-        (error as unknown as { response?: { status?: number } }).response
-          ?.status === 404
-      ) {
+      // A 4xx is an answer, not a hiccup: 404 is a subtitle that does not
+      // exist yet, and 415 or 422 is an embedded track that is not text.
+      // Asking again would only run ffmpeg again.
+      const status = (error as unknown as { response?: { status?: number } })
+        .response?.status;
+      if (status !== undefined && status >= 400 && status < 500) {
         return false;
       }
       return failureCount < 3;
@@ -617,6 +625,8 @@ export function useSubtitleCreate() {
       forced: boolean;
       hi: boolean;
       arrInstanceId?: number;
+      // Set only after the user confirmed the overwrite dialog.
+      overwrite?: boolean;
     }) =>
       api.subtitles.createSubtitle(
         params.mediaType,
@@ -627,6 +637,7 @@ export function useSubtitleCreate() {
         params.forced,
         params.hi,
         params.arrInstanceId,
+        params.overwrite,
       ),
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {
@@ -706,6 +717,12 @@ export function useSubtitleFileDownload() {
     // Viewer/editor language key ("en", "en:hi", "en:forced", ...).
     language: string;
     arrInstanceId?: number;
+    // "embedded" streams the track inside the video under the name Save
+    // would give it; nothing is written next to the video.
+    source?: SubtitleSource;
+    // The codec the embedded row showed, to pick between two text tracks of
+    // one language key.
+    codec?: string;
   }
   return useMutation({
     mutationKey: [QueryKeys.Subtitles, "download-file"],
@@ -715,6 +732,8 @@ export function useSubtitleFileDownload() {
         param.mediaId,
         param.language,
         param.arrInstanceId,
+        param.source,
+        param.codec,
       );
       assertDownloadPayload(response.data);
       saveBlobAs(

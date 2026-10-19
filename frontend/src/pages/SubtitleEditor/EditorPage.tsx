@@ -75,7 +75,11 @@ import {
 import {
   buildEditorAutosaveKey,
   buildEditorSubtitlesUrl,
+  createFieldsForLanguageKey,
   editorBreadcrumb,
+  editorSearchWithoutSource,
+  readEditorCodec,
+  readEditorSource,
 } from "./editorScope";
 import EditorToolbar from "./EditorToolbar";
 import JumpToCue from "./JumpToCue";
@@ -119,7 +123,12 @@ export default function EditorPage() {
   const scopedArrInstanceId = Number.isNaN(arrInstanceId)
     ? undefined
     : arrInstanceId;
-  const editorSearch = searchParams.toString();
+  // ?source=embedded opens the track inside the video in create mode. The
+  // editor's own navigation always drops it, with the row's codec: after
+  // Save, and on Save As or a language switch, it works on files.
+  const source = readEditorSource(searchParams);
+  const codec = readEditorCodec(searchParams);
+  const editorSearch = editorSearchWithoutSource(searchParams);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   // The editor's translate controls read a cached status, so the gate can
@@ -139,16 +148,25 @@ export default function EditorPage() {
     data: queryResult,
     isLoading,
     error,
+    isPlaceholderData,
   } = useSubtitleContent(
     mediaType,
     mediaId ? Number(mediaId) : undefined,
     language,
     scopedArrInstanceId,
+    source,
+    codec,
   );
 
   const data = queryResult?.data;
   const [createdSuccessfully, setCreatedSuccessfully] = useState(false);
-  const isNewSubtitle = data?.exists === false && !createdSuccessfully;
+  // An embedded track answers exists: false with its text, so it opens in
+  // create mode already filled in, and Save creates the file. Placeholder
+  // data is the subtitle the editor just left, shown until this one answers:
+  // it says nothing about whether this one exists.
+  const isNewSubtitle =
+    !isPlaceholderData && data?.exists === false && !createdSuccessfully;
+  const fromEmbedded = data?.source === "embedded";
 
   // Parse the fetched content
   const parseResult = useMemo<ParseResult | null>(() => {
@@ -183,25 +201,32 @@ export default function EditorPage() {
   const [loaded, setLoaded] = useState(false);
   const etagRef = useRef<string>("");
 
-  // Reset when switching to a different subtitle
-  const prevLangRef = useRef(language);
+  // Reset when switching to a different subtitle. The track inside the video
+  // and the file that shares its language key are two subtitles, and so are
+  // two text tracks of one key with different codecs: moving from one to the
+  // other must load the other, or the next Save would write the first one's
+  // text under the second one's name.
+  const subtitleKey = `${language}|${source ?? ""}|${codec ?? ""}`;
+  const prevSubtitleKeyRef = useRef(subtitleKey);
   useEffect(() => {
-    if (prevLangRef.current !== language) {
+    if (prevSubtitleKeyRef.current !== subtitleKey) {
       loadedRef.current = false;
       setLoaded(false);
       setCreatedSuccessfully(false);
-      prevLangRef.current = language;
+      prevSubtitleKeyRef.current = subtitleKey;
     }
-  }, [language]);
+  }, [subtitleKey]);
 
-  // Load cues into document state when data arrives
+  // Load cues into document state when data arrives. Placeholder data is the
+  // subtitle the editor just left, shown until the new one answers; it is
+  // never loaded as the new one.
   useEffect(() => {
-    if (parseResult && !loadedRef.current) {
+    if (parseResult && !loadedRef.current && !isPlaceholderData) {
       dispatch({ type: "LOAD", cues: parseResult.cues });
       loadedRef.current = true;
       setLoaded(true);
     }
-  }, [parseResult]);
+  }, [parseResult, isPlaceholderData]);
 
   // Auto-save to localStorage on every change (debounced 2s)
   const autoSaveKey = buildEditorAutosaveKey(
@@ -209,6 +234,8 @@ export default function EditorPage() {
     mediaId,
     language,
     scopedArrInstanceId,
+    source,
+    codec,
   );
 
   useEffect(() => {
@@ -490,9 +517,85 @@ export default function EditorPage() {
     };
   }, [docState.cues, parseResult?.metadata, format]);
 
+  // The overwrite dialog. `via` is how the confirmed write goes: "create"
+  // replaces exactly the file the create route refused (Save of a new or an
+  // embedded subtitle), "put" overwrites the file the language resolves to
+  // (Save As).
+  const [overwriteConfirm, setOverwriteConfirm] = useState<{
+    lang: string;
+    content: string;
+    via: "create" | "put";
+  } | null>(null);
+
+  // The file exists now, so the editor edits it. Opened on an embedded
+  // track, the editor moves to the file's own URL: the next Save is a normal
+  // PUT, and a reload shows the file instead of the track again. It also
+  // moves when the file's key is not the one it was opened on: a track that
+  // is both HI and forced saves as forced.
+  const finishCreate = useCallback(
+    (message: string, createdLanguage: string) => {
+      dispatch({ type: "MARK_SAVED" });
+      setCreatedSuccessfully(true); // Switch from create to edit mode
+      if (autoSaveKey) {
+        try {
+          removeStoredValue(autoSaveKey);
+        } catch {
+          /* ignore */
+        }
+      }
+      // Refetch content so we pick up the etag and confirm the file is
+      // indexed in the DB (needed for subsequent PUT saves). The key without
+      // the source reaches the file's entry and the track's.
+      queryClient.invalidateQueries({
+        queryKey: [
+          QueryKeys.Subtitles,
+          "content",
+          mediaType,
+          Number(mediaId),
+          language,
+          scopedArrInstanceId,
+        ],
+      });
+      showNotification({ message, color: "green", autoClose: 2000 });
+      if (source || createdLanguage !== language) {
+        // What the cache holds for the file may be from before this write:
+        // the file page must read it as saved.
+        queryClient.removeQueries({
+          queryKey: [
+            QueryKeys.Subtitles,
+            "content",
+            mediaType,
+            Number(mediaId),
+            createdLanguage,
+            scopedArrInstanceId,
+            null,
+            null,
+          ],
+          exact: true,
+        });
+        requestAnimationFrame(() => {
+          navigate(editorPath(createdLanguage), { replace: true });
+        });
+      }
+    },
+    [
+      autoSaveKey,
+      queryClient,
+      mediaType,
+      mediaId,
+      language,
+      scopedArrInstanceId,
+      source,
+      navigate,
+      editorPath,
+    ],
+  );
+
   // Save handler
   const handleSave = useCallback(() => {
-    if (!mediaType || !mediaId || !language) return;
+    // Until the subtitle this URL names has loaded, the document is the one
+    // the editor just left, and saving it here would write it under this name.
+    if (!mediaType || !mediaId || !language || isPlaceholderData) return;
 
     // Commit any uncommitted text from the detail pane textarea before
     // serializing. This handles the case where the user typed text and
@@ -527,57 +630,38 @@ export default function EditorPage() {
     });
 
     if (isNewSubtitle) {
-      // New subtitle: use POST to create
+      // New subtitle: use POST to create. The route takes a bare language
+      // code, so an "en:hi" key sends en with the HI flag.
+      const fields = createFieldsForLanguageKey(language);
       createMutation.mutate(
         {
           mediaType,
           mediaId: Number(mediaId),
           content: serialized,
-          language,
+          language: fields.language,
           format,
-          forced: false,
-          hi: false,
+          forced: fields.forced,
+          hi: fields.hi,
           arrInstanceId: scopedArrInstanceId,
         },
         {
-          onSuccess: () => {
-            dispatch({ type: "MARK_SAVED" });
-            setCreatedSuccessfully(true); // Switch from create to edit mode
-            if (autoSaveKey) {
-              try {
-                removeStoredValue(autoSaveKey);
-              } catch {
-                /* ignore */
-              }
-            }
-            // Refetch content so we pick up the etag and confirm the file
-            // is indexed in the DB (needed for subsequent PUT saves).
-            queryClient.invalidateQueries({
-              queryKey: [
-                QueryKeys.Subtitles,
-                "content",
-                mediaType,
-                Number(mediaId),
-                language,
-                scopedArrInstanceId,
-              ],
-            });
-            showNotification({
-              message: "Subtitle created",
-              color: "green",
-              autoClose: 2000,
-            });
-          },
+          onSuccess: (created) =>
+            finishCreate("Subtitle created", created.language),
           onError: (err) => {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const status = (err as any)?.response?.status;
-            const msg =
-              status === 409
-                ? "Subtitle file already exists for this language."
-                : `Create failed: ${(err as Error).message}`;
+            if (status === 409) {
+              // A file with this name is already there: ask, as Save As does.
+              setOverwriteConfirm({
+                lang: language,
+                content: serialized,
+                via: "create",
+              });
+              return;
+            }
             showNotification({
               title: "Error",
-              message: msg,
+              message: `Create failed: ${(err as Error).message}`,
               color: "red",
               autoClose: 5000,
             });
@@ -684,13 +768,14 @@ export default function EditorPage() {
     format,
     encoding,
     isNewSubtitle,
+    isPlaceholderData,
     saveMutation,
     createMutation,
     autoSaveKey,
     selectedIndex,
     docState.cues,
     parseResult?.metadata,
-    queryClient,
+    finishCreate,
     scopedArrInstanceId,
   ]);
 
@@ -700,7 +785,9 @@ export default function EditorPage() {
   );
   const switchToLanguage = useCallback(
     (targetLang: string) => {
-      if (targetLang === language) return;
+      // On an embedded track the file with the same key is somewhere else to
+      // go: editorPath drops the source.
+      if (targetLang === language && !source) return;
       if (docState.dirty) {
         setPendingLangSwitch(targetLang);
       } else {
@@ -709,7 +796,7 @@ export default function EditorPage() {
         });
       }
     },
-    [language, docState.dirty, navigate, editorPath],
+    [language, source, docState.dirty, navigate, editorPath],
   );
 
   // Navigate after save completes (dirty becomes false while pendingLangSwitch is set)
@@ -746,12 +833,6 @@ export default function EditorPage() {
   }, [pendingLangSwitch, navigate, editorPath]);
 
   // Save As handler (create new subtitle with different language)
-  // State for overwrite confirmation
-  const [overwriteConfirm, setOverwriteConfirm] = useState<{
-    lang: string;
-    content: string;
-  } | null>(null);
-
   const handleSaveAs = useCallback(
     (targetLang: string) => {
       if (!mediaType || !mediaId || !targetLang) return;
@@ -781,7 +862,11 @@ export default function EditorPage() {
             const status = (err as any)?.response?.status;
             if (status === 409) {
               // File already exists, ask to overwrite
-              setOverwriteConfirm({ lang: targetLang, content: serialized });
+              setOverwriteConfirm({
+                lang: targetLang,
+                content: serialized,
+                via: "put",
+              });
             } else {
               showNotification({
                 title: "Error",
@@ -808,7 +893,41 @@ export default function EditorPage() {
 
   const handleOverwrite = useCallback(() => {
     if (!overwriteConfirm || !mediaType || !mediaId) return;
-    const { lang, content } = overwriteConfirm;
+    const { lang, content, via } = overwriteConfirm;
+    if (via === "create") {
+      // Exactly the file the create route refused, <video>.<lang>.<ext>,
+      // not whichever file the language key happens to resolve to.
+      const fields = createFieldsForLanguageKey(lang);
+      createMutation.mutate(
+        {
+          mediaType,
+          mediaId: Number(mediaId),
+          content,
+          language: fields.language,
+          format,
+          forced: fields.forced,
+          hi: fields.hi,
+          arrInstanceId: scopedArrInstanceId,
+          overwrite: true,
+        },
+        {
+          onSuccess: (created) => {
+            setOverwriteConfirm(null);
+            finishCreate(`Overwritten ${lang} subtitle`, created.language);
+          },
+          onError: (err) => {
+            setOverwriteConfirm(null);
+            showNotification({
+              title: "Error",
+              message: `Overwrite failed: ${(err as Error).message}`,
+              color: "red",
+              autoClose: 5000,
+            });
+          },
+        },
+      );
+      return;
+    }
     saveMutation.mutate(
       {
         mediaType,
@@ -851,8 +970,11 @@ export default function EditorPage() {
     overwriteConfirm,
     mediaType,
     mediaId,
+    format,
     encoding,
+    createMutation,
     saveMutation,
+    finishCreate,
     navigate,
     editorPath,
     scopedArrInstanceId,
@@ -1878,9 +2000,9 @@ export default function EditorPage() {
                 }}
               >
                 {(() => {
-                  const sub = availableSubtitles.find(
-                    (s) => s.language === language,
-                  );
+                  const sub = fromEmbedded
+                    ? undefined
+                    : availableSubtitles.find((s) => s.language === language);
                   if (sub) {
                     const name =
                       (serverLanguages ?? []).find(
@@ -1895,6 +2017,9 @@ export default function EditorPage() {
                     (serverLanguages ?? []).find(
                       (l) => l.code2 === language?.split(":")[0],
                     )?.name ?? language;
+                  if (fromEmbedded && isNewSubtitle) {
+                    return `${name} (embedded track)`;
+                  }
                   return isNewSubtitle ? `${name} (new)` : name;
                 })()}
                 {" \u25BE"}
@@ -1915,7 +2040,7 @@ export default function EditorPage() {
                     key={s.language}
                     onClick={() => switchToLanguage(s.language)}
                     style={
-                      s.language === language
+                      s.language === language && !fromEmbedded
                         ? { background: "rgba(230,138,0,0.12)" }
                         : undefined
                     }
@@ -1949,7 +2074,17 @@ export default function EditorPage() {
           </Menu>
         </Breadcrumbs>
         <Group gap="xs">
-          {isNewSubtitle && (
+          {isNewSubtitle && fromEmbedded && (
+            <Badge
+              variant="light"
+              color="teal"
+              size="sm"
+              title={`Opened from the track inside the video file. Save writes ${data?.fileName ?? "a subtitle file"} next to the video; the video file is not changed.`}
+            >
+              FROM VIDEO FILE
+            </Badge>
+          )}
+          {isNewSubtitle && !fromEmbedded && (
             <Badge variant="light" color="yellow" size="sm">
               NEW
             </Badge>
