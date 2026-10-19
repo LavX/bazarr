@@ -248,7 +248,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
 
   const sharedLines: SummaryLine[] = [
     {
-      label: useSeerr ? "Seerr connected" : "Seerr skipped",
+      label: useSeerr ? "Requests connected" : "Requests not set up",
       done: useSeerr,
     },
     {

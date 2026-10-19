@@ -74,7 +74,7 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         },
         onError: () =>
           setSaveError(
-            "Bazarr+ could not save the Seerr connection. Try again, or add it later in Settings, Connections.",
+            "Bazarr+ could not save the request server. Try again, or add it later in Settings, Connections.",
           ),
       },
     );
@@ -92,21 +92,21 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         (result.success ? (
           <Alert
             color="green"
-            title={`Connected to ${result.application_title || "Seerr"}`}
+            title={`Connected to ${result.application_title || "your request server"}`}
           >
             {result.acting_user?.display_name
               ? `Requesting as ${result.acting_user.display_name}.`
               : "The server responded successfully."}
           </Alert>
         ) : result.error_code === "configuration" ? (
-          <Alert color="red" title="URL and API key required">
+          <Alert color="red" title="Server URL and API key required">
             Fill in both fields before testing.
           </Alert>
         ) : (
           <Alert color="red" title="Connection failed">
             {result.error_code === "rejected_key"
-              ? "Seerr rejected the API key."
-              : "Seerr did not respond. Check the URL and the API key."}
+              ? "The server rejected the API key."
+              : "The server did not respond. Check the URL and the API key."}
           </Alert>
         ))}
       {result?.success &&
@@ -115,11 +115,11 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
           result.acting_user.can_request_movie &&
           result.acting_user.can_request_tv
         ) && (
-          <Alert color="yellow" title="Limited Seerr permissions">
-            This Seerr user cannot request both movies and series. Requests from
-            Bazarr+ will be refused. In Seerr, under Settings, Users, give this
-            user the Request Movies and Request Series permissions, then test
-            again.
+          <Alert color="yellow" title="Limited request permissions">
+            This user cannot request both movies and series, so requests from
+            Bazarr+ will be refused. In Overseerr or Jellyseerr, under Settings,
+            Users, give this user the Request Movies and Request Series
+            permissions, then test again.
           </Alert>
         )}
       {test.isError && (
@@ -128,7 +128,7 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         </Alert>
       )}
       {saveError && (
-        <Alert color="red" title="Could not save Seerr">
+        <Alert color="red" title="Could not save the connection">
           {saveError}
         </Alert>
       )}
@@ -137,14 +137,14 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
 
   return (
     <StepLayout
-      title="Seerr"
-      description="Connect Seerr, Jellyseerr or Overseerr and the request button on a title works straight away. Requests are made with this API key, as the Seerr owner, and approved immediately."
+      title="Requests"
+      description="Connect Overseerr, or Jellyseerr if you use Jellyfin, and the request button on a title works straight away. Requests are made with this API key, as the server's owner, and approved immediately."
       aside={verdict}
       actions={
         <Stack gap={6}>
           {!filled && (
             <Text size="sm" c="dimmed" ta="right">
-              Enter a Seerr URL and an API key to test this connection.
+              Enter a server URL and an API key to test this connection.
             </Text>
           )}
           <Group justify="space-between">
@@ -170,7 +170,7 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
                   label says what is being saved. */}
               <Button onClick={handleContinue} loading={settings.isPending}>
                 {!filled
-                  ? "Continue without Seerr"
+                  ? "Continue without requests"
                   : verified
                     ? "Continue"
                     : "Save and continue anyway"}
@@ -181,16 +181,16 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       }
     >
       <TextInput
-        label="Seerr URL"
-        description="Full URL of your Seerr, Jellyseerr or Overseerr server"
-        placeholder="http://seerr:5055"
+        label="Server URL"
+        description="Full URL of your Overseerr or Jellyseerr server"
+        placeholder="http://overseerr:5055"
         value={url}
         onChange={(e) => setUrl(e.currentTarget.value)}
       />
 
       <PasswordInput
         label="API key"
-        description="Found in Seerr under Settings, General"
+        description="Found in Overseerr or Jellyseerr under Settings, General"
         placeholder="API key"
         autoComplete="new-password"
         value={apiKey}

@@ -93,8 +93,10 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     // On both paths. Connecting Seerr is what makes the request button on a
     // title work, and the reader with no arr instance is exactly the one who
     // reaches for it, so the Discover path is the last place to hide it.
+    // Labelled for what it gives the reader: "Seerr" is not one product but a
+    // family, and a newcomer knows the one they run by its own name.
     key: "seerr",
-    label: "Seerr",
+    label: "Requests",
     phase: "connect",
     optional: true,
     Component: SeerrStep,

@@ -253,7 +253,7 @@ describe("media server selection", () => {
 
     // The configure step is gone, so Continue moved on to Seerr.
     expect(
-      await screen.findByRole("heading", { name: /^seerr$/i }),
+      await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /^back$/i }));
@@ -293,7 +293,7 @@ describe("media server selection", () => {
     await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
 
     expect(
-      await screen.findByRole("heading", { name: /^seerr$/i }),
+      await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /^back$/i }));
     await screen.findByRole("heading", { name: /^media servers$/i });
@@ -374,7 +374,7 @@ describe("media server selection", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: /^seerr$/i }),
+      await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
     expect(creates).toHaveLength(1);
   });
@@ -423,7 +423,7 @@ describe("media server selection", () => {
     expect(
       screen.getByRole("heading", { name: /^emby$/i }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^seerr$/i })).toBeNull();
+    expect(screen.queryByRole("heading", { name: /^requests$/i })).toBeNull();
   });
 
   it("does not write the server twice when the reader comes back mid-save", async () => {
@@ -488,7 +488,7 @@ describe("media server selection", () => {
       screen.getByRole("button", { name: /continue without a server/i }),
     );
     expect(
-      await screen.findByRole("heading", { name: /^seerr$/i }),
+      await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
   });
 
@@ -522,7 +522,7 @@ describe("media server selection", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: /^seerr$/i }),
+      await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
     expect(creates).toHaveLength(1);
     expect(switchWriteAttempts).toBe(2);
@@ -561,7 +561,7 @@ describe("media server selection", () => {
     expect(
       screen.getByText(/master switch could not be turned on/i),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^seerr$/i })).toBeNull();
+    expect(screen.queryByRole("heading", { name: /^requests$/i })).toBeNull();
     expect(creates).toHaveLength(1);
     expect(settingsWrites).toEqual([]);
   });
@@ -578,7 +578,7 @@ describe("media server selection", () => {
     await connectJellyfin(user);
 
     expect(
-      await screen.findByRole("heading", { name: /^seerr$/i }),
+      await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
     expect(
       screen.queryByText(/master switch could not be turned on/i),
@@ -609,7 +609,7 @@ describe("media server selection", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: /^seerr$/i }),
+      await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
     expect(creates).toHaveLength(1);
     // The refused first write and the one retry, and nothing after the retry
@@ -639,7 +639,7 @@ describe("media server selection", () => {
       screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
     );
 
-    await screen.findByRole("heading", { name: /^seerr$/i });
+    await screen.findByRole("heading", { name: /^requests$/i });
     expect(creates).toHaveLength(1);
     expect(settingsWrites).toEqual([
       { "settings-general-use_jellyfin": "true" },

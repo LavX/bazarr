@@ -73,7 +73,7 @@ test.describe(
         await next.click();
       }
       expect(seen.sort()).toEqual(["Emby", "Jellyfin", "Jellyfin 2"]);
-      await expect(stepHeading(page, "Seerr")).toBeVisible();
+      await expect(stepHeading(page, "Requests")).toBeVisible();
       expect(await listMediaServers(api)).toEqual([]);
     });
 
@@ -105,7 +105,7 @@ test.describe(
         }
         expect(await listMediaServers(api)).toEqual([]);
       }
-      await expect(stepHeading(page, "Seerr")).toBeVisible();
+      await expect(stepHeading(page, "Requests")).toBeVisible();
     });
 
     test("Emby with a failed test is not saved on Continue", async ({

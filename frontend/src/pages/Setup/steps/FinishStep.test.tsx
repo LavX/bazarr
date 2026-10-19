@@ -392,11 +392,11 @@ describe("FinishStep", () => {
 
     customRender(<FinishStep onNext={vi.fn()} />);
 
-    // No line about a step this user was never shown. Seerr is on both paths,
-    // so it stays.
+    // No line about a step this user was never shown. Requests are on both
+    // paths, so they stay.
     expect(screen.queryByText(/sonarr/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/plex media server/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/seerr skipped/i)).toBeInTheDocument();
+    expect(screen.getByText(/requests not set up/i)).toBeInTheDocument();
     expect(
       screen.getByText(/search for any film or series/i),
     ).toBeInTheDocument();
