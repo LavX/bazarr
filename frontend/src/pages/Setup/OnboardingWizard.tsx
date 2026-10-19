@@ -422,14 +422,17 @@ const OnboardingWizardBody: FunctionComponent = () => {
         <main ref={mainRef} className={styles.main} tabIndex={-1}>
           {/* A progressbar's children are presentational, so the dots and their
             labels are drawn for the eye and the value text carries all of it
-            for everyone else. */}
+            for everyone else. The value counts the phases already done, from
+            0: Orca ignores the value text and reads value / (max - min) as a
+            percentage, which from a minimum of 1 told the first screen it was
+            33 percent through. */}
           <div
             className={styles.rail}
             role="progressbar"
             aria-label="Setup progress"
-            aria-valuemin={1}
+            aria-valuemin={0}
             aria-valuemax={WIZARD_PHASES.length}
-            aria-valuenow={phaseIndex + 1}
+            aria-valuenow={phaseIndex}
             aria-valuetext={`Part ${phaseIndex + 1} of ${WIZARD_PHASES.length}: ${progressText}`}
           >
             {WIZARD_PHASES.map((phase, position) => {

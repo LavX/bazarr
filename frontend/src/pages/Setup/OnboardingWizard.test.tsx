@@ -569,9 +569,11 @@ describe("OnboardingWizardView", () => {
 
     const rail = screen.getByRole("progressbar", { name: "Setup progress" });
     expect(rail).not.toHaveAttribute("aria-hidden");
-    expect(rail).toHaveAttribute("aria-valuemin", "1");
+    // Phases done, from 0, so a screen reader that reads the value as a
+    // percentage says 0 percent on the first screen, not 33.
+    expect(rail).toHaveAttribute("aria-valuemin", "0");
     expect(rail).toHaveAttribute("aria-valuemax", "4");
-    expect(rail).toHaveAttribute("aria-valuenow", "1");
+    expect(rail).toHaveAttribute("aria-valuenow", "0");
     expect(rail).toHaveAttribute(
       "aria-valuetext",
       "Part 1 of 4: Getting started, 1 of 2",
@@ -583,7 +585,7 @@ describe("OnboardingWizardView", () => {
     await answerIntent(user, /sonarr, radarr or sportarr/i);
     await screen.findByRole("heading", { name: /^sonarr$/i });
 
-    expect(rail).toHaveAttribute("aria-valuenow", "2");
+    expect(rail).toHaveAttribute("aria-valuenow", "1");
     expect(rail).toHaveAttribute(
       "aria-valuetext",
       "Part 2 of 4: Connect, 1 of 5",
@@ -1003,7 +1005,7 @@ describe("rail numerals", () => {
   it("marks the dot of the phase the reader is in", () => {
     customRender(<OnboardingWizardView />);
     const rail = screen.getByRole("progressbar", { name: "Setup progress" });
-    expect(rail).toHaveAttribute("aria-valuenow", "1");
+    expect(rail).toHaveAttribute("aria-valuenow", "0");
     // The first dot is the active one, and only it.
     const dots = within(rail).getAllByText(/^[1-4]$/);
     expect(dots[0]).toHaveClass(wizardStyles.dotActive);
