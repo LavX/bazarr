@@ -620,10 +620,9 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
           onChange={(e) => {
             const value = e.currentTarget.value;
             clearError("ip");
-            // Emptied, the note is about an address that is no longer there.
-            if (value.trim() === "") {
-              setSplitNote(null);
-            }
+            // Any hand edit makes the note about an address that is no longer
+            // the one on screen; a paste that splits writes a new one below.
+            setSplitNote(null);
             if (pasted.current) {
               pasted.current = false;
               if (applySplit(value)) {

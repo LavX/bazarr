@@ -297,6 +297,26 @@ describe("ArrStep", () => {
     );
   });
 
+  it("drops the split note on any hand edit of the address", async () => {
+    // Select-all and retype kept the note about the pasted URL on screen
+    // beside an address it no longer described.
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(screen.getByLabelText(/^address/i));
+    await user.paste("http://sonarr:8989");
+    expect(
+      screen.getByRole("alert", { name: /moved into the right fields/i }),
+    ).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/^address/i), "2");
+
+    expect(
+      screen.queryByRole("alert", { name: /moved into the right fields/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("sonarr2");
+  });
+
   it("drops the split note once the address is emptied", async () => {
     const user = userEvent.setup();
     customRender(<ArrStep kind="sonarr" onNext={onNext} />);
