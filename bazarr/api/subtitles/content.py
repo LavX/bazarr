@@ -1330,6 +1330,10 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
     forced = bool(data.get('forced', False))
     hi = bool(data.get('hi', False))
 
+    # Only a JSON true replaces a file: the editor sends it after the user
+    # confirmed the overwrite dialog, and a string "false" must not count.
+    overwrite = data.get('overwrite') is True
+
     if forced and hi:
         return 'A subtitle cannot be both forced and HI', 400
 
@@ -1377,22 +1381,15 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
     video_path = (sports_operation[3] if sports_operation is not None else
                   path_mappings.path_replace_instance(row.path, arr_instance_id, media_type))
 
-    # Build the subtitle filename. `language` was already validated against
-    # r'^[a-zA-Z]{2,3}$' above, `ext` comes from the FORMAT_TO_EXT whitelist,
-    # `hi`/`forced` are booleans, so the source string cannot contain path
-    # separators. _subtitle_filename runs `secure_filename` over that
-    # request-derived suffix, which is the CodeQL-recognised sanitiser for
-    # py/path-injection; it deliberately does NOT run over `video_name`, which
-    # comes off the media row and must keep its spaces to stay matchable. The
-    # directory composition uses `safe_join`, and the normpath containment
+    # Build the subtitle filename, the one a download would get. `language`
+    # was already validated against r'^[a-zA-Z]{2,3}$' above, `ext` comes from
+    # the FORMAT_TO_EXT whitelist, `hi`/`forced` are booleans, so the name
+    # cannot contain path separators: a known language is spelled by the
+    # language table, and _subtitle_filename runs `secure_filename` over any
+    # other code. Neither touches `video_name`, which comes off the media row
+    # and must keep its spaces to stay matchable. The normpath containment
     # below anchors the result.
-    video_name = os.path.splitext(os.path.basename(video_path))[0]
-    suffix = language
-    if hi:
-        suffix += '.hi'
-    elif forced:
-        suffix += '.forced'
-    subtitle_filename = _subtitle_filename(video_name, suffix, ext)
+    subtitle_filename = new_subtitle_filename(video_path, language, hi, forced, ext)
 
     # Determine target directory
     target_folder = get_target_folder(video_path)
@@ -1413,10 +1410,16 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
     if len(encoded) > MAX_FILE_SIZE:
         return f'Content too large ({len(encoded)} bytes, max {MAX_FILE_SIZE})', 413
 
-    # Check and create under the same mutation lock as replacements.
+    # Check and create under the same mutation lock as replacements. A
+    # confirmed overwrite replaces exactly this file; `replaced` is filled by
+    # the write with whether the file was there under its own lock, so the
+    # success code follows the state the write saw, not a check taken before
+    # it: a file that appeared or vanished in the gap cannot mislabel it.
+    replaced = []
     try:
         write_new_subtitle(video_path, [(subtitle_path, encoded)], media_type, arr_instance_id,
-                           publication_guard=sports_operation[2] if sports_operation is not None else None)
+                           publication_guard=sports_operation[2] if sports_operation is not None else None,
+                           replace=overwrite, replaced=replaced)
     except SubtitleFileExists:
         return 'Subtitle file already exists', 409
     except FileNotFoundError:
@@ -1458,7 +1461,8 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
     elif forced:
         language_with_modifiers += ':forced'
 
-    return {'path': subtitle_path, 'language': language_with_modifiers}, 201
+    return ({'path': subtitle_path, 'language': language_with_modifiers},
+            200 if replaced and replaced[0] else 201)
 
 
 @api_ns_subtitle_content.route('episodes/<int:sonarrEpisodeId>/subtitles')

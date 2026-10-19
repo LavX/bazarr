@@ -168,7 +168,7 @@ def apply_subtitle_chmod(path):
 
 
 def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *, operation='edit',
-                       publication_guard=None, also_check=()):
+                       publication_guard=None, also_check=(), replace=False, replaced=None):
     """Write each ``(path, data)`` of ``outputs`` as a new file and publish it.
 
     ``data`` is the file's bytes, or the path of a file to copy. Raises
@@ -177,10 +177,22 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
     while the file was being written. ``publication_guard`` is the sports
     owned boundary (called with the first path); the other media types pass
     None. Returns the written paths, first one first.
+
+    ``replace`` lets the paths themselves be replaced, never ``also_check``.
+    Only the editor passes it, for its one file, after the user confirmed the
+    overwrite dialog; Extract to file and OCR never do.
+
+    ``replaced``, when given, is a one-element list the write fills with
+    whether the first path was already a file under its own lock. The editor's
+    create route reads it to answer 200 or 201 from the state the write saw,
+    not from a check taken before the lock. It is filled before the write, so
+    a caller must not read it after a raised SubtitleFileExists.
     """
     paths = [path for path, _data in outputs]
     with subtitle_write_locks(video_path, *paths):
-        for path in (*paths, *also_check):
+        if replaced is not None:
+            replaced.append(os.path.isfile(paths[0]))
+        for path in (*(() if replace else paths), *also_check):
             if os.path.isfile(path):
                 raise SubtitleFileExists(path)
         with subtitle_mutation(video_path, *paths):
@@ -190,9 +202,9 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
                 try:
                     for path, data in outputs:
                         if isinstance(data, (bytes, bytearray)):
-                            write_bytes_atomically(path, data, replace=False)
+                            write_bytes_atomically(path, data, replace=replace)
                         else:
-                            copy_file_atomically(path, data, replace=False)
+                            copy_file_atomically(path, data, replace=replace)
                         written.append(path)
                 except BaseException:
                     # A pair is published whole or not at all.

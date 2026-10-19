@@ -452,3 +452,158 @@ def test_a_plain_download_still_streams_the_file(library):
     response.direct_passthrough = False
 
     assert response.get_data(as_text=True) == FILE_TEXT
+
+
+# ---------------------------------------------------------------- create route
+
+
+@pytest.fixture
+def create(library, monkeypatch):
+    from api.subtitles import content
+    from subtitles import new_subtitle
+
+    reindexed = []
+    monkeypatch.setattr(content, "store_subtitles_movie",
+                        lambda *args, **kwargs: reindexed.append(kwargs.get("arr_instance_id")))
+    monkeypatch.setattr(content, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(new_subtitle, "publication_callback", lambda *args: (lambda path: None))
+
+    def post(body):
+        with Flask(__name__).test_request_context("/?arr_instance_id=1", method="POST", json=body):
+            return content.MovieSubtitleCreate.post.__wrapped__(content.MovieSubtitleCreate(), 30)
+
+    return post, reindexed
+
+
+def test_create_still_refuses_an_existing_file(library, create):
+    _session, root, _calls = library
+    post, reindexed = create
+
+    result = post({"content": TRACK_TEXT, "language": "en", "format": "srt"})
+
+    assert result == ("Subtitle file already exists", 409)
+    assert (root / "instance1" / "Film" / "Film.en.srt").read_text() == FILE_TEXT
+    assert reindexed == []
+
+
+@pytest.mark.parametrize("flag", ["true", 1, "True"])
+def test_only_a_json_true_overwrites(library, create, flag):
+    _session, root, _calls = library
+    post, _reindexed = create
+
+    result = post({"content": TRACK_TEXT, "language": "en", "format": "srt", "overwrite": flag})
+
+    assert result[1] == 409
+    assert (root / "instance1" / "Film" / "Film.en.srt").read_text() == FILE_TEXT
+
+
+def test_a_confirmed_overwrite_replaces_exactly_the_named_file(library, create):
+    _session, root, _calls = library
+    post, reindexed = create
+    other = root / "instance1" / "Film" / "Film.en.ass"
+    other.write_text("[Script Info]\n")
+
+    body, status = post({"content": TRACK_TEXT, "language": "en", "format": "srt",
+                         "overwrite": True})
+
+    assert status == 200
+    assert body == {"path": str(root / "instance1" / "Film" / "Film.en.srt"), "language": "en"}
+    assert (root / "instance1" / "Film" / "Film.en.srt").read_text() == TRACK_TEXT
+    assert other.read_text() == "[Script Info]\n"
+    assert reindexed == [1]
+
+
+def test_the_success_code_comes_from_the_state_the_write_saw(library, create, monkeypatch):
+    """The 200 or 201 is decided under the write's lock, not by a check taken
+    before it: a file that appears or vanishes in between gets the true code."""
+    from api.subtitles import content
+    from subtitles import new_subtitle
+
+    _session, root, _calls = library
+    post, _reindexed = create
+    film = root / "instance1" / "Film"
+    real = new_subtitle.write_new_subtitle
+
+    def appeared(*args, **kwargs):
+        (film / "Film.en.hi.srt").write_text(FILE_TEXT)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(content, "write_new_subtitle", appeared)
+    _body, status = post({"content": TRACK_TEXT, "language": "en", "hi": True, "format": "srt",
+                          "overwrite": True})
+
+    assert status == 200
+    assert (film / "Film.en.hi.srt").read_text() == TRACK_TEXT
+
+    def vanished(*args, **kwargs):
+        (film / "Film.en.srt").unlink()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(content, "write_new_subtitle", vanished)
+    _body, status = post({"content": TRACK_TEXT, "language": "en", "format": "srt",
+                          "overwrite": True})
+
+    assert status == 201
+    assert (film / "Film.en.srt").read_text() == TRACK_TEXT
+
+
+def test_a_new_file_still_answers_201(library, create):
+    _session, root, _calls = library
+    post, _reindexed = create
+
+    body, status = post({"content": TRACK_TEXT, "language": "en", "hi": True, "format": "srt",
+                         "overwrite": True})
+
+    assert status == 201
+    assert body["language"] == "en:hi"
+    assert (root / "instance1" / "Film" / "Film.en.hi.srt").read_text() == TRACK_TEXT
+
+
+def test_save_names_the_file_the_way_download_does(library, create, monkeypatch):
+    """The HI Extension setting names the saved file, as it names the
+    download of the same track and a file Extract to file writes."""
+    _session, root, _calls = library
+    post, _reindexed = create
+    monkeypatch.setenv("SZ_HI_EXTENSION", "sdh")
+
+    body, status = post({"content": TRACK_TEXT, "language": "en", "hi": True, "format": "srt"})
+
+    assert status == 201
+    assert body == {"path": str(root / "instance1" / "Film" / "Film.en.sdh.srt"), "language": "en:hi"}
+    assert not (root / "instance1" / "Film" / "Film.en.hi.srt").exists()
+
+
+def test_a_code_the_language_table_does_not_know_keeps_its_plain_name(library, create):
+    _session, root, _calls = library
+    post, _reindexed = create
+
+    body, status = post({"content": TRACK_TEXT, "language": "xx", "forced": True, "format": "srt"})
+
+    assert status == 201
+    assert body["path"] == str(root / "instance1" / "Film" / "Film.xx.forced.srt")
+
+
+def test_a_sports_save_overwrites_only_when_confirmed(sports_event, monkeypatch):
+    """The create route's sports branch runs inside the manual operation, and
+    a confirmed overwrite publishes through the same owned boundary."""
+    from api.subtitles import content
+    from subtitles import new_subtitle
+
+    _session, root, _config = sports_event
+    monkeypatch.setattr(content, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(new_subtitle, "publication_callback", lambda *args: (lambda path: None))
+    target = root / "1" / "event.fr.srt"
+
+    def post(body):
+        with Flask(__name__).test_request_context("/?arr_instance_id=1", method="POST", json=body):
+            return content.SportsEventSubtitleCreate.post.__wrapped__(
+                content.SportsEventSubtitleCreate(), 61)
+
+    refused = post({"content": TRACK_TEXT, "language": "fr", "format": "srt"})
+    body, status = post({"content": TRACK_TEXT, "language": "fr", "format": "srt",
+                         "overwrite": True})
+
+    assert refused == ("Subtitle file already exists", 409)
+    assert status == 200
+    assert body["language"] == "fr"
+    assert target.read_text() == TRACK_TEXT
