@@ -20,8 +20,8 @@ from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
 from subtitles.indexer.entries import embedded_entry
 from subtitles.indexer.utils import add_sync_engine_outputs, add_combined_outputs, guess_external_subtitles, \
-    get_external_subtitles_path, normalize_subtitle_language_variant, subtitle_language_with_sync_modifier, \
-    subtitle_language_with_combined_modifier
+    get_external_subtitles_path, kept_embedded_entries, normalize_subtitle_language_variant, \
+    subtitle_language_with_sync_modifier, subtitle_language_with_combined_modifier
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.utils import _get_scores
 from radarr.history import history_log_movie
@@ -66,7 +66,8 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
             item = database.execute(
-                scoped(select(TableMovies.id, TableMovies.movie_file_id, TableMovies.file_size)
+                scoped(select(TableMovies.id, TableMovies.movie_file_id, TableMovies.file_size,
+                              TableMovies.subtitles)
                        .where(TableMovies.path == original_path),
                        TableMovies.arr_instance_id, owner_instance_id)) \
                 .first()
@@ -111,6 +112,11 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                     logging.exception(
                         f"BAZARR error when trying to analyze this {os.path.splitext(reversed_path)[1]} file: "  # noqa: G004
                         f"{reversed_path}")
+                    # Keep the tracks the last good read stored, so a failed
+                    # read does not make every embedded language wanted again.
+                    # They were recorded in history then, so not again now.
+                    actual_subtitles = kept_embedded_entries(item.subtitles, hidden)
+                    embedded_languages = []
 
         destination = os.path.join(get_target_folder(reversed_path, create=False) or os.path.dirname(reversed_path),
                                    '.destination')

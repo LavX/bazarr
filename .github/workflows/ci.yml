@@ -819,6 +819,7 @@ jobs:
             tests/bazarr/test_embedded_track_hidden_indexer.py \
             tests/bazarr/test_embedded_track_hidden_api.py \
             tests/bazarr/test_embedded_hidden_codec.py \
+            tests/bazarr/test_embedded_read_failure.py \
             tests/bazarr/test_upstream_db_adoption.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
