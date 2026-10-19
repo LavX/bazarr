@@ -163,7 +163,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     <StepLayout
       title="Subtitle languages"
       layout="stacked"
-      description="Pick the languages you want subtitles in. Bazarr only searches for languages that belong to a profile, so we will turn your selection into a default profile that gets applied to every show and movie."
+      description="Pick the languages you want subtitles in. Bazarr+ only searches for languages that belong to a profile, so your selection becomes the default profile for shows and movies synced from now on. It does not change anything already in your library: to give those the profile, select them in Series or Movies and use Change Profile."
       actions={
         <Stack gap="sm">
           {saveFailed && (
@@ -202,7 +202,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       )}
       {alreadyConfigured ? (
         <Alert color="green" title="Languages already configured">
-          A language profile already exists, so we will keep it as-is.
+          A language profile already exists, so setup keeps it as it is.
         </Alert>
       ) : (
         <MultiSelect

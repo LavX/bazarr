@@ -48,7 +48,7 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     // leave the rail with nothing to filter on, so it has no skip; the answer
     // itself commits to nothing and is changeable in Settings.
     requiredReason:
-      "This only picks which steps we show you. Nothing here is locked in.",
+      "This only picks which steps come next. Nothing here is locked in.",
     Component: IntentStep,
   },
   {

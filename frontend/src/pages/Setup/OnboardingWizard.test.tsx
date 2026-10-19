@@ -475,6 +475,51 @@ describe("OnboardingWizardView", () => {
     ).toBeInTheDocument();
   });
 
+  it('never has a "we" do the work on Welcome or the intent question', async () => {
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    expect(
+      screen.getByText(/setup only asks for what that needs/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\bwe\b/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await screen.findByRole("heading", { name: /what do you want bazarr/i });
+    expect(screen.queryByText(/\bwe\b/i)).not.toBeInTheDocument();
+  });
+
+  it("asks the intent question on one axis and says what each answer changes", async () => {
+    // One answer said what the reader owned and the other what they wanted,
+    // so a Sonarr user recognised themselves in both, and the helper never
+    // said which steps the answer decided.
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+
+    expect(
+      await screen.findByRole("radio", {
+        name: "Fetch subtitles for my Sonarr, Radarr or Sportarr library",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", {
+        name: "Find subtitles for anything, on demand",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /only decides whether setup asks for sonarr, radarr and sportarr/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/setup asks you to connect them next/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/leaves out the sonarr, radarr and sportarr steps/i),
+    ).toBeInTheDocument();
+  });
+
   it("names the page with one h1 and puts the step in a main landmark", () => {
     customRender(<OnboardingWizardView />);
 

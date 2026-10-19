@@ -11,21 +11,22 @@ interface PathChoice {
   description: string;
 }
 
-// Two honest paths, not a form. The wording is what the product actually does
-// in each case, so a user can recognise themselves in one of them without
-// knowing what an "arr" is.
+// Two honest paths, not a form. Both answer the heading's question, what
+// Bazarr+ should do, on one axis: one said what the reader owned and the other
+// what they wanted, so a Sonarr user recognised themselves in both. Each says
+// what it changes about the steps that follow, at the moment of choosing.
 const CHOICES: PathChoice[] = [
   {
     value: "library",
-    title: "I run Sonarr, Radarr or Sportarr",
+    title: "Fetch subtitles for my Sonarr, Radarr or Sportarr library",
     description:
-      "Connect them and Bazarr+ fetches subtitles for everything in your library, automatically.",
+      "Bazarr+ fetches subtitles for everything they manage, automatically, and Discover still works for anything else. Setup asks you to connect them next.",
   },
   {
     value: "discover",
-    title: "I want to find subtitles for anything",
+    title: "Find subtitles for anything, on demand",
     description:
-      "No library needed. Search any title, preview the subtitles and download them to this device.",
+      "No library needed. Search any title, preview the subtitles and download them to this device. Setup leaves out the Sonarr, Radarr and Sportarr steps.",
   },
 ];
 
@@ -41,7 +42,7 @@ const IntentStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     <StepLayout
       title="What do you want Bazarr+ to do for you?"
       layout="stacked"
-      description="This only decides which steps we walk you through. Whatever you pick, everything else stays available in Settings, and you can connect the rest at any time."
+      description="Your answer only decides whether setup asks for Sonarr, Radarr and Sportarr. Media servers, requests, languages, providers and translation come either way, and you can connect anything later in Settings."
       actions={
         <Group justify="space-between">
           <Group gap="sm">

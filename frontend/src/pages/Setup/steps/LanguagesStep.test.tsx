@@ -215,6 +215,17 @@ describe("LanguagesStep", () => {
     await waitFor(() => expect(onNext).toHaveBeenCalled());
   });
 
+  it("says the profile only reaches what is synced from now on", () => {
+    // The default profile does not retro-apply, and the step that creates it
+    // runs after the arr steps have already started syncing.
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    expect(screen.getByText(/synced from now on/i)).toHaveTextContent(
+      /select them in series or movies and use change profile/i,
+    );
+    expect(screen.queryByText(/\bwe\b/i)).not.toBeInTheDocument();
+  });
+
   it("says so when the profile cannot be saved", async () => {
     // A restarting or unreachable Bazarr+ is kept out of the toasts, so the
     // step is the only place a failed write can be reported.
