@@ -356,6 +356,16 @@ describe("ProviderInstallStage", () => {
     await waitFor(() => {
       expect(refetchCatalog).toHaveBeenCalled();
     });
+    // The refresh's own failure is said, not swallowed for the re-read, and
+    // the client's toast for it is off because it is said here.
+    expect(mockedRefreshCatalog).toHaveBeenCalledWith({ inlineErrors: true });
+    expect(
+      screen.getByRole("alert", {
+        name: /could not load the provider catalog/i,
+      }),
+    ).toHaveTextContent(
+      "The retry could not refresh the catalog either: refresh refused",
+    );
   });
 
   it("names the search box for a screen reader", () => {

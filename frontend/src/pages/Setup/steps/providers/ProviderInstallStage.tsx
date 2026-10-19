@@ -184,7 +184,12 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   } = useProviderHubCatalog();
   // A failed install is listed with its reason in the outcomes.
   const install = useProviderHubInstall({ inlineErrors: true });
-  const refreshCatalog = useProviderHubRefreshCatalog();
+  // A failed refresh is said in the catalog alert, so the client's toast for
+  // it stays away.
+  const refreshCatalog = useProviderHubRefreshCatalog({ inlineErrors: true });
+  // Why the last Retry's refresh did not get through, said beside the
+  // catalog's own reason. It used to be dropped for a plain re-read.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   // A refused restart is said on the step, so the client's toast stays away.
   const { restart } = useSystem({ inlineErrors: true });
   const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
@@ -310,13 +315,18 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   // many times the button is pressed. A refresh is what tries the source again,
   // and it invalidates the catalog itself on the way back.
   const handleCatalogRetry = useCallback(async () => {
+    setRefreshError(null);
     if (!catalogFailed) {
       try {
         await refreshCatalog.mutateAsync();
         return;
-      } catch {
-        // The refresh itself did not get through. Fall back to re-reading what
-        // the backend already has, which is what this button used to do.
+      } catch (reason) {
+        // The refresh itself did not get through. Say so, then fall back to
+        // re-reading what the backend already has, which is what this button
+        // used to do in silence.
+        setRefreshError(
+          describeError(reason, "Bazarr+ gave no reason for the refresh."),
+        );
       }
     }
     await refetchCatalog();
@@ -779,6 +789,11 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
                 : (sourceError ??
                   "Bazarr+ could not read the provider catalog and gave no reason.")}
             </Text>
+            {refreshError !== null && (
+              <Text size="sm">
+                The retry could not refresh the catalog either: {refreshError}
+              </Text>
+            )}
             <Group gap="sm">
               <Button
                 variant="default"

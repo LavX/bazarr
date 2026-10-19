@@ -32,14 +32,20 @@ export function useProviderHubJobs() {
   });
 }
 
-export function useProviderHubRefreshCatalog() {
+export function useProviderHubRefreshCatalog({
+  inlineErrors = false,
+}: {
+  // The caller reports a failed refresh itself, so the client's toast for
+  // the refresh request stays away. The job poll after it is not covered.
+  inlineErrors?: boolean;
+} = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "refresh-catalog"],
-    mutationFn: async () => {
+    mutationFn: inlineWhen(inlineErrors, async () => {
       const { job_id: jobId } = await api.providerHub.refreshCatalog();
       await waitForJob(client, jobId);
-    },
+    }),
     // Settled, not success: a refresh that failed for one source still
     // refreshed the others and recorded the failure on the source.
     onSettled: () => {
