@@ -123,6 +123,15 @@ function describeError(reason: unknown, fallback: string): string {
   return fallback;
 }
 
+// Whether a failed restart request was refused by a running backend, rather
+// than cut off by the restart it asked for: a dropped connection has no
+// response, and a proxy in front of a restarting backend answers 502 to 504.
+function restartRefused(error: unknown): boolean {
+  const status =
+    error instanceof AxiosError ? error.response?.status : undefined;
+  return status !== undefined && (status < 502 || status > 504);
+}
+
 function describeInstallError(reason: unknown): string {
   return describeError(
     reason,
@@ -173,15 +182,20 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     isFetching: catalogFetching,
     refetch: refetchCatalog,
   } = useProviderHubCatalog();
-  const install = useProviderHubInstall();
+  // A failed install is listed with its reason in the outcomes.
+  const install = useProviderHubInstall({ inlineErrors: true });
   const refreshCatalog = useProviderHubRefreshCatalog();
-  const { restart } = useSystem();
+  // A refused restart is said on the step, so the client's toast stays away.
+  const { restart } = useSystem({ inlineErrors: true });
   const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
   const { data: systemSettings } = useSystemSettings();
 
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [restarting, setRestarting] = useState(false);
+  // Why Bazarr+ refused the restart, when it did. The installs are staged and
+  // load on the next restart, whoever starts it.
+  const [restartError, setRestartError] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   // Which control started the run. Both install buttons used to read
   // `installing`, so pressing either spun both and neither said what it was
@@ -352,15 +366,35 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     }
     restartStartedRef.current = true;
     setCountdown(null);
+    setRestartError(null);
     setRestarting(true);
     onInstalledNeedsRestart();
+    // Some restart paths resolve before the connection drops, so the poll
+    // starts regardless, and first: a refusal below has a poll to stop.
+    startHealthPoll();
     restart(undefined, {
       onSuccess: () => {
         startHealthPoll();
       },
+      onError: (error) => {
+        // A dropped connection or a gateway error is the restart itself, so
+        // the poll goes on. An answer that is not one of those is a refusal:
+        // the backend is still up, the poll would find it at once and reload
+        // into setup as if the restart had happened.
+        if (!restartRefused(error)) {
+          return;
+        }
+        if (pollRef.current !== null) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+        restartStartedRef.current = false;
+        setRestarting(false);
+        setRestartError(
+          describeError(error, "It answered without saying why."),
+        );
+      },
     });
-    // Some restart paths resolve before the connection drops; poll regardless.
-    startHealthPoll();
   }, [onInstalledNeedsRestart, restart, startHealthPoll]);
 
   // Enables `ids` without dropping the providers already enabled, which on a
@@ -556,6 +590,20 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   // failure to act on here: it names the one thing the button promised and
   // could not do, and where to do it instead. It is rendered in both of the
   // views a run can end on, because a clean run never shows the outcome list.
+  const restartFailure =
+    restartError === null ? null : (
+      <Alert color="red" title="Bazarr+ did not restart">
+        <Stack gap={4}>
+          <Text size="sm">{restartError}</Text>
+          <Text size="sm">
+            The installed providers are staged and load on the next restart.
+            Press Restart now to try again, or restart Bazarr+ from System,
+            Status.
+          </Text>
+        </Stack>
+      </Alert>
+    );
+
   const enableFailure =
     enableError === null ? null : (
       <Alert color="yellow" title="Installed, but not enabled">
@@ -607,6 +655,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
           <VisuallyHidden role="status">{announcement}</VisuallyHidden>
         </Stack>
 
+        {restartFailure}
         {enableFailure}
 
         <List spacing={4} center className={styles.outcomes}>
