@@ -93,10 +93,11 @@ function savedLine(
 /**
  * Final onboarding step. Finish marks setup complete and routes the user into
  * the app: a Discover-path user lands on /discover, the page they installed
- * Bazarr+ for, and a library user lands on the homepage with their first scan
- * already running.
+ * Bazarr+ for, and a library user lands on the homepage. Pressing Finish only
+ * writes setup_complete: the library sync began when the instance was created,
+ * steps earlier, so nothing here claims to start it.
  *
- * The recap and the "what you skipped" list are derived from live settings,
+ * The recap and the lists under it are derived from live settings,
  * arr instances and language profiles, which is exactly the state
  * discover/summary.py reads to decide whether an install is a first run. Both
  * views therefore answer from the same facts and cannot disagree about what was
@@ -277,36 +278,42 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
     ? [...mediaServerLines, ...sharedLines]
     : [...libraryLines, ...mediaServerLines, ...sharedLines];
 
-  // What was left undone, and the page that finishes it. Named rather than
-  // linked: setup is not marked complete until Finish is pressed, so a link
-  // followed from here would be bounced straight back to the wizard. Only
-  // things the user actually walked past appear, so a Discover user is never
-  // told they skipped a step nobody showed them.
-  const skipped: SkippedLine[] = [];
+  // Where each thing lives, named rather than linked: setup is not marked
+  // complete until Finish is pressed, so a link followed from here would be
+  // bounced straight back to the wizard. Only things the user actually walked
+  // past appear, so a Discover user is never told about a step nobody showed
+  // them.
+  //
+  // The one omission that stops subtitles from arriving is said as one. The
+  // rest are offers: a reader who did not want requests or AI translation
+  // simply did not want them, and ending setup on a list of their failures was
+  // the wrong last word.
+  const blockers: SkippedLine[] = [];
   if (!discoverPath && instanceCount === 0) {
-    skipped.push({
-      label: "No Sonarr, Radarr or Sportarr instance is connected",
+    blockers.push({
+      label:
+        "No Sonarr, Radarr or Sportarr instance is connected, so there is no library to fetch subtitles for",
       where: "Settings, Connections",
     });
   }
+  const extras: SkippedLine[] = [];
   // Not gated on the path, for the same reason the recap is not: both paths
   // are offered the picker now.
   if (mediaServerCount === 0) {
-    skipped.push({
-      label:
-        "No media server is connected, so nothing is refreshed after a download",
+    extras.push({
+      label: "Refresh a media server after each download",
       where: "Settings, Connections",
     });
   }
   if (!useSeerr) {
-    skipped.push({
-      label: "Seerr is not connected, so requests are unavailable",
+    extras.push({
+      label: "Request titles through Overseerr or Jellyseerr",
       where: "Settings, Connections",
     });
   }
   if (!translatorReady) {
-    skipped.push({
-      label: "AI translation has no API key yet",
+    extras.push({
+      label: "Translate subtitles with AI",
       where: "Settings, Translator",
     });
   }
@@ -347,19 +354,33 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
         discoverPath
           ? "Search for any film or series, preview what is available and download it straight to this device. No library required."
           : instanceCount > 0
-            ? "Your first library scan starts now, and Bazarr+ will begin looking for the subtitles it is missing."
+            ? "Bazarr+ started syncing your library when you connected it, and it keeps looking for the subtitles it is missing."
             : "Nothing is connected yet, so Bazarr+ has no library to scan. Discover still works, and you can connect an instance whenever you like."
       }
       aside={
         <Stack gap="md">
-          {skipped.length > 0 && (
+          {blockers.length > 0 && (
             <Stack gap="xs">
-              <Text fw={600}>What you left for later</Text>
+              <Text fw={600}>Still needed for subtitles</Text>
               <List spacing="xs" size="sm">
-                {skipped.map((item) => (
+                {blockers.map((item) => (
+                  <List.Item key={item.label}>
+                    <Text size="sm">
+                      {item.label}. You will find it under {item.where}.
+                    </Text>
+                  </List.Item>
+                ))}
+              </List>
+            </Stack>
+          )}
+          {extras.length > 0 && (
+            <Stack gap="xs">
+              <Text fw={600}>Also available when you want it</Text>
+              <List spacing="xs" size="sm">
+                {extras.map((item) => (
                   <List.Item key={item.label}>
                     <Text size="sm" c="dimmed">
-                      {item.label}. You will find it under {item.where}.
+                      {item.label}, under {item.where}.
                     </Text>
                   </List.Item>
                 ))}
