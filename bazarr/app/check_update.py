@@ -92,6 +92,9 @@ def _release_tags_file():
 def _advertised_tags(repo):
     """The tag shas the git smart-HTTP ref advertisement of ``repo`` lists.
 
+    An annotated tag keeps its tag object's sha rather than the peeled commit,
+    so a tag recreated on the same commit is still a movement.
+
     The advertisement is answered outside the GitHub REST quota, so reading it
     on every check costs nothing the releases API would. Returns None when it
     could not be read or parsed; the caller then fetches the releases list as
@@ -101,7 +104,7 @@ def _advertised_tags(repo):
         from provider_hub.service import _fetch_git_ref_advertisement, _parse_git_ref_advertisement
 
         owner, name = repo.split('/', 1)
-        refs = _parse_git_ref_advertisement(_fetch_git_ref_advertisement(owner, name))
+        refs = _parse_git_ref_advertisement(_fetch_git_ref_advertisement(owner, name), peel_tags=False)
     except Exception as e:
         logging.debug(f'BAZARR cannot read the tag advertisement of {repo}, fetching its releases: {e!r}')  # noqa: G004
         return None

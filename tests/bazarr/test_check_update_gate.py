@@ -191,6 +191,26 @@ def test_a_retargeted_tag_is_a_movement(github):
     assert github.api_calls() == [_TRANSLATOR_API]
 
 
+def test_a_recreated_annotated_tag_on_the_same_commit_is_a_movement(github):
+    github.tags[_TRANSLATOR_AD] = [("b" * 40, "refs/tags/v0.1.0"), (_V1, "refs/tags/v0.1.0^{}")]
+    _check()
+    github.tags[_TRANSLATOR_AD] = [("c" * 40, "refs/tags/v0.1.0"), (_V1, "refs/tags/v0.1.0^{}")]
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_TRANSLATOR_API]
+
+
+def test_an_unchanged_annotated_tag_is_not_a_movement(github):
+    github.tags[_TRANSLATOR_AD] = [("b" * 40, "refs/tags/v0.1.0"), (_V1, "refs/tags/v0.1.0^{}")]
+    _check()
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == []
+
 def test_a_branch_push_alone_is_not_a_movement(github, monkeypatch):
     _check()
     github.calls.clear()
