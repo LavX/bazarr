@@ -182,3 +182,38 @@ def test_the_fallback_still_upgrades_a_download_s_renamed_file(upgrade_run):
     upgrade.upgrade_movies_subtitles(job_id=1)
 
     assert calls == ["/movies/movie.en.srt"]
+
+
+@pytest.mark.parametrize("current", ["renamed-download", "kept-extraction"])
+def test_old_extraction_history_is_checked_against_the_file_there_now(upgrade_run, tmp_path, monkeypatch, current):
+    """Extract at B, then a newer download of another variant at A. If B is
+    gone and A renamed onto B outside Bazarr+, B is that download and the
+    upgrade must go ahead; if B is still the extracted file it must not, even
+    though in both cases the newest history row for B is the old extraction."""
+    from app.database import TableMovies
+    from sqlalchemy import update
+
+    import subtitles.tools.translate.batch as batch
+    from subtitles.tools import extraction_provenance
+
+    upgrade, calls = upgrade_run
+    upgrade_db = upgrade.database
+    monkeypatch.setattr(batch, "extracted_subtitles_dir", lambda: str(tmp_path / "extracted_subs"))
+    monkeypatch.setattr(upgrade.path_mappings, "path_replace_movie", lambda path: str(tmp_path) + path)
+    on_disk = tmp_path / "movies" / "movie.en.srt"
+    on_disk.parent.mkdir()
+    on_disk.write_text("1\n00:00:01,000 --> 00:00:02,000\nExtracted text\n\n")
+    extraction_provenance.record(2, "/movies/movie.en.srt", str(on_disk))
+    if current == "renamed-download":
+        on_disk.write_text("1\n00:00:01,000 --> 00:00:02,000\nThe download, renamed\n\n")
+
+    _insert_movie(upgrade_db)
+    upgrade_db.execute(update(TableMovies).values(subtitles=str([["en", "/movies/movie.en.srt", 10]])))
+    upgrade_db.execute(insert(TableHistoryMovie).values(**dict(
+        _movie_row(8, 120, 180, 201, path="/movies/movie.en.srt"), language="en")))
+    upgrade_db.execute(insert(TableHistoryMovie).values(**dict(
+        _movie_row(1, 30, 90, 202, path="/movies/movie.en.hi.srt"), language="en:hi")))
+
+    upgrade.upgrade_movies_subtitles(job_id=1)
+
+    assert calls == ([str(on_disk)] if current == "renamed-download" else [])

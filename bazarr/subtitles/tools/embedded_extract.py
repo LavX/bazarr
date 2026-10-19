@@ -258,12 +258,21 @@ def _source_score(track):
     return score or MAX_SCORES["episode" if track.media_type == "episode" else "movie"]
 
 
-def log_extracted(track, subtitle_path, *, provider=PROVIDER, description=None, sports_context=None):
-    """Record history action 8 for a file written from ``track``."""
-    score = _source_score(track)
+def log_extracted(track, subtitle_path, *, provider=PROVIDER, description=None, sports_context=None,
+                  score=None):
+    """Record history action 8 for a file written from ``track``.
+
+    ``score`` defaults to the track's own embedded score. The file's content
+    is remembered too, so the upgrade job can tell this file from one put
+    under its name later (extraction_provenance).
+    """
+    from subtitles.tools.extraction_provenance import record
+
+    score = _source_score(track) if score is None else score
     description = description or f"{track.label} subtitles extracted from the video file."
     kind = "sports" if track.media_type == "sports" else track.media_type
     reverse = path_mappings.path_replace_reverse_instance
+    record(track.arr_instance_id, reverse(subtitle_path, track.arr_instance_id, kind), subtitle_path)
     if track.media_type == "sports":
         from sportarr.subtitles import sports_history
 
@@ -475,14 +484,34 @@ def run_tool_on_embedded_track(action, media_type, media_id, arr_instance_id, la
     from subtitles.tools.mods import apply_subtitle_mods
 
     try:
-        return apply_subtitle_mods(language=track.language, subtitle_path=subtitle_path, mods=[action],
-                                   video_path=track.video_path, media_type=track.media_type,
-                                   media_id=track.local_id if track.media_type == "sports" else track.media_id,
-                                   job_id=job_id, arr_instance_id=track.arr_instance_id, never_replace=True)
+        output_path = apply_subtitle_mods(
+            language=track.language, subtitle_path=subtitle_path, mods=[action], video_path=track.video_path,
+            media_type=track.media_type,
+            media_id=track.local_id if track.media_type == "sports" else track.media_id,
+            job_id=job_id, arr_instance_id=track.arr_instance_id, never_replace=True)
     except JobFailed as failure:
         if isinstance(failure.__cause__, SubtitleFileExists):
             raise JobFailed(_taken_by_another_file(failure.__cause__.path, subtitle_path)) from failure.__cause__
         raise
+    if output_path and output_path != subtitle_path:
+        _log_renamed_extraction(track, output_path, action)
+    return output_path
+
+
+def _log_renamed_extraction(track, output_path, action):
+    """Carry the extraction over to the name a tool saved its result under.
+
+    Remove HI saves under the language's plain name and drops the file it
+    read, so the action 8 row of the extracted file now names a file that is
+    gone. Without a row for the new one, an older download of the plain
+    language whose file was deleted stayed an upgrade candidate, adopted the
+    new file as its own and replaced it.
+    """
+    plain = replace(track, hi=False, forced=False)
+    description = f"{track.label} subtitles extracted from the video file, then {tool_name(action)}."
+    with publication_scope(track) as (_scoped, _guard, sports_context):
+        log_extracted(plain, output_path, description=description, sports_context=sports_context,
+                      score=_source_score(track))
 
 
 def _taken_by_another_file(taken, subtitle_path):

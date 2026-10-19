@@ -105,3 +105,31 @@ def test_a_recording_replaced_mid_extraction_publishes_nothing(sports_extract, m
         materialise_embedded_track("sports", 61, 1, "fr")
     assert not (folder / "1" / "event.fr.srt").exists()
     assert _extracted_rows(session) == [] and published == []
+
+
+def test_remove_hi_on_a_sports_track_carries_the_extraction_to_its_result(sports_extract, monkeypatch):
+    """Remove HI saves the plain name and drops the extracted HI file; the
+    extraction's history follows it, through the owned sports operation."""
+    from types import SimpleNamespace
+
+    import subtitles.tools.embedded_extract as extract
+    import subtitles.tools.mods as mods
+    import subtitles.tools.translate.batch as batch
+
+    session, folder, _events, _published = sports_extract
+    monkeypatch.setattr(batch, "embedded_subtitle_tracks", lambda path, kind, owner=None: [
+        dict(FRENCH[0], hearing_impaired=True)])
+    queue = SimpleNamespace(update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None,
+                            add_job_from_function=lambda *a, **kw: 1)
+    monkeypatch.setattr(extract, "jobs_queue", queue)
+    monkeypatch.setattr(mods, "jobs_queue", queue)
+    monkeypatch.setattr("arr_instances.resolution._instance_subtitle_settings", lambda *a, **kw: {})
+    # The mod's own post-processing announces the change; no socket here.
+    monkeypatch.setattr("app.event_handler.event_stream", lambda **kw: None)
+
+    output = extract.run_tool_on_embedded_track("remove_HI", "sports", 61, 1, "fr", hi=True, job_id=7)
+
+    assert output == str(folder / "1" / "event.fr.srt")
+    assert not (folder / "1" / "event.fr.hi.srt").exists()
+    assert [(row[2], row[7]) for row in _extracted_rows(session)] == [
+        ("fr:hi", "/sports/event.fr.hi.srt"), ("fr", "/sports/event.fr.srt")]

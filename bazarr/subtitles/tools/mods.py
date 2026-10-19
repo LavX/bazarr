@@ -186,6 +186,7 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
         job_id=job_id,
         new_job_name=f'{mod_label}: {filename}',
     )
+    return output_path
 
 
 def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None, media_type=None,

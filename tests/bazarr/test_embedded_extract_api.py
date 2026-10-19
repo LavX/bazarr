@@ -458,3 +458,98 @@ def test_a_failed_never_replace_mod_leaves_the_source_and_no_destination(library
     # Nothing is left in the way of another try.
     assert mods.subtitles_apply_mods("en", str(source), ["remove_HI"], str(video), never_replace=True) == str(target)
     assert "[DOOR SLAMS]" not in target.read_text() and not source.exists()
+
+
+def test_remove_hi_carries_the_extraction_to_the_file_it_saves(library, jobs, monkeypatch):
+    """Remove HI on an extracted HI track saves Film.en.srt and drops
+    Film.en.hi.srt. An older plain-English download recorded at Film.en.srt,
+    whose file was deleted before, must not become the owner of the result:
+    the upgrade job would replace it with a provider download."""
+    from datetime import datetime, timedelta
+
+    import sqlalchemy as sa
+
+    from app.database import TableHistoryMovie
+    from subtitles import upgrade
+    from subtitles.tools.embedded_extract import run_tool_on_embedded_track
+
+    session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    session.execute(sa.insert(TableHistoryMovie).values(
+        action=1, radarrId=30, movie_id=1, arr_instance_id=1, language="en", provider="opensubtitlescom",
+        score=90, score_out_of=180, video_path="/movies/Film (2020)/Film.mkv", description="downloaded",
+        subtitles_path="/movies/Film (2020)/Film.en.srt", timestamp=datetime.now() - timedelta(hours=1)))
+    session.commit()
+
+    run_tool_on_embedded_track("remove_HI", "movie", 30, 1, "en", hi=True, job_id=7)
+
+    session.expire_all()
+    assert session.execute(sa.select(TableHistoryMovie.language, TableHistoryMovie.subtitles_path)
+                           .where(TableHistoryMovie.action == 8).order_by(TableHistoryMovie.id)).all() == [
+        ("en:hi", "/movies/Film (2020)/Film.en.hi.srt"), ("en", "/movies/Film (2020)/Film.en.srt")]
+    assert (film / "Film.en.srt").is_file()
+
+    calls = []
+    monkeypatch.setattr(upgrade, "database", session)
+    monkeypatch.setattr(upgrade, "settings", SimpleNamespace(general=SimpleNamespace(
+        days_to_upgrade_subs=365, upgrade_manual=False, upgrade_translated=False, upgrade_subs=True,
+        use_sportarr=False)))
+    monkeypatch.setattr(upgrade, "jobs_queue", SimpleNamespace(
+        update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None))
+    monkeypatch.setattr(upgrade, "get_providers", lambda: ["opensubtitlescom"])
+    monkeypatch.setattr(upgrade, "_language_still_desired", lambda language, profile: True)
+    monkeypatch.setattr(upgrade, "_is_hi_required", lambda language, profile: True)
+    monkeypatch.setattr(upgrade, "get_audio_profile_languages", lambda audio: [])
+    monkeypatch.setattr(upgrade.path_mappings, "path_replace_movie", lambda path: str(root / "owner1") + path)
+    monkeypatch.setattr(upgrade, "generate_subtitles",
+                        lambda *args, **kwargs: calls.append(kwargs["previous_subtitles_to_delete"]) or [])
+
+    assert upgrade.get_upgradable_movies_subtitles() == {}
+    upgrade.upgrade_movies_subtitles(job_id=1)
+
+    assert calls == []
+    assert (film / "Film.en.srt").is_file()
+
+
+def test_the_current_path_guard_holds_without_the_carried_row(library, jobs, monkeypatch):
+    """The candidate's own path, not only the fallback's, is checked: a
+    download row whose recorded path now holds an extracted file is left
+    alone even where its own language key still makes it the latest row."""
+    from datetime import datetime, timedelta
+
+    import sqlalchemy as sa
+
+    from app.database import TableHistoryMovie, TableMovies
+    from subtitles import upgrade
+
+    session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    (film / "Film.en.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nExtracted\n\n")
+    session.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(
+        subtitles=str([["en", "/movies/Film (2020)/Film.en.srt", 10]])))
+    for action, language, minutes in ((1, "en:hi", 60), (8, "en", 1)):
+        session.execute(sa.insert(TableHistoryMovie).values(
+            action=action, radarrId=30, movie_id=1, arr_instance_id=1, language=language, provider="x",
+            score=90, score_out_of=180, video_path="/movies/Film (2020)/Film.mkv", description="x",
+            subtitles_path="/movies/Film (2020)/Film.en.srt",
+            timestamp=datetime.now() - timedelta(minutes=minutes)))
+    session.commit()
+    calls = []
+    monkeypatch.setattr(upgrade, "database", session)
+    monkeypatch.setattr(upgrade, "settings", SimpleNamespace(general=SimpleNamespace(
+        days_to_upgrade_subs=365, upgrade_manual=False, upgrade_translated=False, upgrade_subs=True,
+        use_sportarr=False)))
+    monkeypatch.setattr(upgrade, "jobs_queue", SimpleNamespace(
+        update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None))
+    monkeypatch.setattr(upgrade, "get_providers", lambda: ["opensubtitlescom"])
+    monkeypatch.setattr(upgrade, "_language_still_desired", lambda language, profile: True)
+    monkeypatch.setattr(upgrade, "_is_hi_required", lambda language, profile: True)
+    monkeypatch.setattr(upgrade, "get_audio_profile_languages", lambda audio: [])
+    monkeypatch.setattr(upgrade.path_mappings, "path_replace_movie", lambda path: str(root / "owner1") + path)
+    monkeypatch.setattr(upgrade, "generate_subtitles",
+                        lambda *args, **kwargs: calls.append(kwargs["previous_subtitles_to_delete"]) or [])
+    assert list(upgrade.get_upgradable_movies_subtitles()) != []
+
+    upgrade.upgrade_movies_subtitles(job_id=1)
+
+    assert calls == []
