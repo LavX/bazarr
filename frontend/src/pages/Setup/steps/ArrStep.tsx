@@ -1,4 +1,4 @@
-import { FC, useState } from "react";
+import { FC, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -63,41 +63,57 @@ function normalizeBaseUrl(value: string) {
 
 interface SplitAddress {
   ip: string;
-  scheme: "http" | "https";
+  scheme?: "http" | "https";
   port?: number;
   baseUrl?: string;
 }
 
 /**
- * A full URL typed or pasted into Address, taken apart into the fields it
- * belongs in. Address is stored verbatim as the host, so a newcomer running
- * Sonarr in Docker who typed http://sonarr:8989 saved an instance that could
- * never connect. Matched as soon as the scheme is complete, which is what
- * lets typing it out character by character land in the same place as a paste.
+ * A URL put into Address, taken apart into the fields it belongs in. Address
+ * is stored verbatim as the host, so a newcomer running Sonarr in Docker who
+ * typed http://sonarr:8989 saved an instance that could never connect.
+ *
+ * Read from the text rather than through URL: URL drops a port that is the
+ * scheme's default, so https://sonarr:443 came back with no port at all and
+ * the form kept 8989 while turning SSL on. A bare IPv6 address has several
+ * colons and no port, and is left alone.
  */
 function splitAddress(value: string): SplitAddress | null {
-  const match = /^\s*(https?):\/\//i.exec(value);
-  if (!match) {
+  const trimmed = value.trim();
+  const schemeMatch = /^(https?):\/\//i.exec(trimmed);
+  const scheme = schemeMatch
+    ? (schemeMatch[1].toLowerCase() as "http" | "https")
+    : undefined;
+  const rest = schemeMatch ? trimmed.slice(schemeMatch[0].length) : trimmed;
+  const cut = rest.search(/[/?#]/);
+  const authority = cut < 0 ? rest : rest.slice(0, cut);
+  const path =
+    cut < 0
+      ? ""
+      : rest
+          .slice(cut)
+          .replace(/[?#].*$/, "")
+          .replace(/\/+$/, "");
+  const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+  const portMatch = /^(\[[^\]]*\]|[^:]*):(\d{1,5})$/.exec(hostPort);
+  const portNumber = portMatch ? Number(portMatch[2]) : NaN;
+  const port = portNumber >= 1 && portNumber <= 65535 ? portNumber : undefined;
+  if (scheme === undefined && port === undefined && path === "") {
     return null;
   }
-  const scheme = match[1].toLowerCase() as SplitAddress["scheme"];
-  try {
-    const url = new URL(value.trim());
-    const port = url.port ? Number(url.port) : undefined;
-    const path = url.pathname.replace(/\/+$/, "");
-    return {
-      ip: url.hostname,
-      scheme,
-      port,
-      baseUrl: path ? path : undefined,
-    };
-  } catch {
-    return { ip: value.trim().slice(match[0].trimStart().length), scheme };
-  }
+  return {
+    ip: port !== undefined && portMatch ? portMatch[1] : hostPort,
+    scheme,
+    port,
+    baseUrl: path ? path : undefined,
+  };
 }
 
 function describeSplit(split: SplitAddress, label: string): string {
-  const parts = [`Bazarr+ took the ${split.scheme}:// off the address.`];
+  const parts: string[] = [];
+  if (split.scheme !== undefined) {
+    parts.push(`Bazarr+ took the ${split.scheme}:// off the address.`);
+  }
   if (split.port !== undefined) {
     parts.push("The port went to Port.");
   }
@@ -144,7 +160,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
   const create = useCreateArrInstance({ inlineErrors: true });
   const remove = useDeleteArrInstance({ inlineErrors: true });
   const update = useUpdateArrInstance({ inlineErrors: true });
-  const settings = useSettingsMutation();
+  const settings = useSettingsMutation(false, { inlineErrors: true });
   const { data: systemSettings } = useSystemSettings();
 
   // An enabled row first: with one of the kind on and another off, the one
@@ -178,6 +194,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
   const setSsl = (value: boolean) => patchDraft({ ssl: value });
   const [apiKey, setApiKey] = useState("");
   const [splitNote, setSplitNote] = useState<string | null>(null);
+  const pasted = useRef(false);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   // The row this step wrote, remembered here rather than waited for. The create
@@ -221,6 +238,25 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       delete next[field];
       return next;
     });
+  };
+  // Takes a URL in Address apart into Address, Port, Base URL and Use SSL, and
+  // says so. Answers whether there was anything to take apart.
+  const applySplit = (value: string): boolean => {
+    const split = splitAddress(value);
+    if (split === null) {
+      return false;
+    }
+    patchDraft({
+      ip: split.ip,
+      ...(split.port !== undefined ? { port: split.port } : {}),
+      ...(split.baseUrl !== undefined ? { baseUrl: split.baseUrl } : {}),
+      ...(split.scheme !== undefined ? { ssl: split.scheme === "https" } : {}),
+    });
+    if (split.port !== undefined) {
+      clearError("port");
+    }
+    setSplitNote(describeSplit(split, meta.label));
+    return true;
   };
 
   const buildOverrides = () => ({
@@ -570,26 +606,26 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
           style={{ flex: 1 }}
           value={ip}
           error={errors.ip}
+          // A paste is split as it lands, and anything typed is split once
+          // the reader leaves the field. Splitting on every keystroke took the
+          // scheme off the moment it was complete, and the port and path typed
+          // after it then stayed in Address.
+          onPaste={() => {
+            pasted.current = true;
+          }}
           onChange={(e) => {
             const value = e.currentTarget.value;
-            const split = splitAddress(value);
             clearError("ip");
-            if (split === null) {
-              setIp(value);
-              return;
+            if (pasted.current) {
+              pasted.current = false;
+              if (applySplit(value)) {
+                return;
+              }
             }
-            patchDraft({
-              ip: split.ip,
-              ...(split.port !== undefined ? { port: split.port } : {}),
-              ...(split.baseUrl !== undefined
-                ? { baseUrl: split.baseUrl }
-                : {}),
-              ssl: split.scheme === "https",
-            });
-            if (split.port !== undefined) {
-              clearError("port");
-            }
-            setSplitNote(describeSplit(split, meta.label));
+            setIp(value);
+          }}
+          onBlur={(e) => {
+            applySplit(e.currentTarget.value);
           }}
         />
         <NumberInput
@@ -609,7 +645,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       </Group>
 
       {splitNote && (
-        <Alert color="yellow" title="Full URL split into its fields">
+        <Alert color="yellow" title="Moved into the right fields">
           {splitNote}
         </Alert>
       )}

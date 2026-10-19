@@ -183,7 +183,7 @@ describe("ArrStep", () => {
     expect(screen.getByLabelText(/^port/i)).toHaveValue("8990");
     expect(screen.getByLabelText(/^base url/i)).toHaveValue("/sonarr");
     expect(
-      screen.getByRole("alert", { name: /full url split into its fields/i }),
+      screen.getByRole("alert", { name: /moved into the right fields/i }),
     ).toHaveTextContent(/took the http:\/\/ off the address/i);
 
     await user.type(screen.getByLabelText(/api key/i), "abc123");
@@ -208,12 +208,86 @@ describe("ArrStep", () => {
     customRender(<ArrStep kind="sonarr" onNext={onNext} />);
 
     await user.type(screen.getByLabelText(/^address/i), "https://10.0.0.5");
+    await user.tab();
 
     expect(screen.getByLabelText(/^address/i)).toHaveValue("10.0.0.5");
     expect(screen.getByRole("switch", { name: /use ssl/i })).toBeChecked();
     expect(
-      screen.getByRole("alert", { name: /full url split into its fields/i }),
+      screen.getByRole("alert", { name: /moved into the right fields/i }),
     ).toHaveTextContent(/use ssl is on/i);
+  });
+
+  it.each([
+    ["https://sonarr:443/sonarr", "443", true],
+    ["http://sonarr:80/sonarr", "80", false],
+  ])("keeps the explicit standard port in %s", async (pasted, port, ssl) => {
+    // URL drops a port that is its scheme's default, which left 8989 in
+    // Port while the scheme turned SSL on.
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(screen.getByLabelText(/^address/i));
+    await user.paste(pasted);
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("sonarr");
+    expect(screen.getByLabelText(/^port/i)).toHaveValue(port);
+    expect(screen.getByLabelText(/^base url/i)).toHaveValue("/sonarr");
+    const toggle = screen.getByRole("switch", { name: /use ssl/i });
+    if (ssl) {
+      expect(toggle).toBeChecked();
+    } else {
+      expect(toggle).not.toBeChecked();
+    }
+  });
+
+  it("splits a URL typed out in full once the field is left", async () => {
+    // Splitting on every keystroke took the scheme off as soon as it was
+    // complete, and the port and path typed after it stayed in Address.
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.type(
+      screen.getByLabelText(/^address/i),
+      "http://sonarr:8990/sonarr",
+    );
+    expect(screen.getByLabelText(/^address/i)).toHaveValue(
+      "http://sonarr:8990/sonarr",
+    );
+    await user.tab();
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("sonarr");
+    expect(screen.getByLabelText(/^port/i)).toHaveValue("8990");
+    expect(screen.getByLabelText(/^base url/i)).toHaveValue("/sonarr");
+  });
+
+  it("splits a typed URL before Continue saves it", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/^address/i), "sonarr:8990");
+    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() =>
+      expect(createMutate).toHaveBeenCalledWith(
+        expect.objectContaining({ ip: "sonarr", port: 8990 }),
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("leaves a bare IPv6 address alone", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/^address/i), "fe80::1");
+    await user.tab();
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("fe80::1");
+    expect(screen.getByLabelText(/^port/i)).toHaveValue("8989");
+    expect(
+      screen.queryByRole("alert", { name: /moved into the right fields/i }),
+    ).not.toBeInTheDocument();
   });
 
   // The defect this step shipped with: Continue on a form nobody filled in
