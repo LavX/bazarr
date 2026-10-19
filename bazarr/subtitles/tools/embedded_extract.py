@@ -170,31 +170,57 @@ def existing_output(video_path, paths):
     return next((path for path in (*paths, *twins(video_path, paths)) if os.path.isfile(path)), None)
 
 
-def single_language_paths(video_path, extensions):
-    """The language-less names a subtitle takes in single-language mode, when ``extensions`` write text.
+def single_language_taken(video_path, extensions):
+    """The language-less subtitle already beside ``video_path`` in single-language mode, or None.
 
     In that mode downloads and uploads are saved as ``<video>.<ext>``, with no
     language in the name, and keep their own format (``<video>.ass``, say).
     Such a file already is the subtitle of the one language, so a text
-    extraction counts every such name the indexer lists as taken rather than
-    write a second ``<video>.<language>.srt`` beside it.
+    extraction (``extensions`` writing text) counts it as taken rather than
+    write a second ``<video>.<language>.srt`` beside it. Matched the way the
+    external subtitle search lists files: the name's stem equal to the
+    video's ignoring case, a subtitle extension in any case, and never the
+    ``.sub`` half of a VobSub pair. Looked up in the subtitle folder and next
+    to the video, where the indexer reads both.
     """
     if not settings.general.single_language or not set(extensions) & set(TEXT_OUTPUT_EXTENSIONS):
-        return []
-    folder = get_target_folder(video_path, create=False) or os.path.dirname(video_path)
-    return [os.path.join(folder, os.path.basename(get_subtitle_path(video_path, extension=extension)))
-            for extension in SUBTITLE_EXTENSIONS]
+        return None
+    stem = os.path.splitext(os.path.basename(video_path))[0].lower()
+    beside = os.path.dirname(video_path)
+    folders = [get_target_folder(video_path, create=False) or beside]
+    if os.path.normcase(folders[0]) != os.path.normcase(beside):
+        folders.append(beside)
+    for folder in folders:
+        try:
+            entries = sorted((entry for entry in os.scandir(folder) if entry.is_file(follow_symlinks=False)),
+                             key=lambda entry: entry.name)
+        except OSError:
+            continue
+        names = {entry.name.lower() for entry in entries}
+        for entry in entries:
+            root, extension = os.path.splitext(entry.name)
+            if root.lower() != stem or extension.lower() not in SUBTITLE_EXTENSIONS:
+                continue
+            if extension.lower() == ".sub" and f"{root}.idx".lower() in names:
+                continue
+            return entry.path
+    return None
 
 
-def taken_names(track, extensions):
-    """Every name that, as a file, stops an extraction of ``track`` to ``extensions``."""
-    return (output_paths(track.video_path, track.language, track.hi, track.forced, extensions)
-            + single_language_paths(track.video_path, extensions))
+def taken_output(track, extensions, extra=()):
+    """The first file in the way of an extraction of ``track`` to ``extensions``, or None.
+
+    The names output_paths() gives, then ``extra``, each also next to the
+    video, then a language-less subtitle in single-language mode.
+    """
+    return (existing_output(track.video_path, output_paths(track.video_path, track.language, track.hi,
+                                                           track.forced, extensions) + list(extra))
+            or single_language_taken(track.video_path, extensions))
 
 
 def refuse_taken_name(track, extensions):
     """Raise SubtitleFileExists when a name an extraction of ``track`` would take is a file."""
-    taken = existing_output(track.video_path, taken_names(track, extensions))
+    taken = taken_output(track, extensions)
     if taken:
         raise SubtitleFileExists(taken)
 
@@ -335,15 +361,14 @@ def publish_new_subtitle(track, outputs, *, provider=PROVIDER, description=None,
     """Write ``outputs`` ([(path, bytes or source file)]) for ``track``, log action 8, index again.
 
     Raises SubtitleFileExists when a file of that name is already there, or,
-    in single-language mode, the language-less text name a download takes.
+    in single-language mode, a language-less subtitle of the video.
     """
     destinations = [path for path, _data in outputs]
-    single = [path for path in single_language_paths(track.video_path,
-                                                     [os.path.splitext(path)[1] for path in destinations])
-              if path not in destinations]
+    extensions = [os.path.splitext(path)[1] for path in destinations]
     paths = write_new_subtitle(track.video_path, outputs, track.media_type, track.arr_instance_id,
                                operation="extract", publication_guard=publication_guard,
-                               also_check=single + twins(track.video_path, destinations + single))
+                               also_check=twins(track.video_path, destinations),
+                               also_refuse=lambda: single_language_taken(track.video_path, extensions))
     log_extracted(track, paths[0], provider=provider, description=description,
                   sports_context=sports_context)
     reindex(track)

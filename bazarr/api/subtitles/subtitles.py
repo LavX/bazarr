@@ -670,9 +670,9 @@ def _embedded_track_action(action, args, language, hi, forced, media_type, media
     when a tool is asked of an image-based track, then 202 with the job id and
     the file the job will write.
     """
-    from subtitles.tools.embedded_extract import (ExtractionError, embedded_tool_allowed, existing_output,
-                                                  extract_embedded_track, resolve_track,
-                                                  run_tool_on_embedded_track, taken_names, tool_output_paths)
+    from subtitles.tools.embedded_extract import (ExtractionError, embedded_tool_allowed,
+                                                  extract_embedded_track, output_paths, resolve_track,
+                                                  run_tool_on_embedded_track, taken_output, tool_output_paths)
     from subtitles.tools.embedded_streams import bitmap_family, output_extensions
 
     if media_type not in ("movie", "episode", "sports"):
@@ -693,8 +693,9 @@ def _embedded_track_action(action, args, language, hi, forced, media_type, media
     # language-less name a download takes counts too, and Remove HI saves its
     # result under the language's plain name: both may be a file the user
     # downloaded, and neither is ever replaced.
-    destinations = taken_names(track, output_extensions(codec if action == "extract" else None))
-    clash = existing_output(track.video_path, destinations + tool_output_paths(track, action))
+    extensions = output_extensions(codec if action == "extract" else None)
+    destinations = output_paths(track.video_path, language, hi, forced, extensions)
+    clash = taken_output(track, extensions, tool_output_paths(track, action))
     if clash:
         advice = ("Delete it first to extract this track again." if action == "extract"
                   else "Use the tool on that file's row instead.")

@@ -301,7 +301,7 @@ def test_the_extract_job_names_what_it_wrote_and_fails_with_the_reason(library, 
         extract_embedded_track("movie", 30, 1, "en", job_id=8)
 
 
-@pytest.mark.parametrize("name", ["Film.srt", "Film.ass", "Film.vtt"])
+@pytest.mark.parametrize("name", ["Film.srt", "Film.ass", "Film.vtt", "Film.ASS"])
 def test_single_language_mode_answers_409_for_the_language_less_download(endpoint, monkeypatch, name):
     """A download in single-language mode is <video>.<ext>, in its own
     format: a text extraction or a tool must not write a second Film.en.srt
@@ -553,3 +553,16 @@ def test_the_current_path_guard_holds_without_the_carried_row(library, jobs, mon
     upgrade.upgrade_movies_subtitles(job_id=1)
 
     assert calls == []
+
+
+def test_single_language_mode_lets_a_vobsub_pair_be(endpoint, monkeypatch):
+    from app.config import settings
+
+    call, queued, root = endpoint
+    monkeypatch.setattr(settings.general, "single_language", True)
+    (root / "owner1/movies/Film (2020)/Film.idx").write_text("# VobSub index file, v7")
+    (root / "owner1/movies/Film (2020)/Film.sub").write_bytes(b"\x00\x00\x01\xba")
+
+    body, status = call()
+
+    assert status == 202 and os.path.basename(body["path"]) == "Film.en.srt"

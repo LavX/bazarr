@@ -172,7 +172,7 @@ def apply_subtitle_chmod(path):
 
 
 def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *, operation='edit',
-                       publication_guard=None, also_check=()):
+                       publication_guard=None, also_check=(), also_refuse=None):
     """Write each ``(path, data)`` of ``outputs`` as a new file and publish it.
 
     ``data`` is the file's bytes, or the path of a file to copy. Raises
@@ -180,13 +180,18 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
     ``also_check`` is already a file, including one another program created
     while the file was being written. ``publication_guard`` is the sports
     owned boundary (called with the first path); the other media types pass
-    None. Returns the written paths, first one first.
+    None. ``also_refuse`` is called under the locks and returns a path that
+    stops the write, or None, for files no fixed list of names covers.
+    Returns the written paths, first one first.
     """
     paths = [path for path, _data in outputs]
     with subtitle_write_locks(video_path, *paths):
         for path in (*paths, *also_check):
             if os.path.isfile(path):
                 raise SubtitleFileExists(path)
+        refused = also_refuse() if also_refuse is not None else None
+        if refused:
+            raise SubtitleFileExists(refused)
         with subtitle_mutation(video_path, *paths):
             with (publication_guard(output_path=paths[0])
                   if publication_guard is not None else nullcontext()):

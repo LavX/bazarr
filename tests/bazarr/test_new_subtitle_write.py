@@ -202,3 +202,21 @@ def test_the_write_never_touches_the_process_umask_or_needs_fchmod(tmp_path, pub
                                     "movie", 7)
 
     assert (tmp_path / "Film.hu.srt").read_bytes() == b"mine"
+
+
+def test_also_refuse_is_asked_under_the_locks_and_stops_the_write(tmp_path, published, monkeypatch):
+    from subtitles import new_subtitle
+
+    held = []
+    real_locks = new_subtitle.subtitle_write_locks
+
+    def tracking_locks(*args, **kwargs):
+        held.append("locked")
+        return real_locks(*args, **kwargs)
+
+    monkeypatch.setattr(new_subtitle, "subtitle_write_locks", tracking_locks)
+    with pytest.raises(new_subtitle.SubtitleFileExists, match="Film.ASS"):
+        new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(tmp_path / "Film.en.srt"), b"x")],
+                                        "movie", 7,
+                                        also_refuse=lambda: held and str(tmp_path / "Film.ASS") or None)
+    assert list(tmp_path.iterdir()) == [] and published == []

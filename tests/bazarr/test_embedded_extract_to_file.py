@@ -379,7 +379,7 @@ def test_the_row_s_text_codec_picks_its_own_track(library, monkeypatch):
         materialise_embedded_track("movie", 30, 1, "en", codec="ass")
 
 
-@pytest.mark.parametrize("name", ["Film.srt", "Film.ass", "Film.vtt", "Film.ssa"])
+@pytest.mark.parametrize("name", ["Film.srt", "Film.ass", "Film.vtt", "Film.ssa", "Film.ASS", "film.Srt", "Film.sub"])
 @pytest.mark.parametrize("mode", ["current", "relative"])
 def test_single_language_mode_counts_the_language_less_download_as_taken(library, monkeypatch, mode, name):
     """In single-language mode a download is saved as <video>.<ext>, in its
@@ -406,3 +406,19 @@ def test_single_language_mode_counts_the_language_less_download_as_taken(library
     # An image track is not a second text subtitle and is still copied out.
     assert [os.path.basename(path) for path in materialise_embedded_track("movie", 30, 1, "en", codec="pgs")] == [
         "Film.en.sup"]
+
+
+def test_single_language_mode_ignores_the_sub_half_of_a_vobsub_pair(library, monkeypatch):
+    """The indexer never lists the .sub of an .idx and .sub pair as a text
+    subtitle, so it does not stop a text extraction either; a lone .sub,
+    which can be MicroDVD text, does."""
+    from app.config import settings
+    from subtitles.tools.embedded_extract import materialise_embedded_track
+
+    _session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    monkeypatch.setattr(settings.general, "single_language", True)
+    (film / "Film.IDX").write_text("# VobSub index file, v7")
+    (film / "Film.sub").write_bytes(b"\x00\x00\x01\xba")
+
+    assert materialise_embedded_track("movie", 30, 1, "en") == [str(film / "Film.en.srt")]
