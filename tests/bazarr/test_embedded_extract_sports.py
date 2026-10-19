@@ -131,5 +131,5 @@ def test_remove_hi_on_a_sports_track_carries_the_extraction_to_its_result(sports
 
     assert output == str(folder / "1" / "event.fr.srt")
     assert not (folder / "1" / "event.fr.hi.srt").exists()
-    assert [(row[2], row[7]) for row in _extracted_rows(session)] == [
-        ("fr:hi", "/sports/event.fr.hi.srt"), ("fr", "/sports/event.fr.srt")]
+    # One extraction, one row, moved to the result.
+    assert [(row[2], row[7]) for row in _extracted_rows(session)] == [("fr", "/sports/event.fr.srt")]

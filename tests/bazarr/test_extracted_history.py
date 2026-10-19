@@ -184,36 +184,89 @@ def test_the_fallback_still_upgrades_a_download_s_renamed_file(upgrade_run):
     assert calls == ["/movies/movie.en.srt"]
 
 
-@pytest.mark.parametrize("current", ["renamed-download", "kept-extraction"])
-def test_old_extraction_history_is_checked_against_the_file_there_now(upgrade_run, tmp_path, monkeypatch, current):
-    """Extract at B, then a newer download of another variant at A. If B is
-    gone and A renamed onto B outside Bazarr+, B is that download and the
-    upgrade must go ahead; if B is still the extracted file it must not, even
-    though in both cases the newest history row for B is the old extraction."""
+def _extraction_with_a_newer_candidate_of_another_variant(upgrade_run, tmp_path, monkeypatch, later_rows=()):
+    """An extraction at movie.en.srt, then a newer en:hi download whose file is
+    gone: its fallback takes movie.en.srt, the file of the language."""
     from app.database import TableMovies
     from sqlalchemy import update
 
-    import subtitles.tools.translate.batch as batch
-    from subtitles.tools import extraction_provenance
-
     upgrade, calls = upgrade_run
     upgrade_db = upgrade.database
-    monkeypatch.setattr(batch, "extracted_subtitles_dir", lambda: str(tmp_path / "extracted_subs"))
     monkeypatch.setattr(upgrade.path_mappings, "path_replace_movie", lambda path: str(tmp_path) + path)
     on_disk = tmp_path / "movies" / "movie.en.srt"
     on_disk.parent.mkdir()
     on_disk.write_text("1\n00:00:01,000 --> 00:00:02,000\nExtracted text\n\n")
-    extraction_provenance.record(2, "/movies/movie.en.srt", str(on_disk))
-    if current == "renamed-download":
-        on_disk.write_text("1\n00:00:01,000 --> 00:00:02,000\nThe download, renamed\n\n")
-
     _insert_movie(upgrade_db)
     upgrade_db.execute(update(TableMovies).values(subtitles=str([["en", "/movies/movie.en.srt", 10]])))
     upgrade_db.execute(insert(TableHistoryMovie).values(**dict(
         _movie_row(8, 120, 180, 201, path="/movies/movie.en.srt"), language="en")))
     upgrade_db.execute(insert(TableHistoryMovie).values(**dict(
         _movie_row(1, 30, 90, 202, path="/movies/movie.en.hi.srt"), language="en:hi")))
+    for history_id, (action, minutes) in enumerate(later_rows, start=203):
+        upgrade_db.execute(insert(TableHistoryMovie).values(**dict(
+            _movie_row(action, minutes, 90, history_id, path="/movies/movie.en.srt"), language="en")))
+    return upgrade, calls, on_disk
+
+
+def test_a_kept_extraction_is_protected_with_nothing_but_its_history(upgrade_run, tmp_path, monkeypatch):
+    """The candidate is newer than the extraction and nothing else is known
+    about the file: no stored metadata, no readable identity. Lineage comes
+    from the history rows, so the extracted file is never adopted."""
+    upgrade, calls, on_disk = _extraction_with_a_newer_candidate_of_another_variant(upgrade_run, tmp_path,
+                                                                                   monkeypatch)
 
     upgrade.upgrade_movies_subtitles(job_id=1)
 
-    assert calls == ([str(on_disk)] if current == "renamed-download" else [])
+    assert calls == []
+    assert on_disk.is_file()
+
+
+def test_edits_and_syncs_keep_the_lineage(upgrade_run, tmp_path, monkeypatch):
+    """An edit or a mod rewrites the file in place and logs nothing; a sync
+    logs action 5. Neither puts another file at the path, so the extracted
+    file stays protected whatever its content is now."""
+    upgrade, calls, on_disk = _extraction_with_a_newer_candidate_of_another_variant(
+        upgrade_run, tmp_path, monkeypatch, later_rows=[(5, 10)])
+    on_disk.write_text("1\n00:00:01,500 --> 00:00:02,500\nEdited and synced\n\n")
+
+    upgrade.upgrade_movies_subtitles(job_id=1)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("action", [1, 4, 6], ids=["download", "upload", "translation"])
+def test_a_later_file_at_the_path_ends_the_lineage(upgrade_run, tmp_path, monkeypatch, action):
+    """Only another file put at the path ends it: from then on the file there
+    is that one, and the upgrade treats it like any other."""
+    upgrade, calls, on_disk = _extraction_with_a_newer_candidate_of_another_variant(
+        upgrade_run, tmp_path, monkeypatch, later_rows=[(action, 10)])
+
+    upgrade.upgrade_movies_subtitles(job_id=1)
+
+    # The en:hi candidate falls back to the file; a download at the path is
+    # a candidate of its own as well.
+    assert calls and set(calls) == {str(on_disk)}
+
+
+def test_the_lineage_is_read_once_and_only_for_candidates(upgrade_run, monkeypatch):
+    """The guard's history read runs once per job, for the selected
+    candidates only, not once per history row."""
+    from app.database import TableMovies
+    from sqlalchemy import update
+
+    upgrade, calls = upgrade_run
+    upgrade_db = upgrade.database
+    _insert_movie(upgrade_db)
+    upgrade_db.execute(update(TableMovies).values(subtitles=str([["en", "/movies/movie.en.srt", 10]])))
+    for history_id, minutes in ((201, 90), (202, 60), (203, 30)):
+        upgrade_db.execute(insert(TableHistoryMovie).values(**dict(
+            _movie_row(1, minutes, 90, history_id, path="/movies/movie.en.srt"), language="en")))
+    reads = []
+    real = upgrade._extracted_paths
+    monkeypatch.setattr(upgrade, "_extracted_paths", lambda table, column, media: (
+        reads.append(set(media)) or real(table, column, media)))
+
+    upgrade.upgrade_movies_subtitles(job_id=1)
+
+    assert reads == [{(30, 2)}]
+    assert calls == ["/movies/movie.en.srt"]

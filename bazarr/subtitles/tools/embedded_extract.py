@@ -29,7 +29,8 @@ from subzero.language import Language
 
 from app.config import settings
 from app.database import (TableArrInstances, TableEpisodes, TableHistory, TableHistoryMovie,
-                          TableHistorySports, TableMovies, TableShows, TableSportsEvents, database, select)
+                          TableHistorySports, TableMovies, TableShows, TableSportsEvents, database, select,
+                          update)
 from app.event_handler import event_stream
 from app.jobs_queue import JobFailed, jobs_queue
 from arr_instances.resolution import scoped
@@ -288,17 +289,13 @@ def log_extracted(track, subtitle_path, *, provider=PROVIDER, description=None, 
                   score=None):
     """Record history action 8 for a file written from ``track``.
 
-    ``score`` defaults to the track's own embedded score. The file's content
-    is remembered too, so the upgrade job can tell this file from one put
-    under its name later (extraction_provenance).
+    ``score`` defaults to the track's own embedded score. The row is also
+    the file's extraction lineage, which keeps the upgrade job off it.
     """
-    from subtitles.tools.extraction_provenance import record
-
     score = _source_score(track) if score is None else score
     description = description or f"{track.label} subtitles extracted from the video file."
     kind = "sports" if track.media_type == "sports" else track.media_type
     reverse = path_mappings.path_replace_reverse_instance
-    record(track.arr_instance_id, reverse(subtitle_path, track.arr_instance_id, kind), subtitle_path)
     if track.media_type == "sports":
         from sportarr.subtitles import sports_history
 
@@ -519,24 +516,51 @@ def run_tool_on_embedded_track(action, media_type, media_id, arr_instance_id, la
             raise JobFailed(_taken_by_another_file(failure.__cause__.path, subtitle_path)) from failure.__cause__
         raise
     if output_path and output_path != subtitle_path:
-        _log_renamed_extraction(track, output_path, action)
+        _move_extraction(track, subtitle_path, output_path, action)
     return output_path
 
 
-def _log_renamed_extraction(track, output_path, action):
-    """Carry the extraction over to the name a tool saved its result under.
+def _history_table(track):
+    """The history table of ``track``'s media type and the clause naming its media."""
+    if track.media_type == "sports":
+        return TableHistorySports, TableHistorySports.event_id == track.local_id
+    if track.media_type == "episode":
+        return TableHistory, TableHistory.sonarrEpisodeId == track.media_id
+    return TableHistoryMovie, TableHistoryMovie.radarrId == track.media_id
+
+
+def _move_extraction(track, subtitle_path, output_path, action):
+    """Carry the extraction's history row over to the name a tool saved its result under.
 
     Remove HI saves under the language's plain name and drops the file it
-    read, so the action 8 row of the extracted file now names a file that is
-    gone. Without a row for the new one, an older download of the plain
+    read. The row that recorded the extraction then named a file that is
+    gone, and without lineage on the new name an older download of the plain
     language whose file was deleted stayed an upgrade candidate, adopted the
-    new file as its own and replaced it.
+    result as its own and replaced it. The one extraction keeps one row: its
+    path and language move to the result, and no second arrival is logged.
     """
+    table, media = _history_table(track)
+    kind = "sports" if track.media_type == "sports" else track.media_type
+    reverse = path_mappings.path_replace_reverse_instance
     plain = replace(track, hi=False, forced=False)
     description = f"{track.label} subtitles extracted from the video file, then {tool_name(action)}."
-    with publication_scope(track) as (_scoped, _guard, sports_context):
-        log_extracted(plain, output_path, description=description, sports_context=sports_context,
-                      score=_source_score(track))
+    row_id = database.execute(scoped(
+        select(table.id)
+        .where(media, table.action == EXTRACTED,
+               table.subtitles_path == reverse(subtitle_path, track.arr_instance_id, kind))
+        .order_by(table.timestamp.desc(), table.id.desc()).limit(1),
+        table.arr_instance_id, track.arr_instance_id)).scalar()
+    if row_id is None:
+        # Never leave the result without lineage.
+        logger.warning("BAZARR found no extraction row for %s; recording one for %s", subtitle_path, output_path)
+        with publication_scope(track) as (_scoped, _guard, sports_context):
+            log_extracted(plain, output_path, description=description, sports_context=sports_context,
+                          score=_source_score(track))
+        return
+    database.execute(update(table).where(table.id == row_id).values(
+        subtitles_path=reverse(output_path, track.arr_instance_id, kind), language=plain.language_code,
+        description=description))
+    database.commit()
 
 
 def _taken_by_another_file(taken, subtitle_path):

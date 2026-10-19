@@ -484,9 +484,13 @@ def test_remove_hi_carries_the_extraction_to_the_file_it_saves(library, jobs, mo
     run_tool_on_embedded_track("remove_HI", "movie", 30, 1, "en", hi=True, job_id=7)
 
     session.expire_all()
-    assert session.execute(sa.select(TableHistoryMovie.language, TableHistoryMovie.subtitles_path)
-                           .where(TableHistoryMovie.action == 8).order_by(TableHistoryMovie.id)).all() == [
-        ("en:hi", "/movies/Film (2020)/Film.en.hi.srt"), ("en", "/movies/Film (2020)/Film.en.srt")]
+    # One extraction, one arrival: its row moved to the file Remove HI saved,
+    # with the plain language, and nothing names the removed HI file.
+    assert session.execute(sa.select(TableHistoryMovie.language, TableHistoryMovie.subtitles_path,
+                                     TableHistoryMovie.description)
+                           .where(TableHistoryMovie.action == 8)).all() == [
+        ("en", "/movies/Film (2020)/Film.en.srt",
+         "English (HI) subtitles extracted from the video file, then Remove HI Tags.")]
     assert (film / "Film.en.srt").is_file()
 
     calls = []
@@ -566,3 +570,50 @@ def test_single_language_mode_lets_a_vobsub_pair_be(endpoint, monkeypatch):
     body, status = call()
 
     assert status == 202 and os.path.basename(body["path"]) == "Film.en.srt"
+
+
+def test_an_in_place_mod_on_an_extracted_file_keeps_its_lineage(library, jobs, monkeypatch):
+    """A tool on the extracted file's own row rewrites it in place and logs
+    no history. A newer download of another variant whose file is gone must
+    still not adopt it through the fallback."""
+    from datetime import datetime, timedelta
+
+    import sqlalchemy as sa
+
+    import subtitles.tools.mods as mods
+    from app.database import TableHistoryMovie
+    from subtitles import upgrade
+    from subtitles.tools.embedded_extract import materialise_embedded_track
+
+    session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    materialise_embedded_track("movie", 30, 1, "en")
+    before = (film / "Film.en.srt").read_bytes()
+    mods.subtitles_apply_mods("en", str(film / "Film.en.srt"), ["fix_uppercase", "common"], str(film / "Film.mkv"))
+    (film / "Film.en.srt").write_text((film / "Film.en.srt").read_text() + "\n")
+    assert (film / "Film.en.srt").read_bytes() != before
+    session.execute(sa.insert(TableHistoryMovie).values(
+        action=1, radarrId=30, movie_id=1, arr_instance_id=1, language="en:hi", provider="opensubtitlescom",
+        score=90, score_out_of=180, video_path="/movies/Film (2020)/Film.mkv", description="downloaded",
+        subtitles_path="/movies/Film (2020)/Film.en.hi.srt", timestamp=datetime.now() + timedelta(minutes=1)))
+    session.commit()
+    calls = []
+    monkeypatch.setattr(upgrade, "database", session)
+    monkeypatch.setattr(upgrade, "settings", SimpleNamespace(general=SimpleNamespace(
+        days_to_upgrade_subs=365, upgrade_manual=False, upgrade_translated=False, upgrade_subs=True,
+        use_sportarr=False)))
+    monkeypatch.setattr(upgrade, "jobs_queue", SimpleNamespace(
+        update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None))
+    monkeypatch.setattr(upgrade, "get_providers", lambda: ["opensubtitlescom"])
+    monkeypatch.setattr(upgrade, "_language_still_desired", lambda language, profile: True)
+    monkeypatch.setattr(upgrade, "_is_hi_required", lambda language, profile: True)
+    monkeypatch.setattr(upgrade, "get_audio_profile_languages", lambda audio: [])
+    monkeypatch.setattr(upgrade.path_mappings, "path_replace_movie", lambda path: str(root / "owner1") + path)
+    monkeypatch.setattr(upgrade, "generate_subtitles",
+                        lambda *args, **kwargs: calls.append(kwargs["previous_subtitles_to_delete"]) or [])
+    assert list(upgrade.get_upgradable_movies_subtitles()) != []
+
+    upgrade.upgrade_movies_subtitles(job_id=1)
+
+    assert calls == []
+
