@@ -5,7 +5,6 @@ import hashlib
 import logging
 import os
 import re
-import tempfile
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from media_servers.events import publication_callback
@@ -14,7 +13,6 @@ from flask import make_response, jsonify, request
 from flask_restx import Resource, Namespace
 from werkzeug.utils import secure_filename
 
-from app.config import settings
 from app.database import (TableArrInstances, TableEpisodes, TableHistory, TableHistoryMovie,
                           TableHistorySports, TableMovies, TableShows, TableSportsEvents,
                           TableSportsLeagues, database, select)
@@ -26,6 +24,9 @@ from sonarr.history import history_log
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.indexer.series import store_subtitles
 from subtitles.processing import ProcessSubtitlesResult
+from subtitles.new_subtitle import (SubtitleFileExists, write_new_subtitle,
+                                    apply_subtitle_chmod as _apply_subtitle_chmod,
+                                    write_bytes_atomically as _write_bytes_atomically)
 from subtitles.tools.subsync_engines import subtitle_mutation, subtitle_write_locks
 from utilities.helper import get_target_folder
 from utilities.path_mappings import path_mappings
@@ -570,33 +571,6 @@ def generate_etag(path):
     stat = os.stat(path)
     tag_input = f"{stat.st_mtime_ns}:{stat.st_size}"
     return hashlib.md5(tag_input.encode()).hexdigest()
-
-
-def _write_bytes_atomically(path, data):
-    subtitle_dir = os.path.dirname(path)
-    fd, tmp_path = tempfile.mkstemp(dir=subtitle_dir)
-    try:
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
-def _apply_subtitle_chmod(path):
-    if settings.general.chmod_enabled:
-        try:
-            chmod_value = int(settings.general.chmod, 8)
-            os.chmod(path, chmod_value)
-        except Exception:
-            pass
 
 
 def _refresh_media_subtitles(media_type, media_id, metadata):
@@ -1395,16 +1369,10 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
 
     # Check and create under the same mutation lock as replacements.
     try:
-        with subtitle_write_locks(video_path, subtitle_path):
-            if os.path.isfile(subtitle_path):
-                return 'Subtitle file already exists', 409
-            with subtitle_mutation(video_path, subtitle_path):
-                with (sports_operation[2](output_path=subtitle_path)
-                      if sports_operation is not None else nullcontext()):
-                    _write_bytes_atomically(subtitle_path, encoded)
-                    publication_callback(media_type, video_path, 'edit', arr_instance_id)(subtitle_path)
-                    _apply_subtitle_chmod(subtitle_path)
-
+        write_new_subtitle(video_path, [(subtitle_path, encoded)], media_type, arr_instance_id,
+                           publication_guard=sports_operation[2] if sports_operation is not None else None)
+    except SubtitleFileExists:
+        return 'Subtitle file already exists', 409
     except FileNotFoundError:
         if sports_operation is not None:
             return 'Sports file changed. Please try again.', 409

@@ -114,14 +114,15 @@ def test_create_subtitle_episode_uses_path_replace_instance(schema_session, monk
              patch("api.subtitles.content.os.path.isfile", return_value=False), \
              patch("api.subtitles.content.get_target_folder", return_value=None), \
              patch("api.subtitles.content.os.path.realpath", side_effect=lambda p: p), \
-             patch("api.subtitles.content.tempfile.mkstemp") as mock_mkstemp, \
+             patch("subtitles.new_subtitle.tempfile.mkstemp") as mock_mkstemp, \
              patch("api.subtitles.content.os.write"), \
              patch("api.subtitles.content.os.close"), \
              patch("api.subtitles.content.os.replace"), \
+             patch("subtitles.new_subtitle.os.link"), \
              patch("api.subtitles.content.store_subtitles"), \
              patch("api.subtitles.content.store_subtitles_movie"), \
              patch("api.subtitles.content.event_stream"), \
-             patch("api.subtitles.content.settings") as mock_settings:
+             patch("subtitles.new_subtitle.settings") as mock_settings:
             mock_settings.general.chmod_enabled = False
             mock_mkstemp.return_value = (3, "/local/tv/show/s01e01.en.srt.tmp")
             content._create_subtitle("episode", 55, arr_instance_id=3)
@@ -165,14 +166,15 @@ def test_create_subtitle_movie_uses_path_replace_instance(schema_session, monkey
              patch("api.subtitles.content.os.path.isfile", return_value=False), \
              patch("api.subtitles.content.get_target_folder", return_value=None), \
              patch("api.subtitles.content.os.path.realpath", side_effect=lambda p: p), \
-             patch("api.subtitles.content.tempfile.mkstemp") as mock_mkstemp, \
+             patch("subtitles.new_subtitle.tempfile.mkstemp") as mock_mkstemp, \
              patch("api.subtitles.content.os.write"), \
              patch("api.subtitles.content.os.close"), \
              patch("api.subtitles.content.os.replace"), \
+             patch("subtitles.new_subtitle.os.link"), \
              patch("api.subtitles.content.store_subtitles"), \
              patch("api.subtitles.content.store_subtitles_movie"), \
              patch("api.subtitles.content.event_stream"), \
-             patch("api.subtitles.content.settings") as mock_settings:
+             patch("subtitles.new_subtitle.settings") as mock_settings:
             mock_settings.general.chmod_enabled = False
             mock_mkstemp.return_value = (3, "/local/movies/film.en.srt.tmp")
             content._create_subtitle("movie", 77, arr_instance_id=4)
