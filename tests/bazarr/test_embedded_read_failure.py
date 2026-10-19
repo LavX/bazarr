@@ -29,6 +29,24 @@ def _unreadable(*args, **kwargs):
     raise OSError("the share dropped")
 
 
+# What knowit reports for a readable file that carries no subtitle stream.
+NO_SUBTITLE_STREAMS = {"video": [{"codec": "h264"}], "audio": [{"codec": "aac"}]}
+
+
+def _read_through_knowit(module, session, monkeypatch, result):
+    """Read the tracks through the real reader and parse_video_metadata, with
+    knowit answering ``result``."""
+    from utilities import binaries, video_analyzer
+
+    monkeypatch.setattr(module, "embedded_subs_reader", video_analyzer.embedded_subs_reader)
+    monkeypatch.setattr(video_analyzer, "database", session)
+    monkeypatch.setattr(video_analyzer.settings.general, "embedded_subtitles_parser", "ffprobe")
+    monkeypatch.setattr(video_analyzer.settings.general, "enable_strm_support", False, raising=False)
+    monkeypatch.setattr(binaries, "get_binary", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(video_analyzer, "alpha3_from_alpha2", lambda code: None)
+    monkeypatch.setattr(video_analyzer, "know", lambda *a, **kw: result)
+
+
 def test_movie_keeps_its_embedded_tracks_when_the_read_fails(hidden_db, monkeypatch):  # noqa: F811
     import subtitles.indexer.movies as mv
     from subtitles.embedded_hidden import hide_track
@@ -51,6 +69,17 @@ def test_movie_keeps_its_embedded_tracks_when_the_read_fails(hidden_db, monkeypa
     assert _stored(hidden_db, TableMovies, 1) == (["en", "de"], ["fr"])
     stored = hidden_db.execute(sa.select(TableMovies.subtitles)).scalar_one()
     assert "['en', None, None, 'subrip']" in stored
+    assert logged == []
+
+    # knowit answers {} when its provider cannot load: a failed read too.
+    _read_through_knowit(mv, hidden_db, monkeypatch, {})
+    mv.store_subtitles_movie("/movies/m.mkv", "/local/m.mkv", arr_instance_id=1)
+    assert _stored(hidden_db, TableMovies, 1) == (["en", "de"], ["fr"])
+
+    # A good read of a file without subtitle streams does drop them.
+    _read_through_knowit(mv, hidden_db, monkeypatch, NO_SUBTITLE_STREAMS)
+    mv.store_subtitles_movie("/movies/m.mkv", "/local/m.mkv", arr_instance_id=1)
+    assert _stored(hidden_db, TableMovies, 1) == ([], ["en", "fr"])
     assert logged == []
 
 
@@ -78,6 +107,17 @@ def test_episode_keeps_its_embedded_tracks_on_every_row_of_the_file_when_the_rea
 
     for episode_id in (1, 2):
         assert _stored(hidden_db, TableEpisodes, episode_id) == (["en", "en:hi"], ["fr"])
+    assert logged == []
+
+    _read_through_knowit(se, hidden_db, monkeypatch, {})
+    se.store_subtitles("/tv/s/e01-e02.mkv", "/local/e01-e02.mkv", arr_instance_id=1)
+    for episode_id in (1, 2):
+        assert _stored(hidden_db, TableEpisodes, episode_id) == (["en", "en:hi"], ["fr"])
+
+    _read_through_knowit(se, hidden_db, monkeypatch, NO_SUBTITLE_STREAMS)
+    se.store_subtitles("/tv/s/e01-e02.mkv", "/local/e01-e02.mkv", arr_instance_id=1)
+    for episode_id in (1, 2):
+        assert _stored(hidden_db, TableEpisodes, episode_id) == ([], ["en", "fr"])
     assert logged == []
 
 

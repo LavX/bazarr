@@ -493,6 +493,12 @@ def parse_video_metadata(file, file_size, episode_file_id=None, movie_file_id=No
                       "Settings-->Subtitles.")
         return None
 
+    # knowit answers {} when the selected provider cannot load. That is a read
+    # that failed, not a file without tracks, so it is neither cached nor returned.
+    if not data[embedded_subs_parser]:
+        logging.error(f"BAZARR {embedded_subs_parser} returned nothing for this video file {file}")  # noqa: G004
+        return None
+
     # we write to db the result and return the newly cached ffprobe dict
     if episode_file_id:
         database.execute(
