@@ -117,6 +117,50 @@ describe("Movies Detail Table, embedded subtitle scores", () => {
   });
 });
 
+describe("Movies Detail Table, extracted file score", () => {
+  it("shows the extracted file's own score, not an older download's of the same name", async () => {
+    setupApiMocks();
+    const extracted: Subtitle = {
+      code2: "en",
+      name: "English",
+      hi: false,
+      forced: false,
+      path: "/movies/test.en.srt",
+    };
+    const language = { code2: "en", name: "English", hi: false, forced: false };
+    const history: History.Movie[] = [
+      // Newest first, as the history endpoint returns it.
+      makeHistoryEntry({
+        id: 2,
+        action: 8,
+        score: "100.0%",
+        language,
+        provider: "embedded",
+        subtitles_path: "/movies/test.en.srt",
+      }),
+      makeHistoryEntry({
+        id: 1,
+        action: 1,
+        score: "61.1%",
+        language,
+        provider: "opensubtitlescom",
+        subtitles_path: "/movies/test.en.srt",
+      }),
+    ];
+
+    customRender(
+      <Table
+        movie={makeMovie([extracted])}
+        profile={undefined}
+        history={history}
+      />,
+    );
+
+    expect(await screen.findByText("100.0%")).toBeInTheDocument();
+    expect(screen.queryByText("61.1%")).not.toBeInTheDocument();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Test 2: Multiple embedded tracks same language (hi/forced) no key collision
 // ---------------------------------------------------------------------------

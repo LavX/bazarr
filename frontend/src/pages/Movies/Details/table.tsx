@@ -98,11 +98,11 @@ function newestFirst(history: History.Movie[] | undefined) {
   });
 }
 
-// Deletion, the downloads and upgrades, upload and translation each put a
-// different file at the path, or none. Sync (5) rewrites the same file and
-// embedded tracks (7) have no path.
+// Deletion, the downloads and upgrades, upload, translation and extraction
+// from an embedded track (8) each put a different file at the path, or none.
+// Sync (5) rewrites the same file and embedded tracks (7) have no path.
 function replacesFile(action: number) {
-  return [0, 1, 2, 3, 4, 6].includes(action);
+  return [0, 1, 2, 3, 4, 6, 8].includes(action);
 }
 
 function isSubtitleTrack(path: string | undefined | null) {
@@ -744,7 +744,8 @@ const Table: FunctionComponent<Props> = ({
   // Score and provider belong to whatever last wrote the file on disk. A
   // sync rewrites it in place and keeps where it came from, so only the
   // newest record that replaced or removed the file counts, and only a
-  // download, manual download or upgrade has a score to show.
+  // download, manual download, upgrade or extraction (whose score is the
+  // track's) has a score to show.
   const historyMap = useMemo(() => {
     const map = new Map<string, History.Movie>();
     const settled = new Set<string>();
@@ -752,7 +753,7 @@ const Table: FunctionComponent<Props> = ({
       if (!h.subtitles_path || settled.has(h.subtitles_path)) return;
       if (!replacesFile(h.action)) return;
       settled.add(h.subtitles_path);
-      if ([1, 2, 3].includes(h.action)) map.set(h.subtitles_path, h);
+      if ([1, 2, 3, 8].includes(h.action)) map.set(h.subtitles_path, h);
     });
     return map;
   }, [history]);
@@ -789,8 +790,8 @@ const Table: FunctionComponent<Props> = ({
         if (!map.has(key)) map.set(key, new Set());
         map.get(key)!.add(record.action);
       }
-      // A replacement or deletion ends this file's history. Translation also
-      // writes a new file, so only syncs after that translation still apply.
+      // A replacement or deletion ends this file's history. Translation and
+      // extraction also write a new file, so only syncs after them still apply.
       if (replacesFile(record.action)) completed.add(record.subtitles_path);
     });
     return map;

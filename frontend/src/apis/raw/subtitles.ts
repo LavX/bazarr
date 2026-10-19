@@ -30,7 +30,8 @@ export type BatchAction =
   | "reverse_rtl"
   | "scan-disk"
   | "search-missing"
-  | "upgrade";
+  | "upgrade"
+  | "extract";
 
 /** What Extract to file answers: the queued job and the file it will write. */
 export interface EmbeddedExtractResult {

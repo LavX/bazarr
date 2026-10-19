@@ -173,7 +173,7 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
         );
       }
       const record = historyMap.get(JSON.stringify([episode.id, val.path]));
-      return record && [1, 2, 3].includes(record.action)
+      return record && [1, 2, 3, 8].includes(record.action)
         ? scoreInfoFromHistory(record)
         : undefined;
     };
@@ -448,11 +448,13 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
 
     // Score for a downloaded subtitle: keyed by (episode local id, file path)
     // from the newest file mutation, including replacements and deletions.
+    // An extraction from an embedded track (8) writes a new file too, and its
+    // score is the track's.
     const historyMap = useMemo(() => {
       const map = new Map<string, History.Episode>();
       orderedHistory.forEach((h) => {
         if (!h.subtitles_path) return;
-        if ([0, 1, 2, 3, 4, 6].includes(h.action)) {
+        if ([0, 1, 2, 3, 4, 6, 8].includes(h.action)) {
           const key = JSON.stringify([h.id, h.subtitles_path]);
           if (!map.has(key)) map.set(key, h);
         }

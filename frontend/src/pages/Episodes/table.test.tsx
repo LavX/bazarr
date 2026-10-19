@@ -158,7 +158,21 @@ describe("Episodes Detail Table, subtitle scores", () => {
     },
   );
 
-  it.each([1, 2, 3])(
+  it("shows an extracted file's own score, not an older download's of the same name", async () => {
+    setupApiMocks();
+    customRender(
+      <TableHarness
+        episodes={[makeEpisode([file])]}
+        history={[
+          fileHistory({ history_id: 1 }),
+          fileHistory({ action: 8, history_id: 2, score: "72.0%" }),
+        ]}
+      />,
+    );
+    expect(await findScoredBadge(/^en 72%$/i)).toBeInTheDocument();
+  });
+
+  it.each([1, 2, 3, 8])(
     "shows the newest action %s score after an older replacement",
     async (action) => {
       setupApiMocks();
