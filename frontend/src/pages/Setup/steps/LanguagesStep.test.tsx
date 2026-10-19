@@ -215,6 +215,28 @@ describe("LanguagesStep", () => {
     await waitFor(() => expect(onNext).toHaveBeenCalled());
   });
 
+  it("says so when the profile cannot be saved", async () => {
+    // A restarting or unreachable Bazarr+ is kept out of the toasts, so the
+    // step is the only place a failed write can be reported.
+    const user = userEvent.setup();
+    mutate.mockImplementationOnce(
+      (_input: unknown, opts?: { onError?: () => void }) => {
+        opts?.onError?.();
+      },
+    );
+
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    await user.click(screen.getByRole("combobox", { name: "Languages" }));
+    await user.click(await screen.findByText("English"));
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not save your languages/i,
+    );
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
   it("proceeds without rewriting when a profile already exists", async () => {
     const user = userEvent.setup();
     setProfiles([

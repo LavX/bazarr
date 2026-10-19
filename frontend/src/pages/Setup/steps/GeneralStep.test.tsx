@@ -54,6 +54,29 @@ describe("GeneralStep", () => {
     ).toBeChecked();
   });
 
+  it("says so when the preferences cannot be saved", async () => {
+    // A restarting or unreachable Bazarr+ is kept out of the toasts, so the
+    // step is the only place a failed write can be reported.
+    const user = userEvent.setup();
+    mutate.mockImplementationOnce(
+      (_input: unknown, opts?: { onError?: () => void }) => {
+        opts?.onError?.();
+      },
+    );
+
+    customRender(<GeneralStep onNext={onNext} />);
+
+    await user.click(
+      screen.getByRole("switch", { name: /upgrade previously downloaded/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not save these preferences/i,
+    );
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
   it("does not ask for a page size", () => {
     // A table preference, on a screen the reader meets before they have a
     // table. It is one row of a step that has to fit the window, and nobody

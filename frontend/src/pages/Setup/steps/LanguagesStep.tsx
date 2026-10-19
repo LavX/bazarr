@@ -1,5 +1,12 @@
-import { FC, useMemo } from "react";
-import { Alert, Button, Group, Loader, MultiSelect } from "@mantine/core";
+import { FC, useMemo, useState } from "react";
+import {
+  Alert,
+  Button,
+  Group,
+  Loader,
+  MultiSelect,
+  Stack,
+} from "@mantine/core";
 import {
   useLanguageProfiles,
   useLanguages,
@@ -58,6 +65,9 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     isError: profilesFailed,
   } = useLanguageProfiles();
   const settings = useSettingsMutation();
+  // The client keeps a restarting or unreachable Bazarr+ out of its toasts,
+  // so a write that fails that way said nothing at all unless it is said here.
+  const [saveFailed, setSaveFailed] = useState(false);
 
   // Preselected from the browser, so the gate is met by a working default
   // rather than by a disabled button on a step that cannot explain itself. An
@@ -125,6 +135,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       tag: undefined,
     };
 
+    setSaveFailed(false);
     settings.mutate(
       {
         [enabledLanguageKey]: selected,
@@ -138,6 +149,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         onSuccess: () => {
           onNext();
         },
+        onError: () => setSaveFailed(true),
       },
     );
   };
@@ -153,22 +165,29 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       layout="stacked"
       description="Pick the languages you want subtitles in. Bazarr only searches for languages that belong to a profile, so we will turn your selection into a default profile that gets applied to every show and movie."
       actions={
-        <Group justify="space-between">
-          <Group gap="sm">
-            {onBack && (
-              <Button variant="default" onClick={onBack}>
-                Back
-              </Button>
-            )}
+        <Stack gap="sm">
+          {saveFailed && (
+            <Alert color="red" title="Could not save your languages">
+              Check that Bazarr+ is still running, then try again.
+            </Alert>
+          )}
+          <Group justify="space-between">
+            <Group gap="sm">
+              {onBack && (
+                <Button variant="default" onClick={onBack}>
+                  Back
+                </Button>
+              )}
+            </Group>
+            <Button
+              onClick={handleContinue}
+              loading={settings.isPending}
+              disabled={!canContinue}
+            >
+              Continue
+            </Button>
           </Group>
-          <Button
-            onClick={handleContinue}
-            loading={settings.isPending}
-            disabled={!canContinue}
-          >
-            Continue
-          </Button>
-        </Group>
+        </Stack>
       }
     >
       {profilesFailed && (

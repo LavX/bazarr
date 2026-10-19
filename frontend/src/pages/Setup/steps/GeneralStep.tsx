@@ -1,5 +1,13 @@
-import { FC } from "react";
-import { Button, Group, Select, Switch, TextInput } from "@mantine/core";
+import { FC, useState } from "react";
+import {
+  Alert,
+  Button,
+  Group,
+  Select,
+  Stack,
+  Switch,
+  TextInput,
+} from "@mantine/core";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { folderOptions } from "@/pages/Settings/Subtitles/options";
 import StepLayout from "@/pages/Setup/StepLayout";
@@ -44,6 +52,9 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const setUpgradeSubs = (value: boolean) => patchDraft({ upgradeSubs: value });
 
   const showCustomFolder = needsCustomFolder(subfolder);
+  // The client keeps a restarting or unreachable Bazarr+ out of its toasts,
+  // so a write that fails that way said nothing at all unless it is said here.
+  const [saveFailed, setSaveFailed] = useState(false);
 
   const handleContinue = () => {
     const payload: LooseObject = {};
@@ -63,10 +74,12 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       return;
     }
 
+    setSaveFailed(false);
     mutation.mutate(payload, {
       onSuccess: () => {
         onNext();
       },
+      onError: () => setSaveFailed(true),
     });
   };
 
@@ -75,18 +88,26 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       title="General basics"
       description="A few application preferences to round things out. These are optional and can all be changed later in Settings."
       actions={
-        <Group justify="space-between">
-          <Group gap="sm">
-            {onBack && (
-              <Button variant="default" onClick={onBack}>
-                Back
-              </Button>
-            )}
+        <Stack gap="sm">
+          {saveFailed && (
+            <Alert color="red" title="Could not save these preferences">
+              Check that Bazarr+ is still running, then try again. You can also
+              set these later in Settings.
+            </Alert>
+          )}
+          <Group justify="space-between">
+            <Group gap="sm">
+              {onBack && (
+                <Button variant="default" onClick={onBack}>
+                  Back
+                </Button>
+              )}
+            </Group>
+            <Button onClick={handleContinue} loading={mutation.isPending}>
+              Continue
+            </Button>
           </Group>
-          <Button onClick={handleContinue} loading={mutation.isPending}>
-            Continue
-          </Button>
-        </Group>
+        </Stack>
       }
     >
       <Select

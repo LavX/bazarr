@@ -1,5 +1,13 @@
 import { FC, useState } from "react";
-import { Anchor, Button, Group, PasswordInput, Text } from "@mantine/core";
+import {
+  Alert,
+  Anchor,
+  Button,
+  Group,
+  PasswordInput,
+  Stack,
+  Text,
+} from "@mantine/core";
 import { useSettingsMutation } from "@/apis/hooks";
 import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "./types";
@@ -22,12 +30,16 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
 
   const [apiKey, setApiKey] = useState("");
   const trimmedKey = apiKey.trim();
+  // The client keeps a restarting or unreachable Bazarr+ out of its toasts,
+  // so a write that fails that way said nothing at all unless it is said here.
+  const [saveFailed, setSaveFailed] = useState(false);
 
   const handleContinue = () => {
     if (trimmedKey.length === 0) {
       onNext();
       return;
     }
+    setSaveFailed(false);
     settings.mutate(
       {
         "settings-translator-openrouter_api_key": trimmedKey,
@@ -37,6 +49,7 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
         onSuccess: () => {
           onNext();
         },
+        onError: () => setSaveFailed(true),
       },
     );
   };
@@ -59,20 +72,28 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
         </Text>
       }
       actions={
-        <Group justify="space-between">
-          <Group gap="sm">
-            {onBack && (
-              <Button variant="default" onClick={onBack}>
-                Back
-              </Button>
-            )}
+        <Stack gap="sm">
+          {saveFailed && (
+            <Alert color="red" title="Could not save the key">
+              Check that Bazarr+ is still running, then try again. You can also
+              set translation up later in Settings, Translator.
+            </Alert>
+          )}
+          <Group justify="space-between">
+            <Group gap="sm">
+              {onBack && (
+                <Button variant="default" onClick={onBack}>
+                  Back
+                </Button>
+              )}
+            </Group>
+            <Button onClick={handleContinue} loading={settings.isPending}>
+              {trimmedKey.length > 0
+                ? "Continue"
+                : "Continue without translation"}
+            </Button>
           </Group>
-          <Button onClick={handleContinue} loading={settings.isPending}>
-            {trimmedKey.length > 0
-              ? "Continue"
-              : "Continue without translation"}
-          </Button>
-        </Group>
+        </Stack>
       }
     >
       <PasswordInput

@@ -53,6 +53,27 @@ describe("TranslatorStep", () => {
     expect(onNext).toHaveBeenCalled();
   });
 
+  it("says so when the key cannot be saved", async () => {
+    // A restarting or unreachable Bazarr+ is kept out of the toasts, so the
+    // step is the only place a failed write can be reported.
+    const user = userEvent.setup();
+    mutate.mockImplementationOnce(
+      (_input: unknown, opts?: { onError?: () => void }) => {
+        opts?.onError?.();
+      },
+    );
+
+    customRender(<TranslatorStep onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/openrouter api key/i), "sk-or-xyz");
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not save the key/i,
+    );
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
   it("Continue with no key writes nothing", async () => {
     const user = userEvent.setup();
     customRender(<TranslatorStep onNext={onNext} />);
