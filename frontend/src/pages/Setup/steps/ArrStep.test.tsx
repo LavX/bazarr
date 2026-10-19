@@ -276,6 +276,47 @@ describe("ArrStep", () => {
     );
   });
 
+  it("saves the ticket's own example, typed key by key, as host and port", async () => {
+    // A Docker user types http://sonarr:8989 and presses Continue. It was
+    // stored verbatim as the host, then as sonarr:8989 once the scheme alone
+    // was stripped.
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.clear(screen.getByLabelText(/^port/i));
+    await user.type(screen.getByLabelText(/^port/i), "1234");
+    await user.type(screen.getByLabelText(/^address/i), "http://sonarr:8989");
+    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() =>
+      expect(createMutate).toHaveBeenCalledWith(
+        expect.objectContaining({ ip: "sonarr", port: 8989, ssl: false }),
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("drops the split note once the address is emptied", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(screen.getByLabelText(/^address/i));
+    await user.paste("http://sonarr:8989");
+    expect(
+      screen.getByRole("alert", { name: /moved into the right fields/i }),
+    ).toHaveTextContent(/the port went to port/i);
+
+    await user.clear(screen.getByLabelText(/^address/i));
+    await user.type(screen.getByLabelText(/^address/i), "10.0.0.5");
+    await user.tab();
+
+    expect(
+      screen.queryByRole("alert", { name: /moved into the right fields/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("10.0.0.5");
+  });
+
   it("leaves a bare IPv6 address alone", async () => {
     const user = userEvent.setup();
     customRender(<ArrStep kind="sonarr" onNext={onNext} />);
