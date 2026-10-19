@@ -160,20 +160,18 @@ const AuthSection = () => {
     return (
       <Paper withBorder p="lg" className={styles.authSection}>
         <Stack gap="md">
-          <Title order={4}>Plex OAuth</Title>
+          <Title order={4}>Plex account</Title>
           <Stack gap="sm">
             <Text size="lg" fw={600}>
-              Complete Authentication
+              Finish signing in to Plex
             </Text>
             <Text>
-              PIN Code:{" "}
+              Sign-in code:{" "}
               <Text component="span" fw={700}>
                 {pin?.code}
               </Text>
             </Text>
-            <Text size="sm">
-              Complete the authentication in the opened window.
-            </Text>
+            <Text size="sm">Sign in to Plex in the window that opened.</Text>
             <Button
               onClick={handleCancelAuth}
               variant="light"
@@ -193,15 +191,15 @@ const AuthSection = () => {
     return (
       <Paper withBorder p="lg" className={styles.authSection}>
         <Stack gap="md">
-          <Title order={4}>Plex OAuth</Title>
+          <Title order={4}>Plex account</Title>
           <Stack gap="sm">
             <Text size="sm">
               Connect your Plex account to enable secure, automated integration
               with Bazarr.
             </Text>
             <Text size="xs" c="var(--bz-text-tertiary)">
-              Advanced users: Manual configuration is available via config.yaml
-              if OAuth is not suitable.
+              Advanced users: manual configuration is available in config.yaml
+              if signing in here does not suit you.
             </Text>
             {authError && (
               <Alert color="red" variant="light">
@@ -227,7 +225,7 @@ const AuthSection = () => {
   return (
     <Paper withBorder p="lg" className={styles.authSection}>
       <Stack gap="md">
-        <Title order={4}>Plex OAuth</Title>
+        <Title order={4}>Plex account</Title>
         <Alert color="brand" variant="light" className={styles.authAlert}>
           Connected as {authData?.username} ({authData?.email})
         </Alert>

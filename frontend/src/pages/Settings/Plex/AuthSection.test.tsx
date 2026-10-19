@@ -69,6 +69,28 @@ describe("Plex AuthSection", () => {
     invalidate.mockRestore();
   });
 
+  it("speaks in outcomes, not protocol names, while the sign-in is open", async () => {
+    // The setup wizard renders this panel on a screen where everything else
+    // says what happens; "Plex OAuth", "Complete Authentication" and "PIN
+    // Code:" named the mechanism instead.
+    createPin.mockResolvedValue({
+      data: { pinId: 1, code: "ABCD", authUrl: "https://plex.tv/link" },
+    });
+
+    await startAuth();
+
+    expect(
+      await screen.findByText("Finish signing in to Plex"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Plex account" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/sign-in code:/i)).toHaveTextContent(
+      "Sign-in code: ABCD",
+    );
+    expect(screen.queryByText(/oauth|pin code|authentication/i)).toBeNull();
+  });
+
   it("explains a Plex request that never answered instead of throwing", async () => {
     createPin.mockRejectedValue(new Error("connect ECONNREFUSED"));
 
