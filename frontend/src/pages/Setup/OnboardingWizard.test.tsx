@@ -1030,6 +1030,37 @@ describe("rail numerals", () => {
   });
 });
 
+// The floor and the SegmentedControl ring set Mantine's own variables, so the
+// declaration tests above only mean something while Mantine still reads them.
+// jsdom cannot render them (the browser measurements in the lane report do);
+// this fails on a Mantine release that renames or stops reading one.
+describe("the Mantine variables the overrides rely on", () => {
+  const mantine = (name: string) =>
+    readFileSync(`node_modules/@mantine/core/styles/${name}.css`, "utf8");
+
+  it("are still the ones Mantine sizes its controls from", () => {
+    const button = mantine("Button");
+    expect(button).toMatch(/--button-height-compact-sm:/);
+    expect(button).toMatch(/height: var\(--button-height,/);
+    const input = mantine("Input");
+    expect(input).toMatch(/--input-height: var\(--input-height-sm\);/);
+    expect(input).toMatch(/min-height: var\(--input-height\);/);
+    const pill = mantine("Pill");
+    expect(pill).toMatch(/--pill-height: var\(--pill-height-sm\);/);
+    expect(pill).toMatch(/height: var\(--pill-height\);/);
+  });
+
+  it("still draws SegmentedControl's ring from its variable", () => {
+    const segmented = mantine("SegmentedControl");
+    expect(segmented).toMatch(
+      /outline: var\(--segmented-control-outline, none\);/,
+    );
+    expect(segmented).toMatch(
+      /:focus-visible \+ \.m_[0-9a-f]+ \{\s*--segmented-control-outline: 2px solid/,
+    );
+  });
+});
+
 describe("touch targets on a coarse pointer", () => {
   const coarse = wizardRules.filter((rule) =>
     rule.at.includes("@media (pointer: coarse)"),
