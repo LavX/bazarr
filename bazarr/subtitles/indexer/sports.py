@@ -44,16 +44,37 @@ def _file_signature(context, row, mappings):
             stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
-def _identity(context, row, mappings):
-    """The parts of a file signature an outage cannot change: which event and
-    owner, which upstream file and size, and where the mappings point it."""
-    return (context.event_id, context.arr_instance_id, context.file_id, context.original_path,
-            context.mapped_path, mappings, row.file_size)
+def _read_from_this_file(read_from, context, row, mappings):
+    """Whether the last good read, by its signature, is of the file the row
+    names now, as far as an outage lets anyone tell: the same event and owner,
+    upstream file and size, mapped path, and the same local path for every
+    stored sidecar. Mapping edits that move neither are not a change.
+
+    A replacement with the same upstream identity cannot be told apart while
+    the file cannot be reached; once it can, its inode and times differ from
+    the signature and force a new read.
+    """
+    if not isinstance(read_from, tuple) or len(read_from) < 8:
+        return False
+    identity = (context.event_id, context.arr_instance_id, context.file_id, context.original_path,
+                context.mapped_path, row.file_size)
+    if tuple(read_from[:5]) + (read_from[7],) != identity:
+        return False
+    if read_from[6] == mappings:
+        return True
+    try:
+        before, now = read_sports_mappings(read_from[6]), read_sports_mappings(mappings)
+        sidecars = [entry[1] for entry in ast.literal_eval(row.subtitles or '[]')
+                    if isinstance(entry, (list, tuple)) and len(entry) > 1 and isinstance(entry[1], str)]
+        return all(apply_sports_mapping(path, before) == apply_sports_mapping(path, now) for path in sidecars)
+    except (ValueError, SyntaxError, TypeError):
+        return False
 
 
-def _signature_identity(signature):
-    # _file_signature's tuple without the realpath and the stat fields.
-    return tuple(signature[:5]) + tuple(signature[6:8])
+def _last_read(row):
+    """The signature of the row's last good read, kept across invalidations."""
+    read_from = _stored_cache(row).get('sports_file')
+    return read_from if isinstance(read_from, tuple) else None
 
 
 def _stored_cache(row):
@@ -83,9 +104,8 @@ def _snapshot(event_id, owner, cancel=None):
             if current == context:
                 row = session.get(TableSportsEvents, event_id, populate_existing=True, with_for_update=True)
                 cached = _stored_cache(row)
-                read_from = cached.get('sports_file')
-                if (isinstance(read_from, tuple) and len(read_from) >= 8
-                        and _signature_identity(read_from) != _identity(context, row, mappings)):
+                read_from = _last_read(row)
+                if read_from is not None and not _read_from_this_file(read_from, context, row, mappings):
                     # A new mapping or a new upstream file points at a file that
                     # cannot be reached. Do not keep displaying subtitles from
                     # the previous file while a later repair retries.
@@ -274,8 +294,17 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
                     row.subtitles = '[]'
                     row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language,
                                                          row.failedAttempts))
-            row.ffprobe_cache = (pickle.dumps(cached | {'sports_indexed': False}, pickle.HIGHEST_PROTOCOL)
-                                 if cached else None)
+            if cached:
+                row.ffprobe_cache = pickle.dumps(cached | {'sports_indexed': False}, pickle.HIGHEST_PROTOCOL)
+            else:
+                # The metadata no longer applies, but the signature of the last
+                # good read stays with the listing it produced, so the
+                # stat-failure path in _snapshot can still tell a moved file
+                # from this one. _cached matches it only if the file is exactly
+                # that one again, and then finds no metadata to reuse.
+                read_from = _last_read(row)
+                row.ffprobe_cache = (pickle.dumps({'sports_file': read_from, 'sports_indexed': False},
+                                                  pickle.HIGHEST_PROTOCOL) if read_from else None)
             session.flush()
         data = cached | {'sports_file': signature}
         actual = []

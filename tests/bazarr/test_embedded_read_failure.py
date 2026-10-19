@@ -132,6 +132,7 @@ def test_sports_keeps_its_listing_when_the_probe_fails(indexed_library, monkeypa
     _sports_profile(session)
     assert {item[0] for item in module.store_subtitles_sports(61, 1)} == {"fr", "en:hi"}
     listing = row(session, 61).subtitles
+    read_from = pickle.loads(row(session, 61).ffprobe_cache)["sports_file"]
     assert ast.literal_eval(row(session, 61).missing_subtitles) == ["de"]
 
     # The file changes, so the cached read no longer applies, and the probe fails.
@@ -145,8 +146,9 @@ def test_sports_keeps_its_listing_when_the_probe_fails(indexed_library, monkeypa
     after = row(session, 61)
     assert after.subtitles == listing
     assert ast.literal_eval(after.missing_subtitles) == ["de"]
-    # Still unindexed, so the next sync or scan retries it.
-    assert after.ffprobe_cache is None
+    # Still unindexed, so the next sync or scan retries it, and the old
+    # metadata is gone. What file the listing was read from is not.
+    assert pickle.loads(after.ffprobe_cache) == {"sports_file": read_from, "sports_indexed": False}
 
     # A good read of a file without subtitle streams does drop the track.
     monkeypatch.setattr(module, "parse_video_metadata", _without_subtitle_streams(probe))
@@ -207,3 +209,56 @@ def test_sports_keeps_its_listing_while_the_same_file_cannot_be_reached(indexed_
     module.refresh_sports_files([61], 1)
     assert calls and row(session, 61).subtitles == listing
     assert pickle.loads(row(session, 61).ffprobe_cache)["sports_indexed"] is True
+
+
+def _map_owner_one(session, mappings):
+    from app.database import TableArrInstances
+
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1)
+                    .values(path_mappings=json.dumps(mappings)))
+
+
+def _fail_probe_after_a_change(module, path, monkeypatch):
+    video = path / "1" / "event.mkv"
+    stat = video.stat()
+    os.utime(video, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10 ** 9))
+    probe = module.parse_video_metadata
+    monkeypatch.setattr(module, "parse_video_metadata", lambda *a, **kw: None)
+    with pytest.raises(OSError):
+        module.store_subtitles_sports(61, 1)
+    monkeypatch.setattr(module, "parse_video_metadata", probe)
+
+
+def test_a_failed_probe_keeps_where_the_listing_was_read_from(indexed_library, monkeypatch):  # noqa: F811
+    """A failed probe once dropped the cached signature with the metadata and
+    kept the listing. A mapping moved to an unreachable file after that had no
+    read to compare against, so the old file's tracks stayed for good."""
+    session, path = indexed_library
+    module = sports(monkeypatch, session)
+    assert {item[0] for item in module.store_subtitles_sports(61, 1)} == {"fr", "en:hi"}
+    _fail_probe_after_a_change(module, path, monkeypatch)
+    assert row(session, 61).subtitles != "[]"
+
+    _map_owner_one(session, [["/sports", str(path / "offline")]])
+    module.refresh_sports_files([61], 1)
+    assert row(session, 61).subtitles == "[]" and row(session, 61).ffprobe_cache is None
+
+
+def test_a_mapping_edit_that_moves_nothing_keeps_the_listing_during_an_outage(
+        indexed_library, monkeypatch):  # noqa: F811
+    session, path = indexed_library
+    module = sports(monkeypatch, session)
+    assert {item[0] for item in module.store_subtitles_sports(61, 1)} == {"fr", "en:hi"}
+    listing = row(session, 61).subtitles
+    monkeypatch.setattr(module, "_file_signature",
+                        lambda *a, **kw: (_ for _ in ()).throw(PermissionError("permission denied")))
+
+    _map_owner_one(session, [["/sports", str(path / "1")], ["/elsewhere", str(path / "2")]])
+    module.refresh_sports_files([61], 1)
+    assert row(session, 61).subtitles == listing
+
+    # A mapping that moves a stored sidecar is a change, though the video
+    # itself still maps to the same place.
+    _map_owner_one(session, [["/sports", str(path / "1")], ["/sports/event.en.hi.srt", str(path / "gone.srt")]])
+    module.refresh_sports_files([61], 1)
+    assert row(session, 61).subtitles == "[]"
