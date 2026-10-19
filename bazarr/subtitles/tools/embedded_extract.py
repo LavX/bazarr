@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
-from subliminal_patch.core import get_subtitle_path
+from subliminal_patch.core import SUBTITLE_EXTENSIONS, get_subtitle_path
 from subliminal_patch.score import MAX_SCORES
 from subzero.language import Language
 
@@ -171,18 +171,19 @@ def existing_output(video_path, paths):
 
 
 def single_language_paths(video_path, extensions):
-    """The text name a download takes in single-language mode, when ``extensions`` write text.
+    """The language-less names a subtitle takes in single-language mode, when ``extensions`` write text.
 
-    In that mode downloads and uploads are saved as ``<video>.srt``, with no
-    language in the name. Such a file already is the subtitle of the one
-    language, so a text extraction counts it as taken rather than write a
-    second ``<video>.<language>.srt`` beside it.
+    In that mode downloads and uploads are saved as ``<video>.<ext>``, with no
+    language in the name, and keep their own format (``<video>.ass``, say).
+    Such a file already is the subtitle of the one language, so a text
+    extraction counts every such name the indexer lists as taken rather than
+    write a second ``<video>.<language>.srt`` beside it.
     """
     if not settings.general.single_language or not set(extensions) & set(TEXT_OUTPUT_EXTENSIONS):
         return []
     folder = get_target_folder(video_path, create=False) or os.path.dirname(video_path)
     return [os.path.join(folder, os.path.basename(get_subtitle_path(video_path, extension=extension)))
-            for extension in TEXT_OUTPUT_EXTENSIONS]
+            for extension in SUBTITLE_EXTENSIONS]
 
 
 def taken_names(track, extensions):

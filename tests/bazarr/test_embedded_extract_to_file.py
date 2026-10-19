@@ -379,10 +379,11 @@ def test_the_row_s_text_codec_picks_its_own_track(library, monkeypatch):
         materialise_embedded_track("movie", 30, 1, "en", codec="ass")
 
 
+@pytest.mark.parametrize("name", ["Film.srt", "Film.ass", "Film.vtt", "Film.ssa"])
 @pytest.mark.parametrize("mode", ["current", "relative"])
-def test_single_language_mode_counts_the_language_less_download_as_taken(library, monkeypatch, mode):
-    """In single-language mode a download is saved as <video>.srt. A text
-    extraction must not put a second Film.en.srt beside it."""
+def test_single_language_mode_counts_the_language_less_download_as_taken(library, monkeypatch, mode, name):
+    """In single-language mode a download is saved as <video>.<ext>, in its
+    own format. A text extraction must not put a second Film.en.srt beside it."""
     from app.config import settings
     from subtitles.new_subtitle import SubtitleFileExists
     from subtitles.tools.embedded_extract import materialise_embedded_track
@@ -394,12 +395,12 @@ def test_single_language_mode_counts_the_language_less_download_as_taken(library
         monkeypatch.setattr(settings.general, "subfolder", "relative")
         monkeypatch.setattr(settings.general, "subfolder_custom", "Subs")
     # The download sits next to the video; with a subfolder its twin counts too.
-    (film / "Film.srt").write_text("MY DOWNLOADED FILE")
+    (film / name).write_text("MY DOWNLOADED FILE")
 
-    with pytest.raises(SubtitleFileExists, match="Film.srt"):
+    with pytest.raises(SubtitleFileExists, match=name):
         materialise_embedded_track("movie", 30, 1, "en")
 
-    assert (film / "Film.srt").read_text() == "MY DOWNLOADED FILE"
+    assert (film / name).read_text() == "MY DOWNLOADED FILE"
     assert not list(film.rglob("Film.en.srt"))
     assert _history(session, TableHistoryMovie) == [] and published == []
     # An image track is not a second text subtitle and is still copied out.

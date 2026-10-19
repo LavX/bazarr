@@ -298,16 +298,18 @@ def test_the_extract_job_names_what_it_wrote_and_fails_with_the_reason(library, 
         extract_embedded_track("movie", 30, 1, "en", job_id=8)
 
 
-def test_single_language_mode_answers_409_for_the_language_less_download(endpoint, monkeypatch):
-    """A download in single-language mode is <video>.srt: a text extraction
-    or a tool must not write a second Film.en.srt beside it."""
+@pytest.mark.parametrize("name", ["Film.srt", "Film.ass", "Film.vtt"])
+def test_single_language_mode_answers_409_for_the_language_less_download(endpoint, monkeypatch, name):
+    """A download in single-language mode is <video>.<ext>, in its own
+    format: a text extraction or a tool must not write a second Film.en.srt
+    beside it."""
     from app.config import settings
 
     call, queued, root = endpoint
     monkeypatch.setattr(settings.general, "single_language", True)
-    (root / "owner1/movies/Film (2020)/Film.srt").write_text("MY DOWNLOADED FILE")
+    (root / "owner1/movies/Film (2020)" / name).write_text("MY DOWNLOADED FILE")
 
-    assert call() == ("A subtitle file named Film.srt already exists. Delete it first to extract this track "
+    assert call() == (f"A subtitle file named {name} already exists. Delete it first to extract this track "
                       "again.", 409)
     assert call(action="OCR_fixes")[1] == 409
     # An image copy is not a second text subtitle.
