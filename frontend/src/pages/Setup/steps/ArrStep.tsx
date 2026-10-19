@@ -61,6 +61,56 @@ function normalizeBaseUrl(value: string) {
   return trimmed ? `/${trimmed}` : "";
 }
 
+interface SplitAddress {
+  ip: string;
+  scheme: "http" | "https";
+  port?: number;
+  baseUrl?: string;
+}
+
+/**
+ * A full URL typed or pasted into Address, taken apart into the fields it
+ * belongs in. Address is stored verbatim as the host, so a newcomer running
+ * Sonarr in Docker who typed http://sonarr:8989 saved an instance that could
+ * never connect. Matched as soon as the scheme is complete, which is what
+ * lets typing it out character by character land in the same place as a paste.
+ */
+function splitAddress(value: string): SplitAddress | null {
+  const match = /^\s*(https?):\/\//i.exec(value);
+  if (!match) {
+    return null;
+  }
+  const scheme = match[1].toLowerCase() as SplitAddress["scheme"];
+  try {
+    const url = new URL(value.trim());
+    const port = url.port ? Number(url.port) : undefined;
+    const path = url.pathname.replace(/\/+$/, "");
+    return {
+      ip: url.hostname,
+      scheme,
+      port,
+      baseUrl: path ? path : undefined,
+    };
+  } catch {
+    return { ip: value.trim().slice(match[0].trimStart().length), scheme };
+  }
+}
+
+function describeSplit(split: SplitAddress, label: string): string {
+  const parts = [`Bazarr+ took the ${split.scheme}:// off the address.`];
+  if (split.port !== undefined) {
+    parts.push("The port went to Port.");
+  }
+  if (split.baseUrl !== undefined) {
+    parts.push("The path went to Base URL.");
+  }
+  if (split.scheme === "https") {
+    parts.push("Use SSL is on, because the address was https.");
+  }
+  parts.push(`Check that this is where ${label} is reachable.`);
+  return parts.join(" ");
+}
+
 interface FieldErrors {
   ip?: string;
   port?: string;
@@ -127,6 +177,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
   const setBaseUrl = (value: string) => patchDraft({ baseUrl: value });
   const setSsl = (value: boolean) => patchDraft({ ssl: value });
   const [apiKey, setApiKey] = useState("");
+  const [splitNote, setSplitNote] = useState<string | null>(null);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   // The row this step wrote, remembered here rather than waited for. The create
@@ -469,7 +520,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
           )}
           {!testable && (
             <Text size="sm" c="dimmed" ta="right">
-              Enter an Address and an API Key to test this connection.
+              Enter an address and an API key to test this connection.
             </Text>
           )}
           <Group justify="space-between">
@@ -514,13 +565,31 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       <Group gap="md" align="flex-start" wrap="nowrap">
         <TextInput
           label="Address"
-          placeholder="127.0.0.1"
+          description="Hostname or IP only, no http:// and no port"
+          placeholder={`${kind} or 192.168.1.10`}
           style={{ flex: 1 }}
           value={ip}
           error={errors.ip}
           onChange={(e) => {
-            setIp(e.currentTarget.value);
+            const value = e.currentTarget.value;
+            const split = splitAddress(value);
             clearError("ip");
+            if (split === null) {
+              setIp(value);
+              return;
+            }
+            patchDraft({
+              ip: split.ip,
+              ...(split.port !== undefined ? { port: split.port } : {}),
+              ...(split.baseUrl !== undefined
+                ? { baseUrl: split.baseUrl }
+                : {}),
+              ssl: split.scheme === "https",
+            });
+            if (split.port !== undefined) {
+              clearError("port");
+            }
+            setSplitNote(describeSplit(split, meta.label));
           }}
         />
         <NumberInput
@@ -539,10 +608,16 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
         />
       </Group>
 
+      {splitNote && (
+        <Alert color="yellow" title="Full URL split into its fields">
+          {splitNote}
+        </Alert>
+      )}
+
       <TextInput
         label="Base URL"
-        description="Only needed behind a reverse proxy"
-        placeholder={kind}
+        description={`Leave empty unless ${meta.label} is served under a path`}
+        placeholder={`/${kind}`}
         value={baseUrl}
         onChange={(e) => setBaseUrl(e.currentTarget.value)}
       />
@@ -554,7 +629,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       />
 
       <PasswordInput
-        label="API Key"
+        label="API key"
         description={`Found in ${meta.label} under Settings, General`}
         placeholder="API key"
         autoComplete="new-password"

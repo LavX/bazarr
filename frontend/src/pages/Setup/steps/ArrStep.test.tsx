@@ -152,6 +152,70 @@ describe("ArrStep", () => {
     expect(screen.getByLabelText(/api key/i)).toBeInTheDocument();
   });
 
+  it("says what each field wants, in sentence case", () => {
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    expect(screen.getByLabelText("API key")).toBeInTheDocument();
+    // 127.0.0.1 told a Docker user nothing, and a full URL typed here was
+    // stored verbatim as the host.
+    const address = screen.getByLabelText(/^address/i);
+    expect(address).toHaveAccessibleDescription(
+      "Hostname or IP only, no http:// and no port",
+    );
+    expect(address).not.toHaveAttribute("placeholder", "127.0.0.1");
+    // The literal lowercase kind was the placeholder; normalizeBaseUrl stores
+    // a leading slash, so that is what the example shows.
+    const baseUrl = screen.getByLabelText(/^base url/i);
+    expect(baseUrl).toHaveAttribute("placeholder", "/sonarr");
+    expect(baseUrl).toHaveAccessibleDescription(
+      "Leave empty unless Sonarr is served under a path",
+    );
+  });
+
+  it("splits a pasted URL into address, port and base URL, and says so", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(screen.getByLabelText(/^address/i));
+    await user.paste("http://sonarr:8990/sonarr/");
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("sonarr");
+    expect(screen.getByLabelText(/^port/i)).toHaveValue("8990");
+    expect(screen.getByLabelText(/^base url/i)).toHaveValue("/sonarr");
+    expect(
+      screen.getByRole("alert", { name: /full url split into its fields/i }),
+    ).toHaveTextContent(/took the http:\/\/ off the address/i);
+
+    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => {
+      expect(createMutate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ip: "sonarr",
+          port: 8990,
+          // eslint-disable-next-line camelcase
+          base_url: "/sonarr",
+          ssl: false,
+        }),
+        expect.anything(),
+      );
+    });
+  });
+
+  it("strips a typed https:// and turns SSL on", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/^address/i), "https://10.0.0.5");
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("10.0.0.5");
+    expect(screen.getByRole("switch", { name: /use ssl/i })).toBeChecked();
+    expect(
+      screen.getByRole("alert", { name: /full url split into its fields/i }),
+    ).toHaveTextContent(/use ssl is on/i);
+  });
+
   // The defect this step shipped with: Continue on a form nobody filled in
   // posted it anyway, and the backend fills the blanks (empty key,
   // 127.0.0.1), so a new install came out of the wizard with up to three
