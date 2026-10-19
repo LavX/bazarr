@@ -74,7 +74,7 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         },
         onError: () =>
           setSaveError(
-            "Bazarr+ could not save the request server. Try again, or add it later in Settings, Connections.",
+            "Bazarr+ could not save the request server. Try again, or add it later in Settings, Connections, Seerr.",
           ),
       },
     );
@@ -138,7 +138,7 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   return (
     <StepLayout
       title="Requests"
-      description="Connect Overseerr, or Jellyseerr if you use Jellyfin, and the request button on a title works straight away. Requests are made with this API key, as the server's owner, and approved immediately."
+      description="Connect Overseerr or Jellyseerr, the Seerr family of request servers, and the request button on a title works straight away. Requests are made with this API key, as the server's owner, and approved immediately."
       aside={verdict}
       actions={
         <Stack gap={6}>

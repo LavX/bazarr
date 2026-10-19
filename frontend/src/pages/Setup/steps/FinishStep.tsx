@@ -309,7 +309,8 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   if (!useSeerr) {
     extras.push({
       label: "Request titles through Overseerr or Jellyseerr",
-      where: "Settings, Connections",
+      // The tab the Connections page files them under.
+      where: "Settings, Connections, Seerr",
     });
   }
   if (!translatorReady) {

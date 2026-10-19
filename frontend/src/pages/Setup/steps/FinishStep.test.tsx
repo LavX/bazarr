@@ -453,7 +453,9 @@ describe("FinishStep", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/request titles through overseerr or jellyseerr/i),
+      screen.getByText(
+        /request titles through overseerr or jellyseerr, under settings, connections, seerr/i,
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/left for later/i)).not.toBeInTheDocument();
   });

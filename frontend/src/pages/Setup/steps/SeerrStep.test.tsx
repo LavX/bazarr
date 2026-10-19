@@ -56,10 +56,32 @@ describe("SeerrStep", () => {
       screen.getByRole("heading", { name: "Requests" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/connect overseerr, or jellyseerr/i),
+      screen.getByText(/connect overseerr or jellyseerr, the seerr family/i),
     ).toBeInTheDocument();
-    // "Seerr" is a family of products, not one a newcomer runs by that name.
-    expect(screen.queryByText(/\bseerr\b/i)).not.toBeInTheDocument();
+    // "Seerr" is a family of products, not one a newcomer runs by that name,
+    // so it is never the label; the body names it once, so the reader can
+    // find the Seerr tab in Settings, Connections.
+    expect(
+      screen.queryByRole("heading", { name: /seerr/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("points a failed save at the Seerr tab in Settings, Connections", async () => {
+    const user = userEvent.setup();
+    mutate.mockImplementationOnce(
+      (_input: unknown, opts?: { onError?: () => void }) => opts?.onError?.(),
+    );
+    customRender(<SeerrStep onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/server url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/api key/i), "seerr-key");
+    await user.click(
+      screen.getByRole("button", { name: /save and continue anyway/i }),
+    );
+
+    expect(
+      await screen.findByText(/later in settings, connections, seerr/i),
+    ).toBeInTheDocument();
   });
 
   it("writes the connection and enables Seerr on Continue", async () => {
