@@ -25,9 +25,10 @@ TIMEFRAMES = {
 }
 
 # Acquisition actions. The others are deliberately excluded from the default:
-# 0 deletes nothing was acquired, 4 uploads and 7 embedded scans are written
-# with a synthetic perfect score, and 6 translations carry a score derived from
-# a settings field. Averaging any of them measures configuration, not quality.
+# 0 deletes nothing was acquired, 4 uploads, 7 embedded scans and 8 extracted
+# tracks are written with a synthetic perfect score, and 6 translations carry a
+# score derived from a settings field. Averaging any of them measures
+# configuration, not quality.
 ACQUISITION_ACTIONS = [1, 2, 3]
 
 # score_out_of is only written when score is truthy, so it is NULL for a

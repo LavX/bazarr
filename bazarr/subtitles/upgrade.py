@@ -345,9 +345,10 @@ def get_queries_condition_parameters():
     days_to_upgrade_subs = settings.general.days_to_upgrade_subs
     minimum_timestamp = (datetime.now() - timedelta(days=int(days_to_upgrade_subs)))
 
-    # action=7 (EmbeddedSource) intentionally excluded: embedded subs are source
-    # quality and should not be upgraded. Manual downloads/uploads (2, 4) and
-    # translations (6) are separate opt-ins; both default off on a new install.
+    # action=7 (EmbeddedSource) and action=8 (Extracted) intentionally excluded:
+    # an embedded track and a file copied out of one are source quality and
+    # should not be upgraded. Manual downloads/uploads (2, 4) and translations
+    # (6) are separate opt-ins; both default off on a new install.
     query_actions = [1]
     if getattr(settings.general, 'upgrade_manual', False):
         query_actions.append(2)
@@ -358,6 +359,19 @@ def get_queries_condition_parameters():
         query_actions.append(6)
 
     return [minimum_timestamp, query_actions]
+
+
+# An extracted file is the current subtitle for its language from the moment
+# it is written. It is never a candidate itself, and it also ends the candidacy
+# of any older row of the same video and language: that row's file is gone (the
+# extraction refuses to overwrite one), and the candidate path would otherwise
+# fall back to the extracted file and replace it with a download.
+EXTRACTED_ACTION = 8
+
+
+def latest_row_actions(query_actions):
+    """The actions that decide which row is the latest for a video and language."""
+    return [*query_actions, EXTRACTED_ACTION]
 
 
 def _provider_sourced_actions(query_actions):
@@ -489,7 +503,7 @@ def get_upgradable_episode_subtitles(history_id_list=None):
                               TableHistory.language,
                               TableHistory.arr_instance_id,
                               func.max(TableHistory.timestamp).label('timestamp')) \
-        .where(TableHistory.action.in_(query_actions)) \
+        .where(TableHistory.action.in_(latest_row_actions(query_actions))) \
         .group_by(TableHistory.video_path, TableHistory.language,
                   TableHistory.arr_instance_id) \
         .distinct() \
@@ -585,7 +599,7 @@ def get_upgradable_movies_subtitles(history_id_list=None):
                               TableHistoryMovie.language,
                               TableHistoryMovie.arr_instance_id,
                               func.max(TableHistoryMovie.timestamp).label('timestamp')) \
-        .where(TableHistoryMovie.action.in_(query_actions)) \
+        .where(TableHistoryMovie.action.in_(latest_row_actions(query_actions))) \
         .group_by(TableHistoryMovie.video_path, TableHistoryMovie.language,
                   TableHistoryMovie.arr_instance_id) \
         .distinct() \
