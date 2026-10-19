@@ -21,13 +21,14 @@ from sportarr.workflows import upgrade_sports_subtitles
 from utilities.path_mappings import path_mappings
 from sqlalchemy import or_
 from subtitles.job_errors import describe_failures
+from subtitles.indexer.entries import entry_codec
 
 logger = logging.getLogger(__name__)
 
 VALID_ACTIONS = {
     'sync', 'translate', 'OCR_fixes', 'common', 'remove_HI',
     'remove_tags', 'fix_uppercase', 'reverse_rtl', 'emoji',
-    'scan-disk', 'search-missing', 'upgrade',
+    'scan-disk', 'search-missing', 'upgrade', 'extract',
 }
 
 MEDIA_ACTIONS = {'scan-disk', 'search-missing', 'upgrade'}
@@ -69,7 +70,7 @@ def _item_display_name(item):
     return f'{os.path.basename(video_path)} ({language} track)'
 
 
-def _parse_subtitles_column(subtitles_raw, include_embedded=False):
+def _parse_subtitles_column(subtitles_raw, include_embedded=False, with_codec=False):
     """Parse the subtitles TEXT column into a list of (lang_string, path) tuples.
 
     The indexer records an in-container track with no path (``[language, None,
@@ -78,6 +79,9 @@ def _parse_subtitles_column(subtitles_raw, include_embedded=False):
     Those are left out by default, because most callers want a file they can
     open. Translation does not: it can extract the track first, which is the
     only way to translate a release whose only subtitles are embedded.
+
+    ``with_codec`` adds a third element: the embedded track's codec, or None
+    (always None for a file).
     """
     if not subtitles_raw:
         return []
@@ -91,10 +95,43 @@ def _parse_subtitles_column(subtitles_raw, include_embedded=False):
         if len(entry) < 2:
             continue
         if entry[1]:
-            entries.append((entry[0], entry[1]))
+            entries.append((entry[0], entry[1], None) if with_codec else (entry[0], entry[1]))
         elif include_embedded:
-            entries.append((entry[0], None))
+            entries.append((entry[0], None, entry_codec(entry)) if with_codec else (entry[0], None))
     return entries
+
+
+def _extract_sources(subtitles_raw):
+    """The embedded tracks a mass extract writes out, and how many it leaves.
+
+    Read from the stored listing, which never holds a track the user hid, so a
+    hidden track is never extracted. A track whose language key already has a
+    subtitle file is left alone: the language is covered, and an extraction
+    would find its name taken. Returns ``([(language key, codec)], skipped)``.
+    """
+    entries = _parse_subtitles_column(subtitles_raw, include_embedded=True, with_codec=True)
+    files = {_subtitle_variant_key(lang) for lang, path, _codec in entries if path}
+    sources, skipped = [], 0
+    for lang, path, codec in entries:
+        if path:
+            continue
+        if _subtitle_variant_key(lang) in files:
+            skipped += 1
+            continue
+        sources.append((lang, codec))
+    return sources, skipped
+
+
+def _extract_items(subtitles_raw, video_path, ids):
+    """Mass extract items for one media row; ``ids`` are the item's id fields."""
+    sources, skipped = _extract_sources(subtitles_raw)
+    items = []
+    for lang, codec in sources:
+        base, hi, forced = _subtitle_variant_key(lang)
+        items.append({'video_path': video_path, 'srt_path': None, 'srt_lang': base, 'embedded': True,
+                      'hi': hi, 'forced': forced, 'codec': codec, 'sonarr_series_id': None,
+                      'sonarr_episode_id': None, 'radarr_id': None, **ids})
+    return items, skipped
 
 
 def _subtitle_variant_key(lang_string):
@@ -482,6 +519,14 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
         # Apply the owning instance's per-instance path_mappings (#156).
         video_path = path_mappings.path_replace_instance(ep.path, ep.arr_instance_id, 'episode')
 
+        if action == 'extract':
+            extract_items, extract_skipped = _extract_items(ep.subtitles, video_path, {
+                'sonarr_series_id': ep.sonarrSeriesId, 'sonarr_episode_id': ep.sonarrEpisodeId,
+                'arr_instance_id': ep.arr_instance_id})
+            items.extend(extract_items)
+            skipped += extract_skipped
+            continue
+
         if want_embedded:
             def _usable(lang_string, sub_path, _owner=ep):
                 if not _usable_as_translate_source(lang_string, sub_path):
@@ -640,6 +685,13 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
         subtitles = _parse_subtitles_column(movie.subtitles, include_embedded=want_embedded)
         # Apply the owning instance's per-instance path_mappings (#156).
         video_path = path_mappings.path_replace_instance(movie.path, movie.arr_instance_id, 'movie')
+
+        if action == 'extract':
+            extract_items, extract_skipped = _extract_items(movie.subtitles, video_path, {
+                'radarr_id': movie.radarrId, 'arr_instance_id': movie.arr_instance_id})
+            items.extend(extract_items)
+            skipped += extract_skipped
+            continue
 
         if want_embedded:
             def _usable(lang_string, sub_path, _owner=movie):
@@ -809,6 +861,13 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
         subtitles = _parse_subtitles_column(event.subtitles, include_embedded=want_embedded)
         video_path = path_mappings.path_replace_instance(
             event.path, event.arr_instance_id, 'sports')
+
+        if action == 'extract':
+            extract_items, extract_skipped = _extract_items(event.subtitles, video_path, {
+                'sports_event_id': event.id, 'arr_instance_id': event.arr_instance_id})
+            items.extend(extract_items)
+            skipped += extract_skipped
+            continue
 
         if want_embedded:
             def _usable(lang_string, sub_path, _owner=event):
@@ -1026,6 +1085,23 @@ def _process_subtitle_item(item, action, options, job_id):
             arr_instance_id=item.get('arr_instance_id'),
             sports_operation=sports_operation,
         )
+        return True
+    elif action == 'extract':
+        from subtitles.new_subtitle import SubtitleFileExists
+        from subtitles.tools.embedded_extract import materialise_embedded_track
+
+        if item.get('sports_event_id'):
+            media_type, media_id = 'sports', item['sports_event_id']
+        elif item['sonarr_episode_id']:
+            media_type, media_id = 'episode', item['sonarr_episode_id']
+        else:
+            media_type, media_id = 'movie', item['radarr_id']
+        try:
+            materialise_embedded_track(media_type, media_id, item['arr_instance_id'], item['srt_lang'],
+                                       hi=item['hi'], forced=item['forced'], codec=item.get('codec'))
+        except SubtitleFileExists:
+            # Written since the batch was collected: the language is covered.
+            return ITEM_SKIPPED
         return True
     elif action in MOD_ACTIONS:
         sports_kwargs = {}

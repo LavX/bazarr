@@ -26,6 +26,7 @@ ACTION_LABELS = {
     'scan-disk': 'Scanning Disk',
     'search-missing': 'Searching Missing Subtitles',
     'upgrade': 'Upgrading Subtitles',
+    'extract': 'Extracting Embedded Tracks',
 }
 
 logger = logging.getLogger(__name__)
