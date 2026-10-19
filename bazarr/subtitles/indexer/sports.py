@@ -44,6 +44,27 @@ def _file_signature(context, row, mappings):
             stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
+def _identity(context, row, mappings):
+    """The parts of a file signature an outage cannot change: which event and
+    owner, which upstream file and size, and where the mappings point it."""
+    return (context.event_id, context.arr_instance_id, context.file_id, context.original_path,
+            context.mapped_path, mappings, row.file_size)
+
+
+def _signature_identity(signature):
+    # _file_signature's tuple without the realpath and the stat fields.
+    return tuple(signature[:5]) + tuple(signature[6:8])
+
+
+def _stored_cache(row):
+    """The row's cached metadata whatever file it was read from, or {}."""
+    try:
+        data = pickle.loads(row.ffprobe_cache)
+    except (TypeError, ValueError, EOFError, pickle.UnpicklingError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _snapshot(event_id, owner, cancel=None):
     check_cancelled(cancel)
     context = resolve_event_in_session(database, event_id, owner)
@@ -55,17 +76,30 @@ def _snapshot(event_id, owner, cancel=None):
     try:
         signature = _file_signature(context, row, mappings)
     except OSError:
-        # A new mapping may point at an unavailable file. Do not keep displaying
-        # subtitles from the previous mapped file while a later repair retries.
         with sports_transaction(database) as session:
             check_cancelled(cancel)
             require_sportarr(session, context.arr_instance_id)
             current = resolve_event_in_session(session, event_id, context.arr_instance_id)
             if current == context:
                 row = session.get(TableSportsEvents, event_id, populate_existing=True, with_for_update=True)
-                row.subtitles = '[]'
-                row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language, row.failedAttempts))
-                row.ffprobe_cache = None
+                cached = _stored_cache(row)
+                read_from = cached.get('sports_file')
+                if (isinstance(read_from, tuple) and len(read_from) >= 8
+                        and _signature_identity(read_from) != _identity(context, row, mappings)):
+                    # A new mapping or a new upstream file points at a file that
+                    # cannot be reached. Do not keep displaying subtitles from
+                    # the previous file while a later repair retries.
+                    row.subtitles = '[]'
+                    row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language,
+                                                         row.failedAttempts))
+                    row.ffprobe_cache = None
+                elif cached:
+                    # The same file, unreachable for now: a share that dropped,
+                    # a permission error. The listing stays, and the row is
+                    # left unindexed so the next sync or scan retries it. The
+                    # cached read stays too, so a later outage can still tell
+                    # this file from a moved one.
+                    row.ffprobe_cache = pickle.dumps(cached | {'sports_indexed': False}, pickle.HIGHEST_PROTOCOL)
                 session.flush()
                 check_cancelled(cancel)
         raise

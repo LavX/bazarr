@@ -11,6 +11,7 @@ and PostgreSQL, both on an AUTOCOMMIT engine.
 import ast
 import json
 import os
+import pickle
 
 import pytest
 import sqlalchemy as sa
@@ -125,17 +126,10 @@ def test_sports_keeps_its_listing_when_the_probe_fails(indexed_library, monkeypa
     """The sports indexer commits before it probes. On a file it has no good
     read of, that commit emptied the listing, so a failed probe left the row
     with no subtitles at all, external files included."""
-    from app import database as db
-    from sportarr import library
-
     session, path = indexed_library
     module = sports(monkeypatch, session)
-    items = [dict(id=i, language=language, hi="False", forced="False",
-                  audio_exclude="False", audio_only_include="False")
-             for i, language in enumerate(("fr", "en", "de"), 1)]
-    session.execute(sa.insert(db.TableLanguagesProfiles).values(profileId=5, name="Sports", items=json.dumps(items)))
-    db.update_profile_id_list.invalidate()
-    assert library.assign_profile(session, 51, 1, 5)
+    probe = module.parse_video_metadata
+    _sports_profile(session)
     assert {item[0] for item in module.store_subtitles_sports(61, 1)} == {"fr", "en:hi"}
     listing = row(session, 61).subtitles
     assert ast.literal_eval(row(session, 61).missing_subtitles) == ["de"]
@@ -153,3 +147,63 @@ def test_sports_keeps_its_listing_when_the_probe_fails(indexed_library, monkeypa
     assert ast.literal_eval(after.missing_subtitles) == ["de"]
     # Still unindexed, so the next sync or scan retries it.
     assert after.ffprobe_cache is None
+
+    # A good read of a file without subtitle streams does drop the track.
+    monkeypatch.setattr(module, "parse_video_metadata", _without_subtitle_streams(probe))
+    assert [item[0] for item in module.store_subtitles_sports(61, 1, use_cache=False)] == ["en:hi"]
+    assert ast.literal_eval(row(session, 61).missing_subtitles) == ["fr", "de"]
+
+
+def _sports_profile(session):
+    from app import database as db
+    from sportarr import library
+
+    items = [dict(id=i, language=language, hi="False", forced="False",
+                  audio_exclude="False", audio_only_include="False")
+             for i, language in enumerate(("fr", "en", "de"), 1)]
+    session.execute(sa.insert(db.TableLanguagesProfiles).values(profileId=5, name="Sports", items=json.dumps(items)))
+    db.update_profile_id_list.invalidate()
+    assert library.assign_profile(session, 51, 1, 5)
+
+
+def _without_subtitle_streams(probe):
+    def read(*args, **kwargs):
+        data = probe(*args, **kwargs)
+        return data | {"ffprobe": {key: value for key, value in data["ffprobe"].items() if key != "subtitle"}}
+    return read
+
+
+def test_sports_keeps_its_listing_while_the_same_file_cannot_be_reached(indexed_library, monkeypatch):  # noqa: F811
+    """A share that drops or a permission error fails the stat before the
+    probe, with the owner, path and mappings unchanged. That path emptied the
+    listing too. Only a file that is now a different one, by a new mapping or
+    a new upstream file, may lose the listing of the previous one."""
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    _sports_profile(session)
+    assert {item[0] for item in module.store_subtitles_sports(61, 1)} == {"fr", "en:hi"}
+    listing = row(session, 61).subtitles
+
+    signature = module._file_signature
+
+    def unreachable(*args, **kwargs):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(module, "_file_signature", unreachable)
+    with pytest.raises(PermissionError):
+        module.store_subtitles_sports(61, 1)
+    module.refresh_sports_files([61], 1)
+
+    after = row(session, 61)
+    assert after.subtitles == listing
+    assert ast.literal_eval(after.missing_subtitles) == ["de"]
+    assert pickle.loads(after.ffprobe_cache)["sports_indexed"] is False
+
+    # Reachable again: the next refresh retries the unindexed row.
+    monkeypatch.setattr(module, "_file_signature", signature)
+    calls = []
+    store = module.store_subtitles_sports
+    monkeypatch.setattr(module, "store_subtitles_sports", lambda *a, **kw: calls.append(a) or store(*a, **kw))
+    module.refresh_sports_files([61], 1)
+    assert calls and row(session, 61).subtitles == listing
+    assert pickle.loads(row(session, 61).ffprobe_cache)["sports_indexed"] is True
