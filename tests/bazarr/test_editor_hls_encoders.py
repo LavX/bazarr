@@ -369,12 +369,13 @@ def test_stale_marker_without_an_encoder_does_not_block_a_spawn(hls):
     assert _live(hls) == {cache_dir}
 
 
-def test_eviction_skips_a_live_session_however_old_its_dir(hls):
+def test_eviction_skips_a_live_session_however_old_its_dir(hls, monkeypatch):
     cache_dir = hls.spawn('/media/show/episode.mkv')
-    stamp = time.time() - hls.editor.HLS_IDLE_TTL_SECONDS - 60
-    os.utime(cache_dir, (stamp, stamp))
-
-    hls.editor._evict_stale_hls_dirs()
+    # Age the session by running eviction later, not by backdating the
+    # directory, whose atime an outside listing would refresh.
+    with monkeypatch.context() as clock:
+        clock.setattr(hls.editor, 'time', TimeAhead(hls.editor.HLS_IDLE_TTL_SECONDS + 60))
+        hls.editor._evict_stale_hls_dirs()
 
     assert os.path.isdir(cache_dir)
 
