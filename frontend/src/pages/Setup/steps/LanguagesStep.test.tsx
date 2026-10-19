@@ -228,6 +228,38 @@ describe("LanguagesStep", () => {
     expect(screen.queryByText(/\bwe\b/i)).not.toBeInTheDocument();
   });
 
+  it("says out loud which language a change added or removed", async () => {
+    // Orca read only the highlighted option when one was picked, and nothing
+    // at all when Backspace removed a pill.
+    const user = userEvent.setup();
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    const region = screen.getByTestId("language-announcement");
+    expect(region).toBeEmptyDOMElement();
+    expect(region).toHaveAttribute("aria-live", "polite");
+    expect(region).not.toHaveAttribute("role");
+    const field = screen.getByRole("combobox", { name: "Languages" });
+    await user.click(field);
+    await user.click(await screen.findByText("Spanish"));
+    // Written a beat after the change, so Orca does not drop it.
+    expect(screen.getByTestId("language-announcement")).toBeEmptyDOMElement();
+    await waitFor(() =>
+      expect(screen.getByTestId("language-announcement")).toHaveTextContent(
+        "Spanish added",
+      ),
+    );
+
+    await user.click(field);
+    await user.keyboard("{Backspace}");
+    // Written a beat after the change, so Orca does not drop it.
+    expect(screen.getByTestId("language-announcement")).toBeEmptyDOMElement();
+    await waitFor(() =>
+      expect(screen.getByTestId("language-announcement")).toHaveTextContent(
+        "Spanish removed",
+      ),
+    );
+  });
+
   it("says so when the profile cannot be saved", async () => {
     // A restarting or unreachable Bazarr+ is kept out of the toasts, so the
     // step is the only place a failed write can be reported.
