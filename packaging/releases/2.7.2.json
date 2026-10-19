@@ -1,0 +1,28 @@
+{
+  "app": {
+    "digest": "sha256:62da4872e5e37e1fc7837e5a1a5da6672a7296fedb187a45cbd25fd76a356c88",
+    "image": "ghcr.io/lavx/bazarr"
+  },
+  "companions": {
+    "flaresolverr": {
+      "digest": "sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767",
+      "image": "ghcr.io/flaresolverr/flaresolverr",
+      "tag": "v3.5.2"
+    },
+    "translator": {
+      "digest": "sha256:e22abba9625b96df6727354f10933da312a084ffeae68f0eb1f9a82492f5e48d",
+      "image": "ghcr.io/lavx/ai-subtitle-translator",
+      "tag": "v2.1.1"
+    }
+  },
+  "platform_revisions": {
+    "casaos": "1.0.0",
+    "runtipi": 3,
+    "stack": "1.0.0",
+    "truenas": "1.0.2",
+    "unraid": "1.0.0"
+  },
+  "runtime_profile": "atlas-sidecar",
+  "schema": 1,
+  "version": "2.7.2"
+}
