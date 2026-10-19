@@ -274,8 +274,8 @@ class EmbeddedHiddenTracks(Resource):
                 failure = error
             # The engine autocommits, so reconcile the record by hand with the
             # listing the re-index actually left. A refusal means the file
-            # could not be read, and the sports indexer empties the listing
-            # before it probes, so an empty listing proves nothing there.
+            # could not be read, and the sports indexer then keeps the listing
+            # it had, so the listing proves nothing there.
             if isinstance(failure, _Refused) or _still_listed(media_type, media_id, key):
                 # Not applied: the re-index could not read the file, failed
                 # before it wrote the listing, or returned without applying the

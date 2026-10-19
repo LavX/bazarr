@@ -220,15 +220,26 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
             row = _validated_row(session, context, signature, cancel)
             cached = _cached(row, signature)
             if not cached:
-                row.subtitles = row.failedAttempts = '[]'
-                # Not '[]': this commits before the probe below, and a probe
-                # that cannot run leaves the row as it stands here. An empty
-                # missing list reads as "nothing wanted", and the Wanted query
-                # filters on missing_subtitles != '[]', so the recording would
-                # leave Wanted permanently and never be searched again. The
-                # mapping-failure path above recomputes it for the same reason.
-                row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language,
-                                                     row.failedAttempts))
+                # The listing stays: this commits before the probe below, and a
+                # probe that cannot run leaves the row as it stands here, so an
+                # emptied listing would show no subtitles at all, external
+                # files included, until the next good index replaces it.
+                row.failedAttempts = '[]'
+                # Recomputed for the reset attempts, from the listing the row
+                # keeps, since a failed probe leaves this value in place too.
+                # The Wanted query filters on missing_subtitles != '[]', so a
+                # value from the old attempts could keep a language the new
+                # file should be searched for out of Wanted.
+                try:
+                    kept = ast.literal_eval(row.subtitles or '[]')
+                    row.missing_subtitles = str(_missing(context.profile_id, kept, row.audio_language,
+                                                         row.failedAttempts))
+                except (ValueError, SyntaxError, TypeError):
+                    # A listing that cannot be read must not block the index
+                    # that would replace it.
+                    row.subtitles = '[]'
+                    row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language,
+                                                         row.failedAttempts))
             row.ffprobe_cache = (pickle.dumps(cached | {'sports_indexed': False}, pickle.HIGHEST_PROTOCOL)
                                  if cached else None)
             session.flush()

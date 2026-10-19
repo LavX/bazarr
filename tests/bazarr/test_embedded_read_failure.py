@@ -8,13 +8,18 @@ embedded tracks made each embedded language wanted, and the next search could
 fetch a subtitle the file already carries. The database cases run on SQLite
 and PostgreSQL, both on an AUTOCOMMIT engine.
 """
+import ast
 import json
+import os
 
+import pytest
 import sqlalchemy as sa
 
 from app.database import TableEpisodes, TableLanguagesProfiles, TableMovies, TableShows
 from test_embedded_track_hidden import hidden_db  # noqa: F401
 from test_embedded_track_hidden_indexer import PROFILE, _stored, _stub_indexer
+from test_sportarr_indexer import indexed_library, row, sports  # noqa: F401
+from test_sportarr_kind_migration import migration_engine  # noqa: F401
 
 STORED = str([["en", None, None, "subrip"], ["en:hi", None, None, "subrip"], ["fr", None, None, "pgs"],
               ["de", None, None], ["en", "/movies/m.en.srt", 10]])
@@ -74,3 +79,37 @@ def test_episode_keeps_its_embedded_tracks_on_every_row_of_the_file_when_the_rea
     for episode_id in (1, 2):
         assert _stored(hidden_db, TableEpisodes, episode_id) == (["en", "en:hi"], ["fr"])
     assert logged == []
+
+
+def test_sports_keeps_its_listing_when_the_probe_fails(indexed_library, monkeypatch):  # noqa: F811
+    """The sports indexer commits before it probes. On a file it has no good
+    read of, that commit emptied the listing, so a failed probe left the row
+    with no subtitles at all, external files included."""
+    from app import database as db
+    from sportarr import library
+
+    session, path = indexed_library
+    module = sports(monkeypatch, session)
+    items = [dict(id=i, language=language, hi="False", forced="False",
+                  audio_exclude="False", audio_only_include="False")
+             for i, language in enumerate(("fr", "en", "de"), 1)]
+    session.execute(sa.insert(db.TableLanguagesProfiles).values(profileId=5, name="Sports", items=json.dumps(items)))
+    db.update_profile_id_list.invalidate()
+    assert library.assign_profile(session, 51, 1, 5)
+    assert {item[0] for item in module.store_subtitles_sports(61, 1)} == {"fr", "en:hi"}
+    listing = row(session, 61).subtitles
+    assert ast.literal_eval(row(session, 61).missing_subtitles) == ["de"]
+
+    # The file changes, so the cached read no longer applies, and the probe fails.
+    video = path / "1" / "event.mkv"
+    stat = video.stat()
+    os.utime(video, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10 ** 9))
+    monkeypatch.setattr(module, "parse_video_metadata", lambda *a, **kw: None)
+    with pytest.raises(OSError):
+        module.store_subtitles_sports(61, 1)
+
+    after = row(session, 61)
+    assert after.subtitles == listing
+    assert ast.literal_eval(after.missing_subtitles) == ["de"]
+    # Still unindexed, so the next sync or scan retries it.
+    assert after.ffprobe_cache is None
