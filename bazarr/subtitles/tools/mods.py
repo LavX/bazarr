@@ -189,6 +189,15 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     return output_path
 
 
+def _file_identity(path):
+    """What tells the file at ``path`` apart from one put there later, or None."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None, media_type=None,
                          *, sports_event_id=None, cancel=None, never_replace=False):
     destination = os.path.join(get_target_folder(video_path, create=False) or os.path.dirname(video_path), '.destination')
@@ -265,15 +274,22 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
                     if os.path.exists(taken):
                         raise SubtitleFileExists(taken)
                 write_bytes_atomically(modded_subtitles_path, content, replace=False)
+                published = _file_identity(modded_subtitles_path)
                 try:
                     if os.path.exists(subtitle_path):
                         os.remove(subtitle_path)
                 except BaseException:
-                    try:
-                        os.remove(modded_subtitles_path)
-                    except OSError:
-                        logging.exception('BAZARR could not take back %s after a failed mod',
-                                          modded_subtitles_path)
+                    # Only the file this call published is taken back: another
+                    # program may have put its own there meanwhile.
+                    if published is not None and _file_identity(modded_subtitles_path) == published:
+                        try:
+                            os.remove(modded_subtitles_path)
+                        except OSError:
+                            logging.exception('BAZARR could not take back %s after a failed mod',
+                                              modded_subtitles_path)
+                    else:
+                        logging.warning('BAZARR left %s in place after a failed mod: it is no longer the '
+                                        'file the mod wrote', modded_subtitles_path)
                     raise
             else:
                 if os.path.exists(subtitle_path):

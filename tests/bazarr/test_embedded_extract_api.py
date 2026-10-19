@@ -617,3 +617,34 @@ def test_an_in_place_mod_on_an_extracted_file_keeps_its_lineage(library, jobs, m
 
     assert calls == []
 
+
+def test_a_failed_mod_never_takes_back_a_file_another_program_put_there(library, jobs, tmp_path, monkeypatch):
+    """The result is published, then removing the source fails. If another
+    program replaced the result in between, the rollback leaves its file."""
+    import errno
+
+    import subtitles.tools.mods as mods
+
+    folder = tmp_path / "replaced"
+    folder.mkdir()
+    video = folder / "Film.mkv"
+    video.write_bytes(b"video")
+    source = folder / "Film.en.hi.srt"
+    source.write_text(HEARING)
+    target = folder / "Film.en.srt"
+    real_remove = mods.os.remove
+
+    def replaced_then_locked(path):
+        if str(path) == str(source):
+            foreign = folder / "foreign.tmp"
+            foreign.write_text("imported by another program")
+            os.replace(foreign, target)
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_remove(path)
+
+    monkeypatch.setattr(mods.os, "remove", replaced_then_locked)
+    with pytest.raises(PermissionError):
+        mods.subtitles_apply_mods("en", str(source), ["remove_HI"], str(video), never_replace=True)
+
+    assert target.read_text() == "imported by another program"
+    assert source.read_text() == HEARING
