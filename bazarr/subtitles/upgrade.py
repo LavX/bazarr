@@ -118,6 +118,12 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
         # do not consider subtitles that do not exist on disk anymore
         if item['subtitles_path'] not in item['external_subtitles']:
             current_sub = _find_current_subtitle_for_language(item['language'], item['external_subtitles'])
+            if current_sub and _extracted_from_embedded(TableHistory, TableHistory.sonarrEpisodeId,
+                                                        item['sonarrEpisodeId'], item['arr_instance_id'],
+                                                        current_sub):
+                logging.debug(f"Upgrade candidate {item['id']} dropped: the current subtitle for its language "  # noqa: G004
+                              f"({current_sub}) was extracted from an embedded track")
+                continue
             if current_sub:
                 logging.debug(f"Upgrade candidate {item['id']} ({item['seriesTitle']} S{item['season']:02d}E"  # noqa: G004
                               f"{item['episode']:02d}): history path no longer on disk, using current subtitle "
@@ -266,6 +272,12 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, radarr_filters=None, 
         if item['subtitles_path'] not in item['external_subtitles']:
             # try to find a current subtitle for the same language (file may have been renamed/re-downloaded)
             current_sub = _find_current_subtitle_for_language(item['language'], item['external_subtitles'])
+            if current_sub and _extracted_from_embedded(TableHistoryMovie, TableHistoryMovie.radarrId,
+                                                        item['radarrId'], item['arr_instance_id'], current_sub):
+                if item['id'] in movies_to_upgrade:
+                    logging.debug(f"Upgrade candidate {item['id']} ({item['title']}) dropped: the current subtitle "  # noqa: G004
+                                  f"for its language ({current_sub}) was extracted from an embedded track")
+                continue
             if current_sub:
                 logging.debug(f"Upgrade candidate {item['id']} ({item['title']}): history path no longer on disk, "  # noqa: G004
                               f"using current subtitle for same language ({current_sub})")
@@ -372,6 +384,28 @@ EXTRACTED_ACTION = 8
 def latest_row_actions(query_actions):
     """The actions that decide which row is the latest for a video and language."""
     return [*query_actions, EXTRACTED_ACTION]
+
+
+# Every action that puts a different file at a path, or removes it.
+_FILE_WRITING_ACTIONS = (0, 1, 2, 3, 4, 6, EXTRACTED_ACTION)
+
+
+def _extracted_from_embedded(table, media_column, media_id, arr_instance_id, subtitles_path):
+    """Whether the newest history row that wrote ``subtitles_path`` is an extraction.
+
+    The fallback for a candidate whose file is gone takes the current file of
+    the language, and treats HI and plain as one. An older download row of
+    another variant then adopts a file extracted from an embedded track, and
+    the upgrade deletes it as the file it replaces. latest_row_actions()
+    only covers the same language key, so the fallback checks the file.
+    """
+    action = database.execute(
+        select(table.action)
+        .where(media_column == media_id, table.arr_instance_id.is_not_distinct_from(arr_instance_id),
+               table.subtitles_path == subtitles_path, table.action.in_(_FILE_WRITING_ACTIONS))
+        .order_by(table.timestamp.desc(), table.id.desc())
+        .limit(1)).scalar()
+    return action == EXTRACTED_ACTION
 
 
 def _provider_sourced_actions(query_actions):
