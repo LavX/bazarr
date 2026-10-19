@@ -240,12 +240,17 @@ body::after {
   // lost silently and the symptom came back.
 }
 
-// Two Mantine colours that fall under 4.5:1 for the small text they paint,
-// measured in the setup wizard: a field error is red-8 in dark mode, 2.2:1 on
-// the card, and red-6 in light mode, 4.26:1 on white; a light yellow alert's
-// title is yellow-9 on yellow-1, 2.69:1. The doubled :root outranks the
-// variables MantineProvider writes for the same scheme, whatever order the two
-// style sheets arrive in.
+// Two Mantine colours that fall under 4.5:1 for the small text they paint. An
+// app-wide contrast change on purpose, not a setup-only one: the same text
+// fails the same way everywhere. Measured in the setup wizard and, rendered,
+// in Settings, Connections: a field error ("Address is required", 12px) was
+// red-8 in dark mode, 2.20:1 on the card, and red-6 in light mode, 4.26:1 on
+// white, now 5.57:1 and 5.46:1; a light yellow Alert's title ("Library sync
+// in progress") was yellow-9 on yellow-1, 2.69:1, now 4.85:1. Light yellow
+// Buttons and Badges draw their text from button.module.scss and
+// badge.module.scss, so this does not move them (measured unchanged in the
+// Subtitle Hub). The doubled :root outranks the variables MantineProvider
+// writes for the same scheme, whatever order the two style sheets arrive in.
 :root:root[data-mantine-color-scheme="dark"] {
   --mantine-color-error: var(--mantine-color-red-4);
 }

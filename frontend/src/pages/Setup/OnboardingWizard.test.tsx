@@ -953,6 +953,21 @@ function paletteRef(value: string): string {
 }
 
 describe("small text colours", () => {
+  it("applies app-wide, not only while setup is mounted", () => {
+    // Deliberate: the same field errors and yellow Alert titles fail the same
+    // way in Settings, measured there too.
+    for (const scheme of ["dark", "light"] as const) {
+      expect(overrideFor(scheme, "--mantine-color-error")).not.toBe("");
+      expect(
+        themeRules.some(
+          (rule) =>
+            rule.selectors.some((s) => s.includes("data-bz-setup")) &&
+            rule.decls["--mantine-color-error"] !== undefined,
+        ),
+      ).toBe(false);
+    }
+  });
+
   it.each(["dark", "light"] as const)(
     "a %s field error clears 4.5:1 on every surface the wizard paints",
     (scheme) => {
