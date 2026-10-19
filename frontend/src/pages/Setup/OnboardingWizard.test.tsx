@@ -668,3 +668,77 @@ describe("rail numerals", () => {
     expect(block).toMatch(/color: var\(--mantine-color-white\);/);
   });
 });
+
+describe("touch targets on a coarse pointer", () => {
+  const wizardSource = readFileSync(
+    "src/pages/Setup/OnboardingWizard.module.scss",
+    "utf8",
+  );
+
+  // The block that carries the floor. jsdom applies no media query and
+  // computes no layout, so the stylesheet is what can be asserted.
+  function coarseBlock(): string {
+    const at = wizardSource.indexOf("@media (pointer: coarse)");
+    if (at < 0) return "";
+    let depth = 0;
+    for (let i = wizardSource.indexOf("{", at); i < wizardSource.length; i++) {
+      if (wizardSource[i] === "{") depth += 1;
+      else if (wizardSource[i] === "}" && --depth === 0) {
+        return wizardSource.slice(at, i + 1);
+      }
+    }
+    return "";
+  }
+
+  function rule(block: string, selector: string): string {
+    const at = block.indexOf(`${selector} {`);
+    return at < 0 ? "" : block.slice(at, block.indexOf("}", at));
+  }
+
+  it("floors every kind of control the wizard draws at 44px", () => {
+    const block = coarseBlock();
+    expect(block).toContain(":root[data-bz-setup]");
+    for (const variable of [
+      "--input-height-xs",
+      "--input-height-sm",
+      "--input-height-md",
+    ]) {
+      expect(rule(block, ".mantine-Input-wrapper")).toContain(
+        `${variable}: 44px;`,
+      );
+    }
+    for (const variable of [
+      "--button-height-xs",
+      "--button-height-sm",
+      "--button-height-md",
+    ]) {
+      expect(rule(block, ".mantine-Button-root")).toContain(
+        `${variable}: 44px;`,
+      );
+    }
+    expect(
+      rule(block, ".mantine-CloseButton-root:not(.mantine-Pill-remove)"),
+    ).toMatch(/min-width: 44px;\s*min-height: 44px;/);
+    for (const selector of [
+      ".mantine-Anchor-root",
+      ".mantine-Switch-body",
+      ".mantine-Switch-label",
+      ".mantine-Combobox-option",
+    ]) {
+      expect(rule(block, selector)).toContain("min-height: 44px;");
+    }
+    expect(block).toMatch(/\.mantine-Pill-remove \{[\s\S]*?inset: -12px;/);
+  });
+
+  it("leaves the fine-pointer sizes alone", () => {
+    const outside = wizardSource.replace(coarseBlock(), "");
+    expect(outside).not.toMatch(/:\s*44px/);
+  });
+
+  it("scopes the floor to the document only while the wizard is mounted", () => {
+    const { unmount } = customRender(<OnboardingWizardView />);
+    expect(document.documentElement).toHaveAttribute("data-bz-setup");
+    unmount();
+    expect(document.documentElement).not.toHaveAttribute("data-bz-setup");
+  });
+});

@@ -239,3 +239,80 @@
     padding: 20px;
   }
 }
+
+// The 44px floor, on a coarse pointer only, for every control the wizard
+// draws. Retaken at 320px with a coarse pointer, 69 of them were under 44px
+// and the smallest was 18px. The desktop sizes stay where they are: a mouse
+// keeps the 36 and 40px rhythm the rest of the application is tuned to.
+//
+// Scoped to the attribute the wizard puts on the document while it is
+// mounted, not to .root, because the leave dialog, the select dropdowns and
+// the popovers are portalled out of it. Mantine sets each size from a variable
+// declared on the component itself, so the floor redefines that variable
+// rather than fighting the height it produces.
+@media (pointer: coarse) {
+  :global {
+    :root[data-bz-setup] {
+      .mantine-Input-wrapper {
+        --input-height-xs: 44px;
+        --input-height-sm: 44px;
+        --input-height-md: 44px;
+      }
+
+      .mantine-Button-root {
+        --button-height-xs: 44px;
+        --button-height-sm: 44px;
+        --button-height-md: 44px;
+      }
+
+      .mantine-ActionIcon-root,
+      .mantine-CloseButton-root:not(.mantine-Pill-remove) {
+        min-width: 44px;
+        min-height: 44px;
+      }
+
+      // Inline text, so the taller box is centred or the words hang at its
+      // top edge.
+      .mantine-Anchor-root {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+      }
+
+      // The box stays 20px to read as a checkbox; the label row it sits in is
+      // what a finger presses, and the label toggles it.
+      .mantine-Checkbox-body,
+      .mantine-Radio-body,
+      .mantine-Switch-body {
+        align-items: center;
+        min-height: 44px;
+      }
+
+      .mantine-Checkbox-label,
+      .mantine-Radio-label,
+      .mantine-Switch-label {
+        display: flex;
+        align-items: center;
+        min-height: 44px;
+      }
+
+      .mantine-Combobox-option {
+        display: flex;
+        align-items: center;
+        min-height: 44px;
+      }
+
+      // A selected language's remove button lives inside a pill too short to
+      // grow, so its hit area grows around it instead.
+      .mantine-Pill-remove {
+        position: relative;
+
+        &::after {
+          content: "";
+          position: absolute;
+          inset: -12px;
+        }
+      }
+    }
+  }
+}

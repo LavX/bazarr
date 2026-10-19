@@ -96,6 +96,14 @@ const OnboardingWizardBody: FunctionComponent = () => {
 
   const { index, step: current, goTo, reset } = useWizardStep(steps);
   const StepComponent = current.Component;
+  // What the coarse-pointer touch floor in OnboardingWizard.module.scss is
+  // scoped to. It sits on the document rather than on .root because the
+  // dialogs and dropdowns a step opens are portalled out of the shell.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.setAttribute("data-bz-setup", "");
+    return () => root.removeAttribute("data-bz-setup");
+  }, []);
   const instanceName = useInstanceName()?.trim() || "Bazarr+";
   useDocumentTitle(`${current.label} - Setup - ${instanceName}`);
   const mainRef = useRef<HTMLElement>(null);
