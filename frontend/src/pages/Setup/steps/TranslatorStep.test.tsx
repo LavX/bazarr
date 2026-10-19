@@ -74,6 +74,19 @@ describe("TranslatorStep", () => {
     expect(onNext).not.toHaveBeenCalled();
   });
 
+  it("says OpenRouter is paid and that a key replaces Google Translate", () => {
+    // The step invited a newcomer to switch engines without a word about
+    // cost, then wrote translator_type over the default without saying so.
+    customRender(<TranslatorStep onNext={onNext} />);
+
+    expect(screen.getByText(/openrouter is a paid api/i)).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/openrouter api key/i),
+    ).toHaveAccessibleDescription(
+      "Saving a key switches the translation engine from Google Translate to OpenRouter. Leave this empty to keep Google Translate.",
+    );
+  });
+
   it("Continue with no key writes nothing", async () => {
     const user = userEvent.setup();
     customRender(<TranslatorStep onNext={onNext} />);

@@ -24,6 +24,8 @@ import type { WizardStepProps } from "./types";
  * Writing the key alone would be inert, because the translator engine defaults
  * to Google Translate, so a filled-in key also selects OpenRouter as the
  * engine. Both keys go through the same settings path the Translator page uses.
+ * The step says both things before the reader types anything: that OpenRouter
+ * bills for what it translates, and that a saved key replaces the engine.
  */
 const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const settings = useSettingsMutation();
@@ -58,7 +60,7 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     <StepLayout
       title="Subtitle translation"
       layout="stacked"
-      description="Bazarr+ can translate a subtitle into a language nobody published, with an AI model of your choice. Paste an OpenRouter key to switch it on now. Everything else works without it, and the full set of translation options lives in Settings."
+      description="Bazarr+ can translate a subtitle into a language nobody published, with an AI model of your choice through OpenRouter. OpenRouter is a paid API: it charges your OpenRouter account for each translation, at the price of the model you pick. Everything else works without it, and the full set of translation options lives in Settings."
       aside={
         <Text size="sm" c="dimmed">
           <Anchor
@@ -98,7 +100,7 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     >
       <PasswordInput
         label="OpenRouter API key"
-        description="Leave this empty to set translation up later"
+        description="Saving a key switches the translation engine from Google Translate to OpenRouter. Leave this empty to keep Google Translate."
         placeholder="sk-or-..."
         autoComplete="new-password"
         value={apiKey}
