@@ -12,7 +12,7 @@ import json
 
 import sqlalchemy as sa
 
-from app.database import TableLanguagesProfiles, TableMovies
+from app.database import TableEpisodes, TableLanguagesProfiles, TableMovies, TableShows
 from test_embedded_track_hidden import hidden_db  # noqa: F401
 from test_embedded_track_hidden_indexer import PROFILE, _stored, _stub_indexer
 
@@ -46,4 +46,31 @@ def test_movie_keeps_its_embedded_tracks_when_the_read_fails(hidden_db, monkeypa
     assert _stored(hidden_db, TableMovies, 1) == (["en", "de"], ["fr"])
     stored = hidden_db.execute(sa.select(TableMovies.subtitles)).scalar_one()
     assert "['en', None, None, 'subrip']" in stored
+    assert logged == []
+
+
+def test_episode_keeps_its_embedded_tracks_on_every_row_of_the_file_when_the_read_fails(
+        hidden_db, monkeypatch):  # noqa: F811
+    import subtitles.indexer.series as se
+    from subtitles.embedded_hidden import hide_track
+
+    logged = []
+    _stub_indexer(se, hidden_db, monkeypatch, logged)
+    monkeypatch.setattr(se, "embedded_subs_reader", _unreadable)
+    hidden_db.add(TableLanguagesProfiles(profileId=1, name="P", items=json.dumps(PROFILE)))
+    hidden_db.add(TableShows(id=1, arr_instance_id=1, sonarrSeriesId=1, title="S", path="/tv/s", profileId=1))
+    hidden_db.flush()
+    stored = str([["en", None, None, "subrip"], ["en:hi", None, None, "subrip"], ["fr", None, None, "pgs"]])
+    for episode_id in (1, 2):
+        hidden_db.add(TableEpisodes(
+            id=episode_id, arr_instance_id=1, series_id=1, sonarrSeriesId=1, sonarrEpisodeId=10 + episode_id,
+            title="E", path="/tv/s/e01-e02.mkv", season=1, episode=episode_id, episode_file_id=500,
+            file_size=111, subtitles=stored))
+    hidden_db.commit()
+    hide_track(hidden_db, "episode", 2, 1, "fr")
+
+    se.store_subtitles("/tv/s/e01-e02.mkv", "/local/e01-e02.mkv", arr_instance_id=1)
+
+    for episode_id in (1, 2):
+        assert _stored(hidden_db, TableEpisodes, episode_id) == (["en", "en:hi"], ["fr"])
     assert logged == []
