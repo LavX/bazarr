@@ -411,3 +411,44 @@ def test_the_second_sports_owner_reads_its_own_mount(sports_event, monkeypatch):
     assert "Bienvenue dans cette compétition sportive." in body["content"]
     assert body["arrInstanceId"] == 2
     assert sorted(os.listdir(root / "2")) == before
+
+
+# ---------------------------------------------------------------- download route
+
+
+def test_download_streams_the_track_under_the_name_save_would_use(library):
+    _session, root, _calls = library
+    before = sorted(os.listdir(root / "instance1" / "Film"))
+
+    response = _get("movie-download", 30, "en", query="source=embedded&arr_instance_id=1")
+    response.direct_passthrough = False
+
+    assert response.status_code == 200
+    assert response.headers["Content-Disposition"] == "attachment; filename=Film.en.srt"
+    assert response.get_data(as_text=True) == TRACK_TEXT
+    assert sorted(os.listdir(root / "instance1" / "Film")) == before
+
+
+def test_download_of_a_bitmap_track_answers_415(library):
+    message, status = _get("movie-download", 30, "en:hi", query="source=embedded&arr_instance_id=1")
+
+    assert status == 415
+    assert "PGS" in message
+
+
+def test_download_of_a_row_reads_that_row_s_track(library):
+    _session, _root, calls = library
+
+    response = _get("movie-download", 30, "it", query="source=embedded&codec=ass&arr_instance_id=1")
+    response.direct_passthrough = False
+
+    assert response.status_code == 200
+    assert [call["codec"] for call in calls] == ["ass"]
+    assert response.headers["Content-Disposition"] == "attachment; filename=Film.it.srt"
+
+
+def test_a_plain_download_still_streams_the_file(library):
+    response = _get("movie-download", 30, "en", query="arr_instance_id=1")
+    response.direct_passthrough = False
+
+    assert response.get_data(as_text=True) == FILE_TEXT

@@ -20,10 +20,13 @@ from utilities.helper import get_target_folder
 from utilities.path_mappings import path_mappings
 
 from .content import (
+    EMBEDDED_SOURCE,
     LANGUAGE_BASE_TAG_FRAGMENT,
     SUBTITLE_EXTENSIONS,
     _language_base,
     _request_arr_instance_id,
+    _request_codec,
+    _request_source,
     resolve_subtitle_path,
 )
 from ..utils import authenticate
@@ -431,16 +434,42 @@ def _ambiguous_media_error(media_type, media_id, arr_instance_id):
     return None
 
 
+def _embedded_track_download(media_type, media_id, language_code, arr_instance_id, codec=None):
+    """(cache path, download name) for ``?source=embedded``, or an error tuple.
+
+    The track is read out of the container into the extraction cache and
+    streamed from there under the name Save would give it. Nothing is written
+    next to the video.
+    """
+    from .embedded_source import EmbeddedText, read_embedded_track
+
+    track = read_embedded_track(media_type, media_id, language_code, arr_instance_id, codec=codec)
+    if not isinstance(track, EmbeddedText):
+        return track
+    return track.path, track.filename
+
+
 def _send_single_subtitle(media_type, media_id, language_code):
     arr_instance_id = _request_arr_instance_id()
+    source = _request_source()
+    if source is not None and source != EMBEDDED_SOURCE:
+        return 'Unknown subtitle source', 400
     ambiguous = _ambiguous_media_error(media_type, media_id, arr_instance_id)
     if ambiguous:
         return ambiguous
-    result = resolve_subtitle_path(media_type, media_id, language_code,
-                                   arr_instance_id=arr_instance_id)
-    if isinstance(result[1], int):
-        return result
-    subtitle_path = result[0]
+    if source == EMBEDDED_SOURCE:
+        found = _embedded_track_download(media_type, media_id, language_code, arr_instance_id,
+                                         codec=_request_codec())
+        if isinstance(found[1], int):
+            return found
+        subtitle_path, download_name = found
+    else:
+        result = resolve_subtitle_path(media_type, media_id, language_code,
+                                       arr_instance_id=arr_instance_id)
+        if isinstance(result[1], int):
+            return result
+        subtitle_path = result[0]
+        download_name = os.path.basename(subtitle_path)
     try:
         # Open before handing off, refusing a replacement symlink: send_file
         # on a pathname would follow whatever sits there by the time it opens.
@@ -450,8 +479,7 @@ def _send_single_subtitle(media_type, media_id, language_code):
         return 'Subtitle file or directory not found', 404
     # Control characters in an (otherwise valid POSIX) filename would make
     # Werkzeug reject the Content-Disposition header with a 500.
-    basename = re.sub(r'[\x00-\x1f\x7f]', '_',
-                      os.path.basename(subtitle_path))
+    basename = re.sub(r'[\x00-\x1f\x7f]', '_', download_name)
     try:
         response = send_file(handle,
                              as_attachment=True,
