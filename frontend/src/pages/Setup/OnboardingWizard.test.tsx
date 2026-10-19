@@ -1,5 +1,5 @@
 import userEvent, { UserEvent } from "@testing-library/user-event";
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -479,6 +479,30 @@ describe("OnboardingWizardView", () => {
     expect(
       await screen.findByRole("heading", { name: /subtitle translation/i }),
     ).toBeInTheDocument();
+  });
+
+  it("hands focus to a step's heading once a step that loads first draws it", async () => {
+    // Providers waits on its catalog before it draws a heading, so focus could
+    // only go to main on arrival, and it stayed there once the heading came.
+    server.use(
+      http.get("/api/provider-hub/providers", async () => {
+        await delay(200);
+        return new HttpResponse(null, { status: 503 });
+      }),
+    );
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "translator");
+    customRender(<OnboardingWizardView />);
+
+    await screen.findByRole("heading", { name: /subtitle translation/i });
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+
+    await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
+    const heading = await screen.findByRole("heading", {
+      name: /add subtitle providers/i,
+    });
+    await waitFor(() => expect(heading).toHaveFocus());
   });
 
   it('never has a "we" do the work on Welcome or the intent question', async () => {

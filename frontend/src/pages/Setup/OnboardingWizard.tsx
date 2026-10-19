@@ -266,15 +266,44 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // runs this twice on mount in strict mode, and only a real move should take
   // focus.
   const shownKey = useRef(current.key);
+  // A step that loads before it draws (Providers waits on its catalog) has
+  // no heading yet when it arrives. Focus waits on main, and this hands it to
+  // the heading the moment one is drawn, unless the reader has moved it
+  // somewhere else first.
+  const awaitHeading = useRef<MutationObserver | null>(null);
+  useEffect(() => () => awaitHeading.current?.disconnect(), []);
   useEffect(() => {
     if (shownKey.current === current.key) {
       return;
     }
     shownKey.current = current.key;
-    const heading = cardRef.current?.querySelector<HTMLElement>(
-      "[data-step-heading]",
-    );
-    (heading ?? mainRef.current)?.focus();
+    awaitHeading.current?.disconnect();
+    awaitHeading.current = null;
+    const card = cardRef.current;
+    const findHeading = () =>
+      card?.querySelector<HTMLElement>("[data-step-heading]") ?? null;
+    const heading = findHeading();
+    if (heading !== null) {
+      heading.focus();
+    } else {
+      mainRef.current?.focus();
+      if (card) {
+        const observer = new MutationObserver(() => {
+          const drawn = findHeading();
+          if (drawn === null) {
+            return;
+          }
+          observer.disconnect();
+          awaitHeading.current = null;
+          const active = document.activeElement;
+          if (active === mainRef.current || active === document.body) {
+            drawn.focus();
+          }
+        });
+        observer.observe(card, { childList: true, subtree: true });
+        awaitHeading.current = observer;
+      }
+    }
     setAnnouncement(`${current.label}. ${progressText}`);
   }, [current.key, current.label, progressText]);
 
