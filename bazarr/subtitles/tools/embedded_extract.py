@@ -398,7 +398,7 @@ def extract_embedded_track(media_type, media_id, arr_instance_id, language, hi=F
         # No local may be assigned before this call: the queue re-invokes the
         # function with the frame's locals.
         return jobs_queue.add_job_from_function(f"Extract to file: {label or language.upper()}",
-                                                is_progress=False)
+                                                is_progress=False, return_existing=True)
     try:
         written = materialise_embedded_track(media_type, media_id, arr_instance_id, language, hi, forced,
                                              codec)
@@ -406,3 +406,104 @@ def extract_embedded_track(media_type, media_id, arr_instance_id, language, hi=F
         raise JobFailed(str(error)) from error
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Extracted {os.path.basename(written[0])}")
     return written
+
+
+def embedded_tool_allowed(action):
+    """Whether ``action`` is a tool that can run on an embedded track once extracted."""
+    if action == "sync":
+        return True
+    from subzero.modification import registry
+
+    return (action or "").split("(", 1)[0] in registry.mods
+
+
+def tool_name(action):
+    from subtitles.tools.mods import MOD_LABELS
+
+    if action == "sync":
+        return "Sync"
+    base = action.split("(", 1)[0]
+    return MOD_LABELS.get(base) or {"shift_offset": "Adjust Times", "change_FPS": "Change Frame Rate",
+                                     "two_point_fit": "Two-Point Fit", "color": "Add Color"}.get(base, base)
+
+
+def tool_output_paths(track, action):
+    """Where a tool leaves its result when that is not the file extraction wrote.
+
+    Remove HI saves under the language's plain name, with no HI or forced tag
+    (and no language at all in single-language mode), and drops the file it
+    read, as it does for any subtitle. That name has to be free as well, or
+    the tool would replace a file the user never picked.
+    """
+    from subtitles.tools.mods import has_remove_hi
+
+    if not has_remove_hi([action]):
+        return []
+    language = None if settings.general.single_language else _subtitle_language(track.language, False, False)
+    folder = get_target_folder(track.video_path, create=False) or os.path.dirname(track.video_path)
+    name = os.path.basename(get_subtitle_path(track.video_path, language=language, extension=".srt"))
+    return [os.path.join(folder, name)]
+
+
+def run_tool_on_embedded_track(action, media_type, media_id, arr_instance_id, language, hi=False,
+                               forced=False, options=None, label=None, job_id=None, codec=None):
+    """Extract a text track to a file, then run the tool the user picked on that file.
+
+    One job, named after the tool; extraction is its first step. The tool
+    works on the new file next to the video, never on the extraction cache.
+    ``codec`` is the text codec the row showed, which picks between text
+    tracks of one language key.
+    """
+    if not job_id:
+        return jobs_queue.add_job_from_function(f"{tool_name(action)}: {label or language.upper()}",
+                                                is_progress=True, return_existing=True)
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Extracting the embedded subtitle track")
+    try:
+        track = resolve_track(media_type, media_id, arr_instance_id, language, hi, forced)
+        subtitle_path = materialise_track(track, codec, text_only=True)[0]
+    except (ExtractionError, SubtitleFileExists) as error:
+        raise JobFailed(str(error)) from error
+    # The request checked this name; a file may have appeared since.
+    replaced = existing_output(track.video_path,
+                               [path for path in tool_output_paths(track, action) if path != subtitle_path])
+    if replaced:
+        raise JobFailed(f"A subtitle file named {os.path.basename(replaced)} already exists. Use the tool on "
+                        f"that file's row instead. {os.path.basename(subtitle_path)} was extracted and kept.")
+    if action == "sync":
+        return _sync(track, subtitle_path, options or {}, job_id)
+    from subtitles.tools.mods import apply_subtitle_mods
+
+    return apply_subtitle_mods(language=track.language, subtitle_path=subtitle_path, mods=[action],
+                               video_path=track.video_path, media_type=track.media_type,
+                               media_id=track.local_id if track.media_type == "sports" else track.media_id,
+                               job_id=job_id, arr_instance_id=track.arr_instance_id)
+
+
+def _sync(track, subtitle_path, options, job_id):
+    from subtitles.sync import sync_subtitles
+
+    arguments = dict(
+        srt_path=subtitle_path, srt_lang=track.language, hi=track.hi, forced=track.forced,
+        percent_score=0, job_id=job_id, force_sync=True, arr_instance_id=track.arr_instance_id,
+        max_offset_seconds=options.get("max_offset_seconds"),
+        no_fix_framerate=bool(options.get("no_fix_framerate")), gss=bool(options.get("gss")),
+        output_mode=options.get("output_mode"), enabled_engines=options.get("enabled_engines"))
+    if track.media_type == "sports":
+        from sportarr.subtitles import sports_manual_operation
+
+        with sports_manual_operation(track.local_id, track.arr_instance_id) as (
+                context, validate, guard, video_path):
+            return sync_subtitles(video_path=video_path, reference=options.get("reference") or video_path,
+                                  context=context, validate=validate, publication_guard=guard, **arguments)
+    from api.subtitles.subtitles import postprocess_subtitles
+
+    episode = track.media_type == "episode"
+    metadata = SimpleNamespace(sonarrSeriesId=track.series_id)
+    return sync_subtitles(
+        video_path=track.video_path, reference=options.get("reference") or track.video_path,
+        sonarr_series_id=track.series_id if episode else None,
+        sonarr_episode_id=track.media_id if episode else None,
+        radarr_id=None if episode else track.media_id,
+        callback=lambda: postprocess_subtitles(subtitle_path, track.video_path, track.media_type, metadata,
+                                               track.media_id, arr_instance_id=track.arr_instance_id),
+        **arguments)
