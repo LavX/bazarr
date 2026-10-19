@@ -305,7 +305,10 @@
         min-height: 44px;
       }
 
-      .mantine-Combobox-option {
+      // By role rather than class: Select and MultiSelect name their options
+      // mantine-Select-option and mantine-MultiSelect-option, not
+      // mantine-Combobox-option, and measured 33.7px under the class rule.
+      [role="option"] {
         display: flex;
         align-items: center;
         min-height: 44px;
