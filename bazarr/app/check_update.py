@@ -179,10 +179,14 @@ def check_releases(job_id=None, startup=False, wait_for_completion=False):
 
         fetched = _fetch_repo_releases(repo, label=label)
         if fetched is None:
-            # Only a successful fetch may record tags.
+            # Only a successful fetch may record tags. Forgetting the old ones
+            # makes the next check fetch again, even if the tags move back.
+            recorded.pop(repo, None)
             continue
         releases.extend(fetched)
-        if tags is not None:
+        if tags is None:
+            recorded.pop(repo, None)
+        else:
             recorded[repo] = {'tags': tags}
 
     releases.sort(key=lambda r: r['date'], reverse=True)

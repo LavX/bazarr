@@ -248,3 +248,69 @@ def test_quota_exhausted_with_unchanged_tags_renders_the_last_fetch_without_an_a
     assert _rendered() == before
     assert [r["name"] for r in before["data"]][:1] == ["v1.0.0"]
 
+# A failed releases fetch must never record the tags it was gated on, or the
+# next check would see no movement and keep the failed result until the next
+# tag. The stored state is also dropped, so a tag that moves back to the
+# recorded value still fetches.
+
+def test_a_failed_fetch_does_not_record_the_moved_tags(github):
+    _check()
+    github.tags[_BAZARR_AD].append((_V2, "refs/tags/v1.1.0"))
+    github.releases[_BAZARR_API].insert(0, _release("v1.1.0", "2026-10-10T00:00:00Z"))
+    github.api_status = 403
+    _check()
+    github.api_status = 200
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_BAZARR_API]
+    assert [r["name"] for r in _releases_txt()] == ["v1.1.0", "v1.0.0", "v0.1.0"]
+
+
+def test_a_failed_fetch_forgets_the_old_tags_so_a_tag_moving_back_still_fetches(github):
+    _check()
+    github.tags[_BAZARR_AD].append((_V2, "refs/tags/v1.1.0"))
+    github.api_status = 403
+    _check()
+    github.api_status = 200
+    github.tags[_BAZARR_AD] = [(_V1, "refs/tags/v1.0.0")]
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_BAZARR_API]
+    assert [r["name"] for r in _releases_txt()] == ["v1.0.0", "v0.1.0"]
+
+
+def test_an_unparseable_releases_answer_is_a_failed_fetch(github, monkeypatch):
+    _check()
+    github.tags[_BAZARR_AD].append((_V2, "refs/tags/v1.1.0"))
+    original = github.get
+
+    def not_json(url, **kwargs):
+        response = original(url, **kwargs)
+        if url == _BAZARR_API:
+            response._payload = None
+        return response
+
+    monkeypatch.setattr(requests, "get", not_json)
+    _check()
+    monkeypatch.setattr(requests, "get", original)
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_BAZARR_API]
+
+
+def test_a_fetch_made_while_the_advertisement_was_down_records_no_tags(github):
+    github.advertisement_down = True
+    _check()
+    github.advertisement_down = False
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_BAZARR_API, _TRANSLATOR_API]
+
