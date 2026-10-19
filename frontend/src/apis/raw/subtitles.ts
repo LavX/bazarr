@@ -32,6 +32,12 @@ export type BatchAction =
   | "search-missing"
   | "upgrade";
 
+/** What Extract to file answers: the queued job and the file it will write. */
+export interface EmbeddedExtractResult {
+  job_id: number | null;
+  path: string;
+}
+
 export interface BatchItem {
   // "sports" names an event, as it does everywhere else in the sports code,
   // and "sportsLeague" names a league the way "series" names a show.
@@ -249,6 +255,16 @@ class SubtitlesApi extends BaseApi {
       form,
       { action },
     );
+    return response.data;
+  }
+
+  /** Extract an embedded track to a file next to the video, as a queued job. */
+  async extractEmbedded(
+    form: FormType.ModifySubtitle,
+  ): Promise<EmbeddedExtractResult> {
+    const response = await this.patch<EmbeddedExtractResult>("", form, {
+      action: "extract",
+    });
     return response.data;
   }
 

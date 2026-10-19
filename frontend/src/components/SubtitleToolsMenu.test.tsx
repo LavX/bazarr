@@ -22,6 +22,10 @@ vi.mock("@/apis/raw", async (importOriginal) => {
         ...actual.default.subtitles,
         // eslint-disable-next-line camelcase
         modify: vi.fn().mockResolvedValue({ job_id: 4 }),
+        extractEmbedded: vi
+          .fn()
+          // eslint-disable-next-line camelcase
+          .mockResolvedValue({ job_id: 5, path: "/m/a.en.srt" }),
       },
     },
   };
@@ -75,7 +79,7 @@ describe("SubtitleToolsMenu red slot", () => {
     customRender(
       <SubtitleToolsMenu
         selections={[selection("")]}
-        embeddedTrack
+        embeddedTrack={{ codec: "subrip" }}
         trackLabel="English (HI)"
         onAction={onAction}
       >
@@ -112,7 +116,7 @@ describe("SubtitleToolsMenu red slot", () => {
     customRender(
       <SubtitleToolsMenu
         selections={[selection("")]}
-        embeddedTrack
+        embeddedTrack={{ codec: "subrip" }}
         trackLabel="English"
         coveredTracks={["English", "English"]}
         onAction={vi.fn()}
@@ -154,5 +158,144 @@ describe("SubtitleToolsMenu red slot", () => {
     expect(
       screen.queryByRole("menuitem", { name: "Hide track..." }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("SubtitleToolsMenu modes", () => {
+  const TOOLS = [
+    "Sync...",
+    "Change Frame Rate...",
+    "Adjust Times...",
+    "Remove HI Tags",
+    "Remove Style Tags",
+    "Remove Emoji",
+    "OCR Fixes",
+    "Common Fixes",
+    "Fix Uppercase",
+    "Reverse RTL",
+    "Add Color...",
+    "Translate...",
+  ];
+
+  async function open(props: Partial<Parameters<typeof SubtitleToolsMenu>[0]>) {
+    const user = userEvent.setup();
+    customRender(
+      <SubtitleToolsMenu
+        selections={[selection("")]}
+        onAction={vi.fn()}
+        {...props}
+      >
+        <Button>Tools</Button>
+      </SubtitleToolsMenu>,
+    );
+    await user.click(screen.getByRole("button", { name: "Tools" }));
+    await screen.findByText("Remove HI Tags");
+    return user;
+  }
+
+  // The dropdown can already be closing by the time the assertions run, so
+  // items are looked up whether or not they are still visible: what is
+  // checked is what the menu rendered, enabled or not.
+  const item = (name: string) =>
+    screen.getByRole("menuitem", { name, hidden: true });
+  const noItem = (name: string) =>
+    screen.queryByRole("menuitem", { name, hidden: true });
+
+  it("external file: every tool, no Extract to file, Delete", async () => {
+    await open({ selections: [selection("/m/a.en.srt")] });
+
+    for (const name of [
+      ...TOOLS,
+      "Two-Point Fit...",
+      "View",
+      "Edit",
+      "Download",
+    ]) {
+      expect(item(name)).toBeEnabled();
+    }
+    expect(noItem("Extract to file")).not.toBeInTheDocument();
+    expect(item("Delete...")).toBeEnabled();
+  });
+
+  it.each([["subrip"], [null]])(
+    "embedded text track (codec %s): every tool but Two-Point Fit, Extract to file, Hide",
+    async (codec) => {
+      await open({ embeddedTrack: { codec } });
+
+      for (const name of TOOLS) {
+        expect(item(name)).toBeEnabled();
+      }
+      // Its lines are picked from a file, so it waits for Extract to file.
+      expect(item("Two-Point Fit...")).toBeDisabled();
+      expect(item("Extract to file")).toBeEnabled();
+      for (const name of ["View", "Edit", "Download", "Search"]) {
+        expect(item(name)).toBeDisabled();
+      }
+      expect(item("Hide track...")).toBeEnabled();
+      expect(noItem("Delete...")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Image-based track/)).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ["pgs", "PGS"],
+    ["vobsub", "VobSub"],
+    ["dvbsub", "DVB"],
+  ])(
+    "embedded image-based track (%s): Extract to file and Hide only",
+    async (codec, label) => {
+      await open({ embeddedTrack: { codec } });
+
+      expect(
+        screen.getByText(
+          `Image-based track (${label}): the tools need text. Extract to file copies it out as it is, for players.`,
+        ),
+      ).toBeInTheDocument();
+      for (const name of [
+        ...TOOLS,
+        "Two-Point Fit...",
+        "View",
+        "Edit",
+        "Download",
+        "Search",
+      ]) {
+        expect(item(name)).toBeDisabled();
+      }
+      expect(item("Extract to file")).toBeEnabled();
+      expect(item("Hide track...")).toBeEnabled();
+    },
+  );
+
+  it("a tool on an embedded row sends the row's codec", async () => {
+    vi.mocked(api.subtitles.modify).mockClear();
+    const user = await open({ embeddedTrack: { codec: "ass" } });
+
+    await user.click(item("Remove HI Tags"));
+
+    await waitFor(() => expect(api.subtitles.modify).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.subtitles.modify).mock.calls[0]).toEqual([
+      "remove_HI",
+      expect.objectContaining({ path: "", language: "en", codec: "ass" }),
+    ]);
+  });
+
+  it("Extract to file sends the row with its codec", async () => {
+    vi.mocked(api.subtitles.extractEmbedded).mockClear();
+    const user = await open({ embeddedTrack: { codec: "pgs" } });
+
+    await user.click(item("Extract to file"));
+
+    await waitFor(() =>
+      expect(api.subtitles.extractEmbedded).toHaveBeenCalledTimes(1),
+    );
+    expect(
+      vi.mocked(api.subtitles.extractEmbedded).mock.calls[0][0],
+    ).toMatchObject({
+      id: 5,
+      type: "movie",
+      language: "en",
+      path: "",
+      codec: "pgs",
+    });
   });
 });

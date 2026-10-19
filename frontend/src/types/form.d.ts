@@ -65,6 +65,8 @@ declare namespace FormType {
     from_forced?: PythonBoolean;
     /** Owning Sonarr/Radarr instance id (#156); routes the action to the right server. */
     arr_instance_id?: number;
+    /** Codec the embedded track's row shows; Extract to file picks the track by it. */
+    codec?: string | null;
   }
 
   interface DownloadSeries {

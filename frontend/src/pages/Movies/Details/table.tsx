@@ -544,7 +544,9 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
   return (
     <SubtitleToolsMenu
       selections={selections}
-      embeddedTrack={isSubtitleTrack(path)}
+      embeddedTrack={
+        isSubtitleTrack(path) ? { codec: item.codec ?? null } : undefined
+      }
       trackLabel={embeddedTrackLabel(item)}
       coveredTracks={
         isSubtitleTrack(path)

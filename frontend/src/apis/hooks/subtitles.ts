@@ -18,6 +18,42 @@ import { notification } from "@/modules/notification";
 import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
 import { hiddenTrackOutcome } from "@/utilities/subtitles";
 
+/** Refresh the tables a subtitle of this media type is listed in. */
+function refreshSubtitleOwner(
+  client: ReturnType<typeof useQueryClient>,
+  form: FormType.ModifySubtitle,
+) {
+  if (form.type === "episode") {
+    void client.invalidateQueries({ queryKey: [QueryKeys.Episodes, form.id] });
+    void client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+  } else if (form.type === "sports") {
+    void client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+  } else {
+    void client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
+  }
+}
+
+/**
+ * A 409 from a subtitle action, which the action hooks show with the
+ * backend's reason. Forms that catch the failure themselves skip their own
+ * generic toast for it, so the user sees one toast, not two.
+ */
+export function isShownConflict(error: unknown): boolean {
+  return error instanceof AxiosError && error.response?.status === 409;
+}
+
+// The client shows no toast for a 409 and leaves it to the caller. A tool on
+// an embedded track answers 409 when the file its extraction would write is
+// already there, and that refusal is the only thing the user would otherwise
+// not see.
+function toastConflict(title: string) {
+  return (error: Error) => {
+    if (isShownConflict(error)) {
+      showNotification(notification.error(title, error.message));
+    }
+  };
+}
+
 export function useSubtitleAction() {
   const client = useQueryClient();
   interface Param {
@@ -28,6 +64,13 @@ export function useSubtitleAction() {
     mutationKey: [QueryKeys.Subtitles],
     mutationFn: (param: Param) =>
       api.subtitles.modify(param.action, param.form),
+    // A translation's 409 is the translation gate's refusal, which its callers
+    // show with useTranslationRefusal; every other action's 409 shows here.
+    onError: (error, param) => {
+      if (param.action !== "translate") {
+        toastConflict("Not started")(error);
+      }
+    },
 
     onSuccess: (data, param) => {
       const refresh = () => {
@@ -73,11 +116,39 @@ export function useSubtitleAction() {
           });
         }
       };
-      // Only the episode modify answers with a job to wait on; movie and
-      // sports sync and translation still answer without one.
-      const jobId = param.form.type === "episode" ? data?.job_id : undefined;
+      // The episode modify answers with a job to wait on, and so does a tool
+      // on an embedded track (no path), whatever the media type; movie and
+      // sports sync and translation of a file still answer without one.
+      const jobId =
+        param.form.type === "episode" || !param.form.path
+          ? data?.job_id
+          : undefined;
       return refreshWhenJobFinishes(client, jobId, refresh);
     },
+  });
+}
+
+/**
+ * Extract to file: the embedded track is written next to the video as a new
+ * subtitle file by a queued job. The toast names the file; the tables refresh
+ * once the job has written it.
+ */
+export function useEmbeddedTrackExtract() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "extract"],
+    mutationFn: (form: FormType.ModifySubtitle) =>
+      api.subtitles.extractEmbedded(form),
+    onSuccess: (result, form) => {
+      const name = result.path.split(/[\\/]/).pop();
+      showNotification(
+        notification.info("Extracting to file", `Writing ${name}`),
+      );
+      refreshWhenJobFinishes(client, result.job_id, () =>
+        refreshSubtitleOwner(client, form),
+      );
+    },
+    onError: toastConflict("Not extracted"),
   });
 }
 
