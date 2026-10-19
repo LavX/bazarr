@@ -72,14 +72,14 @@ def _prepare_movies(monkeypatch, schema_session):
     return movies
 
 
-def _add_movie(schema_session, movie_id, subtitles):
+def _add_movie(schema_session, movie_id, subtitles, path=None):
     from app.database import TableMovies
 
     schema_session.add(TableMovies(
         id=movie_id,
         radarrId=movie_id,
         arr_instance_id=1,
-        path=f"/movies/movie{movie_id}.mkv",
+        path=path or f"/movies/movie{movie_id}.mkv",
         title=f"Movie {movie_id}",
         sortTitle=f"movie {movie_id}",
         tmdbId=str(movie_id),
@@ -89,6 +89,28 @@ def _add_movie(schema_session, movie_id, subtitles):
         tags="[]",
     ))
     schema_session.flush()
+
+
+def _configure_mappings(monkeypatch, schema_session, media, instance_mapping=None, global_mapping=None):
+    """Give instance 1 its own path mapping for ``media`` ('movie' or 'series')
+    when one is passed, and set the global mapping for that media type."""
+    import json
+
+    from app.database import TableArrInstances
+    from utilities.path_mappings import path_mappings
+
+    movie = media == 'movie'
+    # The instance mapping is read through the application session.
+    monkeypatch.setattr('app.database.database', schema_session)
+    if instance_mapping is not None:
+        schema_session.add(TableArrInstances(
+            id=1, kind='radarr' if movie else 'sonarr', stable_key='k1', name='i1',
+            enabled=1, is_default=1, ip='127.0.0.1', port=7878, base_url='/', ssl=0,
+            verify_ssl=0, http_timeout=60, api_key='',
+            path_mappings=json.dumps({'movies' if movie else 'series': instance_mapping})))
+        schema_session.flush()
+    monkeypatch.setattr(path_mappings, 'path_mapping_movies' if movie else 'path_mapping_series',
+                        global_mapping or [])
 
 
 def _add_movie_history(schema_session, history_id, movie_id, action, subtitles_path,
@@ -152,12 +174,17 @@ def test_movies_lowest_score_is_min_of_current_subtitles(schema_session, monkeyp
 
 def test_movies_scores_match_a_mapped_translation_of_the_same_file(schema_session, monkeypatch):
     movies = _prepare_movies(monkeypatch, schema_session)
-    # The indexer records the instance-mapped path; the translation history row
-    # carries the globally mapped path for the same file. The translation
-    # replaced the download, so the old provider score must not survive.
-    _add_movie(schema_session, 100, "[['de', '/instance/tv/movie100.de.srt', 100]]")
+    # The indexer and the download reverse the local file with the instance
+    # mapping; the translation reverses it with the global one, so its history
+    # row carries another root for the same file. The translation replaced the
+    # download, so the old provider score must not survive.
+    _configure_mappings(monkeypatch, schema_session, 'movie',
+                        [['/instance/tv', '/local/tv']], [['/global/tv', '/local/tv']])
+    _add_movie(schema_session, 100, "[['de', '/instance/tv/movie100.de.srt', 100]]",
+               path='/instance/tv/movie100.mkv')
     _add_movie_history(schema_session, 1, 100, 1, "/instance/tv/movie100.de.srt", "de", 90, 100)
-    _add_movie_history(schema_session, 2, 100, 6, "/global/tv/movie100.de.srt", "de", 50, 100)
+    _add_movie_history(schema_session, 2, 100, 6, "/global/tv/movie100.de.srt", "de", 50, 100,
+                       video_path='/global/tv/movie100.mkv')
 
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 
@@ -166,12 +193,16 @@ def test_movies_scores_match_a_mapped_translation_of_the_same_file(schema_sessio
 
 def test_movies_scores_match_windows_paths_under_different_roots(schema_session, monkeypatch):
     movies = _prepare_movies(monkeypatch, schema_session)
-    # A Linux host stores a Windows instance's paths unchanged. Windows names
-    # resolve case-insensitively, so two roots and casings name the same file
-    # and the newer translation shadows the download's score.
-    _add_movie(schema_session, 100, r"[['de', 'X:\\TV\\Movie.DE.srt', 100]]")
+    # A Windows instance's paths, with the translation reversed through a
+    # global mapping onto another drive. Windows names resolve
+    # case-insensitively, so two roots and casings name the same file and the
+    # newer translation shadows the download's score.
+    _configure_mappings(monkeypatch, schema_session, 'movie',
+                        [['X:\\TV', '/local/tv']], [['Y:\\tv', '/local/tv']])
+    _add_movie(schema_session, 100, r"[['de', 'X:\\TV\\Movie.DE.srt', 100]]", path=r"X:\TV\Movie.mkv")
     _add_movie_history(schema_session, 1, 100, 1, r"X:\TV\movie.de.srt", "de", 90, 100)
-    _add_movie_history(schema_session, 2, 100, 6, r"Y:\tv\movie.de.srt", "de", 50, 100)
+    _add_movie_history(schema_session, 2, 100, 6, r"Y:\tv\movie.de.srt", "de", 50, 100,
+                       video_path=r"Y:\tv\movie.mkv")
 
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 
@@ -189,13 +220,15 @@ def test_subtitle_file_name_splits_both_separator_styles():
 
 def test_movies_scores_match_mixed_windows_and_linux_paths(schema_session, monkeypatch):
     movies = _prepare_movies(monkeypatch, schema_session)
-    # The index holds the Windows remote path, the translation history the
-    # mapped Linux path for the same file, with different casing. The Windows
-    # side resolves the name case-insensitively, so the newer translation
-    # shadows the download's score.
-    _add_movie(schema_session, 100, r"[['de', 'X:\\TV\\Movie.DE.srt', 100]]")
+    # The index holds the Windows remote path. No global mapping reverses the
+    # translation, so its history keeps the mapped Linux path for the same
+    # file, with different casing. The Windows side resolves the name
+    # case-insensitively, so the newer translation shadows the download's score.
+    _configure_mappings(monkeypatch, schema_session, 'movie', [['X:\\TV', '/media/tv']])
+    _add_movie(schema_session, 100, r"[['de', 'X:\\TV\\Movie.DE.srt', 100]]", path=r"X:\TV\Movie.mkv")
     _add_movie_history(schema_session, 1, 100, 1, r"X:\TV\Movie.DE.srt", "de", 90, 100)
-    _add_movie_history(schema_session, 2, 100, 6, "/media/tv/movie.de.srt", "de", 50, 100)
+    _add_movie_history(schema_session, 2, 100, 6, "/media/tv/movie.de.srt", "de", 50, 100,
+                       video_path="/media/tv/movie.mkv")
 
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 
@@ -216,17 +249,22 @@ def test_movies_case_distinct_unix_subtitles_stay_distinct(schema_session, monke
     assert result["data"][0]["lowest_subtitle_score"] == 40.0
 
 
-@pytest.mark.parametrize("current, history", [
+@pytest.mark.parametrize("current, history, mapping", [
     # Drive-letter Windows paths can use forward slashes, and the mapping can
     # turn either side into a Linux path with different casing.
-    ("X:/TV/Movie.DE.srt", "/media/tv/movie.de.srt"),
-    ("/media/tv/Movie.DE.srt", "X:/TV/movie.de.srt"),
+    ("X:/TV/Movie.DE.srt", "/media/tv/movie.de.srt", [['X:\\TV', '/media/tv']]),
+    ("/media/tv/Movie.DE.srt", "X:/TV/movie.de.srt", [['/media/tv', 'X:\\TV']]),
 ])
-def test_movies_scores_match_forward_slash_windows_paths(schema_session, monkeypatch, current, history):
+def test_movies_scores_match_forward_slash_windows_paths(schema_session, monkeypatch, current, history,
+                                                         mapping):
     movies = _prepare_movies(monkeypatch, schema_session)
-    _add_movie(schema_session, 100, f"[['de', '{current}', 100]]")
+    # No global mapping reverses the translation, so it keeps the local paths.
+    _configure_mappings(monkeypatch, schema_session, 'movie', mapping)
+    _add_movie(schema_session, 100, f"[['de', '{current}', 100]]",
+               path=current.replace('.DE.srt', '.mkv'))
     _add_movie_history(schema_session, 1, 100, 1, current, "de", 90, 100)
-    _add_movie_history(schema_session, 2, 100, 6, history, "de", 50, 100)
+    _add_movie_history(schema_session, 2, 100, 6, history, "de", 50, 100,
+                       video_path=history.replace('.de.srt', '.mkv'))
 
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 
@@ -504,25 +542,12 @@ def test_sync_preserves_download_score(scored_media):
 def placed_media(request, monkeypatch, schema_session):
     """One movie or one episode at a chosen video and subtitle path, owned by
     instance 1, with optional instance and global path mappings."""
-    import json
-
-    from app.database import TableArrInstances, TableEpisodes, TableMovies
-    from utilities.path_mappings import path_mappings
+    from app.database import TableEpisodes, TableMovies
 
     movie = request.param == 'movie'
-    # The instance mapping is read through the application session.
-    monkeypatch.setattr('app.database.database', schema_session)
 
     def place(video_path, subtitles_path, instance_mapping=None, global_mapping=None):
-        if instance_mapping is not None:
-            schema_session.add(TableArrInstances(
-                id=1, kind='radarr' if movie else 'sonarr', stable_key='k1', name='i1',
-                enabled=1, is_default=1, ip='127.0.0.1', port=7878, base_url='/', ssl=0,
-                verify_ssl=0, http_timeout=60, api_key='',
-                path_mappings=json.dumps({'movies' if movie else 'series': instance_mapping})))
-            schema_session.flush()
-        monkeypatch.setattr(path_mappings, 'path_mapping_movies' if movie else 'path_mapping_series',
-                            global_mapping or [])
+        _configure_mappings(monkeypatch, schema_session, request.param, instance_mapping, global_mapping)
         subtitles = repr([['de', subtitles_path, 100]])
         if movie:
             api = _prepare_movies(monkeypatch, schema_session)
