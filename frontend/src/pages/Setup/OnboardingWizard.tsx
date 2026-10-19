@@ -477,7 +477,16 @@ const OnboardingWizardBody: FunctionComponent = () => {
             })}
           </div>
 
-          <VisuallyHidden role="status">{announcement}</VisuallyHidden>
+          {/* A polite live region, not role="status": Orca files a status bar
+            under its own UI text and never reads its changes out, which an
+            Orca pass on this wizard showed. */}
+          <VisuallyHidden
+            aria-live="polite"
+            aria-atomic="true"
+            data-testid="step-announcement"
+          >
+            {announcement}
+          </VisuallyHidden>
 
           <Paper ref={cardRef} className={styles.card}>
             {/* Keyed by the step, so moving to another step starts its component

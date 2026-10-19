@@ -592,7 +592,12 @@ describe("OnboardingWizardView", () => {
   it("takes no focus and announces nothing on first render", () => {
     customRender(<OnboardingWizardView />);
 
-    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    const region = screen.getByTestId("step-announcement");
+    expect(region).toBeEmptyDOMElement();
+    // A polite live region. role="status" is a status bar to Orca, which it
+    // never reads out: measured in an Orca pass of this wizard.
+    expect(region).toHaveAttribute("aria-live", "polite");
+    expect(region).not.toHaveAttribute("role");
     expect(document.body).toHaveFocus();
     expect(document.title).toBe("Welcome - Setup - Bazarr+");
   });
@@ -609,7 +614,7 @@ describe("OnboardingWizardView", () => {
       name: /what do you want bazarr/i,
     });
     await waitFor(() => expect(heading).toHaveFocus());
-    expect(screen.getByRole("status")).toHaveTextContent(
+    expect(screen.getByTestId("step-announcement")).toHaveTextContent(
       "Your setup. Getting started, 2 of 2",
     );
     expect(document.title).toBe("Your setup - Setup - Bazarr+");
@@ -626,7 +631,7 @@ describe("OnboardingWizardView", () => {
       name: /^media servers$/i,
     });
     await waitFor(() => expect(servers).toHaveFocus());
-    expect(screen.getByRole("status")).toHaveTextContent(
+    expect(screen.getByTestId("step-announcement")).toHaveTextContent(
       "Media servers. Connect, Media servers 1 of 1",
     );
   });
