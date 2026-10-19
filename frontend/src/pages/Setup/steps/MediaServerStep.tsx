@@ -1,4 +1,4 @@
-import { FC, useMemo } from "react";
+import { FC, useMemo, useState } from "react";
 import { Button, Checkbox, Group, Text } from "@mantine/core";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
@@ -52,6 +52,11 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
 
   const { data: settings, isPending: settingsPending } = useSystemSettings();
   const settingsMutation = useSettingsMutation();
+  // Which kind's switch write failed. The client keeps a restarting or
+  // unreachable Bazarr+ out of its toasts, so it is said here or not at all.
+  const [switchFailed, setSwitchFailed] = useState<MediaServerKind | null>(
+    null,
+  );
   // One query per kind, a fixed four, so no hook is called in a loop.
   const plex = useMediaServerInstances("plex");
   const jellyfin = useMediaServerInstances("jellyfin");
@@ -303,11 +308,13 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                         variant="light"
                         size="compact-sm"
                         loading={settingsMutation.isPending}
-                        onClick={() =>
-                          settingsMutation.mutate({
-                            [`settings-general-use_${kind}`]: true,
-                          })
-                        }
+                        onClick={() => {
+                          setSwitchFailed(null);
+                          settingsMutation.mutate(
+                            { [`settings-general-use_${kind}`]: true },
+                            { onError: () => setSwitchFailed(kind) },
+                          );
+                        }}
                       >
                         Turn on {kindName(kind)} refreshes
                       </Button>
@@ -326,6 +333,12 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                       </Button>
                     )}
                   </div>
+                  {switchFailed === kind && stalled.length > 0 && (
+                    <Text size="sm" c="red" role="alert">
+                      Bazarr+ could not turn on {kindName(kind)} refreshes.
+                      Check that it is still running, then try again.
+                    </Text>
+                  )}
                 </div>
               )}
             </div>

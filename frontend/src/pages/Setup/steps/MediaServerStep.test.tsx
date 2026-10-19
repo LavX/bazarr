@@ -393,9 +393,31 @@ describe("MediaServerStep", () => {
     );
 
     await waitFor(() =>
-      expect(mutate).toHaveBeenCalledWith({
-        "settings-general-use_emby": true,
-      }),
+      expect(mutate).toHaveBeenCalledWith(
+        { "settings-general-use_emby": true },
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("says so when the switch cannot be turned on", async () => {
+    // A restarting or unreachable Bazarr+ is kept out of the toasts, so the
+    // picker is the only place a failed write can be reported.
+    setInstances({ emby: [row("emby", "Living room", "row-1")] });
+    // eslint-disable-next-line camelcase
+    setSettings({ use_emby: false });
+    mutate.mockImplementationOnce(
+      (_input: unknown, opts?: { onError?: () => void }) => opts?.onError?.(),
+    );
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /turn on emby refreshes/i }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not turn on emby refreshes/i,
     );
   });
 
