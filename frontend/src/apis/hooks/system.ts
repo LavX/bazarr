@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
 import {
   keepPreviousData,
@@ -10,7 +10,7 @@ import { isAxiosError } from "axios";
 import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { ownWriteErrors } from "@/apis/raw/inlineWrites";
+import { inlineWhen } from "@/apis/raw/inlineWrites";
 import { notification } from "@/modules/notification";
 import { Environment } from "@/utilities";
 import { setAuthenticated } from "@/utilities/event";
@@ -90,20 +90,12 @@ export function isSettingsFollowupError(error: unknown): boolean {
 }
 
 interface SettingsMutationOptions {
-  // The caller says a failed write next to the control that made it, so the
-  // generic "Save failed" toast stays away. Both are announced as alerts, and
+  // The caller says a failed write next to the control that made it, so
+  // neither this hook's "Save failed" toast nor the client's "Error <code>"
+  // one is shown. Both are announced as alerts, and
   // the setup wizard read every failure out twice. A write that landed but
   // could not be applied still toasts: that is news the caller does not have.
   inlineErrors?: boolean;
-}
-
-/**
- * While the calling component is mounted, a failed write skips the API
- * client's generic toast. For a surface that shows every write failure inline,
- * and only there: the hooks' own toasts are a separate opt-out each.
- */
-export function useInlineWriteErrors() {
-  useEffect(() => ownWriteErrors(), []);
 }
 
 export function useSettingsMutation(
@@ -187,7 +179,9 @@ export function useSettingsMutation(
   };
   return useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Settings],
-    mutationFn: (data: LooseObject) => api.system.updateSettings(data),
+    mutationFn: inlineWhen(inlineErrors, (data: LooseObject) =>
+      api.system.updateSettings(data),
+    ),
 
     onSuccess: (_, changes) => {
       reloadSaved(changes);
@@ -518,7 +512,13 @@ export function getPostLoginRedirectTarget(baseUrl = Environment.baseUrl) {
   return baseUrl || "/";
 }
 
-export function useSystem() {
+export function useSystem({
+  inlineErrors = false,
+}: {
+  // The caller reports a failed action itself, so the client's toast for
+  // that request stays away.
+  inlineErrors?: boolean;
+} = {}) {
   const client = useQueryClient();
   const { mutate: logout, isPending: isLoggingOut } = useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Actions],
@@ -561,7 +561,7 @@ export function useSystem() {
 
   const { mutate: restart, isPending: isRestarting } = useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Actions],
-    mutationFn: () => api.system.restart(),
+    mutationFn: inlineWhen(inlineErrors, () => api.system.restart()),
 
     onSuccess: () => {
       client.clear();

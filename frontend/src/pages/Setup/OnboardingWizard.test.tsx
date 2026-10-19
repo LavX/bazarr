@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { compileString } from "sass-embedded";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
+import client from "@/apis/raw/client";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import OnboardingWizardView from "./OnboardingWizard";
@@ -661,6 +662,23 @@ describe("OnboardingWizardView", () => {
     await new Promise((settle) => setTimeout(settle, 300));
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(screen.queryByText("Error 400")).not.toBeInTheDocument();
+  });
+
+  it("still lets a write with no handler of its own toast while setup is open", async () => {
+    // Setup once switched the client's toast off for every write while it was
+    // mounted, so a Plex sign-out or a restart that failed without a handler
+    // of its own failed in silence. Only the requests a step asks to cover are.
+    server.use(
+      http.post("/api/inline-probe", () =>
+        HttpResponse.json({ message: "Nope" }, { status: 500 }),
+      ),
+    );
+    customRender(<OnboardingWizardView />);
+    await screen.findByRole("heading", { name: /welcome to bazarr/i });
+
+    await client.axios.post("inline-probe").catch(() => undefined);
+
+    expect(await screen.findByText("Error 500")).toBeInTheDocument();
   });
 
   it("keeps what was typed on a step across Back and forward", async () => {

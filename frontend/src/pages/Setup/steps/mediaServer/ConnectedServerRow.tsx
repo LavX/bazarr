@@ -70,8 +70,11 @@ const ConnectedServerRow: FC<Props> = ({
   // written back the prop reads false whatever it was: the answer has to be
   // taken before the sign-out, not after it.
   const enabledBefore = useRef(kindEnabled);
-  const remove = useDeleteMediaServerInstance(kind, instance.id);
-  const logout = usePlexLogoutMutation();
+  // Both report a failure under the row, so the client's toast stays away.
+  const remove = useDeleteMediaServerInstance(kind, instance.id, {
+    inlineErrors: true,
+  });
+  const logout = usePlexLogoutMutation({ inlineErrors: true });
   const settings = useSettingsMutation();
   const refreshes = instance.enabled && kindEnabled;
   const tested = readMediaServerTest(kind, instance.id);

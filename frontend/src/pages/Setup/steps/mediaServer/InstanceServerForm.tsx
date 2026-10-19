@@ -178,8 +178,13 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   const configured = connection.url.length > 0 && connection.api_key.length > 0;
   const touched = isDraftTouched(draft);
 
-  const test = useMediaServerTest(kind, connection);
-  const libraries = useMediaServerLibraries(kind, connection);
+  // Both report a failure in the form, so the client's toast stays away.
+  const test = useMediaServerTest(kind, connection, undefined, {
+    inlineErrors: true,
+  });
+  const libraries = useMediaServerLibraries(kind, connection, undefined, {
+    inlineErrors: true,
+  });
 
   const handleContinue = () => {
     if (!touched) {

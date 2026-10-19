@@ -147,11 +147,15 @@ describe("SeerrStep", () => {
     await user.type(screen.getByLabelText(/server url/i), "http://seerr:5055");
     await user.type(screen.getByLabelText(/api key/i), "seerr-key");
 
-    expect(mockedTestMutation).toHaveBeenLastCalledWith({
-      url: "http://seerr:5055",
-      apikey: "seerr-key",
-      verifySsl: true,
-    });
+    expect(mockedTestMutation).toHaveBeenLastCalledWith(
+      {
+        url: "http://seerr:5055",
+        apikey: "seerr-key",
+        verifySsl: true,
+      },
+      // A failed Test is said beside the button, not in the client's toast.
+      { inlineErrors: true },
+    );
   });
 
   // The step is optional, so a connection nobody proved is still allowed

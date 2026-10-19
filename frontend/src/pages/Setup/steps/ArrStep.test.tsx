@@ -437,12 +437,15 @@ describe("ArrStep", () => {
     // The verdict belongs to the connection it was measured against: the hook
     // is handed the current values so it can drop a green result the moment
     // the address, the port or the key changes.
+    // A Test that cannot reach Bazarr+ is said beside the button, so the
+    // request is the hook's to keep out of the client's toast.
     expect(mockedUseTestArrInstanceConnection).toHaveBeenLastCalledWith(
       expect.objectContaining({
         ip: "10.0.0.5",
         port: 8989,
         apiKey: "abc123",
       }),
+      { inlineErrors: true },
     );
 
     // A successful result is surfaced inline.

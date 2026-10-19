@@ -221,13 +221,17 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
     trimmedIp.length > 0 || trimmedKey.length > 0 || baseUrl.trim().length > 0;
   const testable = trimmedIp.length > 0 && trimmedKey.length > 0 && portValid;
 
-  const test = useTestArrInstanceConnection({
-    ip: trimmedIp,
-    port: portNumber,
-    baseUrl: normalizedBaseUrl,
-    ssl,
-    apiKey: trimmedKey,
-  });
+  const test = useTestArrInstanceConnection(
+    {
+      ip: trimmedIp,
+      port: portNumber,
+      baseUrl: normalizedBaseUrl,
+      ssl,
+      apiKey: trimmedKey,
+    },
+    // A Test that cannot reach Bazarr+ says so beside the button.
+    { inlineErrors: true },
+  );
 
   const clearError = (field: keyof FieldErrors) => {
     setErrors((current) => {

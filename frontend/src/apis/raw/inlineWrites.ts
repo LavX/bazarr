@@ -1,25 +1,43 @@
-// How many mounted surfaces report every failed write next to the control
-// that made it (the setup wizard). While one is, a failed write skips the API
-// client's generic toast: the reader already has the inline alert, and a
-// second alert-role toast in the far corner read the same failure out twice.
-// Reads still toast, because a failed read on those screens says nothing of
-// its own. Kept apart from the client so a hook can claim the scope without
-// loading the client and its socket.
-let scopes = 0;
+// A request whose failure the caller reports next to the control that made it
+// skips the API client's generic "Error <code>" toast: the reader already has
+// the inline alert, and a second alert-role toast in the far corner read the
+// same failure out twice. It is opted into per call, by the hook a caller asks
+// for inline errors, and never for a whole screen: a write with no handler of
+// its own still toasts, wherever it is made.
+//
+// The flag is read by a synchronous request interceptor, so it covers the
+// request a call issues before its first await. Every raw API method builds
+// and sends its request before it awaits anything, so a wrapped method is
+// covered, and anything it sends after an await (a job poll) is not.
+let depth = 0;
 
-/** Claims failed writes for a surface; call the result to release them. */
-export function ownWriteErrors(): () => void {
-  scopes += 1;
-  let released = false;
-  return () => {
-    if (!released) {
-      released = true;
-      scopes -= 1;
-    }
-  };
+/** Runs `call` so that the request it sends skips the client's toast. */
+export function withInlineErrors<T>(call: () => Promise<T>): Promise<T> {
+  depth += 1;
+  try {
+    return call();
+  } finally {
+    depth -= 1;
+  }
 }
 
-/** Whether a failed request with this method is a claimed write. */
-export function ownsWriteError(method: string | undefined): boolean {
-  return scopes > 0 && (method ?? "get").toLowerCase() !== "get";
+/**
+ * A mutation function that, when `inline` is set, runs through
+ * withInlineErrors. It keeps the exact type it was given, so the mutation
+ * infers the same variables and result as it did before it was wrapped.
+ */
+export function inlineWhen<F extends (...args: never[]) => Promise<unknown>>(
+  inline: boolean,
+  fn: F,
+): F {
+  if (!inline) {
+    return fn;
+  }
+  return ((...args: Parameters<F>) =>
+    withInlineErrors(() => fn(...args))) as unknown as F;
+}
+
+/** Whether the request being built now was asked to skip the toast. */
+export function inlineErrorsRequested(): boolean {
+  return depth > 0;
 }

@@ -22,7 +22,7 @@ import { useDocumentTitle } from "@mantine/hooks";
 import { faCheck } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useQueryClient } from "@tanstack/react-query";
-import { useInlineWriteErrors, useSettingsMutation } from "@/apis/hooks";
+import { useSettingsMutation } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import { PHASE_LABELS, WIZARD_PHASES } from "./steps/types";
 import { clearPersistedConnectionTests } from "./connectionTests";
@@ -104,9 +104,6 @@ const OnboardingWizardBody: FunctionComponent = () => {
     root.setAttribute("data-bz-setup", "");
     return () => root.removeAttribute("data-bz-setup");
   }, []);
-  // Every write a step makes reports its own failure inline, so the API
-  // client's generic toast stays away for as long as setup is on screen.
-  useInlineWriteErrors();
   const instanceName = useInstanceName()?.trim() || "Bazarr+";
   useDocumentTitle(`${current.label} - Setup - ${instanceName}`);
   const mainRef = useRef<HTMLElement>(null);

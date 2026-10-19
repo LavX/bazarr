@@ -12,6 +12,7 @@ import type {
   ArrInstanceUpdate,
   ArrKind,
 } from "@/apis/raw/arrInstances";
+import { inlineWhen } from "@/apis/raw/inlineWrites";
 // Imported from the defining module, not the barrel: index re-exports this
 // file, so going through "." would close an import cycle.
 import { useSystemSettings } from "./system";
@@ -104,9 +105,9 @@ export function useArrInstance(id: number) {
 }
 
 // A caller that shows a failure next to the control that caused it says so,
-// and this hook's own toast stays away: the wizard's arr step had both, and
-// the toast was the one drawn 750px from the button. The API client's generic
-// "Error <code>" toast is a separate opt-out, useInlineWriteErrors.
+// and neither this hook's toast nor the API client's "Error <code>" one is
+// shown: the wizard's arr step had both, and the toast was the one drawn
+// 750px from the button.
 interface ArrInstanceMutationOptions {
   inlineErrors?: boolean;
 }
@@ -117,7 +118,9 @@ export function useCreateArrInstance({
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "create"],
-    mutationFn: (body: ArrInstanceCreate) => api.arrInstances.create(body),
+    mutationFn: inlineWhen(inlineErrors, (body: ArrInstanceCreate) =>
+      api.arrInstances.create(body),
+    ),
     onSuccess: (created) => {
       showNotification({
         color: "green",
@@ -146,8 +149,11 @@ export function useUpdateArrInstance({
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "update"],
-    mutationFn: ({ id, body }: { id: number; body: ArrInstanceUpdate }) =>
-      api.arrInstances.update(id, body),
+    mutationFn: inlineWhen(
+      inlineErrors,
+      ({ id, body }: { id: number; body: ArrInstanceUpdate }) =>
+        api.arrInstances.update(id, body),
+    ),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: arrKey });
     },
@@ -172,13 +178,11 @@ export function useDeleteArrInstance({
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "delete"],
-    mutationFn: ({
-      id,
-      removeLibrary,
-    }: {
-      id: number;
-      removeLibrary?: boolean;
-    }) => api.arrInstances.remove(id, removeLibrary),
+    mutationFn: inlineWhen(
+      inlineErrors,
+      ({ id, removeLibrary }: { id: number; removeLibrary?: boolean }) =>
+        api.arrInstances.remove(id, removeLibrary),
+    ),
     onSuccess: () => {
       showNotification({ color: "green", message: "Instance deleted" });
       client.invalidateQueries({ queryKey: arrKey });
@@ -221,12 +225,15 @@ export interface ArrTestConnection {
 
 export function useTestArrInstanceConnection(
   connection: ArrTestConnection = {},
+  { inlineErrors = false }: ArrInstanceMutationOptions = {},
 ) {
   const mutation = useMutation({
     // The key never appears here: mutation keys are static strings and the
     // request body is the only place credentials travel.
     mutationKey: [...arrKey, QueryKeys.Actions, "test"],
-    mutationFn: (body: ArrInstanceTest) => api.arrInstances.test(body),
+    mutationFn: inlineWhen(inlineErrors, (body: ArrInstanceTest) =>
+      api.arrInstances.test(body),
+    ),
   });
   const { reset } = mutation;
   const { ip, port, baseUrl, ssl, apiKey } = connection;

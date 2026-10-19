@@ -2,6 +2,7 @@ import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { inlineWhen } from "@/apis/raw/inlineWrites";
 import type { ProviderHubInstallRequest } from "@/apis/raw/providerHub";
 import { notification } from "@/modules/notification";
 import { waitForJob } from "@/utilities/jobs";
@@ -84,16 +85,26 @@ export function useProviderHubPatchCatalogSource() {
   });
 }
 
-export function useProviderHubInstall() {
+export function useProviderHubInstall({
+  inlineErrors = false,
+}: {
+  // The caller reports a failed install itself, so the client's toast for
+  // the install request stays away. The job poll after it is a read and is
+  // not covered.
+  inlineErrors?: boolean;
+} = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "install"],
     // Resolves when the install job has finished, not when it was queued, and
     // rejects with the job's reason when it failed.
-    mutationFn: async (request: ProviderHubInstallRequest) => {
-      const { job_id: jobId } = await api.providerHub.install(request);
-      await waitForJob(client, jobId);
-    },
+    mutationFn: inlineWhen(
+      inlineErrors,
+      async (request: ProviderHubInstallRequest) => {
+        const { job_id: jobId } = await api.providerHub.install(request);
+        await waitForJob(client, jobId);
+      },
+    ),
     onSettled: () => {
       client.invalidateQueries({ queryKey: providerHubKey });
     },

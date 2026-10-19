@@ -45,11 +45,11 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
 
   // Editing the URL or the key drops the last verdict, so a green result can
   // never describe a connection that is no longer on screen.
-  const test = useSeerrTestConnectionMutation({
-    url: trimmedUrl,
-    apikey: trimmedKey,
-    verifySsl,
-  });
+  const test = useSeerrTestConnectionMutation(
+    { url: trimmedUrl, apikey: trimmedKey, verifySsl },
+    // A Test that cannot reach Bazarr+ says so beside the button.
+    { inlineErrors: true },
+  );
 
   const handleTest = () => {
     test.mutate({ url: trimmedUrl, apikey: trimmedKey, verifySsl });

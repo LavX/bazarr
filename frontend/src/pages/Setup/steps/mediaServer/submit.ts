@@ -133,7 +133,10 @@ function toPayload(draft: MediaServerDraft): SaveMediaServerInput {
  * a second write of a switch the callback already set.
  */
 export function useMediaServerSubmit() {
-  const save = useSaveMediaServerInstance();
+  // A failed save is reported on the server's own screen.
+  const save = useSaveMediaServerInstance(undefined, undefined, undefined, {
+    inlineErrors: true,
+  });
   const settings = useSettingsMutation(false, { inlineErrors: true });
   const [isPending, setPending] = useState(false);
 
