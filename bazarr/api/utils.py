@@ -15,7 +15,7 @@ from app import activity
 from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
 from app.database import get_audio_profile_languages, get_desired_languages, select
-from utilities.path_mappings import path_mappings
+from utilities.path_mappings import path_mappings, _apply_mapping, _instance_path_mapping
 from subtitles.indexer.entries import entry_codec
 
 None_Keys = ['null', 'undefined', '', None]
@@ -526,12 +526,26 @@ def _subtitle_file_name(path):
     """
     text = str(path)
     name = text.replace('\\', '/').rsplit('/', 1)[-1]
+    return name, _is_windows_path(text)
+
+
+def _is_windows_path(text):
     # A drive letter or a UNC prefix is Windows whichever separator it uses.
-    windows = '\\' in text or bool(_WINDOWS_PATH.match(text))
-    return name, windows
+    return '\\' in text or bool(_WINDOWS_PATH.match(text))
 
 
-def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
+def _video_path_forms(path, mappings):
+    """Return a video path's forms under each candidate mapping, with one
+    separator style, plus the same forms case-folded and whether the path is a
+    Windows path."""
+    forms = {path}
+    for mapping in mappings:
+        forms.add(_apply_mapping(path, mapping, reverse=False))
+    forms = {form.replace('\\', '/') for form in forms}
+    return forms, {form.casefold() for form in forms}, _is_windows_path(path)
+
+
+def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, videos_by_id, media_type):
     """Lowest current-subtitle score (0-100 %) for each item id.
 
     Mirrors what the detail pages show. For every item, per current subtitle:
@@ -549,10 +563,46 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
     and the indexer can apply to the same file; Windows names also match
     case-insensitively, while Unix names keep their case. One grouped, ordered
     history query runs for the whole page (no per-item query).
+
+    ``videos_by_id`` maps id -> (video path, arr_instance_id). A file record
+    counts only when its video path is the item's current video path, directly
+    or under the owning instance's or the global path mapping for
+    ``media_type`` ('movie' or 'series'), so a record left in an item's old
+    folder does not score a same-named subtitle after a move. Embedded records
+    are logged once per track and stay valid for the item wherever it lives.
     """
     ids = list(subtitles_by_id.keys())
     if not ids:
         return {}
+
+    global_mapping = (path_mappings.path_mapping_movies if media_type == 'movie'
+                      else path_mappings.path_mapping_series)
+    instance_mappings = {}
+    current_videos = {}
+    for item_id, (video_path, arr_instance_id) in videos_by_id.items():
+        if arr_instance_id not in instance_mappings:
+            instance_mappings[arr_instance_id] = _instance_path_mapping(arr_instance_id, media_type)
+        mappings = [mapping for mapping in (instance_mappings[arr_instance_id], global_mapping) if mapping]
+        if video_path:
+            current_videos[item_id] = (mappings, _video_path_forms(video_path, mappings))
+
+    video_matches = {}
+
+    def same_video(item_id, video_path):
+        key = (item_id, video_path)
+        if key not in video_matches:
+            current = current_videos.get(item_id)
+            if current is None or not video_path:
+                video_matches[key] = False
+            else:
+                mappings, (forms, folded, windows) = current
+                row_forms, row_folded, row_windows = _video_path_forms(video_path, mappings)
+                # As with subtitle names, a Windows path on either side folds case.
+                if windows or row_windows:
+                    video_matches[key] = not folded.isdisjoint(row_folded)
+                else:
+                    video_matches[key] = not forms.isdisjoint(row_forms)
+        return video_matches[key]
 
     # Current file-subtitle paths and embedded-track languages per item, read
     # straight from the raw subtitles column.
@@ -582,6 +632,7 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
                    history_table.action,
                    history_table.language,
                    history_table.subtitles_path,
+                   history_table.video_path,
                    history_table.score,
                    history_table.score_out_of)
             .where(id_column.in_(chunk))
@@ -610,6 +661,8 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
                 if not folded or not (windows or any(names[other] for other in folded)):
                     continue
                 current_name = sorted(folded)[0]
+            if not same_video(row.item_id, row.video_path):
+                continue
             # The current file is the canonical identity: a row that matched it
             # by exact name and one that matched it case-insensitively belong to
             # the same subtitle, so the newest one wins.

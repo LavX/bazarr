@@ -494,3 +494,114 @@ def test_sync_preserves_download_score(scored_media):
     add(1, 1, 90, 100)
     add(2, 5, None, None)
     assert score() == 90.0
+
+
+@pytest.fixture(params=['movie', 'series'])
+def placed_media(request, monkeypatch, schema_session):
+    """One movie or one episode at a chosen video and subtitle path, owned by
+    instance 1, with optional instance and global path mappings."""
+    import json
+
+    from app.database import TableArrInstances, TableEpisodes, TableMovies
+    from utilities.path_mappings import path_mappings
+
+    movie = request.param == 'movie'
+    # The instance mapping is read through the application session.
+    monkeypatch.setattr('app.database.database', schema_session)
+
+    def place(video_path, subtitles_path, instance_mapping=None, global_mapping=None):
+        if instance_mapping is not None:
+            schema_session.add(TableArrInstances(
+                id=1, kind='radarr' if movie else 'sonarr', stable_key='k1', name='i1',
+                enabled=1, is_default=1, ip='127.0.0.1', port=7878, base_url='/', ssl=0,
+                verify_ssl=0, http_timeout=60, api_key='',
+                path_mappings=json.dumps({'movies' if movie else 'series': instance_mapping})))
+            schema_session.flush()
+        monkeypatch.setattr(path_mappings, 'path_mapping_movies' if movie else 'path_mapping_series',
+                            global_mapping or [])
+        subtitles = repr([['de', subtitles_path, 100]])
+        if movie:
+            api = _prepare_movies(monkeypatch, schema_session)
+            _add_movie(schema_session, 100, subtitles)
+            schema_session.get(TableMovies, 100).path = video_path
+        else:
+            api = _prepare_series(monkeypatch, schema_session)
+            _add_series(schema_session, 501)
+            _add_episode(schema_session, 601, 501, 1, 1, subtitles)
+            schema_session.get(TableEpisodes, 601).path = video_path
+        schema_session.flush()
+
+        def add(history_id, action, score, subtitles_path, video_path):
+            score_out_of = 100 if score is not None else None
+            if movie:
+                _add_movie_history(schema_session, history_id, 100, action, subtitles_path, 'de',
+                                   score, score_out_of, video_path=video_path)
+            else:
+                _add_episode_history(schema_session, history_id, 501, 601, action, subtitles_path,
+                                     'de', score, score_out_of, video_path=video_path)
+
+        def score():
+            if movie:
+                result = _get_movies(api, '/api/movies?id[]=100&scores=1')
+            else:
+                result = _get_series(api, '/api/series?id[]=501&scores=1')
+            return result['data'][0]['lowest_subtitle_score']
+
+        return add, score
+
+    return place
+
+
+def test_moved_item_does_not_inherit_the_old_folder_score(placed_media):
+    # The item moved and kept its subtitle file name. The detail view matches
+    # the full subtitle path, so it shows no score for the old record.
+    add, score = placed_media('/media/new/Title.mkv', '/media/new/Title.de.srt')
+    add(1, 1, 40, '/media/old/Title.de.srt', '/media/old/Title.mkv')
+    assert score() is None
+
+
+def test_moved_item_scores_a_download_in_its_new_folder(placed_media):
+    add, score = placed_media('/media/new/Title.mkv', '/media/new/Title.de.srt')
+    add(1, 1, 40, '/media/old/Title.de.srt', '/media/old/Title.mkv')
+    add(2, 1, 90, '/media/new/Title.de.srt', '/media/new/Title.mkv')
+    assert score() == 90.0
+
+
+@pytest.mark.parametrize('item, instance_mapping, global_mapping, translation', [
+    # The translation logs the globally mapped root, the item the instance's.
+    (('/arr/media/Title.mkv', '/arr/media/Title.de.srt'),
+     [['/arr/media', '/local/media']], [['/global/media', '/local/media']],
+     ('/global/media/Title.de.srt', '/global/media/Title.mkv')),
+    # The translation logs the local path the mapping turns the item into.
+    (('/arr/media/Title.mkv', '/arr/media/Title.de.srt'),
+     [['/arr/media', '/local/media']], None,
+     ('/local/media/Title.de.srt', '/local/media/Title.mkv')),
+    # A Windows instance mapped to a Linux root, with different casing.
+    ((r'X:\Media\Title.mkv', r'X:\Media\Title.de.srt'),
+     [['X:\\Media', '/local/media']], None,
+     ('/local/media/title.de.srt', '/local/media/title.mkv')),
+    # Windows paths resolve case-insensitively without any mapping.
+    ((r'X:\Media\Title.mkv', r'X:\Media\Title.de.srt'), None, None,
+     (r'x:\media\title.de.srt', r'x:\media\title.mkv')),
+], ids=['global-root', 'local-root', 'windows-to-linux', 'windows-case'])
+def test_translation_under_a_mapped_root_shadows_the_download(
+        placed_media, item, instance_mapping, global_mapping, translation):
+    add, score = placed_media(*item, instance_mapping=instance_mapping, global_mapping=global_mapping)
+    add(1, 1, 90, item[1], item[0])
+    add(2, 6, 100, *translation)
+    assert score() is None
+
+
+def test_translation_for_another_folder_under_a_mapped_root_does_not_shadow(placed_media):
+    add, score = placed_media('/arr/media/Title.mkv', '/arr/media/Title.de.srt',
+                              instance_mapping=[['/arr/media', '/local/media']],
+                              global_mapping=[['/global/media', '/local/media']])
+    add(1, 1, 90, '/arr/media/Title.de.srt', '/arr/media/Title.mkv')
+    add(2, 6, 100, '/global/media/Other/Title.de.srt', '/global/media/Other/Title.mkv')
+    assert score() == 90.0
+
+
+def test_unix_video_paths_differing_only_by_case_are_two_files(placed_media):
+    add, score = placed_media('/media/Title.mkv', '/media/Title.de.srt')
+    add(1, 1, 40, '/media/Title.de.srt', '/media/title.mkv')
+    assert score() is None

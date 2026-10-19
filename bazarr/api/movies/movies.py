@@ -149,7 +149,9 @@ class Movies(Resource):
             # One extra grouped/ordered history query for the page's movies; the
             # lowest current-subtitle score per movie is aggregated in Python.
             score_map = lowest_subtitle_scores(database, {x.id: x.subtitles for x in rows},
-                                               TableHistoryMovie.movie_id, TableHistoryMovie)
+                                               TableHistoryMovie.movie_id, TableHistoryMovie,
+                                               videos_by_id={x.id: (x.path, x.arr_instance_id) for x in rows},
+                                               media_type='movie')
             for item in results:
                 item['lowest_subtitle_score'] = score_map.get(item['id'])
             return marshal({'data': results, 'total': count}, self.get_response_model_with_scores)
