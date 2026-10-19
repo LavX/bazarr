@@ -648,3 +648,43 @@ def test_a_failed_mod_never_takes_back_a_file_another_program_put_there(library,
 
     assert target.read_text() == "imported by another program"
     assert source.read_text() == HEARING
+
+
+@pytest.mark.parametrize("failures", [1, 2], ids=["fails-once", "keeps-failing"])
+def test_a_failed_history_move_never_fails_a_successful_remove_hi(library, jobs, monkeypatch, failures):
+    """The file is written, published and indexed before the extraction's row
+    moves to it. A database error there must not fail the job; a passing one
+    is retried, so the result keeps its lineage."""
+    import sqlalchemy as sa
+
+    import subtitles.tools.embedded_extract as extract
+    from app.database import TableHistoryMovie
+
+    session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    real_move = extract._move_extraction
+    attempts = []
+
+    def flaky_move(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) <= failures:
+            raise sa.exc.OperationalError("UPDATE table_history_movie", {}, Exception("database is locked"))
+        return real_move(*args, **kwargs)
+
+    monkeypatch.setattr(extract, "_move_extraction", flaky_move)
+
+    output = extract.run_tool_on_embedded_track("remove_HI", "movie", 30, 1, "en", hi=True, job_id=7)
+
+    assert output == str(film / "Film.en.srt")
+    assert "English with sounds" in (film / "Film.en.srt").read_text()
+    assert not (film / "Film.en.hi.srt").exists()
+    assert jobs.names[-1] == "Remove HI Tags: Film.en.hi.srt"
+    session.expire_all()
+    rows = session.execute(sa.select(TableHistoryMovie.language, TableHistoryMovie.subtitles_path)
+                           .where(TableHistoryMovie.action == 8)).all()
+    if failures == 1:
+        assert rows == [("en", "/movies/Film (2020)/Film.en.srt")]
+    else:
+        # Logged and left: the job succeeded, the row still names the HI file.
+        assert rows == [("en:hi", "/movies/Film (2020)/Film.en.hi.srt")]
+    assert len(attempts) == 2

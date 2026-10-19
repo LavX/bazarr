@@ -516,8 +516,29 @@ def run_tool_on_embedded_track(action, media_type, media_id, arr_instance_id, la
             raise JobFailed(_taken_by_another_file(failure.__cause__.path, subtitle_path)) from failure.__cause__
         raise
     if output_path and output_path != subtitle_path:
-        _move_extraction(track, subtitle_path, output_path, action)
+        _carry_extraction(track, subtitle_path, output_path, action)
     return output_path
+
+
+def _carry_extraction(track, subtitle_path, output_path, action):
+    """Move the extraction's row to the tool's result, best effort.
+
+    The file is written, published and indexed by now, so a database error
+    here must not fail the job. One more attempt follows a failure, after the
+    session is rolled back, so a passing error does not leave the result
+    without lineage; a second failure is logged and the job still succeeds.
+    """
+    for attempt in (1, 2):
+        try:
+            _move_extraction(track, subtitle_path, output_path, action)
+            return
+        except Exception:
+            logger.exception("BAZARR could not move the extraction history of %s to %s (attempt %s)",
+                             subtitle_path, output_path, attempt)
+            try:
+                database.rollback()
+            except Exception:
+                logger.debug("BAZARR could not roll back the session", exc_info=True)
 
 
 def _history_table(track):
