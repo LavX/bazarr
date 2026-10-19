@@ -89,9 +89,11 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
   const meta = KIND_META[kind];
 
   const { data: instances } = useArrInstances();
-  const create = useCreateArrInstance();
-  const remove = useDeleteArrInstance();
-  const update = useUpdateArrInstance();
+  // Every failure here is shown inline, beside the control that caused it, so
+  // the hooks keep their toasts to themselves.
+  const create = useCreateArrInstance({ inlineErrors: true });
+  const remove = useDeleteArrInstance({ inlineErrors: true });
+  const update = useUpdateArrInstance({ inlineErrors: true });
   const settings = useSettingsMutation();
   const { data: systemSettings } = useSystemSettings();
 
@@ -448,11 +450,6 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
           Could not reach the Bazarr API to run the connection test.
         </Alert>
       )}
-      {saveError && (
-        <Alert color="red" title={`Could not connect ${meta.label}`}>
-          {saveError}
-        </Alert>
-      )}
     </Stack>
   );
 
@@ -463,6 +460,13 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       aside={verdict}
       actions={
         <Stack gap={6}>
+          {/* Beside Continue, which is what produced it. In the side column it
+              sat a whole form away from the button at every width. */}
+          {saveError && (
+            <Alert color="red" title={`Could not connect ${meta.label}`}>
+              {saveError}
+            </Alert>
+          )}
           {!testable && (
             <Text size="sm" c="dimmed" ta="right">
               Enter an Address and an API Key to test this connection.

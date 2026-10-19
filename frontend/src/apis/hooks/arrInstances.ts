@@ -103,7 +103,16 @@ export function useArrInstance(id: number) {
   });
 }
 
-export function useCreateArrInstance() {
+// A caller that shows a failure next to the control that caused it says so,
+// and the toast stays away: the wizard's arr step had both, and the toast was
+// the one drawn 750px from the button.
+interface ArrInstanceMutationOptions {
+  inlineErrors?: boolean;
+}
+
+export function useCreateArrInstance({
+  inlineErrors = false,
+}: ArrInstanceMutationOptions = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "create"],
@@ -115,18 +124,24 @@ export function useCreateArrInstance() {
       });
       client.invalidateQueries({ queryKey: arrKey });
     },
-    onError: (error) =>
+    onError: (error) => {
+      if (inlineErrors) {
+        return;
+      }
       showNotification({
         color: "red",
         message: getArrInstanceErrorMessage(
           error,
           "Failed to create the instance",
         ),
-      }),
+      });
+    },
   });
 }
 
-export function useUpdateArrInstance() {
+export function useUpdateArrInstance({
+  inlineErrors = false,
+}: ArrInstanceMutationOptions = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "update"],
@@ -135,18 +150,24 @@ export function useUpdateArrInstance() {
     onSuccess: () => {
       client.invalidateQueries({ queryKey: arrKey });
     },
-    onError: (error) =>
+    onError: (error) => {
+      if (inlineErrors) {
+        return;
+      }
       showNotification({
         color: "red",
         message: getArrInstanceErrorMessage(
           error,
           "Failed to update the instance",
         ),
-      }),
+      });
+    },
   });
 }
 
-export function useDeleteArrInstance() {
+export function useDeleteArrInstance({
+  inlineErrors = false,
+}: ArrInstanceMutationOptions = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "delete"],
@@ -168,7 +189,7 @@ export function useDeleteArrInstance() {
     onError: (error) => {
       // A 409 (the instance still owns synced media, or its library sync is
       // running) is surfaced inline by the delete confirmation dialog.
-      if (isArrInstanceConflict(error)) {
+      if (inlineErrors || isArrInstanceConflict(error)) {
         return;
       }
       showNotification({

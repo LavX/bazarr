@@ -396,6 +396,47 @@ describe("ArrStep", () => {
     expect(onNext).not.toHaveBeenCalled();
   });
 
+  it("shows a rejected create beside Continue, and only there", async () => {
+    // The create used to report itself as a toast in the bottom-left corner,
+    // 750px from the button, while every other error on the step was inline.
+    const user = userEvent.setup();
+    createMutate.mockImplementation(
+      (_body: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        opts?.onError?.(new Error("nope"));
+      },
+    );
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    expect(mockedUseCreateArrInstance).toHaveBeenCalledWith({
+      inlineErrors: true,
+    });
+    expect(mockedUseUpdateArrInstance).toHaveBeenCalledWith({
+      inlineErrors: true,
+    });
+    expect(mockedUseDeleteArrInstance).toHaveBeenCalledWith({
+      inlineErrors: true,
+    });
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/could not save the sonarr connection/i);
+    // Under the last field and straight above the button row, not up in the
+    // side column a whole form away from Continue.
+    const lastField = screen.getByLabelText(/api key/i);
+    const continueButton = screen.getByRole("button", { name: /^continue$/i });
+    expect(
+      lastField.compareDocumentPosition(alert) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      alert.compareDocumentPosition(continueButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("says so when the instance saved but the switch did not", async () => {
     const user = userEvent.setup();
     settingsMutate.mockImplementation(
