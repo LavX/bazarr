@@ -252,21 +252,28 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
               subtitle_mutation(video_path, subtitle_path, modded_subtitles_path)):
             if never_replace and renamed:
                 # Checked under the directory locks, so none of Bazarr+'s own
-                # writers can slip in, and the exclusive open below refuses a
-                # file another program creates meanwhile. The source is only
-                # removed once the result is written.
-                from subtitles.new_subtitle import SubtitleFileExists
+                # writers can slip in, and the shared no-replace writer refuses
+                # a file another program creates meanwhile. It writes through a
+                # temporary name, so a failed write leaves no partial file. The
+                # source is only removed once the result is in place, and if
+                # removing it fails the result written here is taken back, so
+                # a retry finds the name free and the source untouched.
+                from subtitles.new_subtitle import SubtitleFileExists, write_bytes_atomically
 
                 for taken in {modded_subtitles_path, modded_subtitles_path_if_alongside_video} - {subtitle_path}:
                     if os.path.exists(taken):
                         raise SubtitleFileExists(taken)
+                write_bytes_atomically(modded_subtitles_path, content, replace=False)
                 try:
-                    with open(modded_subtitles_path, 'xb') as f:
-                        f.write(content)
-                except FileExistsError:
-                    raise SubtitleFileExists(modded_subtitles_path) from None
-                if os.path.exists(subtitle_path):
-                    os.remove(subtitle_path)
+                    if os.path.exists(subtitle_path):
+                        os.remove(subtitle_path)
+                except BaseException:
+                    try:
+                        os.remove(modded_subtitles_path)
+                    except OSError:
+                        logging.exception('BAZARR could not take back %s after a failed mod',
+                                          modded_subtitles_path)
+                    raise
             else:
                 if os.path.exists(subtitle_path):
                     os.remove(subtitle_path)

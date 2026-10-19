@@ -377,9 +377,8 @@ def test_remove_hi_never_replaces_a_plain_file_that_lands_after_the_job_s_check(
 
 def test_the_mod_s_exclusive_write_refuses_a_file_created_after_its_check(library, jobs, tmp_path, monkeypatch):
     """Another program can create the name between the mod's check and its
-    write: the exclusive open refuses it, and the source stays."""
-    import builtins
-
+    publish: the no-replace writer refuses it, and the source stays."""
+    import subtitles.new_subtitle as new_subtitle
     import subtitles.tools.mods as mods
     from subtitles.new_subtitle import SubtitleFileExists
 
@@ -390,17 +389,72 @@ def test_the_mod_s_exclusive_write_refuses_a_file_created_after_its_check(librar
     source = tmp_path / "Film.en.hi.srt"
     source.write_text(HEARING)
     target = tmp_path / "Film.en.srt"
-    real_open = builtins.open
+    staging = new_subtitle._new_staging_file
 
-    def racing_open(path, mode="r", *args, **kwargs):
-        if str(path) == str(target) and "x" in mode:
-            target.write_text("imported meanwhile")
-        return real_open(path, mode, *args, **kwargs)
+    def imported_meanwhile(directory):
+        made = staging(directory)
+        target.write_text("imported meanwhile")
+        return made
 
-    monkeypatch.setattr(builtins, "open", racing_open)
+    monkeypatch.setattr(new_subtitle, "_new_staging_file", imported_meanwhile)
     with pytest.raises(SubtitleFileExists):
         mods.subtitles_apply_mods("en", str(source), ["remove_HI"], str(video), never_replace=True)
-    monkeypatch.setattr(builtins, "open", real_open)
 
     assert target.read_text() == "imported meanwhile"
     assert "[DOOR SLAMS]" in source.read_text()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["Film.en.hi.srt", "Film.en.srt", "Film.mkv"]
+
+
+@pytest.mark.parametrize("failure", ["write", "close", "remove-source"])
+def test_a_failed_never_replace_mod_leaves_the_source_and_no_destination(library, jobs, tmp_path, monkeypatch,
+                                                                       failure):
+    """A write or close failure must leave no partial result, and a source
+    that cannot be removed must leave the result taken back: either way the
+    source is untouched and a retry finds the name free."""
+    import errno
+
+    import subtitles.new_subtitle as new_subtitle
+    import subtitles.tools.mods as mods
+
+    folder = tmp_path / "failing"
+    folder.mkdir()
+    video = folder / "Film.mkv"
+    video.write_bytes(b"video")
+    source = folder / "Film.en.hi.srt"
+    source.write_text(HEARING)
+    target = folder / "Film.en.srt"
+
+    with monkeypatch.context() as broken:
+        if failure == "write":
+            def no_space(fd, data):
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            broken.setattr(new_subtitle, "_write_all", no_space)
+        elif failure == "close":
+            real_close = new_subtitle.os.close
+            calls = []
+
+            def failing_close(fd):
+                real_close(fd)
+                if not calls:
+                    calls.append(fd)
+                    raise OSError(errno.EIO, "Input/output error")
+
+            broken.setattr(new_subtitle.os, "close", failing_close)
+        else:
+            real_remove = mods.os.remove
+
+            def locked_source(path):
+                if str(path) == str(source):
+                    raise PermissionError(errno.EACCES, "Permission denied", str(path))
+                return real_remove(path)
+
+            broken.setattr(mods.os, "remove", locked_source)
+        with pytest.raises(OSError):
+            mods.subtitles_apply_mods("en", str(source), ["remove_HI"], str(video), never_replace=True)
+
+    assert sorted(path.name for path in folder.iterdir()) == ["Film.en.hi.srt", "Film.mkv"]
+    assert source.read_text() == HEARING
+    # Nothing is left in the way of another try.
+    assert mods.subtitles_apply_mods("en", str(source), ["remove_HI"], str(video), never_replace=True) == str(target)
+    assert "[DOOR SLAMS]" not in target.read_text() and not source.exists()
