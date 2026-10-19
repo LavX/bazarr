@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
 import {
   keepPreviousData,
@@ -10,6 +10,7 @@ import { isAxiosError } from "axios";
 import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { ownWriteErrors } from "@/apis/raw/inlineWrites";
 import { notification } from "@/modules/notification";
 import { Environment } from "@/utilities";
 import { setAuthenticated } from "@/utilities/event";
@@ -94,6 +95,15 @@ interface SettingsMutationOptions {
   // the setup wizard read every failure out twice. A write that landed but
   // could not be applied still toasts: that is news the caller does not have.
   inlineErrors?: boolean;
+}
+
+/**
+ * While the calling component is mounted, a failed write skips the API
+ * client's generic toast. For a surface that shows every write failure inline,
+ * and only there: the hooks' own toasts are a separate opt-out each.
+ */
+export function useInlineWriteErrors() {
+  useEffect(() => ownWriteErrors(), []);
 }
 
 export function useSettingsMutation(

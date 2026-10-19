@@ -5,6 +5,7 @@ import socketio from "@/modules/socketio";
 import { Environment } from "@/utilities";
 import { LOG } from "@/utilities/console";
 import { setAuthenticated } from "@/utilities/event";
+import { ownsWriteError } from "./inlineWrites";
 
 function GetErrorMessage(data: unknown, defaultMsg = "Unknown error"): string {
   if (typeof data === "string") {
@@ -60,7 +61,7 @@ class BazarrClient {
             code: resp.status,
             message: GetErrorMessage(resp.data),
           };
-          this.handleError(error);
+          this.handleError(error, ownsWriteError(resp.config?.method));
           return Promise.reject(resp);
         }
       },
@@ -81,7 +82,10 @@ class BazarrClient {
         };
 
         error.message = backendError.message;
-        this.handleError(backendError, isBlobBody);
+        this.handleError(
+          backendError,
+          isBlobBody || ownsWriteError(error.config?.method),
+        );
 
         return Promise.reject(error);
       },

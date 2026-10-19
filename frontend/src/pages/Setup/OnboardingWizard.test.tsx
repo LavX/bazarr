@@ -607,6 +607,33 @@ describe("OnboardingWizardView", () => {
     );
   });
 
+  it("reports a rejected instance create once, inline, with no client toast", async () => {
+    // Through the real hooks and the real API client: the client toasts
+    // "Error 400" for any failed request, so a create the backend refused
+    // used to say so twice, once beside Continue and once in the corner.
+    server.use(
+      http.post("/api/system/arr-instances", () =>
+        HttpResponse.json({ message: "Port is not a number" }, { status: 400 }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await answerIntent(user, /sonarr, radarr or sportarr/i);
+    await screen.findByRole("heading", { name: /^sonarr$/i });
+    await user.type(screen.getByLabelText(/^address/i), "10.0.0.5");
+    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Port is not a number",
+    );
+    // Give a toast every chance to arrive before saying there is none.
+    await new Promise((settle) => setTimeout(settle, 300));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.queryByText("Error 400")).not.toBeInTheDocument();
+  });
+
   it("keeps what was typed on a step across Back and forward", async () => {
     // Every step held its fields in its own useState and the shell remounts a
     // step on every move, so re-reading the previous question emptied the form

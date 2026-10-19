@@ -104,8 +104,9 @@ export function useArrInstance(id: number) {
 }
 
 // A caller that shows a failure next to the control that caused it says so,
-// and the toast stays away: the wizard's arr step had both, and the toast was
-// the one drawn 750px from the button.
+// and this hook's own toast stays away: the wizard's arr step had both, and
+// the toast was the one drawn 750px from the button. The API client's generic
+// "Error <code>" toast is a separate opt-out, useInlineWriteErrors.
 interface ArrInstanceMutationOptions {
   inlineErrors?: boolean;
 }

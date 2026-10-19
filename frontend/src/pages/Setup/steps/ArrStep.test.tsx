@@ -534,7 +534,7 @@ describe("ArrStep", () => {
     expect(onNext).not.toHaveBeenCalled();
   });
 
-  it("shows a rejected create beside Continue, and only there", async () => {
+  it("shows a rejected create beside Continue, with the hook toasts off", async () => {
     // The create used to report itself as a toast in the bottom-left corner,
     // 750px from the button, while every other error on the step was inline.
     const user = userEvent.setup();
