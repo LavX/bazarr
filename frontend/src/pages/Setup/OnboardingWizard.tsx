@@ -359,6 +359,9 @@ const OnboardingWizardBody: FunctionComponent = () => {
           closeOnClickOutside={!leavePending}
           closeOnEscape={!leavePending}
           withCloseButton={!leavePending}
+          // Mantine draws the close button as an icon with no name, and the
+          // measured pass found it announced as an unnamed button.
+          closeButtonProps={{ "aria-label": "Close" }}
           title="Leave setup?"
           centered
         >

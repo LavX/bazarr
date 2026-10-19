@@ -245,6 +245,8 @@ describe("OnboardingWizardView", () => {
     expect(mutate).not.toHaveBeenCalled();
     // The promise the confirmation makes, which Settings, General now keeps.
     expect(await screen.findByText(/settings,\s*general/i)).toBeInTheDocument();
+    // The dialog's close icon has a name, not an empty button.
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /keep going/i }));
 
@@ -932,7 +934,7 @@ describe("touch targets on a coarse pointer", () => {
       ".mantine-Checkbox-label",
       ".mantine-Radio-label",
       ".mantine-Switch-label",
-      ".mantine-Combobox-option",
+      "[role=option]",
     ]) {
       expect(declared(coarse, scoped(selector), "min-height")).toBe("44px");
     }
