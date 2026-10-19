@@ -19,6 +19,10 @@ export interface SubtitleContentResponse {
   episodeTitle?: string;
 }
 
+// "embedded" reads the track inside the video file instead of the file on
+// disk that shares its language key. Nothing is written until Save.
+export type SubtitleSource = "embedded";
+
 export type BatchAction =
   | "sync"
   | "translate"

@@ -3,7 +3,12 @@ import {
   appendArrInstanceParam,
   buildEditorAutosaveKey,
   buildEditorSubtitlesUrl,
+  createFieldsForLanguageKey,
   editorBreadcrumb,
+  editorSearchWithoutSource,
+  readEditorCodec,
+  readEditorSource,
+  subtitleEditorUrl,
 } from "@/pages/SubtitleEditor/editorScope";
 
 describe("appendArrInstanceParam", () => {
@@ -94,5 +99,121 @@ describe("editorBreadcrumb", () => {
 
   it("omits the detail link when the media id is not known yet", () => {
     expect(editorBreadcrumb("sports", undefined).detailPath).toBeUndefined();
+  });
+});
+
+describe("the embedded source", () => {
+  it("is read only from source=embedded", () => {
+    expect(readEditorSource(new URLSearchParams("source=embedded"))).toBe(
+      "embedded",
+    );
+    expect(readEditorSource(new URLSearchParams("source=file"))).toBe(
+      undefined,
+    );
+    expect(readEditorSource(new URLSearchParams(""))).toBe(undefined);
+  });
+
+  it("carries the row's codec, and only beside the source", () => {
+    expect(
+      readEditorCodec(new URLSearchParams("source=embedded&codec=ass")),
+    ).toBe("ass");
+    expect(readEditorCodec(new URLSearchParams("source=embedded"))).toBe(
+      undefined,
+    );
+    expect(readEditorCodec(new URLSearchParams("codec=ass"))).toBe(undefined);
+  });
+
+  it("is dropped from the editor's own navigation, and nothing else is", () => {
+    expect(
+      editorSearchWithoutSource(
+        new URLSearchParams("arr_instance_id=2&source=embedded"),
+      ),
+    ).toBe("arr_instance_id=2");
+    expect(
+      editorSearchWithoutSource(
+        new URLSearchParams("arr_instance_id=2&source=embedded&codec=ass"),
+      ),
+    ).toBe("arr_instance_id=2");
+    expect(editorSearchWithoutSource(new URLSearchParams(""))).toBe("");
+  });
+
+  it("keeps a draft of the track apart from a draft of the file", () => {
+    expect(buildEditorAutosaveKey("movie", "50", "en", 1, "embedded")).toBe(
+      "bazarr-editor-movie-50-1-en-embedded",
+    );
+    expect(buildEditorAutosaveKey("movie", "50", "en", 1)).toBe(
+      "bazarr-editor-movie-50-1-en",
+    );
+  });
+
+  it("keeps two text tracks of one key apart, codec by codec", () => {
+    expect(
+      buildEditorAutosaveKey("movie", "50", "en", 1, "embedded", "ass"),
+    ).toBe("bazarr-editor-movie-50-1-en-embedded-ass");
+    expect(
+      buildEditorAutosaveKey("movie", "50", "en", 1, "embedded", "subrip"),
+    ).toBe("bazarr-editor-movie-50-1-en-embedded-subrip");
+  });
+});
+
+describe("createFieldsForLanguageKey", () => {
+  it("splits a key into what the create route accepts", () => {
+    expect(createFieldsForLanguageKey("en")).toEqual({
+      language: "en",
+      hi: false,
+      forced: false,
+    });
+    expect(createFieldsForLanguageKey("en:hi")).toEqual({
+      language: "en",
+      hi: true,
+      forced: false,
+    });
+    expect(createFieldsForLanguageKey("pt:forced")).toEqual({
+      language: "pt",
+      hi: false,
+      forced: true,
+    });
+    expect(createFieldsForLanguageKey("zh:HI")).toEqual({
+      language: "zh",
+      hi: true,
+      forced: false,
+    });
+  });
+
+  it("saves a key with both flags as forced, the name a download would get", () => {
+    expect(createFieldsForLanguageKey("en:hi:forced")).toEqual({
+      language: "en",
+      hi: false,
+      forced: true,
+    });
+  });
+});
+
+describe("subtitleEditorUrl", () => {
+  it("opens a file row the way it always did", () => {
+    expect(subtitleEditorUrl("edit", "movie", 30, "en:hi", {})).toBe(
+      "/subtitles/edit/movie/30/en%3Ahi",
+    );
+    expect(
+      subtitleEditorUrl("preview", "episode", 20, "en", { arrInstanceId: 2 }),
+    ).toBe("/subtitles/preview/episode/20/en?arr_instance_id=2");
+  });
+
+  it("carries source=embedded and the row's codec for an embedded row", () => {
+    expect(
+      subtitleEditorUrl("edit", "sports", 61, "fr", {
+        arrInstanceId: 1,
+        source: "embedded",
+        codec: "subrip",
+      }),
+    ).toBe(
+      "/subtitles/edit/sports/61/fr?arr_instance_id=1&source=embedded&codec=subrip",
+    );
+  });
+
+  it("never puts a codec on a URL that is not the embedded source", () => {
+    expect(
+      subtitleEditorUrl("preview", "movie", 30, "en", { codec: "ass" }),
+    ).toBe("/subtitles/preview/movie/30/en");
   });
 });
