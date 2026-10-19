@@ -734,3 +734,13 @@ def test_move_between_overlapping_mapped_roots_does_not_inherit_the_old_score(pl
                               instance_mapping=[['/remote', '/local'], ['/local', '/archive']])
     add(1, 1, 40, '/local/Title.de.srt', '/local/Title.mkv')
     assert score() is None
+
+
+def test_old_record_whose_stored_path_is_the_mapped_current_path_does_not_score(placed_media):
+    # /movies maps to /data/movies. The old record's arr-side path happens to
+    # spell the item's local path, but it names another file, so a stored path
+    # must never be compared with a mapped one.
+    add, score = placed_media('/movies/T/T.mkv', '/movies/T/T.de.srt',
+                              instance_mapping=[['/movies', '/data/movies']])
+    add(1, 1, 40, '/data/movies/T/T.de.srt', '/data/movies/T/T.mkv')
+    assert score() is None
