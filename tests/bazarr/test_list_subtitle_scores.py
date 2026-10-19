@@ -605,3 +605,84 @@ def test_unix_video_paths_differing_only_by_case_are_two_files(placed_media):
     add, score = placed_media('/media/Title.mkv', '/media/Title.de.srt')
     add(1, 1, 40, '/media/Title.de.srt', '/media/title.mkv')
     assert score() is None
+
+
+class _CountingSession:
+    """Count the history rows the score query hands back to Python."""
+
+    def __init__(self, session):
+        self.session = session
+        self.rows = 0
+
+    def execute(self, statement):
+        from types import SimpleNamespace
+
+        rows = self.session.execute(statement).all()
+        self.rows += len(rows)
+        return SimpleNamespace(all=lambda: rows)
+
+
+@pytest.mark.parametrize('media', ['movie', 'series'])
+def test_deep_history_returns_one_row_per_path_and_track(schema_session, monkeypatch, media):
+    from api.utils import lowest_subtitle_scores
+    from app.database import TableHistory, TableHistoryMovie
+
+    subtitles = repr([['en', '/media/a.en.srt', 100], ['es', '/media/a.es.srt', 100],
+                      ['fr', None, None]])
+    other = repr([['en', '/media/b.en.srt', 100]])
+    if media == 'movie':
+        _prepare_movies(monkeypatch, schema_session)
+        _add_movie(schema_session, 100, subtitles)
+        _add_movie(schema_session, 101, other)
+
+        def add(history_id, item_id, action, path, language, score):
+            _add_movie_history(schema_session, history_id, item_id, action, path, language,
+                               score, 100 if score is not None else None)
+        id_column, table = TableHistoryMovie.movie_id, TableHistoryMovie
+        items = (100, 101)
+    else:
+        _prepare_series(monkeypatch, schema_session)
+        _add_series(schema_session, 501)
+        _add_episode(schema_session, 601, 501, 1, 1, subtitles)
+        _add_episode(schema_session, 602, 501, 1, 2, other)
+
+        def add(history_id, item_id, action, path, language, score):
+            _add_episode_history(schema_session, history_id, 501, item_id, action, path, language,
+                                 score, 100 if score is not None else None)
+        id_column, table = TableHistory.episode_id, TableHistory
+        items = (601, 602)
+    first, second = items
+
+    history_id = 0
+    for depth in range(30):
+        history_id += 1
+        add(history_id, first, 1 if depth % 2 else 3, '/media/a.en.srt', 'en', 50 + depth)
+    # A newer deletion with no score still suppresses every older download.
+    history_id += 1
+    add(history_id, first, 0, '/media/a.en.srt', 'en', None)
+    for depth in range(15):
+        history_id += 1
+        add(history_id, first, 1, '/media/a.es.srt', 'es', 66 + depth)
+    for _ in range(10):
+        history_id += 1
+        add(history_id, first, 7, None, 'fr', 100)
+    for depth in range(20):
+        history_id += 1
+        add(history_id, second, 2, '/media/b.en.srt', 'en', 70 + depth)
+    # Syncs never count and stay out of the query.
+    for _ in range(5):
+        history_id += 1
+        add(history_id, first, 5, '/media/a.es.srt', 'es', None)
+
+    from app.database import TableEpisodes, TableMovies
+    model = TableMovies if media == 'movie' else TableEpisodes
+    records = {item: schema_session.get(model, item) for item in items}
+    counting = _CountingSession(schema_session)
+    scores = lowest_subtitle_scores(
+        counting, {item: records[item].subtitles for item in items}, id_column, table,
+        videos_by_id={item: (records[item].path, records[item].arr_instance_id) for item in items},
+        media_type='movie' if media == 'movie' else 'series')
+
+    assert scores == {first: 80.0, second: 89.0}
+    # Three files and one embedded track, whatever the history depth.
+    assert counting.rows == 4

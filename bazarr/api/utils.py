@@ -14,7 +14,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from app import activity
 from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
-from app.database import get_audio_profile_languages, get_desired_languages, select
+from app.database import get_audio_profile_languages, get_desired_languages, select, func
+from sqlalchemy import case
 from utilities.path_mappings import path_mappings, _apply_mapping, _instance_path_mapping
 from subtitles.indexer.entries import entry_codec
 
@@ -561,8 +562,9 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     ``subtitles_by_id`` maps id -> raw ``subtitles`` column. Paths compare by
     their file name, the identity that survives the path mappings a history row
     and the indexer can apply to the same file; Windows names also match
-    case-insensitively, while Unix names keep their case. One grouped, ordered
-    history query runs for the whole page (no per-item query).
+    case-insensitively, while Unix names keep their case. One history query
+    runs for the whole page (no per-item query) and returns only the newest
+    record per item and file or embedded track.
 
     ``videos_by_id`` maps id -> (video path, arr_instance_id). A file record
     counts only when its video path is the item's current video path, directly
@@ -625,19 +627,46 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     # bound-parameter limit for large libraries. Each id lives in exactly one
     # chunk, so every row for a given item keeps its timestamp/id ordering and
     # the newest-record-wins seen-set below still holds across the merge.
+    #
+    # Only the newest record per item and file (or embedded track) can win, so
+    # the database keeps just that one and history depth never reaches Python.
+    # Rows sharing a partition always pass or fail the checks below together
+    # and resolve to the same identity, which keeps the result unchanged.
+    embedded = history_table.action == 7
     rows = []
     for chunk in chunked(ids):
-        rows.extend(db.execute(
+        ranked = (
             select(id_column.label('item_id'),
+                   history_table.id.label('history_id'),
+                   history_table.timestamp,
                    history_table.action,
                    history_table.language,
                    history_table.subtitles_path,
                    history_table.video_path,
                    history_table.score,
-                   history_table.score_out_of)
+                   history_table.score_out_of,
+                   func.row_number().over(
+                       partition_by=(id_column,
+                                     case((embedded, 1), else_=0),
+                                     history_table.language,
+                                     case((embedded, None), else_=history_table.subtitles_path),
+                                     case((embedded, None), else_=history_table.video_path)),
+                       order_by=(history_table.timestamp.desc(), history_table.id.desc()),
+                   ).label('position'))
             .where(id_column.in_(chunk))
             .where(history_table.action.in_([0, 1, 2, 3, 4, 6, 7]))
-            .order_by(history_table.timestamp.desc(), history_table.id.desc())
+            .subquery()
+        )
+        rows.extend(db.execute(
+            select(ranked.c.item_id,
+                   ranked.c.action,
+                   ranked.c.language,
+                   ranked.c.subtitles_path,
+                   ranked.c.video_path,
+                   ranked.c.score,
+                   ranked.c.score_out_of)
+            .where(ranked.c.position == 1)
+            .order_by(ranked.c.timestamp.desc(), ranked.c.history_id.desc())
         ).all())
 
     lowest = {}
