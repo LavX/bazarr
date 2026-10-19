@@ -6,28 +6,31 @@ import pytest
 from subliminal_patch import core
 
 
-def _library(tmpdir, name):
-    """A file under a directory we name ourselves.
+def _library(tmp_path, monkeypatch, name):
+    """A relative path to a file under a directory we name ourselves.
 
-    guessit parses the parent directory as well as the filename, and pytest's
-    own tmpdir carries a run counter (pytest-849). From pytest-10 onward that
-    counter makes guessit drop the title and raise GuessingError, so the test
-    passes on a fresh machine and fails on one that has run pytest ten times.
+    guessit parses every directory in the path it is given, not only the
+    filename. An absolute path would hand it the host temp directory, whose
+    digits change from machine to machine: a UUID in TMPDIR turns
+    "Taxi Driver 1976" into an episode, and pytest's own run counter
+    (pytest-849) once made guessit drop the title. Working from inside the
+    temp directory keeps the path guessit sees down to "Media/<name>".
     """
-    library = Path(tmpdir, "Media")
+    monkeypatch.chdir(tmp_path)
+    library = Path("Media")
     library.mkdir(exist_ok=True)
     video_path = library / name
     video_path.touch()
     return str(video_path)
 
 
-def test_scan_video_movie(tmpdir):
-    result = core.scan_video(_library(tmpdir, "Taxi Driver 1976 Bluray 720p x264.mkv"))
+def test_scan_video_movie(tmp_path, monkeypatch):
+    result = core.scan_video(_library(tmp_path, monkeypatch, "Taxi Driver 1976 Bluray 720p x264.mkv"))
     assert isinstance(result, core.Movie)
 
 
-def test_scan_video_episode(tmpdir):
-    result = core.scan_video(_library(tmpdir, "The Wire S01E01 Bluray 720p x264.mkv"))
+def test_scan_video_episode(tmp_path, monkeypatch):
+    result = core.scan_video(_library(tmp_path, monkeypatch, "The Wire S01E01 Bluray 720p x264.mkv"))
     assert isinstance(result, core.Episode)
 
 
