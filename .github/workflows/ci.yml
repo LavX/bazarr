@@ -448,6 +448,7 @@ jobs:
             tests/bazarr/test_ocr_tessdata.py \
             tests/bazarr/test_new_subtitle_write.py \
             tests/bazarr/test_embedded_bitmap_extraction.py \
+            tests/bazarr/test_vobsub_pair_indexing.py \
             tests/subliminal_patch/test_subliminal_rebase.py \
             tests/subliminal_patch/test_embeddedsubtitles.py \
             tests/subliminal_patch/test_subsunacs.py \
