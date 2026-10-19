@@ -12,7 +12,7 @@ workers, so a slow server delays only its own rows.
 import logging
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Event, Lock
 from urllib.parse import quote
 
@@ -32,9 +32,12 @@ CACHE_SECONDS = 900
 # Per request to the server, where the client lets it be set.
 HTTP_TIMEOUT = (3, 4)
 # The longest one lookup runs, from when it starts, whatever its client does.
-# Plex may ask its agent online, and the pooled Plex client cannot be given a
-# shorter timeout.
+# Plex may ask its agent online, so its lookups get longer.
 BUDGETS = {'emby': 8, 'jellyfin': 8, 'silo': 8, 'plex': 15}
+# Per request on the Plex server a lookup builds of its own. Waiting on the
+# agent may take the whole budget, so a read may too, but no longer: plexapi's
+# own default is 30 s, and a worker held past its budget holds its lane.
+PLEX_HTTP_TIMEOUT = (HTTP_TIMEOUT[0], BUDGETS['plex'])
 # Whether a kind can pin a sports recording to one item of its own. A
 # recording has no identifiers, so it is found by its file: Emby by the mapped
 # path, Jellyfin by the file name. Silo's native API has no path lookup, and a
@@ -100,6 +103,10 @@ def destinations(native):
 
     That is the kind when there is one destination of it and the destination's
     own name when there are more, so two Emby servers never read the same.
+    A signed-in Plex account row is offered even while it is held: startup
+    and every save publish it held until plex.tv is asked, so held means
+    waiting rather than refused, and only a lookup has the budget to ask.
+    The lookup reads the row again first, as a refresh does, see ``_current``.
     """
     usable = [snapshot for snapshot in native.list()
               if snapshot.enabled and not snapshot.configuration_error]
@@ -130,15 +137,22 @@ def candidates(row, media_type, native):
             if not snapshot.libraries(media_type):
                 continue
         else:
-            if row.video_path is None:
-                continue
-            try:
-                mapped = map_media_path(row.video_path, snapshot.mappings(),
-                                        require_library=snapshot.kind == 'silo')['path']
-            except MediaServerError:
+            mapped = _mapped_path(snapshot, row)
+            if mapped is None:
                 continue
         targets.append(Target(snapshot, display_name, mapped))
     return targets
+
+
+def _mapped_path(snapshot, row):
+    """The row's file on a destination that maps paths, or None when no mapping covers it."""
+    if row.video_path is None:
+        return None
+    try:
+        return map_media_path(row.video_path, snapshot.mappings(),
+                              require_library=snapshot.kind == 'silo')['path']
+    except MediaServerError:
+        return None
 
 
 def _shown(snapshot, display_name):
@@ -163,13 +177,15 @@ def resolve(instance_id, media_type, local_id, native=None):
 
     ``resolved`` carries the URL. ``not_found`` is a server that answered and
     does not hold the item, or a destination that cannot hold the row at all.
-    ``unreachable`` is a server that did not answer in time or refused, and is
-    the one answer never cached, so a server that comes back is asked again.
+    ``unreachable`` is a server that did not answer in time or refused, or one
+    nothing may be sent to yet, and is the one answer never cached, so a
+    server that comes back is asked again.
     """
     row = media_metadata_for(media_type, local_id)
     if row is None:
         return None
-    target = next((target for target in candidates(row, media_type, native or _native())
+    native = native or _native()
+    target = next((target for target in candidates(row, media_type, native)
                    if target.snapshot.id == instance_id), None)
     if target is None:
         return {'instance_id': instance_id, 'state': 'not_found', 'url': None}
@@ -177,7 +193,7 @@ def resolve(instance_id, media_type, local_id, native=None):
     # recording by its file name, so a replaced recording is asked again.
     path = target.mapped_path or (row.video_path if media_type == 'sports' else None)
     key = f'{instance_id}:{target.snapshot.revision}:{media_type}:{local_id}:{path}'
-    return links_region.get_or_create(key, lambda: _answer(target, media_type, row),
+    return links_region.get_or_create(key, lambda: _answer(target, media_type, row, native),
                                       should_cache_fn=lambda answer: answer['state'] != 'unreachable')
 
 
@@ -186,7 +202,27 @@ def _native():
     return get_native_configuration()
 
 
-def _answer(target, media_type, row):
+def _current(native, instance_id):
+    """The destination as it is now, read the way a refresh reads it, and its guard.
+
+    ``read`` asks plex.tv about a held account row and, once plex.tv lists
+    its address, publishes it released, one revision on, at that address. So
+    the row read is the one looked up, whatever its revision, and a row that
+    is gone, switched off, broken or still held raises before anything is
+    sent. The guard is the refreshes' own, from the revision read: a change
+    landing after the read stops the lookup at its next request.
+    """
+    revision, snapshot, _changing = native.read(instance_id)
+    if not snapshot.enabled:
+        raise MediaServerError('connection_disabled')
+    if snapshot.configuration_error:
+        raise MediaServerError(snapshot.configuration_error)
+    if not snapshot.sendable:
+        raise MediaServerError('server_not_listed')
+    return snapshot, lambda: native.ensure_current(instance_id, revision)
+
+
+def _answer(target, media_type, row, native):
     snapshot = target.snapshot
     answer = {'instance_id': snapshot.id, 'state': 'unreachable', 'url': None}
     budget = BUDGETS[snapshot.kind]
@@ -203,7 +239,19 @@ def _answer(target, media_type, row):
 
     def run():
         started.set()
-        return _lookup(target, media_type, row)
+        # The row was resolved before this waited for a worker, up to a
+        # budget, so it is read again here, before anything is sent.
+        current, guard = _current(native, snapshot.id)
+        if current.kind in LIBRARY_KEYS:
+            return _lookup(replace(target, snapshot=current), media_type, row, guard)
+        # And the file is mapped again from the row as read, as a refresh maps
+        # it. The guard holds the lookup to that row, so a path mapped from
+        # the one the menu read would be asked of the server as it is now.
+        mapped = _mapped_path(current, row)
+        if mapped is None:
+            # The row as read no longer holds this file.
+            return None
+        return _lookup(replace(target, snapshot=current, mapped_path=mapped), media_type, row, guard)
 
     future = lane.pool.submit(run)
     # The budget is the lookup's own, counted from when it starts. Waiting for
@@ -255,34 +303,53 @@ def plex_web_base(snapshot):
     return f'{snapshot.external_url.rstrip("/")}/web/index.html' if snapshot.external_url else None
 
 
-def _emby_server_id(snapshot, client):
-    return links_region.get_or_create(f'emby-server-id:{snapshot.id}:{snapshot.revision}', client.server_id)
+def _emby_server_id(snapshot, client, ensure_current):
+    """The id Emby's web client routes by, asked once per revision.
+
+    The guard runs inside the fill, right before the request. A caller that
+    waited on another's fill only fills on its own once that one failed, by
+    which time the row may have changed, so a guard run before waiting
+    proves nothing.
+    """
+    def create():
+        ensure_current()
+        return client.server_id()
+    return links_region.get_or_create(f'emby-server-id:{snapshot.id}:{snapshot.revision}', create)
 
 
-def _lookup(target, media_type, row):
-    """The URL on this destination, or None when it does not hold the item."""
+def _lookup(target, media_type, row, ensure_current):
+    """The URL on this destination, or None when it does not hold the item.
+
+    ``ensure_current`` is the refreshes' guard for the row as it was read.
+    Every client is built with it and runs it before each request it sends,
+    so a row held, edited or switched off meanwhile stops the lookup at its
+    next request, whichever step sends it. The guards the steps run as a
+    refresh's do stay as well.
+    """
     snapshot = target.snapshot
     if snapshot.kind == 'emby':
         from emby.client import EmbyClient
-        with EmbyClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl) as client:
+        with EmbyClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl, guard=ensure_current) as client:
             client.http.timeout = HTTP_TIMEOUT
-            item_id = client.locate(media_type, row.metadata, target.mapped_path)
+            item_id = client.locate(media_type, row.metadata, target.mapped_path, ensure_current=ensure_current)
             if item_id is None:
                 return None
-            return emby_url(_browser_base(snapshot), item_id, _emby_server_id(snapshot, client))
+            ensure_current()
+            return emby_url(_browser_base(snapshot), item_id, _emby_server_id(snapshot, client, ensure_current))
     if snapshot.kind == 'jellyfin':
         from jellyfin.refresh import JellyfinRefreshClient
-        with JellyfinRefreshClient(snapshot) as client:
+        with JellyfinRefreshClient(snapshot, guard=ensure_current) as client:
             client.client.timeout = HTTP_TIMEOUT
-            item_id = client.locate(media_type, row.metadata, row.video_path)
+            item_id = client.locate(media_type, row.metadata, row.video_path, ensure_current=ensure_current)
             return None if item_id is None else jellyfin_url(_browser_base(snapshot), item_id)
     if snapshot.kind == 'plex':
         from plex.refresh import PlexRefreshClient
         with PlexRefreshClient(snapshot) as client:
-            item = client.locate(media_type, row.metadata)
+            client.timeout = PLEX_HTTP_TIMEOUT
+            item = client.locate(media_type, row.metadata, ensure_current=ensure_current)
             return None if item is None else item.getWebURL(base=plex_web_base(snapshot))
     from silo.client import SiloClient
-    with SiloClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl) as client:
+    with SiloClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl, guard=ensure_current) as client:
         client.http.timeout = HTTP_TIMEOUT
-        content_id = client.locate(media_type, row.metadata)
+        content_id = client.locate(media_type, row.metadata, ensure_current=ensure_current)
         return None if content_id is None else silo_url(_browser_base(snapshot), content_id)

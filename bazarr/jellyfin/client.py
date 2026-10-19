@@ -69,12 +69,22 @@ def _bounded_body(response: requests.Response) -> bytes:
 class JellyfinClient:
     """Thin HTTP client for the Jellyfin REST API."""
 
-    def __init__(self, url: str, api_key: str, verify_ssl: bool | None = None):
+    def __init__(self, url: str, api_key: str, verify_ssl: bool | None = None, *, guard=None):
         self.base_url = url.rstrip('/')
         self.api_key = api_key
         # Per client, so an interactive lookup can wait less than a refresh.
         self.timeout = _DEFAULT_TIMEOUT
+        # Run before every request get and post send, and raising leaves it
+        # unsent, so a request a caller adds later cannot go out without it.
+        self.guard = guard
         self.session = requests.Session()
+        if guard is not None:
+            # requests sends a redirect's next hop itself, with the token and
+            # without coming back through get or post, so the guard would
+            # never run for it. A guarded client refuses the redirect instead:
+            # ``max_redirects = 0`` raises TooManyRedirects before the next
+            # hop is contacted.
+            self.session.max_redirects = 0
         # Default to verifying TLS. Users with self-signed certs flip the
         # opt-out validator (`jellyfin.verify_ssl=false`). Never silently
         # disable. Settings read happens lazily so importing this module
@@ -101,6 +111,8 @@ class JellyfinClient:
         return f'{self.base_url}{path}'
 
     def get(self, path: str, params: dict = None) -> requests.Response:
+        if self.guard is not None:
+            self.guard()
         response = self.session.get(self._url(path), params=params,
                                     timeout=self.timeout, stream=True)
         # `stream=True` keeps the underlying connection open until the body
@@ -119,6 +131,8 @@ class JellyfinClient:
         return response
 
     def post(self, path: str, json: dict = None, params: dict = None) -> requests.Response:
+        if self.guard is not None:
+            self.guard()
         response = self.session.post(self._url(path), json=json, params=params,
                                      timeout=self.timeout)
         response.raise_for_status()

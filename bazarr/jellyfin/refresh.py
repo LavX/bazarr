@@ -55,14 +55,14 @@ def translated(call, *args, **kwargs):
 class JellyfinRefreshClient:
     REFRESH_STEPS = (resolution.PROVIDER_ID, resolution.TITLE_YEAR, resolution.LIBRARY)
 
-    def __init__(self, snapshot):
+    def __init__(self, snapshot, *, guard=None):
         from media_servers.http import validate_server_url
         from .client import JellyfinClient
         if not snapshot.apikey or not snapshot.apikey.strip():
             raise MediaServerError('missing_credentials')
         self.snapshot = snapshot
         self.client = JellyfinClient(validate_server_url(snapshot.url), snapshot.apikey,
-                                     verify_ssl=snapshot.verify_ssl)
+                                     verify_ssl=snapshot.verify_ssl, guard=guard)
         self.immediate = snapshot.options().get('refresh_method', 'immediate') != 'async'
 
     def close(self):
@@ -214,7 +214,7 @@ class JellyfinRefreshClient:
             raise failure
         return {'status': 'requested'}
 
-    def locate(self, media_type, metadata, video_path=None):
+    def locate(self, media_type, metadata, video_path=None, *, ensure_current=None):
         """The id of the item a library row names, with nothing refreshed.
 
         The identifier rung and then the exact title and year, in the libraries
@@ -222,9 +222,10 @@ class JellyfinRefreshClient:
         so what one finds the other finds. A tie is nothing found, not a guess,
         and it ends the lookup as it ends the refresh's walk: a lower rung
         could only settle it by picking one of the items that tied.
+        ``ensure_current`` runs before each request, as it does for the refresh.
         """
         if media_type == 'sports':
-            return self._locate_recording(video_path)
+            return self._locate_recording(video_path, ensure_current)
         scope = {'movie': 'movie', 'episode': 'episode', 'series': 'episode'}.get(media_type)
         if scope is None:
             raise MediaServerError('internal_error')
@@ -238,7 +239,9 @@ class JellyfinRefreshClient:
             matchers.append(lambda item: isinstance(item.get('Name'), str) and item['Name'].lower() == title)
         for match in matchers:
             try:
-                parent = self._find(scope, metadata, None, match)
+                parent = self._find(scope, metadata, ensure_current, match)
+                if ensure_current and parent is not None and media_type == 'episode':
+                    ensure_current()
                 item = parent if parent is None or media_type != 'episode' else self._find_episode(parent, metadata)
             except MediaServerError as error:
                 if error.code != 'item_ambiguous':
@@ -251,7 +254,7 @@ class JellyfinRefreshClient:
                 return item_id
         return None
 
-    def _locate_recording(self, video_path):
+    def _locate_recording(self, video_path, ensure_current):
         """The one item in the sports libraries whose file has this recording's name.
 
         A recording has no identifiers to ask by, and Jellyfin keeps no path
@@ -263,6 +266,8 @@ class JellyfinRefreshClient:
             return None
         matches = []
         for library_id in self._libraries('sports'):
+            if ensure_current:
+                ensure_current()
             result = translated(self.client.get_items, {'parentId': library_id, 'recursive': 'true',
                                                         'mediaTypes': 'Video', 'fields': 'Path'})
             if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):

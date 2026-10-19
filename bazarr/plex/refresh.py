@@ -104,19 +104,27 @@ class PlexRefreshClient:
 
     def __init__(self, snapshot):
         from media_servers.http import validate_server_url
-        from .operations import plex_server_for
+        from .operations import plex_guarded_server_for, plex_server_for
         if not snapshot.apikey or not snapshot.apikey.strip():
             raise MediaServerError('missing_credentials')
         self.snapshot = snapshot
         self.url = validate_server_url(snapshot.url)
         self.token = snapshot.apikey
         self.verify_ssl = snapshot.verify_ssl
+        # Per client, for the servers a lookup builds of its own; None is
+        # plexapi's default. The pooled server is shared and keeps that.
+        self.timeout = None
         self._server = None
+        self._lookup_servers = []
         self._connect = plex_server_for
+        self._connect_guarded = plex_guarded_server_for
 
     def close(self):
         # The pooled PlexServer is cached by endpoint and outlives one refresh.
         self._server = None
+        # A lookup's own server is not, so its connection goes with this client.
+        while self._lookup_servers:
+            self._lookup_servers.pop()._session.close()
 
     def __enter__(self):
         return self
@@ -132,6 +140,26 @@ class PlexRefreshClient:
             except Exception:
                 raise MediaServerError('connection_error') from None
         return self._server
+
+    def _guarded(self, ensure_current):
+        """A server for one lookup alone, whose every request runs the guard first.
+
+        Through plexapi one step here is several requests: one ``_item_for``
+        is a sample search, an agent match, a filter listing and the guid
+        search, and an episode is one more. So the guard sits on the session
+        they all go out over rather than before each step, and no request
+        plexapi makes, the connection's first included, can miss it. The
+        pooled client is left alone: refreshes share it with guards of their
+        own. The server sends over a session of its own, closed with this
+        client.
+        """
+        try:
+            server = self._connect_guarded(self.url, self.token, self.verify_ssl, ensure_current,
+                                           timeout=self.timeout)
+        except Exception as error:
+            raise _refusal(error) from None
+        self._lookup_servers.append(server)
+        return server
 
     def refresh_by_provider_id(self, media_type, metadata, *, ensure_current=None):
         """The IMDB guid, across the configured sections of this type.
@@ -202,7 +230,7 @@ class PlexRefreshClient:
         # walk reports the publication as unresolved rather than as requested.
         return {'status': 'requested'} if updated else None
 
-    def locate(self, media_type, metadata):
+    def locate(self, media_type, metadata, *, ensure_current=None):
         """The Plex item a library row names, with nothing refreshed.
 
         Through the refresh's own lookup, and in its order: the IMDB guid in
@@ -211,7 +239,8 @@ class PlexRefreshClient:
         never asks and a link still can. A miss is never turned into a scan.
         A sports recording is refused: Plex files a show's date-named
         recordings of one day as one episode, so no file name pins one, and
-        links never asks.
+        links never asks. With ``ensure_current`` the lookup connects through
+        ``_guarded``, so the guard runs before every request it sends.
         """
         if media_type not in ('movie', 'episode', 'series'):
             raise MediaServerError('internal_error')
@@ -220,10 +249,19 @@ class PlexRefreshClient:
         guids = [f'{provider}://{value}' for provider, value in metadata.provider_ids(media_type)]
         if not guids:
             return None
-        sections = list(_sections(self.server, self.snapshot.libraries(media_type)))
+        libraries = self.snapshot.libraries(media_type)
+        if ensure_current:
+            # The connection and the section listing come first, so the guard
+            # runs before them, as it does for a refresh: a row held or edited
+            # meanwhile must stop the lookup before the credential is sent.
+            ensure_current()
+        server = self._guarded(ensure_current) if ensure_current else self.server
+        sections = list(_sections(server, libraries))
         matched = {}
         for guid in guids:
             for _name, section in sections:
+                if ensure_current:
+                    ensure_current()
                 item = _item_for(section, guid, media_type, metadata, matched)
                 if item is not None:
                     return item
