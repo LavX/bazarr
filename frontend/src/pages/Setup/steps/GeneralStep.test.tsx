@@ -47,11 +47,37 @@ describe("GeneralStep", () => {
     // Subtitle folder selector reflects the stored value.
     expect(
       screen.getByRole("combobox", { name: /subtitle folder/i }),
-    ).toHaveValue("AlongSide Media File");
+    ).toHaveValue("Next to the video file (recommended)");
     // Upgrade switch is on.
     expect(
       screen.getByRole("switch", { name: /upgrade previously downloaded/i }),
     ).toBeChecked();
+  });
+
+  it("names the folder choices for where the files end up", async () => {
+    const user = userEvent.setup();
+    customRender(<GeneralStep onNext={onNext} />);
+
+    // Sentence case, outcome first: "AlongSide Media File" was the first
+    // choice on this step.
+    expect(
+      screen.getByRole("combobox", { name: "Subtitle folder" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("combobox", { name: /subtitle folder/i }),
+    );
+    for (const choice of [
+      "Next to the video file (recommended)",
+      "In a subfolder next to the video file",
+      "In one folder for all subtitles",
+    ]) {
+      expect(await screen.findByText(choice)).toBeInTheDocument();
+    }
+
+    await user.click(screen.getByText("In a subfolder next to the video file"));
+    expect(
+      await screen.findByRole("textbox", { name: "Subfolder name" }),
+    ).toBeInTheDocument();
   });
 
   it("says so when the preferences cannot be saved", async () => {
@@ -97,15 +123,17 @@ describe("GeneralStep", () => {
 
     customRender(<GeneralStep onNext={onNext} />);
 
-    // Pick "Absolute Path" which is not the alongside-media default.
+    // Pick the one-folder mode, which is not the next-to-the-video default.
     await user.click(
       screen.getByRole("combobox", { name: /subtitle folder/i }),
     );
-    await user.click(await screen.findByText("Absolute Path"));
+    await user.click(
+      await screen.findByText("In one folder for all subtitles"),
+    );
 
     // The custom-folder input is now revealed; fill it.
     const custom = await screen.findByRole("textbox", {
-      name: /custom subtitles folder/i,
+      name: /^folder path$/i,
     });
     await user.type(custom, "/mnt/subs");
 

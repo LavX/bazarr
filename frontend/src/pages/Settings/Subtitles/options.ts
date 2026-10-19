@@ -16,17 +16,18 @@ export const hiExtensionOptions: SelectorOption<string>[] = [
   },
 ];
 
+// Named for where the files end up, not for how the path is resolved.
 export const folderOptions: SelectorOption<string>[] = [
   {
-    label: "AlongSide Media File",
+    label: "Next to the video file (recommended)",
     value: "current",
   },
   {
-    label: "Relative Path to Media File",
+    label: "In a subfolder next to the video file",
     value: "relative",
   },
   {
-    label: "Absolute Path",
+    label: "In one folder for all subtitles",
     value: "absolute",
   },
 ];

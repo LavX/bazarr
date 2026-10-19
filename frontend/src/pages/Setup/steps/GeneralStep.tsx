@@ -22,6 +22,19 @@ function needsCustomFolder(value: string): boolean {
   return value !== "" && value !== DEFAULT_SUBFOLDER;
 }
 
+// The companion path means a different thing in each mode, so it is asked
+// for in the words of the mode that needs it.
+const CUSTOM_FOLDER_COPY: Record<string, { label: string; hint: string }> = {
+  relative: {
+    label: "Subfolder name",
+    hint: "Created next to each video file, for example Subs.",
+  },
+  absolute: {
+    label: "Folder path",
+    hint: "The one folder that holds the subtitles for every video.",
+  },
+};
+
 /**
  * Optional onboarding step for a few high-traffic general preferences. It
  * pre-fills from the current settings and only writes the keys the user actually
@@ -52,6 +65,10 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const setUpgradeSubs = (value: boolean) => patchDraft({ upgradeSubs: value });
 
   const showCustomFolder = needsCustomFolder(subfolder);
+  const customFolderCopy = CUSTOM_FOLDER_COPY[subfolder] ?? {
+    label: "Subtitle folder path",
+    hint: "The path Bazarr+ should use for the chosen folder mode.",
+  };
   // The client keeps a restarting or unreachable Bazarr+ out of its toasts,
   // so a write that fails that way said nothing at all unless it is said here.
   const [saveFailed, setSaveFailed] = useState(false);
@@ -111,8 +128,8 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       }
     >
       <Select
-        label="Subtitle Folder"
-        description="Where Bazarr stores the subtitles it downloads."
+        label="Subtitle folder"
+        description="Where Bazarr+ saves the subtitles it downloads."
         data={folderOptions}
         value={subfolder}
         onChange={(value) => setSubfolder(value ?? DEFAULT_SUBFOLDER)}
@@ -121,8 +138,8 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
 
       {showCustomFolder && (
         <TextInput
-          label="Custom Subtitles Folder"
-          description="The path Bazarr should use for the chosen folder mode."
+          label={customFolderCopy.label}
+          description={customFolderCopy.hint}
           value={subfolderCustom}
           onChange={(e) => setSubfolderCustom(e.currentTarget.value)}
         />
