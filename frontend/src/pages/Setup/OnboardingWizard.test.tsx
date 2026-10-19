@@ -864,6 +864,56 @@ describe("focus indicators", () => {
   });
 });
 
+// The palettes ThemeProvider hands Mantine, read from its source.
+const providerSource = readFileSync("src/App/ThemeProvider.tsx", "utf8");
+function paletteHex(name: string, shade: number): string {
+  const block = providerSource.match(
+    new RegExp(`\\b${name}: \\[([^\\]]+)\\]`),
+  )?.[1];
+  return (block?.match(/#[0-9a-fA-F]{6}/g)?.[shade] ?? "").toLowerCase();
+}
+
+function overrideFor(scheme: "dark" | "light", token: string): string {
+  return (
+    declared(
+      themeRules,
+      `:root:root[data-mantine-color-scheme=${scheme}]`,
+      token,
+    ) ?? ""
+  );
+}
+
+function paletteRef(value: string): string {
+  const match = value.match(/^var\(--mantine-color-(\w+)-(\d)\)$/);
+  if (match === null) return "";
+  return match[1] === "brand"
+    ? brandHex(match[2])
+    : paletteHex(match[1], Number(match[2]));
+}
+
+describe("small text colours", () => {
+  it.each(["dark", "light"] as const)(
+    "a %s field error clears 4.5:1 on every surface the wizard paints",
+    (scheme) => {
+      // Measured: red-8 was 2.2:1 on the dark card, red-6 4.26:1 on white.
+      const error = paletteRef(overrideFor(scheme, "--mantine-color-error"));
+      for (const surface of wizardSurfaces(scheme)) {
+        expect(contrast(error, surface)).toBeGreaterThanOrEqual(4.5);
+      }
+    },
+  );
+
+  it("a light yellow alert's title clears 4.5:1 on its own fill", () => {
+    // Measured: yellow-9 on yellow-1 was 2.69:1.
+    const title = paletteRef(
+      overrideFor("light", "--mantine-color-yellow-light-color"),
+    );
+    for (const fill of [paletteHex("yellow", 1), "#ffffff"]) {
+      expect(contrast(title, fill)).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+});
+
 describe("rail numerals", () => {
   it.each([".dotActive", ".dotDone"])(
     "%s keeps white numerals at 4.5:1 in both schemes",

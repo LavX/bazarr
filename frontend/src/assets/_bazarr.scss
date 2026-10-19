@@ -240,6 +240,21 @@ body::after {
   // lost silently and the symptom came back.
 }
 
+// Two Mantine colours that fall under 4.5:1 for the small text they paint,
+// measured in the setup wizard: a field error is red-8 in dark mode, 2.2:1 on
+// the card, and red-6 in light mode, 4.26:1 on white; a light yellow alert's
+// title is yellow-9 on yellow-1, 2.69:1. The doubled :root outranks the
+// variables MantineProvider writes for the same scheme, whatever order the two
+// style sheets arrive in.
+:root:root[data-mantine-color-scheme="dark"] {
+  --mantine-color-error: var(--mantine-color-red-4);
+}
+
+:root:root[data-mantine-color-scheme="light"] {
+  --mantine-color-error: var(--mantine-color-red-7);
+  --mantine-color-yellow-light-color: var(--mantine-color-brand-7);
+}
+
 // Mantine draws every focus ring in --mantine-primary-color-filled, which is
 // brand-8 in dark mode and under the 3:1 a focus indicator needs (WCAG 2.2 SC
 // 1.4.11). The ring takes its own token instead, so the filled buttons keep
