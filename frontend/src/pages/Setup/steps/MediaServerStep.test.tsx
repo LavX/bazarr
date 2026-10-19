@@ -416,9 +416,13 @@ describe("MediaServerStep", () => {
       await screen.findByRole("button", { name: /turn on emby refreshes/i }),
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /could not turn on emby refreshes/i,
-    );
+    // An Alert titled with the failure, as every other inline error is: the
+    // red Text it replaced measured 4.26:1 on white.
+    expect(
+      await screen.findByRole("alert", {
+        name: /could not turn on emby refreshes/i,
+      }),
+    ).toHaveTextContent(/still running/i);
   });
 
   it("does not call a switched-off row connected", async () => {

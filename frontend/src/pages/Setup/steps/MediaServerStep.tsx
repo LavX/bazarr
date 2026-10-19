@@ -1,5 +1,5 @@
 import { FC, useMemo, useState } from "react";
-import { Button, Checkbox, Group, Text } from "@mantine/core";
+import { Alert, Button, Checkbox, Group, Text } from "@mantine/core";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import type {
@@ -334,10 +334,14 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                     )}
                   </div>
                   {switchFailed === kind && stalled.length > 0 && (
-                    <Text size="sm" c="red" role="alert">
-                      Bazarr+ could not turn on {kindName(kind)} refreshes.
-                      Check that it is still running, then try again.
-                    </Text>
+                    // An Alert like every other inline error: red-6 text on
+                    // white is 4.26:1, under the 4.5:1 14px text needs.
+                    <Alert
+                      color="red"
+                      title={`Could not turn on ${kindName(kind)} refreshes`}
+                    >
+                      Check that Bazarr+ is still running, then try again.
+                    </Alert>
                   )}
                 </div>
               )}
