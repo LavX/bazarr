@@ -535,13 +535,29 @@ def _is_windows_path(text):
     return '\\' in text or bool(_WINDOWS_PATH.match(text))
 
 
+def _map_video_path(path, mapping):
+    """Map a video path remote to local as ``_apply_mapping`` does, except that
+    a Windows path matches a mapping's root whatever its separators and case,
+    as Windows resolves it. Unix paths keep the exact, case-sensitive match."""
+    if not _is_windows_path(path):
+        return _apply_mapping(path, mapping, reverse=False)
+    normalized = path.replace('\\', '/')
+    for pair in mapping:
+        if len(pair) < 2 or pair[0] == pair[1] or '' in pair:
+            continue
+        match = re.search(re.escape(pair[0].replace('\\', '/')), normalized, re.IGNORECASE)
+        if match:
+            return normalized[:match.start()] + pair[1] + normalized[match.end():]
+    return normalized
+
+
 def _video_path_forms(path, mappings):
     """Return a video path's forms under each candidate mapping, with one
     separator style, plus the same forms case-folded and whether the path is a
     Windows path."""
     forms = {path}
     for mapping in mappings:
-        forms.add(_apply_mapping(path, mapping, reverse=False))
+        forms.add(_map_video_path(path, mapping))
     forms = {form.replace('\\', '/') for form in forms}
     return forms, {form.casefold() for form in forms}, _is_windows_path(path)
 

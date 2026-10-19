@@ -686,3 +686,17 @@ def test_deep_history_returns_one_row_per_path_and_track(schema_session, monkeyp
     assert scores == {first: 80.0, second: 89.0}
     # Three files and one embedded track, whatever the history depth.
     assert counting.rows == 4
+
+
+@pytest.mark.parametrize('video_path, subtitles_path', [
+    ('X:/Media/Title.mkv', 'X:/Media/Title.de.srt'),
+    (r'x:\media\Title.mkv', r'x:\media\Title.de.srt'),
+], ids=['forward-slashes', 'lower-case-root'])
+def test_windows_root_maps_whatever_its_separators_and_case(placed_media, video_path, subtitles_path):
+    # The mapping names the root as X:\Media; the indexed video spells it with
+    # other separators or casing, and Windows resolves both to the same folder.
+    add, score = placed_media(video_path, subtitles_path,
+                              instance_mapping=[['X:\\Media', '/local/media']])
+    add(1, 1, 90, subtitles_path, '/local/media/Title.mkv')
+    assert score() == 90.0
+
