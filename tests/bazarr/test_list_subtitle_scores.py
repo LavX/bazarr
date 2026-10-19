@@ -48,6 +48,10 @@ def schema_session(request, schema_session):
         engine.dispose()
 
 
+# Default video path for a history row: the item's own, as the writers record.
+_ITEM_PATH = object()
+
+
 def _history_timestamp(history_id):
     return datetime(2026, 6, 12, 12, 0) + timedelta(seconds=history_id)
 
@@ -88,10 +92,10 @@ def _add_movie(schema_session, movie_id, subtitles):
 
 
 def _add_movie_history(schema_session, history_id, movie_id, action, subtitles_path,
-                       language, score, score_out_of, video_path=None):
+                       language, score, score_out_of, video_path=_ITEM_PATH):
     from app.database import TableHistoryMovie, TableMovies
 
-    if video_path is None:
+    if video_path is _ITEM_PATH:
         # History writers record the movie's own video path.
         video_path = schema_session.get(TableMovies, movie_id).path
     schema_session.add(TableHistoryMovie(
@@ -349,10 +353,10 @@ def _add_episode(schema_session, episode_id, series_id, season, episode, subtitl
 
 
 def _add_episode_history(schema_session, history_id, series_id, episode_id, action,
-                         subtitles_path, language, score, score_out_of, video_path=None):
+                         subtitles_path, language, score, score_out_of, video_path=_ITEM_PATH):
     from app.database import TableEpisodes, TableHistory
 
-    if video_path is None:
+    if video_path is _ITEM_PATH:
         # History writers record the episode's own video path.
         video_path = schema_session.get(TableEpisodes, episode_id).path
     schema_session.add(TableHistory(
@@ -602,9 +606,30 @@ def test_translation_for_another_folder_under_a_mapped_root_does_not_shadow(plac
 
 
 def test_unix_video_paths_differing_only_by_case_are_two_files(placed_media):
+    # The record names another folder's subtitle and a video that differs from
+    # the item's only by case, which on Unix is another file.
     add, score = placed_media('/media/Title.mkv', '/media/Title.de.srt')
-    add(1, 1, 40, '/media/Title.de.srt', '/media/title.mkv')
+    add(1, 1, 40, '/old/Title.de.srt', '/media/title.mkv')
     assert score() is None
+
+
+@pytest.mark.parametrize('item, record', [
+    # subfolder = absolute: every subtitle lives in one folder, so a move
+    # changes the video path only.
+    (('/media/new/Title.mkv', '/subs/Title.de.srt'), ('/subs/Title.de.srt', '/media/old/Title.mkv')),
+    # A new container under the same base name keeps the subtitle file.
+    (('/media/Title.mp4', '/media/Title.de.srt'), ('/media/Title.de.srt', '/media/Title.mkv')),
+    # The video path differs from the item's only by case.
+    (('/media/Title.mkv', '/media/Title.de.srt'), ('/media/Title.de.srt', '/media/title.mkv')),
+    # The video path column is nullable.
+    (('/media/Title.mkv', '/media/Title.de.srt'), ('/media/Title.de.srt', None)),
+], ids=['absolute-subtitle-folder', 'container-change', 'video-case', 'no-video-path'])
+def test_subtitle_kept_in_place_keeps_its_score(placed_media, item, record):
+    # The detail views key a score by the subtitle path alone, so a record for
+    # the current subtitle file scores it whatever video path it carries.
+    add, score = placed_media(*item)
+    add(1, 1, 40, *record)
+    assert score() == 40.0
 
 
 class _CountingSession:
@@ -693,11 +718,12 @@ def test_deep_history_returns_one_row_per_path_and_track(schema_session, monkeyp
     (r'x:\media\Title.mkv', r'x:\media\Title.de.srt'),
 ], ids=['forward-slashes', 'lower-case-root'])
 def test_windows_root_maps_whatever_its_separators_and_case(placed_media, video_path, subtitles_path):
-    # The mapping names the root as X:\Media; the indexed video spells it with
-    # other separators or casing, and Windows resolves both to the same folder.
+    # The mapping names the root as X:\Media; the indexed paths spell it with
+    # other separators or casing, which Windows resolves to the same folder,
+    # and the record carries the mapped local paths.
     add, score = placed_media(video_path, subtitles_path,
                               instance_mapping=[['X:\\Media', '/local/media']])
-    add(1, 1, 90, subtitles_path, '/local/media/Title.mkv')
+    add(1, 1, 90, '/local/media/Title.de.srt', '/local/media/Title.mkv')
     assert score() == 90.0
 
 

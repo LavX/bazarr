@@ -535,10 +535,11 @@ def _is_windows_path(text):
     return '\\' in text or bool(_WINDOWS_PATH.match(text))
 
 
-def _map_video_path(path, mapping):
-    """Map a video path remote to local as ``_apply_mapping`` does, except that
-    a Windows path matches a mapping's root whatever its separators and case,
-    as Windows resolves it. Unix paths keep the exact, case-sensitive match."""
+def _map_media_path(path, mapping):
+    """Map a video or subtitle path remote to local as ``_apply_mapping`` does,
+    except that a Windows path matches a mapping's root whatever its separators
+    and case, as Windows resolves it. Unix paths keep the exact, case-sensitive
+    match."""
     if not _is_windows_path(path):
         return _apply_mapping(path, mapping, reverse=False)
     normalized = path.replace('\\', '/')
@@ -551,13 +552,26 @@ def _map_video_path(path, mapping):
     return normalized
 
 
-def _video_path_key(path, mapping, fold):
-    """A video path in one comparable spelling: mapped to local by ``mapping``
-    (None for the path as stored), with '/' separators, case-folded on request."""
+def _media_path_key(path, mapping, fold):
+    """A path in one comparable spelling: mapped to local by ``mapping`` (None
+    for the path as stored), with '/' separators, case-folded on request."""
     if mapping is not None:
-        path = _map_video_path(path, mapping)
+        path = _map_media_path(path, mapping)
     path = path.replace('\\', '/')
     return path.casefold() if fold else path
+
+
+def _same_media_path(current, stored, instance_mapping, writer_mapping):
+    """Whether a history path names the item's current file: equal as stored,
+    or equal once each is mapped to local with the mapping that produced it.
+    A stored path never compares with a mapped one, since two roots can
+    overlap. As with subtitle names, a Windows path on either side folds case."""
+    if not current or not stored:
+        return False
+    fold = _is_windows_path(current) or _is_windows_path(stored)
+    return (_media_path_key(current, None, fold) == _media_path_key(stored, None, fold)
+            or _media_path_key(current, instance_mapping, fold)
+            == _media_path_key(stored, writer_mapping, fold))
 
 
 def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, videos_by_id, media_type):
@@ -581,14 +595,16 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     record per item and file or embedded track.
 
     ``videos_by_id`` maps id -> (video path, arr_instance_id). A file record
-    counts only when its video path is the item's current video path, so a
-    record left in an item's old folder does not score a same-named subtitle
-    after a move. The two compare as stored, or both mapped to local with the
-    mapping each was reversed with: the owning instance's effective mapping for
-    the item and most records, the global mapping for ``media_type`` ('movie'
-    or 'series') for translations. A stored path never compares with a mapped
-    one, since two roots can overlap. Embedded records are logged once per
-    track and stay valid for the item wherever it lives.
+    counts only when it names the item's current file: its subtitle path is a
+    current subtitle path, as the detail views key a score, or its video path
+    is the item's current video path. So a record left in an item's old folder
+    does not score a same-named subtitle after a move, while a subtitle kept in
+    place (a custom subtitle folder, a new video container) keeps its score.
+    Paths compare as stored, or both mapped to local with the mapping each was
+    reversed with: the owning instance's effective mapping for the item and
+    most records, the global mapping for ``media_type`` ('movie' or 'series')
+    for translations. Embedded records are logged once per track and stay
+    valid for the item wherever it lives.
     """
     ids = list(subtitles_by_id.keys())
     if not ids:
@@ -597,53 +613,53 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     global_mapping = (path_mappings.path_mapping_movies if media_type == 'movie'
                       else path_mappings.path_mapping_series)
     instance_mappings = {}
+    item_mappings = {}
     current_videos = {}
     for item_id, (video_path, arr_instance_id) in videos_by_id.items():
         if arr_instance_id not in instance_mappings:
             mapping = _instance_path_mapping(arr_instance_id, media_type)
             # The same choice path_replace_instance makes.
             instance_mappings[arr_instance_id] = global_mapping if mapping is None else mapping
-        if video_path:
-            current_videos[item_id] = (video_path, instance_mappings[arr_instance_id])
-
-    video_matches = {}
-
-    def same_video(item_id, action, video_path):
-        # Translations reverse their video path with the global mapping, every
-        # other file record with the owning instance's.
-        translated = action == 6
-        key = (item_id, translated, video_path)
-        if key not in video_matches:
-            current = current_videos.get(item_id)
-            if current is None or not video_path:
-                video_matches[key] = False
-            else:
-                current_path, instance_mapping = current
-                # As with subtitle names, a Windows path on either side folds case.
-                fold = _is_windows_path(current_path) or _is_windows_path(video_path)
-                writer_mapping = global_mapping if translated else instance_mapping
-                video_matches[key] = (
-                    _video_path_key(current_path, None, fold) == _video_path_key(video_path, None, fold)
-                    or _video_path_key(current_path, instance_mapping, fold)
-                    == _video_path_key(video_path, writer_mapping, fold))
-        return video_matches[key]
+        item_mappings[item_id] = instance_mappings[arr_instance_id]
+        current_videos[item_id] = video_path
 
     # Current file-subtitle paths and embedded-track languages per item, read
     # straight from the raw subtitles column.
     current_paths = {}
+    current_subtitle_paths = {}
     embedded_langs = {}
     for item_id, raw in subtitles_by_id.items():
         paths = {}
+        full_paths = []
         langs = set()
         if raw:
             for entry in ast.literal_eval(raw):
                 if entry[1]:
                     name, windows = _subtitle_file_name(entry[1])
                     paths[name] = paths.get(name, False) or windows
+                    full_paths.append(entry[1])
                 else:
                     langs.add(_canonical_embedded_language(entry[0]))
         current_paths[item_id] = paths
+        current_subtitle_paths[item_id] = full_paths
         embedded_langs[item_id] = langs
+
+    file_matches = {}
+
+    def same_file(item_id, action, subtitles_path, video_path):
+        # Translations reverse their paths with the global mapping, every other
+        # file record with the owning instance's.
+        translated = action == 6
+        key = (item_id, translated, subtitles_path, video_path)
+        if key not in file_matches:
+            instance_mapping = item_mappings.get(item_id)
+            writer_mapping = global_mapping if translated else instance_mapping
+            file_matches[key] = (
+                any(_same_media_path(current, subtitles_path, instance_mapping, writer_mapping)
+                    for current in current_subtitle_paths.get(item_id, ()))
+                or _same_media_path(current_videos.get(item_id), video_path,
+                                    instance_mapping, writer_mapping))
+        return file_matches[key]
 
     # Chunk the id list so the IN (...) clause stays within SQLite's
     # bound-parameter limit for large libraries. Each id lives in exactly one
@@ -712,7 +728,7 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                 if not folded or not (windows or any(names[other] for other in folded)):
                     continue
                 current_name = sorted(folded)[0]
-            if not same_video(row.item_id, row.action, row.video_path):
+            if not same_file(row.item_id, row.action, row.subtitles_path, row.video_path):
                 continue
             # The current file is the canonical identity: a row that matched it
             # by exact name and one that matched it case-insensitively belong to
