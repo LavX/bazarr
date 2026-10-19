@@ -385,10 +385,16 @@ def test_startup_cleans_stale_dirs(hls, monkeypatch):
     # Moving the clock forward, rather than a directory's times back, keeps
     # this independent of the host: anything that lists a directory, such as
     # a file watcher on /tmp, refreshes its atime, and eviction counts that as
-    # use. No outside read can stamp a directory later than now.
+    # use. No outside read can stamp a directory later than now. Every
+    # session but the expired one counts as used at startup, so only the
+    # partial-session cleanup, not the TTL, can remove the others.
     startup_delay = hls.editor.HLS_IDLE_TTL_SECONDS + 60
 
-    def session(name, playlist=None, marker=False, used_at_startup=False):
+    def used_at_startup(path):
+        stamp = time.time() + startup_delay
+        os.utime(path, (stamp, stamp))
+
+    def session(name, playlist=None, marker=False, idle=False):
         path = root / name
         path.mkdir()
         (path / 'segment_000.m4s').write_bytes(b'data')
@@ -396,9 +402,8 @@ def test_startup_cleans_stale_dirs(hls, monkeypatch):
             (path / 'playlist.m3u8').write_text(playlist)
         if marker:
             (path / '.encoding').write_text('1')
-        if used_at_startup:
-            stamp = time.time() + startup_delay
-            os.utime(path, (stamp, stamp))
+        if not idle:
+            used_at_startup(path)
         return path
 
     # Left mid-encode by the previous run: marker still there.
@@ -408,13 +413,14 @@ def test_startup_cleans_stale_dirs(hls, monkeypatch):
     # Killed earlier: segments but no finished playlist.
     killed = session('killed')
     # Finished but untouched for longer than the cache TTL.
-    expired = session('expired', playlist=COMPLETE_PLAYLIST)
+    expired = session('expired', playlist=COMPLETE_PLAYLIST, idle=True)
     # Finished and recent: still worth reusing.
-    finished = session('finished', playlist=COMPLETE_PLAYLIST, used_at_startup=True)
+    finished = session('finished', playlist=COMPLETE_PLAYLIST)
     # A damaged playlist must not stop the cleanup, or startup.
     damaged = root / 'damaged'
     damaged.mkdir()
     (damaged / 'playlist.m3u8').write_bytes(b'\xff\xfe\x00garbage')
+    used_at_startup(damaged)
     stray = root / 'not-a-session.txt'
     stray.write_text('x')
 
