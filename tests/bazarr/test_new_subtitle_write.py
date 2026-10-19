@@ -106,14 +106,14 @@ def test_a_file_another_program_creates_while_writing_is_never_replaced(tmp_path
     A name taken between the check and the publish refuses the write."""
     from subtitles import new_subtitle
 
-    mkstemp = new_subtitle.tempfile.mkstemp
+    staging = new_subtitle._new_staging_file
 
     def foreign_writer_meanwhile(*args, **kwargs):
-        made = mkstemp(*args, **kwargs)
+        made = staging(*args, **kwargs)
         (tmp_path / "Film.hu.srt").write_text("imported by another program")
         return made
 
-    monkeypatch.setattr(new_subtitle.tempfile, "mkstemp", foreign_writer_meanwhile)
+    monkeypatch.setattr(new_subtitle, "_new_staging_file", foreign_writer_meanwhile)
     with pytest.raises(new_subtitle.SubtitleFileExists) as refused:
         new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(tmp_path / "Film.hu.srt"), b"mine")],
                                         "movie", 7)
@@ -167,12 +167,13 @@ def test_a_short_write_never_publishes_a_truncated_file(tmp_path, published, mon
 
 def test_a_new_file_gets_the_mode_a_download_gets(tmp_path, published):
     """mkstemp's 0600 would hide the file from a media server running as
-    another user; a new subtitle gets 0666 less the umask, like a download."""
+    another user; a new subtitle gets 0666 less the umask, like a download.
+    The kernel applies the umask: nothing here reads or sets it."""
     from subtitles.new_subtitle import write_new_subtitle
 
     source = tmp_path / "cache.sub"
     source.write_bytes(b"pack")
-    previous = os.umask(0o022)
+    previous = os.umask(0o027)
     try:
         write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(tmp_path / "Film.hu.idx"), b"i"),
                                                          (str(tmp_path / "Film.hu.sub"), str(source))], "movie", 7)
@@ -182,4 +183,22 @@ def test_a_new_file_gets_the_mode_a_download_gets(tmp_path, published):
 
     modes = {name: oct((tmp_path / name).stat().st_mode & 0o777) for name in ("Film.hu.idx", "Film.hu.sub",
                                                                               "plain.srt")}
-    assert modes == {"Film.hu.idx": "0o644", "Film.hu.sub": "0o644", "plain.srt": "0o644"}
+    assert modes == {"Film.hu.idx": "0o640", "Film.hu.sub": "0o640", "plain.srt": "0o640"}
+
+
+def test_the_write_never_touches_the_process_umask_or_needs_fchmod(tmp_path, published, monkeypatch):
+    """The umask is process-wide, so a thread setting it races every other
+    file created meanwhile; os.fchmod does not exist on Windows before 3.13."""
+    from subtitles import new_subtitle
+
+    def forbidden(*args):
+        raise AssertionError("the new-subtitle write must not call this")
+
+    monkeypatch.setattr(new_subtitle.os, "umask", forbidden)
+    monkeypatch.delattr(new_subtitle.os, "fchmod", raising=False)
+    monkeypatch.delattr(new_subtitle.os, "chmod", raising=False)
+
+    new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(tmp_path / "Film.hu.srt"), b"mine")],
+                                    "movie", 7)
+
+    assert (tmp_path / "Film.hu.srt").read_bytes() == b"mine"

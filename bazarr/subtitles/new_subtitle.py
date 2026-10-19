@@ -17,6 +17,7 @@ name exists, rather than a rename, which would replace it.
 import errno
 import logging
 import os
+import secrets
 import shutil
 import tempfile
 from contextlib import nullcontext
@@ -40,24 +41,32 @@ class SubtitleFileExists(Exception):
         self.path = path
 
 
-def _default_file_mode():
-    """The mode a plain ``open(path, 'w')`` gives a new file: 0o666 less the umask.
+# A new file is created with O_EXCL, never through an existing name, and in
+# binary mode on Windows.
+_NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
 
-    mkstemp creates its file as 0o600, and a link or rename keeps that, so a
-    new subtitle would be unreadable to a media server running as another
-    user, where a downloaded one is not. The umask is read from /proc where
-    the kernel reports it, since setting it to read it back is process-wide.
+
+def _new_staging_file(directory):
+    """Create a uniquely named temporary file in ``directory``: ``(fd, path)``.
+
+    Created with mode 0o666, so the kernel applies the umask the way it does
+    for a downloaded subtitle. mkstemp creates 0o600, which a link or rename
+    keeps, and a subtitle a media server running as another user cannot read
+    is no use to it.
     """
-    try:
-        with open('/proc/self/status') as status:
-            for line in status:
-                if line.startswith('Umask:'):
-                    return 0o666 & ~int(line.split()[1], 8)
-    except (OSError, ValueError):
-        pass
-    mask = os.umask(0o022)
-    os.umask(mask)
-    return 0o666 & ~mask
+    for _attempt in range(100):
+        path = os.path.join(directory, f'.bazarr-new-{secrets.token_hex(8)}.tmp')
+        try:
+            return os.open(path, _NEW_FILE_FLAGS, 0o666), path
+        except FileExistsError:
+            continue
+    raise FileExistsError(errno.EEXIST, 'No free temporary file name', directory)
+
+
+def _staging_file(directory, replace):
+    # A replacement keeps the existing temporary-file behaviour of the routes
+    # that save over a file.
+    return tempfile.mkstemp(dir=directory) if replace else _new_staging_file(directory)
 
 
 def _discard(path):
@@ -94,7 +103,7 @@ def _publish_without_replacing(tmp_path, path):
 def _copy_into_new_name(tmp_path, path):
     """The fallback without hard links: claim the name exclusively, then fill it."""
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        fd = os.open(path, _NEW_FILE_FLAGS, 0o666)
     except FileExistsError:
         _discard(tmp_path)
         raise SubtitleFileExists(path) from None
@@ -124,12 +133,9 @@ def write_bytes_atomically(path, data, *, replace=True):
     ``replace=False`` raises SubtitleFileExists instead of replacing a file
     that is there by the time the write is published.
     """
-    subtitle_dir = os.path.dirname(path)
-    fd, tmp_path = tempfile.mkstemp(dir=subtitle_dir)
+    fd, tmp_path = _staging_file(os.path.dirname(path), replace)
     try:
         try:
-            if not replace:
-                os.fchmod(fd, _default_file_mode())
             _write_all(fd, data)
         finally:
             os.close(fd)
@@ -144,10 +150,8 @@ def write_bytes_atomically(path, data, *, replace=True):
 
 def copy_file_atomically(path, source, *, replace=True):
     """Copy ``source`` to ``path`` through a temporary name in the same folder."""
-    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path))
+    fd, tmp_path = _staging_file(os.path.dirname(path), replace)
     try:
-        if not replace:
-            os.fchmod(fd, _default_file_mode())
         with os.fdopen(fd, 'wb') as target, open(source, 'rb') as origin:
             shutil.copyfileobj(origin, target)
         _publish(tmp_path, path, replace)

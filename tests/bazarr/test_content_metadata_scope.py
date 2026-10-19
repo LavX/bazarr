@@ -114,12 +114,11 @@ def test_create_subtitle_episode_uses_path_replace_instance(schema_session, monk
              patch("api.subtitles.content.os.path.isfile", return_value=False), \
              patch("api.subtitles.content.get_target_folder", return_value=None), \
              patch("api.subtitles.content.os.path.realpath", side_effect=lambda p: p), \
-             patch("subtitles.new_subtitle.tempfile.mkstemp") as mock_mkstemp, \
+             patch("subtitles.new_subtitle._new_staging_file") as mock_mkstemp, \
              patch("api.subtitles.content.os.write"), \
              patch("api.subtitles.content.os.close"), \
              patch("api.subtitles.content.os.replace"), \
              patch("subtitles.new_subtitle.os.link"), \
-             patch("subtitles.new_subtitle.os.fchmod"), \
              patch("api.subtitles.content.store_subtitles"), \
              patch("api.subtitles.content.store_subtitles_movie"), \
              patch("api.subtitles.content.event_stream"), \
@@ -167,12 +166,11 @@ def test_create_subtitle_movie_uses_path_replace_instance(schema_session, monkey
              patch("api.subtitles.content.os.path.isfile", return_value=False), \
              patch("api.subtitles.content.get_target_folder", return_value=None), \
              patch("api.subtitles.content.os.path.realpath", side_effect=lambda p: p), \
-             patch("subtitles.new_subtitle.tempfile.mkstemp") as mock_mkstemp, \
+             patch("subtitles.new_subtitle._new_staging_file") as mock_mkstemp, \
              patch("api.subtitles.content.os.write"), \
              patch("api.subtitles.content.os.close"), \
              patch("api.subtitles.content.os.replace"), \
              patch("subtitles.new_subtitle.os.link"), \
-             patch("subtitles.new_subtitle.os.fchmod"), \
              patch("api.subtitles.content.store_subtitles"), \
              patch("api.subtitles.content.store_subtitles_movie"), \
              patch("api.subtitles.content.event_stream"), \
