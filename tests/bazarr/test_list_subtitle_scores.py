@@ -700,3 +700,11 @@ def test_windows_root_maps_whatever_its_separators_and_case(placed_media, video_
     add(1, 1, 90, subtitles_path, '/local/media/Title.mkv')
     assert score() == 90.0
 
+
+def test_move_between_overlapping_mapped_roots_does_not_inherit_the_old_score(placed_media):
+    # /local is both where /remote maps to and a remote root of its own, so the
+    # old record's /local/Title.mkv is the file now at /archive, not the item's.
+    add, score = placed_media('/remote/Title.mkv', '/remote/Title.de.srt',
+                              instance_mapping=[['/remote', '/local'], ['/local', '/archive']])
+    add(1, 1, 40, '/local/Title.de.srt', '/local/Title.mkv')
+    assert score() is None
