@@ -769,3 +769,17 @@ def test_old_record_whose_stored_path_is_the_mapped_current_path_does_not_score(
                               instance_mapping=[['/movies', '/data/movies']])
     add(1, 1, 40, '/data/movies/T/T.de.srt', '/data/movies/T/T.mkv')
     assert score() is None
+
+
+def test_translation_shadows_a_download_despite_a_later_record_under_its_root(placed_media):
+    # The item went to /global and back. The translation's /global paths name
+    # the current file through the global mapping; the later download's same
+    # paths name another folder through the instance mapping. Keeping only the
+    # newest row per path would drop the translation and expose the old 40.
+    add, score = placed_media('/instance/T.mkv', '/instance/T.de.srt',
+                              instance_mapping=[['/instance', '/local']],
+                              global_mapping=[['/global', '/local']])
+    add(1, 1, 40, '/instance/T.de.srt', '/instance/T.mkv')
+    add(2, 6, 100, '/global/T.de.srt', '/global/T.mkv')
+    add(3, 1, 90, '/global/T.de.srt', '/global/T.mkv')
+    assert score() is None

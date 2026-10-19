@@ -670,7 +670,11 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     # the database keeps just that one and history depth never reaches Python.
     # Rows sharing a partition always pass or fail the checks below together
     # and resolve to the same identity, which keeps the result unchanged.
+    # A translation's paths go through another mapping than every other file
+    # record's, so the same stored paths can pass for one and fail for the
+    # other; translations get partitions of their own.
     embedded = history_table.action == 7
+    translated = history_table.action == 6
     rows = []
     for chunk in chunked(ids):
         ranked = (
@@ -685,7 +689,7 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                    history_table.score_out_of,
                    func.row_number().over(
                        partition_by=(id_column,
-                                     case((embedded, 1), else_=0),
+                                     case((embedded, 1), (translated, 2), else_=0),
                                      history_table.language,
                                      case((embedded, None), else_=history_table.subtitles_path),
                                      case((embedded, None), else_=history_table.video_path)),
