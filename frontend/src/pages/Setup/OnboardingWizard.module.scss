@@ -259,10 +259,19 @@
         --input-height-md: 44px;
       }
 
+      // The compact sizes read variables of their own, and the wizard uses
+      // them (compact-sm on the media server picker, compact-xs on provider
+      // settings), so they are floored too. The minimum width is for a
+      // compact button whose label is a word or two.
       .mantine-Button-root {
         --button-height-xs: 44px;
         --button-height-sm: 44px;
         --button-height-md: 44px;
+        --button-height-compact-xs: 44px;
+        --button-height-compact-sm: 44px;
+        --button-height-compact-md: 44px;
+        min-width: 44px;
+        min-height: 44px;
       }
 
       .mantine-ActionIcon-root,

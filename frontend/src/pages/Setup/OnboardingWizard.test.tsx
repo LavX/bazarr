@@ -1,12 +1,16 @@
 import userEvent, { UserEvent } from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { compileString } from "sass-embedded";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import OnboardingWizardView from "./OnboardingWizard";
 import { settleSetupComplete } from "./setupCompleteCache";
+import wizardStyles from "./OnboardingWizard.module.scss";
 
 // Navigation + the settings mutation are the only external effects we assert.
 const navigate = vi.fn();
@@ -622,22 +626,120 @@ describe("OnboardingWizardView", () => {
   });
 });
 
-// jsdom applies no stylesheet and computes no colour, so the indicators are
-// pinned where they are declared: the tokens and the rules that read them.
-const themeSource = readFileSync("src/assets/_bazarr.scss", "utf8");
-const inputSource = readFileSync("src/assets/input.module.scss", "utf8");
+// jsdom applies no stylesheet and computes no colour, so these read the CSS
+// the build actually emits: each stylesheet is compiled with the same Sass and
+// the same injected modules as vite.config.ts, then parsed into rules, and the
+// assertions follow a value from the rule that paints a control to the token
+// it reads and the colour that token holds. The computed result in a real
+// browser is measured separately (see the lane's measurement harness).
+interface CssRule {
+  selectors: string[];
+  at: string[];
+  decls: Record<string, string>;
+}
 
-function schemeBlock(scheme: "dark" | "light"): string {
-  const marker = `:root[data-mantine-color-scheme="${scheme}"] {`;
-  const at = themeSource.indexOf(marker);
-  return at < 0 ? "" : themeSource.slice(at, themeSource.indexOf("}", at));
+function compileScss(file: string): string {
+  const root = process.cwd();
+  const inject = `@use "${root}/src/assets/_mantine" as mantine;\n@use "${root}/src/assets/_bazarr" as bazarr;\n`;
+  const source = readFileSync(file, "utf8");
+  return compileString(
+    file.endsWith("_bazarr.scss") ? source : inject + source,
+    { url: pathToFileURL(resolve(root, file)), style: "expanded" },
+  ).css;
+}
+
+function parseRules(css: string, at: string[] = []): CssRule[] {
+  const found: CssRule[] = [];
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  let cursor = 0;
+  while (cursor < text.length) {
+    const open = text.indexOf("{", cursor);
+    if (open < 0) break;
+    let depth = 0;
+    let close = open;
+    for (; close < text.length; close += 1) {
+      if (text[close] === "{") depth += 1;
+      else if (text[close] === "}" && --depth === 0) break;
+    }
+    const prelude = text.slice(cursor, open).trim();
+    const body = text.slice(open + 1, close);
+    if (prelude.startsWith("@")) {
+      found.push(...parseRules(body, [...at, prelude]));
+    } else {
+      const decls: Record<string, string> = {};
+      for (const decl of body.split(";")) {
+        const colon = decl.indexOf(":");
+        if (colon > 0) {
+          decls[decl.slice(0, colon).trim()] = decl.slice(colon + 1).trim();
+        }
+      }
+      found.push({
+        selectors: prelude.split(",").map((part) => part.trim()),
+        at,
+        decls,
+      });
+    }
+    cursor = close + 1;
+  }
+  return found;
+}
+
+const themeRules = parseRules(compileScss("src/assets/_bazarr.scss"));
+const inputRules = parseRules(compileScss("src/assets/input.module.scss"));
+const wizardRules = parseRules(
+  compileScss("src/pages/Setup/OnboardingWizard.module.scss"),
+);
+const brandSource = readFileSync("src/assets/_bazarr.scss", "utf8");
+
+function rulesFor(rules: CssRule[], selector: string): CssRule[] {
+  return rules.filter((rule) => rule.selectors.includes(selector));
+}
+
+/** A property as the rules that name this exact selector set it, last wins. */
+function declared(
+  rules: CssRule[],
+  selector: string,
+  property: string,
+): string | undefined {
+  return rulesFor(rules, selector)
+    .map((rule) => rule.decls[property])
+    .filter((value) => value !== undefined)
+    .at(-1);
+}
+
+function schemeToken(scheme: "dark" | "light", token: string): string {
+  const selector = `:root[data-mantine-color-scheme=${scheme}]`;
+  const value =
+    declared(themeRules, selector, token) ??
+    declared(themeRules, `:root[data-mantine-color-scheme="${scheme}"]`, token);
+  return value ?? "";
+}
+
+// Mantine's default primary shade: 6 in light mode, 8 in dark. ThemeProvider
+// does not change it.
+const PRIMARY_SHADE = { light: "6", dark: "8" } as const;
+
+/** A colour value resolved to hex through the tokens and the brand scale. */
+function resolveColour(value: string, scheme: "dark" | "light"): string {
+  const trimmed = value.trim();
+  if (/^#[0-9a-f]{6}$/i.test(trimmed)) return trimmed.toLowerCase();
+  if (/^(white|#fff)$/i.test(trimmed)) return "#ffffff";
+  const ref = trimmed.match(/^var\((--[\w-]+)\)$/)?.[1];
+  if (ref === undefined) return "";
+  if (ref === "--mantine-color-white") return "#ffffff";
+  if (ref === "--mantine-primary-color-filled") {
+    return brandHex(PRIMARY_SHADE[scheme]);
+  }
+  const brand = ref.match(/^--mantine-color-brand-(\d)$/)?.[1];
+  if (brand !== undefined) return brandHex(brand);
+  return resolveColour(schemeToken(scheme, ref), scheme);
 }
 
 function brandHex(shade: string): string {
   return (
-    themeSource.match(
-      new RegExp(`\\$color-brand-${shade}: (#[0-9a-f]{6});`),
-    )?.[1] ?? ""
+    brandSource
+      .match(new RegExp(`\\$color-brand-${shade}: (#[0-9a-f]{6});`))?.[1]
+      ?.toLowerCase() ?? ""
   );
 }
 
@@ -652,132 +754,200 @@ function luminance(hex: string): number {
 }
 
 function contrast(a: string, b: string): number {
+  expect(a).toMatch(/^#[0-9a-f]{6}$/);
+  expect(b).toMatch(/^#[0-9a-f]{6}$/);
   const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
   return (hi + 0.05) / (lo + 0.05);
 }
 
-function focusRingHex(scheme: "dark" | "light"): string {
-  const shade = schemeBlock(scheme).match(
-    /--bz-focus-ring: var\(--mantine-color-brand-(\d)\);/,
-  )?.[1];
-  return shade === undefined ? "" : brandHex(shade);
+/** Every surface the wizard paints behind its controls, read from its rules. */
+function wizardSurfaces(scheme: "dark" | "light"): string[] {
+  const painted = [
+    declared(wizardRules, ".card", "background"),
+    declared(wizardRules, ".root", "background"),
+  ].join(" ");
+  const tokens = [...painted.matchAll(/var\((--bz-surface-[\w-]+)\)/g)].map(
+    (match) => match[1],
+  );
+  expect(tokens).toContain("--bz-surface-card");
+  return tokens.map((token) => resolveColour(`var(${token})`, scheme));
 }
 
+const FOCUS_SELECTORS = [
+  ".mantine-focus-auto:focus-visible",
+  ".mantine-focus-always:focus",
+  ".mantine-Switch-input:focus-visible + .mantine-Switch-track",
+  ".mantine-Chip-input:focus-visible + .mantine-Chip-label",
+];
+
 describe("focus indicators", () => {
-  it.each([
-    ["dark", ["#22223a", "#1a1a2e", "#121125"]],
-    ["light", ["#ffffff", "#f8f9fa", "#f1f3f5"]],
-  ] as const)(
-    "the %s focus ring clears 3:1 on every surface the wizard draws",
-    (scheme, surfaces) => {
-      const ring = focusRingHex(scheme);
-      expect(ring).toMatch(/^#[0-9a-f]{6}$/);
-      for (const surface of surfaces) {
+  it.each(["dark", "light"] as const)(
+    "the %s focus ring clears 3:1 on every surface the wizard paints",
+    (scheme) => {
+      const ring = resolveColour("var(--bz-focus-ring)", scheme);
+      for (const surface of wizardSurfaces(scheme)) {
         // WCAG 2.2 SC 1.4.11. The dark ring was brand-8, 2.05:1 on the card.
         expect(contrast(ring, surface)).toBeGreaterThanOrEqual(3);
       }
     },
   );
 
-  it("draws Mantine's focus ring in the token, not the primary shade", () => {
-    expect(themeSource).toMatch(
-      /\.mantine-focus-auto:focus-visible,[\s\S]*?outline-color: var\(--bz-focus-ring\);/,
-    );
-  });
+  it.each(FOCUS_SELECTORS)(
+    "%s draws its ring in the token, outside any layer",
+    (selector) => {
+      // Global by design: _bazarr.scss is compiled into every module.
+      const rule = rulesFor(themeRules, `:global ${selector}`).find(
+        (candidate) => candidate.decls["outline-color"] !== undefined,
+      );
+      expect(rule?.decls["outline-color"]).toBe("var(--bz-focus-ring)");
+      // Unlayered, or Mantine's own layered rule would win.
+      expect(rule?.at.some((at) => at.startsWith("@layer"))).toBe(false);
+    },
+  );
 
-  it("gives a focused input a visible indicator of its own", () => {
-    // Tab used to change only an overlay alpha, 0.06 to 0.07: 1.03:1.
-    const focus = inputSource.slice(inputSource.indexOf("&:focus,"));
-    expect(focus).toMatch(/border-color: var\(--bz-focus-ring\);/);
-    expect(focus).toMatch(/box-shadow: 0 0 0 1px var\(--bz-focus-ring\);/);
+  it.each(["dark", "light"] as const)(
+    "gives a focused %s input an indicator that clears 3:1",
+    (scheme) => {
+      // Tab used to change only an overlay alpha, 0.06 to 0.07: 1.03:1.
+      for (const selector of [".input:focus", ".input:focus-within"]) {
+        expect(declared(inputRules, selector, "border-color")).toBe(
+          "var(--bz-focus-ring)",
+        );
+        expect(declared(inputRules, selector, "box-shadow")).toBe(
+          "0 0 0 1px var(--bz-focus-ring)",
+        );
+      }
+      const ring = resolveColour("var(--bz-focus-ring)", scheme);
+      for (const surface of wizardSurfaces(scheme)) {
+        expect(contrast(ring, surface)).toBeGreaterThanOrEqual(3);
+      }
+    },
+  );
+
+  it("reaches every Mantine input through the theme", () => {
+    const provider = readFileSync("src/App/ThemeProvider.tsx", "utf8");
+    expect(provider).toMatch(
+      /import inputClasses from "@\/assets\/input\.module\.scss";/,
+    );
+    expect(provider).toMatch(
+      /Input: Input\.extend\(\{\s*classNames: inputClasses,\s*\}\)/,
+    );
   });
 });
 
 describe("rail numerals", () => {
-  const wizardSource = readFileSync(
-    "src/pages/Setup/OnboardingWizard.module.scss",
-    "utf8",
+  it.each([".dotActive", ".dotDone"])(
+    "%s keeps white numerals at 4.5:1 in both schemes",
+    (dot) => {
+      // 13px semibold is not large text, so it needs 4.5:1. White on the
+      // light filled shade, brand-6, was 4.2:1.
+      expect(declared(wizardRules, dot, "background")).toBe("var(--dot-fill)");
+      const numeral = resolveColour(
+        declared(wizardRules, dot, "color") ?? "",
+        "light",
+      );
+      const darkFill = declared(wizardRules, dot, "--dot-fill") ?? "";
+      const lightFill =
+        declared(
+          wizardRules,
+          `[data-mantine-color-scheme=light] ${dot}`,
+          "--dot-fill",
+        ) ?? darkFill;
+      expect(
+        contrast(numeral, resolveColour(darkFill, "dark")),
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast(numeral, resolveColour(lightFill, "light")),
+      ).toBeGreaterThanOrEqual(4.5);
+    },
   );
 
-  it("fill the light-mode dots dark enough for white 13px numerals", () => {
-    const block = wizardSource.slice(wizardSource.indexOf(".dotDone,"));
-    const light = block.match(
-      /@include mantine\.light \{\s*--dot-fill: var\(--mantine-color-brand-(\d)\);/,
-    )?.[1];
-    expect(light).toBeDefined();
-    // 13px semibold is not large text, so it needs 4.5:1. brand-6 was 4.2:1.
-    expect(contrast("#ffffff", brandHex(light ?? ""))).toBeGreaterThanOrEqual(
-      4.5,
-    );
-    expect(block).toMatch(/background: var\(--dot-fill\);/);
-    expect(block).toMatch(/color: var\(--mantine-color-white\);/);
+  it("marks the dot of the phase the reader is in", () => {
+    customRender(<OnboardingWizardView />);
+    const rail = screen.getByRole("progressbar", { name: "Setup progress" });
+    expect(rail).toHaveAttribute("aria-valuenow", "1");
+    // The first dot is the active one, and only it.
+    const dots = within(rail).getAllByText(/^[1-4]$/);
+    expect(dots[0]).toHaveClass(wizardStyles.dotActive);
+    for (const dot of dots.slice(1)) {
+      expect(dot).not.toHaveClass(wizardStyles.dotActive);
+    }
   });
 });
 
 describe("touch targets on a coarse pointer", () => {
-  const wizardSource = readFileSync(
-    "src/pages/Setup/OnboardingWizard.module.scss",
-    "utf8",
+  const coarse = wizardRules.filter((rule) =>
+    rule.at.includes("@media (pointer: coarse)"),
   );
+  const scoped = (selector: string) =>
+    `:global :root[data-bz-setup] ${selector}`;
 
-  // The block that carries the floor. jsdom applies no media query and
-  // computes no layout, so the stylesheet is what can be asserted.
-  function coarseBlock(): string {
-    const at = wizardSource.indexOf("@media (pointer: coarse)");
-    if (at < 0) return "";
-    let depth = 0;
-    for (let i = wizardSource.indexOf("{", at); i < wizardSource.length; i++) {
-      if (wizardSource[i] === "{") depth += 1;
-      else if (wizardSource[i] === "}" && --depth === 0) {
-        return wizardSource.slice(at, i + 1);
-      }
-    }
-    return "";
-  }
-
-  function rule(block: string, selector: string): string {
-    const at = block.indexOf(`${selector} {`);
-    return at < 0 ? "" : block.slice(at, block.indexOf("}", at));
-  }
-
-  it("floors every kind of control the wizard draws at 44px", () => {
-    const block = coarseBlock();
-    expect(block).toContain(":root[data-bz-setup]");
-    for (const variable of [
-      "--input-height-xs",
-      "--input-height-sm",
-      "--input-height-md",
+  it("floors buttons of every size the wizard uses, compact included", () => {
+    for (const size of [
+      "xs",
+      "sm",
+      "md",
+      "compact-xs",
+      "compact-sm",
+      "compact-md",
     ]) {
-      expect(rule(block, ".mantine-Input-wrapper")).toContain(
-        `${variable}: 44px;`,
-      );
+      expect(
+        declared(
+          coarse,
+          scoped(".mantine-Button-root"),
+          `--button-height-${size}`,
+        ),
+      ).toBe("44px");
     }
-    for (const variable of [
-      "--button-height-xs",
-      "--button-height-sm",
-      "--button-height-md",
+    expect(declared(coarse, scoped(".mantine-Button-root"), "min-height")).toBe(
+      "44px",
+    );
+    expect(declared(coarse, scoped(".mantine-Button-root"), "min-width")).toBe(
+      "44px",
+    );
+  });
+
+  it("floors inputs, icons, links, toggles and options at 44px", () => {
+    for (const size of ["xs", "sm", "md"]) {
+      expect(
+        declared(
+          coarse,
+          scoped(".mantine-Input-wrapper"),
+          `--input-height-${size}`,
+        ),
+      ).toBe("44px");
+    }
+    for (const selector of [
+      ".mantine-ActionIcon-root",
+      ".mantine-CloseButton-root:not(.mantine-Pill-remove)",
     ]) {
-      expect(rule(block, ".mantine-Button-root")).toContain(
-        `${variable}: 44px;`,
-      );
+      expect(declared(coarse, scoped(selector), "min-width")).toBe("44px");
+      expect(declared(coarse, scoped(selector), "min-height")).toBe("44px");
     }
-    expect(
-      rule(block, ".mantine-CloseButton-root:not(.mantine-Pill-remove)"),
-    ).toMatch(/min-width: 44px;\s*min-height: 44px;/);
     for (const selector of [
       ".mantine-Anchor-root",
+      ".mantine-Checkbox-body",
+      ".mantine-Radio-body",
       ".mantine-Switch-body",
+      ".mantine-Checkbox-label",
+      ".mantine-Radio-label",
       ".mantine-Switch-label",
       ".mantine-Combobox-option",
     ]) {
-      expect(rule(block, selector)).toContain("min-height: 44px;");
+      expect(declared(coarse, scoped(selector), "min-height")).toBe("44px");
     }
-    expect(block).toMatch(/\.mantine-Pill-remove \{[\s\S]*?inset: -12px;/);
+    expect(
+      declared(coarse, scoped(".mantine-Pill-remove::after"), "inset"),
+    ).toBe("-12px");
   });
 
   it("leaves the fine-pointer sizes alone", () => {
-    const outside = wizardSource.replace(coarseBlock(), "");
-    expect(outside).not.toMatch(/:\s*44px/);
+    const outside = wizardRules.filter(
+      (rule) => !rule.at.includes("@media (pointer: coarse)"),
+    );
+    for (const rule of outside) {
+      expect(Object.values(rule.decls)).not.toContain("44px");
+    }
   });
 
   it("scopes the floor to the document only while the wizard is mounted", () => {
