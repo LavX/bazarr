@@ -4,6 +4,7 @@ import os
 import re
 import logging
 import json
+import hashlib
 import requests
 import semver
 import sys
@@ -160,6 +161,13 @@ def _cached_releases_by_label():
     return by_label
 
 
+def _releases_digest(entries):
+    """A digest of one repo's entries that ignores their order, since
+    releases.txt holds them sorted by date rather than as the API listed them."""
+    lines = sorted(json.dumps(entry, sort_keys=True) for entry in entries)
+    return hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest()
+
+
 def check_releases(job_id=None, startup=False, wait_for_completion=False):
     # startup is used to prevent trying to create a job before the jobs queue is initialized
     if not startup and not job_id:
@@ -183,7 +191,7 @@ def check_releases(job_id=None, startup=False, wait_for_completion=False):
         previous = recorded.get(repo)
         if (tags is not None and cached is not None and isinstance(previous, dict)
                 and previous.get('tags') == tags
-                and previous.get('count') == len(cached.get(label, []))):
+                and previous.get('digest') == _releases_digest(cached.get(label, []))):
             logging.debug(f'BAZARR tags of {repo} have not moved, reusing its last fetched releases')  # noqa: G004
             releases.extend(cached.get(label, []))
             continue
@@ -198,7 +206,7 @@ def check_releases(job_id=None, startup=False, wait_for_completion=False):
         if tags is None:
             recorded.pop(repo, None)
         else:
-            recorded[repo] = {'tags': tags, 'count': len(fetched)}
+            recorded[repo] = {'tags': tags, 'digest': _releases_digest(fetched)}
 
     releases.sort(key=lambda r: r['date'], reverse=True)
 

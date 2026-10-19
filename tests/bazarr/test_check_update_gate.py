@@ -432,3 +432,53 @@ def test_switching_the_releases_repo_away_and_back_fetches_again(github, monkeyp
 
     assert github.api_calls() == [_BAZARR_API]
     assert [r["name"] for r in _releases_txt()] == ["v1.0.0", "v0.1.0"]
+
+
+def test_a_releases_file_with_a_stale_entry_fetches_that_repo(github):
+    from app.check_update import args
+
+    _check()
+    edited = _releases_txt()
+    for entry in edited:
+        if entry["repo"] == "AI Subtitle Translator":
+            entry["body"] = "notes from an older fetch"
+    with open(f"{args.config_dir}/config/releases.txt", "w", encoding="UTF-8") as f:
+        json.dump(edited, f)
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_TRANSLATOR_API]
+    assert [r["body"] for r in _releases_txt()] == ["notes for v1.0.0", "notes for v0.1.0"]
+
+
+def test_a_lost_tag_state_save_does_not_serve_a_newer_fetch_as_the_old_one(github, monkeypatch):
+    from app import check_update
+
+    _check()
+    github.tags[_BAZARR_AD] = [(_V2, "refs/tags/v1.0.0")]
+    github.releases[_BAZARR_API] = [dict(_release("v1.0.0", "2026-10-01T00:00:00Z"), body="edited notes")]
+    saved = check_update._save_release_tags
+    monkeypatch.setattr(check_update, "_save_release_tags", lambda state: None)
+    _check()
+    monkeypatch.setattr(check_update, "_save_release_tags", saved)
+    github.tags[_BAZARR_AD] = [(_V1, "refs/tags/v1.0.0")]
+    github.releases[_BAZARR_API] = [_release("v1.0.0", "2026-10-01T00:00:00Z")]
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_BAZARR_API]
+    assert [r["body"] for r in _releases_txt()] == ["notes for v1.0.0", "notes for v0.1.0"]
+
+
+def test_releases_the_api_lists_out_of_date_order_are_still_gated(github):
+    github.releases[_BAZARR_API] = [_release("v1.0.0", "2026-10-01T00:00:00Z"),
+                                    _release("v1.1.0", "2026-10-10T00:00:00Z")]
+    _check()
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == []
+    assert [r["name"] for r in _releases_txt()] == ["v1.1.0", "v1.0.0", "v0.1.0"]
