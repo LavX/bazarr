@@ -1015,9 +1015,16 @@ describe("touch targets on a coarse pointer", () => {
     ]) {
       expect(declared(coarse, scoped(selector), "min-height")).toBe("44px");
     }
-    expect(
-      declared(coarse, scoped(".mantine-Pill-remove::after"), "inset"),
-    ).toBe("-12px");
+    // The pill takes the floor: a grown hit area alone was clipped to 40px
+    // by the field around it, and covered sideways by the next pill.
+    for (const size of ["xs", "sm", "md"]) {
+      expect(
+        declared(coarse, scoped(".mantine-Pill-root"), `--pill-height-${size}`),
+      ).toBe("44px");
+    }
+    expect(declared(coarse, scoped(".mantine-Pill-remove"), "min-width")).toBe(
+      "44px",
+    );
   });
 
   it("leaves the fine-pointer sizes alone", () => {

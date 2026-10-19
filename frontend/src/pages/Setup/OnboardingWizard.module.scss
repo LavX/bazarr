@@ -314,16 +314,19 @@
         min-height: 44px;
       }
 
-      // A selected language's remove button lives inside a pill too short to
-      // grow, so its hit area grows around it instead.
-      .mantine-Pill-remove {
-        position: relative;
+      // A selected language's remove button is as tall as its pill. Growing
+      // only its hit area around a 22px pill measured 40px, because the
+      // field around the pills clips what overflows it, so the pill itself
+      // takes the floor and the field grows to hold it. A grown width was
+      // covered by the next pill along, 42px, so the button is widened too.
+      .mantine-Pill-root {
+        --pill-height-xs: 44px;
+        --pill-height-sm: 44px;
+        --pill-height-md: 44px;
+      }
 
-        &::after {
-          content: "";
-          position: absolute;
-          inset: -12px;
-        }
+      .mantine-Pill-remove {
+        min-width: 44px;
       }
     }
   }
