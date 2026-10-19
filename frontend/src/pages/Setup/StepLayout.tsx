@@ -76,7 +76,16 @@ const StepLayout: FC<Props> = ({
     }
   >
     <div className={styles.intro}>
-      <Title order={titleOrder}>{title}</Title>
+      {/* Where the shell puts focus when the step changes, so it takes focus
+          from script and never from Tab. */}
+      <Title
+        order={titleOrder}
+        tabIndex={-1}
+        data-step-heading
+        className={styles.heading}
+      >
+        {title}
+      </Title>
       {description && <Text c="dimmed">{description}</Text>}
       {aside}
     </div>

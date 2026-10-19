@@ -3,7 +3,7 @@ import { http, HttpResponse } from "msw";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import OnboardingWizardView from "./OnboardingWizard";
 import { settleSetupComplete } from "./setupCompleteCache";
@@ -473,6 +473,87 @@ describe("OnboardingWizardView", () => {
     expect(
       await screen.findByRole("heading", { name: /subtitle translation/i }),
     ).toBeInTheDocument();
+  });
+
+  it("names the page with one h1 and puts the step in a main landmark", () => {
+    customRender(<OnboardingWizardView />);
+
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Bazarr+ Setup" }),
+    ).toBeInTheDocument();
+    const main = screen.getByRole("main");
+    expect(
+      within(main).getByRole("heading", { name: /welcome to bazarr/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("reports progress as a progressbar instead of a hidden rail", async () => {
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    const rail = screen.getByRole("progressbar", { name: "Setup progress" });
+    expect(rail).not.toHaveAttribute("aria-hidden");
+    expect(rail).toHaveAttribute("aria-valuemin", "1");
+    expect(rail).toHaveAttribute("aria-valuemax", "4");
+    expect(rail).toHaveAttribute("aria-valuenow", "1");
+    expect(rail).toHaveAttribute(
+      "aria-valuetext",
+      "Part 1 of 4: Getting started, 1 of 2",
+    );
+    // A title is a mouse-hover label, and the value text already names the
+    // phase for everyone else.
+    expect(within(rail).queryByTitle(/.+/)).not.toBeInTheDocument();
+
+    await answerIntent(user, /sonarr, radarr or sportarr/i);
+    await screen.findByRole("heading", { name: /^sonarr$/i });
+
+    expect(rail).toHaveAttribute("aria-valuenow", "2");
+    expect(rail).toHaveAttribute(
+      "aria-valuetext",
+      "Part 2 of 4: Connect, 1 of 5",
+    );
+  });
+
+  it("takes no focus and announces nothing on first render", () => {
+    customRender(<OnboardingWizardView />);
+
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    expect(document.body).toHaveFocus();
+    expect(document.title).toBe("Welcome - Setup - Bazarr+");
+  });
+
+  it("moves focus to the new step's heading and announces the step", async () => {
+    // Focus used to drop to the body on every step, so a keyboard reader
+    // started from the top of the document each time, and nothing was said.
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+
+    const heading = await screen.findByRole("heading", {
+      name: /what do you want bazarr/i,
+    });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Your setup. Getting started, 2 of 2",
+    );
+    expect(document.title).toBe("Your setup - Setup - Bazarr+");
+
+    // Tab goes on from the heading into the step, not from the top.
+    await user.tab();
+    expect(
+      screen.getByRole("radio", { name: /sonarr, radarr or sportarr/i }),
+    ).toHaveFocus();
+
+    await user.click(screen.getByRole("radio", { name: /find subtitles/i }));
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    const servers = await screen.findByRole("heading", {
+      name: /^media servers$/i,
+    });
+    await waitFor(() => expect(servers).toHaveFocus());
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Media servers. Connect, Media servers 1 of 1",
+    );
   });
 
   it("keeps what was typed on a step across Back and forward", async () => {

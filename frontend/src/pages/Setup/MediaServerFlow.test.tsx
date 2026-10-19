@@ -164,7 +164,9 @@ describe("media server selection", () => {
     expect(
       await screen.findByRole("heading", { name: /^jellyfin$/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/media servers 2 of 3/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/connect \u00b7 media servers 2 of 3/i),
+    ).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: /continue without jellyfin/i }),
@@ -172,7 +174,9 @@ describe("media server selection", () => {
     expect(
       await screen.findByRole("heading", { name: /^emby$/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/media servers 3 of 3/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/connect \u00b7 media servers 3 of 3/i),
+    ).toBeInTheDocument();
   });
 
   it("Back into the picker, retick, and forward lands on the right screen", async () => {
@@ -412,7 +416,9 @@ describe("media server selection", () => {
     // Waiting on the segment counter rather than a timer: it drops to 2 of 2
     // only once the saved draft has been committed and the step list rebuilt,
     // which is the moment any stray advance would have happened.
-    expect(await screen.findByText(/media servers 2 of 2/i)).toBeVisible();
+    expect(
+      await screen.findByText(/connect \u00b7 media servers 2 of 2/i),
+    ).toBeVisible();
 
     expect(
       screen.getByRole("heading", { name: /^emby$/i }),

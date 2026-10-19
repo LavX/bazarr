@@ -51,11 +51,26 @@
 }
 
 .brandTitle {
+  margin: 0;
   font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--bz-text-tertiary);
+}
+
+// The step's own column: the rail, the card and the skip under it. A real box
+// rather than display: contents, which has dropped the landmark in browsers
+// that are still in use.
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+
+  &:focus {
+    outline: none;
+  }
 }
 
 .progress {

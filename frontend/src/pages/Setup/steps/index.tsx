@@ -1,3 +1,4 @@
+import { kindName } from "@/pages/Settings/MediaServers/kinds";
 import type { MediaServerDraftSummary } from "@/pages/Setup/useOnboardingSelection";
 import MediaServerConfigureStep from "./mediaServer/MediaServerConfigureStep";
 import ProvidersStep from "./providers/ProvidersStep";
@@ -177,8 +178,9 @@ export function buildSteps({
       key: mediaServerStepKey(draft.draftId),
       // Named for the kind, not the draft's editable name: the label feeds the
       // step list, and a list that changes shape on every keystroke in the
-      // Name field would remount the form under the cursor.
-      label: draft.kind,
+      // Name field would remount the form under the cursor. It is also what
+      // the window title and the step announcement read out.
+      label: kindName(draft.kind),
       phase: "connect",
       segment: MEDIA_SERVER_SEGMENT,
       optional: true,

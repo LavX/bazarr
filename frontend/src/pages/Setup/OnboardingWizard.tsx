@@ -16,11 +16,14 @@ import {
   Paper,
   Stack,
   Text,
+  VisuallyHidden,
 } from "@mantine/core";
+import { useDocumentTitle } from "@mantine/hooks";
 import { faCheck } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettingsMutation } from "@/apis/hooks";
+import { useInstanceName } from "@/apis/hooks/site";
 import { PHASE_LABELS, WIZARD_PHASES } from "./steps/types";
 import { clearPersistedConnectionTests } from "./connectionTests";
 import { settleSetupComplete } from "./setupCompleteCache";
@@ -93,6 +96,13 @@ const OnboardingWizardBody: FunctionComponent = () => {
 
   const { index, step: current, goTo, reset } = useWizardStep(steps);
   const StepComponent = current.Component;
+  const instanceName = useInstanceName()?.trim() || "Bazarr+";
+  useDocumentTitle(`${current.label} - Setup - ${instanceName}`);
+  const mainRef = useRef<HTMLElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  // What the status region last said. Empty until the reader first moves, so
+  // nothing is read out over the page a screen reader announces on load.
+  const [announcement, setAnnouncement] = useState("");
 
   // The step key is in the URL, so the wizard has history of its own: browser
   // Back walks one step back instead of leaving the application, a reload
@@ -235,6 +245,27 @@ const OnboardingWizardBody: FunctionComponent = () => {
     inSegment.length > 0
       ? `${current.segment} ${inSegment.findIndex((s) => s.key === current.key) + 1} of ${inSegment.length}`
       : `${inPhase.findIndex((s) => s.key === current.key) + 1} of ${inPhase.length}`;
+  const progressText = `${PHASE_LABELS[current.phase]}${showCount ? `, ${counter}` : ""}`;
+
+  // A step change swaps the whole card, and the control that was pressed goes
+  // with it, so focus fell to the body and a keyboard reader started again from
+  // the top of the document on every step. Focus goes to the new step's
+  // heading instead, and the status region says where the reader now is. The
+  // key the reader last saw is kept rather than a first-render flag: React
+  // runs this twice on mount in strict mode, and only a real move should take
+  // focus.
+  const shownKey = useRef(current.key);
+  useEffect(() => {
+    if (shownKey.current === current.key) {
+      return;
+    }
+    shownKey.current = current.key;
+    const heading = cardRef.current?.querySelector<HTMLElement>(
+      "[data-step-heading]",
+    );
+    (heading ?? mainRef.current)?.focus();
+    setAnnouncement(`${current.label}. ${progressText}`);
+  }, [current.key, current.label, progressText]);
 
   // Marking setup complete ends onboarding, so it asks first. The write can
   // also fail, and a failed write used to produce nothing at all: no spinner,
@@ -280,7 +311,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
       <div className={styles.shell}>
         <header className={styles.header}>
           <div className={styles.brand}>
-            <span className={styles.brandTitle}>Bazarr+ Setup</span>
+            <h1 className={styles.brandTitle}>Bazarr+ Setup</h1>
             <Text className={styles.progress}>
               {PHASE_LABELS[current.phase]}
               {showCount ? ` · ${counter}` : ""}
@@ -348,80 +379,95 @@ const OnboardingWizardBody: FunctionComponent = () => {
           </Stack>
         </Modal>
 
-        <div className={styles.rail} aria-hidden>
-          {WIZARD_PHASES.map((phase, position) => {
-            const done = position < phaseIndex;
-            const active = position === phaseIndex;
-            const dotClass = [
-              styles.dot,
-              done ? styles.dotDone : "",
-              active ? styles.dotActive : "",
-            ]
-              .filter(Boolean)
-              .join(" ");
-            return (
-              <div key={phase} className={styles.railNode}>
-                <div className={styles.railLabelGroup}>
-                  <span className={dotClass} title={PHASE_LABELS[phase]}>
-                    {done ? <FontAwesomeIcon icon={faCheck} /> : position + 1}
-                  </span>
-                  <span
-                    className={[
-                      styles.railLabel,
-                      active ? styles.railLabelActive : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                  >
-                    {PHASE_LABELS[phase]}
-                  </span>
+        <main ref={mainRef} className={styles.main} tabIndex={-1}>
+          {/* A progressbar's children are presentational, so the dots and their
+            labels are drawn for the eye and the value text carries all of it
+            for everyone else. */}
+          <div
+            className={styles.rail}
+            role="progressbar"
+            aria-label="Setup progress"
+            aria-valuemin={1}
+            aria-valuemax={WIZARD_PHASES.length}
+            aria-valuenow={phaseIndex + 1}
+            aria-valuetext={`Part ${phaseIndex + 1} of ${WIZARD_PHASES.length}: ${progressText}`}
+          >
+            {WIZARD_PHASES.map((phase, position) => {
+              const done = position < phaseIndex;
+              const active = position === phaseIndex;
+              const dotClass = [
+                styles.dot,
+                done ? styles.dotDone : "",
+                active ? styles.dotActive : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return (
+                <div key={phase} className={styles.railNode}>
+                  <div className={styles.railLabelGroup}>
+                    <span className={dotClass}>
+                      {done ? <FontAwesomeIcon icon={faCheck} /> : position + 1}
+                    </span>
+                    <span
+                      className={[
+                        styles.railLabel,
+                        active ? styles.railLabelActive : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                    >
+                      {PHASE_LABELS[phase]}
+                    </span>
+                  </div>
+                  {position < WIZARD_PHASES.length - 1 && (
+                    <span
+                      className={[
+                        styles.connector,
+                        done ? styles.connectorDone : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                    />
+                  )}
                 </div>
-                {position < WIZARD_PHASES.length - 1 && (
-                  <span
-                    className={[
-                      styles.connector,
-                      done ? styles.connectorDone : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
 
-        <Paper className={styles.card}>
-          {/* Keyed by the step, so moving to another step starts its component
+          <VisuallyHidden role="status">{announcement}</VisuallyHidden>
+
+          <Paper ref={cardRef} className={styles.card}>
+            {/* Keyed by the step, so moving to another step starts its component
               clean while a rebuild of the list around the current one does
               not: the media server steps all share one component type now, and
               without a key React would carry one server's form state into the
               next server's screen. */}
-          <StepComponent
-            key={current.key}
-            onNext={next}
-            // No Back while the step is finishing work either. Back moves the
-            // cursor itself, which unmounts the step before any history guard
-            // can see it, and an install that loses its screen still restarts
-            // Bazarr+ at a reader who is no longer there.
-            onBack={index > 0 && !stepBusy ? back : undefined}
-            draftId={current.draftId}
-            stepKey={current.key}
-          />
-        </Paper>
+            <StepComponent
+              key={current.key}
+              onNext={next}
+              // No Back while the step is finishing work either. Back moves the
+              // cursor itself, which unmounts the step before any history guard
+              // can see it, and an install that loses its screen still restarts
+              // Bazarr+ at a reader who is no longer there.
+              onBack={index > 0 && !stepBusy ? back : undefined}
+              draftId={current.draftId}
+              stepKey={current.key}
+            />
+          </Paper>
 
-        {current.optional && !stepBusy ? (
-          <div className={styles.stepSkip}>
-            <Button variant="subtle" color="gray" onClick={next}>
-              {current.skipLabel ?? "Do this later"}
-            </Button>
-          </div>
-        ) : (
-          !current.optional &&
-          current.requiredReason && (
-            <Text className={styles.stepNote}>{current.requiredReason}</Text>
-          )
-        )}
+          {current.optional && !stepBusy ? (
+            <div className={styles.stepSkip}>
+              <Button variant="subtle" color="gray" onClick={next}>
+                {current.skipLabel ?? "Do this later"}
+              </Button>
+            </div>
+          ) : (
+            !current.optional &&
+            current.requiredReason && (
+              <Text className={styles.stepNote}>{current.requiredReason}</Text>
+            )
+          )}
+        </main>
       </div>
     </Box>
   );
