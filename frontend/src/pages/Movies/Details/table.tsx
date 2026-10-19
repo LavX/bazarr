@@ -18,6 +18,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { isString } from "lodash";
 import {
+  useEmbeddedTrackVisibility,
   useMovieSubtitleModification,
   useSubtitleFileDownload,
   useSubtitleSyncStatus,
@@ -27,6 +28,7 @@ import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action } from "@/components";
 import { CombinedSubtitleBadge, HistoryIcon } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
+import HiddenTracks from "@/components/HiddenTracks";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
@@ -38,6 +40,8 @@ import {
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
   describeEmbeddedTrack,
+  embeddedTrackLabel,
+  embeddedTracksSharingKey,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
   isBitmapCodec,
@@ -404,6 +408,7 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
     useMovieTable();
   const navigate = useNavigate();
   const { download, remove } = useMovieSubtitleModification();
+  const { hide } = useEmbeddedTrackVisibility();
   const combine = useCombineSubtitles();
   const fileDownload = useSubtitleFileDownload();
 
@@ -540,6 +545,14 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
     <SubtitleToolsMenu
       selections={selections}
       embeddedTrack={isSubtitleTrack(path)}
+      trackLabel={embeddedTrackLabel(item)}
+      coveredTracks={
+        isSubtitleTrack(path)
+          ? embeddedTracksSharingKey(item, movie.subtitles).map((track) =>
+              embeddedTrackLabel(track),
+            )
+          : undefined
+      }
       canSync={canSynchronizeSubtitle(item)}
       canCompareSyncOutputs={canCompareSyncOutputs}
       onAction={async (action) => {
@@ -582,6 +595,19 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
               hi,
               path,
             },
+          });
+        } else if (action === "hide" && isSubtitleTrack(path)) {
+          // mutate, not mutateAsync: the hook reports a refusal, and the
+          // menu does not await this callback.
+          hide.mutate({
+            /* eslint-disable camelcase */
+            media_type: "movie",
+            media_id: movie.id,
+            arr_instance_id: movie.arr_instance_id,
+            /* eslint-enable camelcase */
+            language: code2,
+            hi: toPython(hi),
+            forced: toPython(forced),
           });
         }
       }}
@@ -844,6 +870,14 @@ const Table: FunctionComponent<Props> = ({
         }}
         tableStyles={{ emptyText: "No subtitles found for this movie" }}
       ></SimpleTable>
+      {movie && (
+        <HiddenTracks
+          mediaType="movie"
+          mediaId={movie.id}
+          disabled={disabled}
+          align="end"
+        />
+      )}
       {movie && compareSelection && (
         <SyncOutputCompareModal
           opened={compareSelection !== null}

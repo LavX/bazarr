@@ -113,6 +113,55 @@ export interface UpgradableResponse {
   sportsKeys?: UpgradableSportsKey[];
 }
 
+export type HiddenTrackMediaType = "movie" | "episode" | "sports";
+
+export interface EmbeddedHiddenTrack {
+  media_type: HiddenTrackMediaType;
+  /** Local id of the movie, episode or sports event. */
+  media_id: number;
+  arr_instance_id: number | null;
+  /** The stored key, such as "en" or "en:hi". */
+  language: string;
+  code2: string;
+  name: string;
+  hi: boolean;
+  forced: boolean;
+  codec: string | null;
+  hidden_at: string | null;
+}
+
+export interface EmbeddedTrackForm {
+  media_type: HiddenTrackMediaType;
+  media_id: number;
+  arr_instance_id?: number | null;
+  language: string;
+  hi: PythonBoolean;
+  forced: PythonBoolean;
+}
+
+export interface TrackLanguage {
+  code2: string;
+  name: string;
+  hi: boolean;
+  forced: boolean;
+}
+
+/** What a hide changed, read back from the row after the re-index. */
+export interface HideTrackResult {
+  /** True when the language is now missing, so it is searched for. */
+  wanted: boolean;
+  hidden: TrackLanguage;
+  /** The subtitles of the same language that still satisfy it. */
+  covered_by: (TrackLanguage & { embedded: boolean })[];
+}
+
+/**
+ * How many ids one listing request carries. A series or league page can hold
+ * over a thousand, and each adds about 21 characters to the URL: 400 already
+ * pass the 8 KB request line a stock nginx reverse proxy accepts.
+ */
+export const HIDDEN_TRACKS_BATCH = 100;
+
 export interface ArchiveExtractedFile {
   name: string;
   // base64-encoded file content
@@ -340,6 +389,38 @@ class SubtitlesApi extends BaseApi {
       },
     );
     return response.data;
+  }
+
+  async hiddenTracks(
+    mediaType: HiddenTrackMediaType,
+    mediaIds: number[],
+  ): Promise<EmbeddedHiddenTrack[]> {
+    const batches: number[][] = [];
+    for (let at = 0; at < mediaIds.length; at += HIDDEN_TRACKS_BATCH) {
+      batches.push(mediaIds.slice(at, at + HIDDEN_TRACKS_BATCH));
+    }
+    const responses = await Promise.all(
+      batches.map((batch) =>
+        this.get<DataWrapper<EmbeddedHiddenTrack[]>>(
+          "/embedded-hidden",
+          // eslint-disable-next-line camelcase
+          { media_type: mediaType, media_id: batch },
+        ),
+      ),
+    );
+    return responses.flatMap((response) => response.data);
+  }
+
+  async hideTrack(form: EmbeddedTrackForm): Promise<HideTrackResult> {
+    const response = await this.post<DataWrapper<HideTrackResult>>(
+      "/embedded-hidden",
+      form,
+    );
+    return response.data.data;
+  }
+
+  async unhideTrack(form: EmbeddedTrackForm) {
+    await this.delete("/embedded-hidden", form);
   }
 
   async contents(subtitlePath: string) {

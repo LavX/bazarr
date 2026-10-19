@@ -18,6 +18,7 @@ const renderBadge = (subtitle: Subtitle) =>
     <Subtitle
       seriesId={1}
       episodeId={2}
+      localEpisodeId={20}
       arrInstanceId={1}
       subtitle={subtitle}
       availableSubtitles={[]}

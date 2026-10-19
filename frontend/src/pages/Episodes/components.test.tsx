@@ -66,6 +66,7 @@ describe("Subtitle badge source", () => {
       <Subtitle
         seriesId={1}
         episodeId={2}
+        localEpisodeId={20}
         arrInstanceId={1}
         missing={missing}
         subtitle={subtitle}
@@ -114,6 +115,7 @@ describe("Subtitle badge score", () => {
         <Subtitle
           seriesId={1}
           episodeId={2}
+          localEpisodeId={20}
           arrInstanceId={1}
           missing={missing}
           subtitle={subtitle}

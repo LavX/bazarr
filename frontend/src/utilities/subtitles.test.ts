@@ -3,10 +3,14 @@ import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
+  embeddedTrackLabel,
+  embeddedTracksSharingKey,
   getCombinedLabel,
   getCombinedSecondaries,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
+  hiddenTrackCodecs,
+  hiddenTrackOutcome,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
   isSyncOutputLanguageKey,
@@ -402,5 +406,106 @@ describe("combineRequestForSubtitle", () => {
         path: "/movie/Movie.en.srt",
       }),
     ).toBeNull();
+  });
+});
+
+describe("embeddedTrackLabel", () => {
+  const track = (hi: boolean, forced: boolean): Subtitle => ({
+    code2: "en",
+    name: "English",
+    hi,
+    forced,
+    path: null,
+  });
+
+  it("names the language and its variant", () => {
+    expect(embeddedTrackLabel(track(false, false))).toBe("English");
+    expect(embeddedTrackLabel(track(true, false))).toBe("English (HI)");
+    expect(embeddedTrackLabel(track(false, true))).toBe("English (forced)");
+    expect(embeddedTrackLabel(track(true, true))).toBe("English (HI, forced)");
+  });
+
+  it("falls back to the code when a row has no name", () => {
+    expect(embeddedTrackLabel({ ...track(false, false), name: "" })).toBe("en");
+  });
+});
+
+describe("embeddedTracksSharingKey", () => {
+  const track = (code2: string, hi: boolean, path: string | null) => ({
+    code2,
+    name: code2,
+    hi,
+    forced: false,
+    path,
+  });
+
+  it("takes every embedded track with the same language and flags", () => {
+    const srt = track("en", false, null);
+    const pgs = track("en", false, null);
+    const listing = [
+      srt,
+      pgs,
+      track("en", true, null),
+      track("en", false, "/m/m.en.srt"),
+      track("fr", false, null),
+    ];
+    expect(embeddedTracksSharingKey(srt, listing)).toEqual([srt, pgs]);
+  });
+
+  it("falls back to the track itself when the listing lacks it", () => {
+    const srt = track("en", false, null);
+    expect(embeddedTracksSharingKey(srt, [])).toEqual([srt]);
+  });
+});
+
+describe("hiddenTrackCodecs", () => {
+  // A hide covers every track with the same language, HI and forced, so the
+  // server records all of their codecs in one field.
+  it("splits the codecs one hide recorded", () => {
+    expect(hiddenTrackCodecs("pgs, subrip")).toEqual(["pgs", "subrip"]);
+  });
+
+  it("takes a single codec as it is", () => {
+    expect(hiddenTrackCodecs("vobsub")).toEqual(["vobsub"]);
+  });
+
+  it.each([null, "", " , "])("has none for %j", (codec) => {
+    expect(hiddenTrackCodecs(codec)).toEqual([]);
+  });
+});
+
+describe("hiddenTrackOutcome", () => {
+  const english = { code2: "en", name: "English", hi: false, forced: false };
+
+  it("says nothing when the language is now wanted", () => {
+    expect(
+      // eslint-disable-next-line camelcase
+      hiddenTrackOutcome({ wanted: true, hidden: english, covered_by: [] }),
+    ).toBeNull();
+  });
+
+  it("names what still covers the language", () => {
+    expect(
+      hiddenTrackOutcome({
+        wanted: false,
+        hidden: english,
+        // eslint-disable-next-line camelcase
+        covered_by: [
+          { ...english, hi: true, embedded: true },
+          { ...english, embedded: false },
+        ],
+      }),
+    ).toBe(
+      "English is still covered by English (HI) (embedded track), English (subtitle file), so Bazarr+ will not search for it.",
+    );
+  });
+
+  it("says when the profile does not ask for the language", () => {
+    expect(
+      // eslint-disable-next-line camelcase
+      hiddenTrackOutcome({ wanted: false, hidden: english, covered_by: [] }),
+    ).toBe(
+      "English is not wanted for this title under its languages profile, so Bazarr+ will not search for it.",
+    );
   });
 });

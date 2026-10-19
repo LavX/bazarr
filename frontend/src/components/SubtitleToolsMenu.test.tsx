@@ -10,7 +10,7 @@ import { Button } from "@mantine/core";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import api from "@/apis/raw";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, screen, waitFor, within } from "@/tests";
 import SubtitleToolsMenu from "./SubtitleToolsMenu";
 
 vi.mock("@/apis/raw", async (importOriginal) => {
@@ -65,5 +65,94 @@ describe("SubtitleToolsMenu", () => {
     expect(
       vi.mocked(api.subtitles.modify).mock.calls.map((call) => call[1].path),
     ).toEqual(["/m/a.en.srt", "/m/b.en.srt"]);
+  });
+});
+
+describe("SubtitleToolsMenu red slot", () => {
+  it("hides an embedded track instead of deleting it, with its own confirm copy", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    customRender(
+      <SubtitleToolsMenu
+        selections={[selection("")]}
+        embeddedTrack
+        trackLabel="English (HI)"
+        onAction={onAction}
+      >
+        <Button>Tools</Button>
+      </SubtitleToolsMenu>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Tools" }));
+    expect(
+      screen.queryByRole("menuitem", { name: "Delete..." }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Hide track..." }),
+    );
+
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Hide this embedded track?" }),
+    );
+    expect(
+      dialog.getByText(
+        "Bazarr+ will stop listing this track for this title and will treat English (HI) as wanted again. The media file is not changed.",
+      ),
+    ).toBeInTheDocument();
+    // The list names the track, never a path: an embedded track has none.
+    expect(
+      dialog.getByText("English (HI) (embedded track)"),
+    ).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Hide track" }));
+    expect(onAction).toHaveBeenCalledWith("hide");
+  });
+
+  it("lists every track one Hide takes when several share the key", async () => {
+    const user = userEvent.setup();
+    customRender(
+      <SubtitleToolsMenu
+        selections={[selection("")]}
+        embeddedTrack
+        trackLabel="English"
+        coveredTracks={["English", "English"]}
+        onAction={vi.fn()}
+      >
+        <Button>Tools</Button>
+      </SubtitleToolsMenu>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Tools" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Hide track..." }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Hide this embedded track?" }),
+    );
+    expect(dialog.getAllByText("English (embedded track)")).toHaveLength(2);
+    expect(
+      dialog.getByText(
+        "Bazarr+ tells embedded tracks apart only by language, HI and forced, so these 2 tracks are hidden together.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps Delete, and no Hide, on a subtitle file", async () => {
+    const user = userEvent.setup();
+    customRender(
+      <SubtitleToolsMenu
+        selections={[selection("/m/a.en.srt")]}
+        onAction={vi.fn()}
+      >
+        <Button>Tools</Button>
+      </SubtitleToolsMenu>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Tools" }));
+    expect(
+      await screen.findByRole("menuitem", { name: "Delete..." }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("menuitem", { name: "Hide track..." }),
+    ).not.toBeInTheDocument();
   });
 });

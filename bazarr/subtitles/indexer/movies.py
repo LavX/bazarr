@@ -28,6 +28,7 @@ from radarr.history import history_log_movie
 from app.jobs_queue import jobs_queue
 from subtitles.adaptive_searching import is_search_given_up
 from subtitles.mismatch import prune_mismatches_for_media
+from subtitles.embedded_hidden import hidden_languages
 from arr_instances.resolution import scoped
 
 gc.enable()
@@ -65,13 +66,16 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
             item = database.execute(
-                scoped(select(TableMovies.movie_file_id, TableMovies.file_size)
+                scoped(select(TableMovies.id, TableMovies.movie_file_id, TableMovies.file_size)
                        .where(TableMovies.path == original_path),
                        TableMovies.arr_instance_id, owner_instance_id)) \
                 .first()
             if not item:
                 logging.exception(f"BAZARR error when trying to select this movie from database: {reversed_path}")  # noqa: G004
             else:
+                # Tracks the user hid on this movie are skipped, so they neither
+                # list nor satisfy their language, which makes it wanted again.
+                hidden = hidden_languages(database, 'movie', [item.id], owner_instance_id)
                 try:
                     subtitle_languages = embedded_subs_reader(reversed_path,
                                                               file_size=item.file_size,
@@ -94,6 +98,9 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                                     alpha2_from_alpha3(subtitle_language),
                                     forced=subtitle_forced,
                                     hi=subtitle_hi)
+                                if lang in hidden:
+                                    logging.debug("BAZARR skipping hidden embedded subtitles: %s", lang)
+                                    continue
                                 logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
                                 actual_subtitles.append(embedded_entry(lang, subtitle_codec))
                                 embedded_languages.append(lang)

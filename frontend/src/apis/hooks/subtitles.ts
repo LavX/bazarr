@@ -1,12 +1,22 @@
+import { useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AxiosError } from "axios";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { BatchAction, BatchItem, BatchOptions } from "@/apis/raw/subtitles";
+import {
+  BatchAction,
+  BatchItem,
+  BatchOptions,
+  EmbeddedHiddenTrack,
+  EmbeddedTrackForm,
+  HiddenTrackMediaType,
+} from "@/apis/raw/subtitles";
 import { notification } from "@/modules/notification";
 import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
+import { hiddenTrackOutcome } from "@/utilities/subtitles";
 
 export function useSubtitleAction() {
   const client = useQueryClient();
@@ -734,4 +744,94 @@ export function useSubtitleArchiveDownload() {
       );
     },
   });
+}
+
+// The socket handlers refresh this listing per media type, under
+// [...hiddenTracksKey, mediaType], along with the rows the tracks left.
+const hiddenTracksKey = [QueryKeys.Subtitles, QueryKeys.EmbeddedHidden];
+
+// Declared once rather than inline: TanStack Query then regroups the listing
+// only when it changes, not on every render of every row that reads it.
+function tracksByMediaId(tracks: EmbeddedHiddenTrack[]) {
+  const byId = new Map<number, EmbeddedHiddenTrack[]>();
+  tracks.forEach((track) => {
+    const group = byId.get(track.media_id);
+    if (group) {
+      group.push(track);
+    } else {
+      byId.set(track.media_id, [track]);
+    }
+  });
+  return byId;
+}
+
+/**
+ * The embedded tracks hidden on these media rows, keyed by local id. One
+ * query for a whole series or league page rather than one per row; the client
+ * splits it into requests of HIDDEN_TRACKS_BATCH ids.
+ */
+export function useEmbeddedHiddenTracks(
+  mediaType: HiddenTrackMediaType,
+  mediaIds: number[],
+) {
+  const ids = useMemo(() => [...mediaIds].sort((a, b) => a - b), [mediaIds]);
+  return useQuery({
+    queryKey: [...hiddenTracksKey, mediaType, ...ids],
+    queryFn: () => api.subtitles.hiddenTracks(mediaType, ids),
+    enabled: ids.length > 0,
+    select: tracksByMediaId,
+  });
+}
+
+/** Hide and unhide. Both refresh the listing the row came from. */
+export function useEmbeddedTrackVisibility() {
+  const client = useQueryClient();
+
+  const refresh = (form: EmbeddedTrackForm) => {
+    void client.invalidateQueries({ queryKey: hiddenTracksKey });
+    // The same roots the tools menu refreshes: movie queries are keyed by
+    // local id under Movies, episodes under Series and Episodes, sports
+    // under Sports.
+    if (form.media_type === "movie") {
+      void client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
+    } else if (form.media_type === "episode") {
+      void client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+      void client.invalidateQueries({ queryKey: [QueryKeys.Episodes] });
+    } else {
+      void client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+    }
+  };
+
+  // The client shows no toast for a 409, it leaves that to the caller. Here
+  // it is the refusal the user needs to see: the video file cannot be read,
+  // or the re-index could not apply the hide, which was then taken back.
+  const refused = (title: string) => (error: Error) => {
+    if (error instanceof AxiosError && error.response?.status === 409) {
+      showNotification(notification.error(title, error.message));
+    }
+  };
+
+  // Refreshed after an error too: a hide whose re-index failed part way can
+  // still have changed the row, and the page must show what is really there.
+  const hide = useMutation({
+    mutationKey: [...hiddenTracksKey, "hide"],
+    mutationFn: (form: EmbeddedTrackForm) => api.subtitles.hideTrack(form),
+    onSuccess: (result) => {
+      const outcome = hiddenTrackOutcome(result);
+      if (outcome) {
+        showNotification(notification.info("Track hidden", outcome));
+      }
+    },
+    onError: refused("Track not hidden"),
+    onSettled: (_result, _error, form) => refresh(form),
+  });
+
+  const unhide = useMutation({
+    mutationKey: [...hiddenTracksKey, "unhide"],
+    mutationFn: (form: EmbeddedTrackForm) => api.subtitles.unhideTrack(form),
+    onError: refused("Track not unhidden"),
+    onSettled: (_result, _error, form) => refresh(form),
+  });
+
+  return { hide, unhide };
 }

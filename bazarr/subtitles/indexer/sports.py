@@ -24,6 +24,7 @@ from sportarr.parser import positive_id
 from sportarr.settings import get_sports_settings
 from sportarr.sync.leagues import notify, require_sportarr
 from subtitles.adaptive_searching import is_search_given_up
+from subtitles.embedded_hidden import hidden_languages
 from subtitles.mismatch import prune_mismatches_for_media
 from subtitles.indexer.entries import embedded_entry
 from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, get_external_subtitles_path,
@@ -240,6 +241,8 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
             data = _metadata(context, signature, cached, use_cache, cancel)
         embedded_codes = []
         if settings.general.use_embedded_subs:
+            # Hidden tracks are skipped: not listed, and not counted by _missing.
+            hidden = hidden_languages(database, 'sports', [context.event_id], context.arr_instance_id)
             for language, forced, hi, codec in embedded_subtitles_from_metadata(data):
                 if codec and ((settings.general.ignore_pgs_subs and codec.lower() == 'pgs') or
                               (settings.general.ignore_vobsub_subs and codec.lower() == 'vobsub') or
@@ -248,6 +251,8 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
                 code = alpha2_from_alpha3(language)
                 if code:
                     code = normalize_subtitle_language_variant(code, forced=forced, hi=hi)
+                    if code in hidden:
+                        continue
                     actual.append(embedded_entry(code, codec))
                     embedded_codes.append(code)
         actual.extend(_external(context, mappings, ownership_index, cancel))

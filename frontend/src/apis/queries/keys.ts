@@ -9,6 +9,7 @@ export enum QueryKeys {
   System = "system",
   Settings = "settings",
   Subtitles = "subtitles",
+  EmbeddedHidden = "embedded-hidden",
   Providers = "providers",
   ProviderHub = "provider-hub",
   DistributionHub = "distribution-hub",

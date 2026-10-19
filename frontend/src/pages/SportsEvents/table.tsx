@@ -21,7 +21,11 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef, Table as TableInstance } from "@tanstack/react-table";
-import { useSubtitleFileDownload } from "@/apis/hooks";
+import {
+  useEmbeddedTrackVisibility,
+  useLanguages,
+  useSubtitleFileDownload,
+} from "@/apis/hooks";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { useSportsSubtitleModification } from "@/apis/hooks/sports";
@@ -32,6 +36,7 @@ import {
   CombinedSubtitleBadge,
   HistoryIcon,
 } from "@/components/bazarr";
+import HiddenTracks from "@/components/HiddenTracks";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
@@ -44,6 +49,8 @@ import {
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
   describeEmbeddedTrack,
+  embeddedTrackLabel,
+  embeddedTracksSharingKey,
   getSubtitleSyncStatusPresentation,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
@@ -72,6 +79,9 @@ type SportsSubtitleTuple = SportsEvent["subtitles"][number];
 // even on an event whose own subtitles had not changed.
 interface EventsTableValue {
   disabled?: boolean;
+  // Every event's disclosure asks with this same list, so the page makes one
+  // request for all of them.
+  eventIds: number[];
   indexingId?: number;
   profile?: Language.Profile;
   onIndex: (event: SportsEvent) => void;
@@ -157,6 +167,19 @@ const EventSubtitleBadge: FunctionComponent<{
   const combine = useCombineSubtitles();
   const fileDownload = useSubtitleFileDownload();
   const { remove } = useSportsSubtitleModification();
+  const { hide } = useEmbeddedTrackVisibility();
+  const { data: languages } = useLanguages();
+
+  // A sports tuple carries only the language code. The hidden-tracks list
+  // and the toast after a hide name the language as the server does,
+  // "French", so the Hide confirmation names it the same way.
+  const hideLabel = (track: Subtitle) =>
+    embeddedTrackLabel({
+      ...track,
+      name:
+        languages?.find((language) => language.code2 === track.code2)?.name ||
+        track.code2,
+    });
 
   const isEmbedded = !subtitle.path;
   const isCombinedOutput = !missing && isCombinedOutputSubtitle(subtitle);
@@ -242,6 +265,14 @@ const EventSubtitleBadge: FunctionComponent<{
         mediaType="sports"
         arrInstanceId={event.arr_instance_id}
         embeddedTrack={isEmbedded}
+        trackLabel={hideLabel(subtitle)}
+        coveredTracks={
+          isEmbedded
+            ? embeddedTracksSharingKey(subtitle, availableSubtitles).map(
+                hideLabel,
+              )
+            : undefined
+        }
         onAction={async (action) => {
           if (action === "view") {
             navigate(editorUrl("preview"));
@@ -284,6 +315,19 @@ const EventSubtitleBadge: FunctionComponent<{
                 path: subtitle.path,
               },
             });
+          } else if (action === "hide" && isEmbedded) {
+            // mutate, not mutateAsync: the hook reports a refusal, and the
+            // menu does not await this callback.
+            hide.mutate({
+              /* eslint-disable camelcase */
+              media_type: "sports",
+              media_id: event.id,
+              arr_instance_id: event.arr_instance_id,
+              /* eslint-enable camelcase */
+              language: subtitle.code2,
+              hi: toPython(subtitle.hi),
+              forced: toPython(subtitle.forced),
+            });
           }
         }}
       >
@@ -315,7 +359,7 @@ const EventSubtitleBadge: FunctionComponent<{
 const EventSubtitles: FunctionComponent<{
   event: SportsEvent;
 }> = ({ event }) => {
-  const { profile } = useEventsTable();
+  const { disabled, eventIds, profile } = useEventsTable();
   // The shared only-desired rule Series and Movies apply to their subtitle
   // lists. The events table used to render every stored tuple, so an embedded
   // track the operator explicitly hid on the other two pages stayed visible
@@ -341,8 +385,11 @@ const EventSubtitles: FunctionComponent<{
     [allPresentSubtitles, onlyDesired, profileItems],
   );
 
+  // One line, as wide as its content: the table sizes this column from the
+  // cell's minimum width, and without one a phone-width table squeezed the
+  // badges and the hidden-tracks trigger until their labels were cut off.
   return (
-    <Group gap="xs" wrap="nowrap">
+    <Group gap="xs" wrap="nowrap" miw="max-content">
       {event.missing_subtitles?.map((language, index) => (
         <EventSubtitleBadge
           key={BuildKey(index, language, "missing")}
@@ -365,6 +412,12 @@ const EventSubtitles: FunctionComponent<{
           {event.profileId == null ? "No profile" : "None"}
         </Text>
       ) : null}
+      <HiddenTracks
+        mediaType="sports"
+        mediaId={event.id}
+        batchIds={eventIds}
+        disabled={disabled}
+      />
     </Group>
   );
 };
@@ -664,6 +717,11 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
     const tableRef =
       ref as React.MutableRefObject<TableInstance<SportsEvent> | null>;
 
+    const eventIds = useMemo(
+      () => (events ?? []).map((event) => event.id),
+      [events],
+    );
+
     const maxSeason = useMemo(
       () =>
         events?.reduce<number>(
@@ -678,8 +736,8 @@ const Table = forwardRef<TableInstance<SportsEvent> | null, Props>(
     }, [tableRef, maxSeason]);
 
     const tableValue = useMemo<EventsTableValue>(
-      () => ({ disabled, indexingId, profile, onIndex }),
-      [disabled, indexingId, profile, onIndex],
+      () => ({ disabled, eventIds, indexingId, profile, onIndex }),
+      [disabled, eventIds, indexingId, profile, onIndex],
     );
 
     return (

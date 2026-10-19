@@ -52,6 +52,7 @@ from app.database import (TableEpisodes, TableMovies, TableSportsEvents, TableRe
 from app.event_handler import event_stream
 from app.notifier import send_notifications, send_notifications_movie, send_notifications_sports
 from arr_instances.resolution import scoped
+from subtitles.embedded_hidden import forget_hidden
 from utilities.path_mappings import path_mappings
 from utilities.sql_limits import MAX_IN_CLAUSE, in_chunks
 
@@ -588,6 +589,10 @@ def forget_media(session, media_type, media_ids):
             delete(TableReleaseTypeMismatch)
             .where(TableReleaseTypeMismatch.media_type == media_type)
             .where(TableReleaseTypeMismatch.media_id.in_(chunk)))
+
+    # Hidden embedded tracks are keyed the same way and orphan the same way,
+    # and every path that removes a media row already comes through here.
+    forget_hidden(session, 'episode' if media_type == 'series' else media_type, media_ids)
 
 
 def forget_media_by_upstream(media_type, upstream_ids, arr_instance_id=None,
