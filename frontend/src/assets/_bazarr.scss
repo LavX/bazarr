@@ -266,6 +266,12 @@ body::after {
   .mantine-Chip-input:focus-visible + .mantine-Chip-label {
     outline-color: var(--bz-focus-ring);
   }
+
+  // SegmentedControl draws its ring through a variable on the label instead.
+  .mantine-SegmentedControl-input:focus-visible
+    + .mantine-SegmentedControl-label {
+    --segmented-control-outline: 2px solid var(--bz-focus-ring);
+  }
 }
 
 // Global Paper/Card styling

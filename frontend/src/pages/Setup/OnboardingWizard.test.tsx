@@ -858,6 +858,18 @@ describe("focus indicators", () => {
     },
   );
 
+  it("draws SegmentedControl's ring in the token too", () => {
+    // It sets a variable rather than an outline colour, so the rule above
+    // never reached it, and it stayed brand-8 in dark mode.
+    expect(
+      declared(
+        themeRules,
+        ":global .mantine-SegmentedControl-input:focus-visible + .mantine-SegmentedControl-label",
+        "--segmented-control-outline",
+      ),
+    ).toBe("2px solid var(--bz-focus-ring)");
+  });
+
   it.each(["dark", "light"] as const)(
     "gives a focused %s input an indicator that clears 3:1",
     (scheme) => {
