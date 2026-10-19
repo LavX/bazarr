@@ -1,9 +1,55 @@
 # coding=utf-8
 
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 
 import pytest
 from flask import Flask
+
+_PG_URL = os.environ.get(
+    "BAZARR_PG_TEST_URL",
+    "postgresql+psycopg2://postgres:test@127.0.0.1:55432/bazarr")
+
+
+def _pg_session():
+    import sqlalchemy as sa
+    from sqlalchemy.orm import scoped_session, sessionmaker
+
+    from app.database import Base
+
+    try:
+        engine = sa.create_engine(_PG_URL)
+        with engine.connect() as conn:
+            conn.execute(sa.text("SELECT 1"))
+    except Exception as exc:  # pragma: no cover - environment dependent
+        if os.environ.get("BAZARR_PG_TEST_URL"):
+            pytest.fail(f"BAZARR_PG_TEST_URL is set, but PostgreSQL is not usable: {exc}")
+        pytest.skip(f"PostgreSQL not reachable at the default URL: {exc}")
+
+    with engine.begin() as conn:
+        conn.execute(sa.text("DROP SCHEMA public CASCADE"))
+        conn.execute(sa.text("CREATE SCHEMA public"))
+    Base.metadata.create_all(engine)
+    return engine, scoped_session(sessionmaker(bind=engine))
+
+
+@pytest.fixture(params=["sqlite", "postgresql"])
+def schema_session(request, schema_session):
+    """Run every scored-list case on both back ends: the history read is SQL
+    whose ordering and reduction must agree on SQLite and PostgreSQL."""
+    if request.param == "sqlite":
+        yield schema_session
+        return
+    engine, session = _pg_session()
+    try:
+        yield session
+    finally:
+        session.remove()
+        engine.dispose()
+
+
+def _history_timestamp(history_id):
+    return datetime(2026, 6, 12, 12, 0) + timedelta(seconds=history_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -42,9 +88,12 @@ def _add_movie(schema_session, movie_id, subtitles):
 
 
 def _add_movie_history(schema_session, history_id, movie_id, action, subtitles_path,
-                       language, score, score_out_of):
-    from app.database import TableHistoryMovie
+                       language, score, score_out_of, video_path=None):
+    from app.database import TableHistoryMovie, TableMovies
 
+    if video_path is None:
+        # History writers record the movie's own video path.
+        video_path = schema_session.get(TableMovies, movie_id).path
     schema_session.add(TableHistoryMovie(
         id=history_id,
         movie_id=movie_id,
@@ -55,10 +104,10 @@ def _add_movie_history(schema_session, history_id, movie_id, action, subtitles_p
         language=language,
         provider="provider",
         subtitles_path=subtitles_path,
-        video_path=f"/movies/movie{movie_id}.mkv",
+        video_path=video_path,
         score=score,
         score_out_of=score_out_of,
-        timestamp=datetime(2026, 6, 12, 12, 0, history_id),
+        timestamp=_history_timestamp(history_id),
     ))
     schema_session.flush()
 
@@ -300,9 +349,12 @@ def _add_episode(schema_session, episode_id, series_id, season, episode, subtitl
 
 
 def _add_episode_history(schema_session, history_id, series_id, episode_id, action,
-                         subtitles_path, language, score, score_out_of):
-    from app.database import TableHistory
+                         subtitles_path, language, score, score_out_of, video_path=None):
+    from app.database import TableEpisodes, TableHistory
 
+    if video_path is None:
+        # History writers record the episode's own video path.
+        video_path = schema_session.get(TableEpisodes, episode_id).path
     schema_session.add(TableHistory(
         id=history_id,
         series_id=series_id,
@@ -315,10 +367,10 @@ def _add_episode_history(schema_session, history_id, series_id, episode_id, acti
         language=language,
         provider="provider",
         subtitles_path=subtitles_path,
-        video_path=f"/series/ep{episode_id}.mkv",
+        video_path=video_path,
         score=score,
         score_out_of=score_out_of,
-        timestamp=datetime(2026, 6, 12, 12, 0, history_id),
+        timestamp=_history_timestamp(history_id),
     ))
     schema_session.flush()
 
