@@ -94,8 +94,9 @@ function savedLine(
  * Final onboarding step. Finish marks setup complete and routes the user into
  * the app: a Discover-path user lands on /discover, the page they installed
  * Bazarr+ for, and a library user lands on the homepage. Pressing Finish only
- * writes setup_complete: the library sync began when the instance was created,
- * steps earlier, so nothing here claims to start it.
+ * writes setup_complete, and the library sync runs on the scheduler's own
+ * timing (interval jobs start late in their first interval, and Sportarr has
+ * no immediate sync), so the copy says what will happen and never when.
  *
  * The recap and the lists under it are derived from live settings,
  * arr instances and language profiles, which is exactly the state
@@ -106,7 +107,7 @@ function savedLine(
 const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   const navigate = useNavigate();
   const { intent } = useOnboardingIntent();
-  const mutation = useSettingsMutation();
+  const mutation = useSettingsMutation(false, { inlineErrors: true });
   const client = useQueryClient();
   const [failed, setFailed] = useState(false);
   // The write answers before the cache has settled, and the navigation waits
@@ -354,7 +355,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
         discoverPath
           ? "Search for any film or series, preview what is available and download it straight to this device. No library required."
           : instanceCount > 0
-            ? "Bazarr+ started syncing your library when you connected it, and it keeps looking for the subtitles it is missing."
+            ? "Bazarr+ will sync your connected library and look for the subtitles it is missing."
             : "Nothing is connected yet, so Bazarr+ has no library to scan. Discover still works, and you can connect an instance whenever you like."
       }
       aside={

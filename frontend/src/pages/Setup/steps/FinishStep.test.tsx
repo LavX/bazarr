@@ -409,17 +409,22 @@ describe("FinishStep", () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/discover"));
   });
 
-  it("does not claim that pressing Finish starts the library scan", () => {
-    // handleFinish writes setup_complete and navigates. The sync began when
-    // the instance was created, several steps earlier.
+  it("makes no claim about when the library sync runs", () => {
+    // handleFinish writes setup_complete and navigates. The sync is the
+    // scheduler's: its interval jobs first run late in their interval, and
+    // Sportarr has no immediate sync, so neither "now" nor "already" is true.
     localStorage.setItem("bazarr.onboarding.intent", "library");
 
     customRender(<FinishStep onNext={vi.fn()} />);
 
     expect(
-      screen.getByText(/started syncing your library when you connected it/i),
+      screen.getByText(
+        "Bazarr+ will sync your connected library and look for the subtitles it is missing.",
+      ),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/starts now/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/starts now|started|already/i),
+    ).not.toBeInTheDocument();
   });
 
   it("lists what was skipped and where it lives", () => {
