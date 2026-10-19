@@ -127,4 +127,28 @@ describe("History Movies", () => {
       expect(movieLink).toHaveAttribute("href", "/movies/901");
     });
   });
+
+  it("offers each row on the media servers, asking about the local movie id", async () => {
+    let asked = "";
+    server.use(
+      http.get("/api/system/media-server-links/destinations", () =>
+        HttpResponse.json({
+          data: [
+            { instance_id: "e1", kind: "emby", display_name: "Emby" },
+            { instance_id: "p1", kind: "plex", display_name: "Plex" },
+          ],
+        }),
+      ),
+      http.get("/api/system/media-server-links/candidates", ({ request }) => {
+        asked = new URL(request.url).search;
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+    customRender(<MoviesHistoryView />);
+    const trigger = await screen.findByRole("button", {
+      name: "Play The Dark Knight (2008) [1080p.BluRay.x264.DTS-HD.MA.5.1] on a media server",
+    });
+    trigger.focus();
+    await waitFor(() => expect(asked).toBe("?media_type=movie&id=901"));
+  });
 });

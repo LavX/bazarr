@@ -240,6 +240,7 @@ it("saves a credential from its closure and keeps only safe DTO state on success
     refresh_movies: true,
     refresh_episodes: true,
     options: {},
+    external_url: "",
   };
   server.use(
     http.patch(

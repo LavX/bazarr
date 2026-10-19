@@ -14,6 +14,7 @@ from urllib3.exceptions import ReadTimeoutError
 from media_servers import resolution
 from media_servers.http import MediaServerError
 from media_servers.libraries import _SERVER_WIDE
+from media_servers.paths import file_name
 
 # Jellyfin refreshes a movie item, a series item or an episode item the same
 # way. Which one an identity rung resolves is all that differs.
@@ -54,14 +55,14 @@ def translated(call, *args, **kwargs):
 class JellyfinRefreshClient:
     REFRESH_STEPS = (resolution.PROVIDER_ID, resolution.TITLE_YEAR, resolution.LIBRARY)
 
-    def __init__(self, snapshot):
+    def __init__(self, snapshot, *, guard=None):
         from media_servers.http import validate_server_url
         from .client import JellyfinClient
         if not snapshot.apikey or not snapshot.apikey.strip():
             raise MediaServerError('missing_credentials')
         self.snapshot = snapshot
         self.client = JellyfinClient(validate_server_url(snapshot.url), snapshot.apikey,
-                                     verify_ssl=snapshot.verify_ssl)
+                                     verify_ssl=snapshot.verify_ssl, guard=guard)
         self.immediate = snapshot.options().get('refresh_method', 'immediate') != 'async'
 
     def close(self):
@@ -100,7 +101,7 @@ class JellyfinRefreshClient:
             ensure_current()
         return {'status': 'requested'}
 
-    def _resolve(self, media_type, metadata, ensure_current, match):
+    def _find(self, media_type, metadata, ensure_current, match):
         """The first library holding exactly one matching parent, or nothing."""
         for library_id in self._libraries(media_type):
             if ensure_current:
@@ -113,17 +114,19 @@ class JellyfinRefreshClient:
                 # Two items claiming the same identity is not a resolution, and
                 # guessing one is how the wrong film gets refreshed.
                 raise MediaServerError('item_ambiguous')
-            parent = matches[0]
-            if media_type == 'movie':
-                return self._refresh_item(parent, ensure_current)
-            return self._refresh_episode(parent, metadata, ensure_current)
+            return matches[0]
         return None
 
-    def _refresh_episode(self, series, metadata, ensure_current):
-        if not self.immediate:
-            # The singleton reports the series path for an async refresh rather
-            # than looking the episode up, and Jellyfin rescans it from there.
-            return self._refresh_item(series, ensure_current)
+    def _resolve(self, media_type, metadata, ensure_current, match):
+        parent = self._find(media_type, metadata, ensure_current, match)
+        if parent is None:
+            return None
+        if media_type == 'movie':
+            return self._refresh_item(parent, ensure_current)
+        return self._refresh_episode(parent, metadata, ensure_current)
+
+    def _find_episode(self, series, metadata):
+        """The one episode of this series the numbers name, or nothing."""
         series_id = series.get('Id')
         if not isinstance(series_id, str) or not series_id:
             raise MediaServerError('invalid_response')
@@ -136,7 +139,17 @@ class JellyfinRefreshClient:
             return None
         if len(matches) != 1:
             raise MediaServerError('item_ambiguous')
-        return self._refresh_item(matches[0], ensure_current)
+        return matches[0]
+
+    def _refresh_episode(self, series, metadata, ensure_current):
+        if not self.immediate:
+            # The singleton reports the series path for an async refresh rather
+            # than looking the episode up, and Jellyfin rescans it from there.
+            return self._refresh_item(series, ensure_current)
+        episode = self._find_episode(series, metadata)
+        if episode is None:
+            return None
+        return self._refresh_item(episode, ensure_current)
 
     def refresh_by_provider_id(self, media_type, metadata, *, ensure_current=None):
         if media_type not in _PARENT_TYPES:
@@ -200,3 +213,69 @@ class JellyfinRefreshClient:
         if failure is not None:
             raise failure
         return {'status': 'requested'}
+
+    def locate(self, media_type, metadata, video_path=None, *, ensure_current=None):
+        """The id of the item a library row names, with nothing refreshed.
+
+        The identifier rung and then the exact title and year, in the libraries
+        this destination is scoped to, with the same matching the refresh uses,
+        so what one finds the other finds. A tie is nothing found, not a guess,
+        and it ends the lookup as it ends the refresh's walk: a lower rung
+        could only settle it by picking one of the items that tied.
+        ``ensure_current`` runs before each request, as it does for the refresh.
+        """
+        if media_type == 'sports':
+            return self._locate_recording(video_path, ensure_current)
+        scope = {'movie': 'movie', 'episode': 'episode', 'series': 'episode'}.get(media_type)
+        if scope is None:
+            raise MediaServerError('internal_error')
+        if not metadata.locatable(media_type):
+            return None
+        matchers = [lambda item, key=_PROVIDER_KEYS[provider], value=value:
+                    (item.get('ProviderIds') or {}).get(key) == value
+                    for provider, value in metadata.provider_ids(media_type)]
+        if metadata.title and metadata.year:
+            title = metadata.title.lower()
+            matchers.append(lambda item: isinstance(item.get('Name'), str) and item['Name'].lower() == title)
+        for match in matchers:
+            try:
+                parent = self._find(scope, metadata, ensure_current, match)
+                if ensure_current and parent is not None and media_type == 'episode':
+                    ensure_current()
+                item = parent if parent is None or media_type != 'episode' else self._find_episode(parent, metadata)
+            except MediaServerError as error:
+                if error.code != 'item_ambiguous':
+                    raise
+                return None
+            if item is not None:
+                item_id = item.get('Id')
+                if not isinstance(item_id, str) or not item_id:
+                    raise MediaServerError('invalid_response')
+                return item_id
+        return None
+
+    def _locate_recording(self, video_path, ensure_current):
+        """The one item in the sports libraries whose file has this recording's name.
+
+        A recording has no identifiers to ask by, and Jellyfin keeps no path
+        mapping, so its path and Bazarr's can differ in everything but the
+        file name. Two files of that name are a tie, reported as nothing.
+        """
+        name = file_name(video_path)
+        if name is None:
+            return None
+        matches = []
+        for library_id in self._libraries('sports'):
+            if ensure_current:
+                ensure_current()
+            result = translated(self.client.get_items, {'parentId': library_id, 'recursive': 'true',
+                                                        'mediaTypes': 'Video', 'fields': 'Path'})
+            if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+                raise MediaServerError('invalid_response')
+            matches += [item for item in result if file_name(item.get('Path')) == name]
+        if len(matches) != 1:
+            return None
+        item_id = matches[0].get('Id')
+        if not isinstance(item_id, str) or not item_id:
+            raise MediaServerError('invalid_response')
+        return item_id

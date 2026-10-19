@@ -55,24 +55,76 @@ def _sections(server, names):
         yield name, section
 
 
+def _by_guid(section, guid, matched):
+    """What ``section.getGuid(guid)`` returns, with the agent asked once per lookup.
+
+    ``getGuid`` has the section's agent match the external id to a plex://
+    guid on every call, a match that can leave the LAN, and then searches the
+    section for that guid. The match depends on the agent and its language,
+    not on the section, so ``matched`` keeps it for the rest of one lookup and
+    each further section is only searched. A miss raises NotFound, as there.
+    """
+    key = (section.agent, getattr(section, 'language', None), guid)
+    if key not in matched:
+        sample = section.search(maxresults=1)
+        if not sample:
+            # An empty section holds nothing and has no item to match with;
+            # the next section of this agent asks instead.
+            raise NotFound(guid)
+        found = sample[0].matches(agent=section.agent, title=guid.replace('://', '-'))
+        matched[key] = found[0].guid if found else None
+    items = section.search(guid=matched[key]) if matched[key] else None
+    if not items:
+        raise NotFound(guid)
+    return items[0]
+
+
+def _item_for(section, guid, media_type, metadata, matched):
+    """The item one guid names in one section, down to the episode, or nothing.
+
+    The refresh and the link lookup both come through here, so a guid finds
+    the same item for either. Each keeps one ``matched`` for its whole walk
+    over the sections, so an agent is asked once per guid rather than once
+    per section. Only a lookup miss is nothing; anything else is the server
+    refusing, in the shared vocabulary.
+    """
+    try:
+        item = _by_guid(section, guid, matched)
+        if media_type == 'episode':
+            item = item.episode(season=metadata.season, episode=metadata.episode)
+    except NotFound:
+        return None
+    except Exception as error:
+        raise _refusal(error) from None
+    return item
+
+
 class PlexRefreshClient:
     REFRESH_STEPS = (resolution.PROVIDER_ID, resolution.LIBRARY)
 
     def __init__(self, snapshot):
         from media_servers.http import validate_server_url
-        from .operations import plex_server_for
+        from .operations import plex_guarded_server_for, plex_server_for
         if not snapshot.apikey or not snapshot.apikey.strip():
             raise MediaServerError('missing_credentials')
         self.snapshot = snapshot
         self.url = validate_server_url(snapshot.url)
         self.token = snapshot.apikey
         self.verify_ssl = snapshot.verify_ssl
+        # Per client, for the servers a lookup builds of its own; None is
+        # plexapi's default. The pooled server is shared and keeps that.
+        self.timeout = None
         self._server = None
+        self._lookup_servers = []
         self._connect = plex_server_for
+        self._connect_guarded = plex_guarded_server_for
 
     def close(self):
         # The pooled PlexServer is cached by endpoint and outlives one refresh.
         self._server = None
+        # A lookup's own server is not, so its connection goes with this client.
+        while self._lookup_servers:
+            self._lookup_servers.pop()._session.close()
 
     def __enter__(self):
         return self
@@ -89,8 +141,31 @@ class PlexRefreshClient:
                 raise MediaServerError('connection_error') from None
         return self._server
 
+    def _guarded(self, ensure_current):
+        """A server for one lookup alone, whose every request runs the guard first.
+
+        Through plexapi one step here is several requests: one ``_item_for``
+        is a sample search, an agent match, a filter listing and the guid
+        search, and an episode is one more. So the guard sits on the session
+        they all go out over rather than before each step, and no request
+        plexapi makes, the connection's first included, can miss it. The
+        pooled client is left alone: refreshes share it with guards of their
+        own. The server sends over a session of its own, closed with this
+        client.
+        """
+        try:
+            server = self._connect_guarded(self.url, self.token, self.verify_ssl, ensure_current,
+                                           timeout=self.timeout)
+        except Exception as error:
+            raise _refusal(error) from None
+        self._lookup_servers.append(server)
+        return server
+
     def refresh_by_provider_id(self, media_type, metadata, *, ensure_current=None):
-        """The IMDB guid, across the configured sections of this type."""
+        """The IMDB guid, across the configured sections of this type.
+
+        Each agent matches the guid once for the whole walk, as in ``locate``.
+        """
         if media_type not in ('movie', 'episode'):
             raise MediaServerError('internal_error')
         if not metadata.imdb_id or not metadata.locatable(media_type):
@@ -101,18 +176,14 @@ class PlexRefreshClient:
             # callback runs, so the guard runs first: a configuration change
             # must stop the refresh before the credential is sent anywhere.
             ensure_current()
+        guid, matched = f'imdb://{metadata.imdb_id}', {}
         for name, section in _sections(self.server, libraries):
             if ensure_current:
                 ensure_current()
-            try:
-                item = section.getGuid(f'imdb://{metadata.imdb_id}')
-                if media_type != 'movie':
-                    item = item.episode(season=metadata.season, episode=metadata.episode)
-            except NotFound:
+            item = _item_for(section, guid, media_type, metadata, matched)
+            if item is None:
                 logger.debug('Plex section %r holds no item for this publication', name)
                 continue
-            except Exception as error:
-                raise _refusal(error) from None
             try:
                 item.refresh()
             except Exception as error:
@@ -158,3 +229,40 @@ class PlexRefreshClient:
         # Nothing was asked of Plex at all, so this rung did not answer and the
         # walk reports the publication as unresolved rather than as requested.
         return {'status': 'requested'} if updated else None
+
+    def locate(self, media_type, metadata, *, ensure_current=None):
+        """The Plex item a library row names, with nothing refreshed.
+
+        Through the refresh's own lookup, and in its order: the IMDB guid in
+        every configured section first, so an item the refresh finds is the
+        item found here. Only then the TMDB or TVDB guid, which the refresh
+        never asks and a link still can. A miss is never turned into a scan.
+        A sports recording is refused: Plex files a show's date-named
+        recordings of one day as one episode, so no file name pins one, and
+        links never asks. With ``ensure_current`` the lookup connects through
+        ``_guarded``, so the guard runs before every request it sends.
+        """
+        if media_type not in ('movie', 'episode', 'series'):
+            raise MediaServerError('internal_error')
+        if not metadata.locatable(media_type):
+            return None
+        guids = [f'{provider}://{value}' for provider, value in metadata.provider_ids(media_type)]
+        if not guids:
+            return None
+        libraries = self.snapshot.libraries(media_type)
+        if ensure_current:
+            # The connection and the section listing come first, so the guard
+            # runs before them, as it does for a refresh: a row held or edited
+            # meanwhile must stop the lookup before the credential is sent.
+            ensure_current()
+        server = self._guarded(ensure_current) if ensure_current else self.server
+        sections = list(_sections(server, libraries))
+        matched = {}
+        for guid in guids:
+            for _name, section in sections:
+                if ensure_current:
+                    ensure_current()
+                item = _item_for(section, guid, media_type, metadata, matched)
+                if item is not None:
+                    return item
+        return None

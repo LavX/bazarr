@@ -7,6 +7,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
+import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { notification } from "@/modules/notification";
@@ -156,6 +157,12 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
     void client.invalidateQueries({
       queryKey: [QueryKeys.Plex, "libraries"],
     });
+
+    // A media server kind's master switch decides whether a Play on menu
+    // offers its destinations, and the path mappings which of them cover a
+    // file. Settings are saved away from the library pages, so this only
+    // has the next menu opened ask again.
+    void client.invalidateQueries({ queryKey: mediaServerLinksKey });
   };
   return useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Settings],

@@ -357,3 +357,45 @@ def test_invalid_imported_destination_preserves_capacity_for_its_configured_root
     assert dispatcher.wait_idle(3)
     assert dispatcher.status(row.id) == {'pending': 1, 'state': 'unconfirmed', 'error_code': 'invalid_url'}
     assert repo.get_decrypted_api_key(row.id) == 'opaque-A'
+
+
+@pytest.mark.parametrize('kind', ['emby', 'jellyfin', 'plex', 'silo'])
+def test_the_browser_url_round_trips_and_clears(schema_session, kind):
+    from media_servers.repository import MediaServerInstanceRepository, to_safe_dict
+    repo = MediaServerInstanceRepository(schema_session)
+    body = payload(kind, external_url='https://media.example.com/')
+    if kind in ('jellyfin', 'plex'):
+        body['path_mappings'] = []
+    row = repo.create(**body)
+    assert to_safe_dict(row)['external_url'] == 'https://media.example.com'
+    assert repo.snapshot(row.id, settings()).external_url == 'https://media.example.com'
+    revision = row.revision
+    repo.update(row.id, name='Renamed')
+    assert repo.get(row.id).external_url == 'https://media.example.com'
+    repo.update(row.id, external_url='')
+    assert repo.get(row.id).external_url is None
+    assert to_safe_dict(repo.get(row.id))['external_url'] == ''
+    assert repo.snapshot(row.id, settings()).external_url == ''
+    assert repo.get(row.id).revision == revision + 2
+
+
+@pytest.mark.parametrize('value', ['ftp://media.example.com', 'https://user:pw@media.example.com',
+                                   'https://media.example.com/?a=1', 'not a url', 7])
+def test_a_browser_url_is_held_to_the_server_url_rules(schema_session, value):
+    from media_servers.http import MediaServerError
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    with pytest.raises(MediaServerError):
+        repo.create(**payload('emby', external_url=value))
+    row = repo.create(**payload('emby'))
+    with pytest.raises(MediaServerError):
+        repo.update(row.id, external_url=value)
+    assert repo.get(row.id).external_url is None
+
+
+def test_an_import_without_a_browser_url_stores_none(schema_session):
+    from media_servers.repository import MediaServerInstanceRepository, to_safe_dict
+    repo = MediaServerInstanceRepository(schema_session)
+    values = payload('emby') | dict(refresh_movies=True, refresh_episodes=True, options={})
+    row = repo.import_values(values)
+    assert row.external_url is None and to_safe_dict(row)['external_url'] == ''

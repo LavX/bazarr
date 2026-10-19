@@ -30,6 +30,7 @@ function instance(
       kind === "jellyfin"
         ? { movie_library_ids: ["lib-movies"], refresh_method: "immediate" }
         : { movie_libraries: ["Films"] },
+    external_url: "",
     ...overrides,
   };
 }

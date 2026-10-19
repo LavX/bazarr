@@ -173,3 +173,40 @@ def test_library_scan_is_bracketed_by_the_revision_guard(http_fixture):
     with SiloClient(base, "synthetic-key") as client, pytest.raises(MediaServerError, match="configuration_changed"):
         client.refresh_library("7", ensure_current=guard)
     assert calls == [0, 1]
+
+
+def test_catalog_item_exists_is_200_true_404_false_and_anything_else_raises(http_fixture):
+    from media_servers.http import MediaServerError
+    from silo.client import SiloClient
+    base, records = http_fixture([(200, {"content_id": "movie-tmdb-1"}, {}), (404, b"", {}), (401, b"", {})])
+    with SiloClient(base, "synthetic-key") as client:
+        assert client.catalog_item_exists("movie-tmdb-1") is True
+        assert client.catalog_item_exists("movie-tmdb-2") is False
+        with pytest.raises(MediaServerError, match="unauthorized"):
+            client.catalog_item_exists("movie-tmdb-3")
+    assert records[0]["path"] == "/api/v1/catalog/items/movie-tmdb-1"
+    assert records[0]["headers"]["Authorization"] == "Bearer synthetic-key"
+
+
+def test_locate_tries_silos_own_precedence_and_embeds_the_series_anchor(http_fixture):
+    from media_servers.resolution import MediaMetadata
+    from silo.client import SiloClient
+    base, records = http_fixture([(404, b"", {}), (200, {}, {}), (200, {}, {}), (200, {}, {})])
+    with SiloClient(base, "synthetic-key") as client:
+        assert client.locate("movie", MediaMetadata(imdb_id="tt1", tmdb_id="19")) == "movie-imdb-tt1"
+        assert client.locate("series", MediaMetadata(tvdb_id=78874, imdb_id="tt2")) == "series-tvdb-78874"
+        assert client.locate("episode", MediaMetadata(tvdb_id=78874, season=1, episode=1)) == (
+            "episode-tvdb-78874-1-1")
+    assert [record["path"].rsplit("/", 1)[1] for record in records] == [
+        "movie-tmdb-19", "movie-imdb-tt1", "series-tvdb-78874", "episode-tvdb-78874-1-1"]
+
+
+def test_locate_never_asks_with_an_id_that_could_change_the_path(http_fixture):
+    from media_servers.resolution import MediaMetadata
+    from silo.client import SiloClient
+    base, records = http_fixture([])
+    with SiloClient(base, "synthetic-key") as client:
+        assert client.locate("movie", MediaMetadata(imdb_id="tt1/../x", tmdb_id="1;2")) is None
+        assert client.locate("movie", MediaMetadata(title="No identifiers")) is None
+        assert client.locate("episode", MediaMetadata(tvdb_id=1)) is None
+    assert records == []

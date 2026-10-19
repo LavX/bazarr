@@ -40,6 +40,7 @@ function row(
     refresh_movies: true,
     refresh_episodes: true,
     options: {},
+    external_url: "",
   };
 }
 

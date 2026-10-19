@@ -10,8 +10,8 @@ from sqlalchemy import select
 
 from app.database import TableMediaServerInstances
 from .http import MediaServerError
-from .instances import (ConnectionSnapshot, TOGGLES, parse_options, validate_connection,
-                        validate_fields, validate_options)
+from .instances import (ConnectionSnapshot, TOGGLES, normalized_external_url, parse_options,
+                        validate_connection, validate_fields, validate_options)
 
 
 @contextmanager
@@ -118,11 +118,12 @@ class MediaServerInstanceRepository:
                     verify_ssl=bool(row.verify_ssl), api_key=self.retained_api_key(row.id) if decrypt_key else '',
                     path_mappings=json.loads(row.path_mappings),
                     refresh_movies=bool(row.refresh_movies), refresh_episodes=bool(row.refresh_episodes),
-                    options=parse_options(row.options))
+                    options=parse_options(row.options), external_url=row.external_url or '')
 
     def create(self, kind, name, **fields):
         values = dict(kind=kind, name=name, enabled=False, url='', verify_ssl=True, api_key='',
-                      path_mappings=[], refresh_movies=True, refresh_episodes=True, options={})
+                      path_mappings=[], refresh_movies=True, refresh_episodes=True, options={},
+                      external_url='')
         values.update(fields)
         validate_fields(dict(kind=kind, name=name, **fields), create=True)
         values.pop('clear_api_key', None)
@@ -139,7 +140,9 @@ class MediaServerInstanceRepository:
                                            path_mappings=json.dumps(values['path_mappings']),
                                            refresh_movies=int(values.get('refresh_movies', True)),
                                            refresh_episodes=int(values.get('refresh_episodes', True)),
-                                           options=json.dumps(values.get('options') or {}), revision=1)
+                                           options=json.dumps(values.get('options') or {}),
+                                           external_url=normalized_external_url(values.get('external_url')),
+                                           revision=1)
             self.session.add(row)
             self.session.flush()
         return row
@@ -178,6 +181,10 @@ class MediaServerInstanceRepository:
             row.api_key = encrypted
             row.path_mappings = json.dumps(values['path_mappings'])
             row.options = json.dumps(values.get('options') or {})
+            if 'external_url' in fields:
+                # Only a submitted value is rewritten, so a stored one is never
+                # re-judged by an edit that did not touch it.
+                row.external_url = normalized_external_url(fields['external_url'])
             row.revision += 1
             self.session.flush()
         return row
@@ -249,7 +256,7 @@ class MediaServerInstanceRepository:
                                   tuple(tuple(sorted(item.items())) for item in mappings),
                                   bool(row.refresh_movies), bool(row.refresh_episodes),
                                   json.dumps(parse_options(row.options)), row.revision, error,
-                                  sendable=sendable)
+                                  sendable=sendable, external_url=row.external_url or '')
 
     def snapshots(self, settings, *, kinds=None, hold_account_row=False):
         return [self.snapshot(row.id, settings, hold_account_row=hold_account_row)
@@ -261,4 +268,4 @@ def to_safe_dict(row):
                 verify_ssl=bool(row.verify_ssl), api_key_set=bool(row.api_key),
                 path_mappings=json.loads(row.path_mappings),
                 refresh_movies=bool(row.refresh_movies), refresh_episodes=bool(row.refresh_episodes),
-                options=parse_options(row.options))
+                options=parse_options(row.options), external_url=row.external_url or '')

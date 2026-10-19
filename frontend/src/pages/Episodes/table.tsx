@@ -15,7 +15,12 @@ import {
   faMagnifyingGlass,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { ColumnDef, Row, Table as TableInstance } from "@tanstack/react-table";
+import {
+  CellContext,
+  ColumnDef,
+  Row,
+  Table as TableInstance,
+} from "@tanstack/react-table";
 import { useDownloadEpisodeSubtitles, useEpisodesProvider } from "@/apis/hooks";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action, GroupTable } from "@/components";
@@ -24,9 +29,11 @@ import { CombineModal } from "@/components/forms/CombineForm";
 import HiddenTracks from "@/components/HiddenTracks";
 import { EpisodeHistoryModal } from "@/components/modals";
 import { EpisodeSearchModal } from "@/components/modals/ManualSearchModal";
+import PlayOnMenu from "@/components/PlayOnMenu";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
 import { filterSubtitleBy } from "@/utilities";
+import { episodeCode } from "@/utilities/episodes";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
@@ -325,6 +332,19 @@ const ActionsCell = ({ episode }: { episode: Item.Episode }) => {
   );
 };
 
+// Play on, defined once with the other cells. A cell created inside a render is
+// a new component type on every render, so a menu open in it would be unmounted
+// under the user.
+const EpisodePlayCell = ({ row }: CellContext<Item.Episode, unknown>) => (
+  <PlayOnMenu
+    mediaType="episode"
+    id={row.original.id}
+    itemLabel={episodeCode(row.original.season, row.original.episode)}
+    variant="action"
+    className={tableStyles.actionIcon}
+  />
+);
+
 const columns: ColumnDef<Item.Episode>[] = [
   {
     id: "monitored",
@@ -399,6 +419,7 @@ const columns: ColumnDef<Item.Episode>[] = [
     header: "Actions",
     cell: ({ row: { original } }) => <ActionsCell episode={original} />,
   },
+  { id: "play", cell: EpisodePlayCell },
 ];
 
 // The local episode id, so a row keeps its id, and its mounted cells, when an

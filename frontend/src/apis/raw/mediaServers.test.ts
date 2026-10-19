@@ -181,6 +181,7 @@ it("uses item probes with saved-key overrides and omits credential fields from D
     refresh_movies: true,
     refresh_episodes: false,
     options: { movie_libraries: ["Films"] },
+    external_url: "",
   };
   const received: unknown[] = [];
   server.use(

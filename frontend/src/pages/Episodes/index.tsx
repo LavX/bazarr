@@ -56,6 +56,7 @@ import { ItemEditModal } from "@/components/forms/ItemEditForm";
 import { SeriesUploadModal } from "@/components/forms/SeriesUploadForm";
 import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { SubtitleToolsModal } from "@/components/modals";
+import PlayOnMenu from "@/components/PlayOnMenu";
 import { useModals } from "@/modules/modals";
 import { notification } from "@/modules/notification";
 import ItemOverview from "@/pages/views/ItemOverview";
@@ -354,6 +355,14 @@ const SeriesEpisodesView: FunctionComponent = () => {
             >
               Download
             </Toolbox.Button>
+            {series && (
+              <PlayOnMenu
+                mediaType="series"
+                id={series.id}
+                itemLabel={series.title}
+                variant="toolbox"
+              />
+            )}
           </Group>
           <Group gap="xs">
             <Toolbox.Button

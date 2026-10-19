@@ -5,6 +5,7 @@ import distributionHub from "./distributionHub";
 import episodes from "./episodes";
 import files from "./files";
 import history from "./history";
+import mediaServerLinks from "./mediaServerLinks";
 import mediaServers from "./mediaServers";
 import movies from "./movies";
 import plex from "./plex";
@@ -24,6 +25,7 @@ const api = {
   files,
   movies,
   mediaServers,
+  mediaServerLinks,
   series,
   sports,
   providers,

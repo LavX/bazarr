@@ -8,6 +8,7 @@ import {
 import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { mediaServerLinksKey } from "./mediaServerLinks";
 import { mediaServerInstancesKey } from "./mediaServers";
 
 const plexValidationKey = [QueryKeys.Plex, "auth", "validate"];
@@ -135,6 +136,8 @@ export const usePlexLogoutMutation = () => {
       void queryClient.invalidateQueries({
         queryKey: mediaServerInstancesKey("plex"),
       });
+      // A switched-off destination is not one a Play on menu can offer.
+      void queryClient.invalidateQueries({ queryKey: mediaServerLinksKey });
     },
   });
 };
@@ -170,6 +173,8 @@ export const usePlexServerSelectionMutation = () => {
       void queryClient.invalidateQueries({
         queryKey: mediaServerInstancesKey("plex"),
       });
+      // So is every Play on menu that offers it.
+      void queryClient.invalidateQueries({ queryKey: mediaServerLinksKey });
       // And so is plex.instance_id, which is the only thing that says which
       // row the account owns. The settings query never goes stale on its own,
       // so without this the wizard's picker reads the row the account has just

@@ -43,6 +43,21 @@ interface Props {
   onClose: () => void;
 }
 
+function urlError(value: string) {
+  try {
+    const parsed = new URL(value);
+    return ["http:", "https:"].includes(parsed.protocol) &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.search &&
+      !parsed.hash
+      ? null
+      : "Enter a full HTTP or HTTPS URL without credentials, query or fragment";
+  } catch {
+    return "Enter a full HTTP or HTTPS URL";
+  }
+}
+
 // Mount one editor per opening so its state and mutation observers cannot be
 // reused by a different instance or a later opening of the same instance.
 export default function MediaServerInstanceFormModal({
@@ -62,6 +77,7 @@ export default function MediaServerInstanceFormModal({
       name: instance?.name ?? "",
       enabled: instance?.enabled ?? false,
       url: instance?.url ?? "",
+      externalUrl: instance?.external_url ?? "",
       apiKey: "",
       verifySsl: instance?.verify_ssl ?? true,
       mappings: instance?.path_mappings ?? ([] as PathMapping[]),
@@ -71,20 +87,8 @@ export default function MediaServerInstanceFormModal({
     },
     validate: {
       name: (value) => (value.trim() ? null : "Name is required"),
-      url: (value) => {
-        try {
-          const parsed = new URL(value);
-          return ["http:", "https:"].includes(parsed.protocol) &&
-            !parsed.username &&
-            !parsed.password &&
-            !parsed.search &&
-            !parsed.hash
-            ? null
-            : "Enter a full HTTP or HTTPS URL without credentials, query or fragment";
-        } catch {
-          return "Enter a full HTTP or HTTPS URL";
-        }
-      },
+      url: urlError,
+      externalUrl: (value) => (value.trim() ? urlError(value) : null),
       apiKey: (value, values) =>
         values.enabled &&
         !(keyMode === "keep"
@@ -144,6 +148,7 @@ export default function MediaServerInstanceFormModal({
       refresh_movies: form.values.refreshMovies,
       refresh_episodes: form.values.refreshEpisodes,
       options: form.values.options,
+      external_url: form.values.externalUrl.trim(),
     },
     instance?.id,
   );
@@ -197,6 +202,16 @@ export default function MediaServerInstanceFormModal({
             placeholder={URL_PLACEHOLDERS[kind]}
             description={`Full URL of your ${name} server, including any path prefix. Keep credentials in the ${credential} field.`}
             {...form.getInputProps("url")}
+          />
+          <TextInput
+            label="Browser URL"
+            placeholder={URL_PLACEHOLDERS[kind]}
+            description={
+              kind === "plex"
+                ? "Where links from Bazarr+ open Plex Web. Leave empty to open them in app.plex.tv."
+                : `Where links from Bazarr+ open ${name} in your browser, when that is not the server URL above. Leave empty to use it.`
+            }
+            {...form.getInputProps("externalUrl")}
           />
           {kind === "silo" && (
             <Text size="sm" c="dimmed">

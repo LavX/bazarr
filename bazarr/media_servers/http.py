@@ -40,10 +40,14 @@ def parse_verify_ssl(value) -> bool:
 class MediaServerHTTP:
     RESPONSE_LIMIT = 2 * 1024 * 1024
 
-    def __init__(self, url: str, *, verify_ssl: bool = True, headers=None, timeout=(3, 10)):
+    def __init__(self, url: str, *, verify_ssl: bool = True, headers=None, timeout=(3, 10), guard=None):
         self.url = validate_server_url(url)
         self.verify_ssl = parse_verify_ssl(verify_ssl)
         self.timeout = timeout
+        # Run before every request this sends, and raising leaves it unsent.
+        # It lives here rather than at the callers so a request one of them
+        # adds later cannot go out without it.
+        self.guard = guard
         self.session = requests.Session()
         self.session.trust_env = False
         self.session.headers.update({"Accept": "application/json", **(headers or {})})
@@ -59,6 +63,8 @@ class MediaServerHTTP:
 
     def _exchange(self, method, path, *, params=None, json=None, read_body=lambda status: True):
         """One bounded exchange: the status and the body, with redirects refused."""
+        if self.guard is not None:
+            self.guard()
         # API paths are local to this validated base, including any proxy prefix.
         if not isinstance(path, str) or not path.startswith("/") or path.startswith("//") or "?" in path or "#" in path:
             raise MediaServerError("invalid_url")

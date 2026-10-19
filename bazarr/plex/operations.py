@@ -84,6 +84,80 @@ def plex_server_for(baseurl: str, token: str, verify: bool) -> PlexServer:
         return plex_server
 
 
+def _build_lookup_session(verify: bool) -> requests.Session:
+    """A session for one lookup alone, which never resends a request.
+
+    requests' own adapter makes no retries, so each request the guard let
+    through is sent once, and a redirect is refused before the next hop, as
+    on the pooled session."""
+    s = requests.Session()
+    s.verify = verify
+    s.max_redirects = 0
+    return s
+
+
+class _GuardedSession:
+    """A session that runs a guard before every request sent over it.
+
+    plexapi sends every request through ``PlexServer.query`` with the
+    session's get, post, put or delete, and touches nothing else on it, so
+    these four are all a server built over this can send with. Anything
+    else is missing rather than passed through unguarded. ``close`` sends
+    nothing; it lets the owner release the connection.
+    """
+
+    def __init__(self, session, guard):
+        self._session = session
+        self._guard = guard
+
+    def get(self, *args, **kwargs):
+        self._guard()
+        return self._session.get(*args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        self._guard()
+        return self._session.post(*args, **kwargs)
+
+    def put(self, *args, **kwargs):
+        self._guard()
+        return self._session.put(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        self._guard()
+        return self._session.delete(*args, **kwargs)
+
+    def close(self):
+        self._session.close()
+
+
+def plex_guarded_server_for(baseurl: str, token: str, verify: bool, guard, timeout=None) -> PlexServer:
+    """A PlexServer of its own that runs ``guard`` before each request it sends.
+
+    Its first request is the root document the initialiser fetches, so the
+    guard runs before that too. It sends over a session of its own, not the
+    pooled one, and that costs the lookup a fresh connection. The pooled
+    adapter resends a request answered 502, 503 or 504, or cut off by a
+    timeout or a dropped connection, inside the one call the guard ran
+    before, and after a 503 it first sleeps whatever Retry-After the server
+    asks, up to six hours. The resend carries the token with no guard run
+    for it, long after the row may have been held or edited, so a lookup
+    sends over :func:`_build_lookup_session`, which never resends. The
+    cached client is not handed the guard either: refreshes and probes
+    share it and run guards of their own.
+
+    ``timeout`` is the lookup's own, for every request this server sends;
+    None leaves plexapi's default. The caller closes the server's session
+    once the lookup ends. A server that fails to connect is never handed
+    over, so its session is closed here.
+    """
+    session = _build_lookup_session(verify=verify)
+    try:
+        return PlexServer(baseurl, token, session=_GuardedSession(session, guard), timeout=timeout)
+    except BaseException:
+        session.close()
+        raise
+
+
 def plex_server_identity(baseurl: str, token: str, verify: bool) -> tuple:
     """Read a Plex server's own name and version now, not when it was pooled.
 

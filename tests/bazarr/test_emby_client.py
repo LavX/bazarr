@@ -579,3 +579,93 @@ def test_sports_library_refresh_accepts_any_collection_at_the_exact_root(http_fi
     assert len(records) == 2
     assert urlsplit(records[1]['path']).path == '/Items/sports/Refresh'
     assert parse_qs(urlsplit(records[1]['path']).query)['Recursive'] == ['true']
+
+
+# ------------------------------------------------------------------- locate
+
+
+def _items(*items):
+    return {"Items": list(items), "TotalRecordCount": len(items)}
+
+
+def _query(record):
+    return parse_qs(urlsplit(record["path"]).query)
+
+
+def test_locate_a_movie_by_its_identifier_returns_the_raw_id_and_posts_nothing(http_fixture):
+    from emby.client import EmbyClient
+    from media_servers.resolution import MediaMetadata
+    base, records = http_fixture([(200, _items({"Id": "a b", "Type": "Movie", "Path": "/e/m.mkv"}), {})])
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.locate("movie", MediaMetadata(imdb_id="tt1", tmdb_id="2"), "/e/m.mkv") == "a b"
+    assert [record["method"] for record in records] == ["GET"]
+    assert _query(records[0])["AnyProviderIdEquals"] == ["imdb.tt1"]
+
+
+def test_locate_an_episode_descends_from_its_series(http_fixture):
+    from emby.client import EmbyClient
+    from media_servers.resolution import MediaMetadata
+    base, records = http_fixture([
+        (200, _items({"Id": "s1", "Type": "Series", "Path": "/e/Show"}), {}),
+        (200, _items({"Id": "e7", "Type": "Episode", "IndexNumber": 2, "ParentIndexNumber": 1,
+                      "Path": "/e/Show/S01E02.mkv"}), {}),
+    ])
+    with EmbyClient(base, "synthetic-key") as client:
+        metadata = MediaMetadata(tvdb_id=5, title="Show", year=2002, season=1, episode=2)
+        assert client.locate("episode", metadata, "/e/Show/S01E02.mkv") == "e7"
+    assert _query(records[0])["IncludeItemTypes"] == ["Series"]
+    assert urlsplit(records[1]["path"]).path == "/Shows/s1/Episodes"
+
+
+def test_locate_a_series_returns_the_series_item(http_fixture):
+    from emby.client import EmbyClient
+    from media_servers.resolution import MediaMetadata
+    base, records = http_fixture([(200, _items({"Id": "s1", "Type": "Series", "Path": "/e/Show"}), {})])
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.locate("series", MediaMetadata(tvdb_id=5), "/e/Show") == "s1"
+    assert _query(records[0])["IncludeItemTypes"] == ["Series"]
+
+
+def test_locate_climbs_identifier_then_path_then_title_and_never_the_library(http_fixture):
+    from emby.client import EmbyClient
+    from media_servers.resolution import MediaMetadata
+    base, records = http_fixture([
+        (200, _items(), {}),  # imdb
+        (200, _items(), {}),  # exact path
+        (200, _items({"Id": "t9", "Type": "Movie", "Name": "Film", "Path": "/e/Film.mkv"}), {}),
+    ])
+    with EmbyClient(base, "synthetic-key") as client:
+        metadata = MediaMetadata(imdb_id="tt1", title="Film", year=2001)
+        assert client.locate("movie", metadata, "/e/Film.mkv") == "t9"
+    assert [urlsplit(record["path"]).path for record in records] == ["/Items", "/Items", "/Items"]
+    assert "Path" in _query(records[1]) and "NameStartsWith" in _query(records[2])
+
+
+def test_locate_reports_a_tie_or_a_total_miss_as_nothing(http_fixture):
+    from emby.client import EmbyClient
+    from media_servers.resolution import MediaMetadata
+    two = _items({"Id": "a", "Type": "Movie", "Path": "/e/Film.mkv"},
+                 {"Id": "b", "Type": "Movie", "Path": "/e/Film.mkv"})
+    base, records = http_fixture([(200, two, {}), (200, two, {}), (200, _items(), {})])
+    with EmbyClient(base, "synthetic-key") as client:
+        metadata = MediaMetadata(imdb_id="tt1", title="Film", year=2001)
+        assert client.locate("movie", metadata, "/e/Film.mkv") is None
+    assert len(records) == 3
+    assert all(record["method"] == "GET" and "VirtualFolders" not in record["path"] for record in records)
+
+
+def test_server_id_comes_from_system_info(http_fixture):
+    from emby.client import EmbyClient
+    base, records = http_fixture([(200, {"ServerName": "E", "Version": "4.9.5.0", "Id": "5a69"}, {})])
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.server_id() == "5a69"
+    assert records[0]["path"] == "/System/Info"
+
+
+def test_locate_a_recording_by_its_exact_file_of_any_type(http_fixture):
+    from emby.client import EmbyClient
+    from media_servers.resolution import MediaMetadata
+    base, records = http_fixture([(200, _items({"Id": "v1", "Type": "Video", "Path": "/e/NHL/Game 12.mkv"}), {})])
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.locate("sports", MediaMetadata(title="Game 12"), "/e/NHL/Game 12.mkv") == "v1"
+    assert "IncludeItemTypes" not in _query(records[0]) and _query(records[0])["Path"] == ["/e/NHL/Game 12.mkv"]
