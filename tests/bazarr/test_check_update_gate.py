@@ -6,6 +6,7 @@ outside the 60-per-hour REST quota. The releases API is only called for a repo
 whose advertised tags changed since its last successful fetch.
 """
 import json
+import os
 
 import pytest
 import requests
@@ -248,6 +249,7 @@ def test_quota_exhausted_with_unchanged_tags_renders_the_last_fetch_without_an_a
     assert _rendered() == before
     assert [r["name"] for r in before["data"]][:1] == ["v1.0.0"]
 
+
 # A failed releases fetch must never record the tags it was gated on, or the
 # next check would see no movement and keep the failed result until the next
 # tag. The stored state is also dropped, so a tag that moves back to the
@@ -314,3 +316,75 @@ def test_a_fetch_made_while_the_advertisement_was_down_records_no_tags(github):
 
     assert github.api_calls() == [_BAZARR_API, _TRANSLATOR_API]
 
+
+# The gate reuses releases.txt. When that file no longer holds what the
+# recorded fetch wrote, unchanged tags are not enough to skip the API.
+
+def test_a_missing_releases_file_fetches_even_with_unchanged_tags(github):
+    from app.check_update import args
+
+    _check()
+    os.remove(f"{args.config_dir}/config/releases.txt")
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_BAZARR_API, _TRANSLATOR_API]
+    assert [r["name"] for r in _releases_txt()] == ["v1.0.0", "v0.1.0"]
+
+
+def test_a_releases_file_that_lost_a_repos_entries_fetches_that_repo(github):
+    from app.check_update import args
+
+    _check()
+    kept = [r for r in _releases_txt() if r["repo"] != "AI Subtitle Translator"]
+    with open(f"{args.config_dir}/config/releases.txt", "w", encoding="UTF-8") as f:
+        json.dump(kept, f)
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_TRANSLATOR_API]
+    assert [r["name"] for r in _releases_txt()] == ["v1.0.0", "v0.1.0"]
+
+
+def test_a_repo_with_no_releases_is_still_gated(github):
+    github.releases[_TRANSLATOR_API] = []
+    _check()
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == []
+
+
+def test_a_corrupt_tag_state_file_is_a_first_run(github):
+    from app.check_update import args
+
+    _check()
+    with open(f"{args.config_dir}/config/release_tags.json", "w", encoding="UTF-8") as f:
+        f.write("{not json")
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_BAZARR_API, _TRANSLATOR_API]
+
+
+def test_switching_the_releases_repo_away_and_back_fetches_again(github, monkeypatch):
+    from app import check_update
+
+    _check()
+    other_ad = "https://github.com/someone/bazarr/info/refs?service=git-upload-pack"
+    other_api = "https://api.github.com/repos/someone/bazarr/releases?per_page=100"
+    github.tags[other_ad] = [(_V3, "refs/tags/v9.0.0")]
+    github.releases[other_api] = [_release("v9.0.0", "2026-10-05T00:00:00Z")]
+    monkeypatch.setattr(check_update, "RELEASES_REPO", "someone/bazarr")
+    _check()
+    monkeypatch.setattr(check_update, "RELEASES_REPO", "LavX/bazarr")
+    github.calls.clear()
+
+    _check()
+
+    assert github.api_calls() == [_BAZARR_API]
+    assert [r["name"] for r in _releases_txt()] == ["v1.0.0", "v0.1.0"]

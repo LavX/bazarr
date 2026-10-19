@@ -166,13 +166,18 @@ def check_releases(job_id=None, startup=False, wait_for_completion=False):
     cached = _cached_releases_by_label()
 
     repos = [(RELEASES_REPO, 'Bazarr+'), *MICROSERVICE_REPOS]
+    # A repo no longer checked has no entries in releases.txt to reuse, and its
+    # label may since belong to another repo.
+    for repo in set(recorded) - {repo for repo, _label in repos}:
+        recorded.pop(repo)
 
     releases = []
     for repo, label in repos:
         tags = _advertised_tags(repo)
         previous = recorded.get(repo)
         if (tags is not None and cached is not None and isinstance(previous, dict)
-                and previous.get('tags') == tags):
+                and previous.get('tags') == tags
+                and previous.get('count') == len(cached.get(label, []))):
             logging.debug(f'BAZARR tags of {repo} have not moved, reusing its last fetched releases')  # noqa: G004
             releases.extend(cached.get(label, []))
             continue
@@ -187,7 +192,7 @@ def check_releases(job_id=None, startup=False, wait_for_completion=False):
         if tags is None:
             recorded.pop(repo, None)
         else:
-            recorded[repo] = {'tags': tags}
+            recorded[repo] = {'tags': tags, 'count': len(fetched)}
 
     releases.sort(key=lambda r: r['date'], reverse=True)
 
