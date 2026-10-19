@@ -9,7 +9,7 @@ import {
 } from "@/apis/hooks/mediaServers";
 import type { MediaServerKind } from "@/apis/raw/mediaServers";
 import { KINDS_WITH_PATH_MAPPINGS } from "@/apis/raw/mediaServers";
-import { CREDENTIAL_LABELS } from "@/pages/Settings/MediaServers/kinds";
+import { SETUP_CREDENTIAL_LABELS } from "@/pages/Settings/MediaServers/kinds";
 import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
 import { validateServerUrl } from "./validation";
 
@@ -68,7 +68,7 @@ export function validateDraft(draft: MediaServerDraft): DraftFieldErrors {
     errors.url = urlProblem;
   }
   if (!draft.apiKey.trim()) {
-    errors.apiKey = `${CREDENTIAL_LABELS[draft.kind]} is required`;
+    errors.apiKey = `${SETUP_CREDENTIAL_LABELS[draft.kind]} is required`;
   }
   if (KINDS_WITH_PATH_MAPPINGS.includes(draft.kind)) {
     const filled = draft.pathMappings.filter(
