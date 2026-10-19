@@ -547,14 +547,16 @@ def placed_media(request, monkeypatch, schema_session):
     movie = request.param == 'movie'
 
     def place(video_path, subtitles_path, instance_mapping=None, global_mapping=None):
+        # The first import of an API module runs init, which reloads the global
+        # mapping from settings, so the mappings are set after it.
+        prepare = _prepare_movies if movie else _prepare_series
+        api = prepare(monkeypatch, schema_session)
         _configure_mappings(monkeypatch, schema_session, request.param, instance_mapping, global_mapping)
         subtitles = repr([['de', subtitles_path, 100]])
         if movie:
-            api = _prepare_movies(monkeypatch, schema_session)
             _add_movie(schema_session, 100, subtitles)
             schema_session.get(TableMovies, 100).path = video_path
         else:
-            api = _prepare_series(monkeypatch, schema_session)
             _add_series(schema_session, 501)
             _add_episode(schema_session, 601, 501, 1, 1, subtitles)
             schema_session.get(TableEpisodes, 601).path = video_path
