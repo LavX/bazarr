@@ -389,7 +389,7 @@ def _fetch_git_ref_advertisement(owner: str, repo: str) -> bytes:
             close()
 
 
-def _parse_git_ref_advertisement(body: bytes) -> dict[str, str]:
+def _parse_git_ref_advertisement(body: bytes, peel_tags: bool = True) -> dict[str, str]:
     """The branch and tag refs a v0 ref advertisement lists, by full name.
 
     A pkt-line stream in this exact shape: the service banner line, a flush,
@@ -402,6 +402,10 @@ def _parse_git_ref_advertisement(body: bytes) -> dict[str, str]:
     repository advertises, the all-zero sha with the capabilities peel, is
     skipped, so the resolver reports the missing branch. Anything else fails
     closed.
+
+    An annotated tag maps to its peeled commit, which is what resolving a ref
+    needs. With ``peel_tags=False`` it maps to the tag object's own sha, so a
+    tag recreated on the same commit still reads as a change.
     """
     if len(body) > _GIT_ADVERTISEMENT_MAX_BYTES:
         raise CatalogSourceError("GitHub's ref advertisement is too large to read")
@@ -482,6 +486,8 @@ def _parse_git_ref_advertisement(body: bytes) -> dict[str, str]:
         refs[name_text] = sha_text.lower()
     if stage != "terminated":
         raise CatalogSourceError("GitHub sent a truncated ref advertisement")
+    if not peel_tags:
+        return refs
     return {name: peeled.get(name, sha) for name, sha in refs.items()}
 
 

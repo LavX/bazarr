@@ -295,7 +295,9 @@ def test_only_actual_trusted_catalog_proxies_can_search(authenticated_client, pr
     providers.add("discover_good")
     providers.add("discover_untrusted", trusted=False)
     providers.add("discover_legacy")
-    monkeypatch.setitem(provider_registry.providers, "discover_legacy", Provider)
+    # Assigned directly: monkeypatch.setitem would undo after the providers fixture
+    # deletes the entry and put the fixture class back into the shared registry.
+    provider_registry.providers["discover_legacy"] = Provider
     providers.names.append("discover_missing")
     response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
     assert [name for name, _, _ in providers.videos] == ["discover_good"]
