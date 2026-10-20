@@ -495,6 +495,7 @@ jobs:
             tests/bazarr/test_auto_translation_profile.py \
             tests/bazarr/test_backup_contract.py \
             tests/bazarr/test_build_stamp.py \
+            tests/bazarr/test_check_update_gate.py \
             tests/bazarr/test_ci_guard_list.py \
             tests/bazarr/test_ci_plan.py \
             tests/bazarr/test_combine_aligner.py \
