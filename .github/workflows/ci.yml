@@ -378,6 +378,7 @@ jobs:
             tests/bazarr/test_media_server_instances_api.py \
             tests/bazarr/test_media_server_links_api.py \
             tests/bazarr/test_provider_hub.py \
+            tests/bazarr/test_builtin_provider_id_guard.py \
             tests/bazarr/test_provider_pool_config_reload.py \
             tests/bazarr/test_rar_extraction_production_config.py \
             tests/bazarr/test_provider_hub_auto_install_optin.py \
