@@ -1347,10 +1347,12 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
         )
         if arr_instance_id is not None:
             query = query.where(TableEpisodes.arr_instance_id == arr_instance_id)
-        rows = database.execute(query.limit(2)).all()
-        if arr_instance_id is None and len(rows) > 1:
-            return 'Media id is ambiguous across instances', 400
-        row = rows[0] if rows else None
+            row = database.execute(query).first()
+        else:
+            rows = database.execute(query.limit(2)).all()
+            if len(rows) > 1:
+                return 'Media id is ambiguous across instances', 400
+            row = rows[0] if rows else None
     elif media_type == 'movie':
         query = (
             select(TableMovies.id, TableMovies.path, TableMovies.arr_instance_id)
@@ -1358,10 +1360,12 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
         )
         if arr_instance_id is not None:
             query = query.where(TableMovies.arr_instance_id == arr_instance_id)
-        rows = database.execute(query.limit(2)).all()
-        if arr_instance_id is None and len(rows) > 1:
-            return 'Media id is ambiguous across instances', 400
-        row = rows[0] if rows else None
+            row = database.execute(query).first()
+        else:
+            rows = database.execute(query.limit(2)).all()
+            if len(rows) > 1:
+                return 'Media id is ambiguous across instances', 400
+            row = rows[0] if rows else None
     elif media_type == 'sports':
         query = (
             select(TableSportsEvents.id, TableSportsEvents.path, TableSportsEvents.arr_instance_id)
