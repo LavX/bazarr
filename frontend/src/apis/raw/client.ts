@@ -5,6 +5,14 @@ import socketio from "@/modules/socketio";
 import { Environment } from "@/utilities";
 import { LOG } from "@/utilities/console";
 import { setAuthenticated } from "@/utilities/event";
+import { inlineErrorsRequested } from "./inlineWrites";
+
+declare module "axios" {
+  interface AxiosRequestConfig {
+    // Set by withInlineErrors: the caller shows this request's failure itself.
+    inlineErrors?: boolean;
+  }
+}
 
 function GetErrorMessage(data: unknown, defaultMsg = "Unknown error"): string {
   if (typeof data === "string") {
@@ -42,10 +50,20 @@ class BazarrClient {
 
     this.source = Axios.CancelToken.source();
 
-    this.axios.interceptors.request.use((config) => {
-      config.cancelToken = this.source.token;
-      return config;
-    });
+    // Synchronous, so it runs inside the call that sends the request, which
+    // is where withInlineErrors can see it. An asynchronous interceptor anywhere
+    // in the chain would make every one of them run later.
+    this.axios.interceptors.request.use(
+      (config) => {
+        config.cancelToken = this.source.token;
+        if (inlineErrorsRequested()) {
+          config.inlineErrors = true;
+        }
+        return config;
+      },
+      undefined,
+      { synchronous: true },
+    );
 
     this.axios.interceptors.response.use(
       (resp) => {
@@ -60,7 +78,7 @@ class BazarrClient {
             code: resp.status,
             message: GetErrorMessage(resp.data),
           };
-          this.handleError(error);
+          this.handleError(error, resp.config?.inlineErrors === true);
           return Promise.reject(resp);
         }
       },
@@ -81,7 +99,10 @@ class BazarrClient {
         };
 
         error.message = backendError.message;
-        this.handleError(backendError, isBlobBody);
+        this.handleError(
+          backendError,
+          isBlobBody || error.config?.inlineErrors === true,
+        );
 
         return Promise.reject(error);
       },

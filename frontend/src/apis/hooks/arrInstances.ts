@@ -12,6 +12,7 @@ import type {
   ArrInstanceUpdate,
   ArrKind,
 } from "@/apis/raw/arrInstances";
+import { inlineWhen } from "@/apis/raw/inlineWrites";
 // Imported from the defining module, not the barrel: index re-exports this
 // file, so going through "." would close an import cycle.
 import { useSystemSettings } from "./system";
@@ -103,11 +104,23 @@ export function useArrInstance(id: number) {
   });
 }
 
-export function useCreateArrInstance() {
+// A caller that shows a failure next to the control that caused it says so,
+// and neither this hook's toast nor the API client's "Error <code>" one is
+// shown: the wizard's arr step had both, and the toast was the one drawn
+// 750px from the button.
+interface ArrInstanceMutationOptions {
+  inlineErrors?: boolean;
+}
+
+export function useCreateArrInstance({
+  inlineErrors = false,
+}: ArrInstanceMutationOptions = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "create"],
-    mutationFn: (body: ArrInstanceCreate) => api.arrInstances.create(body),
+    mutationFn: inlineWhen(inlineErrors, (body: ArrInstanceCreate) =>
+      api.arrInstances.create(body),
+    ),
     onSuccess: (created) => {
       showNotification({
         color: "green",
@@ -115,48 +128,61 @@ export function useCreateArrInstance() {
       });
       client.invalidateQueries({ queryKey: arrKey });
     },
-    onError: (error) =>
+    onError: (error) => {
+      if (inlineErrors) {
+        return;
+      }
       showNotification({
         color: "red",
         message: getArrInstanceErrorMessage(
           error,
           "Failed to create the instance",
         ),
-      }),
+      });
+    },
   });
 }
 
-export function useUpdateArrInstance() {
+export function useUpdateArrInstance({
+  inlineErrors = false,
+}: ArrInstanceMutationOptions = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "update"],
-    mutationFn: ({ id, body }: { id: number; body: ArrInstanceUpdate }) =>
-      api.arrInstances.update(id, body),
+    mutationFn: inlineWhen(
+      inlineErrors,
+      ({ id, body }: { id: number; body: ArrInstanceUpdate }) =>
+        api.arrInstances.update(id, body),
+    ),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: arrKey });
     },
-    onError: (error) =>
+    onError: (error) => {
+      if (inlineErrors) {
+        return;
+      }
       showNotification({
         color: "red",
         message: getArrInstanceErrorMessage(
           error,
           "Failed to update the instance",
         ),
-      }),
+      });
+    },
   });
 }
 
-export function useDeleteArrInstance() {
+export function useDeleteArrInstance({
+  inlineErrors = false,
+}: ArrInstanceMutationOptions = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "delete"],
-    mutationFn: ({
-      id,
-      removeLibrary,
-    }: {
-      id: number;
-      removeLibrary?: boolean;
-    }) => api.arrInstances.remove(id, removeLibrary),
+    mutationFn: inlineWhen(
+      inlineErrors,
+      ({ id, removeLibrary }: { id: number; removeLibrary?: boolean }) =>
+        api.arrInstances.remove(id, removeLibrary),
+    ),
     onSuccess: () => {
       showNotification({ color: "green", message: "Instance deleted" });
       client.invalidateQueries({ queryKey: arrKey });
@@ -168,7 +194,7 @@ export function useDeleteArrInstance() {
     onError: (error) => {
       // A 409 (the instance still owns synced media, or its library sync is
       // running) is surfaced inline by the delete confirmation dialog.
-      if (isArrInstanceConflict(error)) {
+      if (inlineErrors || isArrInstanceConflict(error)) {
         return;
       }
       showNotification({
@@ -199,12 +225,15 @@ export interface ArrTestConnection {
 
 export function useTestArrInstanceConnection(
   connection: ArrTestConnection = {},
+  { inlineErrors = false }: ArrInstanceMutationOptions = {},
 ) {
   const mutation = useMutation({
     // The key never appears here: mutation keys are static strings and the
     // request body is the only place credentials travel.
     mutationKey: [...arrKey, QueryKeys.Actions, "test"],
-    mutationFn: (body: ArrInstanceTest) => api.arrInstances.test(body),
+    mutationFn: inlineWhen(inlineErrors, (body: ArrInstanceTest) =>
+      api.arrInstances.test(body),
+    ),
   });
   const { reset } = mutation;
   const { ip, port, baseUrl, ssl, apiKey } = connection;

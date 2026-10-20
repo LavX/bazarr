@@ -23,6 +23,15 @@ export const CREDENTIAL_LABELS: Record<MediaServerKind, string> = {
   silo: "API Key",
 };
 
+// The same words in the setup wizard, whose labels are sentence case. Settings
+// keeps the Title Case the rest of its forms use.
+export const SETUP_CREDENTIAL_LABELS: Record<MediaServerKind, string> = {
+  emby: "API key",
+  jellyfin: "API key",
+  plex: "Plex token",
+  silo: "API key",
+};
+
 // The guide's own anchors. Emby is the first half of that page and Silo has its
 // own section; Jellyfin and Plex have none yet, so they land on the page, whose
 // shared half is what they need: path mappings, the refresh states, and what

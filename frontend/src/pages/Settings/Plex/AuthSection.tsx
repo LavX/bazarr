@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Paper, Stack, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useQueryClient } from "@tanstack/react-query";
+import { AxiosError } from "axios";
 import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
 import {
   usePlexAuthValidationQuery,
@@ -14,6 +15,22 @@ import { PLEX_AUTH_CONFIG } from "@/constants/plex";
 import { useModals } from "@/modules/modals";
 import styles from "@/pages/Settings/Plex/AuthSection.module.scss";
 
+// The backend's own words for a failed request, when it gave any. The Plex
+// endpoints answer with `error` (logout says "Failed to logout"), others with
+// `message`.
+function reasonOf(error: unknown): string | undefined {
+  if (!(error instanceof AxiosError)) {
+    return undefined;
+  }
+  const data = error.response?.data as
+    | { error?: unknown; message?: unknown }
+    | undefined;
+  const reason = data?.error ?? data?.message;
+  return typeof reason === "string" && reason.length > 0
+    ? reason.replace(/\.?$/, ".")
+    : undefined;
+}
+
 const AuthSection = () => {
   const {
     data: authData,
@@ -22,7 +39,11 @@ const AuthSection = () => {
     refetch: refetchAuth,
   } = usePlexAuthValidationQuery();
   const { mutateAsync: createPin } = usePlexPinMutation();
-  const { mutate: logout, isPending: isLoggingOut } = usePlexLogoutMutation();
+  // The failure is said below in a notification of its own, so the client's
+  // generic "Error <code>" toast stays away.
+  const { mutate: logout, isPending: isLoggingOut } = usePlexLogoutMutation({
+    inlineErrors: true,
+  });
   const [pin, setPin] = useState<Plex.Pin | null>(null);
   const authWindowRef = useRef<Window | null>(null);
   const queryClient = useQueryClient();
@@ -139,6 +160,18 @@ const AuthSection = () => {
               color: "green",
             });
           },
+          // A refused sign-out had no handler here: the dialog closed, the
+          // panel still said Connected, and all that could appear was the
+          // client's bare "Error <code>". It says what happened instead.
+          onError: (error) => {
+            notifications.show({
+              title: "Could not disconnect from Plex",
+              message: `${
+                reasonOf(error) ?? "Bazarr+ did not answer."
+              } You are still signed in to Plex. Try again in a moment.`,
+              color: "red",
+            });
+          },
         }),
     });
 
@@ -160,20 +193,18 @@ const AuthSection = () => {
     return (
       <Paper withBorder p="lg" className={styles.authSection}>
         <Stack gap="md">
-          <Title order={4}>Plex OAuth</Title>
+          <Title order={4}>Plex account</Title>
           <Stack gap="sm">
             <Text size="lg" fw={600}>
-              Complete Authentication
+              Finish signing in to Plex
             </Text>
             <Text>
-              PIN Code:{" "}
+              Sign-in code:{" "}
               <Text component="span" fw={700}>
                 {pin?.code}
               </Text>
             </Text>
-            <Text size="sm">
-              Complete the authentication in the opened window.
-            </Text>
+            <Text size="sm">Sign in to Plex in the window that opened.</Text>
             <Button
               onClick={handleCancelAuth}
               variant="light"
@@ -193,15 +224,15 @@ const AuthSection = () => {
     return (
       <Paper withBorder p="lg" className={styles.authSection}>
         <Stack gap="md">
-          <Title order={4}>Plex OAuth</Title>
+          <Title order={4}>Plex account</Title>
           <Stack gap="sm">
             <Text size="sm">
               Connect your Plex account to enable secure, automated integration
               with Bazarr.
             </Text>
             <Text size="xs" c="var(--bz-text-tertiary)">
-              Advanced users: Manual configuration is available via config.yaml
-              if OAuth is not suitable.
+              Advanced users: manual configuration is available in config.yaml
+              if signing in here does not suit you.
             </Text>
             {authError && (
               <Alert color="red" variant="light">
@@ -227,7 +258,7 @@ const AuthSection = () => {
   return (
     <Paper withBorder p="lg" className={styles.authSection}>
       <Stack gap="md">
-        <Title order={4}>Plex OAuth</Title>
+        <Title order={4}>Plex account</Title>
         <Alert color="brand" variant="light" className={styles.authAlert}>
           Connected as {authData?.username} ({authData?.email})
         </Alert>

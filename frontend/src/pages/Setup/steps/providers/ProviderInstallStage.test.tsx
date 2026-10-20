@@ -1,4 +1,5 @@
 import userEvent, { UserEvent } from "@testing-library/user-event";
+import { AxiosError } from "axios";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useProviderHubCatalog,
@@ -9,7 +10,7 @@ import {
   useSystemSettings,
 } from "@/apis/hooks";
 import api from "@/apis/raw";
-import { customRender, fireEvent, screen, waitFor } from "@/tests";
+import { act, customRender, fireEvent, screen, waitFor } from "@/tests";
 import ProviderInstallStage from "./ProviderInstallStage";
 import { redirectToSetup } from "./redirect";
 
@@ -218,9 +219,12 @@ describe("ProviderInstallStage", () => {
       mutateAsync: settingsMutateAsync,
       isPending: false,
     } as unknown as ReturnType<typeof useSettingsMutation>);
-    restart.mockImplementation((opts?: { onSuccess?: () => void }) => {
-      opts?.onSuccess?.();
-    });
+    // The restart is answered, as the hook's mutate(vars, options) does.
+    restart.mockImplementation(
+      (_vars: unknown, opts?: { onSuccess?: () => void }) => {
+        opts?.onSuccess?.();
+      },
+    );
     mockedSystem.mockReturnValue({
       restart,
       isMutating: false,
@@ -355,6 +359,16 @@ describe("ProviderInstallStage", () => {
     await waitFor(() => {
       expect(refetchCatalog).toHaveBeenCalled();
     });
+    // The refresh's own failure is said, not swallowed for the re-read, and
+    // the client's toast for it is off because it is said here.
+    expect(mockedRefreshCatalog).toHaveBeenCalledWith({ inlineErrors: true });
+    expect(
+      screen.getByRole("alert", {
+        name: /could not load the provider catalog/i,
+      }),
+    ).toHaveTextContent(
+      "The retry could not refresh the catalog either: refresh refused",
+    );
   });
 
   it("names the search box for a screen reader", () => {
@@ -498,6 +512,181 @@ describe("ProviderInstallStage", () => {
     await vi.advanceTimersByTimeAsync(5000);
     await vi.advanceTimersByTimeAsync(5000);
 
+    expect(mockedRedirect).toHaveBeenCalledTimes(1);
+  });
+
+  function restartAnswers(error: AxiosError) {
+    restart.mockImplementation(
+      (_vars: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        opts?.onError?.(error);
+      },
+    );
+  }
+
+  it("says so when the backend refuses the restart, and does not reload", async () => {
+    // The restart request had no error handling: the overlay and the health
+    // poll started anyway, and the poll, finding the backend that had just
+    // refused still up, reloaded into setup as if the restart had happened.
+    vi.useFakeTimers();
+    restartAnswers(
+      new AxiosError("refused", "ERR_BAD_RESPONSE", undefined, undefined, {
+        status: 500,
+        statusText: "",
+        headers: {},
+        config: {} as never,
+        data: { message: "Restart is not allowed on this install" },
+      }),
+    );
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+    expect(mockedSystem).toHaveBeenCalledWith({ inlineErrors: true });
+    expect(mockedInstall).toHaveBeenCalledWith({ inlineErrors: true });
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    fireEvent.click(screen.getByRole("button", { name: /install & restart/i }));
+    await act(() => vi.advanceTimersByTimeAsync(100));
+    expect(restart).toHaveBeenCalledTimes(1);
+
+    const alert = screen.getByRole("alert", { name: /did not restart/i });
+    expect(alert).toHaveTextContent("Restart is not allowed on this install");
+    expect(screen.queryByText(/restarting bazarr/i)).not.toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(mockedRedirect).not.toHaveBeenCalled();
+
+    // The installs are staged, so the restart can be asked for again.
+    fireEvent.click(screen.getByRole("button", { name: /restart now/i }));
+    await act(() => vi.advanceTimersByTimeAsync(100));
+    expect(restart).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores a health answer already on its way when the restart is refused", async () => {
+    // Clearing the poll left a status request in flight; when it landed, from
+    // the backend that had just refused and was still up, it reloaded into
+    // setup as if the restart had happened.
+    vi.useFakeTimers();
+    let refuse: (() => void) | undefined;
+    restart.mockImplementation(
+      (_vars: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        refuse = () =>
+          opts?.onError?.(
+            new AxiosError(
+              "refused",
+              "ERR_BAD_RESPONSE",
+              undefined,
+              undefined,
+              {
+                status: 500,
+                statusText: "",
+                headers: {},
+                config: {} as never,
+                data: { message: "Restart is not allowed on this install" },
+              },
+            ),
+          );
+      },
+    );
+    let answerStatus: (() => void) | undefined;
+    mockedStatus.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answerStatus = () => resolve({} as never);
+        }),
+    );
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    fireEvent.click(screen.getByRole("button", { name: /install & restart/i }));
+    await act(() => vi.advanceTimersByTimeAsync(100));
+    expect(restart).toHaveBeenCalledTimes(1);
+
+    // The poll's first status request goes out and has not answered yet.
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    expect(mockedStatus).toHaveBeenCalledTimes(1);
+
+    // The restart is refused, and only then does that request answer.
+    await act(async () => refuse?.());
+    await act(async () => answerStatus?.());
+    await act(() => vi.advanceTimersByTimeAsync(15_000));
+
+    expect(mockedRedirect).not.toHaveBeenCalled();
+    expect(mockedStatus).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("alert", { name: /did not restart/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not take a backend that answers before the restart is answered as restarted", async () => {
+    vi.useFakeTimers();
+    let accept: (() => void) | undefined;
+    restart.mockImplementation(
+      (_vars: unknown, opts?: { onSuccess?: () => void }) => {
+        accept = () => opts?.onSuccess?.();
+      },
+    );
+    mockedStatus.mockResolvedValue({} as never);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    fireEvent.click(screen.getByRole("button", { name: /install & restart/i }));
+    await act(() => vi.advanceTimersByTimeAsync(10_100));
+
+    // Up and answering, but the restart has not been taken yet.
+    expect(mockedStatus).toHaveBeenCalled();
+    expect(mockedRedirect).not.toHaveBeenCalled();
+
+    await act(async () => accept?.());
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    expect(mockedRedirect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps waiting when the restart cuts the connection, as a restart does", async () => {
+    vi.useFakeTimers();
+    restartAnswers(new AxiosError("Network Error", "ERR_NETWORK"));
+    mockedStatus
+      .mockRejectedValueOnce(new Error("down"))
+      .mockResolvedValueOnce({} as never);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    fireEvent.click(screen.getByRole("button", { name: /install & restart/i }));
+    await act(() => vi.advanceTimersByTimeAsync(100));
+
+    expect(screen.getByText(/restarting bazarr/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("alert", { name: /did not restart/i }),
+    ).not.toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(5000);
     expect(mockedRedirect).toHaveBeenCalledTimes(1);
   });
 

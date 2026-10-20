@@ -1,7 +1,16 @@
 import { FC, useState } from "react";
-import { Anchor, Button, Group, PasswordInput, Text } from "@mantine/core";
+import {
+  Alert,
+  Anchor,
+  Button,
+  Group,
+  PasswordInput,
+  Stack,
+  Text,
+} from "@mantine/core";
 import { useSettingsMutation } from "@/apis/hooks";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import type { WizardStepProps } from "./types";
 
 /**
@@ -16,18 +25,29 @@ import type { WizardStepProps } from "./types";
  * Writing the key alone would be inert, because the translator engine defaults
  * to Google Translate, so a filled-in key also selects OpenRouter as the
  * engine. Both keys go through the same settings path the Translator page uses.
+ * The step says both things before the reader types anything: that OpenRouter
+ * bills for what it translates, and that a saved key replaces the engine.
  */
 const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
-  const settings = useSettingsMutation();
+  const settings = useSettingsMutation(false, { inlineErrors: true });
+  // Leaving while the save is in flight unmounted the step, TanStack dropped
+  // its callbacks, and a failure then said nothing anywhere, since the toasts
+  // are off for it. The shell holds Back, the skip and Set up later until it
+  // lands.
+  useReportStepBusy(settings.isPending);
 
   const [apiKey, setApiKey] = useState("");
   const trimmedKey = apiKey.trim();
+  // The client keeps a restarting or unreachable Bazarr+ out of its toasts,
+  // so a write that fails that way said nothing at all unless it is said here.
+  const [saveFailed, setSaveFailed] = useState(false);
 
   const handleContinue = () => {
     if (trimmedKey.length === 0) {
       onNext();
       return;
     }
+    setSaveFailed(false);
     settings.mutate(
       {
         "settings-translator-openrouter_api_key": trimmedKey,
@@ -37,6 +57,7 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
         onSuccess: () => {
           onNext();
         },
+        onError: () => setSaveFailed(true),
       },
     );
   };
@@ -45,7 +66,7 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     <StepLayout
       title="Subtitle translation"
       layout="stacked"
-      description="Bazarr+ can translate a subtitle into a language nobody published, with an AI model of your choice. Paste an OpenRouter key to switch it on now. Everything else works without it, and the full set of translation options lives in Settings."
+      description="Bazarr+ can translate a subtitle into a language nobody published, with an AI model of your choice through OpenRouter. OpenRouter is a paid API: it charges your OpenRouter account for each translation, at the price of the model you pick. Everything else works without it, and the full set of translation options lives in Settings."
       aside={
         <Text size="sm" c="dimmed">
           <Anchor
@@ -59,25 +80,33 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
         </Text>
       }
       actions={
-        <Group justify="space-between">
-          <Group gap="sm">
-            {onBack && (
-              <Button variant="default" onClick={onBack}>
-                Back
-              </Button>
-            )}
+        <Stack gap="sm">
+          {saveFailed && (
+            <Alert color="red" title="Could not save the key">
+              Check that Bazarr+ is still running, then try again. You can also
+              set translation up later in Settings, Translator.
+            </Alert>
+          )}
+          <Group justify="space-between">
+            <Group gap="sm">
+              {onBack && (
+                <Button variant="default" onClick={onBack}>
+                  Back
+                </Button>
+              )}
+            </Group>
+            <Button onClick={handleContinue} loading={settings.isPending}>
+              {trimmedKey.length > 0
+                ? "Continue"
+                : "Continue without translation"}
+            </Button>
           </Group>
-          <Button onClick={handleContinue} loading={settings.isPending}>
-            {trimmedKey.length > 0
-              ? "Continue"
-              : "Continue without translation"}
-          </Button>
-        </Group>
+        </Stack>
       }
     >
       <PasswordInput
         label="OpenRouter API key"
-        description="Leave this empty to set translation up later"
+        description="Saving a key switches the translation engine from Google Translate to OpenRouter. Leave this empty to keep Google Translate."
         placeholder="sk-or-..."
         autoComplete="new-password"
         value={apiKey}

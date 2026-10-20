@@ -123,6 +123,15 @@ function describeError(reason: unknown, fallback: string): string {
   return fallback;
 }
 
+// Whether a failed restart request was refused by a running backend, rather
+// than cut off by the restart it asked for: a dropped connection has no
+// response, and a proxy in front of a restarting backend answers 502 to 504.
+function restartRefused(error: unknown): boolean {
+  const status =
+    error instanceof AxiosError ? error.response?.status : undefined;
+  return status !== undefined && (status < 502 || status > 504);
+}
+
 function describeInstallError(reason: unknown): string {
   return describeError(
     reason,
@@ -173,15 +182,25 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     isFetching: catalogFetching,
     refetch: refetchCatalog,
   } = useProviderHubCatalog();
-  const install = useProviderHubInstall();
-  const refreshCatalog = useProviderHubRefreshCatalog();
-  const { restart } = useSystem();
-  const settingsMutation = useSettingsMutation();
+  // A failed install is listed with its reason in the outcomes.
+  const install = useProviderHubInstall({ inlineErrors: true });
+  // A failed refresh is said in the catalog alert, so the client's toast for
+  // it stays away.
+  const refreshCatalog = useProviderHubRefreshCatalog({ inlineErrors: true });
+  // Why the last Retry's refresh did not get through, said beside the
+  // catalog's own reason. It used to be dropped for a plain re-read.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  // A refused restart is said on the step, so the client's toast stays away.
+  const { restart } = useSystem({ inlineErrors: true });
+  const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
   const { data: systemSettings } = useSystemSettings();
 
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [restarting, setRestarting] = useState(false);
+  // Why Bazarr+ refused the restart, when it did. The installs are staged and
+  // load on the next restart, whoever starts it.
+  const [restartError, setRestartError] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   // Which control started the run. Both install buttons used to read
   // `installing`, so pressing either spun both and neither said what it was
@@ -296,13 +315,18 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   // many times the button is pressed. A refresh is what tries the source again,
   // and it invalidates the catalog itself on the way back.
   const handleCatalogRetry = useCallback(async () => {
+    setRefreshError(null);
     if (!catalogFailed) {
       try {
         await refreshCatalog.mutateAsync();
         return;
-      } catch {
-        // The refresh itself did not get through. Fall back to re-reading what
-        // the backend already has, which is what this button used to do.
+      } catch (reason) {
+        // The refresh itself did not get through. Say so, then fall back to
+        // re-reading what the backend already has, which is what this button
+        // used to do in silence.
+        setRefreshError(
+          describeError(reason, "Bazarr+ gave no reason for the refresh."),
+        );
       }
     }
     await refetchCatalog();
@@ -316,52 +340,94 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     );
   }, []);
 
+  // Which restart attempt the poll works for, and whether that attempt's
+  // restart was accepted: answered, or cut off the way a restart cuts the
+  // connection. A health answer counts only for the current attempt once it
+  // was accepted. Clearing the interval on a refusal left a status request
+  // already on its way, and its answer, from a backend that had just refused
+  // and was still up, reloaded into setup as if the restart had happened.
+  const attemptRef = useRef(0);
+  const acceptedRef = useRef(false);
+
+  const stopHealthPoll = useCallback(() => {
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
   // Poll the backend until it answers, then hard-redirect into the wizard.
   const startHealthPoll = useCallback(() => {
     if (pollRef.current !== null) {
       return;
     }
+    const attempt = attemptRef.current;
     pollRef.current = setInterval(() => {
       void api.system
         .status()
         .then(() => {
-          if (pollRef.current !== null) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
+          if (attempt !== attemptRef.current || !acceptedRef.current) {
+            // A stale attempt, or a backend that has not taken the restart
+            // yet: it answering says nothing about a restart.
+            return;
           }
+          stopHealthPoll();
           redirectToSetup();
         })
         .catch(() => {
           // Backend still down; keep polling.
         });
     }, HEALTH_POLL_INTERVAL_MS);
-  }, []);
+  }, [stopHealthPoll]);
 
   useEffect(() => {
     return () => {
-      if (pollRef.current !== null) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
+      // Nothing that answers after the step has gone may move the page.
+      attemptRef.current += 1;
+      stopHealthPoll();
     };
-  }, []);
+  }, [stopHealthPoll]);
 
   const beginRestart = useCallback(() => {
     if (restartStartedRef.current) {
       return;
     }
     restartStartedRef.current = true;
+    attemptRef.current += 1;
+    acceptedRef.current = false;
     setCountdown(null);
+    setRestartError(null);
     setRestarting(true);
     onInstalledNeedsRestart();
+    // Some restart paths resolve before the connection drops, so the poll
+    // starts regardless, and first: a refusal below has a poll to stop.
+    startHealthPoll();
     restart(undefined, {
       onSuccess: () => {
+        acceptedRef.current = true;
         startHealthPoll();
       },
+      onError: (error) => {
+        // A dropped connection or a gateway error is the restart itself, so
+        // the poll goes on. An answer that is not one of those is a refusal:
+        // the backend is still up, the poll would find it at once and reload
+        // into setup as if the restart had happened.
+        if (!restartRefused(error)) {
+          acceptedRef.current = true;
+          return;
+        }
+        // Retires this attempt, so a status answer already on its way is
+        // ignored when it lands.
+        attemptRef.current += 1;
+        stopHealthPoll();
+        restartStartedRef.current = false;
+        setRestarting(false);
+        setRestartError(
+          describeError(error, "It answered without saying why."),
+        );
+      },
     });
-    // Some restart paths resolve before the connection drops; poll regardless.
-    startHealthPoll();
-  }, [onInstalledNeedsRestart, restart, startHealthPoll]);
+  }, [onInstalledNeedsRestart, restart, startHealthPoll, stopHealthPoll]);
 
   // Enables `ids` without dropping the providers already enabled, which on a
   // fresh install is nothing and on a second visit is whatever the reader had
@@ -556,6 +622,20 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   // failure to act on here: it names the one thing the button promised and
   // could not do, and where to do it instead. It is rendered in both of the
   // views a run can end on, because a clean run never shows the outcome list.
+  const restartFailure =
+    restartError === null ? null : (
+      <Alert color="red" title="Bazarr+ did not restart">
+        <Stack gap={4}>
+          <Text size="sm">{restartError}</Text>
+          <Text size="sm">
+            The installed providers are staged and load on the next restart.
+            Press Restart now to try again, or restart Bazarr+ from System,
+            Status.
+          </Text>
+        </Stack>
+      </Alert>
+    );
+
   const enableFailure =
     enableError === null ? null : (
       <Alert color="yellow" title="Installed, but not enabled">
@@ -607,6 +687,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
           <VisuallyHidden role="status">{announcement}</VisuallyHidden>
         </Stack>
 
+        {restartFailure}
         {enableFailure}
 
         <List spacing={4} center className={styles.outcomes}>
@@ -730,6 +811,11 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
                 : (sourceError ??
                   "Bazarr+ could not read the provider catalog and gave no reason.")}
             </Text>
+            {refreshError !== null && (
+              <Text size="sm">
+                The retry could not refresh the catalog either: {refreshError}
+              </Text>
+            )}
             <Group gap="sm">
               <Button
                 variant="default"

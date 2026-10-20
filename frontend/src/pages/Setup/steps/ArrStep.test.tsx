@@ -152,6 +152,205 @@ describe("ArrStep", () => {
     expect(screen.getByLabelText(/api key/i)).toBeInTheDocument();
   });
 
+  it("says what each field wants, in sentence case", () => {
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    expect(screen.getByLabelText("API key")).toBeInTheDocument();
+    // 127.0.0.1 told a Docker user nothing, and a full URL typed here was
+    // stored verbatim as the host.
+    const address = screen.getByLabelText(/^address/i);
+    expect(address).toHaveAccessibleDescription(
+      "Hostname or IP only, no http:// and no port",
+    );
+    expect(address).not.toHaveAttribute("placeholder", "127.0.0.1");
+    // The literal lowercase kind was the placeholder; normalizeBaseUrl stores
+    // a leading slash, so that is what the example shows.
+    const baseUrl = screen.getByLabelText(/^base url/i);
+    expect(baseUrl).toHaveAttribute("placeholder", "/sonarr");
+    expect(baseUrl).toHaveAccessibleDescription(
+      "Leave empty unless Sonarr is served under a path",
+    );
+  });
+
+  it("splits a pasted URL into address, port and base URL, and says so", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(screen.getByLabelText(/^address/i));
+    await user.paste("http://sonarr:8990/sonarr/");
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("sonarr");
+    expect(screen.getByLabelText(/^port/i)).toHaveValue("8990");
+    expect(screen.getByLabelText(/^base url/i)).toHaveValue("/sonarr");
+    expect(
+      screen.getByRole("alert", { name: /moved into the right fields/i }),
+    ).toHaveTextContent(/took the http:\/\/ off the address/i);
+
+    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => {
+      expect(createMutate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ip: "sonarr",
+          port: 8990,
+          // eslint-disable-next-line camelcase
+          base_url: "/sonarr",
+          ssl: false,
+        }),
+        expect.anything(),
+      );
+    });
+  });
+
+  it("strips a typed https:// and turns SSL on", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/^address/i), "https://10.0.0.5");
+    await user.tab();
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("10.0.0.5");
+    expect(screen.getByRole("switch", { name: /use ssl/i })).toBeChecked();
+    expect(
+      screen.getByRole("alert", { name: /moved into the right fields/i }),
+    ).toHaveTextContent(/use ssl is on/i);
+  });
+
+  it.each([
+    ["https://sonarr:443/sonarr", "443", true],
+    ["http://sonarr:80/sonarr", "80", false],
+  ])("keeps the explicit standard port in %s", async (pasted, port, ssl) => {
+    // URL drops a port that is its scheme's default, which left 8989 in
+    // Port while the scheme turned SSL on.
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(screen.getByLabelText(/^address/i));
+    await user.paste(pasted);
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("sonarr");
+    expect(screen.getByLabelText(/^port/i)).toHaveValue(port);
+    expect(screen.getByLabelText(/^base url/i)).toHaveValue("/sonarr");
+    const toggle = screen.getByRole("switch", { name: /use ssl/i });
+    if (ssl) {
+      expect(toggle).toBeChecked();
+    } else {
+      expect(toggle).not.toBeChecked();
+    }
+  });
+
+  it("splits a URL typed out in full once the field is left", async () => {
+    // Splitting on every keystroke took the scheme off as soon as it was
+    // complete, and the port and path typed after it stayed in Address.
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.type(
+      screen.getByLabelText(/^address/i),
+      "http://sonarr:8990/sonarr",
+    );
+    expect(screen.getByLabelText(/^address/i)).toHaveValue(
+      "http://sonarr:8990/sonarr",
+    );
+    await user.tab();
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("sonarr");
+    expect(screen.getByLabelText(/^port/i)).toHaveValue("8990");
+    expect(screen.getByLabelText(/^base url/i)).toHaveValue("/sonarr");
+  });
+
+  it("splits a typed URL before Continue saves it", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/^address/i), "sonarr:8990");
+    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() =>
+      expect(createMutate).toHaveBeenCalledWith(
+        expect.objectContaining({ ip: "sonarr", port: 8990 }),
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("saves the ticket's own example, typed key by key, as host and port", async () => {
+    // A Docker user types http://sonarr:8989 and presses Continue. It was
+    // stored verbatim as the host, then as sonarr:8989 once the scheme alone
+    // was stripped.
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.clear(screen.getByLabelText(/^port/i));
+    await user.type(screen.getByLabelText(/^port/i), "1234");
+    await user.type(screen.getByLabelText(/^address/i), "http://sonarr:8989");
+    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() =>
+      expect(createMutate).toHaveBeenCalledWith(
+        expect.objectContaining({ ip: "sonarr", port: 8989, ssl: false }),
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("drops the split note on any hand edit of the address", async () => {
+    // Select-all and retype kept the note about the pasted URL on screen
+    // beside an address it no longer described.
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(screen.getByLabelText(/^address/i));
+    await user.paste("http://sonarr:8989");
+    expect(
+      screen.getByRole("alert", { name: /moved into the right fields/i }),
+    ).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/^address/i), "2");
+
+    expect(
+      screen.queryByRole("alert", { name: /moved into the right fields/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("sonarr2");
+  });
+
+  it("drops the split note once the address is emptied", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(screen.getByLabelText(/^address/i));
+    await user.paste("http://sonarr:8989");
+    expect(
+      screen.getByRole("alert", { name: /moved into the right fields/i }),
+    ).toHaveTextContent(/the port went to port/i);
+
+    await user.clear(screen.getByLabelText(/^address/i));
+    await user.type(screen.getByLabelText(/^address/i), "10.0.0.5");
+    await user.tab();
+
+    expect(
+      screen.queryByRole("alert", { name: /moved into the right fields/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("10.0.0.5");
+  });
+
+  it("leaves a bare IPv6 address alone", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/^address/i), "fe80::1");
+    await user.tab();
+
+    expect(screen.getByLabelText(/^address/i)).toHaveValue("fe80::1");
+    expect(screen.getByLabelText(/^port/i)).toHaveValue("8989");
+    expect(
+      screen.queryByRole("alert", { name: /moved into the right fields/i }),
+    ).not.toBeInTheDocument();
+  });
+
   // The defect this step shipped with: Continue on a form nobody filled in
   // posted it anyway, and the backend fills the blanks (empty key,
   // 127.0.0.1), so a new install came out of the wizard with up to three
@@ -258,12 +457,15 @@ describe("ArrStep", () => {
     // The verdict belongs to the connection it was measured against: the hook
     // is handed the current values so it can drop a green result the moment
     // the address, the port or the key changes.
+    // A Test that cannot reach Bazarr+ is said beside the button, so the
+    // request is the hook's to keep out of the client's toast.
     expect(mockedUseTestArrInstanceConnection).toHaveBeenLastCalledWith(
       expect.objectContaining({
         ip: "10.0.0.5",
         port: 8989,
         apiKey: "abc123",
       }),
+      { inlineErrors: true },
     );
 
     // A successful result is surfaced inline.
@@ -394,6 +596,47 @@ describe("ArrStep", () => {
       await screen.findByText(/could not save the sonarr connection/i),
     ).toBeInTheDocument();
     expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("shows a rejected create beside Continue, with the hook toasts off", async () => {
+    // The create used to report itself as a toast in the bottom-left corner,
+    // 750px from the button, while every other error on the step was inline.
+    const user = userEvent.setup();
+    createMutate.mockImplementation(
+      (_body: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        opts?.onError?.(new Error("nope"));
+      },
+    );
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    expect(mockedUseCreateArrInstance).toHaveBeenCalledWith({
+      inlineErrors: true,
+    });
+    expect(mockedUseUpdateArrInstance).toHaveBeenCalledWith({
+      inlineErrors: true,
+    });
+    expect(mockedUseDeleteArrInstance).toHaveBeenCalledWith({
+      inlineErrors: true,
+    });
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/could not save the sonarr connection/i);
+    // Under the last field and straight above the button row, not up in the
+    // side column a whole form away from Continue.
+    const lastField = screen.getByLabelText(/api key/i);
+    const continueButton = screen.getByRole("button", { name: /^continue$/i });
+    expect(
+      lastField.compareDocumentPosition(alert) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      alert.compareDocumentPosition(continueButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("says so when the instance saved but the switch did not", async () => {

@@ -110,7 +110,7 @@ const AutopulseSelector: FunctionComponent<AutopulseSelectorProps> = (
           {label}
         </Text>
         <Alert color="brand" variant="light" className={styles.alertMessage}>
-          Enable Plex OAuth above to generate an Autopulse configuration.
+          Sign in to Plex above to generate an Autopulse configuration.
         </Alert>
       </Stack>
     );

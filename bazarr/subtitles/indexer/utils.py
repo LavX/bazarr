@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import ast
 import os
 import logging
 import unicodedata
@@ -13,6 +14,7 @@ from constants import MAXIMUM_SUBTITLE_SIZE
 from app.config import settings
 from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
+from subtitles.indexer.entries import entry_codec
 from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path, sync_output_owner_is_unique
 
 import re as _re_combine
@@ -87,6 +89,33 @@ def normalize_subtitle_language_variant(language, forced=False, hi=False):
     if not normalized_variants:
         return base
     return ':'.join([base] + normalized_variants)
+
+
+def kept_embedded_entries(stored, hidden=()):
+    """The embedded entries of a stored listing that a new listing should keep.
+
+    For an indexer that could not read the file's tracks this time. A failed
+    read says nothing about the tracks, and a listing stored without them makes
+    every embedded language wanted again. Hidden keys and codecs the ignore
+    switches now skip are dropped, as a good read would drop them.
+    """
+    try:
+        listing = ast.literal_eval(stored) if stored else []
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return []
+    kept = []
+    for entry in listing if isinstance(listing, list) else []:
+        if not isinstance(entry, (list, tuple)) or not entry or not isinstance(entry[0], str):
+            continue
+        if len(entry) > 1 and entry[1]:
+            continue
+        codec = entry_codec(entry)
+        if entry[0] in hidden or (codec and ((settings.general.ignore_pgs_subs and codec == 'pgs') or
+                                             (settings.general.ignore_vobsub_subs and codec == 'vobsub') or
+                                             (settings.general.ignore_ass_subs and codec == 'ass'))):
+            continue
+        kept.append(list(entry))
+    return kept
 
 
 def sync_engine_from_subtitle_name(subtitle):

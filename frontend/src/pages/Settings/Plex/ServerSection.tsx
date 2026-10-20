@@ -50,6 +50,11 @@ const ServerSection = () => {
       if (data?.error_code === "plex_unreachable") {
         return "Plex could not be reached to verify the server address. Try again in a moment.";
       }
+      // Any other refusal in the backend's own words: account_changed says to
+      // choose the server again, and the generic line below hid that.
+      if (data?.error) {
+        return data.error;
+      }
     }
     return "Could not save the selected server. Try again.";
   };

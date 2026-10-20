@@ -171,7 +171,7 @@ describe("Plex WebhookSelector without a Plex sign-in", () => {
       screen.getByText(/Sign in to Plex above to manage webhooks/),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(/Enable Plex OAuth above/),
+      screen.queryByText(/Sign in to Plex above to automatically discover/),
     ).not.toBeInTheDocument();
   }
 

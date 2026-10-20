@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { inlineWhen } from "@/apis/raw/inlineWrites";
 import type { SeerrIdentity, SeerrRequestBody } from "@/types/seerr";
 
 export const seerrMediaKey = (identity: SeerrIdentity) =>
@@ -66,13 +67,15 @@ export interface SeerrTestConnection {
 
 export function useSeerrTestConnectionMutation(
   connection: SeerrTestConnection = {},
+  // The caller shows a failed test itself, so the client's toast stays away.
+  { inlineErrors = false }: { inlineErrors?: boolean } = {},
 ) {
   const mutation = useMutation({
-    mutationFn: (params: {
-      url: string;
-      apikey: string;
-      verifySsl?: boolean;
-    }) => api.seerr.testConnection(params.url, params.apikey, params.verifySsl),
+    mutationFn: inlineWhen(
+      inlineErrors,
+      (params: { url: string; apikey: string; verifySsl?: boolean }) =>
+        api.seerr.testConnection(params.url, params.apikey, params.verifySsl),
+    ),
   });
   const { reset } = mutation;
   const { url, apikey, verifySsl } = connection;

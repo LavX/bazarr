@@ -44,6 +44,63 @@ def _file_signature(context, row, mappings):
             stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
+def _read_from_this_file(read_from, context, row, mappings):
+    """Whether the last good read, by its signature, is of the file the row
+    names now, as far as an outage lets anyone tell: the same event and owner,
+    upstream file and size, mapped path, and the same local path for every
+    stored sidecar. Mapping edits that move neither are not a change.
+
+    A replacement with the same upstream identity cannot be told apart while
+    the file cannot be reached; once it can, its inode and times differ from
+    the signature and force a new read.
+    """
+    if not isinstance(read_from, tuple) or len(read_from) < 8:
+        return False
+    identity = (context.event_id, context.arr_instance_id, context.file_id, context.original_path,
+                context.mapped_path, row.file_size)
+    if tuple(read_from[:5]) + (read_from[7],) != identity:
+        return False
+    if read_from[6] == mappings:
+        return True
+    try:
+        before, now = read_sports_mappings(read_from[6]), read_sports_mappings(mappings)
+        sidecars = [entry[1] for entry in ast.literal_eval(row.subtitles or '[]')
+                    if isinstance(entry, (list, tuple)) and len(entry) > 1 and isinstance(entry[1], str)]
+        return all(apply_sports_mapping(path, before) == apply_sports_mapping(path, now) for path in sidecars)
+    except (ValueError, SyntaxError, TypeError):
+        return False
+
+
+def _last_read(row):
+    """The signature of the row's last good read, kept across invalidations."""
+    read_from = _stored_cache(row).get('sports_file')
+    return read_from if isinstance(read_from, tuple) else None
+
+
+def _forget_another_files_listing(row, context, mappings):
+    """Empty the listing when the last good read was of another file.
+
+    Runs wherever the row is about to keep its listing without a fresh index
+    or to record a newer read, reachable or not: a listing only survives a
+    failure of the file it was read from. True when it emptied the listing.
+    """
+    read_from = _last_read(row)
+    if read_from is None or _read_from_this_file(read_from, context, row, mappings):
+        return False
+    row.subtitles = '[]'
+    row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language, row.failedAttempts))
+    return True
+
+
+def _stored_cache(row):
+    """The row's cached metadata whatever file it was read from, or {}."""
+    try:
+        data = pickle.loads(row.ffprobe_cache)
+    except (TypeError, ValueError, EOFError, pickle.UnpicklingError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _snapshot(event_id, owner, cancel=None):
     check_cancelled(cancel)
     context = resolve_event_in_session(database, event_id, owner)
@@ -55,17 +112,25 @@ def _snapshot(event_id, owner, cancel=None):
     try:
         signature = _file_signature(context, row, mappings)
     except OSError:
-        # A new mapping may point at an unavailable file. Do not keep displaying
-        # subtitles from the previous mapped file while a later repair retries.
         with sports_transaction(database) as session:
             check_cancelled(cancel)
             require_sportarr(session, context.arr_instance_id)
             current = resolve_event_in_session(session, event_id, context.arr_instance_id)
             if current == context:
                 row = session.get(TableSportsEvents, event_id, populate_existing=True, with_for_update=True)
-                row.subtitles = '[]'
-                row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language, row.failedAttempts))
-                row.ffprobe_cache = None
+                cached = _stored_cache(row)
+                if _forget_another_files_listing(row, context, mappings):
+                    # A new mapping or a new upstream file points at a file that
+                    # cannot be reached. Do not keep displaying subtitles from
+                    # the previous file while a later repair retries.
+                    row.ffprobe_cache = None
+                elif cached:
+                    # The same file, unreachable for now: a share that dropped,
+                    # a permission error. The listing stays, and the row is
+                    # left unindexed so the next sync or scan retries it. The
+                    # cached read stays too, so a later outage can still tell
+                    # this file from a moved one.
+                    row.ffprobe_cache = pickle.dumps(cached | {'sports_indexed': False}, pickle.HIGHEST_PROTOCOL)
                 session.flush()
                 check_cancelled(cancel)
         raise
@@ -112,13 +177,16 @@ def _metadata(context, signature, cached, use_cache, cancel=None):
 
 def parse_sports_video_metadata(event_id, arr_instance_id=None, use_cache=True, file=None, *, cancel=None):
     """Probe one local event and publish cache only while its ownership still matches."""
-    context, _, signature = _snapshot(event_id, arr_instance_id, cancel)
+    context, mappings, signature = _snapshot(event_id, arr_instance_id, cancel)
     if file is not None and file != context.mapped_path:
         raise ValueError('Sports probe path does not match the local event')
     row = database.get(TableSportsEvents, event_id, populate_existing=True)
     data = _metadata(context, signature, _cached(row, signature), use_cache, cancel)
     with sports_transaction(database) as session:
         row = _validated_row(session, context, signature, cancel)
+        # The signature published below replaces the one the listing was read
+        # from, so a listing of another file cannot stay behind it.
+        _forget_another_files_listing(row, context, mappings)
         # A probe alone must never turn a pending subtitle scan into a completed one.
         data = data | {'sports_indexed': bool(_cached(row, signature).get('sports_indexed'))}
         row.ffprobe_cache = pickle.dumps(data, pickle.HIGHEST_PROTOCOL)
@@ -219,18 +287,44 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
         with sports_transaction(database) as session:
             row = _validated_row(session, context, signature, cancel)
             cached = _cached(row, signature)
+            # Set when the listing belongs to another file and is emptied, so
+            # the signature of that file's read goes with it.
+            forgotten = False
             if not cached:
-                row.subtitles = row.failedAttempts = '[]'
-                # Not '[]': this commits before the probe below, and a probe
-                # that cannot run leaves the row as it stands here. An empty
-                # missing list reads as "nothing wanted", and the Wanted query
-                # filters on missing_subtitles != '[]', so the recording would
-                # leave Wanted permanently and never be searched again. The
-                # mapping-failure path above recomputes it for the same reason.
-                row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language,
-                                                     row.failedAttempts))
-            row.ffprobe_cache = (pickle.dumps(cached | {'sports_indexed': False}, pickle.HIGHEST_PROTOCOL)
-                                 if cached else None)
+                # The listing of this same file stays: this commits before the
+                # probe below, and a probe that cannot run leaves the row as it
+                # stands here, so an emptied listing would show no subtitles at
+                # all, external files included, until the next good index
+                # replaces it. A listing read from another file, by a new
+                # mapping or upstream file, is emptied.
+                row.failedAttempts = '[]'
+                forgotten = _forget_another_files_listing(row, context, raw_mappings)
+                # Recomputed for the reset attempts, from the listing the row
+                # keeps, since a failed probe leaves this value in place too.
+                # The Wanted query filters on missing_subtitles != '[]', so a
+                # value from the old attempts could keep a language the new
+                # file should be searched for out of Wanted.
+                try:
+                    kept = ast.literal_eval(row.subtitles or '[]')
+                    row.missing_subtitles = str(_missing(context.profile_id, kept, row.audio_language,
+                                                         row.failedAttempts))
+                except (ValueError, SyntaxError, TypeError):
+                    # A listing that cannot be read must not block the index
+                    # that would replace it.
+                    row.subtitles = '[]'
+                    row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language,
+                                                         row.failedAttempts))
+            if cached:
+                row.ffprobe_cache = pickle.dumps(cached | {'sports_indexed': False}, pickle.HIGHEST_PROTOCOL)
+            else:
+                # The metadata no longer applies, but the signature of the last
+                # good read stays with the listing it produced, so the
+                # stat-failure path in _snapshot can still tell a moved file
+                # from this one. _cached matches it only if the file is exactly
+                # that one again, and then finds no metadata to reuse.
+                read_from = None if forgotten else _last_read(row)
+                row.ffprobe_cache = (pickle.dumps({'sports_file': read_from, 'sports_indexed': False},
+                                                  pickle.HIGHEST_PROTOCOL) if read_from else None)
             session.flush()
         data = cached | {'sports_file': signature}
         actual = []

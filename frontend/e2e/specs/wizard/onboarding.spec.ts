@@ -72,7 +72,7 @@ test.describe("onboarding wizard", { tag: ["@stateful", "@wizard"] }, () => {
       await expectFitsViewport(page, `media server step ${position}`);
       await skipStep(page);
     }
-    await expect(stepHeading(page, "Seerr")).toBeVisible();
+    await expect(stepHeading(page, "Requests")).toBeVisible();
     expect(configured.sort()).toEqual(["Emby", "Jellyfin", "Jellyfin 2"]);
   });
 
@@ -105,7 +105,7 @@ test.describe("onboarding wizard", { tag: ["@stateful", "@wizard"] }, () => {
       await page
         .getByRole("button", { name: "Continue without a server" })
         .click();
-      await expect(stepHeading(page, "Seerr")).toBeVisible();
+      await expect(stepHeading(page, "Requests")).toBeVisible();
       await skipStep(page);
 
       await expect(stepHeading(page, "Subtitle languages")).toBeVisible();
