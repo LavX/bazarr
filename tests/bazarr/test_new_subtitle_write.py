@@ -298,3 +298,64 @@ def test_a_rejected_replacement_puts_the_original_back(tmp_path, published):
     assert original.read_bytes() == b"old"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["event.en.srt"]
     assert published == []
+
+
+def test_a_replacement_with_no_destination_gets_the_normal_creation_mode(tmp_path, published):
+    from subtitles.new_subtitle import write_new_subtitle
+
+    control = tmp_path / "control.srt"
+    control.write_bytes(b"x")
+    target = tmp_path / "Film.en.srt"
+
+    write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(target), b"new")], "movie", 7,
+                       operation="edit", replace=True)
+
+    assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(control.stat().st_mode)
+
+
+def test_a_failed_mode_change_leaves_the_original_untouched(tmp_path, published, monkeypatch):
+    from app.config import settings
+    from subtitles import new_subtitle
+
+    monkeypatch.setattr(settings.general, "chmod_enabled", False)
+    original = tmp_path / "Film.en.srt"
+    original.write_bytes(b"old")
+    real_chmod = os.chmod
+
+    def refuse_staging(path, *args, **kwargs):
+        if os.path.basename(path).startswith(".bazarr-new-"):
+            raise OSError(1, "Operation not permitted")
+        return real_chmod(path, *args, **kwargs)
+
+    monkeypatch.setattr(new_subtitle.os, "chmod", refuse_staging)
+    with pytest.raises(OSError):
+        new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(original), b"new")],
+                                        "movie", 7, operation="edit", replace=True)
+
+    assert original.read_bytes() == b"old"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["Film.en.srt"]
+    assert published == []
+
+
+def test_a_foreign_file_put_there_during_a_failed_pair_stays(tmp_path, published, monkeypatch):
+    from subtitles import new_subtitle
+
+    first = tmp_path / "Film.hu.idx"
+    first.write_bytes(b"original index")
+
+    def foreign_then_fail(path, source, **kwargs):
+        foreign = tmp_path / "foreign.tmp"
+        foreign.write_bytes(b"another program")
+        os.replace(foreign, first)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(new_subtitle, "copy_file_atomically", foreign_then_fail)
+    with pytest.raises(OSError):
+        new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"),
+                                        [(str(first), b"new index"),
+                                         (str(tmp_path / "Film.hu.sub"), str(tmp_path / "cache.sub"))],
+                                        "movie", 7, replace=True)
+
+    assert first.read_bytes() == b"another program"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["Film.hu.idx"]
+    assert published == []

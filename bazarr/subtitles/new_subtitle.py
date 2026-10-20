@@ -65,9 +65,10 @@ def _new_staging_file(directory):
 
 
 def _staging_file(directory, replace):
-    # A replacement keeps the existing temporary-file behaviour of the routes
-    # that save over a file.
-    return tempfile.mkstemp(dir=directory) if replace else _new_staging_file(directory)
+    # Every write stages the same way. A replacement takes the destination's
+    # mode at publication, and a write with no destination keeps the normal
+    # creation mode, so nothing here needs mkstemp's 0600.
+    return _new_staging_file(directory)
 
 
 def _fd_identity(fd):
@@ -186,18 +187,16 @@ def _backup_for_replacement(path):
 
 def _publish(tmp_path, path, replace):
     if replace:
-        # os.replace keeps the temporary file's mode (mkstemp creates 0600), so
-        # publish with the mode the destination already had, or with the mode a
-        # new subtitle would get when there was no destination.
+        # The replacement takes the destination's mode. Give it to the staged
+        # file before the swap, so a chmod failure leaves the original intact
+        # instead of publishing new bytes with the staging mode.
         try:
             mode = stat.S_IMODE(os.stat(path).st_mode)
         except FileNotFoundError:
+            # No file to keep a mode from: this is an ordinary new file.
             return _publish_without_replacing(tmp_path, path)
+        os.chmod(tmp_path, mode)
         os.replace(tmp_path, path)
-        try:
-            os.chmod(path, mode)
-        except OSError:
-            logger.warning('BAZARR could not keep the mode of %s', path)
         return None
     return _publish_without_replacing(tmp_path, path)
 
@@ -316,11 +315,19 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
                 # after the file was already replaced.
                 for path, identity in written:
                     discard_if_owned(path, identity)
+                written_paths = {path for path, _identity in written}
                 for path, backup in reversed(backups):
-                    try:
-                        os.replace(backup, path)
-                    except OSError:
-                        logger.warning('BAZARR could not put %s back after a failed save', path)
+                    # Put the copy back only when this write published a file
+                    # there and that file is gone. A foreign file that another
+                    # program put under the name stays, and so does an original
+                    # this write never touched.
+                    if path in written_paths and not os.path.exists(path):
+                        try:
+                            os.replace(backup, path)
+                            continue
+                        except OSError:
+                            logger.warning('BAZARR could not put %s back after a failed save', path)
+                    _discard(backup)
                 raise
             else:
                 for _path, backup in backups:
