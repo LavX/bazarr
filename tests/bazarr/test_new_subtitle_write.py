@@ -5,6 +5,7 @@ Never over an existing file, a pair whole or not at all, one publication for
 the media servers, and the configured permissions on every file written.
 """
 import os
+import stat
 from contextlib import contextmanager
 
 import pytest
@@ -254,3 +255,46 @@ def test_the_writers_return_the_identity_of_the_file_they_published(tmp_path):
 
     assert written == new_subtitle.file_identity(str(tmp_path / "a.srt")) is not None
     assert copied == new_subtitle.file_identity(str(tmp_path / "b.sub")) is not None
+
+
+def test_a_replacement_keeps_the_mode_of_the_file_it_replaces(tmp_path, published, monkeypatch):
+    """os.replace keeps the temporary file's mode. A replacement must publish
+    with the mode the subtitle already had, or a media server running as
+    another user can no longer read it."""
+    from app.config import settings
+    from subtitles.new_subtitle import write_new_subtitle
+
+    monkeypatch.setattr(settings.general, "chmod_enabled", False)
+    original = tmp_path / "Film.en.srt"
+    original.write_bytes(b"old")
+    os.chmod(original, 0o644)
+
+    write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(original), b"new")], "movie", 7,
+                       operation="edit", replace=True)
+
+    assert original.read_bytes() == b"new"
+    assert stat.S_IMODE(original.stat().st_mode) == 0o644
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["Film.en.srt"]
+
+
+def test_a_rejected_replacement_puts_the_original_back(tmp_path, published):
+    """The sports publication boundary validates on its way out, after the file
+    was replaced. A rejection there must leave the original subtitle, not a
+    failure message over the new file."""
+    from subtitles.new_subtitle import write_new_subtitle
+
+    original = tmp_path / "event.en.srt"
+    original.write_bytes(b"old")
+
+    @contextmanager
+    def guard(*, output_path=None):
+        yield
+        raise ValueError("the recording changed")
+
+    with pytest.raises(ValueError, match="the recording changed"):
+        write_new_subtitle(str(tmp_path / "event.mkv"), [(str(original), b"new")], "sports", 3,
+                           operation="edit", replace=True, publication_guard=guard)
+
+    assert original.read_bytes() == b"old"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["event.en.srt"]
+    assert published == []

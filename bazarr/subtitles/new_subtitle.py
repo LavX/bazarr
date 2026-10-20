@@ -19,6 +19,7 @@ import logging
 import os
 import secrets
 import shutil
+import stat
 import tempfile
 from contextlib import nullcontext
 
@@ -159,9 +160,44 @@ def _copy_into_new_name(tmp_path, path):
     return identity
 
 
+def _backup_for_replacement(path):
+    """Copy the file at ``path`` beside it and return the copy's name.
+
+    The copy is the only thing that can put the original back when a write is
+    rejected after it has already replaced the file, for example by the sports
+    publication boundary. Returns None when there is no file to keep.
+    """
+    try:
+        source = open(path, 'rb')
+    except FileNotFoundError:
+        return None
+    with source:
+        fd, backup = tempfile.mkstemp(prefix='.bazarr-replaced-', suffix='.tmp',
+                                      dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, 'wb') as target:
+                shutil.copyfileobj(source, target)
+            shutil.copymode(path, backup)
+        except BaseException:
+            _discard(backup)
+            raise
+    return backup
+
+
 def _publish(tmp_path, path, replace):
     if replace:
+        # os.replace keeps the temporary file's mode (mkstemp creates 0600), so
+        # publish with the mode the destination already had, or with the mode a
+        # new subtitle would get when there was no destination.
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            return _publish_without_replacing(tmp_path, path)
         os.replace(tmp_path, path)
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            logger.warning('BAZARR could not keep the mode of %s', path)
         return None
     return _publish_without_replacing(tmp_path, path)
 
@@ -251,24 +287,42 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
         if refused:
             raise SubtitleFileExists(refused)
         with subtitle_mutation(video_path, *paths):
-            with (publication_guard(output_path=paths[0])
-                  if publication_guard is not None else nullcontext()):
-                written = []
-                try:
+            written = []
+            backups = []
+            try:
+                with (publication_guard(output_path=paths[0])
+                      if publication_guard is not None else nullcontext()):
                     for path, data in outputs:
+                        if replace:
+                            backup = _backup_for_replacement(path)
+                            if backup is not None:
+                                backups.append((path, backup))
                         if isinstance(data, (bytes, bytearray)):
                             identity = write_bytes_atomically(path, data, replace=replace)
                         else:
                             identity = copy_file_atomically(path, data, replace=replace)
                         written.append((path, identity))
-                except BaseException:
-                    # A pair is published whole or not at all, but only the
-                    # files this call wrote are taken back: another program
-                    # may have put its own under a name meanwhile.
-                    for path, identity in written:
-                        discard_if_owned(path, identity)
-                    raise
+                # Only after the publication boundary has accepted the write:
+                # its rejection on the way out must not reach the media servers
+                # as a mutation, and it must be able to put the original back.
                 publication_callback(media_type, video_path, operation, arr_instance_id)(paths[0])
                 for path in paths:
                     apply_subtitle_chmod(path)
+            except BaseException:
+                # A pair is published whole or not at all, but only the files
+                # this call wrote are taken back: another program may have put
+                # its own under a name meanwhile. A replacement also puts back
+                # what it found, because the boundary that rejected it runs
+                # after the file was already replaced.
+                for path, identity in written:
+                    discard_if_owned(path, identity)
+                for path, backup in reversed(backups):
+                    try:
+                        os.replace(backup, path)
+                    except OSError:
+                        logger.warning('BAZARR could not put %s back after a failed save', path)
+                raise
+            else:
+                for _path, backup in backups:
+                    _discard(backup)
     return paths

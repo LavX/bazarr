@@ -2709,7 +2709,8 @@ export default function EditorPage() {
             </Button>
             <Button
               color="red"
-              loading={saveMutation.isPending}
+              loading={saveMutation.isPending || createMutation.isPending}
+              disabled={saveMutation.isPending || createMutation.isPending}
               onClick={handleOverwrite}
             >
               Overwrite
