@@ -272,6 +272,7 @@ export default function EditorPage() {
 
   // Auto-save recovery: check on load if there's a newer draft in localStorage
   const [recoveryAvailable, setRecoveryAvailable] = useState<{
+    key: string;
     content: string;
     format: string;
     cueCount: number;
@@ -279,25 +280,34 @@ export default function EditorPage() {
   } | null>(null);
 
   useEffect(() => {
-    if (!autoSaveKey || !loaded) return;
+    if (!autoSaveKey || !loaded) {
+      setRecoveryAvailable(null);
+      return;
+    }
     try {
       const raw = readStoredValue(autoSaveKey);
-      if (!raw) return;
+      if (!raw) {
+        setRecoveryAvailable(null);
+        return;
+      }
       const saved = JSON.parse(raw);
       const age = Date.now() - saved.timestamp;
       if (age < 86400000 && saved.cueCount > 0) {
-        // Less than 24 hours old
-        setRecoveryAvailable(saved);
+        // Less than 24 hours old. The key is part of the state: a draft from
+        // another source must never be offered for this one.
+        setRecoveryAvailable({ ...saved, key: autoSaveKey });
       } else {
         removeStoredValue(autoSaveKey);
+        setRecoveryAvailable(null);
       }
     } catch {
       removeStoredValue(autoSaveKey!);
+      setRecoveryAvailable(null);
     }
   }, [autoSaveKey, loaded]);
 
   const handleRecoverDraft = useCallback(() => {
-    if (!recoveryAvailable) return;
+    if (!recoveryAvailable || recoveryAvailable.key !== autoSaveKey) return;
     try {
       const result = getParser(
         recoveryAvailable.format as SubtitleFormat,
@@ -2109,7 +2119,7 @@ export default function EditorPage() {
       />
 
       {/* Auto-save recovery banner */}
-      {recoveryAvailable && (
+      {recoveryAvailable?.key === autoSaveKey && (
         <Group
           gap="sm"
           px="md"

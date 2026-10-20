@@ -17,6 +17,7 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SubtitleViewer from "@/pages/SubtitleEditor";
 import EditorPage from "@/pages/SubtitleEditor/EditorPage";
+import { buildEditorAutosaveKey } from "@/pages/SubtitleEditor/editorScope";
 import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -410,6 +411,47 @@ describe("the editor on an embedded track", () => {
       expect(puts).toEqual([{ content: FILE.trimEnd(), ifMatch: "abc" }]),
     );
     expect(created).toHaveLength(0);
+  });
+
+  it("does not offer the track's draft to the file that shares its key", async () => {
+    const user = userEvent.setup();
+    serve({ conflict: true, listed: ["en:hi"] });
+    const trackKey = buildEditorAutosaveKey(
+      "movie",
+      "30",
+      "en:hi",
+      2,
+      "embedded",
+      "subrip",
+    );
+    localStorage.setItem(
+      trackKey!,
+      JSON.stringify({
+        content: TRACK,
+        format: "srt",
+        cueCount: 1,
+        timestamp: Date.now(),
+      }),
+    );
+    const router = openAt(EDIT_EMBEDDED);
+    await screen.findByText("FROM VIDEO FILE");
+    expect(await screen.findByText(/Unsaved draft found/)).toBeInTheDocument();
+
+    await user.click(
+      await screen.findByRole("button", { name: /\(embedded track\)/ }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: "en:hi (HI) [srt]",
+        hidden: true,
+      }),
+    );
+
+    await waitFor(() => expect(locationOf(router)).toBe(EDIT_FILE));
+    await onTheFile();
+    await waitFor(() =>
+      expect(screen.queryByText(/Unsaved draft found/)).not.toBeInTheDocument(),
+    );
   });
 
   it("says why an image-based track cannot be opened", async () => {
