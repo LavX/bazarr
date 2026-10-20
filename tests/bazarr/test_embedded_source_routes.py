@@ -468,11 +468,40 @@ def create(library, monkeypatch):
     monkeypatch.setattr(content, "event_stream", lambda **kwargs: None)
     monkeypatch.setattr(new_subtitle, "publication_callback", lambda *args: (lambda path: None))
 
-    def post(body):
-        with Flask(__name__).test_request_context("/?arr_instance_id=1", method="POST", json=body):
+    def post(body, query="arr_instance_id=1"):
+        with Flask(__name__).test_request_context(f"/?{query}", method="POST", json=body):
             return content.MovieSubtitleCreate.post.__wrapped__(content.MovieSubtitleCreate(), 30)
 
     return post, reindexed
+
+
+def test_an_unscoped_create_refuses_an_id_two_instances_share(library, create):
+    _session, root, _calls = library
+    post, reindexed = create
+
+    result = post({"content": TRACK_TEXT, "language": "en", "format": "srt",
+                   "overwrite": True}, query="")
+
+    assert result == ("Media id is ambiguous across instances", 400)
+    for owner in (1, 2):
+        assert (root / f"instance{owner}" / "Film" / "Film.en.srt").read_text() == FILE_TEXT
+    assert reindexed == []
+
+
+def test_an_unscoped_episode_create_refuses_an_id_two_instances_share(library):
+    _session, root, _calls = library
+    from api.subtitles import content
+
+    with Flask(__name__).test_request_context(
+            "/", method="POST",
+            json={"content": TRACK_TEXT, "language": "en", "format": "srt",
+                  "overwrite": True}):
+        result = content.EpisodeSubtitleCreate.post.__wrapped__(
+            content.EpisodeSubtitleCreate(), 20)
+
+    assert result == ("Media id is ambiguous across instances", 400)
+    for owner in (1, 2):
+        assert not (root / f"instance{owner}" / "Show" / "Show.S01E01.en.srt").exists()
 
 
 def test_create_still_refuses_an_existing_file(library, create):
