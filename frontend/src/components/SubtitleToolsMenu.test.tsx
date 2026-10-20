@@ -228,9 +228,11 @@ describe("SubtitleToolsMenu modes", () => {
       // Its lines are picked from a file, so it waits for Extract to file.
       expect(item("Two-Point Fit...")).toBeDisabled();
       expect(item("Extract to file")).toBeEnabled();
-      for (const name of ["View", "Edit", "Download", "Search"]) {
-        expect(item(name)).toBeDisabled();
+      // They read the track out of the video; nothing is written until Save.
+      for (const name of ["View", "Edit", "Download"]) {
+        expect(item(name)).toBeEnabled();
       }
+      expect(item("Search")).toBeDisabled();
       expect(item("Hide track...")).toBeEnabled();
       expect(noItem("Delete...")).not.toBeInTheDocument();
       expect(screen.queryByText(/Image-based track/)).not.toBeInTheDocument();
@@ -248,7 +250,7 @@ describe("SubtitleToolsMenu modes", () => {
 
       expect(
         screen.getByText(
-          `Image-based track (${label}): the tools need text. Extract to file copies it out as it is, for players.`,
+          `Image-based track (${label}): the tools, View, Edit and Download need text. Extract to file copies it out as it is, for players.`,
         ),
       ).toBeInTheDocument();
       for (const name of [
@@ -297,5 +299,49 @@ describe("SubtitleToolsMenu modes", () => {
       path: "",
       codec: "pgs",
     });
+  });
+});
+
+describe("SubtitleToolsMenu, View, Edit and Download on an embedded track", () => {
+  // Mantine hides a floating dropdown once jsdom reports its target has no
+  // size, so the rows are found with hidden: true, as the other menu tests do.
+  const item = (name: string) =>
+    screen.findByRole("menuitem", { name, hidden: true });
+
+  function showEmbedded(codec: string | null, onAction = vi.fn()) {
+    customRender(
+      <SubtitleToolsMenu
+        selections={[selection("")]}
+        embeddedTrack={{ codec }}
+        trackLabel="English"
+        onAction={onAction}
+      >
+        <Button>Tools</Button>
+      </SubtitleToolsMenu>,
+    );
+    return onAction;
+  }
+
+  it.each(["View", "Edit", "Download"])(
+    "hands %s on a text track to the row",
+    async (name) => {
+      const user = userEvent.setup();
+      const onAction = showEmbedded("ass");
+
+      await user.click(screen.getByRole("button", { name: "Tools" }));
+      await user.click(await item(name));
+
+      expect(onAction).toHaveBeenCalledWith(name.toLowerCase());
+    },
+  );
+
+  it("explains an image-based track in one line", async () => {
+    const user = userEvent.setup();
+    showEmbedded("pgs");
+
+    await user.click(screen.getByRole("button", { name: "Tools" }));
+    await item("View");
+
+    expect(screen.getAllByText(/Image-based track/)).toHaveLength(1);
   });
 });

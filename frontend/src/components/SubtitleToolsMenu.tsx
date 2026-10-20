@@ -84,7 +84,7 @@ export function embeddedMenuMode(
 }
 
 export function bitmapTrackNote(codec: string | null | undefined): string {
-  return `Image-based track (${subtitleCodecLabel(codec) ?? "bitmap"}): the tools need text. Extract to file copies it out as it is, for players.`;
+  return `Image-based track (${subtitleCodecLabel(codec) ?? "bitmap"}): the tools, View, Edit and Download need text. Extract to file copies it out as it is, for players.`;
 }
 
 export function useToolGroups() {
@@ -472,9 +472,13 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             Compare Sync Outputs
           </Menu.Item>
         )}
+        {/* View, Edit and Download read an embedded text track out of the
+            video (?source=embedded); an image-based one has no text. */}
         <Menu.Item
           disabled={
-            selections.length === 0 || onAction === undefined || isEmbedded
+            selections.length === 0 ||
+            onAction === undefined ||
+            embeddedMode === "bitmap"
           }
           leftSection={<FontAwesomeIcon icon={faEye}></FontAwesomeIcon>}
           onClick={() => {
@@ -484,7 +488,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           View
         </Menu.Item>
         <Menu.Item
-          disabled={onAction === undefined || isEmbedded}
+          disabled={onAction === undefined || embeddedMode === "bitmap"}
           leftSection={<FontAwesomeIcon icon={faPencil}></FontAwesomeIcon>}
           onClick={() => {
             onAction?.("edit");
@@ -494,10 +498,12 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             ? "Edit"
             : "Create / Upload"}
         </Menu.Item>
-        {/* Embedded tracks have no file on disk to hand out yet */}
+        {/* An embedded text track downloads as the file Save would write */}
         <Menu.Item
           disabled={
-            selections.length === 0 || onAction === undefined || isEmbedded
+            selections.length === 0 ||
+            onAction === undefined ||
+            embeddedMode === "bitmap"
           }
           leftSection={<FontAwesomeIcon icon={faDownload}></FontAwesomeIcon>}
           onClick={() => {

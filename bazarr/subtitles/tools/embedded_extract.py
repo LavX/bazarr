@@ -90,8 +90,26 @@ class EmbeddedTrack:
         return name + (" (HI)" if self.hi else " (forced)" if self.forced else "")
 
 
+def _only_row(rows, not_found, id_label):
+    """The one row an upstream id names.
+
+    Two instances can hold the same radarrId or sonarrEpisodeId, so an
+    unscoped request that matches both is refused rather than served from one
+    of them, as the single-file download route does.
+    """
+    if not rows:
+        raise TrackNotFound(not_found)
+    if len(rows) > 1:
+        raise ExtractionError(f"Ambiguous {id_label} ID; pass arr_instance_id")
+    return rows[0]
+
+
 def resolve_track(media_type, media_id, arr_instance_id, language, hi=False, forced=False):
-    """The row behind a request, scoped to its owner. Raises TrackNotFound."""
+    """The row behind a request, scoped to its owner.
+
+    Raises TrackNotFound, or ExtractionError (400) for an upstream id two
+    instances share when the request names no owner.
+    """
     if media_type == "sports":
         row = database.execute(scoped(
             select(TableSportsEvents.id, TableSportsEvents.path, TableSportsEvents.arr_instance_id,
@@ -107,25 +125,23 @@ def resolve_track(media_type, media_id, arr_instance_id, language, hi=False, for
         owner = row.arr_instance_id
         local_id, series_id, title = row.id, None, row.title
     elif media_type == "episode":
-        row = database.execute(scoped(
+        row = _only_row(database.execute(scoped(
             select(TableEpisodes.id, TableEpisodes.path, TableEpisodes.arr_instance_id,
                    TableEpisodes.sonarrSeriesId, TableEpisodes.season, TableEpisodes.episode,
                    TableShows.title)
             .join(TableShows, TableEpisodes.series_id == TableShows.id, isouter=True)
             .where(TableEpisodes.sonarrEpisodeId == media_id),
-            TableEpisodes.arr_instance_id, arr_instance_id)).first()
-        if not row:
-            raise TrackNotFound("Episode not found")
+            TableEpisodes.arr_instance_id, arr_instance_id)).all(),
+            "Episode not found", "Sonarr episode")
         owner = row.arr_instance_id
         local_id, series_id = row.id, row.sonarrSeriesId
         title = f"{row.title or 'Episode'} S{row.season or 0:02d}E{row.episode or 0:02d}"
     elif media_type == "movie":
-        row = database.execute(scoped(
+        row = _only_row(database.execute(scoped(
             select(TableMovies.id, TableMovies.path, TableMovies.arr_instance_id, TableMovies.title)
             .where(TableMovies.radarrId == media_id),
-            TableMovies.arr_instance_id, arr_instance_id)).first()
-        if not row:
-            raise TrackNotFound("Movie not found")
+            TableMovies.arr_instance_id, arr_instance_id)).all(),
+            "Movie not found", "Radarr movie")
         owner = row.arr_instance_id
         local_id, series_id, title = row.id, None, row.title
     else:
@@ -252,6 +268,13 @@ def _extract_files(track, codec, work_dir, text_only=False):
                                          arr_instance_id=track.arr_instance_id, exact=True, codec=codec)
         if text:
             return TEXT_OUTPUT_EXTENSIONS, [text]
+        if codec:
+            # The row names a text codec that this file no longer has. Another
+            # family's track under that name (a PGS copy as Film.en.sup for an
+            # ASS row) is not the track the row stands for.
+            raise NotExtractable(
+                f"The {track.label} track was stored as {codec}, and the file no longer has a text "
+                f"track of that codec. Extract to file will not substitute a different track.")
     if text_only:
         raise NotExtractable(
             f"The {track.label} track could not be read as text, and the tools need text. If it is "

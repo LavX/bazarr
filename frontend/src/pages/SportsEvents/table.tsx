@@ -47,6 +47,7 @@ import PlayOnMenu from "@/components/PlayOnMenu";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
+import { subtitleEditorUrl } from "@/pages/SubtitleEditor/editorScope";
 import { BuildKey, filterSubtitleBy, toPython } from "@/utilities";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
@@ -227,10 +228,19 @@ const EventSubtitleBadge: FunctionComponent<{
     !isSyncOutputSubtitle(subtitle) &&
     syncOutputs.length > 0;
 
+  // View, Edit and Download of an embedded track read it out of the video;
+  // nothing is written next to it until the editor saves. The row's codec
+  // picks between two text tracks that share a language key.
+  const source = isEmbedded && !missing ? ("embedded" as const) : undefined;
+  const codec = source ? (subtitle.codec ?? undefined) : undefined;
   const editorUrl = (action: "preview" | "edit") =>
-    `/subtitles/${action}/sports/${event.id}/${encodeURIComponent(
+    subtitleEditorUrl(
+      action,
+      "sports",
+      event.id,
       buildSubtitleLanguageKey(subtitle),
-    )}?arr_instance_id=${event.arr_instance_id}`;
+      { arrInstanceId: event.arr_instance_id, source, codec },
+    );
 
   const badgeEl = missing ? (
     <Badge
@@ -301,6 +311,8 @@ const EventSubtitleBadge: FunctionComponent<{
               mediaId: event.id,
               language: buildSubtitleLanguageKey(subtitle),
               arrInstanceId: event.arr_instance_id,
+              source,
+              codec,
             });
           } else if (action === "rebuild") {
             combine.mutate({

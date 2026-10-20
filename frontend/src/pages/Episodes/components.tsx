@@ -22,6 +22,7 @@ import { CombinedSubtitleBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
+import { subtitleEditorUrl } from "@/pages/SubtitleEditor/editorScope";
 import { BuildKey, toPython } from "@/utilities";
 import {
   buildSubtitleLanguageKey,
@@ -140,19 +141,6 @@ export function buildEpisodeSubtitleToolSelections({
   ];
 }
 
-function subtitleEditorUrl(
-  action: "preview" | "edit",
-  mediaType: "episode",
-  mediaId: number,
-  language: string,
-  arrInstanceId?: number,
-) {
-  const path = `/subtitles/${action}/${mediaType}/${mediaId}/${encodeURIComponent(language)}`;
-  return arrInstanceId !== undefined
-    ? `${path}?arr_instance_id=${arrInstanceId}`
-    : path;
-}
-
 export const Subtitle: FunctionComponent<Props> = ({
   seriesId,
   episodeId,
@@ -174,6 +162,12 @@ export const Subtitle: FunctionComponent<Props> = ({
 
   // falsy path (null, undefined, "") means this is an embedded (in-container) subtitle track
   const isEmbedded = !subtitle.path;
+
+  // View, Edit and Download of an embedded track read it out of the video;
+  // nothing is written next to it until the editor saves. The row's codec
+  // picks between two text tracks that share a language key.
+  const source = isEmbedded && !missing ? ("embedded" as const) : undefined;
+  const codec = source ? (subtitle.codec ?? undefined) : undefined;
 
   // Missing subtitles never carry a score. When a score is known the badge is
   // colored by its band and shows the percentage; otherwise it keeps its look.
@@ -337,7 +331,7 @@ export const Subtitle: FunctionComponent<Props> = ({
                   "episode",
                   episodeId,
                   buildSubtitleLanguageKey(subtitle),
-                  arrInstanceId,
+                  { arrInstanceId },
                 ),
               );
             } else if (action === "edit") {
@@ -347,7 +341,7 @@ export const Subtitle: FunctionComponent<Props> = ({
                   "episode",
                   episodeId,
                   buildSubtitleLanguageKey(subtitle),
-                  arrInstanceId,
+                  { arrInstanceId },
                 ),
               );
             } else if (action === "download") {
@@ -419,7 +413,7 @@ export const Subtitle: FunctionComponent<Props> = ({
                 "episode",
                 episodeId,
                 buildSubtitleLanguageKey(subtitle),
-                arrInstanceId,
+                { arrInstanceId, source, codec },
               ),
             );
           } else if (action === "edit") {
@@ -429,7 +423,7 @@ export const Subtitle: FunctionComponent<Props> = ({
                 "episode",
                 episodeId,
                 buildSubtitleLanguageKey(subtitle),
-                arrInstanceId,
+                { arrInstanceId, source, codec },
               ),
             );
           } else if (action === "search") {
@@ -451,6 +445,8 @@ export const Subtitle: FunctionComponent<Props> = ({
               mediaId: episodeId,
               language: buildSubtitleLanguageKey(subtitle),
               arrInstanceId,
+              source,
+              codec,
             });
           } else if (action === "delete" && subtitle.path) {
             await remove.mutateAsync({

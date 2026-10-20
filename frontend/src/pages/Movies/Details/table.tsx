@@ -32,6 +32,7 @@ import HiddenTracks from "@/components/HiddenTracks";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
+import { subtitleEditorUrl } from "@/pages/SubtitleEditor/editorScope";
 import { filterSubtitleBy, toPython } from "@/utilities";
 import { basename } from "@/utilities/files";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
@@ -135,19 +136,6 @@ export function buildMovieSubtitleToolSelections(
       arr_instance_id: movie.arr_instance_id,
     },
   ];
-}
-
-function subtitleEditorUrl(
-  action: "preview" | "edit",
-  mediaType: "movie",
-  mediaId: number,
-  language: string,
-  arrInstanceId?: number | null,
-) {
-  const path = `/subtitles/${action}/${mediaType}/${mediaId}/${encodeURIComponent(language)}`;
-  return arrInstanceId != null
-    ? `${path}?arr_instance_id=${arrInstanceId}`
-    : path;
 }
 
 const SyncEngineBadge: FunctionComponent<{ subtitle: Subtitle }> = ({
@@ -414,6 +402,12 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
 
   const { code2, path, hi, forced } = item;
 
+  // View, Edit and Download of an embedded row read the track inside the
+  // video; nothing is written next to it until the editor saves. The row's
+  // codec picks between two text tracks that share a language key.
+  const source = isSubtitleTrack(path) ? ("embedded" as const) : undefined;
+  const codec = source ? (item.codec ?? undefined) : undefined;
+
   const selections = useMemo(() => {
     return buildMovieSubtitleToolSelections(movie, item);
   }, [item, movie]);
@@ -456,7 +450,7 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
                 "movie",
                 radarrId,
                 buildSubtitleLanguageKey(item),
-                movie.arr_instance_id,
+                { arrInstanceId: movie.arr_instance_id },
               ),
             );
           } else if (action === "edit") {
@@ -466,7 +460,7 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
                 "movie",
                 radarrId,
                 buildSubtitleLanguageKey(item),
-                movie.arr_instance_id,
+                { arrInstanceId: movie.arr_instance_id },
               ),
             );
           } else if (action === "download") {
@@ -516,7 +510,7 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
                 "movie",
                 radarrId,
                 buildSubtitleLanguageKey(item),
-                movie.arr_instance_id,
+                { arrInstanceId: movie.arr_instance_id },
               ),
             );
           } else if (action === "search") {
@@ -565,7 +559,7 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
               "movie",
               radarrId,
               buildSubtitleLanguageKey(item),
-              movie.arr_instance_id,
+              { arrInstanceId: movie.arr_instance_id, source, codec },
             ),
           );
         } else if (action === "edit") {
@@ -575,7 +569,7 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
               "movie",
               radarrId,
               buildSubtitleLanguageKey(item),
-              movie.arr_instance_id,
+              { arrInstanceId: movie.arr_instance_id, source, codec },
             ),
           );
         } else if (action === "compare-sync") {
@@ -586,6 +580,8 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
             mediaId: radarrId,
             language: buildSubtitleLanguageKey(item),
             arrInstanceId: movie.arr_instance_id,
+            source,
+            codec,
           });
         } else if (action === "delete" && path) {
           await remove.mutateAsync({

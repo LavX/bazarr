@@ -307,7 +307,7 @@ describe("Movies Detail Table, bitmap row", () => {
 
     expect(
       await screen.findByText(
-        "Image-based track (PGS): the tools need text. Extract to file copies it out as it is, for players.",
+        "Image-based track (PGS): the tools, View, Edit and Download need text. Extract to file copies it out as it is, for players.",
       ),
     ).toBeInTheDocument();
     // Items are looked up whether or not the dropdown is still visible.

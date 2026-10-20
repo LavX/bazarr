@@ -90,6 +90,23 @@ def _request_arr_instance_id():
     return request.args.get('arr_instance_id', type=int)
 
 
+# ``?source=embedded`` asks the content and download routes for the track
+# inside the video instead of the file on disk (embedded_source.py).
+EMBEDDED_SOURCE = 'embedded'
+
+
+def _request_source():
+    """The ``source`` argument as sent, or None when there is none."""
+    source = request.args.get('source')
+    return source if isinstance(source, str) and source else None
+
+
+def _request_codec():
+    """The codec the row showed, as the embedded track actions already send it."""
+    codec = request.args.get('codec')
+    return codec.strip().lower() if isinstance(codec, str) and codec.strip() else None
+
+
 def _language_non_sync_modifiers(code):
     return sorted(
         modifier.lower()
@@ -149,6 +166,27 @@ def _subtitle_filename(video_name, suffix, ext):
     trusted directory.
     """
     return f'{video_name}.{secure_filename(f"{suffix}{ext}")}'
+
+
+def new_subtitle_filename(video_path, language, hi, forced, ext):
+    """The name a new subtitle file gets, the one a download would give it.
+
+    output_paths() names it as downloads and Extract to file do: the HI
+    Extension setting (hi, cc or sdh), forced before HI, and the IETF name of
+    a custom language (pb is pt-BR). A code the language table does not know,
+    which only a hand-written request sends, keeps <video>.<code>[.forced|.hi].
+    """
+    from languages import get_languages
+
+    # The table start-up loads; a process that never loaded it knows no code.
+    table = getattr(get_languages, 'languages_dict', None) or []
+    if any(item['code2'] == language for item in table):
+        from subtitles.tools.embedded_extract import output_paths
+
+        return os.path.basename(output_paths(video_path, language, hi, forced, (ext,))[0])
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    suffix = language + ('.forced' if forced else '.hi' if hi else '')
+    return _subtitle_filename(video_name, suffix, ext)
 
 
 def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=None):
@@ -873,6 +911,14 @@ def _get_media_metadata(media_type, media_id, arr_instance_id=None):
 
 def _get_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
     """Shared handler for episode and movie subtitle content."""
+    source = _request_source()
+    if source is not None:
+        if source != EMBEDDED_SOURCE:
+            return 'Unknown subtitle source', 400
+        # Imported here: embedded_source builds on this module's helpers.
+        from .embedded_source import get_embedded_content
+        return get_embedded_content(media_type, media_id, language_code, arr_instance_id,
+                                    codec=_request_codec())
     result = resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=arr_instance_id)
 
     # Error tuple: subtitle not found for this language
@@ -1284,10 +1330,16 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
     forced = bool(data.get('forced', False))
     hi = bool(data.get('hi', False))
 
+    # Only a JSON true replaces a file: the editor sends it after the user
+    # confirmed the overwrite dialog, and a string "false" must not count.
+    overwrite = data.get('overwrite') is True
+
     if forced and hi:
         return 'A subtitle cannot be both forced and HI', 400
 
-    # Look up the media to get the video file path
+    # Look up the media to get the video file path. An upstream id can exist in
+    # more than one instance, so an unscoped create must not guess: with
+    # overwrite that guess would replace another instance's subtitle.
     if media_type == 'episode':
         query = (
             select(TableEpisodes.id, TableEpisodes.path, TableEpisodes.arr_instance_id)
@@ -1295,7 +1347,12 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
         )
         if arr_instance_id is not None:
             query = query.where(TableEpisodes.arr_instance_id == arr_instance_id)
-        row = database.execute(query).first()
+            row = database.execute(query).first()
+        else:
+            rows = database.execute(query.limit(2)).all()
+            if len(rows) > 1:
+                return 'Media id is ambiguous across instances', 400
+            row = rows[0] if rows else None
     elif media_type == 'movie':
         query = (
             select(TableMovies.id, TableMovies.path, TableMovies.arr_instance_id)
@@ -1303,7 +1360,12 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
         )
         if arr_instance_id is not None:
             query = query.where(TableMovies.arr_instance_id == arr_instance_id)
-        row = database.execute(query).first()
+            row = database.execute(query).first()
+        else:
+            rows = database.execute(query.limit(2)).all()
+            if len(rows) > 1:
+                return 'Media id is ambiguous across instances', 400
+            row = rows[0] if rows else None
     elif media_type == 'sports':
         query = (
             select(TableSportsEvents.id, TableSportsEvents.path, TableSportsEvents.arr_instance_id)
@@ -1331,22 +1393,15 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
     video_path = (sports_operation[3] if sports_operation is not None else
                   path_mappings.path_replace_instance(row.path, arr_instance_id, media_type))
 
-    # Build the subtitle filename. `language` was already validated against
-    # r'^[a-zA-Z]{2,3}$' above, `ext` comes from the FORMAT_TO_EXT whitelist,
-    # `hi`/`forced` are booleans, so the source string cannot contain path
-    # separators. _subtitle_filename runs `secure_filename` over that
-    # request-derived suffix, which is the CodeQL-recognised sanitiser for
-    # py/path-injection; it deliberately does NOT run over `video_name`, which
-    # comes off the media row and must keep its spaces to stay matchable. The
-    # directory composition uses `safe_join`, and the normpath containment
+    # Build the subtitle filename, the one a download would get. `language`
+    # was already validated against r'^[a-zA-Z]{2,3}$' above, `ext` comes from
+    # the FORMAT_TO_EXT whitelist, `hi`/`forced` are booleans, so the name
+    # cannot contain path separators: a known language is spelled by the
+    # language table, and _subtitle_filename runs `secure_filename` over any
+    # other code. Neither touches `video_name`, which comes off the media row
+    # and must keep its spaces to stay matchable. The normpath containment
     # below anchors the result.
-    video_name = os.path.splitext(os.path.basename(video_path))[0]
-    suffix = language
-    if hi:
-        suffix += '.hi'
-    elif forced:
-        suffix += '.forced'
-    subtitle_filename = _subtitle_filename(video_name, suffix, ext)
+    subtitle_filename = new_subtitle_filename(video_path, language, hi, forced, ext)
 
     # Determine target directory
     target_folder = get_target_folder(video_path)
@@ -1367,10 +1422,16 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
     if len(encoded) > MAX_FILE_SIZE:
         return f'Content too large ({len(encoded)} bytes, max {MAX_FILE_SIZE})', 413
 
-    # Check and create under the same mutation lock as replacements.
+    # Check and create under the same mutation lock as replacements. A
+    # confirmed overwrite replaces exactly this file; `replaced` is filled by
+    # the write with whether the file was there under its own lock, so the
+    # success code follows the state the write saw, not a check taken before
+    # it: a file that appeared or vanished in the gap cannot mislabel it.
+    replaced = []
     try:
         write_new_subtitle(video_path, [(subtitle_path, encoded)], media_type, arr_instance_id,
-                           publication_guard=sports_operation[2] if sports_operation is not None else None)
+                           publication_guard=sports_operation[2] if sports_operation is not None else None,
+                           replace=overwrite, replaced=replaced)
     except SubtitleFileExists:
         return 'Subtitle file already exists', 409
     except FileNotFoundError:
@@ -1412,7 +1473,8 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
     elif forced:
         language_with_modifiers += ':forced'
 
-    return {'path': subtitle_path, 'language': language_with_modifiers}, 201
+    return ({'path': subtitle_path, 'language': language_with_modifiers},
+            200 if replaced and replaced[0] else 201)
 
 
 @api_ns_subtitle_content.route('episodes/<int:sonarrEpisodeId>/subtitles')

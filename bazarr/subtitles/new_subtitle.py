@@ -19,6 +19,7 @@ import logging
 import os
 import secrets
 import shutil
+import stat
 import tempfile
 from contextlib import nullcontext
 
@@ -64,9 +65,10 @@ def _new_staging_file(directory):
 
 
 def _staging_file(directory, replace):
-    # A replacement keeps the existing temporary-file behaviour of the routes
-    # that save over a file.
-    return tempfile.mkstemp(dir=directory) if replace else _new_staging_file(directory)
+    # Every write stages the same way. A replacement takes the destination's
+    # mode at publication, and a write with no destination keeps the normal
+    # creation mode, so nothing here needs mkstemp's 0600.
+    return _new_staging_file(directory)
 
 
 def _fd_identity(fd):
@@ -137,15 +139,22 @@ def _publish_without_replacing(tmp_path, path):
     return created
 
 
-def _copy_into_new_name(tmp_path, path):
-    """The fallback without hard links: claim the name exclusively, then fill it."""
+def _copy_into_new_name(tmp_path, path, discard_source=True):
+    """The fallback without hard links: claim the name exclusively, then fill it.
+
+    ``discard_source`` is true for a staging file, which must not be left
+    behind. A restore passes false: its source is the only copy of the
+    original, so every failure keeps it for recovery.
+    """
     try:
         fd = os.open(path, _NEW_FILE_FLAGS, 0o666)
     except FileExistsError:
-        _discard(tmp_path)
+        if discard_source:
+            _discard(tmp_path)
         raise SubtitleFileExists(path) from None
     except BaseException:
-        _discard(tmp_path)
+        if discard_source:
+            _discard(tmp_path)
         raise
     identity = _fd_identity(fd)
     try:
@@ -154,13 +163,70 @@ def _copy_into_new_name(tmp_path, path):
     except BaseException:
         # The name was claimed by this call, so the partial file is ours.
         discard_if_owned(path, identity)
-        _discard(tmp_path)
+        if discard_source:
+            _discard(tmp_path)
         raise
     return identity
 
 
+def _backup_for_replacement(path):
+    """Copy the file at ``path`` beside it and return the copy's name.
+
+    The copy is the only thing that can put the original back when a write is
+    rejected after it has already replaced the file, for example by the sports
+    publication boundary. Returns None when there is no file to keep.
+    """
+    try:
+        source = open(path, 'rb')
+    except FileNotFoundError:
+        return None
+    with source:
+        fd, backup = tempfile.mkstemp(prefix='.bazarr-replaced-', suffix='.tmp',
+                                      dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, 'wb') as target:
+                shutil.copyfileobj(source, target)
+            shutil.copymode(path, backup)
+        except BaseException:
+            _discard(backup)
+            raise
+    return backup
+
+
+def _restore_backup(backup, path):
+    """Put the copy back under a name only while nothing else holds it.
+
+    Uses the same exclusive publication as a new file: a file, or a dangling
+    symlink, that appeared under the name meanwhile is left alone and the copy
+    is kept. Returns whether the name was restored.
+    """
+    try:
+        os.link(backup, path)
+    except FileExistsError:
+        return False
+    except OSError as error:
+        if error.errno not in _NO_HARD_LINKS:
+            raise
+        try:
+            _copy_into_new_name(backup, path, discard_source=False)
+        except SubtitleFileExists:
+            return False
+        shutil.copymode(backup, path)
+    _discard(backup)
+    return True
+
+
 def _publish(tmp_path, path, replace):
     if replace:
+        # The replacement takes the destination's mode. Give it to the staged
+        # file before the swap, so a chmod failure leaves the original intact
+        # instead of publishing new bytes with the staging mode.
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            # No file to keep a mode from: this is an ordinary new file.
+            return _publish_without_replacing(tmp_path, path)
+        os.chmod(tmp_path, mode)
         os.replace(tmp_path, path)
         return None
     return _publish_without_replacing(tmp_path, path)
@@ -217,7 +283,8 @@ def apply_subtitle_chmod(path):
 
 
 def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *, operation='edit',
-                       publication_guard=None, also_check=(), also_refuse=None):
+                       publication_guard=None, also_check=(), also_refuse=None,
+                       replace=False, replaced=None):
     """Write each ``(path, data)`` of ``outputs`` as a new file and publish it.
 
     ``data`` is the file's bytes, or the path of a file to copy. Raises
@@ -228,34 +295,83 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
     None. ``also_refuse`` is called under the locks and returns a path that
     stops the write, or None, for files no fixed list of names covers.
     Returns the written paths, first one first.
+
+    ``replace`` lets the paths themselves be replaced, never ``also_check``.
+    Only the editor passes it, for its one file, after the user confirmed the
+    overwrite dialog; Extract to file and OCR never do.
+
+    ``replaced``, when given, is a one-element list the write fills with
+    whether the first path was already a file under its own lock. The editor's
+    create route reads it to answer 200 or 201 from the state the write saw,
+    not from a check taken before the lock. It is filled before the write, so
+    a caller must not read it after a raised SubtitleFileExists.
     """
     paths = [path for path, _data in outputs]
     with subtitle_write_locks(video_path, *paths):
-        for path in (*paths, *also_check):
+        if replaced is not None:
+            replaced.append(os.path.isfile(paths[0]))
+        for path in (*(() if replace else paths), *also_check):
             if os.path.isfile(path):
                 raise SubtitleFileExists(path)
         refused = also_refuse() if also_refuse is not None else None
         if refused:
             raise SubtitleFileExists(refused)
         with subtitle_mutation(video_path, *paths):
-            with (publication_guard(output_path=paths[0])
-                  if publication_guard is not None else nullcontext()):
-                written = []
-                try:
+            written = []
+            backups = []
+            try:
+                with (publication_guard(output_path=paths[0])
+                      if publication_guard is not None else nullcontext()):
                     for path, data in outputs:
+                        if replace:
+                            backup = _backup_for_replacement(path)
+                            if backup is not None:
+                                backups.append((path, backup))
                         if isinstance(data, (bytes, bytearray)):
-                            identity = write_bytes_atomically(path, data, replace=False)
+                            identity = write_bytes_atomically(path, data, replace=replace)
                         else:
-                            identity = copy_file_atomically(path, data, replace=False)
+                            identity = copy_file_atomically(path, data, replace=replace)
                         written.append((path, identity))
-                except BaseException:
-                    # A pair is published whole or not at all, but only the
-                    # files this call wrote are taken back: another program
-                    # may have put its own under a name meanwhile.
-                    for path, identity in written:
-                        discard_if_owned(path, identity)
-                    raise
+                # Only after the publication boundary has accepted the write:
+                # its rejection on the way out must not reach the media servers
+                # as a mutation, and it must be able to put the original back.
                 publication_callback(media_type, video_path, operation, arr_instance_id)(paths[0])
+            except BaseException:
+                # A pair is published whole or not at all, but only the files
+                # this call wrote are taken back: another program may have put
+                # its own under a name meanwhile. A replacement also puts back
+                # what it found, because the boundary that rejected it runs
+                # after the file was already replaced.
+                written_identity = dict(written)
+                backed_up = {path for path, _backup in backups}
+                for path, identity in written:
+                    if path not in backed_up:
+                        discard_if_owned(path, identity)
+                for path, backup in reversed(backups):
+                    identity = written_identity.get(path)
+                    if identity is None:
+                        # This write never published here, so the original is
+                        # still in place.
+                        _discard(backup)
+                        continue
+                    if os.path.lexists(path) and not discard_if_owned(path, identity):
+                        # Something else owns the name now. Overwriting it to
+                        # put the original back would destroy that file, so the
+                        # copy stays for the user to recover.
+                        logger.warning('BAZARR kept the previous %s as %s', path, backup)
+                        continue
+                    try:
+                        restored = _restore_backup(backup, path)
+                    except OSError:
+                        restored = False
+                    if not restored:
+                        logger.warning('BAZARR kept the previous %s as %s', path, backup)
+                raise
+            else:
+                for _path, backup in backups:
+                    _discard(backup)
+                # Publication is committed. A chmod failure is reported, but it
+                # cannot take the published file back.
                 for path in paths:
                     apply_subtitle_chmod(path)
     return paths

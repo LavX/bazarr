@@ -25,7 +25,7 @@ def plain_languages():
         yield
 
 
-def _extractor_choice(tracks, alpha2, alpha3, hi, forced, tmp_path):
+def _extractor_choice(tracks, alpha2, alpha3, hi, forced, tmp_path, **kwargs):
     from subtitles.tools.translate.batch import extract_embedded_subtitle
 
     commands = []
@@ -49,7 +49,8 @@ def _extractor_choice(tracks, alpha2, alpha3, hi, forced, tmp_path):
         database.execute.return_value.first.return_value = MagicMock(movie_file_id=1, file_size=1)
         settings.general.default_und_embedded_subtitles_lang = ""
         args.config_dir = str(tmp_path)
-        extract_embedded_subtitle(os.path.join(str(tmp_path), "movie.mkv"), alpha2, "movie", hi=hi, forced=forced)
+        extract_embedded_subtitle(os.path.join(str(tmp_path), "movie.mkv"), alpha2, "movie", hi=hi, forced=forced,
+                                  **kwargs)
     if not commands:
         return None
     mapping = commands[0][commands[0].index("-map") + 1]
@@ -72,6 +73,27 @@ def test_shared_selector_matches_the_text_extractor(tmp_path, tracks, alpha2, al
 
     assert shared == expected
     assert _extractor_choice(tracks, alpha2, alpha3, hi, forced, tmp_path) == expected
+
+
+# exact=True is what the editor, the viewer, the download and Extract to file
+# ask for: the track a row names or nothing, never the language-only fallback
+# translate keeps.
+EXACT = [
+    # en:forced names a forced PGS track; the normal SRT must not stand in.
+    ([_track("PGS", "eng", forced=True), _track("subrip", "eng")], "en", "eng", False, True, None),
+    # Only an HI English track: a plain en request gets nothing.
+    ([_track("subrip", "fra"), _track("ass", "eng", hi=True)], "en", "eng", False, False, None),
+    # The exact track is text: exact changes nothing.
+    ([_track("subrip", "eng"), _track("subrip", "eng", hi=True)], "en", "eng", True, False, 1),
+]
+
+
+@pytest.mark.parametrize("tracks,alpha2,alpha3,hi,forced,expected", EXACT)
+def test_exact_selection_never_falls_back(tmp_path, tracks, alpha2, alpha3, hi, forced, expected):
+    shared = select_subtitle_stream(tracks, alpha3, hi=hi, forced=forced, exact=True)
+
+    assert shared == expected
+    assert _extractor_choice(tracks, alpha2, alpha3, hi, forced, tmp_path, exact=True) == expected
 
 
 @pytest.mark.parametrize("tracks,hi,expected", [

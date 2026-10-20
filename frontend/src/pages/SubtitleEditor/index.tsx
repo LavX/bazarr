@@ -13,7 +13,11 @@ import {
 } from "@mantine/core";
 import { useSubtitleContent } from "@/apis/hooks/subtitles";
 import CueTable from "./CueTable";
-import { editorBreadcrumb } from "./editorScope";
+import {
+  editorBreadcrumb,
+  readEditorCodec,
+  readEditorSource,
+} from "./editorScope";
 import { getParser } from "./parsers";
 import type { ParseResult, SubtitleFormat } from "./types";
 
@@ -29,6 +33,11 @@ export default function SubtitleEditor() {
   const rawArrInstanceId = searchParams.get("arr_instance_id");
   const arrInstanceId =
     rawArrInstanceId === null ? undefined : Number(rawArrInstanceId);
+  // ?source=embedded shows the track inside the video, read into the cache;
+  // nothing is written next to the video. The row's codec picks between two
+  // text tracks that share a language key.
+  const source = readEditorSource(searchParams);
+  const codec = readEditorCodec(searchParams);
 
   const {
     data: rawData,
@@ -39,6 +48,8 @@ export default function SubtitleEditor() {
     mediaId ? Number(mediaId) : undefined,
     language,
     Number.isNaN(arrInstanceId) ? undefined : arrInstanceId,
+    source,
+    codec,
   );
 
   const data = rawData?.data;
@@ -101,6 +112,11 @@ export default function SubtitleEditor() {
           <Text>Subtitle Viewer</Text>
         </Breadcrumbs>
         <Group gap="xs">
+          {data.source === "embedded" && (
+            <Badge variant="light" color="teal" size="sm">
+              Embedded track
+            </Badge>
+          )}
           <Badge variant="light" size="sm">
             {data.format.toUpperCase()}
           </Badge>

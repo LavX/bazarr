@@ -578,7 +578,10 @@ def extract_embedded_subtitle(
             tracks, target_alpha3, hi=hi, forced=forced, exact=exact,
             und_default_language=und_default_language,
             accept=lambda found: found == text_codec)
-    if found_track is None:
+    if found_track is None and not (text_codec and exact):
+        # An exact request names the track the row stands for. Without its
+        # codec there is no such track, and another codec's text under that
+        # name would be wrong.
         text_codec = None
         found_track = select_subtitle_stream(
             tracks, target_alpha3, hi=hi, forced=forced, exact=exact,

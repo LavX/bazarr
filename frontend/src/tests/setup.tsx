@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-empty-function */
 
+import { notifications } from "@mantine/notifications";
 import { cleanup, configure } from "@testing-library/react";
 import { http } from "msw";
 import { HttpResponse } from "msw";
@@ -88,6 +89,11 @@ afterEach(async () => {
   // clearing shared state so active observers cannot refill the next test's
   // settings cache using handlers that have already been reset.
   cleanup();
+  // The toast store outlives the tree that showed a notification: left
+  // alone, a test's refusal toast is still rendered when the next test shows
+  // the same sentence, and a findByText finds two. A slow shard makes the
+  // overlap certain rather than occasional.
+  notifications.clean();
   await queryClient.cancelQueries();
   queryClient.clear();
   server.resetHandlers();
