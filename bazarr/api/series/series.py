@@ -219,7 +219,8 @@ class Series(Resource):
         episodes = []
         for chunk in chunked(series_ids):
             episodes.extend(database.execute(
-                select(TableEpisodes.id, TableEpisodes.series_id, TableEpisodes.subtitles)
+                select(TableEpisodes.id, TableEpisodes.series_id, TableEpisodes.subtitles,
+                       TableEpisodes.path, TableEpisodes.arr_instance_id)
                 .where(TableEpisodes.series_id.in_(chunk))
             ).all())
         if not episodes:
@@ -228,7 +229,9 @@ class Series(Resource):
         series_of_episode = {e.id: e.series_id for e in episodes}
         episode_scores = lowest_subtitle_scores(
             database, {e.id: e.subtitles for e in episodes},
-            TableHistory.episode_id, TableHistory)
+            TableHistory.episode_id, TableHistory,
+            videos_by_id={e.id: (e.path, e.arr_instance_id) for e in episodes},
+            media_type='series')
 
         series_lowest = {}
         for episode_id, percent in episode_scores.items():
