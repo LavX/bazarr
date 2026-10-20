@@ -202,8 +202,9 @@ def test_codec_families_and_their_files(codec, family, extensions):
 
 def test_the_row_s_text_codec_picks_between_text_tracks_of_one_key(batch, ffmpeg, tmp_path, monkeypatch):
     """An English SRT and an English ASS are two rows since the codec is
-    stored. Each row gets its own track, cached under its own name; a row
-    without a codec, or one whose codec no track has, gets the first."""
+    stored. Each row gets its own track, cached under its own name. A row
+    without a codec gets the first; a row whose named text codec no track has
+    gets nothing, so another track's text cannot land under its name."""
     srt, ass = tmp_path / "srt.srt", tmp_path / "ass.srt"
     srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nFrom the SRT\n\n2\n00:00:03,000 --> 00:00:04,000\nBye\n\n")
     ass.write_text("1\n00:00:01,000 --> 00:00:02,000\nFrom the ASS\n\n2\n00:00:03,000 --> 00:00:04,000\nBye\n\n")
@@ -221,7 +222,7 @@ def test_the_row_s_text_codec_picks_between_text_tracks_of_one_key(batch, ffmpeg
     assert "From the ASS" in text(codec="ass")
     assert "From the SRT" in text(codec="subrip")
     assert "From the SRT" in text()
-    assert "From the SRT" in text(codec="webvtt")
+    assert batch.extract_embedded_subtitle(video, "en", "movie", exact=True, codec="webvtt") is None
     # The ASS read did not take the plain key the other reads share.
     assert "From the ASS" in text(codec="ass")
     assert len(os.listdir(cache)) == 3

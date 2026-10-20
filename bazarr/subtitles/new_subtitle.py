@@ -336,8 +336,6 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
                 # its rejection on the way out must not reach the media servers
                 # as a mutation, and it must be able to put the original back.
                 publication_callback(media_type, video_path, operation, arr_instance_id)(paths[0])
-                for path in paths:
-                    apply_subtitle_chmod(path)
             except BaseException:
                 # A pair is published whole or not at all, but only the files
                 # this call wrote are taken back: another program may have put
@@ -372,4 +370,8 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
             else:
                 for _path, backup in backups:
                     _discard(backup)
+                # Publication is committed. A chmod failure is reported, but it
+                # cannot take the published file back.
+                for path in paths:
+                    apply_subtitle_chmod(path)
     return paths
