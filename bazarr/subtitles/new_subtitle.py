@@ -185,6 +185,29 @@ def _backup_for_replacement(path):
     return backup
 
 
+def _restore_backup(backup, path):
+    """Put the copy back under a name only while nothing else holds it.
+
+    Uses the same exclusive publication as a new file: a file, or a dangling
+    symlink, that appeared under the name meanwhile is left alone and the copy
+    is kept. Returns whether the name was restored.
+    """
+    try:
+        os.link(backup, path)
+    except FileExistsError:
+        return False
+    except OSError as error:
+        if error.errno not in _NO_HARD_LINKS:
+            raise
+        try:
+            _copy_into_new_name(backup, path)
+        except SubtitleFileExists:
+            return False
+        shutil.copymode(backup, path)
+    _discard(backup)
+    return True
+
+
 def _publish(tmp_path, path, replace):
     if replace:
         # The replacement takes the destination's mode. Give it to the staged
@@ -313,21 +336,30 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
                 # its own under a name meanwhile. A replacement also puts back
                 # what it found, because the boundary that rejected it runs
                 # after the file was already replaced.
+                written_identity = dict(written)
+                backed_up = {path for path, _backup in backups}
                 for path, identity in written:
-                    discard_if_owned(path, identity)
-                written_paths = {path for path, _identity in written}
+                    if path not in backed_up:
+                        discard_if_owned(path, identity)
                 for path, backup in reversed(backups):
-                    # Put the copy back only when this write published a file
-                    # there and that file is gone. A foreign file that another
-                    # program put under the name stays, and so does an original
-                    # this write never touched.
-                    if path in written_paths and not os.path.exists(path):
-                        try:
-                            os.replace(backup, path)
-                            continue
-                        except OSError:
-                            logger.warning('BAZARR could not put %s back after a failed save', path)
-                    _discard(backup)
+                    identity = written_identity.get(path)
+                    if identity is None:
+                        # This write never published here, so the original is
+                        # still in place.
+                        _discard(backup)
+                        continue
+                    if os.path.lexists(path) and not discard_if_owned(path, identity):
+                        # Something else owns the name now. Overwriting it to
+                        # put the original back would destroy that file, so the
+                        # copy stays for the user to recover.
+                        logger.warning('BAZARR kept the previous %s as %s', path, backup)
+                        continue
+                    try:
+                        restored = _restore_backup(backup, path)
+                    except OSError:
+                        restored = False
+                    if not restored:
+                        logger.warning('BAZARR kept the previous %s as %s', path, backup)
                 raise
             else:
                 for _path, backup in backups:

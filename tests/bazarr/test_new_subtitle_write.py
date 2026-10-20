@@ -357,5 +357,35 @@ def test_a_foreign_file_put_there_during_a_failed_pair_stays(tmp_path, published
                                         "movie", 7, replace=True)
 
     assert first.read_bytes() == b"another program"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["Film.hu.idx"]
+    backups = [path for path in tmp_path.iterdir() if path.name.startswith(".bazarr-replaced-")]
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b"original index"
+    assert sorted(path.name for path in tmp_path.iterdir()
+                  if not path.name.startswith(".bazarr-replaced-")) == ["Film.hu.idx"]
     assert published == []
+
+
+def test_a_restore_refuses_a_file_that_appeared_meanwhile(tmp_path):
+    from subtitles import new_subtitle
+
+    backup = tmp_path / ".bazarr-replaced-one.tmp"
+    backup.write_bytes(b"original")
+    target = tmp_path / "Film.en.srt"
+    target.write_bytes(b"another program")
+
+    assert new_subtitle._restore_backup(str(backup), str(target)) is False
+    assert target.read_bytes() == b"another program"
+    assert backup.read_bytes() == b"original"
+
+
+def test_a_restore_refuses_a_dangling_symlink(tmp_path):
+    from subtitles import new_subtitle
+
+    backup = tmp_path / ".bazarr-replaced-one.tmp"
+    backup.write_bytes(b"original")
+    target = tmp_path / "Film.en.srt"
+    os.symlink(tmp_path / "missing", target)
+
+    assert new_subtitle._restore_backup(str(backup), str(target)) is False
+    assert os.path.islink(target)
+    assert backup.read_bytes() == b"original"
