@@ -269,7 +269,9 @@ const EventSubtitleBadge: FunctionComponent<{
         mediaId={event.id}
         mediaType="sports"
         arrInstanceId={event.arr_instance_id}
-        embeddedTrack={isEmbedded}
+        embeddedTrack={
+          isEmbedded ? { codec: subtitle.codec ?? null } : undefined
+        }
         trackLabel={hideLabel(subtitle)}
         coveredTracks={
           isEmbedded

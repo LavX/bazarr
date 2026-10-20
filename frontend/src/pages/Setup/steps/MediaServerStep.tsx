@@ -1,5 +1,5 @@
-import { FC, useMemo } from "react";
-import { Button, Checkbox, Group, Text } from "@mantine/core";
+import { FC, useMemo, useState } from "react";
+import { Alert, Button, Checkbox, Group, Text } from "@mantine/core";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import type {
@@ -51,7 +51,12 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     useOnboardingSelection();
 
   const { data: settings, isPending: settingsPending } = useSystemSettings();
-  const settingsMutation = useSettingsMutation();
+  const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
+  // Which kind's switch write failed. The client keeps a restarting or
+  // unreachable Bazarr+ out of its toasts, so it is said here or not at all.
+  const [switchFailed, setSwitchFailed] = useState<MediaServerKind | null>(
+    null,
+  );
   // One query per kind, a fixed four, so no hook is called in a loop.
   const plex = useMediaServerInstances("plex");
   const jellyfin = useMediaServerInstances("jellyfin");
@@ -303,11 +308,13 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                         variant="light"
                         size="compact-sm"
                         loading={settingsMutation.isPending}
-                        onClick={() =>
-                          settingsMutation.mutate({
-                            [`settings-general-use_${kind}`]: true,
-                          })
-                        }
+                        onClick={() => {
+                          setSwitchFailed(null);
+                          settingsMutation.mutate(
+                            { [`settings-general-use_${kind}`]: true },
+                            { onError: () => setSwitchFailed(kind) },
+                          );
+                        }}
                       >
                         Turn on {kindName(kind)} refreshes
                       </Button>
@@ -326,6 +333,16 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                       </Button>
                     )}
                   </div>
+                  {switchFailed === kind && stalled.length > 0 && (
+                    // An Alert like every other inline error: red-6 text on
+                    // white is 4.26:1, under the 4.5:1 14px text needs.
+                    <Alert
+                      color="red"
+                      title={`Could not turn on ${kindName(kind)} refreshes`}
+                    >
+                      Check that Bazarr+ is still running, then try again.
+                    </Alert>
+                  )}
                 </div>
               )}
             </div>

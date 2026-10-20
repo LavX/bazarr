@@ -393,7 +393,9 @@ export const Subtitle: FunctionComponent<Props> = ({
           onClose: () => setOpen(false),
         }}
         selections={selections}
-        embeddedTrack={isEmbedded}
+        embeddedTrack={
+          isEmbedded ? { codec: subtitle.codec ?? null } : undefined
+        }
         trackLabel={embeddedTrackLabel(subtitle)}
         coveredTracks={
           isEmbedded

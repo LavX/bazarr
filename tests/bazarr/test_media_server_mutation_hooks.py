@@ -163,7 +163,10 @@ def test_content_publication_precedes_chmod_failure(tmp_path, monkeypatch, mutat
     monkeypatch.setattr(content.path_mappings, 'path_replace_instance', lambda path, owner, kind: str(video))
     monkeypatch.setattr(content, 'resolve_subtitle_path', lambda kind, ident, language, **kwargs:
                         (str(source if ':sync-' in language else subtitle), metadata))
-    monkeypatch.setattr(content, '_apply_subtitle_chmod', Mock(side_effect=RuntimeError('controlled chmod failure')))
+    failing_chmod = Mock(side_effect=RuntimeError('controlled chmod failure'))
+    monkeypatch.setattr(content, '_apply_subtitle_chmod', failing_chmod)
+    # The create route writes through the shared new-subtitle helper.
+    monkeypatch.setattr('subtitles.new_subtitle.apply_subtitle_chmod', failing_chmod)
     monkeypatch.setattr(content, 'get_target_folder', lambda path: None)
     row = Mock(path='/upstream/Actual.mkv', id=4, arr_instance_id=7)
     monkeypatch.setattr(content, 'database', Mock(execute=Mock(return_value=Mock(first=Mock(return_value=row)))))

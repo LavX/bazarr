@@ -49,6 +49,41 @@ describe("SeerrStep", () => {
     } as unknown as ReturnType<typeof useSettingsMutation>);
   });
 
+  it("is named for what it gives the reader and names the servers", () => {
+    customRender(<SeerrStep onNext={onNext} />);
+
+    expect(
+      screen.getByRole("heading", { name: "Requests" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/connect overseerr or jellyseerr, the seerr family/i),
+    ).toBeInTheDocument();
+    // "Seerr" is a family of products, not one a newcomer runs by that name,
+    // so it is never the label; the body names it once, so the reader can
+    // find the Seerr tab in Settings, Connections.
+    expect(
+      screen.queryByRole("heading", { name: /seerr/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("points a failed save at the Seerr tab in Settings, Connections", async () => {
+    const user = userEvent.setup();
+    mutate.mockImplementationOnce(
+      (_input: unknown, opts?: { onError?: () => void }) => opts?.onError?.(),
+    );
+    customRender(<SeerrStep onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/server url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/api key/i), "seerr-key");
+    await user.click(
+      screen.getByRole("button", { name: /save and continue anyway/i }),
+    );
+
+    expect(
+      await screen.findByText(/later in settings, connections, seerr/i),
+    ).toBeInTheDocument();
+  });
+
   it("writes the connection and enables Seerr on Continue", async () => {
     const user = userEvent.setup();
     mutate.mockImplementation(
@@ -59,7 +94,7 @@ describe("SeerrStep", () => {
 
     customRender(<SeerrStep onNext={onNext} />);
 
-    await user.type(screen.getByLabelText(/seerr url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/server url/i), "http://seerr:5055");
     await user.type(screen.getByLabelText(/api key/i), "seerr-key");
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
@@ -80,7 +115,7 @@ describe("SeerrStep", () => {
     customRender(<SeerrStep onNext={onNext} />);
 
     await user.click(
-      screen.getByRole("button", { name: /continue without seerr/i }),
+      screen.getByRole("button", { name: /continue without requests/i }),
     );
 
     expect(mutate).not.toHaveBeenCalled();
@@ -91,7 +126,7 @@ describe("SeerrStep", () => {
     const user = userEvent.setup();
     customRender(<SeerrStep onNext={onNext} />);
 
-    await user.type(screen.getByLabelText(/seerr url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/server url/i), "http://seerr:5055");
     await user.type(screen.getByLabelText(/api key/i), "seerr-key");
     await user.click(screen.getByRole("button", { name: /^test$/i }));
 
@@ -109,14 +144,18 @@ describe("SeerrStep", () => {
     const user = userEvent.setup();
     customRender(<SeerrStep onNext={onNext} />);
 
-    await user.type(screen.getByLabelText(/seerr url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/server url/i), "http://seerr:5055");
     await user.type(screen.getByLabelText(/api key/i), "seerr-key");
 
-    expect(mockedTestMutation).toHaveBeenLastCalledWith({
-      url: "http://seerr:5055",
-      apikey: "seerr-key",
-      verifySsl: true,
-    });
+    expect(mockedTestMutation).toHaveBeenLastCalledWith(
+      {
+        url: "http://seerr:5055",
+        apikey: "seerr-key",
+        verifySsl: true,
+      },
+      // A failed Test is said beside the button, not in the client's toast.
+      { inlineErrors: true },
+    );
   });
 
   // The step is optional, so a connection nobody proved is still allowed
@@ -126,10 +165,10 @@ describe("SeerrStep", () => {
     customRender(<SeerrStep onNext={onNext} />);
 
     expect(
-      screen.getByRole("button", { name: /continue without seerr/i }),
+      screen.getByRole("button", { name: /continue without requests/i }),
     ).toBeInTheDocument();
 
-    await user.type(screen.getByLabelText(/seerr url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/server url/i), "http://seerr:5055");
     await user.type(screen.getByLabelText(/api key/i), "seerr-key");
 
     expect(
@@ -170,12 +209,12 @@ describe("SeerrStep", () => {
 
     customRender(<SeerrStep onNext={onNext} />);
 
-    await user.type(screen.getByLabelText(/seerr url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/server url/i), "http://seerr:5055");
     await user.type(screen.getByLabelText(/api key/i), "seerr-key");
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
     expect(
-      await screen.findByText(/could not save the seerr connection/i),
+      await screen.findByText(/could not save the request server/i),
     ).toBeInTheDocument();
     expect(onNext).not.toHaveBeenCalled();
   });

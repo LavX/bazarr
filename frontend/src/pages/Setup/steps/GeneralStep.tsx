@@ -1,8 +1,17 @@
-import { FC } from "react";
-import { Button, Group, Select, Switch, TextInput } from "@mantine/core";
+import { FC, useState } from "react";
+import {
+  Alert,
+  Button,
+  Group,
+  Select,
+  Stack,
+  Switch,
+  TextInput,
+} from "@mantine/core";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { folderOptions } from "@/pages/Settings/Subtitles/options";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
@@ -14,6 +23,19 @@ function needsCustomFolder(value: string): boolean {
   return value !== "" && value !== DEFAULT_SUBFOLDER;
 }
 
+// The companion path means a different thing in each mode, so it is asked
+// for in the words of the mode that needs it.
+const CUSTOM_FOLDER_COPY: Record<string, { label: string; hint: string }> = {
+  relative: {
+    label: "Subfolder name",
+    hint: "Created next to each video file, for example Subs.",
+  },
+  absolute: {
+    label: "Folder path",
+    hint: "The one folder that holds the subtitles for every video.",
+  },
+};
+
 /**
  * Optional onboarding step for a few high-traffic general preferences. It
  * pre-fills from the current settings and only writes the keys the user actually
@@ -21,7 +43,12 @@ function needsCustomFolder(value: string): boolean {
  */
 const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const { data: settings } = useSystemSettings();
-  const mutation = useSettingsMutation();
+  const mutation = useSettingsMutation(false, { inlineErrors: true });
+  // Leaving while the save is in flight unmounted the step, TanStack dropped
+  // its callbacks, and a failure then said nothing anywhere, since the toasts
+  // are off for it. The shell holds Back, the skip and Set up later until it
+  // lands.
+  useReportStepBusy(mutation.isPending);
 
   const general = settings?.general;
 
@@ -44,6 +71,13 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const setUpgradeSubs = (value: boolean) => patchDraft({ upgradeSubs: value });
 
   const showCustomFolder = needsCustomFolder(subfolder);
+  const customFolderCopy = CUSTOM_FOLDER_COPY[subfolder] ?? {
+    label: "Subtitle folder path",
+    hint: "The path Bazarr+ should use for the chosen folder mode.",
+  };
+  // The client keeps a restarting or unreachable Bazarr+ out of its toasts,
+  // so a write that fails that way said nothing at all unless it is said here.
+  const [saveFailed, setSaveFailed] = useState(false);
 
   const handleContinue = () => {
     const payload: LooseObject = {};
@@ -63,10 +97,12 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       return;
     }
 
+    setSaveFailed(false);
     mutation.mutate(payload, {
       onSuccess: () => {
         onNext();
       },
+      onError: () => setSaveFailed(true),
     });
   };
 
@@ -75,23 +111,31 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       title="General basics"
       description="A few application preferences to round things out. These are optional and can all be changed later in Settings."
       actions={
-        <Group justify="space-between">
-          <Group gap="sm">
-            {onBack && (
-              <Button variant="default" onClick={onBack}>
-                Back
-              </Button>
-            )}
+        <Stack gap="sm">
+          {saveFailed && (
+            <Alert color="red" title="Could not save these preferences">
+              Check that Bazarr+ is still running, then try again. You can also
+              set these later in Settings.
+            </Alert>
+          )}
+          <Group justify="space-between">
+            <Group gap="sm">
+              {onBack && (
+                <Button variant="default" onClick={onBack}>
+                  Back
+                </Button>
+              )}
+            </Group>
+            <Button onClick={handleContinue} loading={mutation.isPending}>
+              Continue
+            </Button>
           </Group>
-          <Button onClick={handleContinue} loading={mutation.isPending}>
-            Continue
-          </Button>
-        </Group>
+        </Stack>
       }
     >
       <Select
-        label="Subtitle Folder"
-        description="Where Bazarr stores the subtitles it downloads."
+        label="Subtitle folder"
+        description="Where Bazarr+ saves the subtitles it downloads."
         data={folderOptions}
         value={subfolder}
         onChange={(value) => setSubfolder(value ?? DEFAULT_SUBFOLDER)}
@@ -100,8 +144,8 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
 
       {showCustomFolder && (
         <TextInput
-          label="Custom Subtitles Folder"
-          description="The path Bazarr should use for the chosen folder mode."
+          label={customFolderCopy.label}
+          description={customFolderCopy.hint}
           value={subfolderCustom}
           onChange={(e) => setSubfolderCustom(e.currentTarget.value)}
         />

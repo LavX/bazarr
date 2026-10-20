@@ -1,5 +1,13 @@
-import { FC, useMemo } from "react";
-import { Alert, Button, Group, Loader, MultiSelect } from "@mantine/core";
+import { FC, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Alert,
+  Button,
+  Group,
+  Loader,
+  MultiSelect,
+  Stack,
+  VisuallyHidden,
+} from "@mantine/core";
 import {
   useLanguageProfiles,
   useLanguages,
@@ -7,8 +15,12 @@ import {
 } from "@/apis/hooks";
 import { enabledLanguageKey, languageProfileKey } from "@/pages/Settings/keys";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
+
+// How long a selection note waits before it is written (see changeSelection).
+const ANNOUNCE_DELAY_MS = 300;
 
 /**
  * Bazarr's own codes for the regional languages it treats as separate.
@@ -57,7 +69,15 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     isLoading: profilesLoading,
     isError: profilesFailed,
   } = useLanguageProfiles();
-  const settings = useSettingsMutation();
+  const settings = useSettingsMutation(false, { inlineErrors: true });
+  // Leaving while the save is in flight unmounted the step, TanStack dropped
+  // its callbacks, and a failure then said nothing anywhere, since the toasts
+  // are off for it. The shell holds Back, the skip and Set up later until it
+  // lands.
+  useReportStepBusy(settings.isPending);
+  // The client keeps a restarting or unreachable Bazarr+ out of its toasts,
+  // so a write that fails that way said nothing at all unless it is said here.
+  const [saveFailed, setSaveFailed] = useState(false);
 
   // Preselected from the browser, so the gate is met by a working default
   // rather than by a disabled button on a step that cannot explain itself. An
@@ -77,6 +97,41 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   );
   const selected = draft.selected ?? preselected;
   const setSelected = (next: string[]) => patchDraft({ selected: next });
+  // What the last change to the selection did, said out loud. Measured with
+  // Orca, picking a language read only the option under the cursor, and
+  // Backspace removed a pill without a word. The note is written a beat after
+  // the change: in the same instant, Orca drops it twice over, once as part of
+  // the burst of events the pill list makes, and once when the listbox moves
+  // its active option and Orca clears its queue of pending announcements.
+  const [selectionNote, setSelectionNote] = useState("");
+  const noteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (noteTimer.current !== null) {
+        clearTimeout(noteTimer.current);
+      }
+    },
+    [],
+  );
+  const nameOf = (code: string) =>
+    (languages ?? []).find((lang) => lang.code2 === code)?.name ?? code;
+  const changeSelection = (next: string[]) => {
+    const added = next.filter((code) => !selected.includes(code));
+    const removed = selected.filter((code) => !next.includes(code));
+    const note = [
+      ...added.map((code) => `${nameOf(code)} added`),
+      ...removed.map((code) => `${nameOf(code)} removed`),
+    ].join(", ");
+    if (noteTimer.current !== null) {
+      clearTimeout(noteTimer.current);
+    }
+    setSelectionNote("");
+    noteTimer.current = setTimeout(() => {
+      noteTimer.current = null;
+      setSelectionNote(note);
+    }, ANNOUNCE_DELAY_MS);
+    setSelected(next);
+  };
 
   const options = useMemo(
     () =>
@@ -125,6 +180,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       tag: undefined,
     };
 
+    setSaveFailed(false);
     settings.mutate(
       {
         [enabledLanguageKey]: selected,
@@ -138,6 +194,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         onSuccess: () => {
           onNext();
         },
+        onError: () => setSaveFailed(true),
       },
     );
   };
@@ -151,24 +208,31 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     <StepLayout
       title="Subtitle languages"
       layout="stacked"
-      description="Pick the languages you want subtitles in. Bazarr only searches for languages that belong to a profile, so we will turn your selection into a default profile that gets applied to every show and movie."
+      description="Pick the languages you want subtitles in. Bazarr+ only searches for languages that belong to a profile, so your selection becomes the default profile for shows and movies synced from now on. It does not change anything already in your library: to give those the profile, select them in Series or Movies and use Change Profile."
       actions={
-        <Group justify="space-between">
-          <Group gap="sm">
-            {onBack && (
-              <Button variant="default" onClick={onBack}>
-                Back
-              </Button>
-            )}
+        <Stack gap="sm">
+          {saveFailed && (
+            <Alert color="red" title="Could not save your languages">
+              Check that Bazarr+ is still running, then try again.
+            </Alert>
+          )}
+          <Group justify="space-between">
+            <Group gap="sm">
+              {onBack && (
+                <Button variant="default" onClick={onBack}>
+                  Back
+                </Button>
+              )}
+            </Group>
+            <Button
+              onClick={handleContinue}
+              loading={settings.isPending}
+              disabled={!canContinue}
+            >
+              Continue
+            </Button>
           </Group>
-          <Button
-            onClick={handleContinue}
-            loading={settings.isPending}
-            disabled={!canContinue}
-          >
-            Continue
-          </Button>
-        </Group>
+        </Stack>
       }
     >
       {profilesFailed && (
@@ -183,7 +247,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
       )}
       {alreadyConfigured ? (
         <Alert color="green" title="Languages already configured">
-          A language profile already exists, so we will keep it as-is.
+          A language profile already exists, so setup keeps it as it is.
         </Alert>
       ) : (
         <MultiSelect
@@ -200,9 +264,18 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
           searchable
           data={options}
           value={selected}
-          onChange={setSelected}
+          onChange={changeSelection}
         />
       )}
+      {/* Polite live region rather than role="status", which Orca never reads
+          out (see OnboardingWizard.tsx). */}
+      <VisuallyHidden
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid="language-announcement"
+      >
+        {selectionNote}
+      </VisuallyHidden>
     </StepLayout>
   );
 };

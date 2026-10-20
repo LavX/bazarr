@@ -7,8 +7,7 @@
  * that multiple embedded tracks with the same language but different hi/forced
  * flags produce unique TanStack row IDs (no key collision), that the
  * embeddedTrack prop is correctly threaded to SubtitleToolsMenu, and that a
- * 400 bitmap error from the translate endpoint surfaces as a user-visible
- * notification without locking the UI.
+ * bitmap row offers Extract to file only, before any click.
  *
  * What: Renders Table directly with controlled movie/history props and asserts
  * cell content and DOM structure via Testing Library queries.
@@ -16,8 +15,10 @@
  * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
  */
 
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
+import queryClient from "@/apis/queries";
 import Table from "@/pages/Movies/Details/table";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -113,6 +114,50 @@ describe("Movies Detail Table, embedded subtitle scores", () => {
     await waitFor(() => {
       expect(screen.getByText("100.0%")).toBeInTheDocument();
     });
+  });
+});
+
+describe("Movies Detail Table, extracted file score", () => {
+  it("shows the extracted file's own score, not an older download's of the same name", async () => {
+    setupApiMocks();
+    const extracted: Subtitle = {
+      code2: "en",
+      name: "English",
+      hi: false,
+      forced: false,
+      path: "/movies/test.en.srt",
+    };
+    const language = { code2: "en", name: "English", hi: false, forced: false };
+    const history: History.Movie[] = [
+      // Newest first, as the history endpoint returns it.
+      makeHistoryEntry({
+        id: 2,
+        action: 8,
+        score: "100.0%",
+        language,
+        provider: "embedded",
+        subtitles_path: "/movies/test.en.srt",
+      }),
+      makeHistoryEntry({
+        id: 1,
+        action: 1,
+        score: "61.1%",
+        language,
+        provider: "opensubtitlescom",
+        subtitles_path: "/movies/test.en.srt",
+      }),
+    ];
+
+    customRender(
+      <Table
+        movie={makeMovie([extracted])}
+        profile={undefined}
+        history={history}
+      />,
+    );
+
+    expect(await screen.findByText("100.0%")).toBeInTheDocument();
+    expect(screen.queryByText("61.1%")).not.toBeInTheDocument();
   });
 });
 
@@ -228,111 +273,61 @@ describe("Movies Detail Table, external subtitle path display", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 5 (Scenario 2b): Bitmap 400 error, notification shown, menu not stuck
+// Test 5: A bitmap row says what it can do before the click
 // ---------------------------------------------------------------------------
 
-describe("Movies Detail Table, bitmap 400 error handling", () => {
-  it("shows error notification and keeps action menu accessible after bitmap codec 400", async () => {
+describe("Movies Detail Table, bitmap row", () => {
+  it("offers Extract to file only on a bitmap row", async () => {
     /**
-     * Why: When the backend returns 400 (bitmap/PGS track cannot be extracted)
-     * the BazarrClient axios interceptor calls showNotification. This test
-     * verifies (a) the notification renders in the DOM and (b) the action menu
-     * button is still accessible so the user can retry or choose another action.
-     *
-     * What: Mounts a movie detail Table with an embedded English track and a
-     * missing French subtitle (so the translate-from-embedded path is reachable
-     * via the missing-language action menu). MSW intercepts the PATCH /api/subtitles
-     * call and returns 400 with a bitmap error body. Asserts notification text
-     * appears and the "Subtitle Actions" button is still in the DOM and enabled.
-     *
-     * Test: waitFor error notification text; assert action button not disabled.
+     * Why: A PGS or VobSub track has no text, so a tool or a translation on it
+     * used to fail after the click (a 400 toast). The row knows its codec now,
+     * and the menu says so up front.
      */
-
-    // Intercept the translate PATCH to return 400
-    server.use(
-      http.patch("/api/subtitles", () =>
-        HttpResponse.text(
-          "Could not extract embedded subtitle: codec may be bitmap (PGS/VobSub) or the language track was not found",
-          { status: 400 },
-        ),
-      ),
-      http.get("/api/subtitles/sync-status", () =>
-        HttpResponse.json({ data: null }),
-      ),
-      http.get("/api/system/languages", () => HttpResponse.json([])),
-    );
-
-    const embeddedEnglish: Subtitle = {
+    setupApiMocks();
+    const embeddedPgs: Subtitle = {
       code2: "en",
       name: "English",
       hi: false,
       forced: false,
-      path: null, // embedded track
+      path: null,
+      codec: "pgs",
     };
-
-    const missingFrench: Subtitle = {
-      code2: "fr",
-      name: "French",
-      hi: false,
-      forced: false,
-      path: "Missing Subtitles", // missing sentinel
-    };
-
-    const movie = makeMovie([embeddedEnglish, missingFrench]);
-
-    customRender(<Table movie={movie} profile={undefined} history={[]} />);
-
-    // Both "Subtitle Actions" buttons should render (one per subtitle row)
-    await waitFor(() => {
-      const buttons = screen.getAllByLabelText("Subtitle Actions");
-      expect(buttons.length).toBeGreaterThanOrEqual(1);
-    });
-
-    // Open the missing-subtitle action menu (it has translationSources = [embeddedEnglish])
-    const missingActionBtn = screen.getAllByLabelText("Subtitle Actions")[1];
-    expect(missingActionBtn).not.toBeDisabled();
-
-    // Trigger translate-from-embedded directly: fire the mutateAsync on the
-    // translate item. We simulate this by importing useSubtitleAction and calling
-    // mutateAsync directly instead of full UI interaction (avoids modal complexity).
-    //
-    // The BazarrClient interceptor fires showNotification on 400 responses.
-    // The Mantine <Notifications> in AllProviders renders those into the DOM.
-    // We wait for the notification text to appear.
-    // Directly call the API to trigger the 400 and observe the notification
-    const api = (await import("@/apis/raw")).default;
-    await api.subtitles
-      .modify("translate", {
-        id: 1,
-        type: "movie",
-        language: "fr",
-        path: "",
-        forced: "False",
-        hi: "False",
-        from_language: "en",
-      })
-      .catch(() => {
-        // Expected, 400 triggers a rejection
-      });
-
-    // The BazarrClient shows an error notification for 400 responses
-    await waitFor(
-      () => {
-        // Mantine Notifications renders with role="alert" or the message text
-        const errorText = screen.queryByText(/Error 400/i);
-        const bitmapText = screen.queryByText(
-          /bitmap|pgs|codec|cannot extract/i,
-        );
-        expect(errorText ?? bitmapText).not.toBeNull();
-      },
-      { timeout: 3000 },
+    const user = userEvent.setup();
+    customRender(
+      <Table
+        movie={makeMovie([embeddedPgs])}
+        profile={undefined}
+        history={[]}
+      />,
     );
+    await screen.findByText("Video File Subtitle Track");
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
 
-    // Action menu buttons must still be accessible (not disabled/removed)
-    const actionButtons = screen.getAllByLabelText("Subtitle Actions");
-    expect(actionButtons.length).toBeGreaterThanOrEqual(1);
-    actionButtons.forEach((btn) => {
-      expect(btn).not.toBeDisabled();
-    });
+    await user.click(await screen.findByLabelText("Subtitle Actions"));
+
+    expect(
+      await screen.findByText(
+        "Image-based track (PGS): the tools need text. Extract to file copies it out as it is, for players.",
+      ),
+    ).toBeInTheDocument();
+    // Items are looked up whether or not the dropdown is still visible.
+    const item = (name: string) =>
+      screen.getByRole("menuitem", { name, hidden: true });
+    expect(item("Extract to file")).toBeEnabled();
+    for (const name of [
+      "Sync...",
+      "Remove HI Tags",
+      "Translate...",
+      "View",
+      "Edit",
+      "Download",
+      "Search",
+    ]) {
+      expect(item(name)).toBeDisabled();
+    }
+    expect(item("Hide track...")).toBeEnabled();
+    expect(
+      screen.queryByRole("menuitem", { name: "Delete...", hidden: true }),
+    ).not.toBeInTheDocument();
   });
 });

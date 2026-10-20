@@ -14,7 +14,7 @@ from .instances import LIBRARY_KEYS, VALID_KINDS, needs_path_mappings
 from .paths import _media_path, map_media_path
 
 _SERVERS = VALID_KINDS
-_OPERATIONS = {"download", "upload", "delete", "sync", "translate", "combine", "edit"}
+_OPERATIONS = {"download", "upload", "delete", "sync", "translate", "combine", "edit", "extract"}
 _ERROR_CODES = {
     "configuration_changed", "connection_disabled", "connection_error", "internal_error", "invalid_response",
     "invalid_url", "invalid_verify_ssl", "missing_credentials", "unauthorized", "forbidden", "not_found",

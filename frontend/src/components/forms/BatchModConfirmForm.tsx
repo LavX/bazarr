@@ -16,6 +16,7 @@ const ACTION_LABELS: Record<string, string> = {
   "scan-disk": "Scan Disk",
   "search-missing": "Search Missing Subtitles",
   upgrade: "Upgrade Subtitles",
+  extract: "Extract Embedded Tracks",
 };
 /* eslint-enable camelcase */
 

@@ -51,11 +51,26 @@
 }
 
 .brandTitle {
+  margin: 0;
   font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--bz-text-tertiary);
+}
+
+// The step's own column: the rail, the card and the skip under it. A real box
+// rather than display: contents, which has dropped the landmark in browsers
+// that are still in use.
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+
+  &:focus {
+    outline: none;
+  }
 }
 
 .progress {
@@ -122,18 +137,23 @@
     box-shadow 0.2s ease;
 }
 
-.dotDone {
-  background: var(--mantine-primary-color-filled);
-  border-color: var(--mantine-primary-color-filled);
+// White numerals on the light filled shade, brand-6, came to 4.2:1 at 13px
+// semibold, under the 4.5:1 that size needs. brand-7 is 5.4:1. Dark mode is
+// already 7.5:1 on brand-8 and keeps it.
+.dotDone,
+.dotActive {
+  --dot-fill: var(--mantine-primary-color-filled);
+  background: var(--dot-fill);
+  border-color: var(--dot-fill);
   color: var(--mantine-color-white);
+
+  @include mantine.light {
+    --dot-fill: var(--mantine-color-brand-7);
+  }
 }
 
 .dotActive {
-  background: var(--mantine-primary-color-filled);
-  border-color: var(--mantine-primary-color-filled);
-  color: var(--mantine-color-white);
-  box-shadow: 0 0 0 4px
-    color-mix(in srgb, var(--mantine-primary-color-filled) 22%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--dot-fill) 22%, transparent);
 }
 
 .connector {
@@ -217,5 +237,97 @@
 
   .card {
     padding: 20px;
+  }
+}
+
+// The 44px floor, on a coarse pointer only, for every control the wizard
+// draws. Retaken at 320px with a coarse pointer, 69 of them were under 44px
+// and the smallest was 18px. The desktop sizes stay where they are: a mouse
+// keeps the 36 and 40px rhythm the rest of the application is tuned to.
+//
+// Scoped to the attribute the wizard puts on the document while it is
+// mounted, not to .root, because the leave dialog, the select dropdowns and
+// the popovers are portalled out of it. Mantine sets each size from a variable
+// declared on the component itself, so the floor redefines that variable
+// rather than fighting the height it produces.
+@media (pointer: coarse) {
+  :global {
+    :root[data-bz-setup] {
+      .mantine-Input-wrapper {
+        --input-height-xs: 44px;
+        --input-height-sm: 44px;
+        --input-height-md: 44px;
+      }
+
+      // The compact sizes read variables of their own, and the wizard uses
+      // them (compact-sm on the media server picker, compact-xs on provider
+      // settings), so they are floored too. The minimum width is for a
+      // compact button whose label is a word or two.
+      .mantine-Button-root {
+        --button-height-xs: 44px;
+        --button-height-sm: 44px;
+        --button-height-md: 44px;
+        --button-height-compact-xs: 44px;
+        --button-height-compact-sm: 44px;
+        --button-height-compact-md: 44px;
+        min-width: 44px;
+        min-height: 44px;
+      }
+
+      .mantine-ActionIcon-root,
+      .mantine-CloseButton-root:not(.mantine-Pill-remove) {
+        min-width: 44px;
+        min-height: 44px;
+      }
+
+      // Inline text, so the taller box is centred or the words hang at its
+      // top edge.
+      .mantine-Anchor-root {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+      }
+
+      // The box stays 20px to read as a checkbox; the label row it sits in is
+      // what a finger presses, and the label toggles it.
+      .mantine-Checkbox-body,
+      .mantine-Radio-body,
+      .mantine-Switch-body {
+        align-items: center;
+        min-height: 44px;
+      }
+
+      .mantine-Checkbox-label,
+      .mantine-Radio-label,
+      .mantine-Switch-label {
+        display: flex;
+        align-items: center;
+        min-height: 44px;
+      }
+
+      // By role rather than class: Select and MultiSelect name their options
+      // mantine-Select-option and mantine-MultiSelect-option, not
+      // mantine-Combobox-option, and measured 33.7px under the class rule.
+      [role="option"] {
+        display: flex;
+        align-items: center;
+        min-height: 44px;
+      }
+
+      // A selected language's remove button is as tall as its pill. Growing
+      // only its hit area around a 22px pill measured 40px, because the
+      // field around the pills clips what overflows it, so the pill itself
+      // takes the floor and the field grows to hold it. A grown width was
+      // covered by the next pill along, 42px, so the button is widened too.
+      .mantine-Pill-root {
+        --pill-height-xs: 44px;
+        --pill-height-sm: 44px;
+        --pill-height-md: 44px;
+      }
+
+      .mantine-Pill-remove {
+        min-width: 44px;
+      }
+    }
   }
 }

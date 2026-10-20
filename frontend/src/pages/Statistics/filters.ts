@@ -29,6 +29,7 @@ export const ACTION_LABELS: Record<number, string> = {
   5: "Synced",
   6: "Translated",
   7: "Embedded",
+  8: "Extracted",
 };
 
 export const actionLabel = (action: number) =>

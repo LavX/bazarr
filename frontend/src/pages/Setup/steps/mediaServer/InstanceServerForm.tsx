@@ -21,8 +21,8 @@ import {
   LIBRARY_OPTION_KEYS,
 } from "@/apis/raw/mediaServers";
 import {
-  CREDENTIAL_LABELS,
   kindName,
+  SETUP_CREDENTIAL_LABELS,
   URL_PLACEHOLDERS,
 } from "@/pages/Settings/MediaServers/kinds";
 import LibraryPickers from "@/pages/Settings/MediaServers/LibraryPickers";
@@ -77,7 +77,7 @@ interface Props extends WizardStepProps {
 const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   const kind = draft.kind;
   const name = kindName(kind);
-  const credential = CREDENTIAL_LABELS[kind];
+  const credential = SETUP_CREDENTIAL_LABELS[kind];
   const mapped = KINDS_WITH_PATH_MAPPINGS.includes(kind);
   const { updateDraft, markSaved } = useOnboardingSelection();
   // Emby and Silo cannot be saved without a mapping, so the first row is on
@@ -178,8 +178,13 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   const configured = connection.url.length > 0 && connection.api_key.length > 0;
   const touched = isDraftTouched(draft);
 
-  const test = useMediaServerTest(kind, connection);
-  const libraries = useMediaServerLibraries(kind, connection);
+  // Both report a failure in the form, so the client's toast stays away.
+  const test = useMediaServerTest(kind, connection, undefined, {
+    inlineErrors: true,
+  });
+  const libraries = useMediaServerLibraries(kind, connection, undefined, {
+    inlineErrors: true,
+  });
 
   const handleContinue = () => {
     if (!touched) {

@@ -1,4 +1,5 @@
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useLanguageProfiles,
@@ -6,6 +7,7 @@ import {
   useSettingsMutation,
 } from "@/apis/hooks";
 import { customRender, screen, waitFor } from "@/tests";
+import server from "@/tests/mocks/node";
 import LanguagesStep from "./LanguagesStep";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
@@ -213,6 +215,100 @@ describe("LanguagesStep", () => {
     expect(onNext).not.toHaveBeenCalled();
     onSuccess?.();
     await waitFor(() => expect(onNext).toHaveBeenCalled());
+  });
+
+  it("says the profile only reaches what is synced from now on", () => {
+    // The default profile does not retro-apply, and the step that creates it
+    // runs after the arr steps have already started syncing.
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    expect(screen.getByText(/synced from now on/i)).toHaveTextContent(
+      /select them in series or movies and use change profile/i,
+    );
+    expect(screen.queryByText(/\bwe\b/i)).not.toBeInTheDocument();
+  });
+
+  it("says out loud which language a change added or removed", async () => {
+    // Orca read only the highlighted option when one was picked, and nothing
+    // at all when Backspace removed a pill.
+    const user = userEvent.setup();
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    const region = screen.getByTestId("language-announcement");
+    expect(region).toBeEmptyDOMElement();
+    expect(region).toHaveAttribute("aria-live", "polite");
+    expect(region).not.toHaveAttribute("role");
+    const field = screen.getByRole("combobox", { name: "Languages" });
+    await user.click(field);
+    await user.click(await screen.findByText("Spanish"));
+    // Written a beat after the change, so Orca does not drop it.
+    expect(screen.getByTestId("language-announcement")).toBeEmptyDOMElement();
+    await waitFor(() =>
+      expect(screen.getByTestId("language-announcement")).toHaveTextContent(
+        "Spanish added",
+      ),
+    );
+
+    await user.click(field);
+    await user.keyboard("{Backspace}");
+    // Written a beat after the change, so Orca does not drop it.
+    expect(screen.getByTestId("language-announcement")).toBeEmptyDOMElement();
+    await waitFor(() =>
+      expect(screen.getByTestId("language-announcement")).toHaveTextContent(
+        "Spanish removed",
+      ),
+    );
+  });
+
+  it("says so when the profile cannot be saved", async () => {
+    // A restarting or unreachable Bazarr+ is kept out of the toasts, so the
+    // step is the only place a failed write can be reported.
+    const user = userEvent.setup();
+    mutate.mockImplementationOnce(
+      (_input: unknown, opts?: { onError?: () => void }) => {
+        opts?.onError?.();
+      },
+    );
+
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    await user.click(screen.getByRole("combobox", { name: "Languages" }));
+    await user.click(await screen.findByText("English"));
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not save your languages/i,
+    );
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed save once, inline, with no toast", async () => {
+    // Through the real settings hook, not a mock of it: a 503 is the failure
+    // a restart mid-setup produces, and the hook's own "Save failed" toast
+    // would announce it a second time beside the inline alert.
+    const { useSettingsMutation: realSettingsMutation } =
+      await vi.importActual<typeof import("@/apis/hooks")>("@/apis/hooks");
+    mockedUseSettingsMutation.mockImplementation(realSettingsMutation);
+    server.use(
+      http.post(
+        "/api/system/settings",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    await user.click(screen.getByRole("combobox", { name: "Languages" }));
+    await user.click(await screen.findByText("English"));
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(1));
+    expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
+    expect(mockedUseSettingsMutation).toHaveBeenCalledWith(false, {
+      inlineErrors: true,
+    });
+    expect(onNext).not.toHaveBeenCalled();
   });
 
   it("proceeds without rewriting when a profile already exists", async () => {

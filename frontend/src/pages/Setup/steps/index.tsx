@@ -1,3 +1,4 @@
+import { kindName } from "@/pages/Settings/MediaServers/kinds";
 import type { MediaServerDraftSummary } from "@/pages/Setup/useOnboardingSelection";
 import MediaServerConfigureStep from "./mediaServer/MediaServerConfigureStep";
 import ProvidersStep from "./providers/ProvidersStep";
@@ -47,7 +48,7 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     // leave the rail with nothing to filter on, so it has no skip; the answer
     // itself commits to nothing and is changeable in Settings.
     requiredReason:
-      "This only picks which steps we show you. Nothing here is locked in.",
+      "This only picks which steps come next. Nothing here is locked in.",
     Component: IntentStep,
   },
   {
@@ -92,8 +93,10 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     // On both paths. Connecting Seerr is what makes the request button on a
     // title work, and the reader with no arr instance is exactly the one who
     // reaches for it, so the Discover path is the last place to hide it.
+    // Labelled for what it gives the reader: "Seerr" is not one product but a
+    // family, and a newcomer knows the one they run by its own name.
     key: "seerr",
-    label: "Seerr",
+    label: "Requests",
     phase: "connect",
     optional: true,
     Component: SeerrStep,
@@ -177,8 +180,9 @@ export function buildSteps({
       key: mediaServerStepKey(draft.draftId),
       // Named for the kind, not the draft's editable name: the label feeds the
       // step list, and a list that changes shape on every keystroke in the
-      // Name field would remount the form under the cursor.
-      label: draft.kind,
+      // Name field would remount the form under the cursor. It is also what
+      // the window title and the step announcement read out.
+      label: kindName(draft.kind),
       phase: "connect",
       segment: MEDIA_SERVER_SEGMENT,
       optional: true,

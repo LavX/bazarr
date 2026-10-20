@@ -39,7 +39,7 @@ test.describe("Plex sign-in", { tag: ["@stateful", "@mediaservers"] }, () => {
 
     await page.getByRole("button", { name: "Connect to Plex" }).click();
 
-    const signingIn = page.getByText("Complete Authentication");
+    const signingIn = page.getByText("Finish signing in to Plex");
     const unreachable = page
       .getByRole("alert")
       .filter({ hasText: /Could not reach Plex|Could not start Plex sign-in/ });

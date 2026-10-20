@@ -10,6 +10,7 @@ import { isAxiosError } from "axios";
 import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { inlineWhen } from "@/apis/raw/inlineWrites";
 import { notification } from "@/modules/notification";
 import { Environment } from "@/utilities";
 import { setAuthenticated } from "@/utilities/event";
@@ -88,7 +89,19 @@ export function isSettingsFollowupError(error: unknown): boolean {
   );
 }
 
-export function useSettingsMutation(retryingMetadataRefresh = false) {
+interface SettingsMutationOptions {
+  // The caller says a failed write next to the control that made it, so
+  // neither this hook's "Save failed" toast nor the client's "Error <code>"
+  // one is shown. Both are announced as alerts, and
+  // the setup wizard read every failure out twice. A write that landed but
+  // could not be applied still toasts: that is news the caller does not have.
+  inlineErrors?: boolean;
+}
+
+export function useSettingsMutation(
+  retryingMetadataRefresh = false,
+  { inlineErrors = false }: SettingsMutationOptions = {},
+) {
   const client = useQueryClient();
   const retireMetadata = (changes: LooseObject, retrying = false) => {
     const names = Object.keys(changes);
@@ -166,7 +179,9 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
   };
   return useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Settings],
-    mutationFn: (data: LooseObject) => api.system.updateSettings(data),
+    mutationFn: inlineWhen(inlineErrors, (data: LooseObject) =>
+      api.system.updateSettings(data),
+    ),
 
     onSuccess: (_, changes) => {
       reloadSaved(changes);
@@ -195,6 +210,9 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
             "Your changes are saved, but applying some of them failed. The system log has the details.",
           ),
         );
+        return;
+      }
+      if (inlineErrors) {
         return;
       }
       showNotification(
@@ -494,7 +512,13 @@ export function getPostLoginRedirectTarget(baseUrl = Environment.baseUrl) {
   return baseUrl || "/";
 }
 
-export function useSystem() {
+export function useSystem({
+  inlineErrors = false,
+}: {
+  // The caller reports a failed action itself, so the client's toast for
+  // that request stays away.
+  inlineErrors?: boolean;
+} = {}) {
   const client = useQueryClient();
   const { mutate: logout, isPending: isLoggingOut } = useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Actions],
@@ -537,7 +561,7 @@ export function useSystem() {
 
   const { mutate: restart, isPending: isRestarting } = useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Actions],
-    mutationFn: () => api.system.restart(),
+    mutationFn: inlineWhen(inlineErrors, () => api.system.restart()),
 
     onSuccess: () => {
       client.clear();

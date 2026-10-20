@@ -26,6 +26,7 @@ ACTION_LABELS = {
     'scan-disk': 'Scanning Disk',
     'search-missing': 'Searching Missing Subtitles',
     'upgrade': 'Upgrading Subtitles',
+    'extract': 'Extracting Embedded Tracks',
 }
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,7 @@ def get_upgradable_media_ids():
 
     from subtitles.upgrade import (
         get_queries_condition_parameters,
+        latest_row_actions,
         _ai_translated_subtitles_are_upgrade_candidates,
     )
     minimum_timestamp, query_actions = get_queries_condition_parameters()
@@ -181,7 +183,7 @@ def get_upgradable_media_ids():
         TableHistoryMovie.language,
         func.max(TableHistoryMovie.timestamp).label('timestamp')
     ).where(
-        TableHistoryMovie.action.in_(query_actions)
+        TableHistoryMovie.action.in_(latest_row_actions(query_actions))
     ).group_by(
         TableHistoryMovie.video_path, TableHistoryMovie.language
     ).distinct().subquery()
@@ -222,7 +224,7 @@ def get_upgradable_media_ids():
         TableHistory.language,
         func.max(TableHistory.timestamp).label('timestamp')
     ).where(
-        TableHistory.action.in_(query_actions)
+        TableHistory.action.in_(latest_row_actions(query_actions))
     ).group_by(
         TableHistory.video_path, TableHistory.language
     ).distinct().subquery()

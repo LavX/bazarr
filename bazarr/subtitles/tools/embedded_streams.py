@@ -12,12 +12,49 @@ from utilities.video_analyzer import _title_is_forced, embedded_track_language
 
 # Substrings of knowit's format string (or the track name when knowit gave no
 # format) that mark an image-based track. Matched as substrings, exactly as the
-# text extractor has always matched them.
-BITMAP_CODECS = ("pgs", "vobsub", "dvd_subtitle", "dvbsub", "hdmv_pgs_subtitle", "dvd")
+# text extractor has always matched them. knowit names no format for a DVB
+# stream, so the extractor fills it from ffprobe's codec name, dvb_subtitle.
+BITMAP_CODECS = ("pgs", "vobsub", "dvd_subtitle", "dvbsub", "dvb_subtitle", "hdmv_pgs_subtitle", "dvd")
 
 # The bitmap codecs OCR reads. DVB is left out on purpose: broadcast tracks
 # repaint cumulatively and are not supported.
 OCR_CODECS = ("pgs", "hdmv_pgs_subtitle", "vobsub", "dvd_subtitle", "dvd")
+
+
+# How an image-based track is copied out as it is: the file extension and the
+# ffmpeg muxer. ffmpeg has no VobSub muxer, so VobSub goes through an MPEG-2
+# program stream, which is what a .sub is, and the .idx is written beside it.
+BITMAP_CONTAINERS = {
+    "pgs": (".sup", "sup"),
+    "vobsub": (".sub", "vob"),
+    "dvb": (".mks", "matroska"),
+}
+
+# The files an extraction of each family leaves next to the video.
+OUTPUT_EXTENSIONS = {
+    "pgs": (".sup",),
+    "vobsub": (".idx", ".sub"),
+    "dvb": (".mks",),
+}
+TEXT_OUTPUT_EXTENSIONS = (".srt",)
+
+
+def bitmap_family(codec):
+    """"pgs", "vobsub" or "dvb" for an image-based codec string, else None."""
+    codec = (codec or "").lower()
+    if not is_bitmap_codec(codec):
+        return None
+    if "pgs" in codec:
+        return "pgs"
+    if "dvb" in codec:
+        return "dvb"
+    return "vobsub"
+
+
+def output_extensions(codec):
+    """The extensions an extraction of a track with ``codec`` writes: text is an SRT."""
+    family = bitmap_family(codec)
+    return OUTPUT_EXTENSIONS[family] if family else TEXT_OUTPUT_EXTENSIONS
 
 
 def track_codec(track):
@@ -36,11 +73,13 @@ def is_ocr_codec(codec):
 
 
 def select_subtitle_stream(tracks, target_alpha3, *, hi=False, forced=False,
-                           und_default_language=None, accept=None):
+                           und_default_language=None, accept=None, exact=False):
     """Index of the stream to use among ``tracks``, or None.
 
     ``accept`` filters on the codec string; streams it rejects still count
     towards the index, because ffmpeg numbers every subtitle stream.
+    ``exact`` turns the language-only fallback off, for callers that must get
+    the track a row names or nothing.
     """
     accept = accept or (lambda codec: not is_bitmap_codec(codec))
     fallback = None
@@ -56,4 +95,4 @@ def select_subtitle_stream(tracks, target_alpha3, *, hi=False, forced=False,
             return index
         if fallback is None:
             fallback = index
-    return fallback
+    return None if exact else fallback

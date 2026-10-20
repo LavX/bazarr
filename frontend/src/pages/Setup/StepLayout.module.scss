@@ -27,6 +27,12 @@
   min-width: 0;
 }
 
+// Focused from script on a step change, never by Tab. It is not a control,
+// and a ring around the heading reads as one.
+.heading:focus {
+  outline: none;
+}
+
 .controls {
   display: flex;
   flex-direction: column;

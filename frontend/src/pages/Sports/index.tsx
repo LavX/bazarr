@@ -19,6 +19,7 @@ import {
   faBookmark,
   faCircleDown,
   faEllipsisVertical,
+  faFileExport,
   faHardDrive,
   faLanguage,
   faLayerGroup,
@@ -152,6 +153,12 @@ const LeagueRowActions: FunctionComponent<{ league: SportsLeagueRow }> = ({
           onClick={batchAction("scan-disk")}
         >
           Scan Disk
+        </Menu.Item>
+        <Menu.Item
+          leftSection={<FontAwesomeIcon icon={faFileExport} size="sm" />}
+          onClick={batchAction("extract")}
+        >
+          Extract Embedded Tracks
         </Menu.Item>
         <Menu.Item
           leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />}
@@ -356,6 +363,17 @@ const Sports: FunctionComponent = () => {
               }
             >
               Scan Disk
+            </Menu.Item>
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faFileExport} size="sm" />}
+              onClick={() =>
+                modals.openContextModal(BatchModConfirmModal, {
+                  items: toBatchItems(),
+                  action: "extract" as BatchAction,
+                })
+              }
+            >
+              Extract Embedded Tracks
             </Menu.Item>
             <Menu.Item
               leftSection={

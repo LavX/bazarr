@@ -43,13 +43,16 @@ MAX_REQUIREMENT_TOKENS = 200
 
 # Recorded acquisition events. 0 is a deletion, 5 a sync and 7 an embedded-state
 # observation; 6 conflates a full translation with a partial one and is proven
-# only by a live typed publication observation, never by the history row.
-ARRIVAL_ACTIONS = (1, 2, 3, 4)
+# only by a live typed publication observation, never by the history row. 8 is
+# a file extracted from an embedded track (or read from one with OCR): a new
+# subtitle file arrived.
+ARRIVAL_ACTIONS = (1, 2, 3, 4, 8)
 
-# The same events minus 4, an upload. An upload is a real arrival, so it belongs
-# above, but it is a subtitle the reader supplied rather than one this install
-# went and found, and counting it under "subtitles fetched" would credit the
-# install with work it did not do.
+# The same events minus 4, an upload, and 8, an extraction. Both are real
+# arrivals, so they belong above, but an upload is a subtitle the reader
+# supplied and an extraction copies one the video already carried, rather than
+# one this install went and found, and counting either under "subtitles
+# fetched" would credit the install with work it did not do.
 FETCHED_ACTIONS = (1, 2, 3)
 
 # Classify by the module and function a job actually runs. Matching words in a

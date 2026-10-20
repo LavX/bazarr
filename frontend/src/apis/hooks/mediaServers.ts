@@ -4,8 +4,10 @@ import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
 import api from "@/apis/raw";
+import { inlineWhen } from "@/apis/raw/inlineWrites";
 import type {
   ConnectionOverrides,
+  MediaServerInstance,
   MediaServerKind,
   MediaServerUpdate,
 } from "@/apis/raw/mediaServers";
@@ -63,34 +65,46 @@ export type SaveMediaServerInput = MediaServerUpdate & {
 
 export type SaveMediaServerPayload = () => SaveMediaServerInput;
 
+// A caller that shows a failure beside the control that caused it says so,
+// and the API client's "Error <code>" toast stays away for that request.
+export interface MediaServerRequestOptions {
+  inlineErrors?: boolean;
+}
+
 export function useSaveMediaServerInstance(
   kind?: MediaServerKind,
   input?: MediaServerUpdate,
   id?: string,
+  { inlineErrors = false }: MediaServerRequestOptions = {},
 ) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (variables: SaveMediaServerPayload | void) => {
-      const source: SaveMediaServerInput = variables
-        ? variables()
-        : (input ?? {});
-      const { kind: payloadKind, ...payload } = source;
-      const target = payloadKind ?? kind;
-      if (id) {
-        return api.mediaServers.update(id, payload);
-      }
-      if (!target) {
-        return Promise.reject(
-          new Error("A new media server instance needs a kind"),
-        );
-      }
-      return api.mediaServers.create({
-        ...payload,
-        kind: target,
-        name: payload.name ?? "",
-        url: payload.url ?? "",
-      });
-    },
+    mutationFn: inlineWhen(
+      inlineErrors,
+      (
+        variables: SaveMediaServerPayload | void,
+      ): Promise<MediaServerInstance> => {
+        const source: SaveMediaServerInput = variables
+          ? variables()
+          : (input ?? {});
+        const { kind: payloadKind, ...payload } = source;
+        const target = payloadKind ?? kind;
+        if (id) {
+          return api.mediaServers.update(id, payload);
+        }
+        if (!target) {
+          return Promise.reject(
+            new Error("A new media server instance needs a kind"),
+          );
+        }
+        return api.mediaServers.create({
+          ...payload,
+          kind: target,
+          name: payload.name ?? "",
+          url: payload.url ?? "",
+        });
+      },
+    ),
     onSuccess: (_data, variables) => {
       // A saved name, URL or switch changes what a Play on menu offers.
       void client.invalidateQueries({ queryKey: mediaServerLinksKey });
@@ -107,10 +121,11 @@ export function useSaveMediaServerInstance(
 export function useDeleteMediaServerInstance(
   kind: MediaServerKind,
   id: string,
+  { inlineErrors = false }: MediaServerRequestOptions = {},
 ) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: () => api.mediaServers.remove(id),
+    mutationFn: inlineWhen(inlineErrors, () => api.mediaServers.remove(id)),
     onSuccess: async () => {
       await client.cancelQueries({ queryKey: itemKey(kind, id) });
       client.removeQueries({ queryKey: itemKey(kind, id) });
@@ -127,9 +142,10 @@ export function useMediaServerTest(
   kind: MediaServerKind,
   input: ConnectionOverrides = {},
   id?: string,
+  { inlineErrors = false }: MediaServerRequestOptions = {},
 ) {
   const mutation = useMutation({
-    mutationFn: () =>
+    mutationFn: inlineWhen(inlineErrors, () =>
       id
         ? api.mediaServers.testExisting(id, input)
         : api.mediaServers.testConnection(kind, {
@@ -137,6 +153,7 @@ export function useMediaServerTest(
             apikey: input.api_key ?? "",
             verify_ssl: input.verify_ssl ?? true,
           }),
+    ),
   });
   const { reset } = mutation;
   useEffect(
@@ -158,9 +175,10 @@ export function useMediaServerLibraries(
   kind: MediaServerKind,
   input: ConnectionOverrides,
   id?: string,
+  { inlineErrors = false }: MediaServerRequestOptions = {},
 ) {
   const mutation = useMutation({
-    mutationFn: () =>
+    mutationFn: inlineWhen(inlineErrors, () =>
       id
         ? api.mediaServers.librariesExisting(id, input)
         : api.mediaServers.libraries(kind, {
@@ -168,6 +186,7 @@ export function useMediaServerLibraries(
             apikey: input.api_key ?? "",
             verify_ssl: input.verify_ssl ?? true,
           }),
+    ),
   });
   const { reset } = mutation;
   useEffect(

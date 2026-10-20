@@ -153,6 +153,9 @@ describe("ConnectedServerRow", () => {
         }),
       ),
     );
+    // That message and nothing else: the shared settings hook used to add
+    // its own "Save failed" toast beside it.
+    expect(shown).toHaveBeenCalledTimes(1);
   });
 
   it("keeps quiet when the switch goes back on", async () => {

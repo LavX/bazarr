@@ -392,11 +392,11 @@ describe("FinishStep", () => {
 
     customRender(<FinishStep onNext={vi.fn()} />);
 
-    // No line about a step this user was never shown. Seerr is on both paths,
-    // so it stays.
+    // No line about a step this user was never shown. Requests are on both
+    // paths, so they stay.
     expect(screen.queryByText(/sonarr/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/plex media server/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/seerr skipped/i)).toBeInTheDocument();
+    expect(screen.getByText(/requests not set up/i)).toBeInTheDocument();
     expect(
       screen.getByText(/search for any film or series/i),
     ).toBeInTheDocument();
@@ -409,14 +409,22 @@ describe("FinishStep", () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/discover"));
   });
 
-  it("tells a library user their first scan is running", () => {
+  it("makes no claim about when the library sync runs", () => {
+    // handleFinish writes setup_complete and navigates. The sync is the
+    // scheduler's: its interval jobs first run late in their interval, and
+    // Sportarr has no immediate sync, so neither "now" nor "already" is true.
     localStorage.setItem("bazarr.onboarding.intent", "library");
 
     customRender(<FinishStep onNext={vi.fn()} />);
 
     expect(
-      screen.getByText(/first library scan starts now/i),
+      screen.getByText(
+        "Bazarr+ will sync your connected library and look for the subtitles it is missing.",
+      ),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/starts now|started|already/i),
+    ).not.toBeInTheDocument();
   });
 
   it("lists what was skipped and where it lives", () => {
@@ -430,12 +438,40 @@ describe("FinishStep", () => {
 
     customRender(<FinishStep onNext={vi.fn()} />);
 
-    expect(screen.getByText(/what you left for later/i)).toBeInTheDocument();
+    // Only the omission that keeps subtitles from arriving is said as one.
+    expect(screen.getByText("Still needed for subtitles")).toBeInTheDocument();
     expect(
       screen.getByText(/no sonarr, radarr or sportarr instance is connected/i),
+    ).toHaveTextContent(/you will find it under settings, connections/i);
+    // What the reader may simply not have wanted is offered, not reported.
+    expect(
+      screen.getByText("Also available when you want it"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/ai translation has no api key yet/i),
+      screen.getByText(
+        /translate subtitles with ai, under settings, translator/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /request titles through overseerr or jellyseerr, under settings, connections, seerr/i,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/left for later/i)).not.toBeInTheDocument();
+  });
+
+  it("offers the extras without a blocker on the Discover path", () => {
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    setArrInstances([]);
+    setGeneral({ enabled_providers: ["opensubtitles"] });
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      screen.queryByText("Still needed for subtitles"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Also available when you want it"),
     ).toBeInTheDocument();
   });
 
@@ -464,7 +500,7 @@ describe("FinishStep", () => {
   it("counts a configured translator as done", async () => {
     localStorage.setItem("bazarr.onboarding.intent", "discover");
     // A media server as well, because the picker is on this path too: with
-    // none connected the recap has something left for later to report.
+    // none connected the recap has something still to offer.
     setMediaServers({ jellyfin: ["Jellyfin"] });
     setGeneral(
       { enabled_providers: ["opensubtitles"], use_seerr: true },
@@ -478,7 +514,10 @@ describe("FinishStep", () => {
       await screen.findByText(/jellyfin connected \(1 server\)/i),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(/what you left for later/i),
+      screen.queryByText("Also available when you want it"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Still needed for subtitles"),
     ).not.toBeInTheDocument();
   });
 
@@ -569,7 +608,7 @@ describe("FinishStep", () => {
     );
   });
 
-  it("tells a Discover reader who connected nothing that nothing refreshes", async () => {
+  it("offers a Discover reader who connected nothing a server refresh", async () => {
     localStorage.setItem("bazarr.onboarding.intent", "discover");
     setArrInstances([]);
     setMediaServers({});
@@ -580,9 +619,7 @@ describe("FinishStep", () => {
       await screen.findByText(/no media server connected/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
-        /no media server is connected, so nothing is refreshed/i,
-      ),
+      screen.getByText(/refresh a media server after each download/i),
     ).toBeInTheDocument();
   });
 });

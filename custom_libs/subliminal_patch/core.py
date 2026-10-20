@@ -1758,10 +1758,12 @@ def _search_external_subtitles(path, languages=None, only_one=False, match_stric
     fn_no_ext_lower = fn_no_ext.lower() # unicodedata.normalize('NFC', fn_no_ext.lower())
     subtitles = {}
 
-    for entry in scandir(dirpath):
-        if not entry.is_file(follow_symlinks=False):
-            continue
+    entries = [entry for entry in scandir(dirpath) if entry.is_file(follow_symlinks=False)]
+    # A VobSub pair: the .sub is image data its .idx indexes, not a text
+    # subtitle, so it is never listed or language-guessed.
+    names = {entry.name.lower() for entry in entries}
 
+    for entry in entries:
         p = entry.name # unicodedata.normalize('NFC', entry.name)
 
         # keep only valid subtitle filenames
@@ -1772,6 +1774,9 @@ def _search_external_subtitles(path, languages=None, only_one=False, match_stric
 
         p_root, p_ext = os.path.splitext(p)
         if not INCLUDE_EXOTIC_SUBS and p_ext not in (".srt", ".ass", ".ssa", ".vtt"):
+            continue
+
+        if p_ext.lower() == ".sub" and f"{p_root}.idx".lower() in names:
             continue
 
         if p_root.lower() == fn_no_ext_lower:
