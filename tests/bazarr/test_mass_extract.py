@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.database import TableEpisodes, TableMovies, TableShows, TableSportsEvents
+from test_embedded_extract_to_file import fixture_video, library  # noqa: F401
 from test_embedded_track_hidden import hidden_db  # noqa: F401
 from test_embedded_track_hidden_indexer import _stub_indexer
 
@@ -132,3 +133,53 @@ def test_each_item_runs_the_primitive_and_a_taken_name_is_a_skip(mass, monkeypat
         mass_operations.mass_batch_operation([{"type": "movie", "radarrId": 7, "arr_instance_id": 1}],
                                              "extract", job_id=5)
     assert calls == [("movie", 7, 1, "en", "subrip"), ("movie", 7, 1, "hu", "pgs"), ("movie", 7, 1, "fr", None)]
+
+
+def test_a_second_bulk_run_over_real_media_is_all_skips(library, monkeypatch):
+    """Every embedded track of a real MKV written out by one mass extract, then
+    the same selection again: nothing is extracted twice, no file changes, and
+    no image track is read again, although .sup, .idx and .sub files are never
+    listed and so are collected again."""
+    import subprocess
+
+    import subtitles.indexer.movies as mv
+    import subtitles.tools.translate.batch as batch
+    from app.database import TableHistoryMovie
+    from subtitles import mass_operations
+    from sqlalchemy import func, select
+
+    session, root, _events, published = library
+    film = root / "owner1/movies/Film (2020)"
+    monkeypatch.setattr(mass_operations, "database", session)
+    names = []
+    monkeypatch.setattr(mass_operations, "jobs_queue", SimpleNamespace(
+        update_job_progress=lambda **kw: None, update_job_name=lambda **kw: names.append(kw["new_job_name"])))
+    mv.store_subtitles_movie("/movies/Film (2020)/Film.mkv", str(film / "Film.mkv"), arr_instance_id=1)
+    selection = [{"type": "movie", "radarrId": 30, "arr_instance_id": 1}]
+
+    first = mass_operations.mass_batch_operation(selection, "extract", job_id=5)
+
+    written = {path.name: path.read_bytes() for path in film.iterdir() if path.name != "Film.mkv"}
+    assert sorted(written) == ["Film.en.hi.srt", "Film.en.srt", "Film.en.sup", "Film.hu.idx", "Film.hu.sub"]
+    assert first["queued"] == 4 and first["errors"] == []
+    extractions = session.execute(select(func.count()).select_from(TableHistoryMovie)
+                                  .where(TableHistoryMovie.action == 8)).scalar_one()
+    published_before = len(published)
+    runs = []
+    real_run = subprocess.run
+    monkeypatch.setattr(batch.subprocess, "run", lambda command, *args, **kwargs: (
+        runs.append(command) or real_run(command, *args, **kwargs)))
+
+    second = mass_operations.mass_batch_operation(selection, "extract", job_id=6)
+
+    assert second["queued"] == 0 and second["errors"] == []
+    assert names[-1] == f"Mass extract complete: 0 done, {second['skipped']} skipped"
+    # English (both codecs, and HI) has files now and is left out when collected;
+    # Hungarian is collected again and stops at its taken names.
+    assert second["skipped"] == 4
+    assert {path.name: path.read_bytes() for path in film.iterdir() if path.name != "Film.mkv"} == written
+    assert runs == [], "an image track already extracted is never read again"
+    session.expire_all()
+    assert session.execute(select(func.count()).select_from(TableHistoryMovie)
+                           .where(TableHistoryMovie.action == 8)).scalar_one() == extractions
+    assert len(published) == published_before

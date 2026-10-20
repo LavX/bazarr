@@ -17,6 +17,7 @@ name exists, rather than a rename, which would replace it.
 import errno
 import logging
 import os
+import secrets
 import shutil
 import tempfile
 from contextlib import nullcontext
@@ -40,24 +41,63 @@ class SubtitleFileExists(Exception):
         self.path = path
 
 
-def _default_file_mode():
-    """The mode a plain ``open(path, 'w')`` gives a new file: 0o666 less the umask.
+# A new file is created with O_EXCL, never through an existing name, and in
+# binary mode on Windows.
+_NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
 
-    mkstemp creates its file as 0o600, and a link or rename keeps that, so a
-    new subtitle would be unreadable to a media server running as another
-    user, where a downloaded one is not. The umask is read from /proc where
-    the kernel reports it, since setting it to read it back is process-wide.
+
+def _new_staging_file(directory):
+    """Create a uniquely named temporary file in ``directory``: ``(fd, path)``.
+
+    Created with mode 0o666, so the kernel applies the umask the way it does
+    for a downloaded subtitle. mkstemp creates 0o600, which a link or rename
+    keeps, and a subtitle a media server running as another user cannot read
+    is no use to it.
+    """
+    for _attempt in range(100):
+        path = os.path.join(directory, f'.bazarr-new-{secrets.token_hex(8)}.tmp')
+        try:
+            return os.open(path, _NEW_FILE_FLAGS, 0o666), path
+        except FileExistsError:
+            continue
+    raise FileExistsError(errno.EEXIST, 'No free temporary file name', directory)
+
+
+def _staging_file(directory, replace):
+    # A replacement keeps the existing temporary-file behaviour of the routes
+    # that save over a file.
+    return tempfile.mkstemp(dir=directory) if replace else _new_staging_file(directory)
+
+
+def _fd_identity(fd):
+    try:
+        stat = os.fstat(fd)
+    except (OSError, TypeError, ValueError):
+        return None
+    return stat.st_dev, stat.st_ino
+
+
+def file_identity(path):
+    """``(device, inode)`` of the file at ``path``, or None when there is none.
+
+    The writers below return the identity of the file they published, taken
+    from the file they wrote rather than read back from the name, so a
+    rollback can tell its own file from one another program put there.
     """
     try:
-        with open('/proc/self/status') as status:
-            for line in status:
-                if line.startswith('Umask:'):
-                    return 0o666 & ~int(line.split()[1], 8)
-    except (OSError, ValueError):
-        pass
-    mask = os.umask(0o022)
-    os.umask(mask)
-    return 0o666 & ~mask
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino
+
+
+def discard_if_owned(path, identity):
+    """Remove ``path`` only when it is still the file ``identity`` names; say whether it was."""
+    if identity is not None and file_identity(path) == identity:
+        _discard(path)
+        return True
+    logger.warning('BAZARR left %s in place: it is no longer the file Bazarr+ wrote there', path)
+    return False
 
 
 def _discard(path):
@@ -77,7 +117,12 @@ def _write_all(fd, data):
 
 
 def _publish_without_replacing(tmp_path, path):
-    """Give the finished ``tmp_path`` the name ``path``, never over a file already there."""
+    """Give the finished ``tmp_path`` the name ``path``, never over a file already there.
+
+    Returns the identity of a file the fallback created, or None when the
+    name is a link to the temporary file itself.
+    """
+    created = None
     try:
         os.link(tmp_path, path)
     except FileExistsError:
@@ -87,54 +132,56 @@ def _publish_without_replacing(tmp_path, path):
         if error.errno not in _NO_HARD_LINKS:
             _discard(tmp_path)
             raise
-        _copy_into_new_name(tmp_path, path)
+        created = _copy_into_new_name(tmp_path, path)
     _discard(tmp_path)
+    return created
 
 
 def _copy_into_new_name(tmp_path, path):
     """The fallback without hard links: claim the name exclusively, then fill it."""
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        fd = os.open(path, _NEW_FILE_FLAGS, 0o666)
     except FileExistsError:
         _discard(tmp_path)
         raise SubtitleFileExists(path) from None
     except BaseException:
         _discard(tmp_path)
         raise
+    identity = _fd_identity(fd)
     try:
         with os.fdopen(fd, 'wb') as target, open(tmp_path, 'rb') as origin:
             shutil.copyfileobj(origin, target)
     except BaseException:
         # The name was claimed by this call, so the partial file is ours.
-        _discard(path)
+        discard_if_owned(path, identity)
         _discard(tmp_path)
         raise
+    return identity
 
 
 def _publish(tmp_path, path, replace):
     if replace:
         os.replace(tmp_path, path)
-    else:
-        _publish_without_replacing(tmp_path, path)
+        return None
+    return _publish_without_replacing(tmp_path, path)
 
 
 def write_bytes_atomically(path, data, *, replace=True):
     """Write ``data`` to ``path`` through a temporary name in the same folder.
 
     ``replace=False`` raises SubtitleFileExists instead of replacing a file
-    that is there by the time the write is published.
+    that is there by the time the write is published. Returns the published
+    file's identity (file_identity()), or None when it could not be taken.
     """
-    subtitle_dir = os.path.dirname(path)
-    fd, tmp_path = tempfile.mkstemp(dir=subtitle_dir)
+    fd, tmp_path = _staging_file(os.path.dirname(path), replace)
     try:
+        identity = _fd_identity(fd)
         try:
-            if not replace:
-                os.fchmod(fd, _default_file_mode())
             _write_all(fd, data)
         finally:
             os.close(fd)
 
-        _publish(tmp_path, path, replace)
+        return _publish(tmp_path, path, replace) or identity
     except SubtitleFileExists:
         raise
     except Exception:
@@ -143,14 +190,16 @@ def write_bytes_atomically(path, data, *, replace=True):
 
 
 def copy_file_atomically(path, source, *, replace=True):
-    """Copy ``source`` to ``path`` through a temporary name in the same folder."""
-    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path))
+    """Copy ``source`` to ``path`` through a temporary name in the same folder.
+
+    Returns the published file's identity, as write_bytes_atomically does.
+    """
+    fd, tmp_path = _staging_file(os.path.dirname(path), replace)
     try:
-        if not replace:
-            os.fchmod(fd, _default_file_mode())
+        identity = _fd_identity(fd)
         with os.fdopen(fd, 'wb') as target, open(source, 'rb') as origin:
             shutil.copyfileobj(origin, target)
-        _publish(tmp_path, path, replace)
+        return _publish(tmp_path, path, replace) or identity
     except SubtitleFileExists:
         raise
     except Exception:
@@ -168,7 +217,8 @@ def apply_subtitle_chmod(path):
 
 
 def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *, operation='edit',
-                       publication_guard=None, also_check=(), replace=False, replaced=None):
+                       publication_guard=None, also_check=(), also_refuse=None,
+                       replace=False, replaced=None):
     """Write each ``(path, data)`` of ``outputs`` as a new file and publish it.
 
     ``data`` is the file's bytes, or the path of a file to copy. Raises
@@ -176,7 +226,9 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
     ``also_check`` is already a file, including one another program created
     while the file was being written. ``publication_guard`` is the sports
     owned boundary (called with the first path); the other media types pass
-    None. Returns the written paths, first one first.
+    None. ``also_refuse`` is called under the locks and returns a path that
+    stops the write, or None, for files no fixed list of names covers.
+    Returns the written paths, first one first.
 
     ``replace`` lets the paths themselves be replaced, never ``also_check``.
     Only the editor passes it, for its one file, after the user confirmed the
@@ -195,6 +247,9 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
         for path in (*(() if replace else paths), *also_check):
             if os.path.isfile(path):
                 raise SubtitleFileExists(path)
+        refused = also_refuse() if also_refuse is not None else None
+        if refused:
+            raise SubtitleFileExists(refused)
         with subtitle_mutation(video_path, *paths):
             with (publication_guard(output_path=paths[0])
                   if publication_guard is not None else nullcontext()):
@@ -202,14 +257,16 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
                 try:
                     for path, data in outputs:
                         if isinstance(data, (bytes, bytearray)):
-                            write_bytes_atomically(path, data, replace=replace)
+                            identity = write_bytes_atomically(path, data, replace=replace)
                         else:
-                            copy_file_atomically(path, data, replace=replace)
-                        written.append(path)
+                            identity = copy_file_atomically(path, data, replace=replace)
+                        written.append((path, identity))
                 except BaseException:
-                    # A pair is published whole or not at all.
-                    for path in written:
-                        _discard(path)
+                    # A pair is published whole or not at all, but only the
+                    # files this call wrote are taken back: another program
+                    # may have put its own under a name meanwhile.
+                    for path, identity in written:
+                        discard_if_owned(path, identity)
                     raise
                 publication_callback(media_type, video_path, operation, arr_instance_id)(paths[0])
                 for path in paths:

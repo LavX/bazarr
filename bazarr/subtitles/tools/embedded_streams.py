@@ -12,8 +12,9 @@ from utilities.video_analyzer import _title_is_forced, embedded_track_language
 
 # Substrings of knowit's format string (or the track name when knowit gave no
 # format) that mark an image-based track. Matched as substrings, exactly as the
-# text extractor has always matched them.
-BITMAP_CODECS = ("pgs", "vobsub", "dvd_subtitle", "dvbsub", "hdmv_pgs_subtitle", "dvd")
+# text extractor has always matched them. knowit names no format for a DVB
+# stream, so the extractor fills it from ffprobe's codec name, dvb_subtitle.
+BITMAP_CODECS = ("pgs", "vobsub", "dvd_subtitle", "dvbsub", "dvb_subtitle", "hdmv_pgs_subtitle", "dvd")
 
 # The bitmap codecs OCR reads. DVB is left out on purpose: broadcast tracks
 # repaint cumulatively and are not supported.

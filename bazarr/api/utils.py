@@ -696,7 +696,7 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                        order_by=(history_table.timestamp.desc(), history_table.id.desc()),
                    ).label('position'))
             .where(id_column.in_(chunk))
-            .where(history_table.action.in_([0, 1, 2, 3, 4, 6, 7]))
+            .where(history_table.action.in_([0, 1, 2, 3, 4, 6, 7, 8]))
             .subquery()
         )
         rows.extend(db.execute(
@@ -742,8 +742,10 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
             continue
         seen.add(key)
         # Uploads/translations may carry a synthetic score, but they replace
-        # the downloaded file and must also shadow its old provider score.
-        if row.action not in (1, 2, 3, 7) or row.score is None:
+        # the downloaded file and must also shadow its old provider score. A
+        # file extracted from an embedded track (8) replaces it too, and its
+        # score is the track's, as on the detail pages.
+        if row.action not in (1, 2, 3, 7, 8) or row.score is None:
             continue
         if row.score == 0:
             # Older history writers leave score_out_of unset for a real zero.

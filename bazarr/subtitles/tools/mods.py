@@ -77,8 +77,12 @@ MOD_LABELS = {
 
 
 def apply_subtitle_mods(language, subtitle_path, mods, video_path,
-                         media_type=None, media_id=None, job_id=None, arr_instance_id=None):
+                         media_type=None, media_id=None, job_id=None, arr_instance_id=None,
+                         never_replace=False):
     """Job-aware wrapper for subtitles_apply_mods.
+
+    ``never_replace`` makes a mod that saves under another name (Remove HI)
+    refuse a file already at that name instead of replacing it.
 
     When called without a job_id, queues the work as a backend job and returns
     its id immediately. When called with a job_id (by the job queue consumer),
@@ -105,6 +109,7 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
         output_path = subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
                                            mods=mods, video_path=video_path,
                                            arr_instance_id=arr_instance_id, media_type=media_type,
+                                           never_replace=never_replace,
                                            **({'sports_event_id': media_id} if media_type == 'sports' else {}))
     except Exception as error:
         jobs_queue.update_job_name(
@@ -181,10 +186,43 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
         job_id=job_id,
         new_job_name=f'{mod_label}: {filename}',
     )
+    return output_path
+
+
+def _carry_extraction_lineage(video_path, subtitle_path, modded_subtitles_path, media_type, arr_instance_id,
+                              mods):
+    """Move a renamed file's extraction lineage to its new name, best effort.
+
+    Remove HI saves under the language's plain name and drops the file it
+    read. When that file was extracted from an embedded track, its lineage
+    has to follow, from every route into the mods (the embedded row, the
+    file's own row, a bulk action), or an older download of the plain
+    language whose file is gone adopts the result and the upgrade replaces
+    it. Tried once more after a rollback; a second failure is logged and
+    the mod, whose work is done, still succeeds.
+    """
+    if not media_type:
+        return
+    from app.database import database
+    from subtitles.tools.embedded_extract import carry_extraction_lineage
+
+    label = MOD_LABELS.get(mods[0].split('(', 1)[0], mods[0]) if mods else 'Apply Mods'
+    for attempt in (1, 2):
+        try:
+            carry_extraction_lineage(media_type, arr_instance_id, video_path, subtitle_path,
+                                     modded_subtitles_path, label)
+            return
+        except Exception:
+            logging.exception('BAZARR could not move the extraction history of %s to %s (attempt %s)',
+                              subtitle_path, modded_subtitles_path, attempt)
+            try:
+                database.rollback()
+            except Exception:
+                logging.debug('BAZARR could not roll back the session', exc_info=True)
 
 
 def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None, media_type=None,
-                         *, sports_event_id=None, cancel=None):
+                         *, sports_event_id=None, cancel=None, never_replace=False):
     destination = os.path.join(get_target_folder(video_path, create=False) or os.path.dirname(video_path), '.destination')
     with subtitle_write_locks(video_path, subtitle_path, destination, cancel=cancel):
         publication_guard = None
@@ -194,11 +232,11 @@ def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance
             publication_guard = sports_modification_guard(
                 sports_event_id, arr_instance_id, video_path, subtitle_path, cancel)
         return _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type,
-                                  publication_guard=publication_guard)
+                                  publication_guard=publication_guard, never_replace=never_replace)
 
 
 def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type=None,
-                       *, publication_guard=None):
+                       *, publication_guard=None, never_replace=False):
     # The mod list is user-chosen here, so only the keep-lyrics preference is
     # instance-relevant: resolve it against the media's owning instance (#227).
     # A None owner keeps the legacy global-only behaviour (single-instance).
@@ -240,17 +278,46 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
             )
         else:
             modded_subtitles_path = subtitle_path
+            modded_subtitles_path_if_alongside_video = subtitle_path
+        renamed = modded_subtitles_path != subtitle_path
 
         with (publication_guard(modded_subtitles_path) if publication_guard else nullcontext(),
               subtitle_mutation(video_path, subtitle_path, modded_subtitles_path)):
-            if os.path.exists(subtitle_path):
-                os.remove(subtitle_path)
+            if never_replace and renamed:
+                # Checked under the directory locks, so none of Bazarr+'s own
+                # writers can slip in, and the shared no-replace writer refuses
+                # a file another program creates meanwhile. It writes through a
+                # temporary name, so a failed write leaves no partial file. The
+                # source is only removed once the result is in place, and if
+                # removing it fails the result written here is taken back, so
+                # a retry finds the name free and the source untouched.
+                from subtitles.new_subtitle import SubtitleFileExists, discard_if_owned, write_bytes_atomically
 
-            if os.path.exists(modded_subtitles_path):
-                os.remove(modded_subtitles_path)
+                for taken in {modded_subtitles_path, modded_subtitles_path_if_alongside_video} - {subtitle_path}:
+                    if os.path.exists(taken):
+                        raise SubtitleFileExists(taken)
+                # The identity comes from the file the writer wrote, not from
+                # the name afterwards, which another program may already have
+                # replaced.
+                published = write_bytes_atomically(modded_subtitles_path, content, replace=False)
+                try:
+                    os.remove(subtitle_path)
+                except FileNotFoundError:
+                    # Gone already: removing it is what this step was for.
+                    pass
+                except BaseException:
+                    # Only the file this call published is taken back.
+                    discard_if_owned(modded_subtitles_path, published)
+                    raise
+            else:
+                if os.path.exists(subtitle_path):
+                    os.remove(subtitle_path)
 
-            with open(modded_subtitles_path, 'wb') as f:
-                f.write(content)
+                if os.path.exists(modded_subtitles_path):
+                    os.remove(modded_subtitles_path)
+
+                with open(modded_subtitles_path, 'wb') as f:
+                    f.write(content)
 
             # The mod rewrote the subtitle, and Remove HI can rename it on the
             # way. Publish the file this leaves behind, here rather than at each
@@ -266,4 +333,10 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
             else:
                 logging.debug('BAZARR mod on %s published nothing: no media type was given',
                               video_path)
+        if renamed:
+            # Still under the directory locks subtitles_apply_mods holds, and
+            # before the caller indexes the new name; after the sports
+            # publication guard, which holds a database transaction of its own.
+            _carry_extraction_lineage(video_path, subtitle_path, modded_subtitles_path, media_type,
+                                      arr_instance_id, mods)
         return modded_subtitles_path

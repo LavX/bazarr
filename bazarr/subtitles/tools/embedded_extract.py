@@ -20,16 +20,18 @@ import os
 import shutil
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
-from subliminal_patch.core import get_subtitle_path
+from subliminal_patch.core import SUBTITLE_EXTENSIONS, get_subtitle_path
 from subliminal_patch.score import MAX_SCORES
 from subzero.language import Language
 
 from app.config import settings
 from app.database import (TableArrInstances, TableEpisodes, TableHistory, TableHistoryMovie,
-                          TableHistorySports, TableMovies, TableShows, TableSportsEvents, database, select)
+                          TableHistorySports, TableMovies, TableShows, TableSportsEvents, database, select,
+                          update)
 from app.event_handler import event_stream
 from app.jobs_queue import JobFailed, jobs_queue
 from arr_instances.resolution import scoped
@@ -186,30 +188,57 @@ def existing_output(video_path, paths):
     return next((path for path in (*paths, *twins(video_path, paths)) if os.path.isfile(path)), None)
 
 
-def single_language_paths(video_path, extensions):
-    """The text name a download takes in single-language mode, when ``extensions`` write text.
+def single_language_taken(video_path, extensions):
+    """The language-less subtitle already beside ``video_path`` in single-language mode, or None.
 
-    In that mode downloads and uploads are saved as ``<video>.srt``, with no
-    language in the name. Such a file already is the subtitle of the one
-    language, so a text extraction counts it as taken rather than write a
-    second ``<video>.<language>.srt`` beside it.
+    In that mode downloads and uploads are saved as ``<video>.<ext>``, with no
+    language in the name, and keep their own format (``<video>.ass``, say).
+    Such a file already is the subtitle of the one language, so a text
+    extraction (``extensions`` writing text) counts it as taken rather than
+    write a second ``<video>.<language>.srt`` beside it. Matched the way the
+    external subtitle search lists files: the name's stem equal to the
+    video's ignoring case, a subtitle extension in any case, and never the
+    ``.sub`` half of a VobSub pair. Looked up in the subtitle folder and next
+    to the video, where the indexer reads both.
     """
     if not settings.general.single_language or not set(extensions) & set(TEXT_OUTPUT_EXTENSIONS):
-        return []
-    folder = get_target_folder(video_path, create=False) or os.path.dirname(video_path)
-    return [os.path.join(folder, os.path.basename(get_subtitle_path(video_path, extension=extension)))
-            for extension in TEXT_OUTPUT_EXTENSIONS]
+        return None
+    stem = os.path.splitext(os.path.basename(video_path))[0].lower()
+    beside = os.path.dirname(video_path)
+    folders = [get_target_folder(video_path, create=False) or beside]
+    if os.path.normcase(folders[0]) != os.path.normcase(beside):
+        folders.append(beside)
+    for folder in folders:
+        try:
+            entries = sorted((entry for entry in os.scandir(folder) if entry.is_file(follow_symlinks=False)),
+                             key=lambda entry: entry.name)
+        except OSError:
+            continue
+        names = {entry.name.lower() for entry in entries}
+        for entry in entries:
+            root, extension = os.path.splitext(entry.name)
+            if root.lower() != stem or extension.lower() not in SUBTITLE_EXTENSIONS:
+                continue
+            if extension.lower() == ".sub" and f"{root}.idx".lower() in names:
+                continue
+            return entry.path
+    return None
 
 
-def taken_names(track, extensions):
-    """Every name that, as a file, stops an extraction of ``track`` to ``extensions``."""
-    return (output_paths(track.video_path, track.language, track.hi, track.forced, extensions)
-            + single_language_paths(track.video_path, extensions))
+def taken_output(track, extensions, extra=()):
+    """The first file in the way of an extraction of ``track`` to ``extensions``, or None.
+
+    The names output_paths() gives, then ``extra``, each also next to the
+    video, then a language-less subtitle in single-language mode.
+    """
+    return (existing_output(track.video_path, output_paths(track.video_path, track.language, track.hi,
+                                                           track.forced, extensions) + list(extra))
+            or single_language_taken(track.video_path, extensions))
 
 
 def refuse_taken_name(track, extensions):
     """Raise SubtitleFileExists when a name an extraction of ``track`` would take is a file."""
-    taken = existing_output(track.video_path, taken_names(track, extensions))
+    taken = taken_output(track, extensions)
     if taken:
         raise SubtitleFileExists(taken)
 
@@ -273,9 +302,14 @@ def _source_score(track):
     return score or MAX_SCORES["episode" if track.media_type == "episode" else "movie"]
 
 
-def log_extracted(track, subtitle_path, *, provider=PROVIDER, description=None, sports_context=None):
-    """Record history action 8 for a file written from ``track``."""
-    score = _source_score(track)
+def log_extracted(track, subtitle_path, *, provider=PROVIDER, description=None, sports_context=None,
+                  score=None):
+    """Record history action 8 for a file written from ``track``.
+
+    ``score`` defaults to the track's own embedded score. The row is also
+    the file's extraction lineage, which keeps the upgrade job off it.
+    """
+    score = _source_score(track) if score is None else score
     description = description or f"{track.label} subtitles extracted from the video file."
     kind = "sports" if track.media_type == "sports" else track.media_type
     reverse = path_mappings.path_replace_reverse_instance
@@ -341,15 +375,14 @@ def publish_new_subtitle(track, outputs, *, provider=PROVIDER, description=None,
     """Write ``outputs`` ([(path, bytes or source file)]) for ``track``, log action 8, index again.
 
     Raises SubtitleFileExists when a file of that name is already there, or,
-    in single-language mode, the language-less text name a download takes.
+    in single-language mode, a language-less subtitle of the video.
     """
     destinations = [path for path, _data in outputs]
-    single = [path for path in single_language_paths(track.video_path,
-                                                     [os.path.splitext(path)[1] for path in destinations])
-              if path not in destinations]
+    extensions = [os.path.splitext(path)[1] for path in destinations]
     paths = write_new_subtitle(track.video_path, outputs, track.media_type, track.arr_instance_id,
                                operation="extract", publication_guard=publication_guard,
-                               also_check=single + twins(track.video_path, destinations + single))
+                               also_check=twins(track.video_path, destinations),
+                               also_refuse=lambda: single_language_taken(track.video_path, extensions))
     log_extracted(track, paths[0], provider=provider, description=description,
                   sports_context=sports_context)
     reindex(track)
@@ -479,20 +512,74 @@ def run_tool_on_embedded_track(action, media_type, media_id, arr_instance_id, la
         subtitle_path = materialise_track(track, codec, text_only=True)[0]
     except (ExtractionError, SubtitleFileExists) as error:
         raise JobFailed(str(error)) from error
-    # The request checked this name; a file may have appeared since.
+    # The request checked this name; a file may have appeared since. The mod
+    # checks it again under its own lock and never replaces it.
     replaced = existing_output(track.video_path,
                                [path for path in tool_output_paths(track, action) if path != subtitle_path])
     if replaced:
-        raise JobFailed(f"A subtitle file named {os.path.basename(replaced)} already exists. Use the tool on "
-                        f"that file's row instead. {os.path.basename(subtitle_path)} was extracted and kept.")
+        raise JobFailed(_taken_by_another_file(replaced, subtitle_path))
     if action == "sync":
         return _sync(track, subtitle_path, options or {}, job_id)
     from subtitles.tools.mods import apply_subtitle_mods
 
-    return apply_subtitle_mods(language=track.language, subtitle_path=subtitle_path, mods=[action],
-                               video_path=track.video_path, media_type=track.media_type,
-                               media_id=track.local_id if track.media_type == "sports" else track.media_id,
-                               job_id=job_id, arr_instance_id=track.arr_instance_id)
+    try:
+        output_path = apply_subtitle_mods(
+            language=track.language, subtitle_path=subtitle_path, mods=[action], video_path=track.video_path,
+            media_type=track.media_type,
+            media_id=track.local_id if track.media_type == "sports" else track.media_id,
+            job_id=job_id, arr_instance_id=track.arr_instance_id, never_replace=True)
+    except JobFailed as failure:
+        if isinstance(failure.__cause__, SubtitleFileExists):
+            raise JobFailed(_taken_by_another_file(failure.__cause__.path, subtitle_path)) from failure.__cause__
+        raise
+    # A tool that saves under another name (Remove HI) carried the
+    # extraction's lineage to it inside the mod, under its locks.
+    return output_path
+
+
+# The history actions that put a file at a path, or remove it; an extraction
+# is the file's lineage while it is the newest of them (subtitles.upgrade).
+_FILE_WRITING_ACTIONS = (0, 1, 2, 3, 4, 6, EXTRACTED)
+_HISTORY_TABLES = {"movie": TableHistoryMovie, "episode": TableHistory, "sports": TableHistorySports}
+
+
+def carry_extraction_lineage(media_type, arr_instance_id, video_path, from_path, to_path, tool_label):
+    """Move the extraction row of ``from_path`` to ``to_path`` when the file there was extracted.
+
+    For a tool that saved its result under another name and dropped the file
+    it read. Only when the newest row that put a file at ``from_path`` is an
+    extraction: its path and language (the plain one, as the tool's name
+    has no HI or forced tag) move to the result, and its time becomes now, so
+    it is the newest row at the new name too, over any download recorded
+    there before. The one extraction keeps one row. Idempotent: once moved,
+    no row names ``from_path``. Returns whether a row moved.
+    """
+    # The bulk mods name movies "movies".
+    media_type = {"movies": "movie", "series": "episode"}.get(media_type, media_type)
+    table = _HISTORY_TABLES.get(media_type)
+    if table is None:
+        return False
+    reverse = path_mappings.path_replace_reverse_instance
+    db_video, db_from, db_to = (reverse(path, arr_instance_id, media_type)
+                                for path in (video_path, from_path, to_path))
+    row = database.execute(scoped(
+        select(table.id, table.action, table.language, table.description)
+        .where(table.video_path == db_video, table.subtitles_path == db_from,
+               table.action.in_(_FILE_WRITING_ACTIONS))
+        .order_by(table.timestamp.desc(), table.id.desc()).limit(1),
+        table.arr_instance_id, arr_instance_id)).first()
+    if row is None or row.action != EXTRACTED:
+        return False
+    database.execute(update(table).where(table.id == row.id).values(
+        subtitles_path=db_to, language=(row.language or "").split(":")[0], timestamp=datetime.now(),
+        description=f"{(row.description or '').rstrip('.')}, then {tool_label}."))
+    database.commit()
+    return True
+
+
+def _taken_by_another_file(taken, subtitle_path):
+    return (f"A subtitle file named {os.path.basename(taken)} already exists. Use the tool on that file's "
+            f"row instead. {os.path.basename(subtitle_path)} was extracted and kept.")
 
 
 def _sync(track, subtitle_path, options, job_id):

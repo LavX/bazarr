@@ -477,8 +477,42 @@ def embedded_subtitle_tracks(video_path, media_type, arr_instance_id=None):
     # ffprobe or mediainfo, whichever parsed the file
     for provider in ("ffprobe", "mediainfo"):
         if data.get(provider) and "subtitle" in data[provider]:
-            return data[provider]["subtitle"]
+            return with_stream_codecs(video_path, data[provider]["subtitle"])
     return None
+
+
+def with_stream_codecs(video_path, tracks):
+    """``tracks`` with a missing ``format`` filled from ffprobe's codec name.
+
+    knowit names no format for some streams, a DVB one among them. With no
+    format the codec matchers read the track's name instead, which never says
+    it is image-based, so a DVB track counted as text: the text extractor ran
+    on it and the image copy never found it. ffprobe numbers the subtitle
+    streams in the same order, so its codec name fills the gap; when the
+    counts differ nothing is filled. Copies, never the cached probe itself.
+    """
+    if not tracks or all(track.get("format") for track in tracks):
+        return tracks
+    codecs = _subtitle_stream_codecs(video_path)
+    if codecs is None or len(codecs) != len(tracks):
+        return tracks
+    return [dict(track, format=codec) if not track.get("format") and codec else track
+            for track, codec in zip(tracks, codecs)]
+
+
+def _subtitle_stream_codecs(video_path):
+    """ffprobe's codec name of each subtitle stream, in stream order, or None."""
+    try:
+        result = subprocess.run(
+            [get_binary("ffprobe"), "-v", "error", "-select_streams", "s", "-show_entries",
+             "stream=codec_name", "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=120)
+    except Exception:
+        logger.debug("ffprobe could not list the subtitle streams of %s", video_path, exc_info=True)
+        return None
+    if result.returncode != 0:
+        return None
+    return [line.strip().lower() for line in result.stdout.splitlines()]
 
 
 def extract_embedded_subtitle(

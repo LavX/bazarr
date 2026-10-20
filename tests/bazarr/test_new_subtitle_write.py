@@ -106,14 +106,14 @@ def test_a_file_another_program_creates_while_writing_is_never_replaced(tmp_path
     A name taken between the check and the publish refuses the write."""
     from subtitles import new_subtitle
 
-    mkstemp = new_subtitle.tempfile.mkstemp
+    staging = new_subtitle._new_staging_file
 
     def foreign_writer_meanwhile(*args, **kwargs):
-        made = mkstemp(*args, **kwargs)
+        made = staging(*args, **kwargs)
         (tmp_path / "Film.hu.srt").write_text("imported by another program")
         return made
 
-    monkeypatch.setattr(new_subtitle.tempfile, "mkstemp", foreign_writer_meanwhile)
+    monkeypatch.setattr(new_subtitle, "_new_staging_file", foreign_writer_meanwhile)
     with pytest.raises(new_subtitle.SubtitleFileExists) as refused:
         new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(tmp_path / "Film.hu.srt"), b"mine")],
                                         "movie", 7)
@@ -167,12 +167,13 @@ def test_a_short_write_never_publishes_a_truncated_file(tmp_path, published, mon
 
 def test_a_new_file_gets_the_mode_a_download_gets(tmp_path, published):
     """mkstemp's 0600 would hide the file from a media server running as
-    another user; a new subtitle gets 0666 less the umask, like a download."""
+    another user; a new subtitle gets 0666 less the umask, like a download.
+    The kernel applies the umask: nothing here reads or sets it."""
     from subtitles.new_subtitle import write_new_subtitle
 
     source = tmp_path / "cache.sub"
     source.write_bytes(b"pack")
-    previous = os.umask(0o022)
+    previous = os.umask(0o027)
     try:
         write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(tmp_path / "Film.hu.idx"), b"i"),
                                                          (str(tmp_path / "Film.hu.sub"), str(source))], "movie", 7)
@@ -182,4 +183,74 @@ def test_a_new_file_gets_the_mode_a_download_gets(tmp_path, published):
 
     modes = {name: oct((tmp_path / name).stat().st_mode & 0o777) for name in ("Film.hu.idx", "Film.hu.sub",
                                                                               "plain.srt")}
-    assert modes == {"Film.hu.idx": "0o644", "Film.hu.sub": "0o644", "plain.srt": "0o644"}
+    assert modes == {"Film.hu.idx": "0o640", "Film.hu.sub": "0o640", "plain.srt": "0o640"}
+
+
+def test_the_write_never_touches_the_process_umask_or_needs_fchmod(tmp_path, published, monkeypatch):
+    """The umask is process-wide, so a thread setting it races every other
+    file created meanwhile; os.fchmod does not exist on Windows before 3.13."""
+    from subtitles import new_subtitle
+
+    def forbidden(*args):
+        raise AssertionError("the new-subtitle write must not call this")
+
+    monkeypatch.setattr(new_subtitle.os, "umask", forbidden)
+    monkeypatch.delattr(new_subtitle.os, "fchmod", raising=False)
+    monkeypatch.delattr(new_subtitle.os, "chmod", raising=False)
+
+    new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(tmp_path / "Film.hu.srt"), b"mine")],
+                                    "movie", 7)
+
+    assert (tmp_path / "Film.hu.srt").read_bytes() == b"mine"
+
+
+def test_also_refuse_is_asked_under_the_locks_and_stops_the_write(tmp_path, published, monkeypatch):
+    from subtitles import new_subtitle
+
+    held = []
+    real_locks = new_subtitle.subtitle_write_locks
+
+    def tracking_locks(*args, **kwargs):
+        held.append("locked")
+        return real_locks(*args, **kwargs)
+
+    monkeypatch.setattr(new_subtitle, "subtitle_write_locks", tracking_locks)
+    with pytest.raises(new_subtitle.SubtitleFileExists, match="Film.ASS"):
+        new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"), [(str(tmp_path / "Film.en.srt"), b"x")],
+                                        "movie", 7,
+                                        also_refuse=lambda: held and str(tmp_path / "Film.ASS") or None)
+    assert list(tmp_path.iterdir()) == [] and published == []
+
+
+def test_a_failed_pair_never_takes_back_a_half_another_program_replaced(tmp_path, published, monkeypatch):
+    """The .idx is published, then the .sub fails. If another program put its
+    own .idx there meanwhile, that file stays: only what this write published
+    is taken back."""
+    from subtitles import new_subtitle
+
+    def replaced_then_no_space(path, source, **kwargs):
+        foreign = tmp_path / "foreign.tmp"
+        foreign.write_text("imported by another program")
+        os.replace(foreign, tmp_path / "Film.hu.idx")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(new_subtitle, "copy_file_atomically", replaced_then_no_space)
+    with pytest.raises(OSError):
+        new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"),
+                                        [(str(tmp_path / "Film.hu.idx"), b"i"),
+                                         (str(tmp_path / "Film.hu.sub"), str(tmp_path / "cache.sub"))],
+                                        "movie", 7)
+    assert (tmp_path / "Film.hu.idx").read_text() == "imported by another program"
+    assert published == []
+
+
+def test_the_writers_return_the_identity_of_the_file_they_published(tmp_path):
+    from subtitles import new_subtitle
+
+    source = tmp_path / "cache.sub"
+    source.write_bytes(b"pack")
+    written = new_subtitle.write_bytes_atomically(str(tmp_path / "a.srt"), b"a", replace=False)
+    copied = new_subtitle.copy_file_atomically(str(tmp_path / "b.sub"), str(source), replace=False)
+
+    assert written == new_subtitle.file_identity(str(tmp_path / "a.srt")) is not None
+    assert copied == new_subtitle.file_identity(str(tmp_path / "b.sub")) is not None
