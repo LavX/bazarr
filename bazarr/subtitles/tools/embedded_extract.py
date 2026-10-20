@@ -268,6 +268,13 @@ def _extract_files(track, codec, work_dir, text_only=False):
                                          arr_instance_id=track.arr_instance_id, exact=True, codec=codec)
         if text:
             return TEXT_OUTPUT_EXTENSIONS, [text]
+        if codec:
+            # The row names a text codec that this file no longer has. Another
+            # family's track under that name (a PGS copy as Film.en.sup for an
+            # ASS row) is not the track the row stands for.
+            raise NotExtractable(
+                f"The {track.label} track was stored as {codec}, and the file no longer has a text "
+                f"track of that codec. Extract to file will not substitute a different track.")
     if text_only:
         raise NotExtractable(
             f"The {track.label} track could not be read as text, and the tools need text. If it is "

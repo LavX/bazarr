@@ -256,6 +256,18 @@ def test_image_based_tracks_land_as_they_are(library):
     assert not [name for name in os.listdir(root / "config" / "extracted_subs") if name.startswith(".bitmap-")]
 
 
+def test_a_named_text_codec_that_is_gone_is_never_satisfied_by_an_image_track(library):
+    from subtitles.tools.embedded_extract import NotExtractable, materialise_embedded_track
+
+    _session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+
+    with pytest.raises(NotExtractable):
+        materialise_embedded_track("movie", 30, 1, "en", codec="ass")
+
+    assert not list(film.glob("Film.en.*"))
+
+
 def test_tools_refuse_an_image_based_track(library):
     from subtitles.tools.embedded_extract import NotExtractable, materialise_embedded_track
 
