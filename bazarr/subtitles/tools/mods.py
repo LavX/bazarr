@@ -189,6 +189,38 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     return output_path
 
 
+def _carry_extraction_lineage(video_path, subtitle_path, modded_subtitles_path, media_type, arr_instance_id,
+                              mods):
+    """Move a renamed file's extraction lineage to its new name, best effort.
+
+    Remove HI saves under the language's plain name and drops the file it
+    read. When that file was extracted from an embedded track, its lineage
+    has to follow, from every route into the mods (the embedded row, the
+    file's own row, a bulk action), or an older download of the plain
+    language whose file is gone adopts the result and the upgrade replaces
+    it. Tried once more after a rollback; a second failure is logged and
+    the mod, whose work is done, still succeeds.
+    """
+    if not media_type:
+        return
+    from app.database import database
+    from subtitles.tools.embedded_extract import carry_extraction_lineage
+
+    label = MOD_LABELS.get(mods[0].split('(', 1)[0], mods[0]) if mods else 'Apply Mods'
+    for attempt in (1, 2):
+        try:
+            carry_extraction_lineage(media_type, arr_instance_id, video_path, subtitle_path,
+                                     modded_subtitles_path, label)
+            return
+        except Exception:
+            logging.exception('BAZARR could not move the extraction history of %s to %s (attempt %s)',
+                              subtitle_path, modded_subtitles_path, attempt)
+            try:
+                database.rollback()
+            except Exception:
+                logging.debug('BAZARR could not roll back the session', exc_info=True)
+
+
 def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None, media_type=None,
                          *, sports_event_id=None, cancel=None, never_replace=False):
     destination = os.path.join(get_target_folder(video_path, create=False) or os.path.dirname(video_path), '.destination')
@@ -301,4 +333,10 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
             else:
                 logging.debug('BAZARR mod on %s published nothing: no media type was given',
                               video_path)
+        if renamed:
+            # Still under the directory locks subtitles_apply_mods holds, and
+            # before the caller indexes the new name; after the sports
+            # publication guard, which holds a database transaction of its own.
+            _carry_extraction_lineage(video_path, subtitle_path, modded_subtitles_path, media_type,
+                                      arr_instance_id, mods)
         return modded_subtitles_path

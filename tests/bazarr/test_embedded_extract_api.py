@@ -662,7 +662,7 @@ def test_a_failed_history_move_never_fails_a_successful_remove_hi(library, jobs,
 
     session, root, _events, _published = library
     film = root / "owner1/movies/Film (2020)"
-    real_move = extract._move_extraction
+    real_move = extract.carry_extraction_lineage
     attempts = []
 
     def flaky_move(*args, **kwargs):
@@ -671,7 +671,7 @@ def test_a_failed_history_move_never_fails_a_successful_remove_hi(library, jobs,
             raise sa.exc.OperationalError("UPDATE table_history_movie", {}, Exception("database is locked"))
         return real_move(*args, **kwargs)
 
-    monkeypatch.setattr(extract, "_move_extraction", flaky_move)
+    monkeypatch.setattr(extract, "carry_extraction_lineage", flaky_move)
 
     output = extract.run_tool_on_embedded_track("remove_HI", "movie", 30, 1, "en", hi=True, job_id=7)
 
@@ -688,6 +688,98 @@ def test_a_failed_history_move_never_fails_a_successful_remove_hi(library, jobs,
         # Logged and left: the job succeeded, the row still names the HI file.
         assert rows == [("en:hi", "/movies/Film (2020)/Film.en.hi.srt")]
     assert len(attempts) == 2
+
+
+def _upgrade_calls(session, root, monkeypatch):
+    """Run the movie upgrade job up to the download it would start."""
+    from subtitles import upgrade
+
+    calls = []
+    monkeypatch.setattr(upgrade, "database", session)
+    monkeypatch.setattr(upgrade, "settings", SimpleNamespace(general=SimpleNamespace(
+        days_to_upgrade_subs=365, upgrade_manual=False, upgrade_translated=False, upgrade_subs=True,
+        use_sportarr=False)))
+    monkeypatch.setattr(upgrade, "jobs_queue", SimpleNamespace(
+        update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None))
+    monkeypatch.setattr(upgrade, "get_providers", lambda: ["opensubtitlescom"])
+    monkeypatch.setattr(upgrade, "_language_still_desired", lambda language, profile: True)
+    monkeypatch.setattr(upgrade, "_is_hi_required", lambda language, profile: True)
+    monkeypatch.setattr(upgrade, "get_audio_profile_languages", lambda audio: [])
+    monkeypatch.setattr(upgrade.path_mappings, "path_replace_movie", lambda path: str(root / "owner1") + path)
+    monkeypatch.setattr(upgrade, "generate_subtitles",
+                        lambda *args, **kwargs: calls.append(kwargs["previous_subtitles_to_delete"]) or [])
+    upgrade.upgrade_movies_subtitles(job_id=1)
+    return calls
+
+
+def _plain_download_at_the_result_name(session, minutes):
+    from datetime import datetime, timedelta
+
+    import sqlalchemy as sa
+
+    from app.database import TableHistoryMovie
+
+    session.execute(sa.insert(TableHistoryMovie).values(
+        action=1, radarrId=30, movie_id=1, arr_instance_id=1, language="en", provider="opensubtitlescom",
+        score=90, score_out_of=180, video_path="/movies/Film (2020)/Film.mkv", description="downloaded",
+        subtitles_path="/movies/Film (2020)/Film.en.srt", timestamp=datetime.now() + timedelta(minutes=minutes)))
+    session.commit()
+
+
+def _extraction_rows(session):
+    import sqlalchemy as sa
+
+    from app.database import TableHistoryMovie
+
+    session.expire_all()
+    return session.execute(sa.select(TableHistoryMovie.language, TableHistoryMovie.subtitles_path)
+                           .where(TableHistoryMovie.action == 8)).all()
+
+
+@pytest.mark.parametrize("download", ["before-the-extraction", "after-the-extraction"])
+def test_remove_hi_from_the_file_s_own_row_carries_the_lineage(library, jobs, monkeypatch, download):
+    """The extracted HI file is an ordinary external row: Remove HI from its
+    own menu renames it to the plain name. A plain download recorded at that
+    name, whose file is gone, must not adopt the result, even when it was
+    recorded after the extraction: the moved row is the newest at the name."""
+    import subtitles.tools.mods as mods
+    from subtitles.tools.embedded_extract import materialise_embedded_track
+
+    session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    if download == "before-the-extraction":
+        _plain_download_at_the_result_name(session, -60)
+    materialise_embedded_track("movie", 30, 1, "en", hi=True)
+    if download == "after-the-extraction":
+        _plain_download_at_the_result_name(session, 0)
+
+    assert mods.apply_subtitle_mods(language="en", subtitle_path=str(film / "Film.en.hi.srt"), mods=["remove_HI"],
+                                    video_path=str(film / "Film.mkv"), media_type="movie", media_id=30, job_id=9,
+                                    arr_instance_id=1) == str(film / "Film.en.srt")
+
+    assert _extraction_rows(session) == [("en", "/movies/Film (2020)/Film.en.srt")]
+    assert _upgrade_calls(session, root, monkeypatch) == []
+
+
+def test_remove_hi_as_a_bulk_action_carries_the_lineage(library, jobs, monkeypatch):
+    from subtitles import mass_operations
+    from subtitles.tools.embedded_extract import materialise_embedded_track
+
+    session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    _plain_download_at_the_result_name(session, -60)
+    materialise_embedded_track("movie", 30, 1, "en", hi=True)
+    monkeypatch.setattr(mass_operations, "database", session)
+    monkeypatch.setattr(mass_operations, "jobs_queue", SimpleNamespace(
+        update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None))
+
+    result = mass_operations.mass_batch_operation([{"type": "movie", "radarrId": 30, "arr_instance_id": 1}],
+                                                  "remove_HI", job_id=5)
+
+    assert result["queued"] == 1 and result["errors"] == []
+    assert (film / "Film.en.srt").is_file() and not (film / "Film.en.hi.srt").exists()
+    assert _extraction_rows(session) == [("en", "/movies/Film (2020)/Film.en.srt")]
+    assert _upgrade_calls(session, root, monkeypatch) == []
 
 
 @pytest.mark.parametrize("when", ["before-it-is-sampled", "after-publication"])

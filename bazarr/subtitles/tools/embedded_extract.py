@@ -20,6 +20,7 @@ import os
 import shutil
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
@@ -515,73 +516,49 @@ def run_tool_on_embedded_track(action, media_type, media_id, arr_instance_id, la
         if isinstance(failure.__cause__, SubtitleFileExists):
             raise JobFailed(_taken_by_another_file(failure.__cause__.path, subtitle_path)) from failure.__cause__
         raise
-    if output_path and output_path != subtitle_path:
-        _carry_extraction(track, subtitle_path, output_path, action)
+    # A tool that saves under another name (Remove HI) carried the
+    # extraction's lineage to it inside the mod, under its locks.
     return output_path
 
 
-def _carry_extraction(track, subtitle_path, output_path, action):
-    """Move the extraction's row to the tool's result, best effort.
+# The history actions that put a file at a path, or remove it; an extraction
+# is the file's lineage while it is the newest of them (subtitles.upgrade).
+_FILE_WRITING_ACTIONS = (0, 1, 2, 3, 4, 6, EXTRACTED)
+_HISTORY_TABLES = {"movie": TableHistoryMovie, "episode": TableHistory, "sports": TableHistorySports}
 
-    The file is written, published and indexed by now, so a database error
-    here must not fail the job. One more attempt follows a failure, after the
-    session is rolled back, so a passing error does not leave the result
-    without lineage; a second failure is logged and the job still succeeds.
+
+def carry_extraction_lineage(media_type, arr_instance_id, video_path, from_path, to_path, tool_label):
+    """Move the extraction row of ``from_path`` to ``to_path`` when the file there was extracted.
+
+    For a tool that saved its result under another name and dropped the file
+    it read. Only when the newest row that put a file at ``from_path`` is an
+    extraction: its path and language (the plain one, as the tool's name
+    has no HI or forced tag) move to the result, and its time becomes now, so
+    it is the newest row at the new name too, over any download recorded
+    there before. The one extraction keeps one row. Idempotent: once moved,
+    no row names ``from_path``. Returns whether a row moved.
     """
-    for attempt in (1, 2):
-        try:
-            _move_extraction(track, subtitle_path, output_path, action)
-            return
-        except Exception:
-            logger.exception("BAZARR could not move the extraction history of %s to %s (attempt %s)",
-                             subtitle_path, output_path, attempt)
-            try:
-                database.rollback()
-            except Exception:
-                logger.debug("BAZARR could not roll back the session", exc_info=True)
-
-
-def _history_table(track):
-    """The history table of ``track``'s media type and the clause naming its media."""
-    if track.media_type == "sports":
-        return TableHistorySports, TableHistorySports.event_id == track.local_id
-    if track.media_type == "episode":
-        return TableHistory, TableHistory.sonarrEpisodeId == track.media_id
-    return TableHistoryMovie, TableHistoryMovie.radarrId == track.media_id
-
-
-def _move_extraction(track, subtitle_path, output_path, action):
-    """Carry the extraction's history row over to the name a tool saved its result under.
-
-    Remove HI saves under the language's plain name and drops the file it
-    read. The row that recorded the extraction then named a file that is
-    gone, and without lineage on the new name an older download of the plain
-    language whose file was deleted stayed an upgrade candidate, adopted the
-    result as its own and replaced it. The one extraction keeps one row: its
-    path and language move to the result, and no second arrival is logged.
-    """
-    table, media = _history_table(track)
-    kind = "sports" if track.media_type == "sports" else track.media_type
+    # The bulk mods name movies "movies".
+    media_type = {"movies": "movie", "series": "episode"}.get(media_type, media_type)
+    table = _HISTORY_TABLES.get(media_type)
+    if table is None:
+        return False
     reverse = path_mappings.path_replace_reverse_instance
-    plain = replace(track, hi=False, forced=False)
-    description = f"{track.label} subtitles extracted from the video file, then {tool_name(action)}."
-    row_id = database.execute(scoped(
-        select(table.id)
-        .where(media, table.action == EXTRACTED,
-               table.subtitles_path == reverse(subtitle_path, track.arr_instance_id, kind))
+    db_video, db_from, db_to = (reverse(path, arr_instance_id, media_type)
+                                for path in (video_path, from_path, to_path))
+    row = database.execute(scoped(
+        select(table.id, table.action, table.language, table.description)
+        .where(table.video_path == db_video, table.subtitles_path == db_from,
+               table.action.in_(_FILE_WRITING_ACTIONS))
         .order_by(table.timestamp.desc(), table.id.desc()).limit(1),
-        table.arr_instance_id, track.arr_instance_id)).scalar()
-    if row_id is None:
-        # Never leave the result without lineage.
-        logger.warning("BAZARR found no extraction row for %s; recording one for %s", subtitle_path, output_path)
-        with publication_scope(track) as (_scoped, _guard, sports_context):
-            log_extracted(plain, output_path, description=description, sports_context=sports_context,
-                          score=_source_score(track))
-        return
-    database.execute(update(table).where(table.id == row_id).values(
-        subtitles_path=reverse(output_path, track.arr_instance_id, kind), language=plain.language_code,
-        description=description))
+        table.arr_instance_id, arr_instance_id)).first()
+    if row is None or row.action != EXTRACTED:
+        return False
+    database.execute(update(table).where(table.id == row.id).values(
+        subtitles_path=db_to, language=(row.language or "").split(":")[0], timestamp=datetime.now(),
+        description=f"{(row.description or '').rstrip('.')}, then {tool_label}."))
     database.commit()
+    return True
 
 
 def _taken_by_another_file(taken, subtitle_path):
