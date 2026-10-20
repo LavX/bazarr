@@ -262,3 +262,40 @@ def test_a_mapping_edit_that_moves_nothing_keeps_the_listing_during_an_outage(
     _map_owner_one(session, [["/sports", str(path / "1")], ["/sports/event.en.hi.srt", str(path / "gone.srt")]])
     module.refresh_sports_files([61], 1)
     assert row(session, 61).subtitles == "[]"
+
+
+def test_a_mapping_moved_to_a_reachable_file_whose_probe_fails_drops_the_old_listing(
+        indexed_library, monkeypatch):  # noqa: F811
+    """The file is reachable, so _snapshot's stat succeeds and the identity
+    check there never runs. The listing is kept only for a failure of the
+    file it was read from, so the cache-miss commit must check it too."""
+    session, path = indexed_library
+    module = sports(monkeypatch, session)
+    assert {item[0] for item in module.store_subtitles_sports(61, 1)} == {"fr", "en:hi"}
+
+    _map_owner_one(session, [["/sports", str(path / "2")]])
+    monkeypatch.setattr(module, "parse_video_metadata", lambda *a, **kw: None)
+    with pytest.raises(OSError):
+        module.store_subtitles_sports(61, 1)
+    for _ in range(2):
+        module.refresh_sports_files([61], 1)
+    assert row(session, 61).subtitles == "[]"
+    assert row(session, 61).ffprobe_cache is None
+
+
+def test_a_metadata_probe_after_a_move_does_not_vouch_for_the_old_listing(indexed_library, monkeypatch):  # noqa: F811
+    """A probe alone publishes the new file's signature. Had the old file's
+    listing stayed behind it, a later outage would have compared against the
+    new file and kept the old tracks."""
+    session, path = indexed_library
+    module = sports(monkeypatch, session)
+    assert {item[0] for item in module.store_subtitles_sports(61, 1)} == {"fr", "en:hi"}
+
+    _map_owner_one(session, [["/sports", str(path / "2")]])
+    module.parse_sports_video_metadata(61, 1, use_cache=False)
+    assert row(session, 61).subtitles == "[]"
+    assert pickle.loads(row(session, 61).ffprobe_cache)["sports_indexed"] is False
+
+    # Reachable and unindexed: the next refresh indexes the new file.
+    module.refresh_sports_files([61], 1)
+    assert {x[0] for x in ast.literal_eval(row(session, 61).subtitles)} == {"fr", "de:forced"}
