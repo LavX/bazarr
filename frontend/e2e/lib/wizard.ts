@@ -7,8 +7,8 @@ import { expect } from "@playwright/test";
 import { appPath } from "./base";
 
 export const INTENT = {
-  library: "I run Sonarr, Radarr or Sportarr",
-  discover: "I want to find subtitles for anything",
+  library: "Fetch subtitles for my Sonarr, Radarr or Sportarr library",
+  discover: "Find subtitles for anything, on demand",
 } as const;
 
 /** The step heading, the one level-2 or level-3 title on the card. */

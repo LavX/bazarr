@@ -73,7 +73,7 @@ test.describe(
         await next.click();
       }
       expect(seen.sort()).toEqual(["Emby", "Jellyfin", "Jellyfin 2"]);
-      await expect(stepHeading(page, "Seerr")).toBeVisible();
+      await expect(stepHeading(page, "Requests")).toBeVisible();
       expect(await listMediaServers(api)).toEqual([]);
     });
 
@@ -86,7 +86,7 @@ test.describe(
       for (const position of STEP_POSITIONS) {
         const server = await onServerStep(page, position);
         await page.getByLabel("Server URL").pressSequentially(BOGUS_URL);
-        await page.getByLabel("API Key").pressSequentially(BOGUS_KEY);
+        await page.getByLabel("API key").pressSequentially(BOGUS_KEY);
         await page.getByRole("button", { name: "Test", exact: true }).click();
         await expect(
           page.getByText(/^Connection test failed\./),
@@ -105,7 +105,7 @@ test.describe(
         }
         expect(await listMediaServers(api)).toEqual([]);
       }
-      await expect(stepHeading(page, "Seerr")).toBeVisible();
+      await expect(stepHeading(page, "Requests")).toBeVisible();
     });
 
     test("Emby with a failed test is not saved on Continue", async ({
@@ -118,7 +118,7 @@ test.describe(
       expect(await onServerStep(page, 3)).toBe("Emby");
 
       await page.getByLabel("Server URL").pressSequentially(BOGUS_URL);
-      await page.getByLabel("API Key").pressSequentially(BOGUS_KEY);
+      await page.getByLabel("API key").pressSequentially(BOGUS_KEY);
       await page.getByRole("button", { name: "Test", exact: true }).click();
       await expect(page.getByText(/^Connection test failed\./)).toBeVisible();
 

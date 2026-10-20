@@ -236,7 +236,7 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
     refetch: refetchProviders,
   } = useProviderHubProviders();
   const { data: systemSettings } = useSystemSettings();
-  const settings = useSettingsMutation();
+  const settings = useSettingsMutation(false, { inlineErrors: true });
   // A save in flight owns this step until it answers: the shell's skip would
   // advance the wizard while the write is still going, and the mutation's own
   // onSuccess would then advance it a second time and report a failure to a

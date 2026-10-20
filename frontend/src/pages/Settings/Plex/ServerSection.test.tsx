@@ -114,6 +114,24 @@ describe("ServerSection, a refused selection", () => {
     });
   });
 
+  it("passes any other refusal on in the backend's own words", async () => {
+    // account_changed asks the reader to choose the server again; the generic
+    // line hid that once the client's toast no longer carried it.
+    mockSelect.mockRejectedValue(
+      refusal(
+        "account_changed",
+        "The Plex account changed. Choose the server again.",
+      ),
+    );
+    customRender(<ServerSection />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("The Plex account changed. Choose the server again."),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("keeps the generic refusal text for anything else", async () => {
     mockSelect.mockRejectedValue(new Error("network down"));
     customRender(<ServerSection />);

@@ -133,7 +133,7 @@ describe("Plex AutopulseSelector without a Plex sign-in", () => {
     await waitFor(() => expect(validations).toBeGreaterThan(1));
     expect(
       await screen.findByText(
-        /Enable Plex OAuth above to generate an Autopulse configuration/,
+        /Sign in to Plex above to generate an Autopulse configuration/,
       ),
     ).toBeInTheDocument();
     expect(

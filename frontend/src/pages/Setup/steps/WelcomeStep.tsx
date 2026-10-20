@@ -16,7 +16,7 @@ const WelcomeStep: FC<WizardStepProps> = ({ onNext }) => {
     <StepLayout
       title="Welcome to Bazarr+"
       layout="stacked"
-      description="A few quick steps and you are running. The next screen asks what you want Bazarr+ to do, and we only ask for what that needs. You can change any of this later in Settings."
+      description="A few quick steps and you are running. The next screen asks what you want Bazarr+ to do, and setup only asks for what that needs. You can change any of this later in Settings."
       actions={
         <Button onClick={onNext} size="md">
           Get started
@@ -24,7 +24,7 @@ const WelcomeStep: FC<WizardStepProps> = ({ onNext }) => {
       }
     >
       <Stack gap="xs">
-        <Text fw={600}>Whatever you pick, we will cover:</Text>
+        <Text fw={600}>Whatever you pick, setup covers:</Text>
         <List spacing="xs">
           <List.Item>The subtitle languages you want</List.Item>
           <List.Item>The subtitle providers to search</List.Item>

@@ -155,7 +155,7 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
           {label}
         </Text>
         <Alert color="brand" variant="light" className={styles.alertMessage}>
-          Enable Plex OAuth above to automatically discover your webhooks.
+          Sign in to Plex above to automatically discover your webhooks.
         </Alert>
       </Stack>
     );

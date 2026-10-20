@@ -1,7 +1,9 @@
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { customRender, screen, waitFor } from "@/tests";
+import server from "@/tests/mocks/node";
 import GeneralStep from "./GeneralStep";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
@@ -47,11 +49,90 @@ describe("GeneralStep", () => {
     // Subtitle folder selector reflects the stored value.
     expect(
       screen.getByRole("combobox", { name: /subtitle folder/i }),
-    ).toHaveValue("AlongSide Media File");
+    ).toHaveValue("Next to the video file (recommended)");
     // Upgrade switch is on.
     expect(
       screen.getByRole("switch", { name: /upgrade previously downloaded/i }),
     ).toBeChecked();
+  });
+
+  it("names the folder choices for where the files end up", async () => {
+    const user = userEvent.setup();
+    customRender(<GeneralStep onNext={onNext} />);
+
+    // Sentence case, outcome first: "AlongSide Media File" was the first
+    // choice on this step.
+    expect(
+      screen.getByRole("combobox", { name: "Subtitle folder" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("combobox", { name: /subtitle folder/i }),
+    );
+    for (const choice of [
+      "Next to the video file (recommended)",
+      "In a subfolder next to the video file",
+      "In one folder for all subtitles",
+    ]) {
+      expect(await screen.findByText(choice)).toBeInTheDocument();
+    }
+
+    await user.click(screen.getByText("In a subfolder next to the video file"));
+    expect(
+      await screen.findByRole("textbox", { name: "Subfolder name" }),
+    ).toBeInTheDocument();
+  });
+
+  it("says so when the preferences cannot be saved", async () => {
+    // A restarting or unreachable Bazarr+ is kept out of the toasts, so the
+    // step is the only place a failed write can be reported.
+    const user = userEvent.setup();
+    mutate.mockImplementationOnce(
+      (_input: unknown, opts?: { onError?: () => void }) => {
+        opts?.onError?.();
+      },
+    );
+
+    customRender(<GeneralStep onNext={onNext} />);
+
+    await user.click(
+      screen.getByRole("switch", { name: /upgrade previously downloaded/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not save these preferences/i,
+    );
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed save once, inline, with no toast", async () => {
+    // Through the real settings hook, not a mock of it: a 503 is the failure
+    // a restart mid-setup produces, and the hook's own "Save failed" toast
+    // would announce it a second time beside the inline alert.
+    const { useSettingsMutation: realSettingsMutation } =
+      await vi.importActual<typeof import("@/apis/hooks")>("@/apis/hooks");
+    mockedUseSettingsMutation.mockImplementation(realSettingsMutation);
+    server.use(
+      http.post(
+        "/api/system/settings",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<GeneralStep onNext={onNext} />);
+
+    await user.click(
+      screen.getByRole("switch", { name: /upgrade previously downloaded/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(1));
+    expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
+    expect(mockedUseSettingsMutation).toHaveBeenCalledWith(false, {
+      inlineErrors: true,
+    });
+    expect(onNext).not.toHaveBeenCalled();
   });
 
   it("does not ask for a page size", () => {
@@ -74,15 +155,17 @@ describe("GeneralStep", () => {
 
     customRender(<GeneralStep onNext={onNext} />);
 
-    // Pick "Absolute Path" which is not the alongside-media default.
+    // Pick the one-folder mode, which is not the next-to-the-video default.
     await user.click(
       screen.getByRole("combobox", { name: /subtitle folder/i }),
     );
-    await user.click(await screen.findByText("Absolute Path"));
+    await user.click(
+      await screen.findByText("In one folder for all subtitles"),
+    );
 
     // The custom-folder input is now revealed; fill it.
     const custom = await screen.findByRole("textbox", {
-      name: /custom subtitles folder/i,
+      name: /^folder path$/i,
     });
     await user.type(custom, "/mnt/subs");
 

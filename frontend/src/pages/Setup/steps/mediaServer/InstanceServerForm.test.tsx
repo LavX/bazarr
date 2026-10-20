@@ -102,8 +102,10 @@ describe("InstanceServerForm", () => {
     );
 
     const url = await screen.findByLabelText("Server URL");
+    // Sentence case, as every other wizard label; Settings keeps "API Key".
+    expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
     await user.type(url, "http://a.example");
-    await user.type(screen.getByLabelText("API Key"), "key-a");
+    await user.type(screen.getByLabelText("API key"), "key-a");
 
     await user.click(screen.getByRole("button", { name: "Test" }));
     await screen.findByText(/Connected to Attic/);
@@ -165,7 +167,7 @@ describe("InstanceServerForm", () => {
       await screen.findByLabelText("Server URL"),
       "http://a.example",
     );
-    await user.type(screen.getByLabelText("API Key"), "key-a");
+    await user.type(screen.getByLabelText("API key"), "key-a");
     if (test) {
       await user.click(screen.getByRole("button", { name: "Test" }));
       await screen.findByText(/Connected to Attic|Connection test failed/);

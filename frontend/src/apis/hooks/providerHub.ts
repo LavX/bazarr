@@ -2,6 +2,7 @@ import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { inlineWhen } from "@/apis/raw/inlineWrites";
 import type { ProviderHubInstallRequest } from "@/apis/raw/providerHub";
 import { notification } from "@/modules/notification";
 import { waitForJob } from "@/utilities/jobs";
@@ -31,14 +32,20 @@ export function useProviderHubJobs() {
   });
 }
 
-export function useProviderHubRefreshCatalog() {
+export function useProviderHubRefreshCatalog({
+  inlineErrors = false,
+}: {
+  // The caller reports a failed refresh itself, so the client's toast for
+  // the refresh request stays away. The job poll after it is not covered.
+  inlineErrors?: boolean;
+} = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "refresh-catalog"],
-    mutationFn: async () => {
+    mutationFn: inlineWhen(inlineErrors, async () => {
       const { job_id: jobId } = await api.providerHub.refreshCatalog();
       await waitForJob(client, jobId);
-    },
+    }),
     // Settled, not success: a refresh that failed for one source still
     // refreshed the others and recorded the failure on the source.
     onSettled: () => {
@@ -84,16 +91,26 @@ export function useProviderHubPatchCatalogSource() {
   });
 }
 
-export function useProviderHubInstall() {
+export function useProviderHubInstall({
+  inlineErrors = false,
+}: {
+  // The caller reports a failed install itself, so the client's toast for
+  // the install request stays away. The job poll after it is a read and is
+  // not covered.
+  inlineErrors?: boolean;
+} = {}) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "install"],
     // Resolves when the install job has finished, not when it was queued, and
     // rejects with the job's reason when it failed.
-    mutationFn: async (request: ProviderHubInstallRequest) => {
-      const { job_id: jobId } = await api.providerHub.install(request);
-      await waitForJob(client, jobId);
-    },
+    mutationFn: inlineWhen(
+      inlineErrors,
+      async (request: ProviderHubInstallRequest) => {
+        const { job_id: jobId } = await api.providerHub.install(request);
+        await waitForJob(client, jobId);
+      },
+    ),
     onSettled: () => {
       client.invalidateQueries({ queryKey: providerHubKey });
     },

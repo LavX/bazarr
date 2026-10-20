@@ -164,6 +164,10 @@ body::after {
   --bz-hover-bg: rgba(255, 255, 255, 0.04);
   --bz-hover-bg-emphasis: rgba(255, 255, 255, 0.07);
 
+  /* Focus indicator. brand-8, Mantine's dark filled shade, measured 2.05:1
+     against the card; brand-5 is 5.9:1 there and 7.1:1 on the ground. */
+  --bz-focus-ring: var(--mantine-color-brand-5);
+
   /* Auth-method accents (used by provider tiles) */
   --bz-auth-none-fg: #51cf66;
   --bz-auth-account-fg: #7cc4ff;
@@ -200,6 +204,9 @@ body::after {
   --bz-hover-bg: rgba(0, 0, 0, 0.04);
   --bz-hover-bg-emphasis: rgba(0, 0, 0, 0.07);
 
+  /* Focus indicator: brand-6, 4.2:1 on white and 3.8:1 on the raised surface. */
+  --bz-focus-ring: var(--mantine-color-brand-6);
+
   /* Auth-method accents (used by provider tiles) */
   --bz-auth-none-fg: #2b8a3e;
   --bz-auth-account-fg: #1971c2;
@@ -231,6 +238,45 @@ body::after {
   // (App/AppShell.module.scss). A rule here cannot outrank a two-class module
   // selector, so the last one written against content showing through the band
   // lost silently and the symptom came back.
+}
+
+// Two Mantine colours that fall under 4.5:1 for the small text they paint. An
+// app-wide contrast change on purpose, not a setup-only one: the same text
+// fails the same way everywhere. Measured in the setup wizard and, rendered,
+// in Settings, Connections: a field error ("Address is required", 12px) was
+// red-8 in dark mode, 2.20:1 on the card, and red-6 in light mode, 4.26:1 on
+// white, now 5.57:1 and 5.46:1; a light yellow Alert's title ("Library sync
+// in progress") was yellow-9 on yellow-1, 2.69:1, now 4.85:1. Light yellow
+// Buttons and Badges draw their text from button.module.scss and
+// badge.module.scss, so this does not move them (measured unchanged in the
+// Subtitle Hub). The doubled :root outranks the variables MantineProvider
+// writes for the same scheme, whatever order the two style sheets arrive in.
+:root:root[data-mantine-color-scheme="dark"] {
+  --mantine-color-error: var(--mantine-color-red-4);
+}
+
+:root:root[data-mantine-color-scheme="light"] {
+  --mantine-color-error: var(--mantine-color-red-7);
+  --mantine-color-yellow-light-color: var(--mantine-color-brand-7);
+}
+
+// Mantine draws every focus ring in --mantine-primary-color-filled, which is
+// brand-8 in dark mode and under the 3:1 a focus indicator needs (WCAG 2.2 SC
+// 1.4.11). The ring takes its own token instead, so the filled buttons keep
+// their shade. Unlayered, so it outranks Mantine's layered rules.
+:global {
+  .mantine-focus-auto:focus-visible,
+  .mantine-focus-always:focus,
+  .mantine-Switch-input:focus-visible + .mantine-Switch-track,
+  .mantine-Chip-input:focus-visible + .mantine-Chip-label {
+    outline-color: var(--bz-focus-ring);
+  }
+
+  // SegmentedControl draws its ring through a variable on the label instead.
+  .mantine-SegmentedControl-input:focus-visible
+    + .mantine-SegmentedControl-label {
+    --segmented-control-outline: 2px solid var(--bz-focus-ring);
+  }
 }
 
 // Global Paper/Card styling

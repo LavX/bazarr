@@ -37,6 +37,13 @@ function skipControlsIn(source: string): string[] {
 }
 
 describe("onboarding step registry", () => {
+  it("labels the Seerr step for what it gives the reader", () => {
+    // The label is the window title and the step announcement.
+    expect(ONBOARDING_STEPS.find((step) => step.key === "seerr")?.label).toBe(
+      "Requests",
+    );
+  });
+
   it("no step renders its own skip control", () => {
     // The shell renders one skip control from step.optional, with one label.
     // A step that rolls its own puts a second, differently worded affordance

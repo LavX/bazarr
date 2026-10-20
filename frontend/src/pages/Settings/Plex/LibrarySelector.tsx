@@ -87,7 +87,7 @@ const LibrarySelector: FunctionComponent<LibrarySelectorProps> = (props) => {
   if (!isAuthenticated) {
     return (
       <Alert color="brand" variant="light" className={styles.alertMessage}>
-        Enable Plex OAuth above to automatically discover your libraries.
+        Sign in to Plex above to automatically discover your libraries.
       </Alert>
     );
   }

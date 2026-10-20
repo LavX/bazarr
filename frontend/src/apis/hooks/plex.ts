@@ -8,6 +8,7 @@ import {
 import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { inlineWhen } from "@/apis/raw/inlineWrites";
 import { mediaServerLinksKey } from "./mediaServerLinks";
 import { mediaServerInstancesKey } from "./mediaServers";
 
@@ -116,11 +117,15 @@ export const usePlexPinCheckQuery = (
   });
 };
 
-export const usePlexLogoutMutation = () => {
+// A caller that reports a failed sign-out itself says so, and the client's
+// "Error <code>" toast stays away for that request.
+export const usePlexLogoutMutation = ({
+  inlineErrors = false,
+}: { inlineErrors?: boolean } = {}) => {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: () => api.plex.logout(),
+    mutationFn: inlineWhen(inlineErrors, () => api.plex.logout()),
     onSuccess: () => {
       // Remove all Plex queries from cache to prevent any refetch attempts after logout
       // This is intentional - on logout we want to completely clear Plex state
