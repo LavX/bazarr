@@ -231,7 +231,7 @@ def test_disabled_connection_retains_pending_without_new_requests(dispatch):
 
 
 @pytest.mark.parametrize('media_type', ['movie', 'episode'])
-@pytest.mark.parametrize('operation', ['download', 'upload', 'delete', 'sync', 'translate', 'combine', 'edit'])
+@pytest.mark.parametrize('operation', ['download', 'upload', 'delete', 'sync', 'translate', 'combine', 'edit', 'extract'])
 def test_emby_consumes_every_publication_silo_does(dispatch, operation, media_type):
     dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'
     dispatch.release.set()
@@ -243,7 +243,7 @@ def test_emby_consumes_every_publication_silo_does(dispatch, operation, media_ty
 
 def test_no_publication_reaches_one_destination_and_not_the_other():
     from media_servers.dispatcher import _OPERATIONS
-    assert _OPERATIONS == {'download', 'upload', 'delete', 'sync', 'translate', 'combine', 'edit'}
+    assert _OPERATIONS == {'download', 'upload', 'delete', 'sync', 'translate', 'combine', 'edit', 'extract'}
 
 
 # ------------------------------------------------------------ resolution ladder
@@ -700,7 +700,7 @@ def test_read_only_status_and_invalid_selection_never_start_worker(dispatch):
         dispatch.dispatcher.retry("jellyfin")
 
 
-@pytest.mark.parametrize('operation', ['download', 'upload', 'delete', 'sync', 'translate', 'combine', 'edit'])
+@pytest.mark.parametrize('operation', ['download', 'upload', 'delete', 'sync', 'translate', 'combine', 'edit', 'extract'])
 @pytest.mark.parametrize('media_type', ['movie', 'episode'])
 def test_silo_accepts_each_supported_publication_for_movies_and_episodes(dispatch, operation, media_type):
     dispatch.libraries[0]['type'] = 'movies' if media_type == 'movie' else 'series'

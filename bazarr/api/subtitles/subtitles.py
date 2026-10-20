@@ -222,6 +222,12 @@ class Subtitles(Resource):
         required=False,
         help="Comma-separated sync engines to use",
     )
+    patch_request_parser.add_argument(
+        "codec",
+        type=str,
+        required=False,
+        help="Codec the embedded track's row shows (extract picks between same-language tracks by it)",
+    )
 
     patch_job_model = api_ns_subtitles.model('JobQueued', job_queued_model)
 
@@ -233,6 +239,7 @@ class Subtitles(Resource):
     @api_ns_subtitles.response(400, "Generated sync output files cannot be synchronized again")
     @api_ns_subtitles.response(404, "Episode/movie not found")
     @api_ns_subtitles.response(409, "Unable to edit subtitles file. Check logs.")
+    @api_ns_subtitles.response(415, "The embedded track is image-based and the tool needs text")
     @api_ns_subtitles.response(500, "Subtitles file not found. Path mapping issue?")
     def patch(self):
         """Apply mods/tools on external subtitles"""
@@ -258,9 +265,18 @@ class Subtitles(Resource):
         forced = True if args.get("forced") == "True" else False
         hi = True if args.get("hi") == "True" else False
 
+        if action == "extract" and subtitles_path:
+            return "Extract to file works on an embedded track, which has no path.", 400
+        # Embedded track (empty path), anything but translate: Extract to file,
+        # or a tool that runs on the extracted file next to the video.
+        if not subtitles_path and action != "translate":
+            return _embedded_track_action(action, args, language, hi, forced, media_type, id,
+                                          arr_instance_id)
+
         # Embedded track: path is absent/empty, the subtitle comes out of the
         # video container into {config_dir}/extracted_subs/.
-        # Only translate is supported for embedded tracks (no file to sync/mod).
+        # Translate keeps this cache-only path: only the translated file lands
+        # next to the video, never a copy of the source track.
         # Episodes and movies extract inside the queued translation job, so this
         # request returns at once; ffmpeg takes seconds per track. A sports
         # translation binds its source file into the profile operation before
@@ -644,6 +660,65 @@ class Subtitles(Resource):
             return {"job_id": job_id or None}, 202
 
         return "", 204
+
+
+def _embedded_track_action(action, args, language, hi, forced, media_type, media_id, arr_instance_id):
+    """Queue Extract to file, or a tool that first extracts, for one embedded track.
+
+    Answers before any ffmpeg runs: 404 for an unknown row, 409 when the file
+    the extraction would write is already there (nothing is overwritten), 415
+    when a tool is asked of an image-based track, then 202 with the job id and
+    the file the job will write.
+    """
+    from subtitles.tools.embedded_extract import (ExtractionError, embedded_tool_allowed,
+                                                  extract_embedded_track, output_paths, resolve_track,
+                                                  run_tool_on_embedded_track, taken_output, tool_output_paths)
+    from subtitles.tools.embedded_streams import bitmap_family, output_extensions
+
+    if media_type not in ("movie", "episode", "sports"):
+        return "Invalid media type", 400
+    if action != "extract" and not embedded_tool_allowed(action):
+        return f"{action} cannot run on an embedded track.", 400
+    if not language or len(language) != 2 or not alpha3_from_alpha2(language):
+        return "language must be a valid alpha2 language code", 400
+    codec = (args.get("codec") or "").strip().lower() or None
+    if action != "extract" and bitmap_family(codec):
+        return ("This embedded track is image-based, and the tools need text. Extract to file copies "
+                "it out as it is, for players."), 415
+    try:
+        track = resolve_track(media_type, media_id, arr_instance_id, language, hi, forced)
+    except ExtractionError as error:
+        return str(error), error.status
+    # The file the extraction writes comes first. In single-language mode the
+    # language-less name a download takes counts too, and Remove HI saves its
+    # result under the language's plain name: both may be a file the user
+    # downloaded, and neither is ever replaced.
+    extensions = output_extensions(codec if action == "extract" else None)
+    destinations = output_paths(track.video_path, language, hi, forced, extensions)
+    clash = taken_output(track, extensions, tool_output_paths(track, action))
+    if clash:
+        advice = ("Delete it first to extract this track again." if action == "extract"
+                  else "Use the tool on that file's row instead.")
+        return f"A subtitle file named {os.path.basename(clash)} already exists. {advice}", 409
+    label = f"{track.title}, {track.label}" if track.title else track.label
+    if action == "extract":
+        job_id = extract_embedded_track(media_type, media_id, track.arr_instance_id, language, hi, forced,
+                                        codec=codec, label=label)
+    else:
+        job_id = run_tool_on_embedded_track(
+            action, media_type, media_id, track.arr_instance_id, language, hi, forced,
+            options={
+                "reference": args.get("reference") if args.get("reference") not in empty_values else None,
+                "max_offset_seconds": args.get("max_offset_seconds")
+                if args.get("max_offset_seconds") not in empty_values else None,
+                "no_fix_framerate": args.get("no_fix_framerate") == "True",
+                "gss": args.get("gss") == "True",
+                "output_mode": args.get("output_mode") if args.get("output_mode") not in empty_values else None,
+                "enabled_engines": args.get("enabled_engines")
+                if args.get("enabled_engines") not in empty_values else None,
+            },
+            label=label, codec=codec)
+    return {"job_id": job_id or None, "path": destinations[0]}, 202
 
 
 def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, arr_instance_id=None):

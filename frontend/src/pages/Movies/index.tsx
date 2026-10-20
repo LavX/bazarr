@@ -18,6 +18,7 @@ import {
   faCheck,
   faCircleDown,
   faEllipsisVertical,
+  faFileExport,
   faHardDrive,
   faLanguage,
   faLayerGroup,
@@ -438,6 +439,19 @@ const MovieView: FunctionComponent = () => {
                 </Menu.Item>
                 <Menu.Item
                   leftSection={
+                    <FontAwesomeIcon icon={faFileExport} size="sm" />
+                  }
+                  onClick={() =>
+                    modals.openContextModal(BatchModConfirmModal, {
+                      items: [batchItem],
+                      action: "extract" as BatchAction,
+                    })
+                  }
+                >
+                  Extract Embedded Tracks
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={
                     <FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />
                   }
                   onClick={() =>
@@ -568,6 +582,17 @@ const MovieView: FunctionComponent = () => {
               }
             >
               Scan Disk
+            </Menu.Item>
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faFileExport} size="sm" />}
+              onClick={() =>
+                modals.openContextModal(BatchModConfirmModal, {
+                  items: toBatchItems(),
+                  action: "extract" as BatchAction,
+                })
+              }
+            >
+              Extract Embedded Tracks
             </Menu.Item>
             <Menu.Item
               leftSection={

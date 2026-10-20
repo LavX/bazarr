@@ -114,10 +114,25 @@ def upgrade_episodes_subtitles(job_id=None, sonarr_series_ids=None, sonarr_serie
        x.video_path == x.path
     ]
 
+    # Only candidates go on; the rest were dropped below anyway, and the
+    # extraction lineage is then read once for exactly those.
+    episodes_data = [item for item in episodes_data if item['id'] in episodes_to_upgrade]
+    extracted = _extracted_paths(TableHistory, TableHistory.sonarrEpisodeId,
+                                 {(item['sonarrEpisodeId'], item['arr_instance_id']) for item in episodes_data})
+
     for item in episodes_data:
+        lineage = (item['sonarrEpisodeId'], item['arr_instance_id'])
+        if item['subtitles_path'] in item['external_subtitles'] and (*lineage, item['subtitles_path']) in extracted:
+            logging.debug(f"Upgrade candidate {item['id']} dropped: its file was since extracted from an "  # noqa: G004
+                          f"embedded track ({item['subtitles_path']})")
+            continue
         # do not consider subtitles that do not exist on disk anymore
         if item['subtitles_path'] not in item['external_subtitles']:
             current_sub = _find_current_subtitle_for_language(item['language'], item['external_subtitles'])
+            if current_sub and (*lineage, current_sub) in extracted:
+                logging.debug(f"Upgrade candidate {item['id']} dropped: the current subtitle for its language "  # noqa: G004
+                              f"({current_sub}) was extracted from an embedded track")
+                continue
             if current_sub:
                 logging.debug(f"Upgrade candidate {item['id']} ({item['seriesTitle']} S{item['season']:02d}E"  # noqa: G004
                               f"{item['episode']:02d}): history path no longer on disk, using current subtitle "
@@ -261,11 +276,26 @@ def upgrade_movies_subtitles(job_id=None, radarr_ids=None, radarr_filters=None, 
             'external_subtitles': [y[1] for y in ast.literal_eval(x.external_subtitles) if y[1]],
         })
 
+    # Only candidates need the lineage check; it is read once for them.
+    extracted = _extracted_paths(TableHistoryMovie, TableHistoryMovie.radarrId,
+                                 {(item['radarrId'], item['arr_instance_id']) for item in movies_data
+                                  if item['id'] in movies_to_upgrade})
+
     for item in movies_data:
+        lineage = (item['radarrId'], item['arr_instance_id'])
+        if item['id'] in movies_to_upgrade and item['subtitles_path'] in item['external_subtitles'] \
+                and (*lineage, item['subtitles_path']) in extracted:
+            logging.debug(f"Upgrade candidate {item['id']} ({item['title']}) dropped: its file was since "  # noqa: G004
+                          f"extracted from an embedded track ({item['subtitles_path']})")
+            continue
         # do not consider subtitles that do not exist on disk anymore
         if item['subtitles_path'] not in item['external_subtitles']:
             # try to find a current subtitle for the same language (file may have been renamed/re-downloaded)
             current_sub = _find_current_subtitle_for_language(item['language'], item['external_subtitles'])
+            if item['id'] in movies_to_upgrade and current_sub and (*lineage, current_sub) in extracted:
+                logging.debug(f"Upgrade candidate {item['id']} ({item['title']}) dropped: the current subtitle "  # noqa: G004
+                              f"for its language ({current_sub}) was extracted from an embedded track")
+                continue
             if current_sub:
                 logging.debug(f"Upgrade candidate {item['id']} ({item['title']}): history path no longer on disk, "  # noqa: G004
                               f"using current subtitle for same language ({current_sub})")
@@ -345,9 +375,10 @@ def get_queries_condition_parameters():
     days_to_upgrade_subs = settings.general.days_to_upgrade_subs
     minimum_timestamp = (datetime.now() - timedelta(days=int(days_to_upgrade_subs)))
 
-    # action=7 (EmbeddedSource) intentionally excluded: embedded subs are source
-    # quality and should not be upgraded. Manual downloads/uploads (2, 4) and
-    # translations (6) are separate opt-ins; both default off on a new install.
+    # action=7 (EmbeddedSource) and action=8 (Extracted) intentionally excluded:
+    # an embedded track and a file copied out of one are source quality and
+    # should not be upgraded. Manual downloads/uploads (2, 4) and translations
+    # (6) are separate opt-ins; both default off on a new install.
     query_actions = [1]
     if getattr(settings.general, 'upgrade_manual', False):
         query_actions.append(2)
@@ -358,6 +389,55 @@ def get_queries_condition_parameters():
         query_actions.append(6)
 
     return [minimum_timestamp, query_actions]
+
+
+# An extracted file is the current subtitle for its language from the moment
+# it is written. It is never a candidate itself, and it also ends the candidacy
+# of any older row of the same video and language: that row's file is gone (the
+# extraction refuses to overwrite one), and the candidate path would otherwise
+# fall back to the extracted file and replace it with a download.
+EXTRACTED_ACTION = 8
+
+
+def latest_row_actions(query_actions):
+    """The actions that decide which row is the latest for a video and language."""
+    return [*query_actions, EXTRACTED_ACTION]
+
+
+# Every action that puts a different file at a path, or removes it.
+_FILE_WRITING_ACTIONS = (0, 1, 2, 3, 4, 6, EXTRACTED_ACTION)
+
+
+def _extracted_paths(table, media_column, media):
+    """The ``(media id, owner, path)`` triples whose file has extraction lineage.
+
+    A file extracted from an embedded track is source quality, and the
+    upgrade must never adopt it as the file it replaces: through the fallback
+    for a candidate whose file is gone (which takes the current file of the
+    language and treats HI and plain as one), or through a candidate's own
+    path. latest_row_actions() only covers the same language key.
+
+    Lineage is read from history alone: a path is extracted while the newest
+    row that put a file there is an extraction. Edits, mods and syncs write
+    no such row, so they keep it; a later download, upload, translation or
+    deletion at the path ends it. Nothing about the file's content is
+    consulted, so nothing that changes or cannot read it drops the
+    protection. ``media`` is the ``(media id, owner)`` pairs to look at.
+    """
+    if not media:
+        return set()
+    ids = sorted({media_id for media_id, _owner in media})
+    newest = {}
+    for start in range(0, len(ids), 900):
+        rows = database.execute(
+            select(media_column.label('media_id'), table.arr_instance_id, table.subtitles_path, table.action)
+            .where(media_column.in_(ids[start:start + 900]), table.action.in_(_FILE_WRITING_ACTIONS),
+                   table.subtitles_path.is_not(None))
+            .order_by(table.timestamp.desc(), table.id.desc())).all()
+        for row in rows:
+            newest.setdefault((row.media_id, row.arr_instance_id, row.subtitles_path), row.action)
+    return {key for key, action in newest.items()
+            if action == EXTRACTED_ACTION and (key[0], key[1]) in media}
 
 
 def _provider_sourced_actions(query_actions):
@@ -489,7 +569,7 @@ def get_upgradable_episode_subtitles(history_id_list=None):
                               TableHistory.language,
                               TableHistory.arr_instance_id,
                               func.max(TableHistory.timestamp).label('timestamp')) \
-        .where(TableHistory.action.in_(query_actions)) \
+        .where(TableHistory.action.in_(latest_row_actions(query_actions))) \
         .group_by(TableHistory.video_path, TableHistory.language,
                   TableHistory.arr_instance_id) \
         .distinct() \
@@ -585,7 +665,7 @@ def get_upgradable_movies_subtitles(history_id_list=None):
                               TableHistoryMovie.language,
                               TableHistoryMovie.arr_instance_id,
                               func.max(TableHistoryMovie.timestamp).label('timestamp')) \
-        .where(TableHistoryMovie.action.in_(query_actions)) \
+        .where(TableHistoryMovie.action.in_(latest_row_actions(query_actions))) \
         .group_by(TableHistoryMovie.video_path, TableHistoryMovie.language,
                   TableHistoryMovie.arr_instance_id) \
         .distinct() \

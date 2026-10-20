@@ -1105,7 +1105,8 @@ def test_review_create_cannot_overwrite_a_later_upload(upload_flow, monkeypatch)
     monkeypatch.setattr(content, "store_subtitles_movie", lambda *args, **kwargs: None)
     monkeypatch.setattr(content, "event_stream", lambda **kwargs: None)
     reached, release = Event(), Event()
-    mkstemp = content.tempfile.mkstemp
+    from subtitles import new_subtitle
+    mkstemp = new_subtitle._new_staging_file
 
     def pause(*args, **kwargs):
         if current_thread().name == "create-subtitle":
@@ -1113,7 +1114,7 @@ def test_review_create_cannot_overwrite_a_later_upload(upload_flow, monkeypatch)
             assert release.wait(5)
         return mkstemp(*args, **kwargs)
 
-    monkeypatch.setattr(content.tempfile, "mkstemp", pause)
+    monkeypatch.setattr(new_subtitle, "_new_staging_file", pause)
     results = []
 
     def create():

@@ -18,6 +18,7 @@ import {
   faEye,
   faEyeSlash,
   faFaceGrinStars,
+  faFileExport,
   faFilm,
   faImage,
   faLanguage,
@@ -33,6 +34,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
+  useEmbeddedTrackExtract,
   useSubtitleAction,
   useTranslationAvailability,
   useTranslationRefusal,
@@ -44,6 +46,7 @@ import { TranslationModal } from "@/components/forms/TranslationForm";
 import { useModals } from "@/modules/modals";
 import { ModalComponent } from "@/modules/modals/WithModal";
 import { toPython } from "@/utilities";
+import { isBitmapCodec, subtitleCodecLabel } from "@/utilities/subtitles";
 import { SyncSubtitleModal } from "./forms/SyncSubtitleForm";
 import { TwoPointFitModal } from "./forms/TwoPointFit";
 
@@ -59,6 +62,29 @@ export interface ToolOptions {
 export interface ToolGroup {
   label: string;
   tools: ToolOptions[];
+}
+
+/** An embedded (in-container) track, and the codec its row shows. */
+export interface EmbeddedTrack {
+  codec?: string | null;
+}
+
+/**
+ * How the menu treats a row. An embedded track with an image-based codec
+ * (PGS, VobSub, DVB) can only be copied out as it is; any other embedded
+ * track, including one whose codec is not known yet, is text.
+ */
+export function embeddedMenuMode(
+  embeddedTrack: EmbeddedTrack | undefined,
+): "text" | "bitmap" | null {
+  if (!embeddedTrack) {
+    return null;
+  }
+  return isBitmapCodec(embeddedTrack.codec) ? "bitmap" : "text";
+}
+
+export function bitmapTrackNote(codec: string | null | undefined): string {
+  return `Image-based track (${subtitleCodecLabel(codec) ?? "bitmap"}): the tools need text. Extract to file copies it out as it is, for players.`;
 }
 
 export function useToolGroups() {
@@ -190,11 +216,12 @@ interface Props {
   // path, which builds its ModifySubtitle form explicitly from mediaId/mediaType.
   arrInstanceId?: number;
   /**
-   * True when the selection refers to an embedded (in-container) track.
-   * Only translate is meaningful; sync/mods require a file on disk, and the
-   * red slot hides the track instead of deleting a file.
+   * Set when the selection refers to an embedded (in-container) track. A text
+   * track runs every tool through Extract to file; an image-based one offers
+   * Extract to file only. The red slot hides the track instead of deleting a
+   * file.
    */
-  embeddedTrack?: boolean;
+  embeddedTrack?: EmbeddedTrack;
   /** How the Hide track confirmation names the track, "English (HI)". */
   trackLabel?: string;
   /**
@@ -219,11 +246,24 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   mediaId,
   mediaType,
   arrInstanceId,
-  embeddedTrack = false,
+  embeddedTrack,
   trackLabel,
   coveredTracks,
 }) => {
   const { mutate, mutateAsync } = useSubtitleAction();
+  const extract = useEmbeddedTrackExtract();
+  // An embedded row's codec travels with every action on it: two text tracks
+  // of one language with different codecs are two rows, and the backend picks
+  // the track by it.
+  const rowCodec =
+    missingLanguage || !embeddedTrack ? undefined : embeddedTrack.codec;
+  const actionSelections = useMemo(
+    () =>
+      rowCodec
+        ? selections.map((s) => ({ ...s, codec: rowCodec }))
+        : selections,
+    [rowCodec, selections],
+  );
   // The translate-from items call the mutation directly, so a closed gate has
   // to disable them with its reason: the 409 is reported nowhere else, and a
   // click that fails invisibly is worse than the failed job it replaced.
@@ -237,7 +277,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
     (action: string) => {
       // Each selection is queued as its own backend job, so the request
       // returns at once and the job reports through the jobs drawer.
-      selections.forEach((s) => {
+      actionSelections.forEach((s) => {
         const form: FormType.ModifySubtitle = {
           id: s.id,
           type: s.type,
@@ -247,11 +287,12 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           forced: s.forced,
           // eslint-disable-next-line camelcase
           arr_instance_id: s.arr_instance_id,
+          codec: s.codec,
         };
         mutate({ action, form });
       });
     },
-    [mutate, selections],
+    [mutate, actionSelections],
   );
 
   const toolGroups = useToolGroups();
@@ -260,13 +301,18 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   const disabledTools = selections.length === 0;
   const isMissing = !!missingLanguage;
   const hasSources = (translationSources ?? []).length > 0;
-  // For embedded tracks only translate is supported: no file on disk for other ops
-  const isTranslateOnlyMode = embeddedTrack && !isMissing;
+  const embeddedMode = isMissing ? null : embeddedMenuMode(embeddedTrack);
+  const isEmbedded = embeddedMode !== null;
 
   return (
     <Menu withArrow withinPortal position="left-end" {...menu}>
       <Menu.Target>{children}</Menu.Target>
       <Menu.Dropdown>
+        {embeddedMode === "bitmap" && (
+          <Text size="xs" c="dimmed" px="sm" py={6} maw={260}>
+            {bitmapTrackNote(embeddedTrack?.codec)}
+          </Text>
+        )}
         {isCombinedOutput && (
           <>
             <Menu.Label>Combined Output</Menu.Label>
@@ -298,10 +344,13 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
               if (tool.key === "translation" && isCombinedOutput) {
                 return null;
               }
-              // For embedded tracks: only translate is supported
+              // An image-based track has no text for any tool. On a text
+              // track every tool runs on the file Extract to file writes,
+              // except Two-Point Fit, whose lines are picked from a file.
               const toolDisabled =
                 disabledTools ||
-                (isTranslateOnlyMode && tool.key !== "translation");
+                embeddedMode === "bitmap" ||
+                (isEmbedded && tool.key === "two_point_fit");
               return (
                 <Menu.Item
                   key={tool.key}
@@ -312,7 +361,9 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
                   onClick={() => {
                     if (toolDisabled) return;
                     if (tool.modal) {
-                      modals.openContextModal(tool.modal, { selections });
+                      modals.openContextModal(tool.modal, {
+                        selections: actionSelections,
+                      });
                     } else {
                       process(tool.key);
                     }
@@ -326,6 +377,19 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
         ))}
         <Divider></Divider>
         <Menu.Label>Actions</Menu.Label>
+        {isEmbedded && (
+          <Menu.Item
+            disabled={selections.length === 0}
+            leftSection={
+              <FontAwesomeIcon icon={faFileExport}></FontAwesomeIcon>
+            }
+            onClick={() => {
+              extract.mutate(actionSelections[0]);
+            }}
+          >
+            Extract to file
+          </Menu.Item>
+        )}
         {/* Translate from source, for missing subtitles */}
         {isMissing && hasSources && (
           <>
@@ -410,9 +474,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
         )}
         <Menu.Item
           disabled={
-            selections.length === 0 ||
-            onAction === undefined ||
-            isTranslateOnlyMode
+            selections.length === 0 || onAction === undefined || isEmbedded
           }
           leftSection={<FontAwesomeIcon icon={faEye}></FontAwesomeIcon>}
           onClick={() => {
@@ -422,7 +484,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           View
         </Menu.Item>
         <Menu.Item
-          disabled={onAction === undefined || isTranslateOnlyMode}
+          disabled={onAction === undefined || isEmbedded}
           leftSection={<FontAwesomeIcon icon={faPencil}></FontAwesomeIcon>}
           onClick={() => {
             onAction?.("edit");
@@ -432,12 +494,10 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             ? "Edit"
             : "Create / Upload"}
         </Menu.Item>
-        {/* Embedded tracks have no file on disk to hand out */}
+        {/* Embedded tracks have no file on disk to hand out yet */}
         <Menu.Item
           disabled={
-            selections.length === 0 ||
-            onAction === undefined ||
-            isTranslateOnlyMode
+            selections.length === 0 || onAction === undefined || isEmbedded
           }
           leftSection={<FontAwesomeIcon icon={faDownload}></FontAwesomeIcon>}
           onClick={() => {
@@ -451,7 +511,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             disabled={
               (selections.length !== 0 && !allowSearchExisting) ||
               onAction === undefined ||
-              isTranslateOnlyMode
+              isEmbedded
             }
             leftSection={<FontAwesomeIcon icon={faSearch}></FontAwesomeIcon>}
             onClick={() => {
@@ -461,7 +521,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             Search
           </Menu.Item>
         )}
-        {isTranslateOnlyMode && (
+        {isEmbedded && (
           // Bazarr+ never rewrites a media file, so on an embedded row the red
           // slot hides the track rather than deleting anything.
           <Menu.Item
@@ -509,7 +569,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             Hide track...
           </Menu.Item>
         )}
-        {!isTranslateOnlyMode && (
+        {!isEmbedded && (
           <Menu.Item
             disabled={selections.length === 0 || onAction === undefined}
             color="red"

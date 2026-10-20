@@ -15,6 +15,7 @@ import { showNotification } from "@mantine/notifications";
 import { faInfoCircle } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
+  isShownConflict,
   useRefTracksByEpisodeId,
   useRefTracksByMovieId,
   useRefTracksBySportsEventId,
@@ -204,13 +205,16 @@ const SyncSubtitleForm: FunctionComponent<Props> = ({
           );
           onSubmit?.();
           modals.closeSelf();
-        } catch {
-          showNotification(
-            notification.error(
-              "Sync failed",
-              "An error occurred while syncing subtitles",
-            ),
-          );
+        } catch (error) {
+          // A 409 (a file of that name is already there) has its own toast.
+          if (!isShownConflict(error)) {
+            showNotification(
+              notification.error(
+                "Sync failed",
+                "An error occurred while syncing subtitles",
+              ),
+            );
+          }
         }
       })}
     >
