@@ -248,6 +248,52 @@ def test_embedded_subs_reader(mediainfo_data, video_file):
         assert ["zht", False, False, "SubRip"] in result
 
 
+# What knowit reports for a readable file that carries no subtitle stream.
+NO_SUBTITLE_STREAMS = {"ffprobe": {"video": [{"codec": "h264"}], "audio": [{"codec": "aac"}]}, "mediainfo": {},
+                       "file_id": None, "file_size": 1e6}
+
+
+def test_embedded_subs_reader_raises_when_the_file_could_not_be_read(video_file):
+    """parse_video_metadata answers None when ffprobe or mediainfo fails or is
+    missing. Read as an empty track list, the indexers stored the listing
+    without any embedded track and every embedded language became wanted."""
+    from unittest.mock import patch
+    with patch("utilities.video_analyzer.alpha3_from_alpha2", return_value=None):
+        with patch("utilities.video_analyzer.parse_video_metadata", return_value=None):
+            with pytest.raises(OSError):
+                video_analyzer.embedded_subs_reader(video_file, 1e6)
+        # A file read without any subtitle stream is still an empty list.
+        with patch("utilities.video_analyzer.parse_video_metadata", return_value=NO_SUBTITLE_STREAMS):
+            assert video_analyzer.embedded_subs_reader(video_file, 1e6) == []
+
+
+
+@pytest.mark.parametrize("parser", ["ffprobe", "mediainfo"])
+def test_an_empty_parser_result_is_a_failed_read_and_is_not_cached(video_file, monkeypatch, parser):
+    """knowit answers {} when the selected provider cannot load. Wrapped and
+    cached, that empty result read as a file without tracks, so the indexers
+    erased the stored embedded entries and every later cached read did again."""
+    from unittest.mock import patch
+    from utilities import binaries
+
+    monkeypatch.setattr(video_analyzer.settings.general, "embedded_subtitles_parser", parser)
+    monkeypatch.setattr(binaries, "get_binary", lambda name: f"/usr/bin/{name}")
+    writes = []
+    monkeypatch.setattr(video_analyzer.database, "execute", lambda *a, **kw: writes.append(a))
+    with patch("utilities.video_analyzer.alpha3_from_alpha2", return_value=None):
+        with patch("utilities.video_analyzer.know", return_value={}):
+            assert video_analyzer.parse_video_metadata(video_file, 1e6, movie_file_id=7, use_cache=False) is None
+            with pytest.raises(OSError):
+                video_analyzer.embedded_subs_reader(video_file, 1e6, movie_file_id=7, use_cache=False)
+        assert writes == []
+
+        # A readable file without subtitle streams is a good read: cached, and
+        # an empty track list.
+        with patch("utilities.video_analyzer.know", return_value=NO_SUBTITLE_STREAMS["ffprobe"]):
+            assert video_analyzer.embedded_subs_reader(video_file, 1e6, movie_file_id=7, use_cache=False) == []
+        assert len(writes) == 1
+
+
 def test_embedded_audio_reader(mediainfo_data, video_file):
     from unittest.mock import patch
     with patch(

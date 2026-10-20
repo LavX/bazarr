@@ -19,8 +19,8 @@ from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
 from subtitles.indexer.entries import embedded_entry
 from subtitles.indexer.utils import add_sync_engine_outputs, add_combined_outputs, guess_external_subtitles, \
-    get_external_subtitles_path, normalize_subtitle_language_variant, subtitle_language_with_sync_modifier, \
-    subtitle_language_with_combined_modifier
+    get_external_subtitles_path, kept_embedded_entries, normalize_subtitle_language_variant, \
+    subtitle_language_with_sync_modifier, subtitle_language_with_combined_modifier
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.utils import _get_scores
 from sonarr.history import history_log
@@ -69,7 +69,8 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
             # Every row sharing this file, read once: the first gives the file
             # details, and all of them get the listing written below.
             sharing_file = database.execute(
-                scoped(select(TableEpisodes.id, TableEpisodes.episode_file_id, TableEpisodes.file_size)
+                scoped(select(TableEpisodes.id, TableEpisodes.episode_file_id, TableEpisodes.file_size,
+                              TableEpisodes.subtitles)
                        .where(TableEpisodes.path == original_path),
                        TableEpisodes.arr_instance_id, owner_instance_id)).all()
             item = sharing_file[0] if sharing_file else None
@@ -112,7 +113,11 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                     logging.exception(
                         "BAZARR error when trying to analyze this %s file: %s" % (os.path.splitext(reversed_path)[1],  # noqa: G002
                                                                                   reversed_path))
-                    pass
+                    # Keep the tracks the last good read stored, so a failed
+                    # read does not make every embedded language wanted again.
+                    # They were recorded in history then, so not again now.
+                    actual_subtitles = kept_embedded_entries(item.subtitles, hidden)
+                    embedded_languages = []
         destination = os.path.join(get_target_folder(reversed_path, create=False) or os.path.dirname(reversed_path),
                                    '.destination')
         with subtitle_write_locks(reversed_path, destination):
