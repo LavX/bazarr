@@ -69,6 +69,37 @@ def _staging_file(directory, replace):
     return tempfile.mkstemp(dir=directory) if replace else _new_staging_file(directory)
 
 
+def _fd_identity(fd):
+    try:
+        stat = os.fstat(fd)
+    except (OSError, TypeError, ValueError):
+        return None
+    return stat.st_dev, stat.st_ino
+
+
+def file_identity(path):
+    """``(device, inode)`` of the file at ``path``, or None when there is none.
+
+    The writers below return the identity of the file they published, taken
+    from the file they wrote rather than read back from the name, so a
+    rollback can tell its own file from one another program put there.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino
+
+
+def discard_if_owned(path, identity):
+    """Remove ``path`` only when it is still the file ``identity`` names; say whether it was."""
+    if identity is not None and file_identity(path) == identity:
+        _discard(path)
+        return True
+    logger.warning('BAZARR left %s in place: it is no longer the file Bazarr+ wrote there', path)
+    return False
+
+
 def _discard(path):
     try:
         os.unlink(path)
@@ -86,7 +117,12 @@ def _write_all(fd, data):
 
 
 def _publish_without_replacing(tmp_path, path):
-    """Give the finished ``tmp_path`` the name ``path``, never over a file already there."""
+    """Give the finished ``tmp_path`` the name ``path``, never over a file already there.
+
+    Returns the identity of a file the fallback created, or None when the
+    name is a link to the temporary file itself.
+    """
+    created = None
     try:
         os.link(tmp_path, path)
     except FileExistsError:
@@ -96,8 +132,9 @@ def _publish_without_replacing(tmp_path, path):
         if error.errno not in _NO_HARD_LINKS:
             _discard(tmp_path)
             raise
-        _copy_into_new_name(tmp_path, path)
+        created = _copy_into_new_name(tmp_path, path)
     _discard(tmp_path)
+    return created
 
 
 def _copy_into_new_name(tmp_path, path):
@@ -110,37 +147,41 @@ def _copy_into_new_name(tmp_path, path):
     except BaseException:
         _discard(tmp_path)
         raise
+    identity = _fd_identity(fd)
     try:
         with os.fdopen(fd, 'wb') as target, open(tmp_path, 'rb') as origin:
             shutil.copyfileobj(origin, target)
     except BaseException:
         # The name was claimed by this call, so the partial file is ours.
-        _discard(path)
+        discard_if_owned(path, identity)
         _discard(tmp_path)
         raise
+    return identity
 
 
 def _publish(tmp_path, path, replace):
     if replace:
         os.replace(tmp_path, path)
-    else:
-        _publish_without_replacing(tmp_path, path)
+        return None
+    return _publish_without_replacing(tmp_path, path)
 
 
 def write_bytes_atomically(path, data, *, replace=True):
     """Write ``data`` to ``path`` through a temporary name in the same folder.
 
     ``replace=False`` raises SubtitleFileExists instead of replacing a file
-    that is there by the time the write is published.
+    that is there by the time the write is published. Returns the published
+    file's identity (file_identity()), or None when it could not be taken.
     """
     fd, tmp_path = _staging_file(os.path.dirname(path), replace)
     try:
+        identity = _fd_identity(fd)
         try:
             _write_all(fd, data)
         finally:
             os.close(fd)
 
-        _publish(tmp_path, path, replace)
+        return _publish(tmp_path, path, replace) or identity
     except SubtitleFileExists:
         raise
     except Exception:
@@ -149,12 +190,16 @@ def write_bytes_atomically(path, data, *, replace=True):
 
 
 def copy_file_atomically(path, source, *, replace=True):
-    """Copy ``source`` to ``path`` through a temporary name in the same folder."""
+    """Copy ``source`` to ``path`` through a temporary name in the same folder.
+
+    Returns the published file's identity, as write_bytes_atomically does.
+    """
     fd, tmp_path = _staging_file(os.path.dirname(path), replace)
     try:
+        identity = _fd_identity(fd)
         with os.fdopen(fd, 'wb') as target, open(source, 'rb') as origin:
             shutil.copyfileobj(origin, target)
-        _publish(tmp_path, path, replace)
+        return _publish(tmp_path, path, replace) or identity
     except SubtitleFileExists:
         raise
     except Exception:
@@ -199,14 +244,16 @@ def write_new_subtitle(video_path, outputs, media_type, arr_instance_id=None, *,
                 try:
                     for path, data in outputs:
                         if isinstance(data, (bytes, bytearray)):
-                            write_bytes_atomically(path, data, replace=False)
+                            identity = write_bytes_atomically(path, data, replace=False)
                         else:
-                            copy_file_atomically(path, data, replace=False)
-                        written.append(path)
+                            identity = copy_file_atomically(path, data, replace=False)
+                        written.append((path, identity))
                 except BaseException:
-                    # A pair is published whole or not at all.
-                    for path in written:
-                        _discard(path)
+                    # A pair is published whole or not at all, but only the
+                    # files this call wrote are taken back: another program
+                    # may have put its own under a name meanwhile.
+                    for path, identity in written:
+                        discard_if_owned(path, identity)
                     raise
                 publication_callback(media_type, video_path, operation, arr_instance_id)(paths[0])
                 for path in paths:

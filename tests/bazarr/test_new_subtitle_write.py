@@ -220,3 +220,37 @@ def test_also_refuse_is_asked_under_the_locks_and_stops_the_write(tmp_path, publ
                                         "movie", 7,
                                         also_refuse=lambda: held and str(tmp_path / "Film.ASS") or None)
     assert list(tmp_path.iterdir()) == [] and published == []
+
+
+def test_a_failed_pair_never_takes_back_a_half_another_program_replaced(tmp_path, published, monkeypatch):
+    """The .idx is published, then the .sub fails. If another program put its
+    own .idx there meanwhile, that file stays: only what this write published
+    is taken back."""
+    from subtitles import new_subtitle
+
+    def replaced_then_no_space(path, source, **kwargs):
+        foreign = tmp_path / "foreign.tmp"
+        foreign.write_text("imported by another program")
+        os.replace(foreign, tmp_path / "Film.hu.idx")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(new_subtitle, "copy_file_atomically", replaced_then_no_space)
+    with pytest.raises(OSError):
+        new_subtitle.write_new_subtitle(str(tmp_path / "Film.mkv"),
+                                        [(str(tmp_path / "Film.hu.idx"), b"i"),
+                                         (str(tmp_path / "Film.hu.sub"), str(tmp_path / "cache.sub"))],
+                                        "movie", 7)
+    assert (tmp_path / "Film.hu.idx").read_text() == "imported by another program"
+    assert published == []
+
+
+def test_the_writers_return_the_identity_of_the_file_they_published(tmp_path):
+    from subtitles import new_subtitle
+
+    source = tmp_path / "cache.sub"
+    source.write_bytes(b"pack")
+    written = new_subtitle.write_bytes_atomically(str(tmp_path / "a.srt"), b"a", replace=False)
+    copied = new_subtitle.copy_file_atomically(str(tmp_path / "b.sub"), str(source), replace=False)
+
+    assert written == new_subtitle.file_identity(str(tmp_path / "a.srt")) is not None
+    assert copied == new_subtitle.file_identity(str(tmp_path / "b.sub")) is not None

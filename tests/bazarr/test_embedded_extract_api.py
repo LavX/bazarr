@@ -688,3 +688,78 @@ def test_a_failed_history_move_never_fails_a_successful_remove_hi(library, jobs,
         # Logged and left: the job succeeded, the row still names the HI file.
         assert rows == [("en:hi", "/movies/Film (2020)/Film.en.hi.srt")]
     assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("when", ["before-it-is-sampled", "after-publication"])
+def test_the_mod_rollback_knows_its_own_file_from_the_writer(library, jobs, tmp_path, monkeypatch, when):
+    """The mod's own result is known by the file the writer wrote, not by
+    reading the name back, so a replacement that lands right after the
+    publish is never taken for the mod's file."""
+    import errno
+
+    import subtitles.new_subtitle as new_subtitle
+    import subtitles.tools.mods as mods
+
+    folder = tmp_path / "early"
+    folder.mkdir()
+    video = folder / "Film.mkv"
+    video.write_bytes(b"video")
+    source = folder / "Film.en.hi.srt"
+    source.write_text(HEARING)
+    target = folder / "Film.en.srt"
+
+    def foreign_replacement():
+        foreign = folder / "foreign.tmp"
+        foreign.write_text("imported by another program")
+        os.replace(foreign, target)
+
+    real_write = new_subtitle.write_bytes_atomically
+
+    def write_then_replaced(path, data, **kwargs):
+        identity = real_write(path, data, **kwargs)
+        if when == "before-it-is-sampled":
+            foreign_replacement()
+        return identity
+
+    real_remove = mods.os.remove
+
+    def locked_source(path):
+        if str(path) == str(source):
+            if when == "after-publication":
+                foreign_replacement()
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_remove(path)
+
+    monkeypatch.setattr(new_subtitle, "write_bytes_atomically", write_then_replaced)
+    monkeypatch.setattr(mods.os, "remove", locked_source)
+    with pytest.raises(PermissionError):
+        mods.subtitles_apply_mods("en", str(source), ["remove_HI"], str(video), never_replace=True)
+
+    assert target.read_text() == "imported by another program"
+    assert source.read_text() == HEARING
+
+
+def test_a_source_already_gone_counts_as_removed(library, jobs, tmp_path, monkeypatch):
+    """Another program removing the source between the write and its removal
+    must not cost the result too."""
+    import subtitles.tools.mods as mods
+
+    folder = tmp_path / "vanished"
+    folder.mkdir()
+    video = folder / "Film.mkv"
+    video.write_bytes(b"video")
+    source = folder / "Film.en.hi.srt"
+    source.write_text(HEARING)
+    real_remove = mods.os.remove
+
+    def already_gone(path):
+        if str(path) == str(source):
+            real_remove(path)
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_remove(path)
+
+    monkeypatch.setattr(mods.os, "remove", already_gone)
+
+    assert mods.subtitles_apply_mods("en", str(source), ["remove_HI"], str(video),
+                                     never_replace=True) == str(folder / "Film.en.srt")
+    assert "English with sounds" in (folder / "Film.en.srt").read_text() and not source.exists()
