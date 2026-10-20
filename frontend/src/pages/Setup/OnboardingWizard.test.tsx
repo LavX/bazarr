@@ -683,6 +683,34 @@ describe("OnboardingWizardView", () => {
     expect(await screen.findByText("Error 500")).toBeInTheDocument();
   });
 
+  it.each(["general", "languages", "translator"])(
+    "holds Back, the skip and Set up later while the %s step's save is in flight",
+    async (step) => {
+      // Leaving mid-save unmounted the step and dropped its callbacks, and a
+      // failure then said nothing anywhere, as its toasts are off.
+      mockedSettingsMutation.mockReturnValue({
+        mutate,
+        isPending: true,
+      } as unknown as ReturnType<typeof useSettingsMutation>);
+      localStorage.setItem("bazarr.onboarding.intent", "discover");
+      localStorage.setItem("bazarr.onboarding.step", step);
+      customRender(<OnboardingWizardView />);
+
+      await screen.findByRole("main");
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: /set up later/i }),
+        ).toBeDisabled(),
+      );
+      expect(
+        screen.queryByRole("button", { name: /^back$/i }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /do this later/i }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
   it("keeps what was typed on a step across Back and forward", async () => {
     // Every step held its fields in its own useState and the shell remounts a
     // step on every move, so re-reading the previous question emptied the form

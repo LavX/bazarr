@@ -10,6 +10,7 @@ import {
 } from "@mantine/core";
 import { useSettingsMutation } from "@/apis/hooks";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import type { WizardStepProps } from "./types";
 
 /**
@@ -29,6 +30,11 @@ import type { WizardStepProps } from "./types";
  */
 const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const settings = useSettingsMutation(false, { inlineErrors: true });
+  // Leaving while the save is in flight unmounted the step, TanStack dropped
+  // its callbacks, and a failure then said nothing anywhere, since the toasts
+  // are off for it. The shell holds Back, the skip and Set up later until it
+  // lands.
+  useReportStepBusy(settings.isPending);
 
   const [apiKey, setApiKey] = useState("");
   const trimmedKey = apiKey.trim();

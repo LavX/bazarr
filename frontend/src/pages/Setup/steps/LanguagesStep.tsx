@@ -15,6 +15,7 @@ import {
 } from "@/apis/hooks";
 import { enabledLanguageKey, languageProfileKey } from "@/pages/Settings/keys";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
@@ -69,6 +70,11 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     isError: profilesFailed,
   } = useLanguageProfiles();
   const settings = useSettingsMutation(false, { inlineErrors: true });
+  // Leaving while the save is in flight unmounted the step, TanStack dropped
+  // its callbacks, and a failure then said nothing anywhere, since the toasts
+  // are off for it. The shell holds Back, the skip and Set up later until it
+  // lands.
+  useReportStepBusy(settings.isPending);
   // The client keeps a restarting or unreachable Bazarr+ out of its toasts,
   // so a write that fails that way said nothing at all unless it is said here.
   const [saveFailed, setSaveFailed] = useState(false);

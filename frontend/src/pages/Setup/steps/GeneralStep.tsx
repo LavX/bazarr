@@ -11,6 +11,7 @@ import {
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { folderOptions } from "@/pages/Settings/Subtitles/options";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
@@ -43,6 +44,11 @@ const CUSTOM_FOLDER_COPY: Record<string, { label: string; hint: string }> = {
 const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const { data: settings } = useSystemSettings();
   const mutation = useSettingsMutation(false, { inlineErrors: true });
+  // Leaving while the save is in flight unmounted the step, TanStack dropped
+  // its callbacks, and a failure then said nothing anywhere, since the toasts
+  // are off for it. The shell holds Back, the skip and Set up later until it
+  // lands.
+  useReportStepBusy(mutation.isPending);
 
   const general = settings?.general;
 
