@@ -340,41 +340,61 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     );
   }, []);
 
+  // Which restart attempt the poll works for, and whether that attempt's
+  // restart was accepted: answered, or cut off the way a restart cuts the
+  // connection. A health answer counts only for the current attempt once it
+  // was accepted. Clearing the interval on a refusal left a status request
+  // already on its way, and its answer, from a backend that had just refused
+  // and was still up, reloaded into setup as if the restart had happened.
+  const attemptRef = useRef(0);
+  const acceptedRef = useRef(false);
+
+  const stopHealthPoll = useCallback(() => {
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
   // Poll the backend until it answers, then hard-redirect into the wizard.
   const startHealthPoll = useCallback(() => {
     if (pollRef.current !== null) {
       return;
     }
+    const attempt = attemptRef.current;
     pollRef.current = setInterval(() => {
       void api.system
         .status()
         .then(() => {
-          if (pollRef.current !== null) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
+          if (attempt !== attemptRef.current || !acceptedRef.current) {
+            // A stale attempt, or a backend that has not taken the restart
+            // yet: it answering says nothing about a restart.
+            return;
           }
+          stopHealthPoll();
           redirectToSetup();
         })
         .catch(() => {
           // Backend still down; keep polling.
         });
     }, HEALTH_POLL_INTERVAL_MS);
-  }, []);
+  }, [stopHealthPoll]);
 
   useEffect(() => {
     return () => {
-      if (pollRef.current !== null) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
+      // Nothing that answers after the step has gone may move the page.
+      attemptRef.current += 1;
+      stopHealthPoll();
     };
-  }, []);
+  }, [stopHealthPoll]);
 
   const beginRestart = useCallback(() => {
     if (restartStartedRef.current) {
       return;
     }
     restartStartedRef.current = true;
+    attemptRef.current += 1;
+    acceptedRef.current = false;
     setCountdown(null);
     setRestartError(null);
     setRestarting(true);
@@ -384,6 +404,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     startHealthPoll();
     restart(undefined, {
       onSuccess: () => {
+        acceptedRef.current = true;
         startHealthPoll();
       },
       onError: (error) => {
@@ -392,12 +413,13 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         // the backend is still up, the poll would find it at once and reload
         // into setup as if the restart had happened.
         if (!restartRefused(error)) {
+          acceptedRef.current = true;
           return;
         }
-        if (pollRef.current !== null) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
-        }
+        // Retires this attempt, so a status answer already on its way is
+        // ignored when it lands.
+        attemptRef.current += 1;
+        stopHealthPoll();
         restartStartedRef.current = false;
         setRestarting(false);
         setRestartError(
@@ -405,7 +427,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         );
       },
     });
-  }, [onInstalledNeedsRestart, restart, startHealthPoll]);
+  }, [onInstalledNeedsRestart, restart, startHealthPoll, stopHealthPoll]);
 
   // Enables `ids` without dropping the providers already enabled, which on a
   // fresh install is nothing and on a second visit is whatever the reader had
