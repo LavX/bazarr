@@ -139,15 +139,22 @@ def _publish_without_replacing(tmp_path, path):
     return created
 
 
-def _copy_into_new_name(tmp_path, path):
-    """The fallback without hard links: claim the name exclusively, then fill it."""
+def _copy_into_new_name(tmp_path, path, discard_source=True):
+    """The fallback without hard links: claim the name exclusively, then fill it.
+
+    ``discard_source`` is true for a staging file, which must not be left
+    behind. A restore passes false: its source is the only copy of the
+    original, so every failure keeps it for recovery.
+    """
     try:
         fd = os.open(path, _NEW_FILE_FLAGS, 0o666)
     except FileExistsError:
-        _discard(tmp_path)
+        if discard_source:
+            _discard(tmp_path)
         raise SubtitleFileExists(path) from None
     except BaseException:
-        _discard(tmp_path)
+        if discard_source:
+            _discard(tmp_path)
         raise
     identity = _fd_identity(fd)
     try:
@@ -156,7 +163,8 @@ def _copy_into_new_name(tmp_path, path):
     except BaseException:
         # The name was claimed by this call, so the partial file is ours.
         discard_if_owned(path, identity)
-        _discard(tmp_path)
+        if discard_source:
+            _discard(tmp_path)
         raise
     return identity
 
@@ -200,7 +208,7 @@ def _restore_backup(backup, path):
         if error.errno not in _NO_HARD_LINKS:
             raise
         try:
-            _copy_into_new_name(backup, path)
+            _copy_into_new_name(backup, path, discard_source=False)
         except SubtitleFileExists:
             return False
         shutil.copymode(backup, path)

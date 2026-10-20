@@ -4,6 +4,7 @@
 Never over an existing file, a pair whole or not at all, one publication for
 the media servers, and the configured permissions on every file written.
 """
+import errno
 import os
 import stat
 from contextlib import contextmanager
@@ -376,6 +377,46 @@ def test_a_restore_refuses_a_file_that_appeared_meanwhile(tmp_path):
     assert new_subtitle._restore_backup(str(backup), str(target)) is False
     assert target.read_bytes() == b"another program"
     assert backup.read_bytes() == b"original"
+
+
+def _no_hard_links(*args, **kwargs):
+    raise OSError(errno.EPERM, "Operation not permitted")
+
+
+def test_a_restore_without_hard_links_keeps_the_copy_when_the_name_is_taken(tmp_path, monkeypatch):
+    from subtitles import new_subtitle
+
+    backup = tmp_path / ".bazarr-replaced-one.tmp"
+    backup.write_bytes(b"original")
+    target = tmp_path / "Film.en.srt"
+    target.write_bytes(b"another program")
+    monkeypatch.setattr(new_subtitle.os, "link", _no_hard_links)
+
+    assert new_subtitle._restore_backup(str(backup), str(target)) is False
+    assert target.read_bytes() == b"another program"
+    assert backup.read_bytes() == b"original"
+
+
+def test_a_restore_without_hard_links_keeps_the_copy_when_the_write_fails(tmp_path, monkeypatch):
+    from subtitles import new_subtitle
+
+    backup = tmp_path / ".bazarr-replaced-one.tmp"
+    backup.write_bytes(b"original")
+    target = tmp_path / "Film.en.srt"
+    monkeypatch.setattr(new_subtitle.os, "link", _no_hard_links)
+    real_open = os.open
+
+    def refuse_target(path, *args, **kwargs):
+        if path == str(target):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(new_subtitle.os, "open", refuse_target)
+    with pytest.raises(OSError):
+        new_subtitle._restore_backup(str(backup), str(target))
+
+    assert backup.read_bytes() == b"original"
+    assert not target.exists()
 
 
 def test_a_restore_refuses_a_dangling_symlink(tmp_path):
