@@ -4,6 +4,7 @@ import os
 import re
 import logging
 import json
+import hashlib
 import requests
 import semver
 import sys
@@ -35,7 +36,11 @@ def deprecated_python_version():
 
 
 def _fetch_repo_releases(repo, label=None):
-    """Fetch releases from a single GitHub repo. Returns list of release dicts."""
+    """Fetch releases from a single GitHub repo.
+
+    Returns the list of release dicts, or None when the fetch failed, so the
+    caller can tell an empty release list from one it never got.
+    """
     releases = []
     url = f'https://api.github.com/repos/{repo}/releases?per_page=100'
     try:
@@ -55,7 +60,10 @@ def _fetch_repo_releases(repo, label=None):
             releases_data = r.json()
         except ValueError:
             logging.error(f"Error parsing JSON from Github releases response ({repo}). Skipping.")  # noqa: G004
-            return releases
+            return None
+        if not isinstance(releases_data, list):
+            logging.error(f"Github releases response ({repo}) is not a list of releases. Skipping.")  # noqa: G004
+            return None
         for release in releases_data:
             download_link = None
             for asset in release.get('assets', []):
@@ -70,7 +78,94 @@ def _fetch_repo_releases(repo, label=None):
                 entry['repo'] = label
             releases.append(entry)
         logging.debug(f'BAZARR fetched {len(releases)} releases from {repo}')  # noqa: G004
-    return releases
+        return releases
+    return None
+
+
+def _releases_file():
+    return os.path.join(args.config_dir, 'config', 'releases.txt')
+
+
+def _release_tags_file():
+    return os.path.join(args.config_dir, 'config', 'release_tags.json')
+
+
+def _advertised_tags(repo):
+    """The tag shas the git smart-HTTP ref advertisement of ``repo`` lists.
+
+    An annotated tag keeps its tag object's sha rather than the peeled commit,
+    so a tag recreated on the same commit is still a movement.
+
+    The advertisement is answered outside the GitHub REST quota, so reading it
+    on every check costs nothing the releases API would. Returns None when it
+    could not be read or parsed; the caller then fetches the releases list as
+    it did before the gate existed.
+    """
+    try:
+        from provider_hub.service import _fetch_git_ref_advertisement, _parse_git_ref_advertisement
+
+        owner, name = repo.split('/', 1)
+        refs = _parse_git_ref_advertisement(_fetch_git_ref_advertisement(owner, name), peel_tags=False)
+    except Exception as e:
+        logging.debug(f'BAZARR cannot read the tag advertisement of {repo}, fetching its releases: {e!r}')  # noqa: G004
+        return None
+    return {ref: sha for ref, sha in refs.items() if ref.startswith('refs/tags/')}
+
+
+def _load_release_tags():
+    """The tag state recorded at each repo's last successful releases fetch.
+
+    Read with setdefault semantics: a missing, unreadable or malformed file is
+    an empty state, which gates nothing, so a first run or an upgraded install
+    fetches every repo once.
+    """
+    try:
+        with open(_release_tags_file(), 'r', encoding='UTF-8') as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    repos = state.setdefault('repos', {})
+    if not isinstance(repos, dict):
+        state['repos'] = {}
+    return state
+
+
+def _save_release_tags(state):
+    path = _release_tags_file()
+    temporary = f'{path}.tmp'
+    try:
+        with open(temporary, 'w', encoding='UTF-8') as f:
+            json.dump(state, f)
+        os.replace(temporary, path)
+    except OSError:
+        logging.exception(f'BAZARR cannot save the release tag state to {path}')  # noqa: G004
+
+
+def _cached_releases_by_label():
+    """The entries of the last written releases.txt, grouped by repo label, or
+    None when there is no readable file to reuse."""
+    try:
+        with open(_releases_file(), 'r', encoding='UTF-8') as f:
+            cached = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cached, list):
+        return None
+    by_label = {}
+    for entry in cached:
+        if not isinstance(entry, dict):
+            return None
+        by_label.setdefault(entry.get('repo', 'Bazarr+'), []).append(entry)
+    return by_label
+
+
+def _releases_digest(entries):
+    """A digest of one repo's entries that ignores their order, since
+    releases.txt holds them sorted by date rather than as the API listed them."""
+    lines = sorted(json.dumps(entry, sort_keys=True) for entry in entries)
+    return hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest()
 
 
 def check_releases(job_id=None, startup=False, wait_for_completion=False):
@@ -80,16 +175,46 @@ def check_releases(job_id=None, startup=False, wait_for_completion=False):
                                          wait_for_completion=wait_for_completion)
         return
 
-    releases = _fetch_repo_releases(RELEASES_REPO, label='Bazarr+')
+    state = _load_release_tags()
+    recorded = state['repos']
+    cached = _cached_releases_by_label()
 
-    for repo, label in MICROSERVICE_REPOS:
-        releases.extend(_fetch_repo_releases(repo, label=label))
+    repos = [(RELEASES_REPO, 'Bazarr+'), *MICROSERVICE_REPOS]
+    # A repo no longer checked has no entries in releases.txt to reuse, and its
+    # label may since belong to another repo.
+    for repo in set(recorded) - {repo for repo, _label in repos}:
+        recorded.pop(repo)
+
+    releases = []
+    for repo, label in repos:
+        tags = _advertised_tags(repo)
+        previous = recorded.get(repo)
+        if (tags is not None and cached is not None and isinstance(previous, dict)
+                and previous.get('tags') == tags
+                and previous.get('digest') == _releases_digest(cached.get(label, []))):
+            logging.debug(f'BAZARR tags of {repo} have not moved, reusing its last fetched releases')  # noqa: G004
+            releases.extend(cached.get(label, []))
+            continue
+
+        fetched = _fetch_repo_releases(repo, label=label)
+        if fetched is None:
+            # Only a successful fetch may record tags. Forgetting the old ones
+            # makes the next check fetch again, even if the tags move back.
+            recorded.pop(repo, None)
+            continue
+        releases.extend(fetched)
+        if tags is None:
+            recorded.pop(repo, None)
+        else:
+            recorded[repo] = {'tags': tags, 'digest': _releases_digest(fetched)}
 
     releases.sort(key=lambda r: r['date'], reverse=True)
 
-    with open(os.path.join(args.config_dir, 'config', 'releases.txt'), 'w') as f:
+    with open(_releases_file(), 'w') as f:
         json.dump(releases, f)
     logging.debug(f'BAZARR saved {len(releases)} releases to releases.txt')  # noqa: G004
+
+    _save_release_tags(state)
 
     if job_id:
         jobs_queue.update_job_name(job_id=job_id, new_job_name="Updated Release Info")
