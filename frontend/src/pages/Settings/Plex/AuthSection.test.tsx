@@ -232,7 +232,8 @@ describe("Plex AuthSection", () => {
             statusText: "",
             headers: {},
             config: {} as never,
-            data: { message: "plex.tv did not answer" },
+            // The shape the logout endpoint answers with on a failure.
+            data: { error: "Failed to logout" },
           }),
         ),
     );
@@ -254,7 +255,7 @@ describe("Plex AuthSection", () => {
       expect(notify).toHaveBeenCalledWith(
         expect.objectContaining({
           title: "Could not disconnect from Plex",
-          message: expect.stringContaining("plex.tv did not answer"),
+          message: expect.stringContaining("Failed to logout."),
           color: "red",
         }),
       ),

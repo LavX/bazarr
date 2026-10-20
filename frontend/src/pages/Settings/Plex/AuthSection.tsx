@@ -15,13 +15,20 @@ import { PLEX_AUTH_CONFIG } from "@/constants/plex";
 import { useModals } from "@/modules/modals";
 import styles from "@/pages/Settings/Plex/AuthSection.module.scss";
 
-// The backend's own words for a failed request, when it gave any.
+// The backend's own words for a failed request, when it gave any. The Plex
+// endpoints answer with `error` (logout says "Failed to logout"), others with
+// `message`.
 function reasonOf(error: unknown): string | undefined {
   if (!(error instanceof AxiosError)) {
     return undefined;
   }
-  const data = error.response?.data as { message?: unknown } | undefined;
-  return typeof data?.message === "string" ? data.message : undefined;
+  const data = error.response?.data as
+    | { error?: unknown; message?: unknown }
+    | undefined;
+  const reason = data?.error ?? data?.message;
+  return typeof reason === "string" && reason.length > 0
+    ? reason.replace(/\.?$/, ".")
+    : undefined;
 }
 
 const AuthSection = () => {
