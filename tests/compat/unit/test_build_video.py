@@ -5,6 +5,7 @@ whatever the client and local library can provide. Providers score heavily on
 fields like source, release_group, resolution, so enriching the Video makes
 the difference between 0 and dozens of useful results.
 """
+from pathlib import Path
 from unittest.mock import patch
 import pytest
 
@@ -266,7 +267,11 @@ def test_release_query_policy_never_collapses_conflicting_parser_values(monkeypa
 
 def test_release_query_does_not_adopt_an_existing_file(monkeypatch, tmp_path):
     from compat import service
-    media = tmp_path / "Example.Movie.2024.mkv"
+    # guessit reads every directory in the query, so a relative path keeps the
+    # host temp directory, and any digits in it, out of the parse.
+    monkeypatch.chdir(tmp_path)
+    Path("Library").mkdir()
+    media = Path("Library", "Example.Movie.2024.mkv")
     media.write_bytes(b"synthetic media fixture")
 
     def forbidden(*args, **kwargs):

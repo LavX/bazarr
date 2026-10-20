@@ -73,6 +73,19 @@ class FakeClock:
         self.now += seconds
 
 
+class TimeAhead:
+    """The time module, with time() reading the given seconds past now."""
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+
+    def time(self):
+        return time.time() + self.seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 def _wait_until(condition, timeout=2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -356,20 +369,33 @@ def test_stale_marker_without_an_encoder_does_not_block_a_spawn(hls):
     assert _live(hls) == {cache_dir}
 
 
-def test_eviction_skips_a_live_session_however_old_its_dir(hls):
+def test_eviction_skips_a_live_session_however_old_its_dir(hls, monkeypatch):
     cache_dir = hls.spawn('/media/show/episode.mkv')
-    stamp = time.time() - hls.editor.HLS_IDLE_TTL_SECONDS - 60
-    os.utime(cache_dir, (stamp, stamp))
-
-    hls.editor._evict_stale_hls_dirs()
+    # Age the session by running eviction later, not by backdating the
+    # directory, whose atime an outside listing would refresh.
+    with monkeypatch.context() as clock:
+        clock.setattr(hls.editor, 'time', TimeAhead(hls.editor.HLS_IDLE_TTL_SECONDS + 60))
+        hls.editor._evict_stale_hls_dirs()
 
     assert os.path.isdir(cache_dir)
 
 
-def test_startup_cleans_stale_dirs(hls):
+def test_startup_cleans_stale_dirs(hls, monkeypatch):
     root = hls.root
+    # Startup runs a TTL and a minute after these sessions were last used.
+    # Moving the clock forward, rather than a directory's times back, keeps
+    # this independent of the host: anything that lists a directory, such as
+    # a file watcher on /tmp, refreshes its atime, and eviction counts that as
+    # use. No outside read can stamp a directory later than now. Every
+    # session but the expired one counts as used at startup, so only the
+    # partial-session cleanup, not the TTL, can remove the others.
+    startup_delay = hls.editor.HLS_IDLE_TTL_SECONDS + 60
 
-    def session(name, playlist=None, marker=False, age=0):
+    def used_at_startup(path):
+        stamp = time.time() + startup_delay
+        os.utime(path, (stamp, stamp))
+
+    def session(name, playlist=None, marker=False, idle=False):
         path = root / name
         path.mkdir()
         (path / 'segment_000.m4s').write_bytes(b'data')
@@ -377,9 +403,8 @@ def test_startup_cleans_stale_dirs(hls):
             (path / 'playlist.m3u8').write_text(playlist)
         if marker:
             (path / '.encoding').write_text('1')
-        if age:
-            stamp = time.time() - age
-            os.utime(path, (stamp, stamp))
+        if not idle:
+            used_at_startup(path)
         return path
 
     # Left mid-encode by the previous run: marker still there.
@@ -389,18 +414,20 @@ def test_startup_cleans_stale_dirs(hls):
     # Killed earlier: segments but no finished playlist.
     killed = session('killed')
     # Finished but untouched for longer than the cache TTL.
-    expired = session('expired', playlist=COMPLETE_PLAYLIST,
-                      age=hls.editor.HLS_IDLE_TTL_SECONDS + 60)
+    expired = session('expired', playlist=COMPLETE_PLAYLIST, idle=True)
     # Finished and recent: still worth reusing.
     finished = session('finished', playlist=COMPLETE_PLAYLIST)
     # A damaged playlist must not stop the cleanup, or startup.
     damaged = root / 'damaged'
     damaged.mkdir()
     (damaged / 'playlist.m3u8').write_bytes(b'\xff\xfe\x00garbage')
+    used_at_startup(damaged)
     stray = root / 'not-a-session.txt'
     stray.write_text('x')
 
-    hls.editor.start_hls_housekeeping()
+    with monkeypatch.context() as clock:
+        clock.setattr(hls.editor, 'time', TimeAhead(startup_delay))
+        hls.editor.start_hls_housekeeping()
 
     assert not encoding.exists()
     assert not marked_closed.exists()

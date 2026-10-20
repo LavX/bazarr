@@ -378,6 +378,7 @@ jobs:
             tests/bazarr/test_media_server_instances_api.py \
             tests/bazarr/test_media_server_links_api.py \
             tests/bazarr/test_provider_hub.py \
+            tests/bazarr/test_builtin_provider_id_guard.py \
             tests/bazarr/test_provider_pool_config_reload.py \
             tests/bazarr/test_rar_extraction_production_config.py \
             tests/bazarr/test_provider_hub_auto_install_optin.py \
@@ -498,6 +499,7 @@ jobs:
             tests/bazarr/test_auto_translation_profile.py \
             tests/bazarr/test_backup_contract.py \
             tests/bazarr/test_build_stamp.py \
+            tests/bazarr/test_check_update_gate.py \
             tests/bazarr/test_ci_guard_list.py \
             tests/bazarr/test_ci_plan.py \
             tests/bazarr/test_combine_aligner.py \

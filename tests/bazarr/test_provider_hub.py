@@ -7122,6 +7122,22 @@ def test_advertisement_parser_reads_heads_and_peeled_tags_only():
     }
 
 
+def test_advertisement_parser_can_keep_the_tag_object_sha():
+    from provider_hub.service import _parse_git_ref_advertisement
+
+    body = _git_advertisement([
+        ("a" * 40, "refs/heads/main"),
+        ("c" * 40, "refs/tags/v1.0.0"),
+        ("d" * 40, "refs/tags/v1.0.0^{}"),
+        ("e" * 40, "refs/tags/v1.1.0"),
+    ])
+
+    assert _parse_git_ref_advertisement(body, peel_tags=False) == {
+        "refs/heads/main": "a" * 40,
+        "refs/tags/v1.0.0": "c" * 40,
+        "refs/tags/v1.1.0": "e" * 40,
+    }
+
 def test_advertisement_parser_accepts_a_real_shaped_body_with_pull_refs():
     from provider_hub.service import _parse_git_ref_advertisement
 
