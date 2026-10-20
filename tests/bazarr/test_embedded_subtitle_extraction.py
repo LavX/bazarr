@@ -95,6 +95,33 @@ def test_text_codec_extraction_succeeds(tmp_path):
     assert os.path.exists(result), "Extracted file should exist on disk"
 
 
+def test_an_exact_codec_request_does_not_fall_back_to_another_codec(monkeypatch, tmp_path):
+    """An exact request for a codec the fresh probe lacks must return None.
+
+    The stored listing can still name an ASS track after a remux leaves only
+    SubRip. Returning the SubRip text under the ASS row's name would be wrong.
+    """
+    from subtitles.tools.translate import batch
+
+    calls = []
+
+    def selector(tracks, language, **kwargs):
+        calls.append(kwargs.get("accept"))
+        return None
+
+    monkeypatch.setattr(batch, "alpha3_from_alpha2", lambda code: "eng")
+    monkeypatch.setattr(batch, "embedded_subtitle_tracks", lambda *args, **kwargs: [object()])
+    monkeypatch.setattr(batch, "select_subtitle_stream", selector)
+
+    result = batch.extract_embedded_subtitle(
+        str(tmp_path / "movie.mkv"), "en", "movie", exact=True, codec="ass")
+
+    assert result is None
+    assert len(calls) == 1
+    assert calls[0] is not None
+    assert calls[0](batch.normalize_codec("ass")) is True
+
+
 # ---------------------------------------------------------------------------
 # Test 2: Bitmap codec rejection
 # ---------------------------------------------------------------------------
