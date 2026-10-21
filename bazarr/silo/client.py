@@ -15,14 +15,29 @@ _ANCHORS = {"movie": ("tmdb", "imdb"), "series": ("tvdb", "imdb"), "episode": ("
 # Only ids that cannot change the shape of a content id or its URL path.
 _ID_SHAPES = {"tmdb": re.compile(r"[0-9]+"), "tvdb": re.compile(r"[0-9]+"), "imdb": re.compile(r"tt[0-9]+")}
 # Silo stores a library's kind as free text and classifies it in one package
-# (internal/librarykind), case and space insensitively. Only these kinds hold
-# video. A mixed library holds movies and series together, and since Silo has
-# no sports kind, a Sports folder is a mixed library too.
+# (internal/librarykind): Go's strings.TrimSpace, then strings.ToLower. Python
+# is not a drop-in for either. strip() also trims U+001C to U+001F, which Go
+# does not, and lower() maps some non-ASCII letters differently (a dotted
+# capital I becomes "i" plus a combining dot where Go answers "i"). Only ASCII
+# spellings are accepted, trimmed the way Go trims ASCII space, so no
+# disagreement can promote a kind Silo rejects to a video library. The price is
+# that an exotic non-ASCII spelling Silo reads as mixed is omitted: that loses
+# a selector row rather than sending a refresh Silo refuses.
+_ASCII_SPACE = " \t\n\r\v\f"
+# Only these kinds hold video. A mixed library holds movies and series
+# together, and since Silo has no sports kind, a Sports folder is a mixed
+# library too.
 _LIBRARY_KINDS = {
     "movie": "movies", "movies": "movies",
     "series": "series", "show": "series", "tv": "series", "tvshows": "series",
     "mixed": "mixed",
 }
+
+
+def _library_kind(value: str) -> str | None:
+    if not value.isascii():
+        return None
+    return _LIBRARY_KINDS.get(value.strip(_ASCII_SPACE).lower())
 
 
 class SiloClient:
@@ -71,7 +86,7 @@ class SiloClient:
                     or type(row.get("enabled")) is not bool):
                 raise MediaServerError("invalid_response")
             seen.add(row["id"])
-            kind = _LIBRARY_KINDS.get(row["type"].strip().lower())
+            kind = _library_kind(row["type"])
             if row["enabled"] and kind:
                 result.append({"id": str(row["id"]), "name": row["name"], "type": kind, "paths": row["paths"]})
         return result
