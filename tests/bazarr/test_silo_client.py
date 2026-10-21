@@ -11,6 +11,9 @@ LIBRARIES = [
     {"id": 8, "name": "Shows", "type": "series", "paths": ["/media/shows"], "enabled": True},
     {"id": 9, "name": "Music", "type": "music", "paths": ["/media/music"], "enabled": True},
     {"id": 10, "name": "Offline", "type": "movies", "paths": ["/offline"], "enabled": False},
+    # Silo has no sports kind: a Sports folder is a mixed library, because the
+    # recordings are neither a movie nor a series library on their own.
+    {"id": 11, "name": "Sports", "type": "mixed", "paths": ["/media/sports"], "enabled": True},
 ]
 
 
@@ -40,6 +43,23 @@ def test_library_selector_uses_native_shapes_string_ids_and_enabled_media_types(
     assert silo_get_libraries(base, "synthetic-key") == {"data": [
         {"id": "7", "name": "Movies", "type": "movies", "paths": ["/media/movies"]},
         {"id": "8", "name": "Shows", "type": "series", "paths": ["/media/shows"]},
+        {"id": "11", "name": "Sports", "type": "mixed", "paths": ["/media/sports"]},
+    ], "error_code": None}
+
+
+@pytest.mark.parametrize(("stored", "canonical"), [
+    ("Mixed", "mixed"), (" MOVIES ", "movies"), ("movie", "movies"),
+    ("TV", "series"), ("tvshows", "series"),
+])
+def test_a_video_library_kind_is_normalised_the_way_silo_normalises_it(http_fixture, stored, canonical):
+    """Silo stores media_folders.type as free text and matches it case and
+    space insensitively (internal/librarykind), so the selector has to apply
+    the same rule rather than an exact string comparison."""
+    from silo.operations import silo_get_libraries
+    base, _records = http_fixture([(200, [{"id": 7, "name": "Library", "type": stored,
+                                          "paths": ["/media"], "enabled": True}], {})])
+    assert silo_get_libraries(base, "synthetic-key") == {"data": [
+        {"id": "7", "name": "Library", "type": canonical, "paths": ["/media"]},
     ], "error_code": None}
 
 

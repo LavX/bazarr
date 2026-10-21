@@ -14,6 +14,15 @@ from .scans import refresh_file, refresh_library
 _ANCHORS = {"movie": ("tmdb", "imdb"), "series": ("tvdb", "imdb"), "episode": ("tvdb", "imdb")}
 # Only ids that cannot change the shape of a content id or its URL path.
 _ID_SHAPES = {"tmdb": re.compile(r"[0-9]+"), "tvdb": re.compile(r"[0-9]+"), "imdb": re.compile(r"tt[0-9]+")}
+# Silo stores a library's kind as free text and classifies it in one package
+# (internal/librarykind), case and space insensitively. Only these kinds hold
+# video. A mixed library holds movies and series together, and since Silo has
+# no sports kind, a Sports folder is a mixed library too.
+_LIBRARY_KINDS = {
+    "movie": "movies", "movies": "movies",
+    "series": "series", "show": "series", "tv": "series", "tvshows": "series",
+    "mixed": "mixed",
+}
 
 
 class SiloClient:
@@ -62,8 +71,9 @@ class SiloClient:
                     or type(row.get("enabled")) is not bool):
                 raise MediaServerError("invalid_response")
             seen.add(row["id"])
-            if row["enabled"] and row["type"] in {"movies", "series"}:
-                result.append({"id": str(row["id"]), "name": row["name"], "type": row["type"], "paths": row["paths"]})
+            kind = _LIBRARY_KINDS.get(row["type"].strip().lower())
+            if row["enabled"] and kind:
+                result.append({"id": str(row["id"]), "name": row["name"], "type": kind, "paths": row["paths"]})
         return result
 
     def refresh_file(self, library_id: str, video_path: str, *, timeout: float = 90.0,
