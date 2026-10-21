@@ -95,6 +95,28 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     if not series_id:
         return
 
+    # Resolve the sync scope BEFORE the first database access. A caller that
+    # names no instance (manual syncs, settings-triggered syncs, the bulk
+    # update_series() run without an instance) is a default-instance sync, so
+    # its rows belong to the enabled default. Leaving the scope unset kept the
+    # current-rows read, the deletes, the updates and the mismatch cleanup
+    # below unscoped, and on a multi-instance install those span instances: an
+    # upstream series or episode id shared with another instance could delete
+    # or rewrite its rows. A pre-backfill install has no instance row at all
+    # and keeps the legacy unscoped behaviour. Saved instances without an
+    # enabled default name no owner, so the series is skipped rather than risk
+    # another instance's rows.
+    if arr_instance_id is None:
+        arr_instance_id = default_instance_id(database, "sonarr")
+        if arr_instance_id is None and database.execute(
+                select(TableArrInstances.id)
+                .where(TableArrInstances.kind == "sonarr")
+                .limit(1)).first() is not None:
+            logging.warning("BAZARR cannot tell which instance owns the episodes of series %s "
+                            "because no enabled default Sonarr instance exists; the series was "
+                            "skipped and no episode was deleted", series_id)
+            return SYNC_SKIPPED_UNREADABLE_EPISODE_FILES
+
     current_episodes_in_db_row_as_dict = {
         row.sonarrEpisodeId: {
             'sonarrSeriesId': row.sonarrSeriesId,
@@ -168,35 +190,22 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
     # Episodes inherit their owning instance (and local series ref) from
     # their parent series. Resolved BEFORE parsing, not after: episodeParser
     # reads the embedded audio track, and that metadata cache is keyed by
-    # the owning instance, so handing it the requested scope (None on every
-    # default-instance path) would leave the cache query unscoped. Falls
-    # back to the default instance when the parent is unstamped; leaves both
-    # unset for a pre-backfill install. When this sync is instance-scoped,
-    # the explicit instance owns the episodes.
+    # the owning instance, so handing it an unresolved scope would leave the
+    # cache query unscoped. The lookup is scoped to the sync's instance, so a
+    # parent row of another instance that happens to share the upstream series
+    # id is never adopted: the episodes written here belong to the synced
+    # instance, and the local series ref stays unset when its parent row does
+    # not exist in scope yet. Falls back to the default instance when the
+    # parent is unstamped; leaves both unset for a pre-backfill install.
     owner_instance_id, parent_local_id = sonarr_series_owner(database, series_id, arr_instance_id)
     if arr_instance_id is not None:
         owner_instance_id = arr_instance_id
 
-    # An empty answer used to do nothing, so the delete it now drives must not
-    # become a new cross-instance hazard: upstream ids are not unique across
-    # instances, and the legacy unscoped query spans them. Scope an empty-list
-    # delete on the default path to the enabled default instance, the owner of
-    # a default call's rows. A pre-backfill install has no instances at all, so
-    # every row is the implicit default's and the delete stays unscoped as
-    # before. Saved instances without an enabled default name no owner for the
-    # deletion, so the series is skipped rather than risk another instance's
-    # rows.
+    # The scope was resolved at entry, so the reads, deletes, updates and
+    # mismatch cleanup below are all confined to the instance being synced.
+    # A pre-backfill install has no instances at all: every row is the
+    # implicit default's and the operations stay unscoped, as before.
     delete_scope = arr_instance_id
-    if not episodes and delete_scope is None:
-        delete_scope = default_instance_id(database, "sonarr")
-        if delete_scope is None and database.execute(
-                select(TableArrInstances.id)
-                .where(TableArrInstances.kind == "sonarr")
-                .limit(1)).first() is not None:
-            logging.warning("BAZARR cannot tell which instance owns the episodes of series %s "
-                            "because no enabled default Sonarr instance exists; the series was "
-                            "skipped and no episode was deleted", series_id)
-            return SYNC_SKIPPED_UNREADABLE_EPISODE_FILES
 
     sonarr_version = get_sonarr_info.semver()
     if episodes and not (sonarr_version and sonarr_version >= semver.Version(*(4, 0, 9, 2421))):
@@ -411,7 +420,8 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
             for episode in episodes_to_update + episodes_to_add:
                 episode_title = (f'{series_data.title} - S{episode["season"]:02d}E{episode["episode"]:02d} '
                                  f'- {episode["title"]}')
-                if _is_there_missing_subtitles(episode_id=episode['sonarrEpisodeId']):
+                if _is_there_missing_subtitles(episode_id=episode['sonarrEpisodeId'],
+                                               arr_instance_id=arr_instance_id):
                     if os.path.exists(path_mappings.path_replace(episode['path'])):
                         logging.debug('BAZARR downloading missing subtitles for this episode: %s', episode_title)
                         jobs_queue.feed_jobs_pending_queue(job_name=f'Downloading missing subtitles for '
@@ -459,6 +469,13 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
     if arr_instance_id is None and skip_unscoped_sync(
             database, 'sonarr', settings.general.use_sonarr, f'episode {episode_id}'):
         return
+    if arr_instance_id is None:
+        # The guard above only lets this through when an enabled default
+        # exists, and a call that names no instance is that default's sync.
+        # Resolving it before the row lookup keeps the update, insert and
+        # delete below off another instance's row that shares the upstream
+        # episode id.
+        arr_instance_id = default_instance_id(database, 'sonarr')
     apikey_sonarr = settings.sonarr.apikey
 
     # Check if there's a row in database for this episode ID
@@ -600,7 +617,8 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
 
         if os.path.exists(path_mappings.path_replace(episode["path"])):
             logging.debug('BAZARR downloading missing subtitles for this episode: %s', episode_full_title)
-            if _is_there_missing_subtitles(episode_id=episode_id):
+            if _is_there_missing_subtitles(episode_id=episode_id,
+                                           arr_instance_id=arr_instance_id):
                 jobs_queue.feed_jobs_pending_queue(job_name=f'Downloading missing subtitles for {series_title}',
                                                    module='subtitles.mass_download.series',
                                                    func='episode_download_subtitles',
@@ -620,7 +638,8 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                           ': %s', episode_full_title)
 
 
-def _is_there_missing_subtitles(series_id: int = None, episode_id: int = None) -> bool:
+def _is_there_missing_subtitles(series_id: int = None, episode_id: int = None,
+                                arr_instance_id: int = None) -> bool:
     """
     Determines whether there are missing subtitles for a given series or episode.
 
@@ -634,6 +653,8 @@ def _is_there_missing_subtitles(series_id: int = None, episode_id: int = None) -
         Optional, defaults to None.
     :param episode_id: The ID of the episode to check for missing subtitles.
         Optional, defaults to None.
+    :param arr_instance_id: The owning instance to confine the lookup to.
+        Optional: a None scope is the legacy unscoped read.
     :return: Boolean indicating whether there are missing subtitles (`True`)
         or not (`False`).
     :rtype: bool
@@ -648,10 +669,11 @@ def _is_there_missing_subtitles(series_id: int = None, episode_id: int = None) -
         episodes_conditions.append(TableEpisodes.sonarrEpisodeId == episode_id)
     episodes_conditions += get_exclusion_clause('series')
     missing_episodes = database.execute(
-        select(TableEpisodes.missing_subtitles, TableEpisodes.failedAttempts)
-        .select_from(TableEpisodes)
-        .join(TableShows)
-        .where(reduce(operator.and_, episodes_conditions))) \
+        scoped(select(TableEpisodes.missing_subtitles, TableEpisodes.failedAttempts)
+               .select_from(TableEpisodes)
+               .join(TableShows)
+               .where(reduce(operator.and_, episodes_conditions)),
+               TableEpisodes.arr_instance_id, arr_instance_id)) \
         .all()
     for missing_episode in missing_episodes:
         for language in missing_episode.missing_subtitles:
