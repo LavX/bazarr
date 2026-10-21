@@ -170,6 +170,7 @@ def get_upgradable_media_ids():
     from subtitles.upgrade import (
         get_queries_condition_parameters,
         latest_row_actions,
+        newer_embedded_source,
         _ai_translated_subtitles_are_upgrade_candidates,
     )
     minimum_timestamp, query_actions = get_queries_condition_parameters()
@@ -209,6 +210,7 @@ def get_upgradable_media_ids():
         .where(and_(
             TableHistoryMovie.action.in_(query_actions),
             TableHistoryMovie.timestamp > minimum_timestamp,
+            ~newer_embedded_source(TableHistoryMovie),
             or_(*movie_score_conditions),
         ))
     ).all()
@@ -250,6 +252,7 @@ def get_upgradable_media_ids():
         .where(and_(
             TableHistory.action.in_(query_actions),
             TableHistory.timestamp > minimum_timestamp,
+            ~newer_embedded_source(TableHistory),
             or_(*episode_score_conditions),
         ))
     ).all()

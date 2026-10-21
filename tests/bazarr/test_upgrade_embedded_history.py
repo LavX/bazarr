@@ -56,7 +56,7 @@ def upgrade_db(monkeypatch):
         engine.dispose()
 
 
-def test_episode_upgrade_keeps_download_candidate_when_embedded_history_is_newer(upgrade_db):
+def test_episode_upgrade_drops_download_candidate_when_embedded_history_is_newer(upgrade_db):
     from subtitles.upgrade import get_upgradable_episode_subtitles
 
     now = datetime.now()
@@ -94,10 +94,10 @@ def test_episode_upgrade_keeps_download_candidate_when_embedded_history_is_newer
         video_path="/series/show/s01e01.mkv",
     ))
 
-    assert get_upgradable_episode_subtitles() == {101: None}
+    assert get_upgradable_episode_subtitles() == {}
 
 
-def test_movie_upgrade_keeps_download_candidate_when_embedded_history_is_newer(upgrade_db):
+def test_movie_upgrade_drops_download_candidate_when_embedded_history_is_newer(upgrade_db):
     from subtitles.upgrade import get_upgradable_movies_subtitles
 
     now = datetime.now()
@@ -131,10 +131,10 @@ def test_movie_upgrade_keeps_download_candidate_when_embedded_history_is_newer(u
         video_path="/movies/movie.mkv",
     ))
 
-    assert get_upgradable_movies_subtitles() == {201: None}
+    assert get_upgradable_movies_subtitles() == {}
 
 
-def test_batch_upgrade_ids_ignore_newer_embedded_history(upgrade_db):
+def test_batch_upgrade_ids_drop_downloads_older_than_embedded_history(upgrade_db):
     from api.subtitles.batch import get_upgradable_media_ids
 
     now = datetime.now()
@@ -198,10 +198,10 @@ def test_batch_upgrade_ids_ignore_newer_embedded_history(upgrade_db):
     ))
 
     assert get_upgradable_media_ids() == {
-        "movies": [30],
-        "series": [10],
-        "movieKeys": [{"radarrId": 30, "arr_instance_id": 2}],
-        "seriesKeys": [{"sonarrSeriesId": 10, "arr_instance_id": 1}],
+        "movies": [],
+        "series": [],
+        "movieKeys": [],
+        "seriesKeys": [],
         # The endpoint carries sports now, so the sports library page can show
         # the same low-score marker Series and Movies do. Empty here: this
         # fixture has no sports rows and use_sportarr is off.
