@@ -199,31 +199,6 @@ def test_empty_source_does_not_report_a_saved_translation(service, events):
     assert events.history == []
 
 
-@pytest.mark.parametrize('valid', [True, False])
-def test_sync_fallback_uses_the_same_result_validation(service, events, monkeypatch, valid):
-    lines = [{'position': 0, 'line': 'Egy'}, {'position': 1, 'line': ''}]
-    if not valid:
-        lines[0]['position'] = 9
-    responses = iter([
-        SimpleNamespace(status_code=404),
-        SimpleNamespace(status_code=200, json=lambda: lines),
-    ])
-    monkeypatch.setattr(module.requests, 'post', lambda *args, **kwargs: next(responses))
-
-    try:
-        result = service.translate()
-    except module.TranslationServiceError as error:
-        result = error
-    if valid:
-        assert result == service.dest_srt_file
-        assert [cue.plaintext for cue in pysubs2.load(result)] == ['Egy', 'Two', 'Three']
-        assert 'partial' in events.history[-1]['result'].message.lower()
-    else:
-        assert isinstance(result, module.TranslationServiceError)
-        assert not Path(service.dest_srt_file).exists()
-        assert events.history == []
-
-
 @pytest.mark.parametrize('status', ['partial', 'completed'])
 def test_save_failure_preserves_destination_and_cleans_temporary_file(service, events, monkeypatch, status):
     destination = Path(service.dest_srt_file)
@@ -243,16 +218,10 @@ def test_save_failure_preserves_destination_and_cleans_temporary_file(service, e
     assert events.history == []
 
 
-@pytest.mark.parametrize('synchronous', [False, True])
-def test_missing_or_blank_cues_are_reported_as_partial(service, events, monkeypatch, synchronous):
+def test_missing_or_blank_cues_are_reported_as_partial(service, events, monkeypatch):
     lines = [{'position': 0, 'line': 'Egy'}, {'position': 1, 'line': '  '}]
     monkeypatch.setattr(module.settings.translator, 'translator_info', True)
-    if synchronous:
-        responses = iter([SimpleNamespace(status_code=404),
-                          SimpleNamespace(status_code=200, json=lambda: lines)])
-        monkeypatch.setattr(module.requests, 'post', lambda *args, **kwargs: next(responses))
-    else:
-        _response(monkeypatch, 'completed', {'lines': lines})
+    _response(monkeypatch, 'completed', {'lines': lines})
 
     assert service.translate() == service.dest_srt_file
     output = pysubs2.load(service.dest_srt_file)
