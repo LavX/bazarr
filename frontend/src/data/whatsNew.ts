@@ -5,6 +5,7 @@ import {
   faCompass,
   faDatabase,
   faDownload,
+  faFileExport,
   faFileZipper,
   faGaugeHigh,
   faLayerGroup,
@@ -95,6 +96,16 @@ const clockworkSlides: WhatsNewSlide[] = [
 ];
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
+  // v2.8.0 opens with the embedded track tools. The rest of the release's
+  // slides are added at release prep, which bumps the version.
+  "2.8.0": [
+    {
+      title: "Your video's own subtitles get the full toolbox",
+      body: "Text tracks inside your video now show their format and offer Sync, the cleanup tools, Edit, View and Download, or write themselves out as an SRT next to the video. Bitmap tracks can be copied out as they are or hidden when wrong, and PGS or VobSub tracks can be read into text with OCR.",
+      icon: faFileExport,
+      cta: { label: "Open your movies", to: "/movies" },
+    },
+  ],
   // v2.7.2 (a patch on the Atlas line) stands alone: the patch's own
   // story is the tour.
   "2.7.2": [
