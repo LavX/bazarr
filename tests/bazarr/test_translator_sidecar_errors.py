@@ -67,6 +67,16 @@ def _leaking_refusal():
     return _refusal(500, {'error': 'translation_failed', 'message': message})
 
 
+def _leaking_poll_failure():
+    return SimpleNamespace(
+        status_code=200,
+        json=lambda: {
+            'status': 'failed',
+            'error': f'upstream rejected request={SUBMITTED_CIPHERTEXT} stored={STORED_CIPHERTEXT}',
+        },
+    )
+
+
 def _assert_no_echoed_secret(text):
     for secret in ECHOED_SECRETS:
         assert secret not in text
@@ -295,3 +305,65 @@ def test_a_refusal_is_scrubbed_before_the_file_log_formatter_sees_it(service, mo
         'AI Subtitle Translator refused the job: %s', (raised.value,), None)
 
     _assert_no_echoed_secret(FileHandlerFormatter('%(message)s|').format(record))
+
+
+def test_an_editor_poll_failure_does_not_carry_an_echoed_secret(service, monkeypatch):
+    monkeypatch.setattr(editor, '_results', type(editor._results)())
+    monkeypatch.setattr(module.time, 'sleep', lambda seconds: None)
+    _posts(monkeypatch, SimpleNamespace(
+        status_code=200, json=lambda: {'jobId': 'remote-1'}))
+
+    def get(url, **kwargs):
+        if url.endswith('/health'):
+            return SimpleNamespace(
+                status_code=200, json=lambda: {'status': 'healthy', 'version': '2.0.0'})
+        return _leaking_poll_failure()
+
+    monkeypatch.setattr(module.requests, 'get', get)
+
+    with pytest.raises(module.TranslationServiceError):
+        editor.translate_editor_lines(['One'], [7], 'English', 'Hungarian', 'Example',
+                                      'episode', job_id=984002)
+
+    state = editor.editor_translation_state(984002)
+    assert state['status'] == 'failed'
+    _assert_no_echoed_secret(state['error'])
+
+
+def test_a_refusal_echoing_a_short_openrouter_token_is_masked(service, monkeypatch):
+    short_token = 'sk-or-v1-short-token-not-64-hex'  # pragma: allowlist secret
+    _posts(monkeypatch, _refusal(500, {
+        'error': 'translation_failed', 'message': f'upstream rejected token {short_token}'}))
+
+    with pytest.raises(module.TranslationServiceError) as raised:
+        service.translate()
+
+    reason = str(raised.value)
+    assert short_token not in reason
+    assert 'upstream rejected token' in reason
+    assert '***' in reason
+
+
+def test_a_refusal_with_a_non_string_error_code_falls_through(service, monkeypatch):
+    _posts(monkeypatch, _refusal(500, {
+        'error': ['not', 'hashable'], 'message': 'Provider overloaded'}))
+
+    with pytest.raises(module.TranslationServiceError) as raised:
+        service.translate()
+
+    reason = str(raised.value)
+    assert 'Provider overloaded' in reason
+    assert 'HTTP 500' in reason
+
+
+def test_a_very_long_service_message_is_truncated(service, monkeypatch):
+    long_message = 'x' * 2000
+    _posts(monkeypatch, _refusal(500, {
+        'error': 'translation_failed', 'message': long_message}))
+
+    with pytest.raises(module.TranslationServiceError) as raised:
+        service.translate()
+
+    reason = str(raised.value)
+    assert 'HTTP 500' in reason
+    assert reason.count('x') == 500

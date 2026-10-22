@@ -45,6 +45,9 @@ docs/superpowers/
 # pipeline regenerates them, and the captures can carry LAN detail.
 screenshot/release/
 
+# Agent lane reports are local working evidence and never part of the source.
+.lane-report.md
+
 # Third-party tooling clones and local agent config. These are working-copy
 # conveniences that must never become part of the published source.
 claude-remotion-skill/

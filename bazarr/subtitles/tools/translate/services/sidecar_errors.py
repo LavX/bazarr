@@ -66,6 +66,11 @@ REFUSAL_REASONS = {
 # its suffix is not the 64 hex characters a real key carries.
 _OPENROUTER_TOKEN_RE = re.compile(r'\bsk-or-v1-[A-Za-z0-9_\-]{8,}')
 
+# A service body is arbitrary text and can be arbitrarily long. The reason is
+# stored on the job, held by the editor and returned to the settings toast, so
+# keep it to a size those surfaces can display without cutting the useful part.
+MAX_REFUSAL_LENGTH = 500
+
 
 def redact_service_text(message):
     """The service's own message with anything shaped like a credential masked.
@@ -99,12 +104,15 @@ def describe_sidecar_refusal(response):
     """The refusal in words a user can act on, for the status and body it came with."""
     status = getattr(response, 'status_code', None)
     code, message = sidecar_error_detail(response)
-    if code in REFUSAL_REASONS:
+    # ``code`` is untrusted: a malformed body can put a list or an object
+    # there, and membership on an unhashable value raises instead of falling
+    # through to the service's own message.
+    if isinstance(code, str) and code in REFUSAL_REASONS:
         return REFUSAL_REASONS[code]
     if status in (404, 405):
         return (f'The AI Subtitle Translator does not offer the translation API at this URL '
                 f'(HTTP {status}). Check the service URL, and update the translator if it is old.')
-    text = redact_service_text(message)
+    text = redact_service_text(message)[:MAX_REFUSAL_LENGTH]
     if text:
         return f'The AI Subtitle Translator refused the request (HTTP {status}): {text}'
     return f'The AI Subtitle Translator refused the request (HTTP {status}).'
