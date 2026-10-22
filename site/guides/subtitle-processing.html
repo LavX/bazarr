@@ -109,7 +109,7 @@
 
     <article class="content">
 
-      <p class="lede">Bazarr+ v2.4.0 (Prism) adds three subtitle processing features: combined bilingual or trilingual subtitles built from files already on disk, source scoring and direct translation for embedded tracks, and multi-engine synchronization with side-by-side output comparison. This guide covers all three.</p>
+      <p class="lede">Bazarr+ v2.4.0 (Prism) adds three subtitle processing features: combined bilingual or trilingual subtitles built from files already on disk, source scoring and direct translation for embedded tracks, and multi-engine synchronization with side-by-side output comparison. This guide covers all three, plus the embedded track tools added in v2.8.0: Extract to file, every tool on an in-container track, Hide track, and OCR to text for image-based tracks.</p>
 
       <h2 id="combined-subtitles">Combined subtitles</h2>
       <p>Combined output takes subtitles you already have on disk and composes them into a single bilingual or trilingual subtitle, written as SRT or ASS. You pick two or three languages, and Bazarr+ aligns their cues into one file.</p>
@@ -176,19 +176,50 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
       <p>An embedded track is recorded in history as a source-quality result at a 100% score. In the subtitle table, the embedded track shows that 100% score so you can see at a glance that the item already carries an in-container subtitle for that language.</p>
 
       <h3 id="embedded-translate">Translate from an embedded track</h3>
-      <p>You can translate directly from an embedded text track without first downloading a separate subtitle. The embedded row exposes a translate-only action in its menu.</p>
+      <p>You can translate directly from an embedded text track without first downloading a separate subtitle. The embedded row's menu has a Translate action.</p>
       <ol class="steps">
         <li>In the subtitle table, find the embedded track you want to translate from.</li>
-        <li>Open its action menu and choose the translate-only action.</li>
+        <li>Open its action menu and choose Translate.</li>
         <li>Bazarr+ extracts the text stream with ffmpeg to <code>{config_dir}/extracted_subs/</code>.</li>
         <li>It then runs your configured translator on the extracted text and writes the translated subtitle.</li>
       </ol>
 
       <div class="note">
-        <strong>Text-based tracks only.</strong> Translate-from-embedded works on text subtitle codecs. Bitmap codecs such as PGS and VobSub cannot be translated this way and are rejected with a clear error, because there is no text to feed the translator. ffmpeg must be available for the extraction step.
+        <strong>Text-based tracks only.</strong> Translate-from-embedded works on text subtitle codecs. Bitmap codecs such as PGS and VobSub cannot be translated this way and are rejected with a clear error, because there is no text to feed the translator. Read one with OCR to text first, then translate the SRT it writes; the Embedded tracks section below covers that. ffmpeg must be available for the extraction step.
       </div>
 
       <p>Translation uses whatever engine you have set up in Bazarr+. See <a href="ai-translation.html">AI Subtitle Translation</a> for configuring a translator. Sync outputs and combined outputs are intentionally excluded from the list of sources you can translate from, so you translate from real source tracks rather than from generated files.</p>
+
+      <h2 id="embedded-tracks">Embedded tracks <span class="badge-new" aria-label="New in v2.8">v2.8</span></h2>
+      <p>A video file can carry its subtitles inside the container instead of beside it. When <strong>Settings &gt; Subtitles &gt; Embedded Subtitles Handling &gt; Treat Embedded Subtitles as Downloaded</strong> is on, which is the default, Bazarr+ lists those tracks as rows on the movie, episode and sports detail pages. Each row shows the track's format: <strong>SRT</strong>, <strong>ASS</strong>, <strong>SSA</strong> or <strong>MOV Text</strong> for text, and <strong>PGS</strong>, <strong>VobSub</strong> or <strong>DVB</strong> for images. Any other format is shown upper-cased. Hovering the badge names the format and adds that the track is image-based when it is. Only the languages your profile wants are listed by default; the Show Only Desired Languages switch changes that.</p>
+      <p>Before v2.8 an embedded row offered only Translate. The tools needed a file on disk, and the track was inside the container. Now the row can write that file itself.</p>
+
+      <h3 id="embedded-extract">Extract to file</h3>
+      <p><strong>Extract to file</strong> pulls the track out of the container with ffmpeg and writes it next to the video as an ordinary subtitle, named with the video's name, the language, any HI or forced tag, and the extension. A hearing-impaired English track becomes <code>Film.en.sdh.srt</code> with the HI extension set to <code>sdh</code>, a forced one becomes <code>Film.en.forced.srt</code>, and a plain one becomes <code>Film.en.srt</code>. The file goes into the folder set under <strong>Settings &gt; Subtitles &gt; Subtitle Folder</strong>, or beside the video when that setting is the current folder. Text tracks always come out as SRT.</p>
+      <p>Image-based tracks are copied out as they are: <code>.sup</code> for PGS, an <code>.idx</code> plus <code>.sub</code> pair for VobSub, and <code>.mks</code> for DVB. Those files are for players. Bazarr+ does not list them as text subtitles.</p>
+      <p>Nothing is overwritten. If a file with the name the extraction would take already exists, the action refuses and names the file in the way; for a text track in single-language mode, a language-less <code>&lt;video&gt;.srt</code> counts too. Delete or rename it and run the action again. A finished extraction is recorded in History as <strong>Extracted</strong>, keeps the source track's score, and the item is indexed again, so the new file is an ordinary external subtitle from then on.</p>
+      <p>To extract in bulk, use <strong>Extract Embedded Tracks</strong> on the Movies, Series or Sports list. It extracts every listed embedded track whose language has no subtitle file yet and leaves covered languages alone. Coverage is checked by language plus the HI and forced flags, so an existing plain English file does not suppress an English HI or forced track.</p>
+
+      <h3 id="embedded-tools">The same tools as an external file</h3>
+      <p>On a text track the row menu offers Sync, Change Frame Rate, Adjust Times, the cleanup tools and Add Color, plus View, Edit and Download. The extraction and the tool are one job: Bazarr+ writes the SRT next to the video first, then runs the tool on it, and the result stays there. Two-Point Fit is not offered on an embedded row, because it picks its two lines from a file you choose.</p>
+      <ul>
+        <li><strong>Sync, Change Frame Rate, Adjust Times, the cleanup tools and Add Color</strong> extract the track and then work on the new file.</li>
+        <li><strong>Edit</strong> opens the track in the editor as a new subtitle, already filled in. Nothing is written until you press Save; Save creates the external file.</li>
+        <li><strong>View</strong> opens the same text in the preview and writes nothing beside the video.</li>
+        <li><strong>Download</strong> saves the text to your computer without creating a library file.</li>
+        <li><strong>Translate</strong> keeps its earlier behaviour: it extracts into <code>{config_dir}/extracted_subs/</code>, translates that copy, and writes only the translated subtitle, so no source copy appears next to the video.</li>
+      </ul>
+
+      <h3 id="embedded-bitmap">Image-based tracks and OCR to text</h3>
+      <p>A PGS, VobSub or DVB track is a series of pictures, so the tools, Translate, View, Edit and Download have no text to work on. The menu says so and leaves <strong>Extract to file</strong> and <strong>Hide track</strong> available.</p>
+      <p>PGS and VobSub tracks can be turned into text with <strong>OCR to text...</strong>. It renders the cues with ffmpeg, reads them with Tesseract, applies the OCR Fixes mod, and writes an SRT next to the video the same way Extract to file does. The result is an ordinary subtitle from then on. DVB is not supported. If the row does not know the track's format, run Scan Disk on the title and try again.</p>
+      <p>The first OCR in a language downloads that language's Tesseract pack into <code>{config_dir}/tessdata</code>, or the folder set under <strong>Settings &gt; Subtitles &gt; Embedded Subtitles Handling &gt; OCR Language Packs Folder</strong>, and checks its checksum. Without internet access the job fails with the download URL and the folder, so you can place the pack there by hand; a hand-placed pack is accepted when its checksum matches. Italics are not preserved. OCR ships in the Docker image. On a source install the requirements install it on Linux x86_64 and ARM64; Linux ARM64 compiles cysignals and needs a C compiler and the Python headers. On macOS 15 or later the requirements skip OCR, so install tesserocr 2.11.0 by hand as the README describes. Where no wheel exists or cysignals cannot compile, install the rest without OCR and the action reports that OCR is unavailable.</p>
+      <p>OCR runs as a job with progress, and only one OCR run happens at a time. An 867-cue PGS track took about three and a half minutes in a measured run at a lowered CPU priority; a slow NAS can take fifteen minutes or more. The History entry is <strong>Extracted</strong> with the provider <code>ocr-tesseract</code>. To read several tracks, use <strong>OCR Image Subtitles</strong> on the Movies, Series or Sports list; it reads the image tracks your language profiles still want, one after another.</p>
+
+      <h3 id="embedded-hide">Hide track</h3>
+      <p>Delete is not offered on an embedded row, because Bazarr+ never rewrites a media file. The red action is <strong>Hide track...</strong>. It stops listing the track for that title and treats the language as wanted again, so a later search can download a real subtitle. The track stays inside the video and nothing is deleted.</p>
+      <p>Bazarr+ tells embedded tracks apart by language, HI and forced only, so hiding an English SRT track also hides an English PGS track on the same title. The confirmation lists every track the hide covers. If another subtitle still covers the language, or your language profile does not want it, Bazarr+ says so and does not search.</p>
+      <p>Hidden tracks are listed under the subtitle table as <strong>Hidden tracks (n)</strong>. Open it and press <strong>Unhide</strong> to list the track again; the next index brings it back.</p>
 
       <h2 id="multi-engine-sync">Multi-engine synchronization</h2>
       <p>Synchronization shifts subtitle timing to match the audio. Bazarr+ now lets you choose which sync engine to run and compare the result before you keep it.</p>
