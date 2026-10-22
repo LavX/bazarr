@@ -68,7 +68,7 @@ semver==3.1.0
 six==1.17.0
 sqlalchemy==2.1.4
 srt==3.5.3
-subliminal[rar]==2.6.0
+subliminal[rar]==2.8.0
 # OCR of bitmap subtitle tracks. Only the OCR worker process imports tesserocr
 # (bazarr/subtitles/tools/ocr/tesseract_worker.py): since 2.10.0 it loads
 # cysignals, which must be imported in a main thread and takes over the
