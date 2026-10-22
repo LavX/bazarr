@@ -40,10 +40,11 @@ FEATURE_PREFIX = "SYNC_EPISODES "
 EPISODE_INSERT_CHUNK_SIZE = 50
 
 # Returned by sync_episodes when the series was skipped whole: its episode-file
-# answer could not be decoded, or its episode list could not be fetched or
-# decoded into an episode array. The bulk sync counts that series as skipped the
-# way it counts a failed pre-fetch. Every other return, including the implicit
-# one, means the sync itself ran.
+# answer could not be decoded, its episode list could not be fetched or decoded
+# into an episode array, or no enabled default Sonarr instance exists to own
+# the sync. The bulk sync counts that series as skipped the way it counts a
+# failed pre-fetch. Every other return, including the implicit one, means the
+# sync itself ran.
 SYNC_SKIPPED_UNREADABLE_EPISODE_FILES = object()
 
 
@@ -283,10 +284,10 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
 
     if not episodes:
         # An empty answer removes every row of the series in the owning scope.
-        # The current-rows read above ran unscoped on the default path, so its
-        # id list can hold another instance's episode ids for this series, and
-        # upstream episode ids collide across instances and series: applying
-        # that list to the owning scope could delete and clean up an unrelated
+        # The current-rows read above runs in the same owning scope, so its
+        # id list is already limited to this instance's episodes. Upstream
+        # episode ids still collide across instances and series: applying an
+        # id list to the owning scope could delete and clean up an unrelated
         # series' episode that happens to share an id. This read only decides
         # whether there is anything to delete; the delete below is carried by
         # the series clause in the owning scope, never by an id list. Within
@@ -501,8 +502,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
             # Resolve the owning instance (and local series ref) from the parent
             # series BEFORE parsing. episodeParser reads the embedded audio
             # track, and that metadata cache is keyed by the owning instance, so
-            # the requested scope (None on every default/legacy entry point)
-            # would leave the cache query unscoped. The upstream payload's
+            # the requested scope would leave the cache query unscoped. The upstream payload's
             # seriesId is what the parser itself stores as sonarrSeriesId.
             # seriesId is read defensively: a payload without it cannot be
             # parsed into a writable episode anyway, and the delete path used to
@@ -528,7 +528,8 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
         # Resolve the LOCAL episode id BEFORE the row is deleted (#156): the
         # frontend caches episode detail by local id, and the upstream
         # sonarrEpisodeId is not unique across instances. Fall back to the
-        # upstream id if the row vanished. No-op scope for the default path.
+        # upstream id if the row vanished. The owning scope is resolved before
+        # this point.
         local_id_row = database.execute(
             scoped(select(TableEpisodes.id)
                    .where(TableEpisodes.sonarrEpisodeId == episode_id),
@@ -566,7 +567,7 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
             store_subtitles(episode['path'], path_mappings.path_replace_instance(episode['path'], arr_instance_id, 'episode'), arr_instance_id=arr_instance_id)
             # Emit the LOCAL episode id (#156): the frontend caches episode
             # detail by local id, and the upstream sonarrEpisodeId is not unique
-            # across instances. No-op scope for the default/single-instance path.
+            # across instances. The owning scope is resolved before this point.
             local_id_row = database.execute(
                 scoped(select(TableEpisodes.id)
                        .where(TableEpisodes.sonarrEpisodeId == episode_id),
