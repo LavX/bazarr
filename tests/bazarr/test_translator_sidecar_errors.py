@@ -10,6 +10,7 @@ translator runs its documented encryption-off mode, so the answer is the reason,
 not a refusal to send the request. The sync endpoint is not a fallback: every
 failure there has already been reported by the job endpoint.
 """
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +18,18 @@ import pytest
 from flask import Flask
 
 from api.translator import translator as api_mod
+from app.logger import FileHandlerFormatter
+from secret_store.scrub import clear_secret_values, register_secret_values, registered_secret_values
+from subtitles.tools.translate import editor
 from subtitles.tools.translate.services import openrouter_translator as module
+
+# What an unhelpful 500 can echo back. The key has the real shape, the first
+# ciphertext is the ``enc:`` envelope Bazarr submits, and the second is the
+# ``enc:v1:`` form the settings hold at rest.
+ECHOED_API_KEY = 'sk-or-v1-' + '0123456789abcdef' * 4  # pragma: allowlist secret
+SUBMITTED_CIPHERTEXT = 'enc:' + 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo='  # pragma: allowlist secret
+STORED_CIPHERTEXT = 'enc:v1:' + 'gAAAAAB' + 'A' * 64  # pragma: allowlist secret
+ECHOED_SECRETS = (ECHOED_API_KEY, SUBMITTED_CIPHERTEXT, STORED_CIPHERTEXT)
 
 
 @pytest.fixture
@@ -47,6 +59,19 @@ def service(tmp_path, monkeypatch):
 def _refusal(status, detail=None, *, message=None):
     body = {'detail': detail} if detail is not None else {'detail': message}
     return SimpleNamespace(status_code=status, text='', json=lambda: body)
+
+
+def _leaking_refusal():
+    message = (f'upstream 500 echoed apiKey={ECHOED_API_KEY}, request={SUBMITTED_CIPHERTEXT}, '
+               f'stored={STORED_CIPHERTEXT}')
+    return _refusal(500, {'error': 'translation_failed', 'message': message})
+
+
+def _assert_no_echoed_secret(text):
+    for secret in ECHOED_SECRETS:
+        assert secret not in text
+    assert 'sk-or-v1-' not in text
+    assert 'enc:' not in text
 
 
 def _posts(monkeypatch, refusal):
@@ -124,6 +149,36 @@ def test_a_service_error_keeps_the_sidecars_own_reason(service, monkeypatch):
     assert 'HTTP 500' in reason
 
 
+def test_a_refusal_that_echoes_a_key_or_ciphertext_does_not_raise_it(service, monkeypatch):
+    _posts(monkeypatch, _leaking_refusal())
+
+    with pytest.raises(module.TranslationServiceError) as raised:
+        service.translate()
+
+    reason = str(raised.value)
+    assert 'upstream 500 echoed' in reason
+    assert 'HTTP 500' in reason
+    _assert_no_echoed_secret(reason)
+
+
+def test_a_registered_plaintext_credential_in_a_refusal_is_masked(service, monkeypatch):
+    custom_key = 'custom-provider-credential-0123456789'  # pragma: allowlist secret
+    previous = registered_secret_values()
+    clear_secret_values()
+    try:
+        register_secret_values([custom_key])
+        _posts(monkeypatch, _refusal(500, {
+            'error': 'translation_failed', 'message': f'upstream rejected {custom_key}'}))
+
+        with pytest.raises(module.TranslationServiceError) as raised:
+            service.translate()
+    finally:
+        register_secret_values(previous)
+
+    assert custom_key not in str(raised.value)
+    assert 'upstream rejected' in str(raised.value)
+
+
 def test_a_service_without_the_job_api_is_not_retried_on_the_sync_endpoint(service, monkeypatch):
     calls = _posts(monkeypatch, _refusal(404, message='Not Found'))
 
@@ -196,3 +251,47 @@ def test_the_settings_test_button_keeps_a_working_answer(monkeypatch):
 
     assert status == 200
     assert body == {'encryption': None, 'apiKey': {'status': 'ok'}}
+
+
+def test_the_settings_test_button_does_not_return_an_echoed_secret(monkeypatch):
+    body, status, _ = _call_test_endpoint(monkeypatch, _leaking_refusal())
+
+    assert status == 502
+    assert 'HTTP 500' in body['error']
+    _assert_no_echoed_secret(body['error'])
+
+
+def test_the_editor_facing_error_does_not_carry_an_echoed_secret(service, monkeypatch):
+    monkeypatch.setattr(editor, '_results', type(editor._results)())
+    _posts(monkeypatch, _leaking_refusal())
+
+    with pytest.raises(module.TranslationServiceError):
+        editor.translate_editor_lines(['One'], [7], 'English', 'Hungarian', 'Example',
+                                      'episode', job_id=984001)
+
+    state = editor.editor_translation_state(984001)
+    assert state['status'] == 'failed'
+    assert 'HTTP 500' in state['error']
+    _assert_no_echoed_secret(state['error'])
+
+
+def test_the_file_log_formatter_masks_echoed_ciphertext_on_its_own():
+    formatter = FileHandlerFormatter('%(message)s|')
+    record = logging.LogRecord(
+        'bazarr', logging.ERROR, '', 0,
+        f'service echoed request={SUBMITTED_CIPHERTEXT} stored={STORED_CIPHERTEXT}', (), None)
+
+    assert formatter.format(record) == 'service echoed request=*** stored=***|'
+
+
+def test_a_refusal_is_scrubbed_before_the_file_log_formatter_sees_it(service, monkeypatch):
+    _posts(monkeypatch, _leaking_refusal())
+
+    with pytest.raises(module.TranslationServiceError) as raised:
+        service.translate()
+
+    record = logging.LogRecord(
+        'bazarr', logging.ERROR, '', 0,
+        'AI Subtitle Translator refused the job: %s', (raised.value,), None)
+
+    _assert_no_echoed_secret(FileHandlerFormatter('%(message)s|').format(record))

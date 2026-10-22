@@ -7,13 +7,23 @@ The service answers a refusal with FastAPI's ``{"detail": {"error": code,
 encryption key was missing or stale that the translator "refused the request
 (HTTP 401)", which reads like a wrong OpenRouter API key and sends them to the
 wrong setting. The codes below are the ones the service speaks; anything else
-keeps the service's own message and the status code.
+keeps the service's own message, sanitized, and the status code.
+
+The unknown message is the service's own text, and a refusal that echoes the
+request can carry a credential: the OpenRouter key Bazarr sent, or the ``enc:``
+ciphertext it wrapped that key in. The reason is stored on the job, retained by
+the editor and returned by the settings Test, so it is sanitized once here,
+before any of those readers can hold it.
 
 A blank encryption key is not a reason to refuse before sending: the translator's
 documented encryption-off mode expects Bazarr to send the API key in the body and
 no ``X-Auth-Token``. Against a default, encryption-on translator that request is
 refused with ``unauthorized``, and the reason below says which key to look at.
 """
+
+import re
+
+from secret_store.scrub import MASK, scrub_text
 
 # The translator keeps the key in this file inside its container, and its CLI
 # writes a new one when the file is gone. Both are named so the message points
@@ -51,6 +61,24 @@ REFUSAL_REASONS = {
 }
 
 
+# The scrub module knows a real OpenRouter key by its exact shape. A service
+# body is untrusted text, so any ``sk-or-v1-`` token is masked here even when
+# its suffix is not the 64 hex characters a real key carries.
+_OPENROUTER_TOKEN_RE = re.compile(r'\bsk-or-v1-[A-Za-z0-9_\-]{8,}')
+
+
+def redact_service_text(message):
+    """The service's own message with anything shaped like a credential masked.
+
+    Ciphertext is covered by the scrub module's shape layer, both the at-rest
+    ``enc:v1:`` form and the ``enc:`` form Bazarr submits, and a registered
+    plaintext credential is masked by its value layer. The broad token shape
+    below is the one a service can echo that neither layer knows.
+    """
+    text = scrub_text(str(message or '').strip())
+    return _OPENROUTER_TOKEN_RE.sub(MASK, text)
+
+
 def sidecar_error_detail(response):
     """The service's error code and message from its response body, when readable."""
     try:
@@ -76,7 +104,7 @@ def describe_sidecar_refusal(response):
     if status in (404, 405):
         return (f'The AI Subtitle Translator does not offer the translation API at this URL '
                 f'(HTTP {status}). Check the service URL, and update the translator if it is old.')
-    text = str(message or '').strip()
+    text = redact_service_text(message)
     if text:
         return f'The AI Subtitle Translator refused the request (HTTP {status}): {text}'
     return f'The AI Subtitle Translator refused the request (HTTP {status}).'
