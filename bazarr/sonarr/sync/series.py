@@ -266,8 +266,9 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                         arr_instance_id=arr_instance_id, arr_client=arr_client)
                 del episodes_data
                 # A series whose episode or episode-file answer could not be
-                # decoded was skipped whole, the way a failed episode fetch is,
-                # so it belongs in the skipped count and the job name too.
+                # decoded, or whose default instance could not be resolved, was
+                # skipped whole the way a failed episode fetch is, so it belongs
+                # in the skipped count and the job name too.
                 if outcome is SYNC_SKIPPED_UNREADABLE_EPISODE_FILES:
                     skipped_series.append(show['id'])
 
