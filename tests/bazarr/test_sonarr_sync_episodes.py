@@ -560,7 +560,11 @@ def test_a_default_episode_sync_leaves_another_instances_rows_alone(
     monkeypatch.setattr(episodes_mod, 'episodeParser', lambda episode, **kw: {
         "sonarrSeriesId": 7, "sonarrEpisodeId": episode['id'],
         "path": episode['episodeFile']['path'], "season": 1, "episode": 1,
-        "title": "Default keep", "monitored": "True"})
+        "title": "Default renamed", "monitored": "True",
+        "episode_file_id": episode['episodeFileId'],
+        "format": "WEB-DL", "resolution": "1080p", "video_codec": "h264",
+        "audio_codec": "aac", "audio_language": "eng", "file_size": 999999,
+        "sceneName": None, "absoluteEpisode": 1, "tvdbId": None})
     forget_calls = []
 
     def _forget(media_type, upstream_ids, arr_instance_id=None, series_upstream_id=None):
@@ -570,7 +574,7 @@ def test_a_default_episode_sync_leaves_another_instances_rows_alone(
 
     episodes_data = [] if answer == 'empty' else [
         {"id": 45, "hasFile": True, "monitored": True, "episodeFileId": 100,
-         "episodeFile": {"size": 999999, "path": "/series/default/s01e01.mkv"}}]
+         "episodeFile": {"size": 999999, "path": "/series/default/s01e01-renamed.mkv"}}]
 
     # No arr_instance_id: the every-default path, which used to stay unscoped.
     episodes_mod.sync_episodes(7, episodes_data=episodes_data, defer_search=True)
@@ -588,6 +592,14 @@ def test_a_default_episode_sync_leaves_another_instances_rows_alone(
             other_instance_row.title) == (
         2, "/series/other/s01e01.mkv", "Other keep 1"), (
         "the default sync rewrote and re-homed another instance's episode row")
+    if answer == 'non-empty':
+        default_row = schema_session.execute(
+            select(TableEpisodes.arr_instance_id, TableEpisodes.path, TableEpisodes.title)
+            .where(TableEpisodes.id == 704)).first()
+        assert (default_row.arr_instance_id, default_row.path,
+                default_row.title) == (
+            8, "/series/default/s01e01-renamed.mkv", "Default renamed"), (
+            "the default sync did not update its own colliding row")
     assert forget_calls == ([('series', [], 8, 7)] if answer == 'empty'
                             else [('series', [46], 8, None)]), (
         "the mismatch cleanup was not confined to the default instance")
