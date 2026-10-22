@@ -50,7 +50,11 @@ def test_library_selector_uses_native_shapes_string_ids_and_enabled_media_types(
 @pytest.mark.parametrize(("stored", "canonical"), [
     ("Mixed", "mixed"), (" MOVIES ", "movies"), ("movie", "movies"),
     ("TV", "series"), ("tvshows", "series"),
-])
+    # Silo's Unicode lowercasing reads these as mixed, and its TrimSpace set
+    # includes NBSP. The helper reproduces both, so the row stays selectable.
+    ("M\u0130XED", "mixed"), ("\u00a0mixed\u00a0", "mixed"),
+], ids=["mixed", "spaced-movies", "movie", "tv", "tvshows",
+        "dotted-capital-i", "nbsp-padded"])
 def test_a_video_library_kind_is_normalised_the_way_silo_normalises_it(http_fixture, stored, canonical):
     """Silo stores media_folders.type as free text and matches it case and
     space insensitively (internal/librarykind), so the selector has to apply
@@ -65,14 +69,8 @@ def test_a_video_library_kind_is_normalised_the_way_silo_normalises_it(http_fixt
 
 @pytest.mark.parametrize("stored", [
     "\u001cmixed", "\u001fmixed", "mixed\u001c", "mixed\u0000",
-    # Silo's Unicode lowercasing reads this as mixed. Python lower() maps the
-    # dotted capital I to "i" plus a combining dot, so matching it would need
-    # Go's simple case mapping. A non-ASCII spelling is omitted instead: that
-    # costs one selector row, where admitting it wrongly could send a refresh
-    # Silo refuses.
-    "M\u0130XED", "\u00a0mixed\u00a0",
-], ids=["unit-separator", "unit-separator-trailing", "suffix", "nul", "non-ascii-case", "non-ascii-space"])
-def test_a_library_kind_go_and_python_disagree_about_is_not_video(http_fixture, stored):
+], ids=["unit-separator", "unit-separator-trailing", "suffix", "nul"])
+def test_a_control_character_does_not_become_a_video_kind(http_fixture, stored):
     """Python's strip() trims U+001C to U+001F and Go's TrimSpace does not, so
     a control character must not be trimmed into a kind Silo would refuse."""
     from silo.operations import silo_get_libraries

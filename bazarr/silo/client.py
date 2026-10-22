@@ -18,12 +18,17 @@ _ID_SHAPES = {"tmdb": re.compile(r"[0-9]+"), "tvdb": re.compile(r"[0-9]+"), "imd
 # (internal/librarykind): Go's strings.TrimSpace, then strings.ToLower. Python
 # is not a drop-in for either. strip() also trims U+001C to U+001F, which Go
 # does not, and lower() maps some non-ASCII letters differently (a dotted
-# capital I becomes "i" plus a combining dot where Go answers "i"). Only ASCII
-# spellings are accepted, trimmed the way Go trims ASCII space, so no
-# disagreement can promote a kind Silo rejects to a video library. The price is
-# that an exotic non-ASCII spelling Silo reads as mixed is omitted: that loses
-# a selector row rather than sending a refresh Silo refuses.
-_ASCII_SPACE = " \t\n\r\v\f"
+# capital I becomes "i" plus a combining dot where Go answers "i"). This
+# reproduces both steps: trim Go's unicode.IsSpace set, lowercase A to Z,
+# U+0130 (dotted capital I) to "i" and U+212A (Kelvin sign) to "k", and reject
+# any other non-ASCII character. A kind spelled any other way is left out of
+# the selector rather than sending a refresh Silo refuses.
+_GO_SPACE = (
+    " \t\n\r\v\f"
+    "\u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
 # Only these kinds hold video. A mixed library holds movies and series
 # together, and since Silo has no sports kind, a Sports folder is a mixed
 # library too.
@@ -34,10 +39,33 @@ _LIBRARY_KINDS = {
 }
 
 
+def _go_lower(value: str) -> str | None:
+    """Lowercase the way Go's strings.ToLower does for kind spellings.
+
+    Only A to Z, U+0130 and U+212A can lowercase into an ASCII letter. Any
+    other non-ASCII character means Silo's librarykind package does not read
+    the kind as a video library, so return None.
+    """
+    lowered = []
+    for char in value:
+        if "A" <= char <= "Z":
+            lowered.append(chr(ord(char) + 32))
+        elif char == "\u0130":
+            lowered.append("i")
+        elif char == "\u212a":
+            lowered.append("k")
+        elif char.isascii():
+            lowered.append(char)
+        else:
+            return None
+    return "".join(lowered)
+
+
 def _library_kind(value: str) -> str | None:
-    if not value.isascii():
+    lowered = _go_lower(value.strip(_GO_SPACE))
+    if lowered is None:
         return None
-    return _LIBRARY_KINDS.get(value.strip(_ASCII_SPACE).lower())
+    return _LIBRARY_KINDS.get(lowered)
 
 
 class SiloClient:
