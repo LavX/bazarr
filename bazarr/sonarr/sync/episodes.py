@@ -466,16 +466,15 @@ def sync_one_episode_for_instance(arr_instance_id, episode_id, **kwargs):
 def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                      arr_instance_id=None, arr_client=None):
     logging.debug('BAZARR syncing this specific episode from Sonarr: %s', episode_id)
-    if arr_instance_id is None and skip_unscoped_sync(
-            database, 'sonarr', settings.general.use_sonarr, f'episode {episode_id}'):
-        return
     if arr_instance_id is None:
-        # The guard above only lets this through when an enabled default
-        # exists, and a call that names no instance is that default's sync.
-        # Resolving it before the row lookup keeps the update, insert and
-        # delete below off another instance's row that shares the upstream
-        # episode id.
+        # A call that names no instance is the default instance's sync. Resolve
+        # it once and hand the same answer to the guard, so a default disabled
+        # between two reads cannot turn the row lookup, update or delete below
+        # into an unscoped write against another instance's row.
         arr_instance_id = default_instance_id(database, 'sonarr')
+        if skip_unscoped_sync(database, 'sonarr', settings.general.use_sonarr,
+                              f'episode {episode_id}', default_id=arr_instance_id):
+            return
     apikey_sonarr = settings.sonarr.apikey
 
     # Check if there's a row in database for this episode ID
