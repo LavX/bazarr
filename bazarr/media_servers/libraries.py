@@ -19,8 +19,8 @@ from .http import MediaServerError
 from .instances import KIND_STEPS, LIBRARY_KEYS
 from .paths import _media_path
 
-# The types a library scan can be asked for. Sports lives inside a movie or
-# series library everywhere, and is scoped separately on the kinds that have it.
+# The types a library scan can be asked for. Sports lives inside a movie,
+# series or mixed library, and is scoped separately on the kinds that have it.
 _MEDIA_TYPES = ('movie', 'episode', 'sports')
 
 # Refusals that are about the server rather than one scope. Every other scope
