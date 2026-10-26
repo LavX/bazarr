@@ -109,7 +109,7 @@
 
     <article class="content">
 
-      <p class="lede">Bazarr+ v2.4.0 (Prism) adds three subtitle processing features: combined bilingual or trilingual subtitles built from files already on disk, source scoring and direct translation for embedded tracks, and multi-engine synchronization with side-by-side output comparison. This guide covers all three, plus the embedded track tools added in v2.8.0: Extract to file, every tool on an in-container track, Hide track, and OCR to text for image-based tracks.</p>
+      <p class="lede">Bazarr+ v2.4.0 (Prism) adds three subtitle processing features: combined bilingual or trilingual subtitles built from files already on disk, source scoring and direct translation for embedded tracks, and multi-engine synchronization with side-by-side output comparison. This guide covers all three, plus the embedded track tools added in v2.8.0: Extract to file, every tool on an in-container track, and Hide track.</p>
 
       <h2 id="combined-subtitles">Combined subtitles</h2>
       <p>Combined output takes subtitles you already have on disk and composes them into a single bilingual or trilingual subtitle, written as SRT or ASS. You pick two or three languages, and Bazarr+ aligns their cues into one file.</p>
@@ -185,7 +185,7 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
       </ol>
 
       <div class="note">
-        <strong>Text-based tracks only.</strong> Translate-from-embedded works on text subtitle codecs. Bitmap codecs such as PGS and VobSub cannot be translated this way and are rejected with a clear error, because there is no text to feed the translator. Read one with OCR to text first, then translate the SRT it writes; the Embedded tracks section below covers that. ffmpeg must be available for the extraction step.
+        <strong>Text-based tracks only.</strong> Translate-from-embedded works on text subtitle codecs. Bitmap codecs such as PGS and VobSub cannot be translated this way and are rejected with a clear error, because there is no text to feed the translator. ffmpeg must be available for the extraction step.
       </div>
 
       <p>Translation uses whatever engine you have set up in Bazarr+. See <a href="ai-translation.html">AI Subtitle Translation</a> for configuring a translator. Sync outputs and combined outputs are intentionally excluded from the list of sources you can translate from, so you translate from real source tracks rather than from generated files.</p>
@@ -210,11 +210,8 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
         <li><strong>Translate</strong> keeps its earlier behaviour: it extracts into <code>{config_dir}/extracted_subs/</code>, translates that copy, and writes only the translated subtitle, so no source copy appears next to the video.</li>
       </ul>
 
-      <h3 id="embedded-bitmap">Image-based tracks and OCR to text</h3>
+      <h3 id="embedded-bitmap">Image-based tracks</h3>
       <p>A PGS, VobSub or DVB track is a series of pictures, so the tools, Translate, View, Edit and Download have no text to work on. The menu says so and leaves <strong>Extract to file</strong> and <strong>Hide track</strong> available.</p>
-      <p>PGS and VobSub tracks can be turned into text with <strong>OCR to text...</strong>. It renders the cues with ffmpeg, reads them with Tesseract, applies the OCR Fixes mod, and writes an SRT next to the video the same way Extract to file does. The result is an ordinary subtitle from then on. DVB is not supported. If the row does not know the track's format, run Scan Disk on the title and try again.</p>
-      <p>The first OCR in a language downloads that language's Tesseract pack into <code>{config_dir}/tessdata</code>, or the folder set under <strong>Settings &gt; Subtitles &gt; Embedded Subtitles Handling &gt; OCR Language Packs Folder</strong>, and checks its checksum. Without internet access the job fails with the download URL and the folder, so you can place the pack there by hand; a hand-placed pack is accepted when its checksum matches. Italics are not preserved. OCR ships in the Docker image. On a source install the requirements install it on Linux x86_64 and ARM64; Linux ARM64 compiles cysignals and needs a C compiler and the Python headers. On macOS 15 or later the requirements skip OCR, so install tesserocr 2.11.0 by hand as the README describes. Where no wheel exists or cysignals cannot compile, install the rest without OCR and the action reports that OCR is unavailable.</p>
-      <p>OCR runs as a job with progress, and only one OCR run happens at a time. An 867-cue PGS track took about three and a half minutes in a measured run at a lowered CPU priority; a slow NAS can take fifteen minutes or more. The History entry is <strong>Extracted</strong> with the provider <code>ocr-tesseract</code>. To read several tracks, use <strong>OCR Image Subtitles</strong> on the Movies, Series or Sports list; it reads the image tracks your language profiles still want, one after another.</p>
 
       <h3 id="embedded-hide">Hide track</h3>
       <p>Delete is not offered on an embedded row, because Bazarr+ never rewrites a media file. The red action is <strong>Hide track...</strong>. It stops listing the track for that title and treats the language as wanted again, so a later search can download a real subtitle. The track stays inside the video and nothing is deleted.</p>
