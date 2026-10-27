@@ -103,7 +103,7 @@ beforeEach(() => {
 });
 
 function renderPanel(onApplyTranslation = vi.fn()) {
-  customRender(
+  return customRender(
     <TranslatePanel
       open
       cues={[
@@ -334,6 +334,72 @@ describe("TranslatePanel recovery and cancel", () => {
 
     await waitFor(() => expect(cancelled).toEqual(["7"]));
     expect(screen.getByRole("button", { name: "Translate" })).toBeVisible();
+  });
+});
+
+describe("TranslatePanel and the editors following one translation", () => {
+  function stops() {
+    const asked: Array<{ jobId: string | null; release: string | null }> = [];
+    server.use(
+      http.post("/api/translator/editor", () =>
+        HttpResponse.json({ jobId: 7 }, { status: 202 }),
+      ),
+      http.delete("/api/translator/editor", ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        asked.push({
+          jobId: params.get("jobId"),
+          release: params.get("release"),
+        });
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    return asked;
+  }
+
+  async function startTranslating() {
+    const user = userEvent.setup();
+    const translate = await screen.findByRole("button", { name: "Translate" });
+    await waitFor(() => expect(translate).toBeEnabled());
+    await user.click(translate);
+    await screen.findByRole("button", { name: "Cancel" });
+    return user;
+  }
+
+  it("lets go of the translation, without stopping it, when the editor closes", async () => {
+    const asked = stops();
+    const { unmount } = renderPanel();
+    await startTranslating();
+    expect(asked).toEqual([]);
+
+    unmount();
+
+    await waitFor(() =>
+      expect(asked).toEqual([{ jobId: "7", release: "true" }]),
+    );
+  });
+
+  it("does not release a translation it already stopped", async () => {
+    const asked = stops();
+    const { unmount } = renderPanel();
+    const user = await startTranslating();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(asked).toEqual([{ jobId: "7", release: null }]));
+
+    unmount();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(asked).toEqual([{ jobId: "7", release: null }]);
+  });
+
+  it("releases nothing when no translation was started", async () => {
+    const asked = stops();
+    const { unmount } = renderPanel();
+    await screen.findByRole("button", { name: "Translate" });
+
+    unmount();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(asked).toEqual([]);
   });
 });
 

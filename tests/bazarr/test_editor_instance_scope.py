@@ -669,3 +669,18 @@ def test_query_key_outside_the_editor_still_accepted_with_a_warning(monkeypatch,
 
     assert response.status_code == 200
     assert len(_deprecation_warnings(caplog)) == 1
+
+
+def test_peaks_not_yet_generated_answer_with_the_job_and_the_backend_run_it_belongs_to(editor_client, monkeypatch):
+    from api.editor import editor
+
+    client, api_key = editor_client
+    monkeypatch.setattr(editor, "request_peaks", lambda _path, _track: ("queued", 31))
+
+    response = client.get("/api/editor/peaks",
+                          query_string={"mediaType": "movie", "mediaId": "50", "audioTrack": "0",
+                                        "arr_instance_id": "2"},
+                          headers={"X-API-KEY": api_key})
+
+    assert response.status_code == 202
+    assert response.json == {"jobId": 31, "jobSession": editor.PROCESS_SESSION, "status": "pending"}

@@ -21,6 +21,7 @@ from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableSh
                           TableSportsEvents, database, select)
 from app.get_args import args
 from app.process_session import PROCESS_SESSION
+from secret_store.scrub import scrub_text
 from utilities.path_mappings import path_mappings
 from utilities.waveform_peaks import request_peaks
 from api.subtitles.content import resolve_subtitle_path  # noqa: F401
@@ -75,6 +76,15 @@ class _HlsEncoder:
         self.last_access = last_access
 
 
+# These encoders are deliberately not jobs. An HLS session is the playback
+# stream of a live player, not work someone submitted: at most
+# HLS_MAX_ENCODERS run, the reaper stops one that has had no request for
+# HLS_ENCODER_IDLE_TIMEOUT_SECONDS, and every seek or track switch starts a
+# new session in its own cache directory. A job per session would fill the Jobs
+# list with entries that end when the player moves, and would put playback
+# behind the queue's limit. A failure is reported to the player instead, in
+# the playlist response.
+#
 # Live ffmpeg encoders keyed by cache directory. Every encoder is registered
 # here from the moment it starts, so the reaper can find the ones the preview
 # has walked away from. Without this, a closed preview or a track switch left
@@ -92,6 +102,12 @@ _hls_replaced_dirs: dict[str, float] = {}
 # deletion would take the new encoder's files with it. Guarded by
 # _hls_encoders_guard.
 _hls_stopping_dirs: set[str] = set()
+
+# Why the last encoder of a session failed, so the playlist answer can say it
+# instead of asking the player to retry for ever. Bounded; guarded by
+# _hls_encoders_guard.
+_hls_failures: dict[str, str] = {}
+HLS_FAILURES_KEPT = 32
 
 # How long a session may go without a playlist or segment request before its
 # ffmpeg is considered abandoned and stopped. hls.js refreshes the playlist
@@ -751,6 +767,28 @@ def _build_hls_ffmpeg_command(
     ]
 
 
+# What kind of failure ffmpeg's last line describes, by phrases it uses. Only the category is ever
+# sent to the client: the line itself names the input file, so it stays in the log.
+_HLS_FAILURE_CATEGORIES = (
+    ('unsupported audio stream', ('matches no streams', 'decoder (codec', 'unknown decoder', 'unsupported codec',
+                                  'could not find codec parameters', 'stream specifier')),
+    ('unreadable input', ('invalid data found', 'permission denied', 'no such file', 'moov atom not found',
+                          'end of file', 'input/output error')),
+)
+
+
+def _ffmpeg_failure_reason(stderr_data, returncode):
+    """The answer for a player whose encoder failed: that the audio could not be encoded, and a coarse
+    category when the last line ffmpeg printed makes one clear. The line itself can hold the absolute
+    path of the media file, so it is never part of the answer."""
+    lines = [line.strip() for line in (stderr_data or b'').decode(errors='replace').splitlines() if line.strip()]
+    last = lines[-1].lower() if lines else ''
+    for category, phrases in _HLS_FAILURE_CATEGORIES:
+        if any(phrase in last for phrase in phrases):
+            return f'The audio could not be encoded: {category}'
+    return 'The audio could not be encoded'
+
+
 def _wait_for_hls_encoder(cache_dir, process, video_path, encoding_marker):
     """Waiter thread: collect ffmpeg's exit and clean up after a natural exit.
 
@@ -792,11 +830,19 @@ def _wait_for_hls_encoder(cache_dir, process, video_path, encoding_marker):
     if not still_registered:
         return
     if returncode != 0:
+        # The tail, where ffmpeg says what went wrong. Scrubbed like every other text that can carry
+        # a credential into the log; the client is told the category only.
         logger.error(
             'HLS encode failed for %s (rc=%s): %s',
             video_path, returncode,
-            (stderr_data or b'').decode(errors='replace')[:500],
+            scrub_text((stderr_data or b'').decode(errors='replace')[-500:]),
         )
+        if not interrupted:
+            with _hls_encoders_guard:
+                _hls_failures.pop(cache_dir, None)
+                _hls_failures[cache_dir] = _ffmpeg_failure_reason(stderr_data, returncode)
+                while len(_hls_failures) > HLS_FAILURES_KEPT:
+                    _hls_failures.pop(next(iter(_hls_failures)))
     try:
         os.unlink(encoding_marker)
     except OSError:
@@ -814,7 +860,8 @@ def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir, p
     forcing the browser to seek into a non-keyframe fMP4 fragment.
 
     Idempotent: returns immediately if a complete playlist already exists or
-    another thread is currently encoding.
+    another thread is currently encoding. Returns False when another request
+    holds the spawn lock and is starting ffmpeg for this session right now.
     """
     playlist = os.path.join(cache_dir, 'playlist.m3u8')
     encoding_marker = os.path.join(cache_dir, '.encoding')
@@ -830,8 +877,9 @@ def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir, p
 
     lock = _hls_encoder_lock(cache_dir)
     if not lock.acquire(blocking=False):
-        # Another thread is spawning ffmpeg; let it finish.
-        return
+        # Another thread is spawning ffmpeg; let it finish. False tells the caller the session is being
+        # started by someone else, so whatever failure is on record is about to be replaced.
+        return False
 
     try:
         # Re-check inside the lock. A live encoder already owns the session,
@@ -875,6 +923,8 @@ def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir, p
             except OSError:
                 pass
             raise
+        with _hls_encoders_guard:
+            _hls_failures.pop(cache_dir, None)
         displaced = _register_hls_encoder(cache_dir, process, player)
         try:
             # The waiter starts first so the new ffmpeg's stderr is drained
@@ -896,6 +946,10 @@ def _wait_for_first_segment(cache_dir, deadline):
     """Block (briefly) until the playlist has at least one segment listed."""
     playlist = os.path.join(cache_dir, 'playlist.m3u8')
     while time.time() < deadline:
+        if cache_dir in _hls_failures:
+            # ffmpeg already failed; waiting out the rest of the deadline would
+            # only delay saying so.
+            return False
         if os.path.isfile(playlist):
             try:
                 with open(playlist, 'r') as f:
@@ -986,8 +1040,9 @@ class EditorHls(Resource):
             # Idle encoders and stale directories are handled by the
             # background reaper, which does not depend on requests arriving.
             try:
-                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir, player=player,
-                                   native_hls=native_hls)
+                starting_elsewhere = _spawn_hls_encoder(
+                    video_path, audio_track, start_time_sec, cache_dir, player=player,
+                    native_hls=native_hls) is False
             except Exception:
                 logger.exception('Failed to spawn HLS encoder for %s', video_path)
                 return 'ffmpeg not available', 500
@@ -1000,6 +1055,14 @@ class EditorHls(Resource):
             )
 
             if not os.path.isfile(target):
+                with _hls_encoders_guard:
+                    failure = _hls_failures.get(cache_dir)
+                if failure and not starting_elsewhere and not _hls_encoder_is_live(cache_dir):
+                    # The ffmpeg this request started already exited with an error. Saying so beats a 503
+                    # the player retries as if the encode were only slow. The next request starts ffmpeg
+                    # again, which clears the failure, so a transient error recovers on its own. Not for a
+                    # request that lost the spawn race: the failure on record is the one being replaced.
+                    return failure, 502
                 return 'Encoding starting, retry shortly', 503
 
             # Relative segment and #EXT-X-MAP URLs do not inherit the
@@ -1064,8 +1127,9 @@ class EditorHls(Resource):
             # requested, for example during a long pause. Encode it again
             # instead of answering 404 for the rest of the session.
             try:
-                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir, player=player,
-                                   native_hls=native_hls)
+                _spawn_hls_encoder(
+                    video_path, audio_track, start_time_sec, cache_dir, player=player,
+                    native_hls=native_hls)
             except Exception:
                 logger.exception('Failed to respawn HLS encoder for %s', video_path)
         if not os.path.isfile(target):
@@ -1199,7 +1263,8 @@ class EditorPeaks(Resource):
             return value
         if not value:
             return 'Waveform generation could not be queued', 503
-        return {'jobId': value, 'status': 'pending'}, 202
+        # The id only means something within this backend run, so the run is named too.
+        return {'jobId': value, 'jobSession': PROCESS_SESSION, 'status': 'pending'}, 202
 
 
 @api_ns_editor.route('editor/info')

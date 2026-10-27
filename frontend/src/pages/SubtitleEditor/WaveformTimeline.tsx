@@ -93,6 +93,7 @@ export default function WaveformTimeline({
   // editor then waits for that job's terminal event on the jobs socket and
   // asks again, instead of holding a request open while ffmpeg runs.
   const [peaksJobId, setPeaksJobId] = useState<number | null>(null);
+  const [peaksJobSession, setPeaksJobSession] = useState<string | undefined>();
   const [waveformError, setWaveformError] = useState("");
   const peaksAttempts = useRef(0);
   const peaksGeneration = useRef(0);
@@ -114,10 +115,14 @@ export default function WaveformTimeline({
     fetch(peaksUrl, { headers: { "X-API-KEY": apiKey } })
       .then(async (r) => {
         if (r.status === 202) {
-          const body = (await r.json()) as { jobId?: number };
+          const body = (await r.json()) as {
+            jobId?: number;
+            jobSession?: string;
+          };
           if (generation !== peaksGeneration.current) return;
           if (body?.jobId) {
             setPeaksJobId(body.jobId);
+            setPeaksJobSession(body.jobSession);
           } else {
             setLoading(false);
           }
@@ -137,7 +142,7 @@ export default function WaveformTimeline({
       });
   }, [peaksUrl, apiKey]);
 
-  const peaksJob = useEditorJob(peaksJobId);
+  const peaksJob = useEditorJob(peaksJobId, peaksJobSession);
   const peaksJobFinished = isTerminalJob(peaksJob);
   const peaksJobStatus = peaksJob?.status;
   const peaksJobMessage = peaksJob?.error?.message;
