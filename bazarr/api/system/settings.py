@@ -44,11 +44,16 @@ def _settings_key_is_malformed(key):
     through the settings library, which strips whitespace and reads dots and
     double underscores as nesting. A key spelled that way would land on a
     setting under a name the checks below do not know, so it is refused.
+    Field names below the section are plain mapping keys, where a double
+    underscore is legal (a plugin's config field may carry one), so only the
+    section is held to that; no segment may be empty, padded or dotted.
     """
     segments = str(key).split('-')
     if segments[0].strip().lower() != 'settings':
         return False
-    return any(not segment or segment != segment.strip() or '.' in segment or '__' in segment
+    if len(segments) > 1 and '__' in segments[1]:
+        return True
+    return any(not segment or segment != segment.strip() or '.' in segment
                for segment in segments[1:])
 
 

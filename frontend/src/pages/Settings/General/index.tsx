@@ -43,14 +43,10 @@ import RunSetupAgain from "./RunSetupAgain";
 // Auth password input that NEVER displays the stored value.
 //
 // At rest, settings.auth.password holds a one-way hash (PBKDF2 since the
-// post-md5 migration). Pre-populating the input with that hash would
-// either reveal it via the eye toggle (useless to the user, but harmful
-// in screen-shares / support bundles) or, on submit, round-trip the hash
-// back to the backend. save_settings's `value != settings.auth.password`
-// check would catch that exact case - but ONLY when the value sent in
-// matches the stored hash byte-for-byte, which fails the moment a hash
-// is encrypted-then-decrypted across a single character. So we never
-// read the stored value into the input at all.
+// post-md5 migration), and the settings read hands out a mask ("***") in
+// its place, never the hash. Pre-populating the input with the mask would
+// show a fake password and, on submit, send the mask as if it were typed.
+// So we never read the stored value into the input at all.
 //
 // State machine:
 // - User loads page: input empty, draft="", touched=false. No setValue
@@ -68,10 +64,10 @@ import RunSetupAgain from "./RunSetupAgain";
 // staged form value, which becomes whatever update() last set it to.
 // After typing "newpw", a fresh `stored` read returns "newpw", so a
 // fall-back to `stored` on clear would re-stage the new password
-// instead of the original hash - silently saving the typed-then-
+// instead of the loaded value - silently saving the typed-then-
 // cancelled password. The ref captures the value
 // once on first render (before any user interaction can stage anything)
-// and stays pinned to the loaded hash for the lifetime of the
+// and stays pinned to the loaded mask for the lifetime of the
 // component.
 const AuthPasswordInput: FunctionComponent = () => {
   const { value: stored, update } = useBaseInput<
@@ -105,7 +101,7 @@ const AuthPasswordInput: FunctionComponent = () => {
           update(next);
         } else if (touched) {
           // originalRef.current is "" when no password was configured at
-          // load, or the original hash otherwise. Coalesce to "" as
+          // load, or the mask otherwise. Coalesce to "" as
           // belt-and-suspenders: NEVER hand a null to update() here, or
           // FormData turns it into the literal string "null" downstream.
           update(originalRef.current ?? "");

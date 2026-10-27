@@ -953,3 +953,16 @@ def test_a_confirmation_that_names_no_username_checks_the_configured_account(mon
     assert right.status_code == 204
     with client.session_transaction() as sess:
         assert sess[CONFIRM_KEY] > time.time()
+
+
+@pytest.mark.parametrize('key', ['settings-myplugin-api__key', 'settings-myplugin-__secret_fields'])
+def test_a_double_underscore_below_the_section_is_still_a_valid_settings_key(key, monkeypatch, settings_saves):
+    # A plugin's config field may carry a double underscore; only the section
+    # goes through the settings library's nesting rules.
+    _auth(monkeypatch)
+    client = _client()
+
+    response = _settings_save(client, {key: 'value'})
+
+    assert response.status_code == 204
+    assert settings_saves == [{key: ['value']}]
