@@ -149,19 +149,39 @@ def transport(monkeypatch, engine, phase="complete", during=None):
             )
         payload = kwargs["json"]
         assert "arrMediaId" not in payload and "mediaType" not in payload
-        if "/jobs/" in url:
-            return SimpleNamespace(status_code=404)
+        if engine != "openrouter":
+            raise AssertionError(f"Unexpected POST for {engine}: {url}")
+        assert url.endswith("/api/v1/jobs/translate/content")
         if phase == "fail":
             return SimpleNamespace(status_code=400, text="fixture failure")
+        return SimpleNamespace(status_code=200, json=lambda: {"jobId": "fixture-job"})
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        if url.endswith("/health"):
+            return SimpleNamespace(status_code=404)
+        assert engine == "openrouter", f"Unexpected GET for {engine}: {url}"
+        assert url.endswith("/api/v1/jobs/fixture-job")
+        if phase == "fail":
+            status, error = "failed", "fixture failure"
+        elif phase == "partial":
+            status, error = "partial", "fixture partial failure"
+        else:
+            status, error = "completed", None
         return SimpleNamespace(
             status_code=200,
             json=lambda: {
-                "lines": [
-                    {"position": i, "line": "A végső kör."}
-                    for i in range(
-                        0 if phase == "empty" else 1 if phase == "partial" else 2
-                    )
-                ]
+                "status": status,
+                "progress": 100,
+                "error": error,
+                "result": {
+                    "lines": [
+                        {"position": i, "line": "A végső kör."}
+                        for i in range(
+                            0 if phase == "empty" else 1 if phase == "partial" else 2
+                        )
+                    ]
+                },
             },
         )
 
@@ -213,6 +233,7 @@ def transport(monkeypatch, engine, phase="complete", during=None):
         return SimpleNamespace(text=json.dumps(response), raise_for_status=lambda: None)
 
     monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(requests, "get", get)
     monkeypatch.setattr(requests, "request", gemini)
     monkeypatch.setattr(google_translator.GoogleTranslator, "translate", google)
     return calls

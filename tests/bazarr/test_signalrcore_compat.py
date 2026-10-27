@@ -76,3 +76,26 @@ def test_signalr_connection_builder_forces_json_protocol_version_one():
 
     assert protocol.protocol == "json"
     assert protocol.version == 1
+
+
+def test_signalrcore_reconnect_transitions_fire_lost_then_open_callbacks():
+    patch_signalrcore_stop()
+    transport = _make_transport(state=TransportState.connecting)
+
+    transport._set_state(TransportState.connected)
+    transport._on_open.assert_called_once()
+    transport._on_reconnect.assert_not_called()
+
+    # Entering reconnecting (and the duplicate _set_state inside
+    # start(reconnection=True)) notifies on_reconnect once.
+    transport._set_state(TransportState.reconnecting)
+    transport._set_state(TransportState.reconnecting)
+    transport._on_reconnect.assert_called_once()
+    assert transport._on_open.call_count == 1
+
+    # Finishing the reconnect handshake notifies on_open so the client marks
+    # the feed connected again instead of firing on_reconnect a second time.
+    transport._set_state(TransportState.connected)
+    assert transport._on_open.call_count == 2
+    assert transport._on_reconnect.call_count == 1
+    transport._on_close.assert_not_called()

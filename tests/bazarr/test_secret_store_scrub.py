@@ -24,6 +24,8 @@ ANOTHER_FAKE_KEY = "another-fake-value-9876"  # pragma: allowlist secret
 GOOGLE_KEY = "AIza" + "0123456789abcdefghijklmnopqrstuvwxy"  # pragma: allowlist secret
 OPENROUTER_KEY = "sk-or-v1-" + "0123456789abcdef" * 4  # pragma: allowlist secret
 BEARER_TOKEN = "fake-bearer-token-9876"  # pragma: allowlist secret
+STORED_CIPHERTEXT = SECRET_MARKER_PREFIX + "gAAAAAB" + "A" * 64  # pragma: allowlist secret
+SUBMITTED_CIPHERTEXT = "enc:" + "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="  # pragma: allowlist secret
 
 MANIFEST = {
     "secret_fields": ["api_key"],
@@ -58,6 +60,16 @@ def test_a_goog_api_key_header_is_masked_and_its_name_is_kept():
 def test_a_key_carried_without_a_label_is_masked_anyway():
     assert scrub_text(f"400 Bad Request for key {GOOGLE_KEY}") == "400 Bad Request for key ***"
     assert scrub_text(f"OpenRouter says {OPENROUTER_KEY} is invalid") == "OpenRouter says *** is invalid"
+
+
+def test_ciphertext_is_masked_in_both_the_stored_and_submitted_forms():
+    assert scrub_text(f"stored value {STORED_CIPHERTEXT} was echoed") == "stored value *** was echoed"
+    assert scrub_text(f"request carried {SUBMITTED_CIPHERTEXT}") == "request carried ***"
+
+
+def test_a_bare_ciphertext_marker_is_left_alone():
+    line = "values at rest carry the enc:v1: marker"
+    assert scrub_text(line) == line
 
 
 def test_ordinary_text_comes_back_unchanged():

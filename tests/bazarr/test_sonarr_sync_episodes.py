@@ -496,6 +496,342 @@ def test_an_unscoped_empty_episode_list_with_no_default_skips(schema_session, mo
         "the ambiguity was not reported")
 
 
+@pytest.mark.parametrize('answer', ['empty', 'non-empty'])
+def test_a_default_episode_sync_leaves_another_instances_rows_alone(
+        schema_session, monkeypatch, answer):
+    """A call without an instance is the default instance's sync, not an
+    unscoped one.
+
+    A multi-instance install can hold the same upstream series id under two
+    instances, and upstream episode ids collide across them as well. When the
+    default path left the scope unset, the current-rows read collected the
+    other instance's episodes of this series, so the stale-row delete (on a
+    non-empty answer) or the series-wide delete (on an empty one) removed
+    them. The update in the same loop was unscoped too, so an episode id the
+    two instances share rewrote and re-homed the other instance's row. Every
+    read, delete, update and mismatch cleanup is confined to the default
+    instance that owns a default call's rows.
+    """
+    import semver
+    from types import SimpleNamespace
+
+    import sonarr.sync.episodes as episodes_mod
+    from app.database import TableArrInstances, TableEpisodes
+
+    schema_session.add_all([
+        TableArrInstances(
+            id=8, kind='sonarr', stable_key='sonarr-default', name='Sonarr',
+            enabled=1, is_default=1, ip='127.0.0.1', port=8989, base_url='/', ssl=0,
+            verify_ssl=0, http_timeout=60, api_key='k'),
+        TableArrInstances(
+            id=2, kind='sonarr', stable_key='sonarr-4k', name='Sonarr 4K',
+            enabled=1, is_default=0, ip='127.0.0.1', port=8990, base_url='/', ssl=0,
+            verify_ssl=0, http_timeout=60, api_key='k'),
+    ])
+    schema_session.flush()
+    schema_session.add_all([
+        TableEpisodes(
+            id=704, series_id=None, sonarrEpisodeId=45, sonarrSeriesId=7,
+            arr_instance_id=8, path="/series/default/s01e01.mkv", title="Default keep",
+            season=1, episode=1, monitored="True", subtitles="[]"),
+        TableEpisodes(
+            id=705, series_id=None, sonarrEpisodeId=46, sonarrSeriesId=7,
+            arr_instance_id=8, path="/series/default/s01e02.mkv", title="Default stale",
+            season=1, episode=2, monitored="True", subtitles="[]"),
+        TableEpisodes(
+            id=706, series_id=None, sonarrEpisodeId=46, sonarrSeriesId=7,
+            arr_instance_id=2, path="/series/other/s01e02.mkv", title="Other keep 2",
+            season=1, episode=2, monitored="True", subtitles="[]"),
+        TableEpisodes(
+            id=707, series_id=None, sonarrEpisodeId=45, sonarrSeriesId=7,
+            arr_instance_id=2, path="/series/other/s01e01.mkv", title="Other keep 1",
+            season=1, episode=1, monitored="True", subtitles="[]"),
+    ])
+    schema_session.flush()
+
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'apikey', 'x', raising=False)
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'sync_only_monitored_series', False,
+                        raising=False)
+    monkeypatch.setattr(episodes_mod, 'database', schema_session)
+    monkeypatch.setattr(episodes_mod, 'get_sonarr_info',
+                        SimpleNamespace(semver=lambda: semver.Version(*(4, 0, 9, 2421))))
+    monkeypatch.setattr(episodes_mod, 'store_subtitles', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod, 'event_stream', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod, 'episodeParser', lambda episode, **kw: {
+        "sonarrSeriesId": 7, "sonarrEpisodeId": episode['id'],
+        "path": episode['episodeFile']['path'], "season": 1, "episode": 1,
+        "title": "Default renamed", "monitored": "True",
+        "episode_file_id": episode['episodeFileId'],
+        "format": "WEB-DL", "resolution": "1080p", "video_codec": "h264",
+        "audio_codec": "aac", "audio_language": "eng", "file_size": 999999,
+        "sceneName": None, "absoluteEpisode": 1, "tvdbId": None})
+    forget_calls = []
+
+    def _forget(media_type, upstream_ids, arr_instance_id=None, series_upstream_id=None):
+        forget_calls.append((media_type, upstream_ids, arr_instance_id, series_upstream_id))
+
+    monkeypatch.setattr(episodes_mod, 'forget_media_by_upstream', _forget)
+
+    episodes_data = [] if answer == 'empty' else [
+        {"id": 45, "hasFile": True, "monitored": True, "episodeFileId": 100,
+         "episodeFile": {"size": 999999, "path": "/series/default/s01e01-renamed.mkv"}}]
+
+    # No arr_instance_id: the every-default path, which used to stay unscoped.
+    episodes_mod.sync_episodes(7, episodes_data=episodes_data, defer_search=True)
+
+    from sqlalchemy import select
+    remaining = sorted(schema_session.execute(
+        select(TableEpisodes.id)).scalars().all())
+
+    assert remaining == ([706, 707] if answer == 'empty' else [704, 706, 707]), (
+        f"the default sync of an {answer} answer deleted another instance's rows")
+    other_instance_row = schema_session.execute(
+        select(TableEpisodes.arr_instance_id, TableEpisodes.path, TableEpisodes.title)
+        .where(TableEpisodes.id == 707)).first()
+    assert (other_instance_row.arr_instance_id, other_instance_row.path,
+            other_instance_row.title) == (
+        2, "/series/other/s01e01.mkv", "Other keep 1"), (
+        "the default sync rewrote and re-homed another instance's episode row")
+    if answer == 'non-empty':
+        default_row = schema_session.execute(
+            select(TableEpisodes.arr_instance_id, TableEpisodes.path, TableEpisodes.title)
+            .where(TableEpisodes.id == 704)).first()
+        assert (default_row.arr_instance_id, default_row.path,
+                default_row.title) == (
+            8, "/series/default/s01e01-renamed.mkv", "Default renamed"), (
+            "the default sync did not update its own colliding row")
+    assert forget_calls == ([('series', [], 8, 7)] if answer == 'empty'
+                            else [('series', [46], 8, None)]), (
+        "the mismatch cleanup was not confined to the default instance")
+
+
+def test_an_unscoped_sync_with_no_default_skips_a_non_empty_answer(schema_session, monkeypatch,
+                                                                   caplog):
+    """Saved instances without an enabled default name no owner, so a sync
+    that names none must skip even when Sonarr answers a non-empty list.
+
+    The non-empty path used to fall through to the unscoped stale-row delete,
+    which removed whichever instance's episode rows happened to share the
+    upstream series id. Skipping leaves every row as it is. A pre-backfill
+    install has no instances at all and keeps the legacy unscoped behaviour,
+    covered by the tests whose databases have no instance rows.
+    """
+    import logging
+
+    import sonarr.sync.episodes as episodes_mod
+    from app.database import TableArrInstances, TableEpisodes
+
+    schema_session.add(TableArrInstances(
+        id=2, kind='sonarr', stable_key='sonarr-other', name='Sonarr 4K',
+        enabled=1, is_default=0, ip='127.0.0.1', port=8990, base_url='/', ssl=0,
+        verify_ssl=0, http_timeout=60, api_key='k'))
+    schema_session.flush()
+    schema_session.add(TableEpisodes(
+        id=704, series_id=None, sonarrEpisodeId=46, sonarrSeriesId=7,
+        arr_instance_id=2, path="/series/other/s01e02.mkv", title="Kept",
+        season=1, episode=2, monitored="True", subtitles="[]"))
+
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'apikey', 'x', raising=False)
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'sync_only_monitored_series', False,
+                        raising=False)
+    monkeypatch.setattr(episodes_mod, 'database', schema_session)
+    monkeypatch.setattr(episodes_mod, 'sonarr_series_owner', lambda *a, **kw: (None, None))
+    monkeypatch.setattr(episodes_mod, 'forget_media_by_upstream', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod, 'event_stream', lambda *a, **kw: None)
+
+    with caplog.at_level(logging.WARNING):
+        result = episodes_mod.sync_episodes(7, episodes_data=[
+            {"id": 45, "hasFile": True, "monitored": True, "episodeFileId": 100,
+             "episodeFile": {"size": 999999, "path": "/series/default/s01e01.mkv"}}])
+
+    from sqlalchemy import select
+    remaining = sorted(schema_session.execute(
+        select(TableEpisodes.id)).scalars().all())
+
+    assert result is episodes_mod.SYNC_SKIPPED_UNREADABLE_EPISODE_FILES, (
+        "an unattributable sync ran instead of skipping")
+    assert remaining == [704], (
+        "an unscoped sync without a default instance deleted another "
+        "instance's rows")
+    assert "no enabled default Sonarr instance" in caplog.text, (
+        "the ambiguity was not reported")
+
+
+def test_a_default_single_episode_sync_leaves_another_instances_row_alone(
+        schema_session, monkeypatch):
+    """The single-episode entry point has the same default-path hazard.
+
+    Its row lookup, update and delete key on the upstream episode id alone, so
+    with the scope unset an event for the default instance rewrote another
+    instance's row that happens to share that id. Resolving the default before
+    the lookup confines the writes to the default instance and inserts its own
+    row instead.
+    """
+    import sonarr.sync.episodes as episodes_mod
+    from app.database import TableArrInstances, TableEpisodes
+
+    schema_session.add_all([
+        TableArrInstances(
+            id=8, kind='sonarr', stable_key='sonarr-default', name='Sonarr',
+            enabled=1, is_default=1, ip='127.0.0.1', port=8989, base_url='/', ssl=0,
+            verify_ssl=0, http_timeout=60, api_key='k'),
+        TableArrInstances(
+            id=2, kind='sonarr', stable_key='sonarr-4k', name='Sonarr 4K',
+            enabled=1, is_default=0, ip='127.0.0.1', port=8990, base_url='/', ssl=0,
+            verify_ssl=0, http_timeout=60, api_key='k'),
+    ])
+    schema_session.flush()
+    schema_session.add(TableEpisodes(
+        id=707, series_id=None, sonarrEpisodeId=45, sonarrSeriesId=7,
+        arr_instance_id=2, path="/series/other/s01e01.mkv", title="Other keep",
+        season=1, episode=1, monitored="True", subtitles="[]"))
+    schema_session.flush()
+
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'apikey', 'x', raising=False)
+    monkeypatch.setattr(episodes_mod, 'database', schema_session)
+    monkeypatch.setattr(episodes_mod, 'store_subtitles', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod, 'event_stream', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod, 'get_episodesFiles_from_sonarr_api',
+                        lambda **kw: {"size": 999999,
+                                      "path": "/series/default/s01e01.mkv"})
+    monkeypatch.setattr(episodes_mod, 'get_episodes_from_sonarr_api', lambda **kw: {
+        "id": 45, "seriesId": 7, "hasFile": True, "episodeFileId": 100,
+        "episodeFile": {"size": 999999, "path": "/series/default/s01e01.mkv"}})
+    monkeypatch.setattr(episodes_mod, 'episodeParser', lambda episode, **kw: {
+        "sonarrSeriesId": 7, "sonarrEpisodeId": 45,
+        "path": "/series/default/s01e01.mkv", "season": 1, "episode": 1,
+        "title": "Default", "monitored": "True"})
+
+    episodes_mod.sync_one_episode(45, defer_search=True)
+
+    from sqlalchemy import select
+    rows = schema_session.execute(
+        select(TableEpisodes.arr_instance_id, TableEpisodes.path)
+        .where(TableEpisodes.sonarrEpisodeId == 45)
+        .order_by(TableEpisodes.arr_instance_id)).all()
+
+    assert [(row.arr_instance_id, row.path) for row in rows] == [
+        (2, "/series/other/s01e01.mkv"),
+        (8, "/series/default/s01e01.mkv")], (
+        "the default single-episode sync rewrote or moved another instance's row")
+
+
+def test_a_default_disabled_between_reads_keeps_the_validated_owner(
+        schema_session, monkeypatch):
+    """A default disabled between the guard and the row lookup must not make
+    the sync unscoped.
+
+    The guard and the scoping read used to resolve the default separately. If
+    the last enabled default was disabled between those reads, the second read
+    returned None and every scoped() call became a no-op, so an event for the
+    default instance could rewrite another instance's row that shared the
+    upstream episode id. Resolve once and keep the validated owner.
+    """
+    import arr_instances.resolution as resolution
+    import sonarr.sync.episodes as episodes_mod
+    from app.database import TableArrInstances, TableEpisodes
+
+    schema_session.add_all([
+        TableArrInstances(
+            id=8, kind='sonarr', stable_key='sonarr-default', name='Sonarr',
+            enabled=1, is_default=1, ip='127.0.0.1', port=8989, base_url='/', ssl=0,
+            verify_ssl=0, http_timeout=60, api_key='k'),
+        TableArrInstances(
+            id=2, kind='sonarr', stable_key='sonarr-4k', name='Sonarr 4K',
+            enabled=1, is_default=0, ip='127.0.0.1', port=8990, base_url='/', ssl=0,
+            verify_ssl=0, http_timeout=60, api_key='k'),
+    ])
+    schema_session.flush()
+    schema_session.add(TableEpisodes(
+        id=707, series_id=None, sonarrEpisodeId=45, sonarrSeriesId=7,
+        arr_instance_id=2, path="/series/other/s01e01.mkv", title="Other keep",
+        season=1, episode=1, monitored="True", subtitles="[]"))
+    schema_session.flush()
+
+    calls = []
+
+    def _disappearing_default(session, kind):
+        calls.append(kind)
+        return 8 if len(calls) == 1 else None
+
+    monkeypatch.setattr(resolution, 'default_instance_id', _disappearing_default)
+    monkeypatch.setattr(episodes_mod, 'default_instance_id', _disappearing_default)
+    monkeypatch.setattr(episodes_mod, 'sonarr_series_owner', lambda *a, **kw: (8, None))
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'apikey', 'x', raising=False)
+    monkeypatch.setattr(episodes_mod, 'database', schema_session)
+    monkeypatch.setattr(episodes_mod, 'store_subtitles', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod, 'event_stream', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod, 'get_episodesFiles_from_sonarr_api',
+                        lambda **kw: {"size": 999999,
+                                      "path": "/series/default/s01e01.mkv"})
+    monkeypatch.setattr(episodes_mod, 'get_episodes_from_sonarr_api', lambda **kw: {
+        "id": 45, "seriesId": 7, "hasFile": True, "episodeFileId": 100,
+        "episodeFile": {"size": 999999, "path": "/series/default/s01e01.mkv"}})
+    monkeypatch.setattr(episodes_mod, 'episodeParser', lambda episode, **kw: {
+        "sonarrSeriesId": 7, "sonarrEpisodeId": 45,
+        "path": "/series/default/s01e01.mkv", "season": 1, "episode": 1,
+        "title": "Default", "monitored": "True"})
+
+    episodes_mod.sync_one_episode(45, defer_search=True)
+
+    from sqlalchemy import select
+    rows = schema_session.execute(
+        select(TableEpisodes.arr_instance_id, TableEpisodes.path)
+        .where(TableEpisodes.sonarrEpisodeId == 45)
+        .order_by(TableEpisodes.arr_instance_id)).all()
+
+    assert len(calls) == 1, "the default was resolved more than once"
+    assert [(row.arr_instance_id, row.path) for row in rows] == [
+        (2, "/series/other/s01e01.mkv"),
+        (8, "/series/default/s01e01.mkv")], (
+        "a default disabled between reads turned the sync unscoped and "
+        "rewrote another instance's row")
+
+
+def test_the_missing_subtitle_gate_reads_only_the_given_instance(
+        schema_session, monkeypatch):
+    """The gate that decides whether a sync queues a search reads the episode
+    rows of the instance being synced. Upstream episode ids collide across
+    instances, so an unscoped read could queue (or skip) a search from another
+    instance's row for the same id.
+    """
+    import sonarr.sync.episodes as episodes_mod
+    from app.database import TableEpisodes, TableShows
+
+    schema_session.add_all([
+        TableShows(id=70, sonarrSeriesId=7, arr_instance_id=8, path="/series/default",
+                   title="Default", audio_language="[]"),
+        TableShows(id=71, sonarrSeriesId=7, arr_instance_id=2, path="/series/other",
+                   title="Other", audio_language="[]"),
+    ])
+    schema_session.flush()
+    schema_session.add_all([
+        TableEpisodes(
+            id=704, series_id=70, sonarrEpisodeId=45, sonarrSeriesId=7,
+            arr_instance_id=8, path="/series/default/s01e01.mkv", title="Default",
+            season=1, episode=1, monitored="True", subtitles="[]", missing_subtitles="[]"),
+        TableEpisodes(
+            id=707, series_id=71, sonarrEpisodeId=45, sonarrSeriesId=7,
+            arr_instance_id=2, path="/series/other/s01e01.mkv", title="Other",
+            season=1, episode=1, monitored="True", subtitles="[]",
+            missing_subtitles='["en"]'),
+    ])
+    schema_session.flush()
+
+    monkeypatch.setattr(episodes_mod, 'database', schema_session)
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'only_monitored', False, raising=False)
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'excluded_tags', [], raising=False)
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'excluded_series_types', [], raising=False)
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'exclude_season_zero', False, raising=False)
+
+    assert episodes_mod._is_there_missing_subtitles(
+        episode_id=45, arr_instance_id=8) is False, (
+        "the gate saw another instance's missing subtitles for the same episode id")
+    assert episodes_mod._is_there_missing_subtitles(
+        episode_id=45, arr_instance_id=2) is True, (
+        "the gate missed the owning instance's missing subtitles")
+
+
 def test_the_episode_fetch_helper_answers_none_for_failures(monkeypatch):
     """Every failure path of the episode fetch must answer None, never an
     empty list: the sync trusts [] as a real answer and deletes with it.
