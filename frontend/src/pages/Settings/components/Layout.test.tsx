@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import App from "@/App";
 import { latestWhatsNewVersion } from "@/data/whatsNew";
+import RunSetupAgain from "@/pages/Settings/General/RunSetupAgain";
 import { useFormActions } from "@/pages/Settings/utilities/FormValues";
 import { AllProviders } from "@/providers";
 import { act, customRender, rawRender, screen, waitFor } from "@/tests";
@@ -108,6 +109,65 @@ describe("Settings layout", () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByLabelText("1 unsaved change")).toHaveTextContent("1");
+  });
+
+  it("tells the page's own actions that edits are pending", async () => {
+    // Run first-time setup writes a flag and then navigates, and the prompt
+    // this layout raises can stop that navigation, so the control has to know
+    // before it writes.
+    customRender(
+      <Layout name="Test Settings">
+        <StageChangeButton />
+        <RunSetupAgain />
+      </Layout>,
+    );
+    const run = () =>
+      screen.getByRole("button", { name: /run first-time setup/i });
+    expect(run()).not.toHaveAttribute("aria-disabled");
+
+    await userEvent.click(screen.getByRole("button", { name: "Stage change" }));
+
+    await waitFor(() => expect(run()).toHaveAttribute("aria-disabled", "true"));
+    expect(run()).toHaveAccessibleDescription(/save or discard/i);
+  });
+
+  it("names the refresh retry, not unsaved edits, when only a failed refresh is pending", async () => {
+    // A save kept after its application refresh failed leaves nothing staged,
+    // so telling the reader to save or discard edits pointed at nothing. The
+    // one thing that clears it is the Retry refresh button.
+    cleanNotifications();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { theme: "auto" } }),
+      ),
+      http.post("/api/system/settings", () =>
+        HttpResponse.json(
+          {
+            code: "discover_settings_refresh_failed",
+            message: "Settings were saved, but application refresh failed.",
+          },
+          { status: 503 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <Layout name="Test Settings">
+        <StageChangeButton />
+        <RunSetupAgain />
+      </Layout>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Stage change" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Save 1 pending change" }),
+    );
+    await screen.findByRole("button", { name: "Retry application refresh" });
+
+    const run = screen.getByRole("button", { name: /run first-time setup/i });
+    expect(run).toHaveAttribute("aria-disabled", "true");
+    expect(run).toHaveAccessibleDescription(/retry the application refresh/i);
+    expect(run).not.toHaveAccessibleDescription(/unsaved changes/i);
   });
 
   it("commits the focused field before a keyboard save submits", async () => {

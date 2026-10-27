@@ -247,8 +247,14 @@ export const OnboardingSelectionProvider: FunctionComponent<
   const removeKind = useCallback(
     (kind: MediaServerKind) => {
       commit((current) =>
+        // A draft that has written its row, whether or not it has been marked
+        // saved yet, is not a tick any more: dropping it forgot a server that
+        // exists, and ticking the kind again minted a second one.
         current.filter(
-          (draft) => draft.kind !== kind || draft.instanceId !== undefined,
+          (draft) =>
+            draft.kind !== kind ||
+            draft.instanceId !== undefined ||
+            draft.savedInstanceId !== undefined,
         ),
       );
     },

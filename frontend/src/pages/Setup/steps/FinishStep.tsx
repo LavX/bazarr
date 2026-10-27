@@ -37,6 +37,7 @@ import {
   useOnboardingIntent,
 } from "@/pages/Setup/useOnboardingIntent";
 import { clearPersistedSelection } from "@/pages/Setup/useOnboardingSelection";
+import { clearPersistedSkips } from "@/pages/Setup/useSkippedSteps";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { clearPersistedStep } from "@/pages/Setup/useWizardStep";
 import type { WizardStepProps } from "./types";
@@ -337,6 +338,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
           clearPersistedIntent();
           clearPersistedSelection();
           clearPersistedConnectionTests();
+          clearPersistedSkips();
           // The Redirector picks routing back up once setup is marked
           // complete. A Discover user goes straight to the page they came for.
           navigate(discoverPath ? "/discover" : "/");

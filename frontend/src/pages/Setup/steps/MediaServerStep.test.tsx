@@ -5,8 +5,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
 import type { MediaServerKind } from "@/apis/raw/mediaServers";
 import { recordConnectionTest } from "@/pages/Setup/connectionTests";
-import { OnboardingSelectionProvider } from "@/pages/Setup/useOnboardingSelection";
-import { customRender, screen, waitFor } from "@/tests";
+import { writeOnboardingValue } from "@/pages/Setup/onboardingStorage";
+import {
+  OnboardingSelectionProvider,
+  useOnboardingSelection,
+} from "@/pages/Setup/useOnboardingSelection";
+import { act, customRender, renderHook, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import MediaServerStep from "./MediaServerStep";
 
@@ -85,6 +89,14 @@ function setPlexOwner(instanceId: string) {
   setSettings({}, instanceId);
 }
 
+// The picker holds a card until its kind's list has answered, so a tick waits
+// for the card to be live instead of racing the first request.
+async function tick(user: ReturnType<typeof userEvent.setup>, name: RegExp) {
+  const box = screen.getByRole("checkbox", { name });
+  await waitFor(() => expect(box).toBeEnabled());
+  await user.click(box);
+}
+
 function withSelection(ui: ReactElement) {
   return customRender(
     <OnboardingSelectionProvider>{ui}</OnboardingSelectionProvider>,
@@ -140,6 +152,11 @@ describe("MediaServerStep", () => {
     // the card did nothing when clicked.
     const user = userEvent.setup();
     withSelection(<MediaServerStep onNext={onNext} />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", { name: /^Jellyfin$/ }),
+      ).toBeEnabled(),
+    );
 
     await user.click(
       screen.getByText("Connect with the server URL and an API key."),
@@ -152,8 +169,8 @@ describe("MediaServerStep", () => {
     const user = userEvent.setup();
     withSelection(<MediaServerStep onNext={onNext} />);
 
-    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
-    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await tick(user, /^Jellyfin$/);
+    await tick(user, /^Emby$/);
 
     expect(screen.getByRole("checkbox", { name: /^Jellyfin$/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /^Emby$/ })).toBeChecked();
@@ -169,7 +186,7 @@ describe("MediaServerStep", () => {
     const user = userEvent.setup();
     withSelection(<MediaServerStep onNext={onNext} />);
 
-    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await tick(user, /^Emby$/);
     await user.click(screen.getByRole("button", { name: /add another emby/i }));
 
     expect(
@@ -190,7 +207,7 @@ describe("MediaServerStep", () => {
     const user = userEvent.setup();
     withSelection(<MediaServerStep onNext={onNext} />);
 
-    await user.click(screen.getByRole("checkbox", { name: /^Plex$/ }));
+    await tick(user, /^Plex$/);
 
     expect(
       screen.queryByRole("button", { name: /add another plex/i }),
@@ -200,7 +217,7 @@ describe("MediaServerStep", () => {
     ).toBeInTheDocument();
 
     // Every other kind still takes as many as the reader wants.
-    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await tick(user, /^Emby$/);
     expect(
       screen.getByRole("button", { name: /add another emby/i }),
     ).toBeInTheDocument();
@@ -486,13 +503,13 @@ describe("MediaServerStep", () => {
     const user = userEvent.setup();
     withSelection(<MediaServerStep onNext={onNext} />);
 
-    await user.click(screen.getByRole("checkbox", { name: /^Silo$/ }));
+    await tick(user, /^Silo$/);
     expect(screen.getByText("1 to set up")).toBeInTheDocument();
     // One pending server needs no Remove of its own: unticking the card is
     // how it is undone, and a second control for the same thing is noise.
     expect(screen.queryByRole("button", { name: "Remove Silo" })).toBeNull();
 
-    await user.click(screen.getByRole("checkbox", { name: /^Silo$/ }));
+    await tick(user, /^Silo$/);
 
     expect(screen.queryByText("1 to set up")).toBeNull();
     expect(
@@ -560,6 +577,135 @@ describe("MediaServerStep", () => {
     await waitFor(() => expect(deleted).toEqual(["row-1"]));
     expect(mutate).toHaveBeenCalledWith({
       "settings-general-use_emby": false,
+    });
+  });
+
+  describe("before the instance lists settle", () => {
+    it("holds a kind's card until its list has answered", async () => {
+      // Pending data read as "nothing connected", so a tick inside the first
+      // round trip minted a draft for a kind that already had a row, and the
+      // arrival of the real list left it standing.
+      let release: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      server.use(
+        http.get("/api/system/media-server-instances", async ({ request }) => {
+          const kind = new URL(request.url).searchParams.get("kind");
+          if (kind === "jellyfin") {
+            await held;
+            return HttpResponse.json({
+              data: [row("jellyfin", "Den", "jf-1")],
+            });
+          }
+          return HttpResponse.json({ data: [] });
+        }),
+      );
+      const user = userEvent.setup();
+      withSelection(<MediaServerStep onNext={onNext} />);
+
+      const jellyfin = screen.getByRole("checkbox", { name: /^Jellyfin$/ });
+      expect(jellyfin).toBeDisabled();
+      await user.click(jellyfin);
+      expect(jellyfin).not.toBeChecked();
+
+      release?.();
+
+      // The row arrived: the card reads as connected and locked, and no
+      // pending draft was minted on the way.
+      expect(await screen.findByText("Den")).toBeInTheDocument();
+      expect(
+        screen.getByRole("checkbox", { name: /^Jellyfin$/ }),
+      ).toBeChecked();
+      expect(
+        screen.getByRole("button", { name: /continue without a server/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("lets a kind through once its list answers empty", async () => {
+      withSelection(<MediaServerStep onNext={onNext} />);
+
+      await waitFor(() =>
+        expect(
+          screen.getByRole("checkbox", { name: /^Jellyfin$/ }),
+        ).toBeEnabled(),
+      );
+    });
+
+    it("lets a kind through when its list fails to load", async () => {
+      server.use(
+        http.get("/api/system/media-server-instances", () =>
+          HttpResponse.json({ error: "down" }, { status: 500 }),
+        ),
+      );
+      withSelection(<MediaServerStep onNext={onNext} />);
+
+      await waitFor(() =>
+        expect(
+          screen.getByRole("checkbox", { name: /^Jellyfin$/ }),
+        ).toBeEnabled(),
+      );
+    });
+  });
+
+  describe("a draft whose row is already written", () => {
+    // The create landed and the kind's master switch did not, so the draft
+    // holds the new row under savedInstanceId and has no instanceId yet. The
+    // instance list has not refetched, so the picker has no row to show.
+    const writtenDraft = {
+      draftId: "draft-1",
+      kind: "jellyfin",
+      name: "Jellyfin",
+      url: "http://10.0.0.9:8096",
+      verifySsl: true,
+      pathMappings: [],
+      options: {},
+      savedInstanceId: "jf-1",
+      switchFailed: true,
+    };
+
+    beforeEach(() => {
+      writeOnboardingValue("media-servers", JSON.stringify([writtenDraft]));
+    });
+
+    it("shows the kind ticked and locked, so it cannot be unticked", async () => {
+      const user = userEvent.setup();
+      withSelection(<MediaServerStep onNext={onNext} />);
+
+      const jellyfin = await screen.findByRole("checkbox", {
+        name: /^Jellyfin$/,
+      });
+      await waitFor(() => expect(jellyfin).toBeChecked());
+      expect(jellyfin).toBeDisabled();
+
+      await user.click(jellyfin);
+      expect(jellyfin).toBeChecked();
+    });
+
+    it("does not offer to set up a server the row already is", async () => {
+      withSelection(<MediaServerStep onNext={onNext} />);
+
+      await waitFor(() =>
+        expect(
+          screen.getByRole("checkbox", { name: /^Jellyfin$/ }),
+        ).toBeChecked(),
+      );
+      // Its step is still to be walked, which the Continue label counts, but
+      // the card does not list the written row as one more thing to set up.
+      expect(screen.queryByText(/to set up/i)).toBeNull();
+      expect(screen.getByText(/1 saved/i)).toBeInTheDocument();
+    });
+
+    it("keeps the draft when its kind is unticked through the selection", () => {
+      const { result } = renderHook(() => useOnboardingSelection(), {
+        wrapper: OnboardingSelectionProvider,
+      });
+
+      act(() => result.current.removeKind("jellyfin"));
+
+      expect(result.current.drafts.map((d) => d.savedInstanceId)).toEqual([
+        "jf-1",
+      ]);
     });
   });
 });

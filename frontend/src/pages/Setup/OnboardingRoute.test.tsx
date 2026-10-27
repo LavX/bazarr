@@ -221,4 +221,118 @@ describe("the wizard's own URL", () => {
       screen.getByRole("heading", { name: /welcome to bazarr/i }),
     ).toBeInTheDocument();
   });
+
+  it("a save that lands after the step was left does not move the wizard", async () => {
+    // Only the provider stages report themselves busy, so browser Back can
+    // unmount any other step with its write still in the air. The callback the
+    // step handed to the write still ran when the write answered, and advanced
+    // the wizard to the step it had been heading for over wherever the reader
+    // had gone.
+    let landed: (() => void) | undefined;
+    mockedSettingsMutation.mockReturnValue({
+      mutate: vi.fn(
+        (_payload: unknown, options?: { onSuccess?: () => void }) => {
+          landed = options?.onSuccess;
+        },
+      ),
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+    const user = userEvent.setup();
+    const router = openWizardAt("/setup/translator", [
+      "/setup/welcome",
+      "/setup/translator",
+    ]);
+
+    await user.type(
+      await screen.findByLabelText(/openrouter api key/i),
+      "sk-1",
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    expect(landed).toBeDefined();
+
+    await act(async () => {
+      await router.navigate(-1);
+    });
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+
+    act(() => landed?.());
+
+    // Still where the reader went, not carried on to the step after Translation.
+    expect(router.state.location.pathname).toBe("/setup/welcome");
+    expect(
+      screen.getByRole("heading", { name: /welcome to bazarr/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("a save from an earlier visit to the same step does not move the wizard", async () => {
+    // The guard used to be keyed by the step, so Back and then Forward before
+    // the first save answered put the same key on screen again, as a fresh
+    // mount, and the old save advanced it over the reader's second visit.
+    let landed: (() => void) | undefined;
+    mockedSettingsMutation.mockReturnValue({
+      mutate: vi.fn(
+        (_payload: unknown, options?: { onSuccess?: () => void }) => {
+          landed = options?.onSuccess;
+        },
+      ),
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+    const user = userEvent.setup();
+    const router = openWizardAt("/setup/translator", [
+      "/setup/welcome",
+      "/setup/translator",
+    ]);
+
+    await user.type(
+      await screen.findByLabelText(/openrouter api key/i),
+      "sk-1",
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    expect(landed).toBeDefined();
+    const firstVisit = landed;
+
+    await act(async () => {
+      await router.navigate(-1);
+    });
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+    await act(async () => {
+      await router.navigate(1);
+    });
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/translator"),
+    );
+    expect(await screen.findByLabelText(/openrouter api key/i)).toBeVisible();
+
+    act(() => firstVisit?.());
+
+    // Still on the second visit, not carried on to the step after Translation.
+    expect(router.state.location.pathname).toBe("/setup/translator");
+    expect(screen.getByLabelText(/openrouter api key/i)).toBeVisible();
+  });
+
+  it("a save that lands while the step is still on screen still advances", async () => {
+    let landed: (() => void) | undefined;
+    mockedSettingsMutation.mockReturnValue({
+      mutate: vi.fn(
+        (_payload: unknown, options?: { onSuccess?: () => void }) => {
+          landed = options?.onSuccess;
+        },
+      ),
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+    const user = userEvent.setup();
+    const router = openWizardAt("/setup/translator");
+
+    await user.type(
+      await screen.findByLabelText(/openrouter api key/i),
+      "sk-1",
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    act(() => landed?.());
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/general"),
+    );
+  });
 });

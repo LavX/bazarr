@@ -124,6 +124,14 @@ function stageBackend() {
 }
 
 /** Land the shell on the media server picker, library path. */
+// The picker holds a card until its kind's list has answered, so a tick waits
+// for the card to be live instead of racing the first request.
+async function tick(user: ReturnType<typeof userEvent.setup>, name: RegExp) {
+  const box = screen.getByRole("checkbox", { name });
+  await waitFor(() => expect(box).toBeEnabled());
+  await user.click(box);
+}
+
 function startOnPicker() {
   localStorage.setItem("bazarr.onboarding.intent", "library");
   localStorage.setItem("bazarr.onboarding.step", "media-servers");
@@ -156,8 +164,8 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
-    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await tick(user, /^Jellyfin$/);
+    await tick(user, /^Emby$/);
     await user.click(screen.getByRole("button", { name: /set up 2 servers/i }));
 
     // One server per screen, in the order the picker lists them.
@@ -187,8 +195,8 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
-    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await tick(user, /^Jellyfin$/);
+    await tick(user, /^Emby$/);
     await user.click(screen.getByRole("button", { name: /set up 2 servers/i }));
     await screen.findByRole("heading", { name: /^jellyfin$/i });
 
@@ -196,7 +204,7 @@ describe("media server selection", () => {
     await screen.findByRole("heading", { name: /^media servers$/i });
 
     // Untick Jellyfin. Nothing was written, so the step simply goes.
-    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await tick(user, /^Jellyfin$/);
     await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
 
     expect(
@@ -212,12 +220,12 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Silo$/ }));
+    await tick(user, /^Silo$/);
     await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
     await screen.findByRole("heading", { name: /^silo$/i });
 
     await user.click(screen.getByRole("button", { name: /^back$/i }));
-    await user.click(screen.getByRole("checkbox", { name: /^Silo$/ }));
+    await tick(user, /^Silo$/);
 
     // Never a blank screen: the nearest surviving earlier step is the picker.
     expect(
@@ -232,7 +240,7 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await tick(user, /^Jellyfin$/);
     await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
     await screen.findByRole("heading", { name: /^jellyfin$/i });
 
@@ -279,7 +287,7 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await tick(user, /^Jellyfin$/);
     await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
     await screen.findByRole("heading", { name: /^jellyfin$/i });
 
@@ -307,7 +315,7 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await tick(user, /^Emby$/);
     await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
     await screen.findByRole("heading", { name: /^emby$/i });
 
@@ -330,7 +338,7 @@ describe("media server selection", () => {
 
   async function connectJellyfin(user: ReturnType<typeof userEvent.setup>) {
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await tick(user, /^Jellyfin$/);
     await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
     await screen.findByRole("heading", { name: /^jellyfin$/i });
     await user.type(
@@ -394,8 +402,8 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
-    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await tick(user, /^Jellyfin$/);
+    await tick(user, /^Emby$/);
     await user.click(screen.getByRole("button", { name: /set up 2 servers/i }));
     await screen.findByRole("heading", { name: /^jellyfin$/i });
 
@@ -659,7 +667,7 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await tick(user, /^Jellyfin$/);
     await waitFor(() =>
       expect(
         localStorage.getItem("bazarr.onboarding.media-servers"),
@@ -682,7 +690,7 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await tick(user, /^Emby$/);
     await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
     await screen.findByRole("heading", { name: /^emby$/i });
 
@@ -705,7 +713,7 @@ describe("media server selection", () => {
     customRender(<OnboardingWizardView />);
 
     await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await tick(user, /^Emby$/);
     await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
     await screen.findByRole("heading", { name: /^emby$/i });
 

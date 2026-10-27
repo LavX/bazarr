@@ -63,6 +63,21 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const emby = useMediaServerInstances("emby");
   const silo = useMediaServerInstances("silo");
 
+  // Whether a kind's list has not answered yet. Pending data reads as an empty
+  // list, and an empty list reads as "nothing connected", so a card ticked in
+  // that window minted a draft for a kind that already had a row, which the
+  // arriving list then left standing. A failed load is not pending: the reader
+  // is not kept from a kind because the list could not be read.
+  const listing = useMemo<Record<MediaServerKind, boolean>>(
+    () => ({
+      plex: plex.isPending,
+      jellyfin: jellyfin.isPending,
+      emby: emby.isPending,
+      silo: silo.isPending,
+    }),
+    [plex.isPending, jellyfin.isPending, emby.isPending, silo.isPending],
+  );
+
   const connected = useMemo<Record<MediaServerKind, MediaServerInstance[]>>(
     () => ({
       plex: plex.data ?? [],
@@ -99,9 +114,28 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     [connected],
   );
 
+  // A draft is pending until its create has landed. One that has written its
+  // row (savedInstanceId) is not: the row exists, whatever its master switch
+  // did, so unticking the card or ticking it again would orphan or duplicate
+  // it. Its step is still walked, which pendingTotal counts.
   const pendingOf = (kind: MediaServerKind) =>
     drafts.filter(
-      (draft) => draft.kind === kind && draft.instanceId === undefined,
+      (draft) =>
+        draft.kind === kind &&
+        draft.instanceId === undefined &&
+        draft.savedInstanceId === undefined,
+    );
+
+  // The rows drafts have written that the instance list does not show yet,
+  // because it has not refetched since the create. Once it does, the row is
+  // listed and counted there instead.
+  const writtenOf = (kind: MediaServerKind) =>
+    drafts.filter(
+      (draft) =>
+        draft.kind === kind &&
+        draft.instanceId === undefined &&
+        draft.savedInstanceId !== undefined &&
+        !connected[kind].some((row) => row.id === draft.savedInstanceId),
     );
 
   const toggle = (kind: MediaServerKind, checked: boolean) => {
@@ -197,6 +231,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           const live = kindOn ? enabledRows : [];
           const stalled = kindOn ? [] : enabledRows;
           const pending = pendingOf(kind);
+          const written = writtenOf(kind);
           // Plex is the kind whose card is not answered by "a Plex row
           // exists". A row somebody added by hand in Connections is not the
           // account, and this card is the only way to reach the account
@@ -209,14 +244,15 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
             kind === "plex" && !settingsPending
               ? enabledRows.some((row) => row.id === plexAccountRowId)
               : enabledRows.length > 0;
-          const checked = answered || pending.length > 0;
-          const locked = answered && pending.length === 0;
+          const checked = answered || written.length > 0 || pending.length > 0;
+          const locked =
+            (answered || written.length > 0) && pending.length === 0;
           const tested = live.filter(
             (row) => readMediaServerTest(kind, row.id) === "passed",
           ).length;
           const summary = summarise(
             tested,
-            live.length - tested,
+            live.length - tested + written.length,
             stalled.length,
             pending.length,
           );
@@ -239,10 +275,14 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                 radius="md"
                 checked={checked}
                 // A connected server is undone by disconnecting it, not by
-                // unticking it: the row is already written.
-                disabled={locked}
+                // unticking it: the row is already written. Held as well while
+                // the kind's list is still on its way, since what is connected
+                // is not known yet.
+                disabled={locked || listing[kind]}
                 aria-label={kindName(kind)}
-                onClick={() => (locked ? undefined : toggle(kind, !checked))}
+                onClick={() =>
+                  locked || listing[kind] ? undefined : toggle(kind, !checked)
+                }
               >
                 <div className={styles.cardBody}>
                   <Checkbox.Indicator />
@@ -255,7 +295,9 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                 </div>
               </Checkbox.Card>
 
-              {(rows.length > 0 || pending.length > 0) && (
+              {(rows.length > 0 ||
+                pending.length > 0 ||
+                written.length > 0) && (
                 <div className={styles.footer}>
                   {rows.map((instance) => (
                     <ConnectedServerRow
