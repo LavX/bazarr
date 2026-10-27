@@ -7,6 +7,7 @@ import {
   FormValues,
   runHooks,
   useFormActions,
+  useFormValues,
 } from "./FormValues";
 
 function StageSecrets() {
@@ -84,4 +85,50 @@ it("logs staged field names with the real development logger, never values befor
       "settings-emby-apikey": "sentinel-stage-secret-hooked",
     },
   ]);
+});
+
+it("takes a staged value and its submit hook back out with clearValue", async () => {
+  function Clearing({ saved }: { saved: LooseObject[] }) {
+    const { setValue, clearValue } = useFormActions();
+    const form = useFormValues();
+    return (
+      <>
+        <button
+          onClick={() => {
+            setValue("one", "settings-a-b", (value: string) => `${value}!`);
+            setValue("two", "settings-a-c");
+          }}
+        >
+          Stage
+        </button>
+        <button onClick={() => clearValue("settings-a-b")}>Clear</button>
+        <button
+          onClick={() => {
+            const values = { ...form.values.settings };
+            runHooks(form.values.hooks, values);
+            saved.push(values);
+          }}
+        >
+          Save
+        </button>
+      </>
+    );
+  }
+  function ClearHarness({ saved }: { saved: LooseObject[] }) {
+    const form = useForm<FormValues>({
+      initialValues: { settings: {}, hooks: {} },
+    });
+    return (
+      <FormContext.Provider value={form}>
+        <Clearing saved={saved} />
+      </FormContext.Provider>
+    );
+  }
+
+  const saved: LooseObject[] = [];
+  customRender(<ClearHarness saved={saved} />);
+  await userEvent.click(screen.getByRole("button", { name: "Stage" }));
+  await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(saved).toEqual([{ "settings-a-c": "two" }]);
 });

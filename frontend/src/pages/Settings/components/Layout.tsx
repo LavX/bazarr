@@ -53,13 +53,15 @@ const isMetadataKey = (key: string) =>
   key === "settings-general-metadata_language";
 
 // The backend asks for a password confirmation on a save that changes any of
-// these keys: they run code or decide who may sign in.
+// these keys: they run code, decide who may sign in, or decide whose address
+// the login throttle counts.
 const GATED_SETTINGS_KEYS = new Set([
   "settings-general-postprocessing_cmd",
   "settings-general-use_postprocessing",
   "settings-auth-type",
   "settings-auth-username",
   "settings-auth-password",
+  "settings-general-trusted_proxy",
 ]);
 
 const isGatedSettingsKey = (key: string) =>

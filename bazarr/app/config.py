@@ -1527,6 +1527,27 @@ def _require_provider_order_for_custom_routing(settings_items):
                               'Choose a provider, or pick another routing option.')
 
 
+def _validate_auth_password(settings_items):
+    """Refuse a new login password that is the mask the settings read hands out.
+
+    The mask stands for "keep the stored password": a save that sends it back
+    leaves the password as it is. With a password stored, that is the only
+    reading it can have, so a caller who really wants the password to be the
+    mask text gets the old one kept. With none stored there is nothing to keep,
+    and hashing the mask would set a password that later saves could never
+    resend as itself, so it is refused instead.
+    """
+    if settings.auth.password:
+        return
+    for key, value in settings_items:
+        if key.lower() != 'settings-auth-password':
+            continue
+        submitted = value[0] if isinstance(value, list) and len(value) == 1 else value
+        if submitted == AUTH_PASSWORD_MASK:
+            raise ValidationError(f'The password cannot be {AUTH_PASSWORD_MASK}: that text stands for '
+                                  'the stored password. Choose a different password.')
+
+
 def _validate_postprocessing_command(settings_items):
     """Refuse a post-processing command that relies on a shell.
 
@@ -2601,6 +2622,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     ]
     _require_provider_order_for_custom_routing(settings_items)
     _validate_postprocessing_command(settings_items)
+    _validate_auth_password(settings_items)
 
     def _registered_credential(key):
         """Whether a submitted settings key names a registered at-rest
@@ -2788,9 +2810,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         if key == 'settings-auth-password':
             if value == AUTH_PASSWORD_MASK and settings.auth.password:
-                # The settings read hands out the mask, never the hash, and the
-                # General page sends back what it read when a typed password is
-                # cleared again: that keeps the stored password.
+                # The settings read hands out the mask, never the hash, and a
+                # client that sends back what it read means to keep the stored
+                # password.
                 value = settings.auth.password
             if value != settings.auth.password and value is not None:
                 from utilities.helper import hash_password
@@ -2992,7 +3014,16 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 _settings_mapping(settings, settings_keys[1])[settings_keys[2]] = value
             elif len(settings_keys) == 4:
                 section = _settings_mapping(settings, settings_keys[1])
-                _settings_mapping(section, settings_keys[2])[settings_keys[3]] = value
+                try:
+                    inner = section[settings_keys[2]]
+                except KeyError:
+                    inner = None
+                # Stored whole, merged with what is there: a mapping read back
+                # from the settings store can be a copy, and a value written
+                # into a copy never reaches the store.
+                merged = {} if inner is None else dict(inner)
+                merged[settings_keys[3]] = value
+                section[settings_keys[2]] = merged
 
         if settings_keys[0] == 'subzero':
             mod = settings_keys[1]

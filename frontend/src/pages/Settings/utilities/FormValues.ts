@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useRef } from "react";
 import type { UseFormReturnType } from "@mantine/form";
+import { omit } from "lodash";
 import { LOG } from "@/utilities/console";
 
 export const FormContext = createContext<UseFormReturnType<FormValues> | null>(
@@ -53,7 +54,20 @@ export function useFormActions() {
     });
   }, []);
 
-  return { update, setValue };
+  // Takes a key back out of the staged changes, with its submit hook: for a
+  // field the user changed and then changed back, which is no change at all.
+  const clearValue = useCallback((key: string) => {
+    LOG("info", `Clearing staged value of ${key}`);
+    formRef.current.setValues((values) => {
+      return {
+        ...values,
+        settings: omit(values.settings, key),
+        hooks: omit(values.hooks, key),
+      };
+    });
+  }, []);
+
+  return { update, setValue, clearValue };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

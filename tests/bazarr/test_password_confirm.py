@@ -54,6 +54,7 @@ GATED_SETTINGS_SAVES = [
     {'settings-auth-type': 'null'},
     {'settings-auth-username': 'someone-else'},
     {'settings-auth-password': 'a-new-password'},
+    {'settings-general-trusted_proxy': '10.9.9.9'},
 ]
 
 GATED_SETTINGS_SAVE_CASES = [
@@ -847,6 +848,7 @@ MALFORMED_SETTINGS_KEYS = [
     'settings-auth.type-x',
     'settings--auth-type',
     'settings-general- postprocessing_cmd',
+    'settings-general- trusted_proxy',
 ]
 
 
@@ -867,12 +869,31 @@ def test_a_malformed_settings_key_is_refused_before_anything_is_saved(key, confi
     assert settings.auth.password == PASSWORD_HASH
 
 
-def test_a_longer_key_under_a_gated_setting_is_refused_too(monkeypatch, settings_saves):
+@pytest.mark.parametrize('key', ['settings-auth-type-x', 'settings-general-trusted_proxy-x',
+                                 'SETTINGS-GENERAL-TRUSTED_PROXY'])
+def test_a_longer_or_case_variant_key_under_a_gated_setting_is_refused_too(key, monkeypatch, settings_saves):
     _auth(monkeypatch)
     client = _client()
 
-    _assert_confirm_refusal(_settings_save(client, {'settings-auth-type-x': 'None'}))
+    _assert_confirm_refusal(_settings_save(client, {key: 'None'}))
     assert settings_saves == []
+
+
+def test_the_trusted_proxy_is_gated_while_its_neighbours_stay_open(monkeypatch, settings_saves):
+    # The trusted proxy decides whose forwarded address the login throttle
+    # counts. The settings next to it on the General page are ordinary saves.
+    _auth(monkeypatch)
+    client = _client()
+    _prime(client, confirmed=False)
+
+    _assert_confirm_refusal(_settings_save(client, {'settings-general-trusted_proxy': '10.9.9.9'}))
+    assert settings_saves == []
+    assert _settings_save(client, {'settings-general-hostname': 'bazarr.example'}).status_code == 204
+    assert len(settings_saves) == 1
+
+    _prime(client)
+    assert _settings_save(client, {'settings-general-trusted_proxy': '10.9.9.9'}).status_code == 204
+    assert settings_saves[-1] == {'settings-general-trusted_proxy': ['10.9.9.9']}
 
 
 def test_the_settings_read_never_hands_out_the_password_hash(monkeypatch):
@@ -923,6 +944,36 @@ def test_saving_the_masked_password_back_keeps_the_stored_one(monkeypatch, real_
     real_save.save_settings([('settings-auth-password', ['***'])])
 
     assert settings.auth.password == PASSWORD_HASH
+
+
+def test_a_first_password_cannot_be_the_mask(monkeypatch, real_save):
+    # With a password stored the mask means "keep it". With none stored there is
+    # nothing to keep, and hashing the mask would set a password that no later
+    # save could resend as itself.
+    from dynaconf.validator import ValidationError
+
+    _auth(monkeypatch)
+    monkeypatch.setitem(settings.auth, 'password', '')
+
+    with pytest.raises(ValidationError, match='cannot be'):
+        real_save.save_settings([('settings-general-theme', ['dark']), ('settings-auth-password', ['***'])])
+
+    assert settings.auth.password == ''
+
+
+def test_a_four_part_settings_key_under_a_missing_mapping_keeps_its_value(real_save):
+    # settings-<section>-<mapping>-<field>: the mapping may not exist yet, and
+    # the value written into a fresh one used to vanish.
+    section = 'fourpartsection'
+    try:
+        real_save.save_settings([(f'settings-{section}-fresh-field', ['one'])])
+        assert settings[section]['fresh']['field'] == 'one'
+
+        real_save.save_settings([(f'settings-{section}-fresh-other', ['two'])])
+        assert settings[section]['fresh']['field'] == 'one'
+        assert settings[section]['fresh']['other'] == 'two'
+    finally:
+        settings.unset(section, force=True)
 
 
 def test_a_new_password_is_still_hashed_on_save(monkeypatch, real_save):

@@ -1,4 +1,4 @@
-import { FunctionComponent, useRef, useState } from "react";
+import { FunctionComponent, useState } from "react";
 import {
   Box,
   Group as MantineGroup,
@@ -27,6 +27,7 @@ import {
   Selector,
   Text,
 } from "@/pages/Settings/components";
+import { useFormActions } from "@/pages/Settings/utilities/FormValues";
 import { useBaseInput } from "@/pages/Settings/utilities/hooks";
 import { useSettings } from "@/pages/Settings/utilities/SettingsProvider";
 import { Environment, toggleState } from "@/utilities";
@@ -49,45 +50,21 @@ import RunSetupAgain from "./RunSetupAgain";
 // So we never read the stored value into the input at all.
 //
 // State machine:
-// - User loads page: input empty, draft="", touched=false. No setValue
+// - User loads page: input empty, draft="". No setValue
 //   call -> form has no pending change for this key -> save preserves
 //   the existing hash.
-// - User types "newpw": draft="newpw", touched=true, update("newpw")
+// - User types "newpw": draft="newpw", update("newpw")
 //   stages the new password. save_settings hashes it via hash_password.
-// - User clears the field after typing: draft="", touched=true. We push
-//   the ORIGINAL value (snapshotted on first render via originalRef)
-//   back in via update(...). The settings read hands out a mask ("***")
-//   in place of a stored password, never the hash, and save_settings
-//   keeps the stored password when the mask comes back.
-//
-// originalRef vs reading `stored` directly: useBaseInput returns the
-// staged form value, which becomes whatever update() last set it to.
-// After typing "newpw", a fresh `stored` read returns "newpw", so a
-// fall-back to `stored` on clear would re-stage the new password
-// instead of the loaded value - silently saving the typed-then-
-// cancelled password. The ref captures the value
-// once on first render (before any user interaction can stage anything)
-// and stays pinned to the loaded mask for the lifetime of the
-// component.
-const AuthPasswordInput: FunctionComponent = () => {
-  const { value: stored, update } = useBaseInput<
-    { settingKey: string },
-    string
-  >({
+// - User clears the field after typing: draft="". The
+//   staged change is taken back out, so the form is as if the field was
+//   never touched: no unsaved-changes prompt, and a save sends nothing for
+//   this key and so asks for no password confirmation.
+export const AuthPasswordInput: FunctionComponent = () => {
+  const { update } = useBaseInput<{ settingKey: string }, string>({
     settingKey: "settings-auth-password",
   });
-  // Capture the FIRST observed `stored` value, including the empty
-  // string. The prior `stored.length > 0` guard meant
-  // originalRef.current stayed null whenever there was no auth password
-  // configured, and the type-then-clear path below sent that null back
-  // through FormData, where it was serialized as the string "null" and
-  // hashed by save_settings as a brand-new password.
-  const originalRef = useRef<string | null>(null);
-  if (originalRef.current === null && typeof stored === "string") {
-    originalRef.current = stored;
-  }
+  const { clearValue } = useFormActions();
   const [draft, setDraft] = useState("");
-  const [touched, setTouched] = useState(false);
   return (
     <PasswordInput
       label="Password"
@@ -97,14 +74,9 @@ const AuthPasswordInput: FunctionComponent = () => {
         const next = e.currentTarget.value;
         setDraft(next);
         if (next.length > 0) {
-          if (!touched) setTouched(true);
           update(next);
-        } else if (touched) {
-          // originalRef.current is "" when no password was configured at
-          // load, or the mask otherwise. Coalesce to "" as
-          // belt-and-suspenders: NEVER hand a null to update() here, or
-          // FormData turns it into the literal string "null" downstream.
-          update(originalRef.current ?? "");
+        } else {
+          clearValue("settings-auth-password");
         }
       }}
     />
