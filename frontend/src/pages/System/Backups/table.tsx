@@ -4,6 +4,7 @@ import { faHistory, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { ColumnDef } from "@tanstack/react-table";
 import { useDeleteBackups, useRestoreBackups } from "@/apis/hooks";
 import { Action } from "@/components";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import PageTable from "@/components/tables/PageTable";
 import { useModals } from "@/modules/modals";
 import { Environment } from "@/utilities";
@@ -18,6 +19,8 @@ const Table: FunctionComponent<Props> = ({ backups }) => {
   const restore = useRestoreBackups();
 
   const remove = useDeleteBackups();
+
+  const runGated = useGatedAction();
 
   const columns = useMemo<ColumnDef<System.Backups>[]>(
     () => [
@@ -84,7 +87,12 @@ const Table: FunctionComponent<Props> = ({ backups }) => {
                   ),
                   labels: { confirm: "Restore", cancel: "Cancel" },
                   confirmProps: { color: "red" },
-                  onConfirm: () => restore.mutate(filename),
+                  onConfirm: () => {
+                    void runGated(
+                      () => restore.mutate(filename),
+                      "restore this backup",
+                    );
+                  },
                 })
               }
               icon={faHistory}
@@ -124,7 +132,7 @@ const Table: FunctionComponent<Props> = ({ backups }) => {
         },
       },
     ],
-    [modals, remove, restore],
+    [modals, remove, restore, runGated],
   );
 
   return <PageTable columns={columns} data={backups}></PageTable>;

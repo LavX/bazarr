@@ -1,6 +1,8 @@
 import { showNotification } from "@mantine/notifications";
 import Axios, { AxiosError, AxiosInstance, CancelTokenSource } from "axios";
+import type { SilentRequestConfig } from "@/apis/raw/base";
 import { notification } from "@/modules/notification";
+import { forgetPasswordConfirmation } from "@/modules/passwordConfirm";
 import socketio from "@/modules/socketio";
 import { Environment } from "@/utilities";
 import { LOG } from "@/utilities/console";
@@ -83,6 +85,16 @@ class BazarrClient {
         }
       },
       (error: AxiosError) => {
+        // A confirmation refusal voids the remembered window, so the next
+        // gated action prompts again instead of believing it is confirmed
+        // (after a restart, or when the server's window is shorter).
+        if (
+          error.response?.status === 403 &&
+          (error.response?.data as { code?: string } | undefined)?.code ===
+            "confirm_password"
+        ) {
+          forgetPasswordConfirmation();
+        }
         // A blob response (file downloads) carries its error body as a Blob,
         // which cannot be read synchronously: give it a status-based message
         // (never the disconnect sentinel, which would suppress the 401
@@ -99,9 +111,17 @@ class BazarrClient {
         };
 
         error.message = backendError.message;
+        // A request flagged silentError owns its own user-facing failure for
+        // these two statuses (the password confirm modal answers 403 and 429
+        // inline), so the shared handler stays quiet rather than toasting on
+        // top of the modal's message. Any other status still toasts.
+        const silentByRequest =
+          (error.config as SilentRequestConfig | undefined)?.silentError ===
+            true &&
+          (backendError.code === 403 || backendError.code === 429);
         this.handleError(
           backendError,
-          isBlobBody || error.config?.inlineErrors === true,
+          isBlobBody || error.config?.inlineErrors === true || silentByRequest,
         );
 
         return Promise.reject(error);

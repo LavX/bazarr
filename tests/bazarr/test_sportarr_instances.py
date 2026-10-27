@@ -274,6 +274,7 @@ def _load_endpoints(monkeypatch):
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
     for name, path in (("_sportarr_test_api.utils", api_path / "utils.py"),
+                       ("_sportarr_test_api.password_confirm", api_path / "password_confirm.py"),
                        ("_sportarr_test_api.system.arr_instances", api_path / "system" / "arr_instances.py")):
         spec = importlib.util.spec_from_file_location(name, path)
         module = importlib.util.module_from_spec(spec)

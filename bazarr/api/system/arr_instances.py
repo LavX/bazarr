@@ -9,6 +9,7 @@ from app.database import database
 from app.jobs_queue import jobs_queue
 from arr_instances import service
 
+from ..password_confirm import password_confirm_refusal, password_confirmation_live
 from ..utils import authenticate
 
 api_ns_system_arr_instances = Namespace(
@@ -71,6 +72,37 @@ _test_by_id_parser.add_argument("verify_ssl", type=bool, location="json")
 _test_by_id_parser.add_argument("http_timeout", type=service.whole_number, location="json")
 
 
+# The per-instance post-processing override is part of what the download path
+# reads, so saving one joins the gated settings keys. The stored blob is what
+# the override resolves from, and the instance edit modal sends the whole
+# subtitle_settings on every save, so the change test compares against the
+# stored override rather than key presence: a resend of the same overrides
+# must not ask for the password.
+_INSTANCE_POSTPROCESSING_KEYS = ('use_postprocessing', 'postprocessing_cmd')
+_MISSING = object()
+
+
+def _changes_postprocessing_override(incoming, stored):
+    """True when a subtitle_settings save changes the post-processing override.
+
+    ``stored`` is the override the instance already holds, {} for a create. A
+    key counts as changed when it differs from the stored override by presence
+    or by value, which for a create is the same as being present at all.
+    """
+    if not isinstance(incoming, dict):
+        # A malformed blob never reaches the service; the gate leaves the
+        # service's own validation to answer it.
+        return False
+    incoming_general = incoming.get('general')
+    stored_general = (stored or {}).get('general')
+    if not isinstance(incoming_general, dict):
+        incoming_general = {}
+    if not isinstance(stored_general, dict):
+        stored_general = {}
+    return any(incoming_general.get(key, _MISSING) != stored_general.get(key, _MISSING)
+               for key in _INSTANCE_POSTPROCESSING_KEYS)
+
+
 @api_ns_system_arr_instances.route("/system/arr-instances")
 class ArrInstancesList(Resource):
     @authenticate
@@ -82,6 +114,11 @@ class ArrInstancesList(Resource):
     @authenticate
     def post(self):
         args = _create_parser.parse_args()
+        # Before the master key is persisted and before the service call: a
+        # refused save leaves the instance and its overrides untouched.
+        if (_changes_postprocessing_override(args.get("subtitle_settings"), {})
+                and not password_confirmation_live()):
+            return password_confirm_refusal()
         # Persist the master key to config.yaml BEFORE the encrypted api_key is
         # written: the repository flush commits immediately under AUTOCOMMIT, so
         # a key generated only in memory here would be lost on restart and make
@@ -108,6 +145,15 @@ class ArrInstanceItem(Resource):
     @authenticate
     def patch(self, instance_id):
         args = _update_parser.parse_args()
+        # Before the master key is persisted and before the service call, and
+        # against the stored override: the modal resends the whole blob, so
+        # only a real change asks for the password.
+        if args.get("subtitle_settings") is not None:
+            existing, status = service.get_instance(database, instance_id)
+            stored = existing.get("subtitle_settings") if status == 200 else {}
+            if (_changes_postprocessing_override(args.get("subtitle_settings"), stored)
+                    and not password_confirmation_live()):
+                return password_confirm_refusal()
         # See post(): persist the master key before a (possibly new) encrypted
         # api_key is committed.
         if args.get("api_key"):

@@ -10,7 +10,8 @@ import {
   useSystemSettings,
 } from "@/apis/hooks";
 import api from "@/apis/raw";
-import { act, customRender, fireEvent, screen, waitFor } from "@/tests";
+import { forgetPasswordConfirmation } from "@/modules/passwordConfirm";
+import { act, customRender, fireEvent, screen, waitFor, within } from "@/tests";
 import ProviderInstallStage from "./ProviderInstallStage";
 import { redirectToSetup } from "./redirect";
 
@@ -28,11 +29,14 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
   };
 });
 
-// The post-restart health poll hits api.system.status() directly.
+// The post-restart health poll hits api.system.status() directly, and the
+// password confirm modal posts through api.system.confirmPassword.
+const mockConfirmPassword = vi.fn();
 vi.mock("@/apis/raw", () => ({
   default: {
     system: {
       status: vi.fn(),
+      confirmPassword: (...args: unknown[]) => mockConfirmPassword(...args),
     },
   },
 }));
@@ -60,6 +64,7 @@ const onNext = vi.fn();
 
 const refetchCatalog = vi.fn();
 const refreshCatalogAsync = vi.fn();
+const refetchSettings = vi.fn();
 
 function setCatalog(entries: unknown[], sources: unknown[] = []) {
   mockedCatalog.mockReturnValue({
@@ -88,6 +93,32 @@ function setCatalogError(error: unknown) {
 function setEnabledProviders(ids: string[]) {
   mockedSystemSettings.mockReturnValue({
     data: { general: { enabled_providers: ids } },
+  } as unknown as ReturnType<typeof useSystemSettings>);
+}
+
+// The interactive wizard can be reopened with form login configured (Settings
+// > General > Run setup again), so the install batch runs through the same
+// password confirmation the Hub does.
+function setFormLogin() {
+  mockedSystemSettings.mockReturnValue({
+    data: {
+      general: { enabled_providers: [] },
+      auth: { type: "form", username: "admin" },
+    },
+  } as unknown as ReturnType<typeof useSystemSettings>);
+}
+
+// The settings read has not answered yet, so nothing about auth is known.
+// The wizard sits outside the app's settings-loading guard, and the catalog
+// can arrive first, which is the ordering the gate must not read as login
+// being off.
+function setUnresolvedSettings() {
+  mockedSystemSettings.mockReturnValue({
+    data: undefined,
+    isPending: true,
+    isError: false,
+    error: null,
+    refetch: refetchSettings,
   } as unknown as ReturnType<typeof useSystemSettings>);
 }
 
@@ -1185,8 +1216,12 @@ describe("ProviderInstallStage", () => {
   it("leaves the enabled list alone when it cannot be read", async () => {
     const user = userEvent.setup();
     setCatalog([subtitlecatEntry]);
+    // The settings answer, but the enabled list is not in the answer. The gate
+    // has what it needs to run the batch, while the union still cannot write
+    // a list it never saw. A read that never answers never gets this far any
+    // more: the gate blocks the batch and asks for a retry instead.
     mockedSystemSettings.mockReturnValue({
-      data: undefined,
+      data: { general: {} },
     } as unknown as ReturnType<typeof useSystemSettings>);
 
     customRender(
@@ -1254,5 +1289,138 @@ describe("ProviderInstallStage", () => {
     expect(
       screen.getByRole("button", { name: /install & restart/i }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ProviderInstallStage and the password confirmation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setCatalog([opensubtitlesEntry, subsceneEntry]);
+    setFormLogin();
+    forgetPasswordConfirmation();
+    mutateAsync.mockResolvedValue(undefined);
+    settingsMutateAsync.mockResolvedValue(undefined);
+    mockConfirmPassword.mockResolvedValue(undefined);
+    mockedInstall.mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useProviderHubInstall>);
+    restart.mockImplementation((opts?: { onSuccess?: () => void }) => {
+      opts?.onSuccess?.();
+    });
+    mockedSystem.mockReturnValue({
+      restart,
+      isMutating: false,
+    } as unknown as ReturnType<typeof useSystem>);
+  });
+
+  it("asks once for the whole selection, then installs it", async () => {
+    const user = userEvent.setup();
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    await user.click(screen.getByRole("checkbox", { name: /subscene/i }));
+    await user.click(
+      screen.getByRole("button", { name: /install & restart/i }),
+    );
+
+    // One prompt holds the whole batch: nothing installed, nothing confirmed.
+    expect(mutateAsync).not.toHaveBeenCalled();
+    const prompt = await screen.findByRole("dialog", {
+      name: "Confirm your password",
+    });
+    await user.type(within(prompt).getByLabelText("Password"), "hunter2");
+    await user.click(
+      within(prompt).getByRole("button", { name: /^confirm$/i }),
+    );
+
+    await waitFor(() => {
+      expect(mutateAsync).toHaveBeenCalledTimes(2);
+    });
+    expect(mockConfirmPassword).toHaveBeenCalledTimes(1);
+
+    await waitFor(() => {
+      expect(restart).toHaveBeenCalled();
+    });
+  });
+
+  it("installs nothing when the confirmation is cancelled", async () => {
+    const user = userEvent.setup();
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    await user.click(
+      screen.getByRole("button", { name: /install & restart/i }),
+    );
+
+    const prompt = await screen.findByRole("dialog", {
+      name: "Confirm your password",
+    });
+    await user.click(within(prompt).getByRole("button", { name: /cancel/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("Confirm your password"),
+      ).not.toBeInTheDocument();
+    });
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("waits for the auth settings to answer before running the batch", async () => {
+    const user = userEvent.setup();
+    setUnresolvedSettings();
+    // The settings answer only once the gate asks for them, long after the
+    // catalog did: a batch that read the unread settings as login off would
+    // install without a prompt and land on a 403.
+    refetchSettings.mockImplementation(async () => {
+      setFormLogin();
+      return {
+        data: { auth: { type: "form", username: "admin" } },
+      };
+    });
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    await user.click(
+      screen.getByRole("button", { name: /install & restart/i }),
+    );
+
+    // Nothing ran while the settings were unread, and the read was retried
+    // rather than answered from nothing.
+    expect(mutateAsync).not.toHaveBeenCalled();
+    expect(refetchSettings).toHaveBeenCalledTimes(1);
+    const prompt = await screen.findByRole("dialog", {
+      name: "Confirm your password",
+    });
+    await user.type(within(prompt).getByLabelText("Password"), "hunter2");
+    await user.click(
+      within(prompt).getByRole("button", { name: /^confirm$/i }),
+    );
+
+    await waitFor(() => {
+      expect(mutateAsync).toHaveBeenCalledTimes(1);
+    });
+    expect(mockConfirmPassword).toHaveBeenCalledWith("admin", "hunter2");
   });
 });
