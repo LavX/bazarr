@@ -135,6 +135,8 @@ def test_the_canvas_is_given_only_when_ffprobe_cannot_size_the_track(fixture_vid
     ("pack", 1_250_000, 5_296_273, "Downloading the OCR language pack hun.traineddata (1.2 of 5.3 MB)"),
     ("pack", 1, 1, "Rendering the image subtitles"),
     ("render", 42, 0, "Rendering the image subtitles"),
+    ("segment", 0, 0, "Finding the subtitle cues"),
+    ("segment", 5, 10, "Finding the subtitle cues (50%)"),
     ("recognise", 7, 812, "Reading cue 7 of 812"),
     ("write", 1, 1, "Writing the SRT next to the video"),
 ])
@@ -194,7 +196,9 @@ class Jobs:
         from app.jobs_queue import JobCancelled
 
         self.progress.append((progress_value, progress_max, progress_message))
-        if self.cancel_at and self.cancel_at in progress_message:
+        # A leading "=" asks for the whole message, not a part of it.
+        wanted = self.cancel_at or ""
+        if wanted and (progress_message == wanted[1:] if wanted.startswith("=") else wanted in progress_message):
             raise JobCancelled("cancelled")
 
 
@@ -623,7 +627,12 @@ def test_the_upgrade_job_never_replaces_an_ocr_file(ocr_run, monkeypatch):
     assert upgrade.get_upgradable_movies_subtitles() == {}
 
 
-def test_stopping_the_job_mid_read_ends_the_worker_and_writes_nothing(ocr_library, packs, monkeypatch):
+@pytest.mark.parametrize("cancel_at", [
+    "Reading cue 2",
+    "Finding the subtitle cues (0%)",  # while the frames are read for cues
+    "=Finding the subtitle cues",      # the moment ffmpeg has exited, before any frame is read
+], ids=["reading", "segmenting", "after-render"])
+def test_stopping_the_job_mid_read_ends_the_worker_and_writes_nothing(ocr_library, packs, monkeypatch, cancel_at):
     """The real engine: a stopped job leaves no Tesseract worker, no frames and no file behind."""
     from app.config import settings
     from app.jobs_queue import JobCancelled
@@ -634,7 +643,7 @@ def test_stopping_the_job_mid_read_ends_the_worker_and_writes_nothing(ocr_librar
     work = root / "ocr-work"
     monkeypatch.setattr(settings.ocr, "tessdata_dir", packs)
     monkeypatch.setattr(pipeline, "work_parent", lambda: str(work))
-    jobs = Jobs(cancel_at="Reading cue 2")
+    jobs = Jobs(cancel_at=cancel_at)
     monkeypatch.setattr(ocr, "jobs_queue", jobs)
     workers = []
     real_worker = tesseract.TesseractWorker
@@ -654,8 +663,13 @@ def test_stopping_the_job_mid_read_ends_the_worker_and_writes_nothing(ocr_librar
     assert _history(session) == [] and published == []
 
 
+@pytest.mark.parametrize("cancel_at", [
+    "Reading cue 2",
+    "Finding the subtitle cues (0%)",  # while the frames are read for cues
+    "=Finding the subtitle cues",      # the moment ffmpeg has exited, before any frame is read
+], ids=["reading", "segmenting", "after-render"])
 def test_stopping_a_translation_from_an_image_track_ends_it_cancelled_and_leaves_nothing(
-        ocr_library, packs, monkeypatch):
+        ocr_library, packs, monkeypatch, cancel_at):
     """The real engine inside the translation job: Stop ends the job Cancelled, with no worker, no frames,
     no half SRT next to the video and no failed-translation hold."""
     from app.config import settings
@@ -668,7 +682,7 @@ def test_stopping_a_translation_from_an_image_track_ends_it_cancelled_and_leaves
     work = root / "ocr-work"
     monkeypatch.setattr(settings.ocr, "tessdata_dir", packs)
     monkeypatch.setattr(pipeline, "work_parent", lambda: str(work))
-    jobs = Jobs(cancel_at="Reading cue 2")
+    jobs = Jobs(cancel_at=cancel_at)
     monkeypatch.setattr(ocr, "jobs_queue", jobs)
     monkeypatch.setattr(main, "jobs_queue", jobs)
     monkeypatch.setattr(main, "activity", MagicMock())
@@ -739,6 +753,53 @@ def test_render_progress_names_the_total():
 
     assert progress_message("render", 5, 10) == "Rendering the image subtitles (50%)"
     assert progress_message("render", 5, 0) == "Rendering the image subtitles"
+
+def test_the_segment_step_drives_the_jobs_ring_as_the_render_does(monkeypatch):
+    """The cue search has its own percentage in the message; the ring must follow it.
+
+    Run against the queue's real payload math: a segment report that only
+    reached the message left the ring at 0 while the text counted up.
+    """
+    import subtitles.tools.embedded_ocr as ocr
+    from app.jobs_queue import JobsQueue
+
+    from test_jobs_queue_progress import _make_job
+
+    job = _make_job(progress_max=0)
+
+    class Queue:
+        def update_job_progress(self, job_id, progress_value=None, progress_max=None, progress_message=""):
+            JobsQueue._build_progress_payload(job, progress_value, progress_max, progress_message)
+
+    monkeypatch.setattr(ocr, "jobs_queue", Queue())
+    report = ocr.job_progress(1, "en")
+
+    report("render", 90, 100)
+    assert (job.progress_value, job.progress_max) == (90, 100)
+
+    # The boundary report: no total yet. It must not turn the max into 0 or lose the message.
+    report("segment", 0, 0)
+    assert job.progress_max == 100
+    assert job.progress_message == "Finding the subtitle cues"
+
+    report("segment", 0, 40)
+    assert (job.progress_value, job.progress_max) == (0, 40)
+    report("segment", 10, 40)
+    assert (job.progress_value, job.progress_max) == (10, 40)
+    assert job.progress_message == "Finding the subtitle cues (25%)"
+
+
+def test_the_segment_step_reports_its_value_and_max_to_the_job(monkeypatch):
+    import subtitles.tools.embedded_ocr as ocr
+
+    jobs = Jobs()
+    monkeypatch.setattr(ocr, "jobs_queue", jobs)
+    report = ocr.job_progress(1, "en")
+
+    report("segment", 12, 48)
+
+    assert jobs.progress == [(12, 48, "Finding the subtitle cues (25%)")]
+
 
 def test_an_old_row_is_probed_for_its_codec(ocr_library, monkeypatch):
     """A row stored before codecs were saved can still be read without a manual scan."""

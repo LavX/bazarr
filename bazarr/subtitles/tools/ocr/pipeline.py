@@ -7,9 +7,11 @@ language and fetches what it needs before anything is rendered, and
 ``session()``, a context manager yielding ``read(image) -> str``.
 
 ``progress(step, value, maximum)`` is called with the steps ``pack``,
-``render`` (frames so far, maximum 0 while ffmpeg runs) and ``recognise`` (one
-call per cue). An exception raised by it, a cancelled job for instance,
-aborts the run and still removes the rendered frames.
+``render`` (position in the stream, called about once a second while ffmpeg
+runs, new output or not), ``segment`` (one call per rendered frame read for
+cues; maximum 0 once, as ffmpeg exits) and ``recognise`` (one call per cue).
+An exception raised by it, a cancelled job for instance, aborts the run and
+still removes the rendered frames.
 """
 
 import logging

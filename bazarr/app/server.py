@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import os
+import sys
 import signal
 import warnings
 import logging
@@ -138,6 +139,15 @@ class Server:
         # the streams first meant a restart appeared to hang: the server was
         # still accepting requests that blocked on the stream manager's lock.
         from sportarr.sse_client import stop_sportarr_clients
+        # ffmpeg renders for OCR run in sessions of their own, so the terminal's
+        # Ctrl+C does not reach them; end them here. Nothing to end, and nothing
+        # to import, when OCR never ran.
+        ocr_decode = sys.modules.get("subtitles.tools.ocr.decode")
+        if ocr_decode:
+            try:
+                ocr_decode.stop_live_renders()
+            except Exception:
+                pass
         if self.server:
             print("Closing webserver...")
             self.server.close()

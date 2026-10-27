@@ -438,3 +438,383 @@ def test_progress_position_never_moves_backward():
     assert decode.progress_position(5000, 12000, 10000) == 5000
     assert decode.progress_position(0, 5000, 0) == 0
 
+
+
+class _StopAtCall:
+    """A progress callback that raises on its ``n``th call, like a job that was stopped."""
+
+    def __init__(self, n):
+        self.n, self.calls = n, 0
+
+    def __call__(self, step, value, maximum):
+        self.calls += 1
+        if self.calls >= self.n:
+            raise RuntimeError("cancelled")
+
+
+@pytest.mark.parametrize("body", [
+    # ffmpeg with nothing to say: a long idle stretch, the tail of a stream, a slow filter flush.
+    "exec sleep 30",
+    # ffmpeg that keeps logging frames.
+    "while true; do echo '0 0 1/1000' >> \"$(dirname \"$0\")/frames.txt\"; sleep 0.1; done",
+], ids=["silent", "chatty"])
+def test_stop_while_ffmpeg_is_silent_or_chatty_ends_the_render_within_seconds(tmp_path, monkeypatch, body):
+    monkeypatch.setattr(decode, "POLL_S", 0.1)
+    ffmpeg = _fake_ffmpeg(tmp_path, body)
+    stop = _StopAtCall(3)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="cancelled"):
+        decode.render_frames("/v.mkv", 0, str(tmp_path), ffmpeg=ffmpeg, progress=stop)
+
+    # Three polls is well under a second; the bound only has to beat the 30 s of silence.
+    assert time.monotonic() - started < 10
+    assert stop.calls == 3, "the stop check runs on a timer, not only when ffmpeg logs a frame"
+
+
+def _alive(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def test_stop_ends_ffmpegs_whole_process_group(tmp_path, monkeypatch):
+    monkeypatch.setattr(decode, "POLL_S", 0.1)
+    pidfile = tmp_path / "child.pid"
+    ffmpeg = _fake_ffmpeg(tmp_path, f"sleep 40 &\necho $! > '{pidfile}'\nwait")
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="cancelled"):
+        decode.render_frames("/v.mkv", 0, str(tmp_path), ffmpeg=ffmpeg, progress=_StopAtCall(5))
+
+    # A child left holding ffmpeg's stderr would keep the reap waiting for its 40 s.
+    assert time.monotonic() - started < 20
+    child = int(pidfile.read_text())
+    deadline = time.monotonic() + 3
+    while _alive(child) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(child), "a process ffmpeg started outlived the stop"
+
+
+def _frames(folder, count):
+    paths = []
+    for number in range(count):
+        path = os.path.join(folder, f"{number:08d}.png")
+        Image.new("RGBA", (64, 64), (0, 0, 0, 0)).save(path)
+        paths.append((number * 100, path))
+    return paths
+
+
+def test_segmenting_the_frames_checks_for_a_stop_between_frames(tmp_path):
+    """After ffmpeg exits there is a long read of every frame; Stop must not wait for all of it."""
+    frames = _frames(str(tmp_path), 30)
+    seen = []
+
+    def stop_at_the_fifth(step, value, maximum):
+        seen.append((step, value, maximum))
+        if value == 5:
+            raise RuntimeError("cancelled")
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        decode.segment(frames, progress=stop_at_the_fifth)
+
+    assert seen[-1] == ("segment", 5, 30)
+
+
+def test_the_gap_after_ffmpeg_exits_reports_a_step_so_stop_lands_there(tmp_path):
+    ffmpeg = _fake_ffmpeg(tmp_path, "exit 0")  # no ffprobe beside it: reading the start time would fail
+    seen = []
+
+    def stop_at_segment(step, value, maximum):
+        seen.append(step)
+        if step == "segment":
+            raise RuntimeError("cancelled")
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        decode.decode_cues("/v.mkv", 0, str(tmp_path), ffmpeg=ffmpeg, progress=stop_at_segment)
+    assert seen[-1] == "segment"
+
+
+def test_decode_cues_reports_each_frame_it_reads(media, ffmpeg, tmp_path):
+    steps = []
+    decode.decode_cues(media["pgs"], 0, str(tmp_path), ffmpeg=ffmpeg,
+                       progress=lambda *step: steps.append(step))
+    reads = [step for step in steps if step[0] == "segment" and step[2] > 0]
+    assert reads and [step[1] for step in reads] == list(range(len(reads)))
+    assert all(step[2] == len(reads) for step in reads)
+
+
+def _wait_gone(pid, seconds=3):
+    deadline = time.monotonic() + seconds
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
+def test_the_exit_hook_ends_a_render_still_running_and_removes_its_frames(tmp_path, monkeypatch):
+    """A terminal Ctrl+C no longer reaches ffmpeg (it has a session of its own), so
+    the hook that runs when Bazarr shuts down must end it and clear its frames."""
+    import threading
+
+    monkeypatch.setattr(decode, "POLL_S", 0.1)
+    pidfile = tmp_path / "child.pid"
+    ffmpeg = _fake_ffmpeg(tmp_path, f"sleep 40 &\necho $! > '{pidfile}'\nwait")
+    context = decode.render_workspace(str(tmp_path / "work"))
+    work = context.__enter__()  # held open: only the hook may remove it below
+    outcome = []
+
+    def render():
+        try:
+            decode.render_frames("/v.mkv", 0, work, ffmpeg=ffmpeg)
+        except BaseException as error:  # noqa: B036
+            outcome.append(error)
+
+    thread = threading.Thread(target=render)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        (open(os.path.join(work, "00000000.png"), "wb")).close()
+        child = int(pidfile.read_text())
+        assert _alive(child)
+
+        decode.stop_live_renders()
+
+        assert _wait_gone(child), "a process of the render outlived the exit hook"
+        assert not os.path.exists(work), "the frames of the killed render were left behind"
+        thread.join(10)
+        assert not thread.is_alive()
+        assert outcome and isinstance(outcome[0], OcrError), outcome
+    finally:
+        thread.join(10)
+        context.__exit__(None, None, None)
+
+
+def test_a_render_that_ended_is_no_longer_registered_for_the_exit_hook(tmp_path):
+    ffmpeg = _fake_ffmpeg(tmp_path, "exit 1")
+    with pytest.raises(OcrError):
+        decode.render_frames("/v.mkv", 0, str(tmp_path), ffmpeg=ffmpeg)
+    assert not decode._live_renders
+
+    with decode.render_workspace(str(tmp_path / "work")) as work:
+        assert decode._normal(work) in decode._live_workspaces
+    assert not decode._live_workspaces
+
+    decode.stop_live_renders()  # nothing registered: a no-op
+
+
+def test_the_servers_shutdown_path_ends_a_render_registered_in_the_decode_module(monkeypatch):
+    """Runs the real ``close_all`` body. Importing app.server starts a web server, so
+    the function's source is executed on its own with its collaborators stubbed; the
+    decode module is looked up by the key it is imported under, and a wrong key
+    would find nothing and leave the render running."""
+    import ast
+    import sys
+    import types
+
+    path = os.path.join(os.path.dirname(decode.__file__), "..", "..", "..", "app", "server.py")
+    source = open(path).read()
+    close_all = next(node for node in ast.walk(ast.parse(source))
+                     if isinstance(node, ast.FunctionDef) and node.name == "close_all")
+    namespace = {"sys": sys, "close_database": lambda: None}
+    exec(compile(ast.Module(body=[close_all], type_ignores=[]), path, "exec"), namespace)
+
+    sportarr = types.ModuleType("sportarr")
+    sse_client = types.ModuleType("sportarr.sse_client")
+    sse_client.stop_sportarr_clients = lambda: None
+    sportarr.sse_client = sse_client
+    monkeypatch.setitem(sys.modules, "sportarr", sportarr)
+    monkeypatch.setitem(sys.modules, "sportarr.sse_client", sse_client)
+    assert sys.modules[decode.__name__] is decode
+
+    render = subprocess.Popen(["sleep", "40"], start_new_session=True)
+    with decode._registry_lock:
+        decode._live_renders.add(render)
+    try:
+        namespace["close_all"](types.SimpleNamespace(server=None))
+        assert _wait_gone(render.pid), "close_all did not end the render registered in the decode module"
+    finally:
+        with decode._registry_lock:
+            decode._live_renders.discard(render)
+        render.kill()
+        render.wait()
+
+
+def test_frames_left_by_a_process_that_is_gone_are_swept_when_the_next_render_starts(tmp_path):
+    """After a killed run the folder is minutes old, not hours: the owner's pid says it is orphaned."""
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+
+    def folder(name, owner):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "00000000.png").write_bytes(b"")
+        if owner is not None:
+            (path / decode.OWNER_FILE).write_text(str(owner))
+        return path
+
+    dead = folder("ocr-dead-owner", gone.pid)
+    # A restart in Docker gives Bazarr the same pid again; the folder is still not this run's.
+    same_pid_not_live = folder("ocr-previous-run", os.getpid())
+    other_process_alive = folder("ocr-other-instance", os.getppid())
+    no_marker = folder("ocr-no-marker", None)
+
+    with decode.render_workspace(str(tmp_path)) as mine:
+        assert os.path.exists(os.path.join(mine, decode.OWNER_FILE))
+        assert not dead.exists()
+        assert not same_pid_not_live.exists()
+        assert other_process_alive.exists()
+        assert no_marker.exists(), "without an owner the age rule is the only one"
+        assert os.path.isdir(mine), "a workspace live in this process is never swept"
+        # A second run starting while the first is live must leave it alone.
+        with decode.render_workspace(str(tmp_path)) as second:
+            assert os.path.isdir(mine) and os.path.isdir(second)
+
+
+def _orphan(parent, name="ocr-orphan"):
+    """A folder a killed run left: its owner is a process that has ended."""
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    path = os.path.join(parent, name)
+    os.makedirs(path)
+    with open(os.path.join(path, "00000000.png"), "wb"):
+        pass
+    with open(os.path.join(path, decode.OWNER_FILE), "w") as handle:
+        handle.write(str(gone.pid))
+    return path
+
+
+@pytest.mark.parametrize("spelling", ["relative", "doubled-slash", "dot-segment"])
+def test_a_second_render_does_not_sweep_the_first_when_the_parent_is_not_normalised(tmp_path, monkeypatch, spelling):
+    """The work parent comes from the config directory as typed (``-c data``, ``/config//x``).
+    mkdtemp returns a normalised path while the directory scan keeps the parent as
+    given, so a live folder was compared by string and lost: this process's own pid
+    in its owner file then marked it orphaned and the sweep deleted it mid-render."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cache").mkdir()
+    parent = {
+        "relative": os.path.join("cache", "ocr"),
+        "doubled-slash": f"{tmp_path}//cache//ocr",
+        "dot-segment": f"{tmp_path}/cache/./ocr",
+    }[spelling]
+    orphan = None
+    with decode.render_workspace(parent) as first:
+        open(os.path.join(first, "00000000.png"), "wb").close()
+        orphan = _orphan(os.path.join(tmp_path, "cache", "ocr"))
+        with decode.render_workspace(parent) as second:
+            assert os.path.isdir(first), "the first render's frames were swept by the second render's start"
+            assert os.path.exists(os.path.join(first, "00000000.png"))
+            assert os.path.isdir(second)
+            assert not os.path.exists(orphan), "a real orphan in the same parent must still be swept"
+
+
+def _record_killpg(monkeypatch):
+    sent = []
+    monkeypatch.setattr(decode.os, "killpg", lambda group, sig: sent.append((group, sig)))
+    return sent
+
+
+def test_a_render_already_reaped_gets_no_group_signal(monkeypatch):
+    """Once the render thread has reaped the leader its pid is free for anyone,
+    and a group signal sent to it afterwards would hit whatever took it."""
+    process = subprocess.Popen(["true"])
+    process.wait()
+    sent = _record_killpg(monkeypatch)
+
+    decode._signal_tree(process)
+
+    assert sent == []
+
+
+def test_a_render_not_yet_reaped_still_gets_the_group_signal(monkeypatch):
+    """An exited leader nobody has reaped keeps its pid, and a child of it may still
+    hold the stderr pipe, so the group is still signalled; and signalling does not reap."""
+    process = subprocess.Popen(["true"])
+    deadline = time.monotonic() + 5
+    while _alive(process.pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    sent = _record_killpg(monkeypatch)
+    try:
+        decode._signal_tree(process)
+        assert sent and sent[0][0] == process.pid
+        assert process.returncode is None, "the stop path must leave the reaping to the render thread"
+    finally:
+        process.wait()
+
+
+def test_a_marker_owner_that_cannot_be_signalled_is_alive(tmp_path, monkeypatch):
+    """EPERM means the process exists and belongs to someone else (a second Bazarr
+    under another user): its folder is not an orphan."""
+    def kill(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(decode.os, "kill", kill)
+    assert decode._pid_alive(4242) is True
+
+    other = tmp_path / "ocr-other-user"
+    other.mkdir()
+    (other / decode.OWNER_FILE).write_text("4242")
+    with decode.render_workspace(str(tmp_path)):
+        assert other.exists(), "a folder whose owner exists but cannot be signalled was swept"
+
+
+def test_a_marker_owner_that_does_not_exist_is_dead(monkeypatch):
+    def kill(pid, sig):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(decode.os, "kill", kill)
+    assert decode._pid_alive(4242) is False
+
+
+def test_the_interpreters_exit_ends_a_render_still_running(tmp_path):
+    """A source install ended by a plain interpreter exit (no signal handler runs)
+    must still end its ffmpeg: the hook is registered with atexit at import."""
+    import sys
+
+    script = tmp_path / "exit_hook_child.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "from subtitles.tools.ocr import decode\n"
+        "render = subprocess.Popen(['sleep', '40'], start_new_session=True, stdin=subprocess.DEVNULL,\n"
+        "                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "decode._live_renders.add(render)\n"
+        "print(render.pid, flush=True)\n"
+    )
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+    completed = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env, timeout=60)
+    assert completed.returncode == 0, completed.stderr
+    pid = int(completed.stdout.split()[0])
+    try:
+        assert _wait_gone(pid), "the render outlived the interpreter that started it"
+    finally:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+@pytest.mark.parametrize("content", ["", "  \n", "garbage", "12abc", "0", "-5"])
+def test_an_owner_file_that_names_no_process_means_no_marker_and_the_age_rule_decides(tmp_path, content):
+    """A run killed while writing its marker leaves an empty one, and a damaged file
+    can hold anything. Either way the folder is handled as one without a marker:
+    kept while it is young, swept once it is older than the stale limit. 0 and
+    negative numbers are not pids (os.kill would signal a whole group)."""
+    def folder(name, age_s):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "00000000.png").write_bytes(b"")
+        (path / decode.OWNER_FILE).write_text(content)
+        stamp = time.time() - age_s
+        os.utime(path, (stamp, stamp))
+        return path
+
+    young = folder("ocr-young", 60)
+    old = folder("ocr-old", decode.STALE_WORKSPACE_S + 3600)
+    assert decode._owner_of(str(young)) is None
+
+    with decode.render_workspace(str(tmp_path)):
+        assert young.exists(), "an unreadable marker must not count as a dead owner"
+        assert not old.exists(), "without a usable marker the age rule is the fallback"
