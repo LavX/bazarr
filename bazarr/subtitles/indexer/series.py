@@ -145,9 +145,10 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                         note_uncounted_track(uncounted_embedded, entry[0], entry_codec(entry),
                                              hidden=entry[0] in hidden)
                 # Before the new listing is stored, so a pass that fails here
-                # still finds the track in the old one and tries again.
+                # still finds the track in the old one and tries again. What the
+                # listing about to be stored holds counts, a failed read's too.
                 retract_embedded_history(database, TableHistory, original_path, uncounted_embedded,
-                                         embedded_languages, previous_embedded, owner_instance_id)
+                                         [entry[0] for entry in actual_subtitles], previous_embedded, owner_instance_id)
         destination = os.path.join(get_target_folder(reversed_path, create=False) or os.path.dirname(reversed_path),
                                    '.destination')
         with subtitle_write_locks(reversed_path, destination):

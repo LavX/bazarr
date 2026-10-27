@@ -203,6 +203,25 @@ def test_an_unreadable_file_retracts_what_the_stored_listing_drops(hidden_db, mo
     assert _movie_rows(hidden_db) == [(1, MOVIE_PATH, "en"), (1, MOVIE_PATH, "fr"), (2, MOVIE_PATH, "en:hi")]
 
 
+def test_a_failed_read_keeps_the_row_of_a_language_a_kept_entry_still_covers(hidden_db, monkeypatch):
+    """An English SRT and PGS, ignore PGS on, and the file cannot be read, as
+    while another tool is remuxing it. The SRT stays listed, so the language
+    stays covered and its row stays."""
+    mv = _stub_movie(hidden_db, monkeypatch)
+    hidden_db.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(
+        subtitles=str([["en", None, None, "subrip"], ["en", None, None, "pgs"]])))
+    monkeypatch.setattr(mv.settings.general, "ignore_pgs_subs", True, raising=False)
+
+    def unreadable(*args, **kwargs):
+        raise OSError("cannot read")
+
+    monkeypatch.setattr(mv, "embedded_subs_reader", unreadable)
+    mv.store_subtitles_movie(MOVIE_PATH, "/local/m.mkv", arr_instance_id=1)
+
+    assert (1, MOVIE_PATH, "en") in _movie_rows(hidden_db)
+    assert _stored(hidden_db, TableMovies, 1)[0] == ["en"]
+
+
 @pytest.mark.parametrize("how,retracted", [("hide", True), ("ignore", False)])
 def test_a_listing_without_codecs_retracts_a_hide_but_not_an_ignored_codec(hidden_db, monkeypatch, how, retracted):
     """Listings stored before codecs were kept hold three elements. A hide names

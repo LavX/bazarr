@@ -216,11 +216,6 @@ def partition_embedded_entries(stored, hidden=()):
     return kept, dropped
 
 
-def kept_embedded_entries(stored, hidden=()):
-    """The embedded entries of a stored listing that a new listing should keep."""
-    return partition_embedded_entries(stored, hidden)[0]
-
-
 def sync_engine_from_subtitle_name(subtitle):
     return sync_engine_from_output_path(subtitle)
 
