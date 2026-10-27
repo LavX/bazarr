@@ -162,9 +162,11 @@ def retract_embedded_history(session, table, video_path, uncounted, counted, pre
     tells the two apart (language, description, provider and score are the
     same), and a plain HI track that has since left the container would leave
     exactly such a row as its only trace. So they are not retracted here, and
-    only the rows written under the forced code are. Hiding the forced and HI
-    track leaves an older ``en:hi`` row where it is, and it keeps ending the
-    upgrades of that language until it is cleaned from the history.
+    only the rows written under the forced code are. An older ``en:hi`` row
+    stays whether or not the forced and HI track is hidden, and it keeps ending
+    the upgrades of a plain download of that language. Nothing in the app
+    deletes a single history row, so only a manual cleanup of the history
+    removes it.
 
     The index on (video_path, language) serves the delete on the series and
     movies history tables. The sports history table has no such index: its

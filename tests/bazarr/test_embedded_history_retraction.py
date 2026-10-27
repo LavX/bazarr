@@ -111,10 +111,10 @@ def test_the_stored_listing_is_read_into_codecs_by_history_language():
     assert embedded_codecs_by_language(None) == {}
 
 
-def _stub_movie(db, monkeypatch):
+def _stub_movie(db, monkeypatch, logged=None):
     import subtitles.indexer.movies as mv
 
-    _stub_indexer(mv, db, monkeypatch, [])
+    _stub_indexer(mv, db, monkeypatch, [] if logged is None else logged)
     db.add(TableLanguagesProfiles(profileId=1, name="P", items=json.dumps(PROFILE)))
     # The listing the last index stored for the tracks the stub reads below.
     listing = str([["en", None, None, "subrip"], ["en:hi", None, None, "subrip"], ["fr", None, None, "pgs"]])
@@ -310,7 +310,8 @@ def test_a_failed_retraction_keeps_the_old_listing_and_the_next_pass_retracts(hi
     the pass that finds the language absent from that listing could never retract."""
     from subtitles.embedded_hidden import hide_track
 
-    mv = _stub_movie(hidden_db, monkeypatch)
+    logged = []
+    mv = _stub_movie(hidden_db, monkeypatch, logged)
     before = _listing(hidden_db, TableMovies, 1)
     hide_track(hidden_db, "movie", 1, 1, "en:hi")
     state = _fail_the_next_delete(monkeypatch, mv, hidden_db)
@@ -319,6 +320,8 @@ def test_a_failed_retraction_keeps_the_old_listing_and_the_next_pass_retracts(hi
 
     assert state["failures"] == 1
     assert _listing(hidden_db, TableMovies, 1) == before
+    # Nothing is logged for a listing that is not stored.
+    assert logged == []
     assert (1, MOVIE_PATH, "en:hi") in _movie_rows(hidden_db)
 
     mv.store_subtitles_movie(MOVIE_PATH, "/local/m.mkv", arr_instance_id=1)
@@ -331,7 +334,8 @@ def test_a_failed_episode_retraction_keeps_the_old_listing_and_the_next_pass_ret
     import subtitles.indexer.series as se
     from subtitles.embedded_hidden import hide_track
 
-    _stub_indexer(se, hidden_db, monkeypatch, [])
+    logged = []
+    _stub_indexer(se, hidden_db, monkeypatch, logged)
     hidden_db.add(TableLanguagesProfiles(profileId=1, name="P", items=json.dumps(PROFILE)))
     hidden_db.add(TableShows(id=1, arr_instance_id=1, sonarrSeriesId=1, title="S", path="/tv/s", profileId=1))
     hidden_db.flush()
@@ -357,6 +361,7 @@ def test_a_failed_episode_retraction_keeps_the_old_listing_and_the_next_pass_ret
 
     assert state["failures"] == 1
     assert _listing(hidden_db, TableEpisodes, 1) == before
+    assert logged == []
     assert languages() == ["en", "en:hi", "fr"]
 
     se.store_subtitles(EPISODE_PATH, "/local/e01.mkv", arr_instance_id=1)
@@ -385,7 +390,7 @@ def test_a_row_an_older_version_wrote_for_a_forced_and_hi_track_is_not_retracted
     assert _movie_rows(hidden_db) == [(1, MOVIE_PATH, "en:hi")]
 
 
-def test_a_failed_sports_retraction_rolls_the_index_back_and_the_next_pass_retracts(indexed_library, monkeypatch):  # noqa: F811
+def test_a_failed_sports_retraction_rolls_the_index_back_and_the_next_pass_retracts(indexed_library, monkeypatch):
     from app import database as db
     from app.database import TableHistorySports
     from sportarr import library
@@ -426,3 +431,17 @@ def test_a_failed_sports_retraction_rolls_the_index_back_and_the_next_pass_retra
     module.store_subtitles_sports(61, 1)
 
     assert (61, "fr") not in recorded()
+
+
+def test_a_guarded_retraction_returns_none_on_failure_and_an_unguarded_one_raises(hidden_db):
+    from subtitles.indexer.utils import retract_embedded_history
+
+    class Broken:
+        def execute(self, statement):
+            raise sa.exc.OperationalError("DELETE", {}, Exception("connection lost"))
+
+    arguments = (TableHistoryMovie, MOVIE_PATH, {"en:hi": {"subrip"}}, [], {"en:hi": {"subrip"}}, 1)
+
+    assert retract_embedded_history(Broken(), *arguments) is None
+    with pytest.raises(sa.exc.OperationalError):
+        retract_embedded_history(Broken(), *arguments, guard=False)

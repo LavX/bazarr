@@ -358,8 +358,9 @@ def test_movies_forced_and_hi_track_falls_back_to_the_hi_row_an_older_version_wr
 def test_movies_forced_row_wins_over_the_older_hi_row_for_a_forced_and_hi_track(schema_session, monkeypatch):
     movies = _prepare_movies(monkeypatch, schema_session)
     _add_movie(schema_session, 100, "[['en:hi:forced', None, None]]")
-    _add_movie_history(schema_session, 1, 100, 7, None, "en:hi", 40, 100)
-    _add_movie_history(schema_session, 2, 100, 7, None, "en:forced", 100, 100)
+    _add_movie_history(schema_session, 1, 100, 7, None, "en:forced", 100, 100)
+    # The newer row is the older version's: the forced code row still wins.
+    _add_movie_history(schema_session, 2, 100, 7, None, "en:hi", 40, 100)
 
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 

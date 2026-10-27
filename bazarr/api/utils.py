@@ -577,7 +577,9 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         file; only downloads (action 1/2/3) supply a score. Sync (5) preserves it;
       * embedded tracks -> the newest source record (action 7) whose language
         the item still has as an embedded track (a subtitles entry with an
-        empty path).
+        empty path). A forced and HI track is recorded under its forced code;
+        an HI code row that an older version wrote for it counts when the item
+        has no forced code row, as on the detail pages.
     Each counted record scores ``round(score * 100 / score_out_of, 2)``; records
     without a usable score/score_out_of are skipped. The item's value is the
     minimum over the counted records, absent from the result when nothing counts.
@@ -623,8 +625,8 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     current_paths = {}
     current_subtitle_paths = {}
     embedded_langs = {}
-    # The HI code an older version recorded a forced and HI track under, with
-    # the forced code it is recorded under now.
+    # Per item, the HI code older versions recorded a forced and HI track under,
+    # mapped to the forced code it is recorded under now.
     embedded_legacy_langs = {}
     for item_id, raw in subtitles_by_id.items():
         paths = {}
@@ -646,8 +648,7 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         current_paths[item_id] = paths
         current_subtitle_paths[item_id] = full_paths
         embedded_langs[item_id] = langs
-        # A plain HI track of the item has the HI code for itself.
-        embedded_legacy_langs[item_id] = {old: new for old, new in legacy.items() if old not in langs}
+        embedded_legacy_langs[item_id] = legacy
 
     file_matches = {}
 
