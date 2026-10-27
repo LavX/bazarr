@@ -7,6 +7,7 @@ from pathlib import Path
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
+from packaging.version import Version
 import subliminal
 import yaml
 import pytest
@@ -745,3 +746,77 @@ def test_required_requirement_failure_still_exits_before_optional_ones(monkeypat
     with pytest.raises(Exited):
         requirements.install_requirements(["six"])
     assert len(calls) == 1
+
+
+# numpy 2.4 raised the x86-64 baseline to v2.
+NUMPY_BASELINE_RAISED_AT = Version("2.4")
+_NUMPY_PROBES = ["2.4.0", "2.4.1", "2.5.0", "2.6.0", "3.0.0", "10.0.0"]
+
+
+def _numpy_pin_findings(requirements_text, readme_text):
+    """What is wrong with the numpy pin's comment and the README, as a list of messages.
+
+    A pin that still admits numpy 2.4 or newer can install a build that needs an
+    x86-64-v2 CPU, whatever its lower bound says, so its comment and the README
+    must say so and the comment must not claim to avoid that line. A pin capped
+    below 2.4 never installs one: its comment must say it excludes the line, and
+    the README must not announce a CPU requirement the pin does not impose.
+    """
+    line = next(raw for raw in requirements_text.splitlines() if raw.startswith("numpy"))
+    spec, _, comment = line.partition("#")
+    specifier = Requirement(spec.strip()).specifier
+    versions = {Version(item.version) for item in specifier}
+    probes = {Version(text) for text in _NUMPY_PROBES} | versions
+    admits_the_raised_baseline = any(
+        version >= NUMPY_BASELINE_RAISED_AT and specifier.contains(version, prereleases=True)
+        for version in probes)
+    findings = []
+    if admits_the_raised_baseline:
+        if "excludes" in comment:
+            findings.append("the pin admits numpy 2.4 or newer but its comment claims to exclude that line")
+        if "x86-64-v2" not in comment:
+            findings.append("the pin admits numpy 2.4 or newer but its comment does not name x86-64-v2")
+        if "x86-64-v2" not in readme_text:
+            findings.append("the pin admits numpy 2.4 or newer but the README does not name x86-64-v2")
+    else:
+        if "excludes" not in comment:
+            findings.append("the pin is capped below numpy 2.4 but its comment does not say it excludes that line")
+        if "**CPU requirement:**" in readme_text:
+            findings.append("the pin is capped below numpy 2.4 but the README still announces an x86-64-v2 requirement")
+    return findings
+
+
+def test_numpy_pin_comment_matches_the_cpu_baseline_it_requires():
+    repo_root = Path(__file__).resolve().parents[2]
+    findings = _numpy_pin_findings((repo_root / "requirements.txt").read_text(),
+                                   (repo_root / "README.md").read_text())
+    assert findings == []
+
+
+_README_V2 = "**CPU requirement:** needs an x86-64-v2 CPU.\n"
+_README_NONE = "Nothing about CPUs here.\n"
+
+
+@pytest.mark.parametrize("pin, comment, readme, expected", [
+    # Today's pin: a floor at 2.5.4.
+    ("numpy>=2.5.4,<2.6.0", "needs an x86-64-v2 CPU", _README_V2, []),
+    # An exact pin at the raised baseline is just as much a requirement.
+    ("numpy==2.5.4", "needs an x86-64-v2 CPU", _README_V2, []),
+    # A floor below 2.4 with no cap still admits 2.4 and newer.
+    ("numpy>=1.26", "needs an x86-64-v2 CPU", _README_V2, []),
+    ("numpy>=1.26", "needs an x86-64-v2 CPU", _README_NONE, ["README"]),
+    ("numpy>=1.26", "any CPU", _README_V2, ["name x86-64-v2"]),
+    ("numpy>=2.5.4", "excludes the v2 line, x86-64-v2", _README_V2, ["claims to exclude"]),
+    ("numpy==2.5.4", "needs an x86-64-v2 CPU", _README_NONE, ["README"]),
+    # Capped below the raised baseline: no requirement to announce.
+    ("numpy>=1.26,<2.4", "excludes 2.4 and newer, which need x86-64-v2", _README_NONE, []),
+    ("numpy==1.26.4", "excludes 2.4 and newer", _README_NONE, []),
+    ("numpy>=1.26,<2.4", "pinned for no stated reason", _README_NONE, ["does not say it excludes"]),
+    ("numpy>=1.26,<2.4", "excludes 2.4 and newer", _README_V2, ["still announces"]),
+])
+def test_numpy_pin_check_reads_the_floor_the_pin_really_imposes(pin, comment, readme, expected):
+    findings = _numpy_pin_findings(f"six==1.0\n{pin}  # {comment}\n", readme)
+
+    assert len(findings) == len(expected)
+    for finding, fragment in zip(findings, expected):
+        assert fragment in finding

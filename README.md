@@ -165,6 +165,8 @@ Two limits worth knowing before you set this up:
 
 ## Quick Start
 
+**CPU requirement:** on x86-64 hardware the Docker image and a native install need an x86-64-v2 CPU (SSE4.2 and POPCNT, roughly 2009 and later), because numpy 2.4 and newer raise that baseline. On an older x86-64 CPU Bazarr+ stops at startup with an illegal instruction error. ARM64 is not affected.
+
 ### Option 1: Docker Compose (Recommended)
 
 ```bash
