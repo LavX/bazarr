@@ -1231,6 +1231,8 @@ class EditorStreamToken(Resource):
 class EditorPeaks(Resource):
     get_pending_model = api_ns_editor.model('EditorPeaksPending', {
         'jobId': fields.Integer(description='Id of the job generating the peaks'),
+        'jobSession': fields.String(description='The backend run that owns the job. Job ids restart with the '
+                                                 'backend, so a job is named by its id together with this.'),
         'status': fields.String(description='Always "pending"'),
     })
 

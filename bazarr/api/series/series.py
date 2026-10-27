@@ -354,14 +354,14 @@ class Series(Resource):
         action = args.get('action')
         if action == "scan-disk":
             job_id = series_scan_disk(seriesid, arr_instance_id=arr_instance_id)
-            return {'job_id': job_id or None}, 202
+            return queued_job_response(job_id or None), 202
         elif action == "search-missing":
             try:
                 job_id = series_download_subtitles(seriesid, arr_instance_id=arr_instance_id)
             except OSError:
                 return 'Series directory not found. Path mapping issue?', 500
             else:
-                return {'job_id': job_id or None}, 202
+                return queued_job_response(job_id or None), 202
         elif action == "search-wanted":
             wanted_search_missing_subtitles_series()
             return '', 204

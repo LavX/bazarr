@@ -270,7 +270,7 @@ class Movies(Resource):
         action = args.get('action')
         if action == "scan-disk":
             job_id = movies_scan_disk(radarrid, arr_instance_id=arr_instance_id)
-            return {'job_id': job_id or None}, 202
+            return queued_job_response(job_id or None), 202
         elif action == "search-missing":
             try:
                 movies_download_subtitles(radarrid, arr_instance_id=arr_instance_id)

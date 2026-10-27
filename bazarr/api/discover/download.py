@@ -12,7 +12,7 @@ from werkzeug.exceptions import Unauthorized
 from app.config import settings
 from discover.download import (ExpiredResultError, ResultAuthority, UnauthorizedResultError, classify_failure,
                                enqueue_download, fetch_ticket, preview_result)
-from ..swaggerui import job_queued_model
+from ..queued_job import queued_job_model, queued_job_response
 from ..utils import _safe_apikey_compare, authenticate
 
 api_ns_discover_download = Namespace("Discover", description="Exact subtitle attachments and preview")
@@ -112,7 +112,7 @@ def _enqueue():
         logging.warning("Discover download could not be queued: reason=%s: %s", failure.reason,
                         failure.detail or type(error).__name__)
         return {"message": failure.message, "reason": failure.reason, "recoverable": True}, 503, _HEADERS
-    return {"job_id": job_id}, 202, _HEADERS
+    return queued_job_response(job_id), 202, _HEADERS
 
 
 def _ticket():
@@ -144,7 +144,7 @@ class DiscoverDownload(Resource):
         """Fetch the file of a finished download job by its ticket (?job=<id>)."""
         return _ticket()
 
-    post_job_model = api_ns_discover_download.model('JobQueued', job_queued_model)
+    post_job_model = api_ns_discover_download.model('DiscoverDownloadQueued', queued_job_model)
 
     @_private_auth_errors
     @authenticate

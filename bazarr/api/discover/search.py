@@ -3,7 +3,7 @@ from flask_restx import Namespace, Resource
 
 from discover.library import CopyUnavailable
 from discover.search import queue_search, validate_context
-from ..queued_job import queued_job_response
+from ..queued_job import queued_job_model, queued_job_response
 from ..utils import authenticate
 
 api_ns_discover_search = Namespace("Discover", description="Explicit title subtitle searches")
@@ -11,8 +11,11 @@ api_ns_discover_search = Namespace("Discover", description="Explicit title subti
 
 @api_ns_discover_search.route("discover/search")
 class DiscoverSearch(Resource):
+    post_job_model = api_ns_discover_search.model("DiscoverSearchQueued", queued_job_model)
+
     @authenticate
-    @api_ns_discover_search.response(202, "Search queued as a job; its progress and rows are the job result")
+    @api_ns_discover_search.response(202, "Search queued as a job; its progress and rows are the job result",
+                                     post_job_model)
     @api_ns_discover_search.response(400, "Invalid search context")
     @api_ns_discover_search.response(401, "Not Authenticated")
     @api_ns_discover_search.response(409, "The chosen copy no longer resolves")

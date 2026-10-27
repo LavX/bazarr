@@ -39,6 +39,43 @@ def test_series_and_movie_actions_document_the_scan_job(spec):
         assert model["properties"]["job_id"]["x-nullable"] is True
 
 
+def _model(spec, path, method, code):
+    response = spec["paths"][path][method]["responses"][code]
+    return spec["definitions"][_schema_ref(response)]
+
+
+@pytest.mark.parametrize("path,method", [
+    ("/series", "patch"),
+    ("/movies", "patch"),
+    ("/discover/search", "post"),
+    ("/discover/download", "post"),
+    ("/system/health", "post"),
+    ("/providers/episodes/search", "post"),
+    ("/providers/movies/search", "post"),
+    # The sports routes are declared with a leading slash of their own.
+    ("//sports/events/{event_id}/search", "post"),
+    ("/system/media-server-instances/{instance_id}/retry-pending", "post"),
+])
+def test_a_route_that_queues_a_job_documents_the_job_and_its_session(spec, path, method):
+    # Job ids restart with the backend, so a client names a job by its id and
+    # the backend run that owns it. The 202 says both.
+    properties = _model(spec, path, method, "202")["properties"]
+    assert properties["job_id"]["type"] == "integer"
+    assert properties["session"]["type"] == "string"
+
+
+def test_the_peaks_route_documents_the_session_of_the_job_it_started(spec):
+    # The body already carries jobSession; the model a client reads must name it.
+    properties = _model(spec, "/editor/peaks", "get", "202")["properties"]
+    assert properties["jobId"]["type"] == "integer"
+    assert properties["jobSession"]["type"] == "string"
+
+
+def test_retrying_pending_refreshes_documents_how_many_were_waiting(spec):
+    path = "/system/media-server-instances/{instance_id}/retry-pending"
+    assert _model(spec, path, "post", "202")["properties"]["queued"]["type"] == "integer"
+
+
 def test_listing_jobs_documents_the_list_it_returns(spec):
     responses = spec["paths"]["/system/jobs"]["get"]["responses"]
     assert "204" not in responses
@@ -123,3 +160,29 @@ def test_exclude_documents_the_replacement_search_to_follow(spec):
     model = spec["definitions"][_schema_ref(responses["200"])]
     assert model["properties"]["job_id"]["type"] == "integer"
     assert model["properties"]["job_id"]["x-nullable"] is True
+
+
+def test_the_subtitles_answer_is_its_own_model_not_the_one_series_and_movies_use(spec):
+    # Models are registered by name and the last one wins, so a shared name made
+    # series and movies advertise a path they never send.
+    names = {
+        route: spec["paths"][route]["patch"]["responses"]["202"]["schema"]["$ref"].rsplit("/", 1)[-1]
+        for route in ("/series", "/movies", "/subtitles")
+    }
+    assert names["/subtitles"] != names["/series"]
+    for route in ("/series", "/movies"):
+        properties = spec["definitions"][names[route]]["properties"]
+        assert "path" not in properties, route
+        assert {"job_id", "session"} <= set(properties), route
+
+
+def test_the_subtitles_answer_says_which_answers_carry_a_session_and_a_path(spec):
+    model = spec["definitions"][
+        spec["paths"]["/subtitles"]["patch"]["responses"]["202"]["schema"]["$ref"].rsplit("/", 1)[-1]
+    ]
+    properties = model["properties"]
+    assert {"job_id", "session", "path"} <= set(properties)
+    # Sync and subtitle mods answer with the job id alone, so neither of the
+    # others can be required.
+    assert model.get("required", []) == []
+    assert "sync" in properties["session"]["description"].lower()

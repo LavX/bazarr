@@ -181,6 +181,13 @@ def subtitle_tool_request(episode_queue, schema_session, monkeypatch, tmp_path):
     return queue, request_tool
 
 
+def _queued_body(action, job_id):
+    """A translation names the backend run that owns its job; the other tools answer with the bare id."""
+    from app.process_session import PROCESS_SESSION
+
+    return {'job_id': job_id, 'session': PROCESS_SESSION} if action == 'translate' else {'job_id': job_id}
+
+
 @pytest.mark.parametrize('action', ['sync', 'translate', 'remove_HI'])
 def test_subtitle_tools_expose_the_native_queued_job(subtitle_tool_request, action):
     queue, request_tool = subtitle_tool_request
@@ -189,7 +196,7 @@ def test_subtitle_tools_expose_the_native_queued_job(subtitle_tool_request, acti
     assert len(queue.jobs_pending_queue) == 1
     job = queue.jobs_pending_queue[0]
     assert isinstance(job.job_id, int)
-    assert result == ({'job_id': job.job_id}, 202)
+    assert result == (_queued_body(action, job.job_id), 202)
     assert job.kwargs['arr_instance_id'] == 1
 
 
@@ -220,7 +227,7 @@ def test_subtitle_tool_reuses_the_active_job(subtitle_tool_request, action, stat
     if status == 'running':
         _start_job(queue)
 
-    assert request_tool(action) == ({'job_id': existing}, 202)
+    assert request_tool(action) == (_queued_body(action, existing), 202)
     assert len(queue.jobs_pending_queue) + len(queue.jobs_running_queue) == 1
 
 
@@ -269,7 +276,9 @@ def test_series_action_returns_the_new_or_existing_job(episode_queue, monkeypatc
 
     active = list(queue.jobs_pending_queue) + list(queue.jobs_running_queue)
     assert len(active) == 1
-    assert result == ({'job_id': active[0].job_id}, 202)
+    from app.process_session import PROCESS_SESSION
+
+    assert result == ({'job_id': active[0].job_id, 'session': PROCESS_SESSION}, 202)
     if status:
         assert result[0]['job_id'] == existing
 

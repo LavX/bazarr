@@ -4,6 +4,7 @@ from flask import request
 from flask_restx import Namespace, Resource
 
 from app.database import database, TableHistorySports
+from app.process_session import PROCESS_SESSION
 from sportarr import history, workflows
 from sportarr.identity import resolve_event_in_session
 from sportarr.sync.leagues import require_sportarr
@@ -63,16 +64,17 @@ def _league_id(value):
 
 
 def _queued(job_id):
-    return (
-        {
-            "queued": bool(job_id),
-            "job_id": job_id or None,
-            "message": "Search queued"
-            if job_id
-            else "No work queued; no eligible items or a matching job is active",
-        },
-        202 if job_id else 200,
-    )
+    body = {
+        "queued": bool(job_id),
+        "job_id": job_id or None,
+        "message": "Search queued"
+        if job_id
+        else "No work queued; no eligible items or a matching job is active",
+    }
+    if job_id:
+        # Ids restart with the backend, so the client names the job by its id together with the run.
+        body["session"] = PROCESS_SESSION
+    return body, 202 if job_id else 200
 
 
 @api_ns_sports_workflows.route("/sports/wanted")

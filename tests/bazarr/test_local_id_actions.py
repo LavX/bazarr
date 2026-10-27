@@ -271,7 +271,9 @@ def test_series_search_missing_action_passes_arr_instance_id(monkeypatch):
     ):
         response = series.Series.patch.__wrapped__(series.Series())
 
-    assert response == ({"job_id": None}, 202)
+    from app.process_session import PROCESS_SESSION
+
+    assert response == ({"job_id": None, "session": PROCESS_SESSION}, 202)
     assert captured == {"no": 1, "arr_instance_id": 3}
 
 

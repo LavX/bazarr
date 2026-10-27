@@ -1856,7 +1856,7 @@ def batch_api(monkeypatch):
         package = ModuleType(name)
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
-    for name, path in [('utils', 'utils.py'), ('subtitles.batch', 'subtitles/batch.py')]:
+    for name, path in [('utils', 'utils.py'), ('queued_job', 'queued_job.py'), ('swaggerui', 'swaggerui.py'), ('subtitles.batch', 'subtitles/batch.py')]:
         spec = importlib.util.spec_from_file_location('_sports_batch_api.' + name, root / path)
         module = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, spec.name, module)
