@@ -62,6 +62,29 @@ describe("PasswordConfirmView", () => {
     expect(passwordConfirmWindowLive()).toBe(true);
   });
 
+  it("asks for the password without calling the server when it is empty", async () => {
+    const user = userEvent.setup();
+    const onConfirmed = vi.fn();
+    server.use(FORM_AUTH_SETTINGS);
+    const bodies = mockConfirmEndpoint(403);
+
+    customRender(
+      <PasswordConfirmView
+        action="install this provider"
+        onConfirmed={onConfirmed}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /^confirm$/i }));
+
+    expect(await screen.findByText("Enter your password.")).toBeInTheDocument();
+    // An empty submit never reaches the endpoint, so it cannot spend one of
+    // the attempts the login throttle allows before it locks the address out.
+    expect(bodies).toEqual([]);
+    expect(onConfirmed).not.toHaveBeenCalled();
+    expect(passwordConfirmWindowLive()).toBe(false);
+  });
+
   it("shows an inline error for a wrong password and stays open", async () => {
     const user = userEvent.setup();
     const onConfirmed = vi.fn();

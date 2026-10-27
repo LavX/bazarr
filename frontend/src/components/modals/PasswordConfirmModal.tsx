@@ -35,6 +35,12 @@ export const PasswordConfirmView: FunctionComponent<
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (submitting) return;
+    // A wrong confirmation counts toward the login throttle, so an empty
+    // submit is answered here instead of spending one of those attempts.
+    if (password === "") {
+      setError("Enter your password.");
+      return;
+    }
     setSubmitting(true);
     setError(undefined);
     try {
