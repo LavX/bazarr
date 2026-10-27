@@ -76,6 +76,28 @@ function mountSelector() {
   return stagedValues;
 }
 
+describe("AIModelSelector suggestions", () => {
+  it("says the suggestions are a sample and any model id works", () => {
+    mountSelector();
+
+    expect(screen.getByText(/sample list/i)).toHaveTextContent(/any model id/i);
+  });
+
+  it("accepts an id that is not in the sample list", async () => {
+    const user = userEvent.setup();
+    const stagedValues = mountSelector();
+
+    const input = screen.getByRole("combobox");
+    await user.clear(input);
+    await user.type(input, "vendor/brand-new-model");
+    await user.tab();
+
+    await waitFor(() => {
+      expect(stagedValues[MODEL_KEY]).toBe("vendor/brand-new-model");
+    });
+  });
+});
+
 describe("AIModelSelector routing adoption", () => {
   it("does not adopt half a word while the user is still typing", async () => {
     // ":floor" is an exact suffix in the middle of typing ":floorplan", so

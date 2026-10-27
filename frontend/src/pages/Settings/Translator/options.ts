@@ -7,60 +7,59 @@ export const translatorOption: SelectorOption<string>[] = [
   { label: "Lingarr", value: "lingarr" },
 ];
 
+// A sample, not a catalogue: the field takes any OpenRouter model id. These ids
+// were checked against OpenRouter's public model list when the list was last
+// refreshed.
 export const aiTranslatorModelOptions: SelectorOption<string>[] = [
-  { label: "anthropic/claude-haiku-4.5", value: "anthropic/claude-haiku-4.5" },
+  { label: "anthropic/claude-haiku-5.5", value: "anthropic/claude-haiku-5.5" },
   {
-    label: "anthropic/claude-sonnet-4.6",
-    value: "anthropic/claude-sonnet-4.6",
+    label: "anthropic/claude-sonnet-5.5",
+    value: "anthropic/claude-sonnet-5.5",
   },
   {
     label: "bytedance-seed/seed-2.0-mini",
     value: "bytedance-seed/seed-2.0-mini",
   },
-  { label: "google/gemini-2.5-flash", value: "google/gemini-2.5-flash" },
   {
-    label: "google/gemini-2.5-flash-lite",
-    value: "google/gemini-2.5-flash-lite",
-  },
-  { label: "google/gemini-2.5-pro", value: "google/gemini-2.5-pro" },
-  {
-    label: "google/gemini-3-flash-preview",
-    value: "google/gemini-3-flash-preview",
+    label: "deepseek/deepseek-v4.1-flash",
+    value: "deepseek/deepseek-v4.1-flash",
   },
   {
-    label: "google/gemini-3.1-flash-lite-preview",
-    value: "google/gemini-3.1-flash-lite-preview",
+    label: "google/gemini-3.1-flash-lite",
+    value: "google/gemini-3.1-flash-lite",
   },
+  { label: "google/gemini-3.5-flash", value: "google/gemini-3.5-flash" },
   {
-    label: "google/gemini-3.1-pro-preview",
-    value: "google/gemini-3.1-pro-preview",
+    label: "google/gemini-3.5-flash-lite",
+    value: "google/gemini-3.5-flash-lite",
   },
-  { label: "inception/mercury-2", value: "inception/mercury-2" },
+  { label: "google/gemini-3.8-flash", value: "google/gemini-3.8-flash" },
+  { label: "google/gemini-4-argon", value: "google/gemini-4-argon" },
+  { label: "inception/mercury-3", value: "inception/mercury-3" },
   {
     label: "meta-llama/llama-4-maverick",
     value: "meta-llama/llama-4-maverick",
   },
   { label: "meta-llama/llama-4-scout", value: "meta-llama/llama-4-scout" },
-  { label: "minimax/minimax-m2.7", value: "minimax/minimax-m2.7" },
+  { label: "minimax/minimax-m3.1-flash", value: "minimax/minimax-m3.1-flash" },
+  {
+    label: "mistralai/mistral-large-4-0",
+    value: "mistralai/mistral-large-4-0",
+  },
   {
     label: "mistralai/mistral-small-2603",
     value: "mistralai/mistral-small-2603",
   },
-  { label: "moonshotai/kimi-k2.5", value: "moonshotai/kimi-k2.5" },
-  { label: "openai/gpt-4o-mini", value: "openai/gpt-4o-mini" },
-  { label: "openai/gpt-5", value: "openai/gpt-5" },
-  { label: "openai/gpt-5-mini", value: "openai/gpt-5-mini" },
-  { label: "openai/gpt-5-nano", value: "openai/gpt-5-nano" },
-  { label: "openai/gpt-5.4", value: "openai/gpt-5.4" },
+  { label: "moonshotai/kimi-k3.1-pro", value: "moonshotai/kimi-k3.1-pro" },
   { label: "openai/gpt-5.4-mini", value: "openai/gpt-5.4-mini" },
   { label: "openai/gpt-5.4-nano", value: "openai/gpt-5.4-nano" },
-  { label: "openai/o4-mini", value: "openai/o4-mini" },
+  { label: "openai/gpt-6.1-sol", value: "openai/gpt-6.1-sol" },
+  { label: "openai/gpt-6.1-terra", value: "openai/gpt-6.1-terra" },
   { label: "openrouter/auto", value: "openrouter/auto" },
   { label: "openrouter/free", value: "openrouter/free" },
-  { label: "qwen/qwen3.5-plus-02-15", value: "qwen/qwen3.5-plus-02-15" },
-  { label: "x-ai/grok-4.20", value: "x-ai/grok-4.20" },
-  { label: "x-ai/grok-4.6", value: "x-ai/grok-4.6" },
-  { label: "z-ai/glm-4.7-flash", value: "z-ai/glm-4.7-flash" },
+  { label: "qwen/qwen3.8-flash", value: "qwen/qwen3.8-flash" },
+  { label: "x-ai/grok-4.7", value: "x-ai/grok-4.7" },
+  { label: "z-ai/glm-5.3-flash", value: "z-ai/glm-5.3-flash" },
 ];
 
 export const aiTranslatorReasoningOptions: SelectorOption<string>[] = [

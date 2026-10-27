@@ -83,6 +83,7 @@ const AIModelSelector: FunctionComponent = () => {
     <>
       <Autocomplete
         label="AI Model"
+        description="The suggestions are a sample list. Any model ID from OpenRouter works."
         data={modelData}
         value={(value as string) ?? ""}
         onChange={onChange}

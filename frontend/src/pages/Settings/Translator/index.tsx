@@ -480,8 +480,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
               <AIModelSelector />
               <FreeModelWarning />
               <MantineText size="xs" c="var(--bz-text-tertiary)">
-                Models are fetched from the service. You can also type any model
-                ID from{" "}
+                Browse every model ID at{" "}
                 <Anchor
                   href="https://openrouter.ai/models"
                   target="_blank"
