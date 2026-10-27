@@ -28,12 +28,15 @@ api_ns_system_settings = Namespace('systemSettings', description='System setting
 # run a shell command after the next subtitle download, and the login keys
 # decide who may sign in, which decides whether this gate applies at all. A
 # leaked key that could switch login off would switch the gate off with it.
+# The trusted proxy decides whose forwarded address the login throttle counts,
+# so a key holder who could change it could pick the address that is counted.
 GATED_SETTINGS_KEYS = frozenset({
     'settings-general-postprocessing_cmd',
     'settings-general-use_postprocessing',
     'settings-auth-type',
     'settings-auth-username',
     'settings-auth-password',
+    'settings-general-trusted_proxy',
 })
 
 

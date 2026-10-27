@@ -42,6 +42,10 @@ function renderSettingsPage() {
             label="Stage a gated key"
           />
           <Stager
+            value={{ "settings-general-trusted_proxy": "10.0.0.5" }}
+            label="Stage the trusted proxy"
+          />
+          <Stager
             value={{ "settings-general-theme": "dark" }}
             label="Stage an ordinary key"
           />
@@ -132,6 +136,29 @@ describe("Settings layout and the password confirmation", () => {
       expect(saved).toHaveLength(1);
     });
     expect(saved[0]["settings-auth-password"]).toBe("a-new-password");
+  });
+
+  it("prompts before saving the trusted proxy", async () => {
+    const user = userEvent.setup();
+    const saved = recordSettingsSaves();
+    renderSettingsPage();
+
+    await user.click(await screen.findByText("Stage the trusted proxy"));
+    await user.click(
+      await screen.findByRole("button", { name: /save 1 pending change/i }),
+    );
+
+    expect(saved).toEqual([]);
+    expect(
+      await screen.findByText("Confirm your password"),
+    ).toBeInTheDocument();
+
+    await confirmThePassword(user);
+
+    await waitFor(() => {
+      expect(saved).toHaveLength(1);
+    });
+    expect(saved[0]["settings-general-trusted_proxy"]).toBe("10.0.0.5");
   });
 
   it("saves an ordinary key without a prompt", async () => {

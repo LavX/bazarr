@@ -60,6 +60,7 @@ const GATED_SETTINGS_KEYS = new Set([
   "settings-auth-type",
   "settings-auth-username",
   "settings-auth-password",
+  "settings-general-trusted_proxy",
 ]);
 
 const isGatedSettingsKey = (key: string) =>
