@@ -1,6 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { claimJobCompletion } from "@/modules/jobs";
 
 // Waiting on a backend job the standard way: the jobs socket keeps the
 // [System, Jobs] cache current, and a job has settled once its entry there is
@@ -226,4 +227,29 @@ export async function awaitJobResult<T>(
     throw new Error(JOB_RESULT_GONE);
   }
   return outcome.result;
+}
+
+/** What a route that queues a search answers with. */
+export interface QueuedSearch {
+  job_id: number | null;
+  /** The backend run that owns the job, which ids restart with. */
+  session?: string;
+}
+
+/**
+ * Run a search as a standard job and hand back its rows. The modal that asked
+ * shows the outcome itself, so the job's finish is claimed and the standard
+ * notification stays quiet; the Jobs drawer still lists it with its progress.
+ * Asking again while the search runs follows the same job, so a modal opened
+ * again mid-search can pick it up with one more press of Search.
+ */
+export async function searchAsJob<T>(
+  client: QueryClient,
+  enqueue: () => Promise<QueuedSearch>,
+): Promise<T> {
+  const queued = await enqueue();
+  if (queued.job_id !== null) {
+    claimJobCompletion(queued.job_id, queued.session);
+  }
+  return awaitJobResult<T>(client, queued.job_id);
 }

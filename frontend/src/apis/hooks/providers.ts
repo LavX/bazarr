@@ -3,6 +3,7 @@ import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { searchAsJob } from "@/utilities/jobs";
 
 export function useSystemProviders(history?: boolean) {
   return useQuery({
@@ -11,7 +12,11 @@ export function useSystemProviders(history?: boolean) {
   });
 }
 
+// The manual searches run as standard jobs: the request queues one and the
+// query follows it to its rows. Closing the modal does not stop the job, and
+// pressing Search again for the same item follows the search that is running.
 export function useMoviesProvider(radarrId?: number) {
+  const client = useQueryClient();
   return useQuery({
     queryKey: [
       QueryKeys.System,
@@ -22,7 +27,9 @@ export function useMoviesProvider(radarrId?: number) {
 
     queryFn: () => {
       if (radarrId) {
-        return api.providers.movies(radarrId);
+        return searchAsJob<SearchResultType[]>(client, () =>
+          api.providers.searchMovie(radarrId),
+        );
       }
 
       return [];
@@ -33,6 +40,7 @@ export function useMoviesProvider(radarrId?: number) {
 }
 
 export function useEpisodesProvider(episodeId?: number) {
+  const client = useQueryClient();
   return useQuery({
     queryKey: [
       QueryKeys.System,
@@ -43,7 +51,9 @@ export function useEpisodesProvider(episodeId?: number) {
 
     queryFn: () => {
       if (episodeId) {
-        return api.providers.episodes(episodeId);
+        return searchAsJob<SearchResultType[]>(client, () =>
+          api.providers.searchEpisode(episodeId),
+        );
       }
 
       return [];

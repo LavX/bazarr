@@ -4,6 +4,7 @@
 import os
 import sys
 import logging
+from threading import Thread
 from media_servers.events import publication_callback
 import subliminal
 
@@ -34,6 +35,7 @@ from .pool import update_pools, _get_pool
 from .utils import get_video, _get_lang_obj, _get_scores
 from .mismatch import clear_mismatch_for_video
 from .processing import process_subtitle
+from .search_result import marshal_search_results
 
 
 @update_pools
@@ -176,6 +178,51 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
     subliminal.region.backend.sync()
 
     return final_subtitles
+
+
+# The search without the observation wrapper: the queue already observes a job,
+# and observing it a second time would list one search as two operations.
+_search_in_job = update_pools(_manual_search)
+
+
+def queue_manual_search(path, profile_id, scene_name, title, media_type, label, arr_instance_id=None):
+    """Queue a manual search as a standard job and start it at once.
+
+    A person pressing Search is waiting, so the job does not queue behind a
+    backlog of library work: it starts the way an editor sync does. Pressing
+    Search again for the same file while that search runs follows it instead
+    of starting a second one. The rows come back as the job's result.
+
+    :return: The job id.
+    """
+    job_id = jobs_queue.feed_jobs_pending_queue(
+        job_name=f"Searching subtitles for {label}", module=__name__, func="run_manual_search_job",
+        kwargs={"path": path, "profile_id": profile_id, "scene_name": scene_name, "title": title,
+                "media_type": media_type, "arr_instance_id": arr_instance_id},
+        is_progress=True, progress_max=2, retryable=True, return_existing=True)
+    Thread(target=jobs_queue.force_start_pending_job, args=(job_id, True), daemon=True).start()
+    return job_id
+
+
+def run_manual_search_job(path, profile_id, scene_name, title, media_type, arr_instance_id=None, job_id=None):
+    """The job body: list the providers for one file and publish what they offered."""
+    from app.get_providers import get_providers_sorted
+
+    activity.register(activity.activity_id_for_job(job_id), operation='manual_search', scope_kind='media',
+                      media_type='episode' if media_type == 'series' else 'movie', title=title)
+    jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=2,
+                                   progress_message="Searching the providers")
+    found = _search_in_job(path, profile_id, get_providers_sorted(), scene_name, title, media_type,
+                           arr_instance_id=arr_instance_id)
+    if isinstance(found, str):
+        # The search says why it could not run as its return value.
+        logging.warning("Manual search failed: reason=providers_unavailable title=%s: %s", title, found)
+        raise JobFailed(found, reason="providers_unavailable", retryable=True)
+    jobs_queue.update_job_progress(job_id=job_id, progress_value=1,
+                                   progress_message=f"Preparing {len(found)} result(s)")
+    jobs_queue.publish_job_result(job_id, marshal_search_results(found))
+    jobs_queue.update_job_progress(job_id=job_id, progress_value="max", allow_cancelled=True,
+                                   progress_message=f"{len(found)} subtitle(s) found")
 
 
 @update_pools
