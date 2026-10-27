@@ -124,9 +124,18 @@ def embedded_codecs_by_language(stored):
     return found
 
 
-def note_uncounted_track(uncounted, key, codec):
-    """Record a track of this file that the indexer does not count (hidden, or skipped by an ignore switch)."""
-    uncounted.setdefault(embedded_history_language(key), set()).add(normalize_codec(codec))
+# Stands in the codecs of an uncounted language for a track the user hid.
+HIDDEN = "hidden"
+
+
+def note_uncounted_track(uncounted, key, codec, hidden=False):
+    """Record a track of this file that the indexer does not count.
+
+    It is hidden, or skipped by an ignore switch for its codec. A hide is the
+    user naming the language, whatever codec the listing held for it.
+    """
+    codecs = uncounted.setdefault(embedded_history_language(key), set())
+    codecs.add(HIDDEN if hidden else normalize_codec(codec))
 
 
 def retract_embedded_history(session, table, video_path, uncounted, counted, previous, arr_instance_id=None,
@@ -140,22 +149,30 @@ def retract_embedded_history(session, table, video_path, uncounted, counted, pre
     track keys the pass did list, and ``previous`` the codecs the last stored
     listing counted for each language (``embedded_codecs_by_language``).
 
-    A language is retracted only when a codec the last listing counted is the
-    one now skipped, and no counted track still covers the language. A track
-    that is merely gone from the container is never retracted, nor is one whose
+    A language is retracted only when no counted track still covers it and
+    either the user hid it and the last listing counted it, or a codec the last
+    listing counted is the one an ignore switch now skips. A track that is merely gone from the container is never retracted, nor is one whose
     codec is not the skipped one: another tool may have copied it out next to the
     video and stripped it, leaving a hidden or ignored track of the same
     language behind, and the row is the only trace of the copy. The index on
     (video_path, language) serves the delete.
 
-    With ``guard`` it never raises, so indexing goes on if the delete fails and
-    the row ends upgrades a little longer. A caller inside a transaction that a
-    failed statement would abort passes ``guard=False``.
+    The caller runs it before it stores the new listing, so a delete that fails
+    is tried again by the next pass, which still sees the track in the old
+    listing. With ``guard`` it never raises, so indexing goes on. A caller inside
+    a transaction that a failed statement would abort passes ``guard=False``.
     """
     try:
         covered = {embedded_history_language(key) for key in counted or ()}
+        previous = previous or {}
+
+        def counted_before(language, codecs):
+            if HIDDEN in codecs and language in previous:
+                return True
+            return bool(codecs & previous.get(language, set()))
+
         languages = sorted(language for language, codecs in (uncounted or {}).items()
-                           if language not in covered and codecs & (previous or {}).get(language, set()))
+                           if language not in covered and counted_before(language, codecs))
         if not languages or not video_path:
             return 0
         statement = delete(table).where(table.action == 7, table.video_path == video_path,
@@ -170,8 +187,9 @@ def retract_embedded_history(session, table, video_path, uncounted, counted, pre
         return 0
 
 
-def kept_embedded_entries(stored, hidden=()):
-    """The embedded entries of a stored listing that a new listing should keep.
+def partition_embedded_entries(stored, hidden=()):
+    """Split the embedded entries of a stored listing into those a new listing
+    should keep and those it drops.
 
     For an indexer that could not read the file's tracks this time. A failed
     read says nothing about the tracks, and a listing stored without them makes
@@ -181,8 +199,8 @@ def kept_embedded_entries(stored, hidden=()):
     try:
         listing = ast.literal_eval(stored) if stored else []
     except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
-        return []
-    kept = []
+        return [], []
+    kept, dropped = [], []
     for entry in listing if isinstance(listing, list) else []:
         if not isinstance(entry, (list, tuple)) or not entry or not isinstance(entry[0], str):
             continue
@@ -192,9 +210,15 @@ def kept_embedded_entries(stored, hidden=()):
         if entry[0] in hidden or (codec and ((settings.general.ignore_pgs_subs and codec == 'pgs') or
                                              (settings.general.ignore_vobsub_subs and codec == 'vobsub') or
                                              (settings.general.ignore_ass_subs and codec == 'ass'))):
+            dropped.append(list(entry))
             continue
         kept.append(list(entry))
-    return kept
+    return kept, dropped
+
+
+def kept_embedded_entries(stored, hidden=()):
+    """The embedded entries of a stored listing that a new listing should keep."""
+    return partition_embedded_entries(stored, hidden)[0]
 
 
 def sync_engine_from_subtitle_name(subtitle):

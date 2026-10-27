@@ -186,7 +186,9 @@ def test_a_track_gone_from_the_container_keeps_its_row(hidden_db, monkeypatch):
     assert len(_movie_rows(hidden_db)) == 4
 
 
-def test_an_unreadable_file_keeps_every_row(hidden_db, monkeypatch):
+def test_an_unreadable_file_retracts_what_the_stored_listing_drops(hidden_db, monkeypatch):
+    """A failed read keeps the tracks the last good read stored, except the ones
+    hidden or ignored since. That listing is all the retraction has to go on."""
     from subtitles.embedded_hidden import hide_track
 
     mv = _stub_movie(hidden_db, monkeypatch)
@@ -198,7 +200,26 @@ def test_an_unreadable_file_keeps_every_row(hidden_db, monkeypatch):
     monkeypatch.setattr(mv, "embedded_subs_reader", unreadable)
     mv.store_subtitles_movie(MOVIE_PATH, "/local/m.mkv", arr_instance_id=1)
 
-    assert len(_movie_rows(hidden_db)) == 4
+    assert _movie_rows(hidden_db) == [(1, MOVIE_PATH, "en"), (1, MOVIE_PATH, "fr"), (2, MOVIE_PATH, "en:hi")]
+
+
+@pytest.mark.parametrize("how,retracted", [("hide", True), ("ignore", False)])
+def test_a_listing_without_codecs_retracts_a_hide_but_not_an_ignored_codec(hidden_db, monkeypatch, how, retracted):
+    """Listings stored before codecs were kept hold three elements. A hide names
+    the language, so it retracts; an ignored codec has nothing to match."""
+    from subtitles.embedded_hidden import hide_track
+
+    mv = _stub_movie(hidden_db, monkeypatch)
+    hidden_db.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(
+        subtitles=str([["en", None, None], ["en:hi", None, None], ["fr", None, None]])))
+    if how == "hide":
+        hide_track(hidden_db, "movie", 1, 1, "fr")
+    else:
+        monkeypatch.setattr(mv.settings.general, "ignore_pgs_subs", True, raising=False)
+
+    mv.store_subtitles_movie(MOVIE_PATH, "/local/m.mkv", arr_instance_id=1)
+
+    assert ((1, MOVIE_PATH, "fr") in _movie_rows(hidden_db)) is not retracted
 
 
 @pytest.mark.parametrize("how", ["hide", "ignore"])
@@ -214,8 +235,10 @@ def test_skipping_an_episode_track_takes_the_row_of_every_episode_in_the_file(hi
         hidden_db.add(TableEpisodes(
             id=episode_id, arr_instance_id=1, series_id=1, sonarrSeriesId=1, sonarrEpisodeId=10 + episode_id,
             title="E", path=EPISODE_PATH, season=1, episode=episode_id, episode_file_id=500, file_size=111,
-            subtitles=str([["en", None, None, "subrip"], ["en:hi", None, None, "subrip"],
-                           ["fr", None, None, "pgs"]])))
+            # The first row is one a sync added since the last index: no listing yet.
+            subtitles="[]" if episode_id == 1 else str([["en", None, None, "subrip"],
+                                                         ["en:hi", None, None, "subrip"],
+                                                         ["fr", None, None, "pgs"]])))
     hidden_db.commit()
     for episode_id in (1, 2):
         for language in ("en", "fr"):

@@ -17,10 +17,11 @@ from subtitles.tools.subsync_engines import SyncOutputOwnerIndex, subtitle_write
 from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import embedded_subs_reader
 from app.event_handler import event_stream
-from subtitles.indexer.entries import embedded_entry
+from subtitles.indexer.entries import embedded_entry, entry_codec
 from subtitles.indexer.utils import add_sync_engine_outputs, add_combined_outputs, guess_external_subtitles, \
-    get_external_subtitles_path, kept_embedded_entries, normalize_subtitle_language_variant, \
-    embedded_codecs_by_language, embedded_history_language, note_uncounted_track, retract_embedded_history, \
+    get_external_subtitles_path, normalize_subtitle_language_variant, \
+    embedded_codecs_by_language, embedded_history_language, note_uncounted_track, \
+    partition_embedded_entries, retract_embedded_history, \
     subtitle_language_with_sync_modifier, subtitle_language_with_combined_modifier
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.utils import _get_scores
@@ -85,7 +86,10 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
             else:
                 # A track hidden on any row sharing the file is skipped for the file.
                 hidden = hidden_languages(database, 'episode', [row.id for row in sharing_file], owner_instance_id)
-                previous_embedded = embedded_codecs_by_language(item.subtitles)
+                # What the last index counted, from every row sharing the file.
+                for row in sharing_file:
+                    for language, codecs in embedded_codecs_by_language(row.subtitles).items():
+                        previous_embedded.setdefault(language, set()).update(codecs)
                 try:
                     subtitle_languages = embedded_subs_reader(reversed_path,
                                                               file_size=item.file_size,
@@ -118,7 +122,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                                     hi=subtitle_hi)
                                 if lang in hidden:
                                     logging.debug("BAZARR skipping hidden embedded subtitles: %s", lang)
-                                    note_uncounted_track(uncounted_embedded, lang, codec)
+                                    note_uncounted_track(uncounted_embedded, lang, codec, hidden=True)
                                     continue
                                 logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
                                 actual_subtitles.append(embedded_entry(lang, subtitle_codec))
@@ -132,9 +136,18 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                     # Keep the tracks the last good read stored, so a failed
                     # read does not make every embedded language wanted again.
                     # They were recorded in history then, so not again now.
-                    actual_subtitles = kept_embedded_entries(item.subtitles, hidden)
+                    actual_subtitles, dropped = partition_embedded_entries(item.subtitles, hidden)
                     embedded_languages = []
+                    # The listing stored below drops the tracks now hidden or
+                    # skipped, so this is the only pass that can retract them.
                     uncounted_embedded = {}
+                    for entry in dropped:
+                        note_uncounted_track(uncounted_embedded, entry[0], entry_codec(entry),
+                                             hidden=entry[0] in hidden)
+                # Before the new listing is stored, so a pass that fails here
+                # still finds the track in the old one and tries again.
+                retract_embedded_history(database, TableHistory, original_path, uncounted_embedded,
+                                         embedded_languages, previous_embedded, owner_instance_id)
         destination = os.path.join(get_target_folder(reversed_path, create=False) or os.path.dirname(reversed_path),
                                    '.destination')
         with subtitle_write_locks(reversed_path, destination):
@@ -234,8 +247,6 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                 # wrong row (no-op for the default/single-instance path).
                 list_missing_subtitles(epno=episode.sonarrEpisodeId,
                                        arr_instance_id=episode.arr_instance_id)
-                retract_embedded_history(database, TableHistory, original_path, uncounted_embedded,
-                                         embedded_languages, previous_embedded, episode.arr_instance_id)
                 if embedded_languages:
                     # Pass the DB-side path (original_path), not the local
                     # filesystem path. history_log stores result.path verbatim,

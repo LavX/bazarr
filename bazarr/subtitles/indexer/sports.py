@@ -356,7 +356,7 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
                 if code:
                     code = normalize_subtitle_language_variant(code, forced=forced, hi=hi)
                     if code in hidden:
-                        note_uncounted_track(uncounted_codes, code, codec)
+                        note_uncounted_track(uncounted_codes, code, codec, hidden=True)
                         continue
                     actual.append(embedded_entry(code, codec))
                     embedded_codes.append(code)
