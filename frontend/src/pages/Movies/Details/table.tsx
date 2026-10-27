@@ -309,6 +309,19 @@ function buildHistoryLanguageKey(sub: {
   return sub.code2;
 }
 
+// An Embedded Source row records a forced and HI track as forced, so a track
+// with both flags is looked up under that key first. The HI key follows for the
+// rows an older version wrote.
+function embeddedHistoryLanguageKeys(sub: {
+  code2: string;
+  hi?: boolean;
+  forced?: boolean;
+}): string[] {
+  return sub.hi && sub.forced
+    ? [`${sub.code2}:forced`, `${sub.code2}:hi`]
+    : [buildHistoryLanguageKey(sub)];
+}
+
 type CompareSelection = { original: Subtitle; outputs: Subtitle[] } | null;
 
 // What the cells read from the table. The cells and the columns live at module
@@ -341,9 +354,12 @@ function historyRecordFor(
   historyMap: Map<string, History.Movie>,
   embeddedScoreMap: Map<string, History.Movie>,
 ) {
-  return !isSubtitleTrack(subtitle.path)
-    ? historyMap.get(subtitle.path!)
-    : embeddedScoreMap.get(buildHistoryLanguageKey(subtitle));
+  if (!isSubtitleTrack(subtitle.path)) return historyMap.get(subtitle.path!);
+  for (const key of embeddedHistoryLanguageKeys(subtitle)) {
+    const record = embeddedScoreMap.get(key);
+    if (record) return record;
+  }
+  return undefined;
 }
 
 const ScoreCell: FunctionComponent<{ subtitle: Subtitle }> = ({ subtitle }) => {

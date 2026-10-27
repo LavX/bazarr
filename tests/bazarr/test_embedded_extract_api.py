@@ -497,6 +497,7 @@ def test_remove_hi_carries_the_extraction_to_the_file_it_saves(library, jobs, mo
     monkeypatch.setattr(upgrade, "database", session)
     monkeypatch.setattr(upgrade, "settings", SimpleNamespace(general=SimpleNamespace(
         days_to_upgrade_subs=365, upgrade_manual=False, upgrade_translated=False, upgrade_subs=True,
+        use_embedded_subs=True,
         use_sportarr=False)))
     monkeypatch.setattr(upgrade, "jobs_queue", SimpleNamespace(
         update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None))
@@ -542,6 +543,7 @@ def test_the_current_path_guard_holds_without_the_carried_row(library, jobs, mon
     monkeypatch.setattr(upgrade, "database", session)
     monkeypatch.setattr(upgrade, "settings", SimpleNamespace(general=SimpleNamespace(
         days_to_upgrade_subs=365, upgrade_manual=False, upgrade_translated=False, upgrade_subs=True,
+        use_embedded_subs=True,
         use_sportarr=False)))
     monkeypatch.setattr(upgrade, "jobs_queue", SimpleNamespace(
         update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None))
@@ -601,6 +603,7 @@ def test_an_in_place_mod_on_an_extracted_file_keeps_its_lineage(library, jobs, m
     monkeypatch.setattr(upgrade, "database", session)
     monkeypatch.setattr(upgrade, "settings", SimpleNamespace(general=SimpleNamespace(
         days_to_upgrade_subs=365, upgrade_manual=False, upgrade_translated=False, upgrade_subs=True,
+        use_embedded_subs=True,
         use_sportarr=False)))
     monkeypatch.setattr(upgrade, "jobs_queue", SimpleNamespace(
         update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None))
@@ -698,6 +701,7 @@ def _upgrade_calls(session, root, monkeypatch):
     monkeypatch.setattr(upgrade, "database", session)
     monkeypatch.setattr(upgrade, "settings", SimpleNamespace(general=SimpleNamespace(
         days_to_upgrade_subs=365, upgrade_manual=False, upgrade_translated=False, upgrade_subs=True,
+        use_embedded_subs=True,
         use_sportarr=False)))
     monkeypatch.setattr(upgrade, "jobs_queue", SimpleNamespace(
         update_job_progress=lambda **kw: None, update_job_name=lambda **kw: None))

@@ -23,6 +23,7 @@ def upgrade_db(monkeypatch):
     settings = SimpleNamespace(
         general=SimpleNamespace(
             days_to_upgrade_subs=365,
+            use_embedded_subs=True,
             upgrade_manual=False,
             upgrade_translated=False,
             upgrade_subs=True,

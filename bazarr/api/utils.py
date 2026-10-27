@@ -488,23 +488,18 @@ def chunked(items, size=900):
 
 
 def _canonical_embedded_language(language):
-    """Reduce a possibly multi-variant embedded language code to the
-    hi-priority single variant that action-7 history rows store.
+    """Reduce a possibly multi-variant embedded language code to the single
+    variant that action-7 history rows store.
 
     The raw ``subtitles`` column can hold a combined code like
-    ``"en:hi:forced"`` for a track that is both HI and forced, while
-    ``_log_embedded_history_movie`` writes the canonical single variant
-    ``"en:hi"``. Applying the same reduction here (base, plus ``":hi"`` when HI,
-    else ``":forced"`` when forced, else the base) lets the two match.
+    ``"en:hi:forced"`` for a track that is both HI and forced, while the
+    indexers record that track's Embedded Source row as ``"en:forced"``
+    (``embedded_history_language()``). Applying the same reduction here lets
+    the two match.
     """
-    parts = str(language).split(':')
-    base = parts[0]
-    variants = set(parts[1:])
-    if 'hi' in variants:
-        return base + ':hi'
-    if 'forced' in variants:
-        return base + ':forced'
-    return base
+    from subtitles.indexer.utils import embedded_history_language
+
+    return embedded_history_language(language)
 
 
 # A Windows path: a drive letter followed by either separator, a UNC prefix, or

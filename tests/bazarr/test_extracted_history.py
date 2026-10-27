@@ -28,7 +28,7 @@ def upgrade_db(hidden_db, monkeypatch):
 
     settings = SimpleNamespace(general=SimpleNamespace(
         days_to_upgrade_subs=365, upgrade_manual=False, upgrade_translated=False, upgrade_subs=True,
-        use_sportarr=False))
+        use_sportarr=False, use_embedded_subs=True))
     for module in (upgrade, batch):
         monkeypatch.setattr(module, "database", hidden_db)
         monkeypatch.setattr(module, "settings", settings)

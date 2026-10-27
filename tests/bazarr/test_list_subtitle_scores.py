@@ -335,10 +335,10 @@ def test_movies_newer_unscored_record_shadows_older_scored(schema_session, monke
 def test_movies_embedded_multivariant_language_matches_canonical_record(schema_session, monkeypatch):
     movies = _prepare_movies(monkeypatch, schema_session)
     # The current embedded track carries a combined code ("en:hi:forced"), while
-    # the action-7 record stores the canonical hi-priority variant ("en:hi").
+    # the action-7 record stores the canonical variant, forced first ("en:forced").
     # The two must still be recognised as the same track.
     _add_movie(schema_session, 100, "[['en:hi:forced', None, None]]")
-    _add_movie_history(schema_session, 1, 100, 7, None, "en:hi", 100, 100)
+    _add_movie_history(schema_session, 1, 100, 7, None, "en:forced", 100, 100)
 
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 

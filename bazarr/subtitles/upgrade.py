@@ -7,7 +7,7 @@ import ast
 
 from datetime import datetime, timedelta
 from functools import reduce
-from sqlalchemy import and_, exists, or_
+from sqlalchemy import and_, exists, false, or_
 from sqlalchemy.orm import aliased
 
 from app.config import settings
@@ -424,7 +424,15 @@ def newer_embedded_source(table):
     apart: a forced track covers only part of the dialogue. This is a
     condition of its own, not an action in latest_row_actions(), because that
     keys on the exact language.
+
+    The row counts only while the track does. With embedded subtitles switched
+    off no track covers a language, so nothing holds; the indexer deletes the
+    row of a track the user hides or an ignore switch skips (see
+    retract_embedded_history()), so those stop holding too, while a track that
+    is merely gone from the container still does.
     """
+    if not settings.general.use_embedded_subs:
+        return false()
     embedded = aliased(table)
     return exists().where(
         embedded.action == EMBEDDED_SOURCE_ACTION,

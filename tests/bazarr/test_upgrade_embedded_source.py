@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import insert, update
 
 from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies
+# Pytest fixture, used by name through upgrade_db: the import is what registers it here.
 from test_embedded_track_hidden import hidden_db  # noqa: F401
 from test_extracted_history import upgrade_db, upgrade_run  # noqa: F401
 from test_upgrade_embedded_history import _insert_episode, _insert_movie
@@ -97,6 +98,40 @@ def test_a_download_after_the_embedded_track_is_still_a_candidate(upgrade_db):
     track was stripped and its file deleted, say. The file at the download's
     path is then that download."""
     _history(upgrade_db, download=dict(minutes_ago=1), embedded=dict(minutes_ago=60))
+
+    assert _candidates() == KEPT
+
+
+@pytest.mark.parametrize("download_language,embedded_language", [("en", "en:hi"), ("en:hi", "en")],
+                         ids=["plain-then-hi-track", "hi-then-plain-track"])
+def test_a_chain_of_mixed_language_keys_around_the_embedded_row(upgrade_db, download_language, embedded_language):
+    """An older download, the Embedded Source row of the other variant, then a
+    newer download and its upgrade in that variant. The older download is no
+    candidate, since the track is newer than it. The newer chain keeps its
+    latest row as the candidate, which names the row it upgraded."""
+    _insert_movie(upgrade_db)
+    _insert_episode(upgrade_db)
+    for table, row, ids in ((TableHistoryMovie, _movie_row, (201, 202, 203, 204)),
+                            (TableHistory, _episode_row, (101, 102, 103, 104))):
+        first, track, later, latest = ids
+        upgrade_db.execute(insert(table).values(**row(first, 1, 240, language=download_language)))
+        upgrade_db.execute(insert(table).values(**row(track, 7, 180, language=embedded_language)))
+        upgrade_db.execute(insert(table).values(**row(later, 1, 120, language=embedded_language)))
+        upgrade_db.execute(insert(table).values(**row(latest, 3, 60, language=embedded_language,
+                                                      upgradedFromId=later)))
+
+    assert _candidates() == ({204: 203}, {104: 103}, [30], [10])
+
+
+def test_switching_embedded_subtitles_off_brings_the_upgrades_back(upgrade_db, monkeypatch):
+    """With embedded subtitles off no track covers a language, so the Embedded
+    Source rows the indexer wrote earlier stop ending upgrades."""
+    from subtitles import upgrade
+
+    _history(upgrade_db, download=dict(minutes_ago=60), embedded=dict(minutes_ago=1))
+    assert _candidates() == ENDED
+
+    monkeypatch.setattr(upgrade.settings.general, "use_embedded_subs", False)
 
     assert _candidates() == KEPT
 

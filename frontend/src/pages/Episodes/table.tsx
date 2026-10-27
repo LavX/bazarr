@@ -108,6 +108,19 @@ function buildHistoryLanguageKey(sub: {
   return sub.code2;
 }
 
+// An Embedded Source row records a forced and HI track as forced, so a track
+// with both flags is looked up under that key first. The HI key follows for the
+// rows an older version wrote.
+function embeddedHistoryLanguageKeys(sub: {
+  code2: string;
+  hi?: boolean;
+  forced?: boolean;
+}): string[] {
+  return sub.hi && sub.forced
+    ? [`${sub.code2}:forced`, `${sub.code2}:hi`]
+    : [buildHistoryLanguageKey(sub)];
+}
+
 function scoreInfoFromHistory(
   record: History.Episode | undefined,
 ): SubtitleScoreInfo | undefined {
@@ -166,11 +179,13 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
     // by path, embedded tracks by language key.
     const scoreFor = (val: Subtitle): SubtitleScoreInfo | undefined => {
       if (!val.path) {
-        return scoreInfoFromHistory(
-          embeddedScoreMap.get(
-            JSON.stringify([episode.id, buildHistoryLanguageKey(val)]),
-          ),
-        );
+        for (const key of embeddedHistoryLanguageKeys(val)) {
+          const record = embeddedScoreMap.get(
+            JSON.stringify([episode.id, key]),
+          );
+          if (record) return scoreInfoFromHistory(record);
+        }
+        return undefined;
       }
       const record = historyMap.get(JSON.stringify([episode.id, val.path]));
       return record && [1, 2, 3, 8].includes(record.action)

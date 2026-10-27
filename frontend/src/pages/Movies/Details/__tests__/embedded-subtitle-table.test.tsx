@@ -165,6 +165,51 @@ describe("Movies Detail Table, extracted file score", () => {
 // Test 2: Multiple embedded tracks same language (hi/forced) no key collision
 // ---------------------------------------------------------------------------
 
+describe("Movies Detail Table, forced and HI embedded track", () => {
+  it("scores the track from its forced record, and from the HI record an older version wrote", async () => {
+    setupApiMocks();
+    const embedded: Subtitle = {
+      code2: "en",
+      name: "English",
+      hi: true,
+      forced: true,
+      path: null,
+    };
+    const record = (hi: boolean, forced: boolean, score: string) =>
+      makeHistoryEntry({
+        action: 7,
+        score,
+        language: { code2: "en", name: "English", hi, forced },
+        provider: "embedded",
+        subtitles_path: "",
+      });
+
+    const { unmount } = customRender(
+      <Table
+        movie={makeMovie([embedded])}
+        profile={undefined}
+        history={[record(true, false, "95.0%"), record(false, true, "80.0%")]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("80.0%")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("95.0%")).not.toBeInTheDocument();
+    unmount();
+
+    customRender(
+      <Table
+        movie={makeMovie([embedded])}
+        profile={undefined}
+        history={[record(true, false, "95.0%")]}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("95.0%")).toBeInTheDocument();
+    });
+  });
+});
+
 describe("Movies Detail Table, no key collision for hi vs regular", () => {
   it("renders both regular and HI embedded English tracks without error", async () => {
     setupApiMocks();
