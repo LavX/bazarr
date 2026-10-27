@@ -11,7 +11,7 @@ from app.database import (TableArrInstances, TableEpisodes, TableLanguagesProfil
                           TableHistoryMovie, TableHistorySports, TableShows, TableSportsEvents, TableSportsLeagues,
                           database, get_audio_profile_languages, select)
 from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
-from subtitles.sync import sync_subtitles
+from subtitles.sync import SYNC_SKIPPED, sync_subtitles
 from subtitles.tools.subsync_engines import is_sync_engine_output
 from subtitles.tools.mods import subtitles_apply_mods
 from subtitles.indexer.series import series_scan_subtitles
@@ -1126,6 +1126,11 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
     return items, skipped
 
 
+def _item_outcome(sync_result):
+    """A sync left alone on purpose is a skipped item, not a failed one."""
+    return ITEM_SKIPPED if sync_result is SYNC_SKIPPED else sync_result
+
+
 def _process_subtitle_item(item, action, options, job_id):
     """Process a single subtitle item based on the action.
 
@@ -1159,7 +1164,7 @@ def _process_subtitle_item(item, action, options, job_id):
             sync_kwargs['enabled_engines'] = item.get('enabled_engines')
         sports_event_id = item.get('sports_event_id')
         if sports_event_id is None:
-            return sync_subtitles(**sync_kwargs)
+            return _item_outcome(sync_subtitles(**sync_kwargs))
         # Sports publishes under an owned boundary pinning the file signature,
         # so a batch item collected before a resync replaced the recording
         # cannot write over the new file. The other two media types pass None
@@ -1172,7 +1177,7 @@ def _process_subtitle_item(item, action, options, job_id):
             sync_kwargs['context'] = sports_context
             sync_kwargs['validate'] = sports_validate
             sync_kwargs['publication_guard'] = sports_guard
-            return sync_subtitles(**sync_kwargs)
+            return _item_outcome(sync_subtitles(**sync_kwargs))
     elif action == 'translate':
         # Re-asked per item: the entry check answered before the job was
         # queued, and an operator can switch translation off between two
@@ -1699,6 +1704,9 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
         return {'queued': 0, 'skipped': 0, 'errors': []}
 
     all_items, total_skipped = _collect_subtitle_items(items, action, options)
+    # What the collection left out is part of what was selected, so the
+    # failure summary counts it in the total it is a share of.
+    collection_skipped = total_skipped
 
     # Process items sequentially within this single job
     total_count = len(all_items)
@@ -1751,7 +1759,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
         f'BAZARR mass {action} complete: {processed} processed, {failed} failed, '  # noqa: G004
         f'{total_skipped} skipped, {len(all_errors)} errors'
     )
-    _raise_for_batch_failures(action, failures, total_count, processed, total_skipped)
+    _raise_for_batch_failures(action, failures, total_count + collection_skipped, processed, total_skipped)
     return {'queued': processed, 'skipped': total_skipped + failed, 'errors': all_errors}
 
 

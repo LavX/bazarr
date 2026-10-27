@@ -531,7 +531,8 @@ def run_tool_on_embedded_track(action, media_type, media_id, arr_instance_id, la
     if replaced:
         raise JobFailed(_taken_by_another_file(replaced, subtitle_path))
     if action == "sync":
-        return _sync(track, subtitle_path, options or {}, job_id)
+        # A skip answers falsy like a failure; only the batch tells them apart.
+        return bool(_sync(track, subtitle_path, options or {}, job_id))
     from subtitles.tools.mods import apply_subtitle_mods
 
     try:

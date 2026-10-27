@@ -516,7 +516,7 @@ def test_sync_subtitles_does_not_queue_generated_sync_output(mocker):
         enabled_engines=['ffsubsync', 'autosubsync'],
     )
 
-    assert result is False
+    assert result is sync_module.SYNC_SKIPPED
     mock_jobs_queue.add_job_from_function.assert_not_called()
 
 
@@ -646,7 +646,7 @@ def test_sync_subtitles_marks_skipped_progress_complete(mocker):
         enabled_engines=['ffsubsync', 'autosubsync'],
     )
 
-    assert result is False
+    assert result is sync_module.SYNC_SKIPPED
     progress_calls = [call.kwargs for call in mock_jobs_queue.update_job_progress.call_args_list]
     assert {
         'job_id': 99,

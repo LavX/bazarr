@@ -123,6 +123,24 @@ def _sync_complete_job_name(srt_path, sync_result):
     return f"Failed to sync {srt_path}"
 
 
+class _SyncSkipped:
+    """What ``sync_subtitles`` answers when it left a file alone on purpose.
+
+    It is falsy, so a caller that only asks whether the file was synced reads it
+    as it always read ``False``. A batch that has to tell a deliberate skip from a
+    failure compares with ``SYNC_SKIPPED``.
+    """
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return 'SYNC_SKIPPED'
+
+
+SYNC_SKIPPED = _SyncSkipped()
+
+
 def _sync_only_skipped(sync_result):
     return bool(sync_result and sync_result.skipped_results and not sync_result.failed_results)
 
@@ -346,14 +364,14 @@ def sync_subtitles(video_path,
                 and not force_sync):
             logging.debug('BAZARR automatic syncing is disabled in settings. Skipping sync routine.')
             release_subtitle_publication(source_version)
-            return False
+            return SYNC_SKIPPED
 
         if is_sync_engine_output(srt_path):
             logging.debug('BAZARR generated sync output cannot be synchronized again. Skipping: %s', srt_path)
             _report_progress(job_id, track_job_progress, owns_job_progress, 'Sync skipped',
                              value='max', name=f"Skipped sync for {srt_path}")
             release_subtitle_publication(source_version)
-            return False
+            return SYNC_SKIPPED
 
         if not job_id and track_job_progress:
             # HTTP callers need the id to refresh only after the queued sync
@@ -401,7 +419,7 @@ def sync_subtitles(video_path,
             logging.debug('BAZARR cannot sync forced subtitles. Skipping sync routine.')
             report('Sync skipped', value='max', name=f"Skipped sync for {srt_path}")
             release_subtitle_publication(source_version)
-            return False
+            return SYNC_SKIPPED
 
         logging.debug(f'BAZARR automatic syncing is enabled in settings. We\'ll try to sync this '  # noqa: G004
                       f'subtitles: {srt_path}.')
@@ -488,7 +506,7 @@ def sync_subtitles(video_path,
                     # that runs this inside its own job (a download, a batch)
                     # still gets False and decides for itself.
                     raise JobFailed(_sync_outcome_message(sync_result))
-                return False
+                return SYNC_SKIPPED if _sync_only_skipped(sync_result) else False
             finally:
                 try:
                     try:
@@ -517,6 +535,6 @@ def sync_subtitles(video_path,
                       f"threshold value: {subsync_threshold}%")
         report('Sync skipped', value='max', name=f"Skipped sync for {srt_path}")
         release_subtitle_publication(source_version)
-        return False
+        return SYNC_SKIPPED
     finally:
         release_subtitle_publication(source_version)

@@ -256,6 +256,60 @@ class TestMassBatchOperationValidation:
         assert result['errors'] == []
 
 
+class TestMassSyncSkipsAreNotFailures:
+    """A sync that was left alone on purpose (a generated output, a forced file) is a skip.
+
+    It used to come back as False, which the batch counted as a failed item, so a batch of
+    nothing but skipped files was reported as a failure.
+    """
+
+    @staticmethod
+    def _item(index):
+        return {
+            'video_path': f'/video/{index}.mkv', 'srt_path': f'/subs/{index}.en.srt', 'srt_lang': 'en',
+            'forced': False, 'hi': False, 'sonarr_series_id': None, 'sonarr_episode_id': None,
+            'radarr_id': index, 'max_offset_seconds': None, 'no_fix_framerate': False, 'gss': False,
+            'metadata': MagicMock(),
+        }
+
+    def test_the_item_is_reported_skipped(self):
+        from subtitles.mass_operations import ITEM_SKIPPED, _process_subtitle_item
+        from subtitles.sync import SYNC_SKIPPED
+
+        with patch('subtitles.mass_operations.sync_subtitles', return_value=SYNC_SKIPPED):
+            assert _process_subtitle_item(self._item(1), 'sync', {}, 'job') is ITEM_SKIPPED
+        with patch('subtitles.mass_operations.sync_subtitles', return_value=False):
+            assert _process_subtitle_item(self._item(1), 'sync', {}, 'job') is False
+
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_a_batch_where_everything_was_skipped_completes_named_for_the_skips(self, mock_jobs_queue, mock_collect):
+        from subtitles.mass_operations import mass_batch_operation
+        from subtitles.sync import SYNC_SKIPPED
+
+        mock_collect.return_value = ([self._item(1), self._item(2)], 0)
+        with patch('subtitles.mass_operations.sync_subtitles', return_value=SYNC_SKIPPED):
+            result = mass_batch_operation(items=[{'type': 'movie', 'radarrId': 1}], action='sync', job_id=5)
+
+        assert result['queued'] == 0 and result['errors'] == []
+        names = [entry.kwargs['new_job_name'] for entry in mock_jobs_queue.update_job_name.call_args_list]
+        assert names[-1] == 'Mass sync complete: 0 done, 2 skipped'
+
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_a_sync_that_really_failed_still_fails_the_batch(self, mock_jobs_queue, mock_collect):
+        from app.jobs_queue import JobFailed
+        from subtitles.mass_operations import mass_batch_operation
+        from subtitles.sync import SYNC_SKIPPED
+
+        mock_collect.return_value = ([self._item(1), self._item(2)], 0)
+        with patch('subtitles.mass_operations.sync_subtitles', side_effect=[SYNC_SKIPPED, False]):
+            with pytest.raises(JobFailed) as failure:
+                mass_batch_operation(items=[{'type': 'movie', 'radarrId': 1}], action='sync', job_id=5)
+
+        assert '1 of 2 items failed (0 done, 1 skipped)' in str(failure.value)
+
+
 class TestMassBatchOperationTranslateGate:
     """A mass translate asks the translation gate before it queues anything.
 
@@ -2339,3 +2393,27 @@ class TestDuplicateEmbeddedTracks:
         kept = _drop_embedded_duplicates(subtitles, lambda lang, path: True)
 
         assert len(kept) == 2
+
+
+def test_the_failure_summary_counts_what_the_collection_left_out_in_its_total(monkeypatch):
+    """Three of the five selected items were left out while collecting, and one of the two that ran
+    failed: the summary is a share of five, not of two."""
+    from types import SimpleNamespace
+
+    from app.jobs_queue import JobFailed
+    from subtitles import mass_operations
+
+    monkeypatch.setattr(mass_operations, "jobs_queue", SimpleNamespace(
+        update_job_progress=lambda **kwargs: None, update_job_name=lambda **kwargs: None))
+    monkeypatch.setattr(mass_operations, "_collect_subtitle_items",
+                        lambda items, action, options: ([{"type": "movie", "radarrId": 1},
+                                                         {"type": "movie", "radarrId": 2}], 3))
+    outcomes = iter([True, False])
+    monkeypatch.setattr(mass_operations, "_process_subtitle_item",
+                        lambda item, action, options, job_id: next(outcomes))
+    monkeypatch.setattr(mass_operations, "_item_display_name", lambda item: f"movie {item['radarrId']}")
+
+    with pytest.raises(JobFailed) as raised:
+        mass_operations.mass_batch_operation([{"type": "movie", "radarrId": 1}], "sync", job_id=5)
+
+    assert "Mass sync: 1 of 5 items failed (1 done, 3 skipped)" in str(raised.value)

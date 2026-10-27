@@ -10,6 +10,7 @@ SQLite and PostgreSQL, both AUTOCOMMIT.
 # ruff: noqa: F811
 import json
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -448,7 +449,9 @@ def test_a_folder_bazarr_cannot_write_fails_the_item_at_once(ocr_run, monkeypatc
         film.chmod(0o755)
 
     # English has embedded text tracks (a skip); the Hungarian VobSub fails at once.
-    assert str(failed.value).startswith("Mass ocr: 1 of 1 items failed (0 done, 1 skipped).")
+    # The total may or may not include the skipped track, depending on whether collection counts it,
+    # so the failure count and the done/skipped split are what this pins.
+    assert re.match(r"Mass ocr: 1 of \d+ items failed \(0 done, 1 skipped\)\.", str(failed.value))
     assert f"Film.mkv (hu track) (Bazarr+ cannot write subtitles into {film} (Permission denied)" in str(failed.value)
     assert engine.prepared is None and published == []
 

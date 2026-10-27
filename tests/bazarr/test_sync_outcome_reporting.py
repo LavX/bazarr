@@ -539,3 +539,50 @@ def test_sync_subtitles_reports_a_partial_run_to_the_jobs_queue(mocker):
     assert outcome.startswith('Sync partially complete: 1 of 3 engines produced output.')
     assert 'Autosubsync rejected its own result' in outcome
     assert 'ALASS is not installed.' in outcome
+
+
+# --------------------------------------------------------------------------------------
+# A sync left alone on purpose is not a sync that failed.
+# --------------------------------------------------------------------------------------
+
+
+def _skipped_sync(sync_module, **overrides):
+    arguments = dict(video_path='/video.mkv', srt_path='/subtitle.hu.srt', srt_lang='hu', forced=False,
+                     hi=False, percent_score=0, job_id=99, force_sync=True)
+    arguments.update(overrides)
+    return sync_module.sync_subtitles(**arguments)
+
+
+def test_a_sync_left_alone_on_purpose_says_so_and_still_reads_as_not_synced(mocker):
+    from subtitles import sync as sync_module
+
+    mocker.patch.object(sync_module, 'jobs_queue')
+
+    forced = _skipped_sync(sync_module, forced=True)
+    generated = _skipped_sync(sync_module, srt_path='/subtitle.hu.ffsubsync.srt')
+
+    assert forced is sync_module.SYNC_SKIPPED and generated is sync_module.SYNC_SKIPPED
+    # Callers that only ask whether it synced keep getting a falsy answer.
+    assert not forced and not generated
+    assert forced is not False
+
+
+def test_a_below_threshold_score_is_a_skip_and_an_engine_failure_is_not(mocker):
+    from subtitles import sync as sync_module
+    from subtitles.tools.subsync_engines import RESULT_FAILED, SyncEngineResult, SyncRunResult
+
+    mocker.patch.object(sync_module, 'jobs_queue')
+    mocker.patch.object(sync_module, '_resolve_subsync_overrides', return_value=(True, True, '50', ['ffsubsync'], None))
+
+    assert _skipped_sync(sync_module, percent_score=90) is sync_module.SYNC_SKIPPED
+
+    failed = SyncRunResult(source_path='/subtitle.hu.srt', output_mode='overwrite')
+    failed.results = [SyncEngineResult(engine='ffsubsync', status=RESULT_FAILED, reason='engine_failed',
+                                       message='boom')]
+
+    class FakeSubSyncer:
+        def sync(self, **kwargs):
+            return failed
+
+    mocker.patch.object(sync_module, 'SubSyncer', return_value=FakeSubSyncer())
+    assert _skipped_sync(sync_module, percent_score=10, track_job_progress=False) is False

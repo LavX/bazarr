@@ -341,7 +341,7 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path, ar
         logging.exception("BAZARR error writing embedded subtitle history for movie %s", radarr_id)
 
 
-def list_missing_subtitles_movies(no=None, arr_instance_id=None):
+def list_missing_subtitles_movies(no=None, arr_instance_id=None, cancel=None):
     stmt = select(TableMovies.radarrId,
                   TableMovies.id,
                   TableMovies.subtitles,
@@ -363,6 +363,9 @@ def list_missing_subtitles_movies(no=None, arr_instance_id=None):
                                 movie_subtitles.audio_language))
 
     for movie_subtitles in movies_subtitles:
+        # Raises when the job running this was stopped.
+        if cancel is not None:
+            cancel()
         missing_subtitles_text = '[]'
         if movie_subtitles.profileId:
             # get desired subtitles

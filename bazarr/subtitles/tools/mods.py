@@ -15,6 +15,7 @@ from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.utils import get_subtitle_destination_path
 from utilities.helper import get_target_folder
+from utilities.security_guards import subtitle_path_within_area
 from media_servers.events import publication_callback
 from subtitles.tools.subsync_engines import (_report_subtitle_publication, subtitle_mutation,
                                             subtitle_write_locks)
@@ -78,8 +79,13 @@ MOD_LABELS = {
 
 def apply_subtitle_mods(language, subtitle_path, mods, video_path,
                          media_type=None, media_id=None, job_id=None, arr_instance_id=None,
-                         never_replace=False):
+                         never_replace=False, require_within_area=False):
     """Job-aware wrapper for subtitles_apply_mods.
+
+    ``require_within_area`` is set when the path came from the request. The route
+    checks it when it queues the job, and the job checks it again when it runs: the
+    path can be a symlink the file system has redirected since, or the media's
+    folder or the custom subtitle folder can have changed while the job waited.
 
     ``never_replace`` makes a mod that saves under another name (Remove HI)
     refuse a file already at that name instead of replacing it.
@@ -104,6 +110,14 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
 
     mod_label = MOD_LABELS.get(mods[0], mods[0]) if mods else 'Apply Mods'
     filename = os.path.basename(subtitle_path)
+
+    if require_within_area and not subtitle_path_within_area(
+            subtitle_path, video_path, subfolder_mode=settings.general.subfolder,
+            custom_subfolder=settings.general.subfolder_custom):
+        logging.warning('BAZARR %s refused: reason=outside_media_library file=%s', mod_label, filename)
+        jobs_queue.update_job_name(job_id=job_id, new_job_name=f'Failed {mod_label}: {filename}')
+        raise JobFailed(f'{mod_label} was not applied to {filename}: the subtitle is no longer inside the media '
+                        f'library.', reason='outside_media_library', retryable=False)
 
     try:
         output_path = subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
