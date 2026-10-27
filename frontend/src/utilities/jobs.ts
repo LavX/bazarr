@@ -21,6 +21,13 @@ const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
 type JobRecord = System.Jobs;
 
+function isJobsQuery(queryKey: readonly unknown[]) {
+  return (
+    queryKey.length === JOBS_KEY.length &&
+    queryKey.every((part, index) => part === JOBS_KEY[index])
+  );
+}
+
 export class JobFailedError extends Error {
   readonly jobId: number;
 
@@ -84,12 +91,32 @@ const waiters = new Map<number, Waiter[]>();
 const subscriptions = new Map<QueryClient, () => void>();
 let timer: ReturnType<typeof setInterval> | null = null;
 
+// Whether the pass under way has settled anything yet.
+let settled = false;
+
+/**
+ * One pass over the waiters: everything it settles is released together at its
+ * end, and only if it settled anything.
+ */
+function runPass(pass: () => void) {
+  settled = false;
+  try {
+    pass();
+  } finally {
+    if (settled) {
+      settled = false;
+      releaseIdle();
+    }
+  }
+}
+
 function settle(jobId: number, job: JobRecord | undefined) {
   const list = waiters.get(jobId);
   if (list === undefined) {
     return;
   }
   waiters.delete(jobId);
+  settled = true;
   for (const waiter of list) {
     if (job?.status === "failed") {
       waiter.reject(
@@ -105,21 +132,37 @@ function settle(jobId: number, job: JobRecord | undefined) {
       waiter.resolve(job);
     }
   }
-  const clientsInUse = new Set(
-    Array.from(waiters.values()).flatMap((entries) =>
-      entries.map((waiter) => waiter.client),
-    ),
-  );
+}
+
+/**
+ * Releases what no waiter needs any more: the cache subscription of a client
+ * nothing waits on through, and the fallback timer once nothing waits at all.
+ * It runs once at the end of a pass over the waiters, not once per settled
+ * job. A pass can settle thousands of children, and looking over every
+ * remaining waiter after each one made the pass quadratic.
+ */
+function releaseIdle() {
+  if (waiters.size === 0) {
+    for (const unsubscribe of subscriptions.values()) {
+      unsubscribe();
+    }
+    subscriptions.clear();
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+    return;
+  }
+  const clientsInUse = new Set<QueryClient>();
+  for (const entries of waiters.values()) {
+    for (const waiter of entries) {
+      clientsInUse.add(waiter.client);
+    }
+  }
   for (const [client, unsubscribe] of Array.from(subscriptions.entries())) {
     if (!clientsInUse.has(client)) {
       unsubscribe();
       subscriptions.delete(client);
-    }
-  }
-  if (waiters.size === 0) {
-    if (timer !== null) {
-      clearInterval(timer);
-      timer = null;
     }
   }
 }
@@ -132,7 +175,7 @@ function settleUnknown(jobId: number) {
   if (list === undefined) {
     return;
   }
-  // Reuses settle's cleanup with a synthetic failed record.
+  // Reuses settle with a synthetic failed record.
   settle(jobId, {
     // eslint-disable-next-line camelcase
     job_id: jobId,
@@ -157,23 +200,44 @@ function sameRun(waiter: Waiter, job: JobRecord) {
   return isSameRun(waiter.session, job.session);
 }
 
-function checkCache(client: QueryClient) {
-  const jobs = client.getQueryData<JobRecord[]>(JOBS_KEY) ?? [];
-  for (const [jobId, entries] of Array.from(waiters.entries())) {
-    if (!entries.some((waiter) => waiter.client === client)) {
-      continue;
-    }
-    const job = jobs.find(
-      (entry) =>
-        entry.job_id === jobId &&
-        entries.some(
-          (waiter) => waiter.client === client && sameRun(waiter, entry),
-        ),
-    );
-    if (job !== undefined && TERMINAL.has(job.status)) {
-      settle(jobId, job);
+// Rows by job id, indexed once per scan so the cost follows the sizes of the
+// list and of the waiters added together, not multiplied: a batch can follow
+// thousands of jobs at once.
+function indexById(list: readonly JobRecord[]) {
+  const rows = new Map<number, JobRecord[]>();
+  for (const entry of list) {
+    const entries = rows.get(entry.job_id);
+    if (entries === undefined) {
+      rows.set(entry.job_id, [entry]);
+    } else {
+      entries.push(entry);
     }
   }
+  return rows;
+}
+
+function checkCache(client: QueryClient) {
+  if (waiters.size === 0) {
+    return;
+  }
+  const rows = indexById(client.getQueryData<JobRecord[]>(JOBS_KEY) ?? []);
+  runPass(() => {
+    for (const [jobId, entries] of Array.from(waiters.entries())) {
+      if (!entries.some((waiter) => waiter.client === client)) {
+        continue;
+      }
+      const job = rows
+        .get(jobId)
+        ?.find((entry) =>
+          entries.some(
+            (waiter) => waiter.client === client && sameRun(waiter, entry),
+          ),
+        );
+      if (job !== undefined && TERMINAL.has(job.status)) {
+        settle(jobId, job);
+      }
+    }
+  });
 }
 
 function pollOnce() {
@@ -181,27 +245,27 @@ function pollOnce() {
   void api.system
     .jobs()
     .then((jobs) => {
-      const list = (jobs ?? []) as JobRecord[];
-      for (const [jobId, pending] of Array.from(waiters.entries())) {
-        const job = list.find(
-          (entry) =>
-            entry.job_id === jobId &&
-            pending.some((waiter) => sameRun(waiter, entry)),
-        );
-        if (job !== undefined) {
-          if (TERMINAL.has(job.status)) {
-            settle(jobId, job);
+      const rows = indexById((jobs ?? []) as JobRecord[]);
+      runPass(() => {
+        for (const [jobId, pending] of Array.from(waiters.entries())) {
+          const job = rows
+            .get(jobId)
+            ?.find((entry) => pending.some((waiter) => sameRun(waiter, entry)));
+          if (job !== undefined) {
+            if (TERMINAL.has(job.status)) {
+              settle(jobId, job);
+            }
+            continue;
           }
-          continue;
+          // Absent from a list read after the wait began: the job was removed,
+          // the backend restarted, or it finished and aged out of the short
+          // history. None of those says it worked, so it is not reported as
+          // success.
+          if (pending.every((waiter) => waiter.registeredAt <= startedAt)) {
+            settleUnknown(jobId);
+          }
         }
-        // Absent from a list read after the wait began: the job was removed,
-        // the backend restarted, or it finished and aged out of the short
-        // history. None of those says it worked, so it is not reported as
-        // success.
-        if (pending.every((waiter) => waiter.registeredAt <= startedAt)) {
-          settleUnknown(jobId);
-        }
-      }
+      });
     })
     .catch(() => {
       // Backend unreachable for a moment; the next tick tries again.
@@ -223,6 +287,34 @@ export function waitForJob(
   jobId: number | null | undefined,
   session?: string,
 ): Promise<JobRecord | undefined> {
+  const waiting = register(client, jobId, session);
+  // The job may have finished before its id reached us.
+  checkCache(client);
+  return waiting;
+}
+
+/**
+ * Follow many jobs at once, the standard way each. Every job is registered
+ * first and the jobs cache is read once, so a batch of thousands costs one
+ * scan rather than one per job. The answer settles when every job has, one
+ * entry per id in order, as `Promise.allSettled` gives them: a job that failed
+ * or was stopped does not end the wait for the others.
+ */
+export function waitForJobs(
+  client: QueryClient,
+  jobIds: readonly (number | null | undefined)[],
+  session?: string,
+): Promise<PromiseSettledResult<JobRecord | undefined>[]> {
+  const waiting = jobIds.map((jobId) => register(client, jobId, session));
+  checkCache(client);
+  return Promise.allSettled(waiting);
+}
+
+function register(
+  client: QueryClient,
+  jobId: number | null | undefined,
+  session?: string,
+): Promise<JobRecord | undefined> {
   if (jobId === null || jobId === undefined) {
     return Promise.resolve(undefined);
   }
@@ -233,14 +325,20 @@ export function waitForJob(
     if (!subscriptions.has(client)) {
       subscriptions.set(
         client,
-        client.getQueryCache().subscribe(() => checkCache(client)),
+        client.getQueryCache().subscribe((event) => {
+          // Only the jobs list arriving or changing can settle a job.
+          if (
+            (event.type === "updated" || event.type === "added") &&
+            isJobsQuery(event.query.queryKey)
+          ) {
+            checkCache(client);
+          }
+        }),
       );
     }
     if (timer === null) {
       timer = setInterval(pollOnce, JOB_FALLBACK_POLL_MS);
     }
-    // The job may have finished before its id reached us.
-    checkCache(client);
   });
 }
 

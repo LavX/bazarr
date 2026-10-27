@@ -37,6 +37,10 @@ import api from "@/apis/raw";
 
 vi.mock("@/apis/raw", () => ({
   default: {
+    system: {
+      jobResult: vi.fn(),
+      jobs: vi.fn().mockResolvedValue([]),
+    },
     subtitles: {
       modify: vi.fn().mockResolvedValue(undefined),
       batch: vi.fn().mockResolvedValue({ queued: 1, skipped: 0, errors: [] }),
@@ -89,7 +93,7 @@ function capturedKeys(spy: ReturnType<typeof vi.spyOn>) {
 // useSubtitleAction
 // ---------------------------------------------------------------------------
 
-describe("useSubtitleAction – episode", () => {
+describe("useSubtitleAction - episode", () => {
   let spy: ReturnType<typeof vi.spyOn>;
   let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
 
@@ -128,7 +132,7 @@ describe("useSubtitleAction – episode", () => {
   });
 });
 
-describe("useSubtitleAction – movie", () => {
+describe("useSubtitleAction - movie", () => {
   let spy: ReturnType<typeof vi.spyOn>;
   let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
 
@@ -210,7 +214,7 @@ describe("useSubtitleAction – movie", () => {
 // useSubtitleAction - sports
 // ---------------------------------------------------------------------------
 
-describe("useSubtitleAction – sports", () => {
+describe("useSubtitleAction - sports", () => {
   let spy: ReturnType<typeof vi.spyOn>;
   let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
 
@@ -316,7 +320,7 @@ describe("useBatchAction", () => {
   });
 });
 
-describe("useBatchAction – queued job", () => {
+describe("useBatchAction - queued job", () => {
   it("refreshes the tables on the job's terminal event, not on enqueue", async () => {
     const { client, spy, wrapper } = makeClientAndWrapper();
     vi.mocked(api.subtitles.batch).mockResolvedValueOnce({
@@ -353,13 +357,185 @@ describe("useBatchAction – queued job", () => {
   });
 });
 
+describe("useBatchAction - translate batch", () => {
+  const BATCH = 31;
+  const batchJob = () => ({
+    queued: 2,
+    skipped: 0,
+    errors: [],
+    // eslint-disable-next-line camelcase
+    job_id: BATCH,
+  });
+  const jobs = (...rows: [number, string][]) =>
+    // eslint-disable-next-line camelcase
+    rows.map(([job_id, status]) => ({ job_id, status, session: "s1" }));
+  const refreshed = (spy: ReturnType<typeof vi.spyOn>) =>
+    capturedKeys(spy).some(
+      (key: unknown[]) => key.length === 1 && key[0] === QueryKeys.Movies,
+    );
+
+  function setup(result: unknown) {
+    const made = makeClientAndWrapper();
+    vi.mocked(api.subtitles.batch).mockResolvedValueOnce(batchJob());
+    vi.mocked(api.system.jobResult).mockResolvedValue({
+      // eslint-disable-next-line camelcase
+      job_id: BATCH,
+      session: "s1",
+      status: "completed",
+      error: null,
+      result,
+    });
+    const { result: hook } = renderHook(() => useBatchAction(), {
+      wrapper: made.wrapper,
+    });
+    hook.current.mutate({
+      items: [{ type: "movie", radarrId: 5 }],
+      action: "translate",
+    });
+    return { ...made, hook };
+  }
+
+  it("waits for the translation jobs the batch queued before it refreshes", async () => {
+    // eslint-disable-next-line camelcase
+    const { client, spy, hook } = setup({ child_jobs: [41, 42] });
+    await waitFor(() => expect(hook.current.isSuccess).toBe(true));
+
+    // The batch has ended, its children are still running.
+    client.setQueryData(
+      jobsKey,
+      jobs([BATCH, "completed"], [41, "running"], [42, "pending"]),
+    );
+    await waitFor(() => expect(api.system.jobResult).toHaveBeenCalledWith(31));
+    expect(refreshed(spy)).toBe(false);
+
+    client.setQueryData(
+      jobsKey,
+      jobs([BATCH, "completed"], [41, "completed"], [42, "pending"]),
+    );
+    await Promise.resolve();
+    expect(refreshed(spy)).toBe(false);
+
+    client.setQueryData(
+      jobsKey,
+      jobs([BATCH, "completed"], [41, "completed"], [42, "completed"]),
+    );
+    await waitFor(() => expect(refreshed(spy)).toBe(true));
+  });
+
+  it("refreshes after a child that failed or was stopped", async () => {
+    // eslint-disable-next-line camelcase
+    const { client, spy, hook } = setup({ child_jobs: [41, 42] });
+    await waitFor(() => expect(hook.current.isSuccess).toBe(true));
+
+    client.setQueryData(
+      jobsKey,
+      jobs([BATCH, "completed"], [41, "failed"], [42, "cancelled"]),
+    );
+    await waitFor(() => expect(refreshed(spy)).toBe(true));
+  });
+
+  it("does not refresh on a failed child while another is still running", async () => {
+    // eslint-disable-next-line camelcase
+    const { client, spy, hook } = setup({ child_jobs: [41, 42] });
+    await waitFor(() => expect(hook.current.isSuccess).toBe(true));
+
+    client.setQueryData(
+      jobsKey,
+      jobs([BATCH, "completed"], [41, "failed"], [42, "running"]),
+    );
+    await waitFor(() => expect(api.system.jobResult).toHaveBeenCalledWith(31));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(refreshed(spy)).toBe(false);
+
+    client.setQueryData(
+      jobsKey,
+      jobs([BATCH, "completed"], [41, "failed"], [42, "completed"]),
+    );
+    await waitFor(() => expect(refreshed(spy)).toBe(true));
+  });
+
+  it("follows a batch of thousands of children without a cache scan per child", async () => {
+    const ids = Array.from({ length: 3000 }, (_, index) => 100 + index);
+    // eslint-disable-next-line camelcase
+    const { client, spy, hook } = setup({ child_jobs: ids });
+    await waitFor(() => expect(hook.current.isSuccess).toBe(true));
+
+    const scan = vi.spyOn(client, "getQueryData");
+    client.setQueryData(
+      jobsKey,
+      jobs(
+        [BATCH, "completed"],
+        ...ids.map((id): [number, string] => [id, "pending"]),
+      ),
+    );
+    await waitFor(() => expect(api.system.jobResult).toHaveBeenCalledWith(31));
+    // The batch's end, the result read and the children's registration each
+    // cost one scan; it was one per child before.
+    await waitFor(() => expect(scan.mock.calls.length).toBeGreaterThan(0));
+    await Promise.resolve();
+    expect(scan.mock.calls.length).toBeLessThan(20);
+    expect(refreshed(spy)).toBe(false);
+
+    client.setQueryData(
+      jobsKey,
+      jobs(
+        [BATCH, "completed"],
+        ...ids.map((id): [number, string] => [id, "completed"]),
+      ),
+    );
+    await waitFor(() => expect(refreshed(spy)).toBe(true));
+  });
+
+  it("refreshes at the batch's end when it published no children", async () => {
+    const { client, spy, hook } = setup(null);
+    await waitFor(() => expect(hook.current.isSuccess).toBe(true));
+
+    client.setQueryData(jobsKey, jobs([BATCH, "completed"]));
+    await waitFor(() => expect(refreshed(spy)).toBe(true));
+  });
+
+  it("refreshes when the batch's result can no longer be read", async () => {
+    const made = makeClientAndWrapper();
+    vi.mocked(api.subtitles.batch).mockResolvedValueOnce(batchJob());
+    vi.mocked(api.system.jobResult).mockRejectedValue(new Error("404"));
+    const { result: hook } = renderHook(() => useBatchAction(), {
+      wrapper: made.wrapper,
+    });
+    hook.current.mutate({
+      items: [{ type: "movie", radarrId: 5 }],
+      action: "translate",
+    });
+    await waitFor(() => expect(hook.current.isSuccess).toBe(true));
+
+    made.client.setQueryData(jobsKey, jobs([BATCH, "completed"]));
+    await waitFor(() => expect(refreshed(made.spy)).toBe(true));
+  });
+
+  it("does not wait on children for any other action", async () => {
+    const { client, spy, wrapper } = makeClientAndWrapper();
+    vi.mocked(api.subtitles.batch).mockResolvedValueOnce(batchJob());
+    vi.mocked(api.system.jobResult).mockClear();
+    const { result } = renderHook(() => useBatchAction(), { wrapper });
+    result.current.mutate({
+      items: [{ type: "movie", radarrId: 5 }],
+      action: "sync",
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    client.setQueryData(jobsKey, jobs([BATCH, "completed"]));
+    expect(refreshed(spy)).toBe(true);
+    expect(api.system.jobResult).not.toHaveBeenCalled();
+  });
+});
+
 const jobsKey = [QueryKeys.System, QueryKeys.Jobs];
 
 // ---------------------------------------------------------------------------
 // usePromoteSyncSubtitle
 // ---------------------------------------------------------------------------
 
-describe("usePromoteSyncSubtitle – episode", () => {
+describe("usePromoteSyncSubtitle - episode", () => {
   let spy: ReturnType<typeof vi.spyOn>;
   let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
 
@@ -408,7 +584,7 @@ describe("usePromoteSyncSubtitle – episode", () => {
   });
 });
 
-describe("usePromoteSyncSubtitle – movie", () => {
+describe("usePromoteSyncSubtitle - movie", () => {
   let spy: ReturnType<typeof vi.spyOn>;
   let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
 
@@ -457,7 +633,7 @@ describe("usePromoteSyncSubtitle – movie", () => {
   });
 });
 
-describe("usePromoteSyncSubtitle – sports", () => {
+describe("usePromoteSyncSubtitle - sports", () => {
   let spy: ReturnType<typeof vi.spyOn>;
   let wrapper: ReturnType<typeof makeClientAndWrapper>["wrapper"];
 
