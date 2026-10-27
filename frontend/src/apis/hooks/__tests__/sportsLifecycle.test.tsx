@@ -153,6 +153,26 @@ it("follows a job through the jobs cache and never asks for it while it runs", a
   expect(status).not.toHaveBeenCalled();
 });
 
+it("does not follow a job of another backend run that shares the id", async () => {
+  availability.enabled = true;
+  jobsCache.data = [cachedJob("completed", { session: "run-b" })];
+  const status = vi.spyOn(sports, "jobStatus");
+  const { result } = renderHook(() => useSportsJob(9, 42, "run-a"), {
+    wrapper,
+  });
+  expect(result.current.data).toBeUndefined();
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  });
+  expect(status).not.toHaveBeenCalled();
+
+  jobsCache.data = [cachedJob("running", { session: "run-a" })];
+  const { result: own } = renderHook(() => useSportsJob(9, 42, "run-a"), {
+    wrapper,
+  });
+  expect(own.current.data).toMatchObject({ status: "running" });
+});
+
 it("reads what the job produced one time, once it has ended", async () => {
   availability.enabled = true;
   jobsCache.data = [cachedJob("running")];

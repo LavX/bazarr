@@ -3,6 +3,7 @@ import type {
   DiscoverSearchProgress,
   DiscoverSearchSnapshot,
 } from "@/types/discover";
+import { isSameRun, JOB_RESULT_GONE } from "@/utilities/jobs";
 
 /** How often the running search is asked for the providers and rows it has so far. */
 export const SEARCH_POLL_MS = 600;
@@ -31,13 +32,17 @@ type SearchJobResult = DiscoverSearchProgress & {
  * it goes, the providers heard from and the rows already built, and hands the
  * whole snapshot over at the end; every look is passed to `onProgress`. Losing
  * a look does not cancel the search or discard results, and asking stops once
- * the reader has moved on.
+ * the reader has moved on. `session` is the backend run the search was queued
+ * under: a job of another run that shares the id is not this search. A search
+ * that completed without a snapshot has nothing more to give, so it is treated
+ * as gone rather than asked about again.
  */
 export async function followSearch(
   jobId: number | null,
   signal: AbortSignal,
   retired: () => boolean,
   onProgress: (progress: DiscoverSearchProgress) => void,
+  session?: string,
 ): Promise<DiscoverSearchSnapshot> {
   if (jobId === null) throw new SearchJobFailed(undefined);
   await new Promise((resolve) => setTimeout(resolve, 200));
@@ -56,8 +61,16 @@ export async function followSearch(
         throw new SearchJobFailed(undefined);
       // Anything else is a look lost, and the next one tries again.
     }
-    if (outcome?.result?.snapshot && outcome.status === "completed") {
-      return outcome.result.snapshot;
+    if (
+      outcome !== undefined &&
+      session !== undefined &&
+      outcome.session !== session
+    ) {
+      throw new SearchJobFailed(JOB_RESULT_GONE);
+    }
+    if (outcome?.status === "completed") {
+      if (outcome.result?.snapshot) return outcome.result.snapshot;
+      throw new SearchJobFailed(JOB_RESULT_GONE);
     }
     if (outcome?.status === "failed") {
       throw new SearchJobFailed(
@@ -73,5 +86,28 @@ export async function followSearch(
     // over with the job's end; it is not an observation to show.
     if (outcome?.result && !outcome.result.snapshot) onProgress(outcome.result);
     await new Promise((resolve) => setTimeout(resolve, SEARCH_POLL_MS));
+  }
+}
+
+/**
+ * Stop a search nobody is reading any more, so it does not hold a slot of the
+ * user-search lane for the searches that come after it. A search still waiting
+ * for a slot is taken off the queue, and one that is running is asked to stop
+ * (it ends at its next check). A job of another backend run that reuses the
+ * id, or one that already ended, is left alone, and a failure to ask is
+ * ignored: the search simply runs to its end, as it did before.
+ */
+export async function stopSearchJob(
+  jobId: number,
+  session?: string,
+): Promise<void> {
+  try {
+    const [job] = await api.system.jobs(jobId);
+    if (!job || !isSameRun(session, job.session)) return;
+    if (job.status === "pending") await api.system.deleteJobs(jobId);
+    else if (job.status === "running")
+      await api.system.actionOnJobs(jobId, "cancel");
+  } catch {
+    // The search runs on, which is what it did before it was stopped.
   }
 }

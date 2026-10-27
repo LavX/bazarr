@@ -33,7 +33,7 @@ import type {
 } from "@/types/discover";
 import { writeStoredValue } from "@/utilities/browserStorage";
 import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
-import { UNKNOWN_JOB_OUTCOME } from "@/utilities/jobs";
+import { isSameRun, UNKNOWN_JOB_OUTCOME } from "@/utilities/jobs";
 import {
   copyTargetKey,
   DISCOVER_LANGUAGE_KEY,
@@ -47,7 +47,7 @@ import {
   recentEpisodeMismatch,
   searchSelection,
 } from "./discoverState";
-import { followSearch, SearchJobFailed } from "./searchJob";
+import { followSearch, SearchJobFailed, stopSearchJob } from "./searchJob";
 
 interface DiscoverContextValue {
   state: DiscoverState;
@@ -109,6 +109,14 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   // joins it instead of saving the file a second time.
   const saving = useRef(new Map<number, Promise<string | null>>());
   const generation = useRef(0);
+  // The searches being followed, so the provider leaving can stop them.
+  const following = useRef(new Set<AbortController>());
+  // The job each search being followed queued, by attempt. A search the reader
+  // has moved on from is stopped, so it does not hold a slot of the search lane
+  // for the searches that come after it.
+  const searchJobs = useRef(
+    new Map<number, { jobId: number; session?: string }>(),
+  );
   const draft = useRef(state.draft);
   const currentState = useRef(state);
   currentState.current = state;
@@ -121,6 +129,21 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   const mutation = useDiscoverSearch();
   const { mutateAsync, reset } = mutation;
   const client = useQueryClient();
+
+  // The provider going away retires the search it is following: its look at the
+  // job would otherwise go on every 600 ms for as long as the job runs, and
+  // land in a page that is no longer there.
+  useEffect(() => {
+    const searches = following.current;
+    const jobs = searchJobs.current;
+    return () => {
+      generation.current += 1;
+      searches.forEach((controller) => controller.abort());
+      searches.clear();
+      jobs.forEach((job) => void stopSearchJob(job.jobId, job.session));
+      jobs.clear();
+    };
+  }, []);
 
   useEffect(() => {
     const onAuth = (event: WindowEventMap["app-auth-changed"]) => {
@@ -299,6 +322,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         storageAvailable: stored,
       });
       const controller = new AbortController();
+      following.current.add(controller);
       try {
         // matching_mode, the resolved copy and its physical revision are all
         // server-owned. Only the opaque copy identity is ever an input.
@@ -315,6 +339,19 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         // announcement stays quiet. The Jobs drawer still lists the job.
         if (queued.job_id !== null) {
           claimJobCompletion(queued.job_id, queued.session);
+          // A newer search replaces the ones before it. When the queue answered
+          // with the job already running for the same search, that job is the
+          // one being followed and stays.
+          searchJobs.current.forEach((older, olderAttempt) => {
+            if (olderAttempt < attempt && older.jobId !== queued.job_id) {
+              searchJobs.current.delete(olderAttempt);
+              void stopSearchJob(older.jobId, older.session);
+            }
+          });
+          searchJobs.current.set(attempt, {
+            jobId: queued.job_id,
+            session: queued.session,
+          });
         }
         const snapshot = await followSearch(
           queued.job_id,
@@ -322,6 +359,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
           () => generation.current !== attempt,
           (progress) =>
             dispatch({ type: "progress", generation: attempt, progress }),
+          queued.session,
         );
         dispatch({ type: "success", generation: attempt, key, snapshot });
       } catch (error) {
@@ -347,6 +385,8 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         });
       } finally {
         controller.abort();
+        following.current.delete(controller);
+        searchJobs.current.delete(attempt);
       }
     },
     [mutateAsync],
@@ -412,16 +452,23 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
           });
           return;
         }
-        const jobId = await fetchDownload({
+        const { jobId, session } = await fetchDownload({
           resultId: row.id,
           searchId: row.search_id,
+        });
+        // The socket normally brings the new job into the jobs cache. When one
+        // of its events is dropped the cache has nothing to follow, and it
+        // never goes stale on its own, so the list is read again now.
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Jobs],
+          exact: true,
         });
         if (!stillCurrent()) return;
         // Still pending: the jobs cache moves it on from here.
         dispatch({
           type: "download",
           key,
-          feedback: { ...feedback, jobId },
+          feedback: { ...feedback, jobId, session },
         });
       } catch (error) {
         if (!stillCurrent()) return;
@@ -437,7 +484,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         });
       }
     },
-    [fetchDownload],
+    [fetchDownload, client],
   );
 
   /** Fetch a ticket's file and save it; null when the sign-in changed meanwhile. */
@@ -593,6 +640,52 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     [autoSave],
   );
 
+  // Jobs whose absence from the cache is being checked against the queue.
+  const confirming = useRef(new Set<number>());
+
+  /**
+   * A job the row saw is no longer in the cache. That says it left the cache,
+   * which a removal from the queue (Cancel on a job that never started) does,
+   * and so does trimming, so the queue is asked before the row is called
+   * cancelled.
+   */
+  const confirmGone = useCallback(
+    (feedback: DiscoverDownloadFeedback, key: string) => {
+      const jobId = feedback.jobId;
+      if (jobId === undefined || confirming.current.has(jobId)) return;
+      confirming.current.add(jobId);
+      api.system
+        .jobs(jobId)
+        .then((jobs) => {
+          const current = currentState.current.download;
+          if (
+            current?.status !== "pending" ||
+            current.jobId !== jobId ||
+            current.contextKey !== key
+          )
+            return;
+          const job = Array.isArray(jobs) ? jobs[0] : undefined;
+          if (job && isSameRun(current.session, job.session)) {
+            applyJob(current, key, job);
+            return;
+          }
+          dispatch({
+            type: "download",
+            key,
+            feedback: {
+              ...current,
+              status: "failed",
+              message: "The download was cancelled.",
+              retryable: true,
+            },
+          });
+        })
+        .catch(() => undefined)
+        .finally(() => confirming.current.delete(jobId));
+    },
+    [applyJob],
+  );
+
   /**
    * Follow the row's job in the standard jobs cache, which the jobs socket
    * events keep current. A retry started from the job's notification or the
@@ -612,7 +705,11 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     ]);
     if (!Array.isArray(jobs)) return;
     const key = feedback.contextKey;
-    const retry = jobs.find((job) => job.retry_of === feedback.jobId);
+    const retry = jobs.find(
+      (job) =>
+        job.retry_of === feedback.jobId &&
+        isSameRun(feedback.session, job.session),
+    );
     if (retry) {
       dispatch({
         type: "download",
@@ -621,30 +718,27 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
           ...feedback,
           status: "pending",
           jobId: retry.job_id,
+          session: retry.session ?? feedback.session,
           message: undefined,
         },
       });
       return;
     }
-    const job = jobs.find((candidate) => candidate.job_id === feedback.jobId);
+    // Ids restart with the backend, so a row of another run that shares the id
+    // is not this download's job.
+    const job = jobs.find(
+      (candidate) =>
+        candidate.job_id === feedback.jobId &&
+        isSameRun(feedback.session, candidate.session),
+    );
     if (feedback.status !== "pending") return;
     if (!job) {
-      if (seenJobs.current.has(feedback.jobId))
-        dispatch({
-          type: "download",
-          key,
-          feedback: {
-            ...feedback,
-            status: "failed",
-            message: "The download was cancelled.",
-            retryable: true,
-          },
-        });
+      if (seenJobs.current.has(feedback.jobId)) confirmGone(feedback, key);
       return;
     }
     seenJobs.current.add(job.job_id);
     applyJob(feedback, key, job);
-  }, [client, applyJob]);
+  }, [client, applyJob, confirmGone]);
 
   useEffect(
     () =>
@@ -681,7 +775,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
           )
             return;
           const job = Array.isArray(jobs) ? jobs[0] : undefined;
-          if (job) {
+          if (job && isSameRun(feedback.session, job.session)) {
             applyJob(feedback, feedback.contextKey, job);
             return;
           }
@@ -745,7 +839,8 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
           // announced with Save. Other jobs keep Save in the notification.
           handlesCompletion: (job) =>
             isJobCompletionClaimed(job.job_id) ||
-            currentState.current.download?.jobId === job.job_id,
+            (currentState.current.download?.jobId === job.job_id &&
+              isSameRun(currentState.current.download.session, job.session)),
         },
       ),
     [saveOrFail],
@@ -765,6 +860,11 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   }, [resetPreview]);
 
   const cancelPending = useCallback(() => {
+    // A search the reader left is not read by anyone: it stops holding its slot.
+    searchJobs.current.forEach(
+      (job) => void stopSearchJob(job.jobId, job.session),
+    );
+    searchJobs.current.clear();
     generation.current += 1;
     downloadSequence.current += 1;
     previewSequence.current += 1;

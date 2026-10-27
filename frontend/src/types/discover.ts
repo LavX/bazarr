@@ -220,6 +220,8 @@ export interface DiscoverDownloadFeedback {
   filename?: string;
   /** The standard job carrying this download; a retry replaces it. */
   jobId?: number;
+  /** The backend run that owns the job, which ids restart with. */
+  session?: string;
   /** What a finished job's file is fetched by. */
   ticket?: number;
   /** The failed job's own one-line reason, the same text its notification shows. */

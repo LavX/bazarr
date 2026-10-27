@@ -9,6 +9,7 @@ import {
   JOB_FALLBACK_POLL_MS,
   JOB_RESULT_GONE,
   JobFailedError,
+  JobOutcomeUnknownError,
   JobStoppedError,
   UNKNOWN_JOB_OUTCOME,
   waitForJob,
@@ -66,7 +67,6 @@ describe("waitForJob", () => {
   it("rejects with the reason the job failed with", async () => {
     const waiting = waitForJob(client, 1);
     client.setQueryData(JOBS_KEY, [
-      // eslint-disable-next-line camelcase
       job(1, "failed", {
         error: { reason: "failed", message: "Could not install X: offline" },
       }),
@@ -137,7 +137,6 @@ describe("waitForJob", () => {
   it("falls back to reading the job list when the socket stays silent", async () => {
     vi.useFakeTimers();
     mockedJobs.mockImplementation(async () => [
-      // eslint-disable-next-line camelcase
       job(4, "failed", {
         error: { reason: "failed", message: "Refresh failed" },
       }),
@@ -173,6 +172,45 @@ describe("waitForJob", () => {
     queryClient.setQueryData(JOBS_KEY, [job(1, "completed")]);
     await waiting;
     expect(settled).toBe(true);
+  });
+
+  it("waits for the job of its own backend run, not a row of another run that shares the id", async () => {
+    client.setQueryData(JOBS_KEY, [
+      job(1, "completed", { session: "run-before" }),
+    ]);
+    let settled = false;
+    const waiting = waitForJob(client, 1, "run-after").then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    client.setQueryData(JOBS_KEY, [
+      job(1, "completed", { session: "run-before" }),
+      job(1, "completed", { session: "run-after" }),
+    ]);
+    await waiting;
+    expect(settled).toBe(true);
+  });
+
+  it("tells a job it can no longer follow from a job that failed", async () => {
+    vi.useFakeTimers();
+    mockedJobs.mockImplementation(async () => []);
+    const waiting = waitForJob(client, 5);
+    const unknown = expect(waiting).rejects.toBeInstanceOf(
+      JobOutcomeUnknownError,
+    );
+
+    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
+    await unknown;
+    // It is still a failure to follow, so callers that only know failures keep working.
+    await expect(waiting).rejects.toBeInstanceOf(JobFailedError);
+
+    const failed = waitForJob(client, 6);
+    client.setQueryData(JOBS_KEY, [
+      job(6, "failed", { error: { reason: "x", message: "Real failure" } }),
+    ]);
+    await expect(failed).rejects.not.toBeInstanceOf(JobOutcomeUnknownError);
   });
 
   it("does not report a job the backend no longer lists as a success", async () => {
@@ -231,6 +269,18 @@ describe("awaitJobResult", () => {
 
     mockedResult.mockRejectedValueOnce({ response: { status: 404 } });
     await expect(awaitJobResult(client, 3)).rejects.toThrow(JOB_RESULT_GONE);
+  });
+
+  it("does not hand back the result of another backend run's job with the same id", async () => {
+    client.setQueryData(JOBS_KEY, [job(3, "completed", { session: "run-a" })]);
+    mockedResult.mockResolvedValue({
+      ...outcome([{ provider: "other" }]),
+      session: "run-b",
+    });
+
+    await expect(awaitJobResult(client, 3, "run-a")).rejects.toThrow(
+      JOB_RESULT_GONE,
+    );
   });
 
   it("refuses a search that could not be queued", async () => {

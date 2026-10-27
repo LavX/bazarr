@@ -182,12 +182,12 @@ function renderDiscover() {
     ],
     { initialEntries: ["/discover"] },
   );
-  rawRender(
+  const { unmount } = rawRender(
     <AllProviders>
       <RouterProvider router={router} />
     </AllProviders>,
   );
-  return { user: userEvent.setup() };
+  return { user: userEvent.setup(), unmount };
 }
 
 async function startSearch(user: ReturnType<typeof userEvent.setup>) {
@@ -298,6 +298,76 @@ it("shows each result as it lands and never reorders what is already read", asyn
     ).toBeNull(),
   );
   expect(releases()).toEqual(["First.Release"]);
+});
+
+it("stops following a running search once the page that asked is gone", async () => {
+  let looks = 0;
+  holdLook = () => {
+    looks += 1;
+    return undefined;
+  };
+  server.use(...liveSearch(() => finished([row("live-1", "First.Release")])));
+  const { user, unmount } = renderDiscover();
+  await startSearch(user);
+  await waitFor(() => expect(looks).toBeGreaterThan(0), { timeout: 5000 });
+
+  unmount();
+  // A look already out may still land; it is the next one that must not be asked.
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  const settled = looks;
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  expect(looks).toBe(settled);
+  releaseSearch?.();
+});
+
+it("stops the search it was following when the page that asked is gone", async () => {
+  const stopped: { id: string | null; action: string | null }[] = [];
+  server.use(
+    ...liveSearch(() => finished([row("live-1", "First.Release")])),
+    http.get("/api/system/jobs", ({ request }) => {
+      const id = Number(new URL(request.url).searchParams.get("id"));
+      return HttpResponse.json({
+        data: [{ job_id: id, session: "run-live", status: "running" }],
+      });
+    }),
+    http.post("/api/system/jobs", ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      stopped.push({ id: params.get("id"), action: params.get("action") });
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  const { user, unmount } = renderDiscover();
+  await startSearch(user);
+  expect(stopped).toEqual([]);
+
+  unmount();
+  await waitFor(() =>
+    expect(stopped).toEqual([{ id: "700", action: "cancel" }]),
+  );
+  releaseSearch?.();
+});
+
+it("stops the search when the reader leaves the title it was for", async () => {
+  const stopped: string[] = [];
+  server.use(
+    ...liveSearch(() => finished([row("live-1", "First.Release")])),
+    http.get("/api/system/jobs", ({ request }) => {
+      const id = Number(new URL(request.url).searchParams.get("id"));
+      return HttpResponse.json({
+        data: [{ job_id: id, session: "run-live", status: "running" }],
+      });
+    }),
+    http.post("/api/system/jobs", ({ request }) => {
+      stopped.push(new URL(request.url).searchParams.get("id") ?? "");
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  const { user } = renderDiscover();
+  await startSearch(user);
+  expect(stopped).toEqual([]);
+  await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+  await waitFor(() => expect(stopped).toEqual(["700"]));
+  releaseSearch?.();
 });
 
 it("downloads a row the running search has already published", async () => {

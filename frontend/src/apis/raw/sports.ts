@@ -133,6 +133,8 @@ export interface SportsRecord {
 export interface SportsJob {
   queued: boolean;
   job_id: number | null;
+  /** The backend run that owns the job, which ids restart with. */
+  session?: string;
   message: string;
 }
 export interface SportsJobStatus {

@@ -23,6 +23,25 @@ function invalidateHiddenTracks(mediaType: HiddenTrackMediaType) {
 
 const JOBS_KEY = [QueryKeys.System, QueryKeys.Jobs];
 
+// The backend remembers 50 failed and 50 completed jobs beside the ones still
+// active, so the cache holds both histories with room to spare. It is bounded
+// so a long session cannot grow it for ever, but never at the expense of a job
+// that has not ended: a trimmed running job would read as gone.
+export const MAX_JOBS_IN_CACHE = 250;
+const ACTIVE_JOB = new Set(["pending", "running"]);
+
+export function trimJobs(jobs: LooseObject[], cap = MAX_JOBS_IN_CACHE) {
+  if (jobs.length <= cap) return jobs;
+  let excess = jobs.length - cap;
+  return jobs.filter((job) => {
+    if (excess > 0 && !ACTIVE_JOB.has(job.status)) {
+      excess -= 1;
+      return false;
+    }
+    return true;
+  });
+}
+
 // A job is its id within one backend run. A row from another run only shares
 // the id by chance, so it is never the one an event is about.
 function isSameJob(
@@ -342,7 +361,6 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "jobs",
       update: (items) => {
         const keys = [QueryKeys.System, QueryKeys.Jobs];
-        const MAX_JOBS_IN_CACHE = 100;
 
         items.forEach((payload) => {
           // A job event names the backend run it came from. One from a run the
@@ -384,13 +402,8 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
                   ]
                 : [...current, updatedJob];
 
-            // Prevent memory leak: keep only the most recent jobs
-            const trimmed =
-              next.length > MAX_JOBS_IN_CACHE
-                ? next.slice(-MAX_JOBS_IN_CACHE)
-                : next;
-
-            queryClient.setQueryData(keys, trimmed);
+            // Prevent memory leak: drop the oldest ended jobs, never an active one
+            queryClient.setQueryData(keys, trimJobs(next));
             LOG(
               "info",
               "Applied inline payload content to cache",
@@ -427,13 +440,8 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
                     ]
                   : [...current, incoming];
 
-              // Prevent memory leak: keep only the most recent jobs
-              const trimmed =
-                next.length > MAX_JOBS_IN_CACHE
-                  ? next.slice(-MAX_JOBS_IN_CACHE)
-                  : next;
-
-              queryClient.setQueryData(keys, trimmed);
+              // Prevent memory leak: drop the oldest ended jobs, never an active one
+              queryClient.setQueryData(keys, trimJobs(next));
               // The terminal event is the one place a finish is announced.
               if (
                 payload.status === "completed" ||
@@ -453,6 +461,18 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
               });
             });
         });
+      },
+      // A queued job removed from the queue, which is how Cancel ends one that
+      // never started. The row is gone from the backend, so it goes from the
+      // cache too, or whatever follows it keeps waiting on a job that is not
+      // coming.
+      delete: (items) => {
+        const current = queryClient.getQueryData<LooseObject[]>(JOBS_KEY);
+        if (!isArray(current)) return;
+        queryClient.setQueryData(
+          JOBS_KEY,
+          current.filter((row) => !items.some((gone) => isSameJob(row, gone))),
+        );
       },
     },
   ];

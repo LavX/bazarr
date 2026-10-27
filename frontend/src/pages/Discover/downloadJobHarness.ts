@@ -32,6 +32,8 @@ interface Options {
   ticket?: (jobId: number) => Response | undefined;
 }
 
+export const DOWNLOAD_SESSION = "run-download-test";
+
 export const jobs = new Map<number, System.Jobs & { result_id: string }>();
 let nextJob = 100;
 
@@ -70,6 +72,7 @@ function create(resultId: string, retryOf: number | null = null) {
   const jobId = ++nextJob;
   jobs.set(jobId, {
     job_id: jobId,
+    session: DOWNLOAD_SESSION,
     job_name: `Download ${resultId}`,
     status: "pending",
     last_run_time: new Date().toISOString(),
@@ -110,7 +113,10 @@ export function downloadJobHandlers(options: Options) {
       const jobId = create(body.result_id ?? "");
       const result = outcome(body.result_id ?? "");
       if (result.status !== "running") finish(jobId, result);
-      return HttpResponse.json({ job_id: jobId }, { status: 202 });
+      return HttpResponse.json(
+        { job_id: jobId, session: DOWNLOAD_SESSION },
+        { status: 202 },
+      );
     }),
     http.get("/api/system/jobs", ({ request }) => {
       const id = Number(new URL(request.url).searchParams.get("id"));

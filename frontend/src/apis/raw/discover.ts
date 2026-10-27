@@ -102,14 +102,18 @@ class DiscoverApi extends BaseApi {
 
   /**
    * Queue the download of one exact result as a standard job. Answers at once
-   * with the job id, which is also the ticket the finished file is saved by.
+   * with the job id, which is also the ticket the finished file is saved by,
+   * and the backend run that owns the job.
    */
   async download({ resultId, searchId }: DiscoverDownloadIdentity) {
-    const response = await this.postRaw<{ job_id: number }>("/download", {
-      result_id: resultId,
-      search_id: searchId,
-    });
-    return response.data.job_id;
+    const response = await this.postRaw<{ job_id: number; session?: string }>(
+      "/download",
+      {
+        result_id: resultId,
+        search_id: searchId,
+      },
+    );
+    return { jobId: response.data.job_id, session: response.data.session };
   }
 
   /** The file a finished download job kept, fetched by its ticket. */

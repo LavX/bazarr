@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { JOB_WATCH_POLL_MS } from "@/apis/hooks/jobWatch";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
 import { useDiscover } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
@@ -698,7 +699,10 @@ describe("Discover download as a standard job", () => {
     expect(
       row("full").getByRole("button", { name: "Download SRT" }),
     ).toBeDisabled();
-    // Cancel removes a queued job; the drawer's refetch no longer lists it.
+    // Cancel removes a queued job from the queue and the cache. The row asks
+    // the queue before it calls the job cancelled, and the queue no longer
+    // knows it.
+    jobs.delete(jobId());
     act(() => queryClient.setQueryData([QueryKeys.System, QueryKeys.Jobs], []));
     expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
       "The download was cancelled.",
@@ -706,6 +710,68 @@ describe("Discover download as a standard job", () => {
     expect(
       row("full").getByRole("button", { name: "Download SRT" }),
     ).toBeEnabled();
+  });
+
+  it("does not take another backend run's job with the same id for the download", async () => {
+    server.use(...handlers({ outcome: () => ({ status: "running" }) }));
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    // The backend restarted: its ids began again, and a finished job of the
+    // old run now shares the id this download was queued under.
+    act(() =>
+      queryClient.setQueryData(
+        [QueryKeys.System, QueryKeys.Jobs],
+        [
+          {
+            ...jobs.get(jobId())!,
+            session: "run-before-restart",
+            status: "completed",
+            action: {
+              kind: "discover.save",
+              label: "Save",
+              ticket: jobId(),
+              filename: "old.srt",
+            },
+          },
+        ],
+      ),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(save).not.toHaveBeenCalled();
+    expect(tickets).toEqual([]);
+    expect(
+      row("full").getByRole("button", { name: "Download SRT" }),
+    ).toBeDisabled();
+  });
+
+  it("does not call a job cancelled when it only left the cache", async () => {
+    server.use(...handlers({ outcome: () => ({ status: "running" }) }));
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    emitJob(jobId());
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData([QueryKeys.System, QueryKeys.Jobs]),
+      ).toHaveLength(1),
+    );
+    // The cache lost the row (it was trimmed or reset) while the queue still
+    // has the job, which then finishes and saves the file.
+    const asked = vi.spyOn(api.system, "jobs");
+    act(() => queryClient.setQueryData([QueryKeys.System, QueryKeys.Jobs], []));
+    await waitFor(() => expect(asked).toHaveBeenCalledWith(jobId()));
+    await act(async () => {
+      await Promise.all(asked.mock.results.map((result) => result.value));
+    });
+    expect(screen.queryByText(/Download failed for/)).toBeNull();
+    expect(
+      row("full").getByRole("button", { name: "Download SRT" }),
+    ).toBeDisabled();
   });
 
   describe("when the terminal socket event never arrives", () => {

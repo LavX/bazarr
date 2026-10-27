@@ -207,3 +207,84 @@ describe("jobs events and the backend session", () => {
     });
   });
 });
+
+describe("the jobs cache", () => {
+  const jobsReducer = () =>
+    createDefaultReducer().find(({ key }) => key === "jobs")!;
+
+  beforeEach(() => {
+    queryClientMock.setQueryData.mockReset();
+    queryClientMock.getQueryData.mockReset();
+  });
+
+  it("drops a queued job the backend removed", () => {
+    queryClientMock.getQueryData.mockReturnValue([
+      { job_id: 3, session: "run-a", status: "pending" },
+      { job_id: 4, session: "run-a", status: "pending" },
+    ]);
+
+    jobsReducer().delete?.([{ job_id: 3, session: "run-a" }] as never);
+
+    expect(queryClientMock.setQueryData).toHaveBeenCalledWith(JOBS, [
+      { job_id: 4, session: "run-a", status: "pending" },
+    ]);
+  });
+
+  it("does not drop the job of another backend run that shares the id", () => {
+    queryClientMock.getQueryData.mockReturnValue([
+      { job_id: 3, session: "run-a", status: "completed" },
+    ]);
+
+    jobsReducer().delete?.([{ job_id: 3, session: "run-b" }] as never);
+
+    expect(queryClientMock.setQueryData).toHaveBeenCalledWith(JOBS, [
+      { job_id: 3, session: "run-a", status: "completed" },
+    ]);
+  });
+
+  it("keeps the history of both outcomes, and trims ended jobs before active ones", async () => {
+    const { MAX_JOBS_IN_CACHE, trimJobs } = await import("./reducer");
+    const ended = Array.from({ length: 100 }, (_, index) => ({
+      job_id: index,
+      status: index % 2 ? "failed" : "completed",
+    }));
+    // Fifty of each outcome, which the backend now remembers, fit with room to spare.
+    expect(MAX_JOBS_IN_CACHE).toBeGreaterThan(ended.length + 100);
+    expect(trimJobs(ended)).toBe(ended);
+
+    const crowded = [
+      { job_id: -1, status: "running" },
+      ...Array.from({ length: MAX_JOBS_IN_CACHE + 5 }, (_, index) => ({
+        job_id: index,
+        status: "completed",
+      })),
+      { job_id: 9999, status: "pending" },
+    ];
+    const trimmed = trimJobs(crowded);
+    expect(trimmed).toHaveLength(MAX_JOBS_IN_CACHE);
+    // The oldest ended jobs go; the one that is running and the one that is
+    // pending stay, wherever they sit in the list.
+    expect(trimmed.map((job) => job.job_id)).toContain(-1);
+    expect(trimmed.map((job) => job.job_id)).toContain(9999);
+    expect(trimmed.map((job) => job.job_id)).not.toContain(0);
+    expect(trimmed.map((job) => job.job_id)).toContain(MAX_JOBS_IN_CACHE + 4);
+
+    // Nothing but active jobs: none is ever dropped.
+    const active = Array.from(
+      { length: MAX_JOBS_IN_CACHE + 3 },
+      (_, index) => ({
+        job_id: index,
+        status: "running",
+      }),
+    );
+    expect(trimJobs(active)).toHaveLength(MAX_JOBS_IN_CACHE + 3);
+  });
+});
+
+describe("the legacy socket channels", () => {
+  it("no longer register a message or progress reducer", () => {
+    const keys = createDefaultReducer().map(({ key }) => key as string);
+    expect(keys).not.toContain("message");
+    expect(keys).not.toContain("progress");
+  });
+});

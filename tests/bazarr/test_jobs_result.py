@@ -109,3 +109,36 @@ def test_the_result_route_reads_a_job_and_answers_404_for_a_stranger(monkeypatch
     assert body["result"] == [{"provider": "x"}]
 
     assert client.get("/api/system/jobs/result?id=4040", headers=headers).status_code == 404
+
+
+def test_the_queue_sizes_both_histories_by_the_constant(monkeypatch):
+    from app import jobs_queue as module
+
+    monkeypatch.setattr(module.JobsQueue, "_flush_progress_loop", lambda self: None)
+    queue = module.JobsQueue()
+
+    assert queue.jobs_completed_queue.maxlen == module.JOB_HISTORY_DEPTH == 50
+    assert queue.jobs_failed_queue.maxlen == module.JOB_HISTORY_DEPTH
+
+
+def test_only_the_most_recent_ended_jobs_keep_the_rows_they_published(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from app.jobs_queue import JOB_RESULTS_KEPT, Job
+
+    queue = private_queue(monkeypatch)
+    base = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    for n in range(1, JOB_RESULTS_KEPT + 6):
+        job = Job(job_id=n, job_name=f"Job {n}", module="m", func="f")
+        job.status = "completed"
+        job.result = [{"row": n}]
+        job.observed_finished_at = base + timedelta(minutes=n)
+        (queue.jobs_failed_queue if n % 2 else queue.jobs_completed_queue).append(job)
+
+    queue._trim_results()
+
+    kept = [job.job_id for job in (*queue.jobs_failed_queue, *queue.jobs_completed_queue) if job.result is not None]
+    assert sorted(kept) == list(range(6, JOB_RESULTS_KEPT + 6))
+    # The older jobs are still listed, they only lost their rows.
+    listed = {job["job_id"] for job in queue.list_jobs_from_queue()}
+    assert listed >= set(range(1, JOB_RESULTS_KEPT + 6))

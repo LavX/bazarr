@@ -515,7 +515,7 @@ export function useRecheckHealth() {
     mutationFn: async () => {
       const queued = await api.system.recheckHealth();
       try {
-        await waitForJob(client, queued.job_id);
+        await waitForJob(client, queued.job_id, queued.session);
       } catch (error) {
         if (
           !(error instanceof JobFailedError || error instanceof JobStoppedError)

@@ -290,6 +290,27 @@ def test_a_duplicate_is_refused_and_can_name_the_job_it_matched():
         assert second not in (False, first)
 
 
+def test_a_caller_asking_to_follow_a_job_is_never_handed_one_that_was_stopped():
+    """A running job that was told to stop only ends at its next check. A search asked for again in
+    that window must get a job of its own, not the dying one that will read as stopped."""
+    from pytest import MonkeyPatch
+    from test_sportarr_workflows import private_queue
+
+    def feed(**options):
+        return queue.feed_jobs_pending_queue("Example", "tests.fake", "work", kwargs={"index": 0}, **options)
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        first = feed()
+        queue.jobs_running_queue.append(queue.jobs_pending_queue.popleft())
+        assert queue.cancel_running_job(first) is True
+
+        # Without asking to follow, the stopped job still counts as the one doing the work.
+        assert feed() is False
+        second = feed(return_existing=True)
+        assert second not in (False, first)
+
+
 def argument_heavy_job(payload=None, apikey=None, job_id=None):
     return "done"
 
