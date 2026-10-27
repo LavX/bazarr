@@ -1114,7 +1114,7 @@ def _first_run(instances):
 
 
 def _onboarding(instances):
-    from app.config import settings
+    from subtitles.tools.translate.availability import ai_translator_configured
     items = []
     if _first_run(instances):
         # The first-run guide is reachable from nowhere else once Discover is
@@ -1131,12 +1131,12 @@ def _onboarding(instances):
                       "summary": "No Sonarr or Radarr instance is connected yet. "
                                  "Discover works without one.",
                       "target": "/settings/connections"})
-    # The API key, not the service URL. openrouter_url defaults to a non-empty
-    # placeholder host, so keying off it meant this item could never appear on
-    # the install it exists for: the fresh one that has not set translation up.
-    # The key is also what the onboarding wizard's Finish step reads, so the
-    # two views agree about whether translation is configured.
-    if not (settings.translator.openrouter_api_key or "").strip():
+    # Whether an AI translator is set up, by the translation gate's own rule and
+    # not by any one setting. The service URL ships non-empty, so keying off it
+    # hid this item on the install it exists for, and the API key stays empty
+    # when the sidecar holds its own. The wizard's Finish step reads the same
+    # answer from the system status.
+    if not ai_translator_configured():
         items.append({"id": "translator",
                       "summary": "The optional AI translator is not configured.",
                       "target": "/settings/translator"})

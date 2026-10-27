@@ -107,7 +107,7 @@ class SystemStatus(Resource):
         # disable its actions with the same answer the queue paths refuse with.
         # The gate never raises: a configuration that cannot be read is just
         # another unavailable translator.
-        from subtitles.tools.translate.availability import translation_available
+        from subtitles.tools.translate.availability import ai_translator_configured, translation_available
         availability = translation_available()
         system_status.update({'translation_availability':
                               {'available': availability.available,
@@ -122,5 +122,10 @@ class SystemStatus(Resource):
                               {'available': editor_availability.available,
                                'reason': '' if editor_availability.available
                                else editor_availability.reason}})
+
+        # Whether an AI translator is set up, which onboarding asks instead of
+        # the two answers above: the shipped Google engine always passes the
+        # gate. The Discover nudge answers from the same function.
+        system_status.update({'ai_translator_configured': ai_translator_configured()})
 
         return {'data': system_status}

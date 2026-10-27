@@ -123,6 +123,14 @@ declare namespace System {
      * the field existed, so every reader must tolerate undefined.
      */
     editor_translation_availability?: System.TranslationAvailability;
+    /**
+     * Whether an AI translator (OpenRouter or Gemini) is the configured engine
+     * and the translation gate lets it run. Onboarding asks this instead of
+     * the gate's answer, which the shipped Google engine always passes.
+     * Absent on responses from before the field existed, so every reader must
+     * tolerate undefined.
+     */
+    ai_translator_configured?: boolean;
   }
 
   interface TranslationAvailability {

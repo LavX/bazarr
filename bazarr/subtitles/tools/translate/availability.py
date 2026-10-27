@@ -31,6 +31,12 @@ class TranslationAvailability(NamedTuple):
 NO_TRANSLATOR_SPELLINGS = (None, '', 'None', 'none')
 
 
+# The engines that translate with an AI model. Google Translate (the shipped
+# default) and Lingarr are not on the list: the first needs no setup and the
+# second is a bridge to whatever its own service runs.
+AI_TRANSLATOR_TYPES = ('openrouter', 'gemini')
+
+
 def translation_available(translator_type=None):
     """The configured translator's answer to "can you translate", with a reason.
 
@@ -82,3 +88,21 @@ def translation_available(translator_type=None):
     except Exception as e:
         logging.error('BAZARR cannot read the translator configuration, so nothing can be translated: %s', e)
         return TranslationAvailability(False, f'The translator configuration cannot be read: {e}')
+
+
+def ai_translator_configured():
+    """Whether an AI translator is set up and the gate would let it run.
+
+    Onboarding offers AI translation to installs that have not set it up. That
+    is a narrower question than whether anything can translate, because the
+    shipped Google engine always can. So the answer is the gate's own, asked
+    for the configured engine, and only for an engine that uses an AI model.
+    It never reads the OpenRouter API key itself: the sidecar can hold its own,
+    and the gate already knows what a usable setup needs.
+    """
+    try:
+        translator_type = settings.translator.translator_type
+    except Exception as e:
+        logging.error('BAZARR cannot read the translator configuration: %s', e)
+        return False
+    return translator_type in AI_TRANSLATOR_TYPES and translation_available(translator_type).available
