@@ -409,25 +409,21 @@ def test_encrypted_queued_custom_request_preserves_routing(monkeypatch, submit_r
     ('smartfast', {'sort': 'smartfast'}),
     ('custom', {'sort': 'default', 'order': ['deepinfra'], 'only': ['deepinfra'], 'allowFallbacks': False}),
 ])
-def test_sync_endpoint_fallback_preserves_selected_routing(monkeypatch, submit_request, routing, expected):
+def test_queued_request_preserves_selected_routing(monkeypatch, submit_request, routing, expected):
     _sidecar_health(monkeypatch, '2.0.0')
     monkeypatch.setattr(config.settings.translator, 'openrouter_provider_routing', routing)
     monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['deepinfra'])
     monkeypatch.setattr(config.settings.translator, 'openrouter_model', 'deepseek/example:free:nitro')
-    submit_request.post.side_effect = [
-        SimpleNamespace(status_code=404),
-        SimpleNamespace(status_code=200, json=lambda: [{'position': 0, 'line': 'Szia'}]),
-    ]
 
     assert submit_request.send('queued') == [{'position': 0, 'line': 'Szia'}]
 
+    # One submission: a refusal is reported, not retried on the sync endpoint.
     assert [call.args[0] for call in submit_request.post.call_args_list] == [
         'http://sidecar:8765/api/v1/jobs/translate/content',
-        'http://sidecar:8765/api/v1/translate/content',
     ]
-    for call in submit_request.post.call_args_list:
-        assert call.kwargs['json']['config']['provider'] == expected
-        assert call.kwargs['json']['config']['model'] == 'deepseek/example:free'
+    payload = submit_request.post.call_args.kwargs['json']['config']
+    assert payload['provider'] == expected
+    assert payload['model'] == 'deepseek/example:free'
 
 
 def test_smartfast_support_uses_version_even_when_upstream_is_unhealthy(monkeypatch):
