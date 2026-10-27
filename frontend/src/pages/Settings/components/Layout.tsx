@@ -28,6 +28,7 @@ import {
   useSystemSettings,
 } from "@/apis/hooks";
 import { useAppTitle } from "@/apis/hooks/site";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import { LoadingProvider } from "@/contexts";
 import {
   FormContext,
@@ -51,6 +52,21 @@ const isMetadataKey = (key: string) =>
   key.startsWith("settings-discover-") ||
   key === "settings-general-metadata_language";
 
+// The backend asks for a password confirmation on a save that changes any of
+// these keys: they run code, decide who may sign in, or decide whose address
+// the login throttle counts.
+const GATED_SETTINGS_KEYS = new Set([
+  "settings-general-postprocessing_cmd",
+  "settings-general-use_postprocessing",
+  "settings-auth-type",
+  "settings-auth-username",
+  "settings-auth-password",
+  "settings-general-trusted_proxy",
+]);
+
+const isGatedSettingsKey = (key: string) =>
+  GATED_SETTINGS_KEYS.has(key.toLowerCase());
+
 const Layout: FunctionComponent<Props> = (props) => {
   const { children, fluid = false, name } = props;
 
@@ -73,6 +89,7 @@ const Layout: FunctionComponent<Props> = (props) => {
     mutateAsync,
     isPending: isMutating,
   } = useSettingsMutation(metadataRefreshFailed && totalStagedCount === 0);
+  const runGated = useGatedAction();
   // A settings refetch has several causes: the refresh the app runs when the
   // socket first reports online, the one it runs again on every reconnect, and
   // the reload that follows a save. Only the save is meant to clear the form.
@@ -117,20 +134,27 @@ const Layout: FunctionComponent<Props> = (props) => {
         const settingsToSubmit = { ...settings };
         runHooks(hooks, settingsToSubmit);
         LOG("info", "submitting settings", Object.keys(settingsToSubmit));
-        mutate(settingsToSubmit, {
-          onSuccess: () => {
-            setMetadataRefreshFailed(false);
-            // The reload this save triggers is the refetch allowed to clear the
-            // form.
-            savedRef.current = true;
-            if (Object.keys(settingsToSubmit).some(isMetadataKey))
-              formRef.current.reset();
-          },
-          onError: (error) => handleSaveError(error, settingsToSubmit),
-        });
+        const save = () => {
+          mutate(settingsToSubmit, {
+            onSuccess: () => {
+              setMetadataRefreshFailed(false);
+              // The reload this save triggers is the refetch allowed to clear the
+              // form.
+              savedRef.current = true;
+              if (Object.keys(settingsToSubmit).some(isMetadataKey))
+                formRef.current.reset();
+            },
+            onError: (error) => handleSaveError(error, settingsToSubmit),
+          });
+        };
+        if (Object.keys(settingsToSubmit).some(isGatedSettingsKey)) {
+          void runGated(save, "save these settings");
+        } else {
+          save();
+        }
       }
     },
-    [mutate, metadataRefreshFailed, handleSaveError],
+    [mutate, metadataRefreshFailed, handleSaveError, runGated],
   );
 
   const submitAndLeave = useCallback(async () => {
@@ -139,19 +163,35 @@ const Layout: FunctionComponent<Props> = (props) => {
       const settingsToSubmit = { ...settings };
       runHooks(hooks, settingsToSubmit);
       LOG("info", "save & leave", Object.keys(settingsToSubmit));
-      try {
-        await mutateAsync(settingsToSubmit);
-        setMetadataRefreshFailed(false);
-        savedRef.current = true;
-      } catch (error) {
-        handleSaveError(error, settingsToSubmit);
-        // Written all the same: leaving loses nothing.
-        if (!isSettingsFollowupError(error)) {
-          throw error;
+      const save = async () => {
+        try {
+          await mutateAsync(settingsToSubmit);
+          setMetadataRefreshFailed(false);
+          savedRef.current = true;
+        } catch (error) {
+          handleSaveError(error, settingsToSubmit);
+          // Written all the same: leaving loses nothing.
+          if (!isSettingsFollowupError(error)) {
+            throw error;
+          }
         }
+      };
+      if (Object.keys(settingsToSubmit).some(isGatedSettingsKey)) {
+        // A cancelled prompt keeps the draft and the blocker in place.
+        if (!(await runGated(save, "save these settings"))) {
+          throw new Error("The password confirmation was cancelled");
+        }
+      } else {
+        await save();
       }
     }
-  }, [form.values, mutateAsync, metadataRefreshFailed, handleSaveError]);
+  }, [
+    form.values,
+    mutateAsync,
+    metadataRefreshFailed,
+    handleSaveError,
+    runGated,
+  ]);
 
   usePrompt(
     totalStagedCount > 0 || metadataRefreshFailed,

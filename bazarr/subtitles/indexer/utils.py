@@ -6,6 +6,7 @@ import logging
 import unicodedata
 
 from guess_language import guess_language
+from sqlalchemy import delete
 from subliminal_patch import core
 from subzero.language import Language
 from charset_normalizer import detect
@@ -14,7 +15,7 @@ from constants import MAXIMUM_SUBTITLE_SIZE
 from app.config import settings
 from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
-from subtitles.indexer.entries import entry_codec
+from subtitles.indexer.entries import entry_codec, normalize_codec
 from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path, sync_output_owner_is_unique
 
 import re as _re_combine
@@ -91,8 +92,121 @@ def normalize_subtitle_language_variant(language, forced=False, hi=False):
     return ':'.join([base] + normalized_variants)
 
 
-def kept_embedded_entries(stored, hidden=()):
-    """The embedded entries of a stored listing that a new listing should keep.
+def embedded_history_language(language):
+    """The language an Embedded Source history row records for a track.
+
+    Forced wins over HI here, unlike the language code a download is stored
+    under: a forced track covers only part of the dialogue, so a forced and HI
+    track must not be recorded as plain HI, where it would stand in for the
+    full-dialogue subtitles of that language.
+    """
+    base, *variants = normalize_subtitle_language_variant(language).split(':')
+    return base + (':forced' if 'forced' in variants else ':hi' if 'hi' in variants else '')
+
+
+def embedded_codecs_by_language(stored):
+    """The codecs of the embedded entries of a stored listing, by history language.
+
+    A codec is None for an entry indexed before codecs were stored, or whose
+    format could not be named. An unreadable listing has no entries.
+    """
+    try:
+        listing = ast.literal_eval(stored) if stored else []
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return {}
+    found = {}
+    for entry in listing if isinstance(listing, list) else []:
+        if not isinstance(entry, (list, tuple)) or not entry or not isinstance(entry[0], str):
+            continue
+        if len(entry) > 1 and entry[1]:
+            continue
+        found.setdefault(embedded_history_language(entry[0]), set()).add(entry_codec(entry))
+    return found
+
+
+# Stands in the codecs of an uncounted language for a track the user hid.
+HIDDEN = "hidden"
+
+
+def note_uncounted_track(uncounted, key, codec, hidden=False):
+    """Record a track of this file that the indexer does not count.
+
+    It is hidden, or skipped by an ignore switch for its codec. A hide is the
+    user naming the language, whatever codec the listing held for it.
+    """
+    codecs = uncounted.setdefault(embedded_history_language(key), set())
+    codecs.add(HIDDEN if hidden else normalize_codec(codec))
+
+
+def retract_embedded_history(session, table, video_path, uncounted, counted, previous, arr_instance_id=None,
+                             guard=True):
+    """Delete the Embedded Source rows of a video for tracks the indexer stopped counting.
+
+    A track the user hid, or that an ignore switch now skips, stops covering its
+    language, so the row that recorded it must stop ending the upgrades of that
+    language. ``uncounted`` maps the history language of each such track seen on
+    this pass to its codecs (see ``note_uncounted_track``), ``counted`` holds the
+    track keys the pass did list, and ``previous`` the codecs the last stored
+    listing counted for each language (``embedded_codecs_by_language``).
+
+    A language is retracted only when no counted track still covers it and
+    either the user hid it and the last listing counted it, or a codec the last
+    listing counted is the one an ignore switch now skips. A track that is merely
+    gone from the container is never retracted, nor is one whose codec is not the
+    skipped one: another tool may have copied it out next to the video and
+    stripped it, leaving a hidden or ignored track of the same language behind,
+    and the row is the only trace of the copy.
+
+    Rows that an older version wrote for a forced and HI track sit under the HI
+    code, ``en:hi``, where a plain HI track's row sits too. Nothing in the row
+    tells the two apart (language, description, provider and score are the
+    same), and a plain HI track that has since left the container would leave
+    exactly such a row as its only trace. So they are not retracted here, and
+    only the rows written under the forced code are. An older ``en:hi`` row
+    stays whether or not the forced and HI track is hidden, and it keeps ending
+    the upgrades of a plain download of that language. Nothing in the app
+    deletes a single history row, so only a manual cleanup of the history
+    removes it.
+
+    The index on (video_path, language) serves the delete on the series and
+    movies history tables. The sports history table has no such index: its
+    delete reads the owner's rows, and it runs only when a track stops counting.
+
+    The caller runs it before it stores the new listing. A delete that fails
+    returns None, and the caller then leaves the stored listing as it is, so the
+    next pass sees the track in the old listing and tries again. Without
+    ``guard`` the error is raised instead, for a caller inside a transaction
+    that a failed statement would abort and roll back, which also leaves the old
+    listing in place.
+    """
+    try:
+        covered = {embedded_history_language(key) for key in counted or ()}
+        previous = previous or {}
+
+        def counted_before(language, codecs):
+            if HIDDEN in codecs and language in previous:
+                return True
+            return bool(codecs & previous.get(language, set()))
+
+        languages = sorted(language for language, codecs in (uncounted or {}).items()
+                           if language not in covered and counted_before(language, codecs))
+        if not languages or not video_path:
+            return 0
+        statement = delete(table).where(table.action == 7, table.video_path == video_path,
+                                        table.language.in_(languages))
+        if arr_instance_id is not None:
+            statement = statement.where(table.arr_instance_id == arr_instance_id)
+        return session.execute(statement).rowcount or 0
+    except Exception:
+        if not guard:
+            raise
+        logging.exception("BAZARR error retracting embedded subtitle history for %s", video_path)
+        return None
+
+
+def partition_embedded_entries(stored, hidden=()):
+    """Split the embedded entries of a stored listing into those a new listing
+    should keep and those it drops.
 
     For an indexer that could not read the file's tracks this time. A failed
     read says nothing about the tracks, and a listing stored without them makes
@@ -102,8 +216,8 @@ def kept_embedded_entries(stored, hidden=()):
     try:
         listing = ast.literal_eval(stored) if stored else []
     except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
-        return []
-    kept = []
+        return [], []
+    kept, dropped = [], []
     for entry in listing if isinstance(listing, list) else []:
         if not isinstance(entry, (list, tuple)) or not entry or not isinstance(entry[0], str):
             continue
@@ -113,9 +227,10 @@ def kept_embedded_entries(stored, hidden=()):
         if entry[0] in hidden or (codec and ((settings.general.ignore_pgs_subs and codec == 'pgs') or
                                              (settings.general.ignore_vobsub_subs and codec == 'vobsub') or
                                              (settings.general.ignore_ass_subs and codec == 'ass'))):
+            dropped.append(list(entry))
             continue
         kept.append(list(entry))
-    return kept
+    return kept, dropped
 
 
 def sync_engine_from_subtitle_name(subtitle):

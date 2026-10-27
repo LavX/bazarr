@@ -96,6 +96,7 @@ describe("PlayOnMenu", () => {
     );
     expect(emby).toHaveAttribute("target", "_blank");
     expect(emby).toHaveAttribute("rel", "noopener noreferrer");
+    expect(emby).not.toHaveAttribute("aria-disabled");
     expect(await row("Not found on Silo")).toHaveAttribute(
       "aria-disabled",
       "true",
@@ -118,6 +119,7 @@ describe("PlayOnMenu", () => {
     // The same element, answered in place.
     expect(plex).toHaveTextContent("Plex is unreachable");
     expect(plex).not.toHaveAttribute("href");
+    expect(plex).toHaveAttribute("aria-disabled", "true");
     expect(rows()).toEqual([
       "Play on Emby",
       "Plex is unreachable",
@@ -328,10 +330,12 @@ describe("PlayOnMenu", () => {
       name: "Play on a media server: Metropolis",
     });
     await user.click(trigger);
-    await screen.findByRole("menuitem", {
-      name: "Plex is unreachable",
-      hidden: true,
-    });
+    expect(
+      await screen.findByRole("menuitem", {
+        name: "Plex is unreachable",
+        hidden: true,
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
     await user.click(trigger);
     await waitFor(() =>
       expect(trigger).toHaveAttribute("aria-expanded", "false"),
@@ -341,15 +345,15 @@ describe("PlayOnMenu", () => {
       url: "https://app.plex.tv/desktop/#!/server/m1/details?key=1",
     };
     await user.click(trigger);
-    expect(
-      await screen.findByRole("menuitem", {
-        name: "Play on Plex",
-        hidden: true,
-      }),
-    ).toHaveAttribute(
+    const plexRow = await screen.findByRole("menuitem", {
+      name: "Play on Plex",
+      hidden: true,
+    });
+    expect(plexRow).toHaveAttribute(
       "href",
       "https://app.plex.tv/desktop/#!/server/m1/details?key=1",
     );
+    expect(plexRow).not.toHaveAttribute("aria-disabled");
     // Emby's answer was kept; only the server that did not answer was asked.
     expect(asked).toEqual([
       "candidates:?media_type=movie&id=1",
@@ -429,7 +433,8 @@ describe("PlayOnMenu", () => {
       hidden: true,
     });
     // Three presses reach all three rows, whether or not opening the menu
-    // already focused the first one: the rows loop.
+    // already focused the first one: the rows loop. A row without a link is
+    // reached too, and still says it is unavailable.
     const reached = new Set<string | null | undefined>();
     for (let step = 0; step < 3; step += 1) {
       await user.keyboard("{ArrowDown}");
@@ -438,6 +443,11 @@ describe("PlayOnMenu", () => {
     expect(reached).toEqual(
       new Set(["Play on Emby", "Checking Plex", "Not found on Silo"]),
     );
+    const shown = (name: string) =>
+      screen.getByRole("menuitem", { name, hidden: true });
+    expect(shown("Play on Emby")).not.toHaveAttribute("aria-disabled");
+    expect(shown("Checking Plex")).toHaveAttribute("aria-disabled", "true");
+    expect(shown("Not found on Silo")).toHaveAttribute("aria-disabled", "true");
     finishPlex?.();
   });
   // A lookup the page no longer waits for lets go of its connection: a

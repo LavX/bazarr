@@ -43,6 +43,7 @@ import type {
   ArrSportsSettings,
   ArrSubtitleSettings,
 } from "@/apis/raw/arrInstances";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import {
   GLOBAL_DEFAULT,
   hasMediaDefaultProfile,
@@ -165,6 +166,31 @@ function destinationMoved(values: FormValues, instance: ArrInstance | null) {
   );
 }
 
+// The backend asks for a password confirmation when a save changes the
+// per-instance post-processing override. The whole subtitle_settings blob is
+// sent on every save, so the change test compares against the loaded
+// instance's stored override: a resend of the same overrides never prompts.
+function postprocessingOverrideChanges(
+  incoming: ArrSubtitleSettings | undefined,
+  stored: ArrSubtitleSettings | undefined,
+): boolean {
+  const incomingGeneral = incoming?.general;
+  const storedGeneral = stored?.general;
+  for (const key of ["use_postprocessing", "postprocessing_cmd"] as const) {
+    const hasIncoming = incomingGeneral !== undefined && key in incomingGeneral;
+    const hasStored = storedGeneral !== undefined && key in storedGeneral;
+    if (hasIncoming !== hasStored) return true;
+    if (
+      hasIncoming &&
+      hasStored &&
+      incomingGeneral?.[key] !== storedGeneral?.[key]
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const InstanceFormModal: FunctionComponent<Props> = ({
   opened,
   kind,
@@ -179,6 +205,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
   const testById = useTestArrInstanceById();
   const applyDefaultProfile = useApplyArrInstanceDefaultProfile();
   const { data: languageProfiles } = useLanguageProfiles();
+  const runGated = useGatedAction();
 
   const [keyMode, setKeyMode] = useState<KeyMode>("keep");
   const hasStoredKey = instance !== null && instance.api_key_set;
@@ -346,89 +373,101 @@ const InstanceFormModal: FunctionComponent<Props> = ({
   const saving = create.isPending || update.isPending;
 
   const submit = form.onSubmit((values) => {
-    const common = {
-      name: values.name.trim(),
-      ip: values.ip.trim(),
-      port: Number(values.port),
-      base_url: normalizeBaseUrl(values.baseUrl),
-      ssl: values.ssl,
-      verify_ssl: values.verifySsl,
-      http_timeout: Number(values.httpTimeout),
-      enabled: values.enabled,
-    };
-    const typed = values.apiKey.trim();
-    if (instance) {
-      const body: ArrInstanceUpdate = {
-        ...common,
-        is_default: values.isDefault,
-        // Always sent so clearing every override (an empty object) removes the
-        // stored block server-side; an absent key would instead preserve it.
-        subtitle_settings: values.subtitleSettings,
-        media_defaults: values.mediaDefaults,
-        // Always sent for a Sportarr, for the same reason subtitle_settings
-        // above is: the blob is the complete set of overrides, so omitting it
-        // when empty made clearing the last one impossible.
-        ...(values.kind === "sportarr"
-          ? { sports_settings: values.sportsSettings }
-          : {}),
+    const perform = () => {
+      const common = {
+        name: values.name.trim(),
+        ip: values.ip.trim(),
+        port: Number(values.port),
+        base_url: normalizeBaseUrl(values.baseUrl),
+        ssl: values.ssl,
+        verify_ssl: values.verifySsl,
+        http_timeout: Number(values.httpTimeout),
+        enabled: values.enabled,
       };
-      if (
-        values.kind === "sportarr" &&
-        JSON.stringify(values.pathMappings) !==
-          JSON.stringify(instance.path_mappings ?? [])
-      ) {
-        body["path_mappings"] = values.pathMappings;
-      }
-      if (hasStoredKey) {
-        if (keyMode === "replace" && typed.length) {
+      const typed = values.apiKey.trim();
+      if (instance) {
+        const body: ArrInstanceUpdate = {
+          ...common,
+          is_default: values.isDefault,
+          // Always sent so clearing every override (an empty object) removes the
+          // stored block server-side; an absent key would instead preserve it.
+          subtitle_settings: values.subtitleSettings,
+          media_defaults: values.mediaDefaults,
+          // Always sent for a Sportarr, for the same reason subtitle_settings
+          // above is: the blob is the complete set of overrides, so omitting it
+          // when empty made clearing the last one impossible.
+          ...(values.kind === "sportarr"
+            ? { sports_settings: values.sportsSettings }
+            : {}),
+        };
+        if (
+          values.kind === "sportarr" &&
+          JSON.stringify(values.pathMappings) !==
+            JSON.stringify(instance.path_mappings ?? [])
+        ) {
+          body["path_mappings"] = values.pathMappings;
+        }
+        if (hasStoredKey) {
+          if (keyMode === "replace" && typed.length) {
+            body.api_key = typed;
+          }
+          if (keyMode === "clear") {
+            body.clear_api_key = true;
+          }
+        } else if (typed.length) {
           body.api_key = typed;
         }
-        if (keyMode === "clear") {
-          body.clear_api_key = true;
-        }
-      } else if (typed.length) {
-        body.api_key = typed;
-      }
-      update.mutate(
-        { id: instance.id, body },
-        {
+        update.mutate(
+          { id: instance.id, body },
+          {
+            onSuccess: () => {
+              showNotification({
+                color: "green",
+                message: `Instance "${common.name}" updated`,
+              });
+              onClose();
+            },
+          },
+        );
+      } else {
+        const body = buildArrInstanceCreateBody(values.kind, {
+          name: common.name,
+          ip: common.ip,
+          port: common.port,
+          base_url: common.base_url,
+          ssl: common.ssl,
+          verify_ssl: common.verify_ssl,
+          http_timeout: common.http_timeout,
+          enabled: common.enabled,
+          isDefault: values.isDefault,
+          apiKey: typed.length ? typed : undefined,
+          subtitleSettings: values.subtitleSettings,
+          mediaDefaults: values.mediaDefaults,
+        });
+        if (values.kind === "sportarr")
+          body["sports_settings"] = values.sportsSettings;
+        if (values.kind === "sportarr" && values.pathMappings.length)
+          body["path_mappings"] = values.pathMappings;
+        create.mutate(body, {
           onSuccess: () => {
             showNotification({
               color: "green",
-              message: `Instance "${common.name}" updated`,
+              message: `Instance "${common.name}" added`,
             });
             onClose();
           },
-        },
-      );
+        });
+      }
+    };
+    if (
+      postprocessingOverrideChanges(
+        values.subtitleSettings,
+        instance?.subtitle_settings,
+      )
+    ) {
+      void runGated(perform, "save these instance settings");
     } else {
-      const body = buildArrInstanceCreateBody(values.kind, {
-        name: common.name,
-        ip: common.ip,
-        port: common.port,
-        base_url: common.base_url,
-        ssl: common.ssl,
-        verify_ssl: common.verify_ssl,
-        http_timeout: common.http_timeout,
-        enabled: common.enabled,
-        isDefault: values.isDefault,
-        apiKey: typed.length ? typed : undefined,
-        subtitleSettings: values.subtitleSettings,
-        mediaDefaults: values.mediaDefaults,
-      });
-      if (values.kind === "sportarr")
-        body["sports_settings"] = values.sportsSettings;
-      if (values.kind === "sportarr" && values.pathMappings.length)
-        body["path_mappings"] = values.pathMappings;
-      create.mutate(body, {
-        onSuccess: () => {
-          showNotification({
-            color: "green",
-            message: `Instance "${common.name}" added`,
-          });
-          onClose();
-        },
-      });
+      perform();
     }
   });
 

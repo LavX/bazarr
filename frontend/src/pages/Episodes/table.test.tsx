@@ -259,7 +259,7 @@ describe("Episodes Detail Table, subtitle scores", () => {
     ).toHaveTextContent(/^en$/i);
   });
 
-  it("takes the newest embedded score without mixing language variants", async () => {
+  it("scores a forced and HI embedded track from its forced record", async () => {
     setupApiMocks();
     const embedded = { ...file, path: null, hi: true, forced: true };
     customRender(
@@ -277,6 +277,31 @@ describe("Episodes Detail Table, subtitle scores", () => {
             history_id: 3,
             language: { ...file, forced: true },
             score: "50.0%",
+          }),
+          makeHistoryEntry({
+            action: 7,
+            history_id: 2,
+            language: { ...file, hi: true },
+            score: "100.0%",
+          }),
+        ]}
+      />,
+    );
+    expect(await findScoredBadge(/50%$/i)).toBeInTheDocument();
+  });
+
+  it("takes the newest HI record for a forced and HI track an older version recorded", async () => {
+    setupApiMocks();
+    const embedded = { ...file, path: null, hi: true, forced: true };
+    customRender(
+      <TableHarness
+        episodes={[makeEpisode([embedded])]}
+        history={[
+          makeHistoryEntry({
+            action: 7,
+            history_id: 1,
+            language: { ...file, hi: true },
+            score: "72.0%",
           }),
           makeHistoryEntry({
             action: 7,

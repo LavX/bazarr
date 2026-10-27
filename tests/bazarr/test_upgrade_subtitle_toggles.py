@@ -79,6 +79,7 @@ def test_upgrade_query_actions_split_manual_and_translated(monkeypatch, manual, 
         SimpleNamespace(
             general=SimpleNamespace(
                 days_to_upgrade_subs=7,
+                use_embedded_subs=True,
                 upgrade_manual=manual,
                 upgrade_translated=translated,
             )

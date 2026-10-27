@@ -230,6 +230,33 @@ def test_sports_hidden_track_is_skipped_for_that_owner_only(indexed_library, mon
     assert ast.literal_eval(row(session, 61).missing_subtitles) == []
 
 
+def test_sports_hiding_a_track_takes_its_embedded_source_row(indexed_library, monkeypatch):  # noqa: F811
+    from app import database as db
+    from app.database import TableHistorySports
+    from sportarr import library
+    from subtitles.embedded_hidden import hide_track
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    session.execute(sa.insert(db.TableLanguagesProfiles).values(
+        profileId=5, name="Sports", items=json.dumps(PROFILE)))
+    db.update_profile_id_list.invalidate()
+    assert library.assign_profile(session, 51, 1, 5)
+
+    def recorded():
+        return sorted(session.execute(sa.select(TableHistorySports.event_id, TableHistorySports.language)
+                                      .where(TableHistorySports.action == 7)).tuples().all())
+
+    module.store_subtitles_sports(61, 1)
+    module.store_subtitles_sports(62, 2)
+    assert recorded() == [(61, "fr"), (62, "fr")]
+
+    hide_track(session, "sports", 61, 1, "fr", "subrip")
+    module.store_subtitles_sports(61, 1)
+
+    assert recorded() == [(62, "fr")]
+
+
 @pytest.mark.parametrize("use_embedded", [False])
 def test_hidden_records_are_inert_when_embedded_subtitles_are_off(hidden_db, monkeypatch, use_embedded):  # noqa: F811
     import subtitles.indexer.movies as mv

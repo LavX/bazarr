@@ -15,6 +15,12 @@ from .paths import _media_path, map_media_path
 
 _SERVERS = VALID_KINDS
 _OPERATIONS = {"download", "upload", "delete", "sync", "translate", "combine", "edit", "extract"}
+# Silo library kinds that can hold each publication. A mixed library holds
+# movies and series together, and it is also where a sports folder lives:
+# Silo has no sports kind. The client reports one canonical kind per row, so
+# a sports publication has no kind to check and is settled by existence and
+# root alone.
+_SILO_PUBLICATION_KINDS = {"movie": {"movies", "mixed"}, "episode": {"series", "mixed"}}
 _ERROR_CODES = {
     "configuration_changed", "connection_disabled", "connection_error", "internal_error", "invalid_response",
     "invalid_url", "invalid_verify_ssl", "missing_credentials", "unauthorized", "forbidden", "not_found",
@@ -387,13 +393,13 @@ class RefreshDispatcher:
                 libraries = client.get_libraries()
                 library = next((row for row in libraries if row["id"].lstrip("0") ==
                                 mapped["library_id"].lstrip("0")), None)
-                # Silo only knows movie and series library types. A sports root
-                # lives inside one of those, so the type it declares cannot be
-                # checked for a sports publication; the library still has to
-                # exist and hold the file.
+                # A sports root lives in a movie, series or mixed library and a
+                # mixed library holds both video kinds, so the kind it declares
+                # is checked only where one is expected. The library still has
+                # to exist and hold the file.
+                kinds = _SILO_PUBLICATION_KINDS.get(event.media_type)
                 if (library is None
-                        or (event.media_type != "sports"
-                            and library["type"] != ("movies" if event.media_type == "movie" else "series"))
+                        or (kinds is not None and library["type"] not in kinds)
                         or not any(_media_path(mapped["path"]).is_relative_to(_media_path(root))
                                    for root in library["paths"])):
                     raise MediaServerError("library_invalid")

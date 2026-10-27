@@ -5,6 +5,7 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from utilities.backup import (get_backup_files, prepare_restore, delete_backup_file,
                               backup_to_zip, schedule_restore_restart)
 
+from ..password_confirm import require_password_confirmation
 from ..utils import authenticate
 
 api_ns_system_backups = Namespace('System Backups', description='List, create, restore or delete backups')
@@ -48,10 +49,12 @@ class SystemBackups(Resource):
     })
 
     @authenticate
+    @require_password_confirmation
     @api_ns_system_backups.doc(parser=patch_request_parser)
     @api_ns_system_backups.response(200, 'Restore staged; restart follows', patch_response_model)
     @api_ns_system_backups.response(400, 'Filename not provided')
     @api_ns_system_backups.response(401, 'Not Authenticated')
+    @api_ns_system_backups.response(403, 'Password confirmation required')
     @api_ns_system_backups.response(500, 'Error while restoring backup. Check logs.')
     def patch(self):
         """Restore a backup file"""

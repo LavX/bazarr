@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from test_media_server_http import http_fixture as http_fixture
+
 
 def native_settings():
     return SimpleNamespace(
@@ -711,10 +713,89 @@ def test_silo_accepts_each_supported_publication_for_movies_and_episodes(dispatc
     assert dispatch.dispatcher.status(IDS['silo'])['state'] == 'confirmed'
 
 
+@pytest.mark.parametrize('media_type', ['movie', 'episode'])
+def test_silo_accepts_a_mixed_library_for_movies_and_series(dispatch, media_type):
+    """A mixed library holds both, so it is a legitimate home for either."""
+    dispatch.libraries[:] = [{'id': '7', 'type': 'mixed', 'paths': ['/media']}]
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event(media_type=media_type))
+    assert dispatch.dispatcher.wait_idle(3)
+    assert [path for path, _snapshot in dispatch.calls['silo']] == ['/media/A.mkv']
+    assert dispatch.dispatcher.status(IDS['silo'])['state'] == 'confirmed'
+
+
+@pytest.mark.parametrize('stored', ['mixed', 'M\u0130XED', '\u00a0mixed\u00a0'],
+                         ids=['plain', 'dotted-capital-i', 'nbsp-padded'])
+def test_a_sports_publication_reaches_a_mixed_silo_library(http_fixture, monkeypatch, stored):
+    """Silo has no sports kind, so a Sports folder is a mixed library. The
+    selector used to drop every mixed row, which made a mapping into that
+    library read as a library Silo did not have, and the publication ended
+    library_invalid."""
+    from media_servers.dispatcher import NativeConfiguration, RefreshDispatcher
+    from silo.client import SiloClient
+    base, records = http_fixture([(200, [{'id': 7, 'name': 'Sports', 'type': stored,
+                                         'paths': ['/media'], 'enabled': True}], {})])
+    settings = native_settings()
+    settings.silo.url = base
+    snapshots = [snapshot for snapshot in native_snapshots(settings) if snapshot.kind == 'silo']
+    dispatched = []
+
+    def refresh_file(_self, library_id, path, **_kwargs):
+        dispatched.append((library_id, path))
+        return {'status': 'confirmed'}
+
+    monkeypatch.setattr(SiloClient, 'refresh_file', refresh_file)
+    dispatcher = RefreshDispatcher(
+        NativeConfiguration(settings, snapshots=snapshots),
+        client_factory=lambda _kind, snapshot: SiloClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl),
+        metadata_factory=lambda _event: None)
+    dispatcher.notify(movie_event(media_type='sports'))
+    assert dispatcher.wait_idle(5)
+    assert [record['path'] for record in records] == ['/api/v1/libraries']
+    assert dispatcher.status(IDS['silo']) == {'pending': 0, 'state': 'confirmed', 'error_code': None}
+    assert dispatched == [('7', '/media/A.mkv')]
+
+
+@pytest.mark.parametrize('stored', ['\u001cmixed'],
+                         ids=['control-character'])
+@pytest.mark.parametrize('media_type', ['movie', 'episode'])
+def test_a_library_kind_silo_does_not_call_video_never_reaches_a_refresh(http_fixture, monkeypatch,
+                                                                          stored, media_type):
+    """The control-character probe must not be admitted as a video library.
+    Silo does not trim U+001C to U+001F the way Python's strip() does, so the
+    row is omitted. Omitting it costs a selector entry; admitting it would send
+    a refresh into a library Silo itself refuses."""
+    from media_servers.dispatcher import NativeConfiguration, RefreshDispatcher
+    from silo.client import SiloClient
+    base, records = http_fixture([(200, [{'id': 7, 'name': 'Library', 'type': stored,
+                                         'paths': ['/media'], 'enabled': True}], {})])
+    settings = native_settings()
+    settings.silo.url = base
+    snapshots = [snapshot for snapshot in native_snapshots(settings) if snapshot.kind == 'silo']
+    dispatched = []
+
+    def refresh_file(_self, library_id, path, **_kwargs):
+        dispatched.append((library_id, path))
+        return {'status': 'confirmed'}
+
+    monkeypatch.setattr(SiloClient, 'refresh_file', refresh_file)
+    dispatcher = RefreshDispatcher(
+        NativeConfiguration(settings, snapshots=snapshots),
+        client_factory=lambda _kind, snapshot: SiloClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl),
+        metadata_factory=lambda _event: None)
+    dispatcher.notify(movie_event(media_type=media_type))
+    assert dispatcher.wait_idle(5)
+    assert [record['path'] for record in records] == ['/api/v1/libraries']
+    assert dispatcher.status(IDS['silo']) == {
+        'pending': 1, 'state': 'unconfirmed', 'error_code': 'library_invalid'}
+    assert dispatched == []
+
+
 @pytest.mark.parametrize('library', [
     {'id': '7', 'type': 'movies', 'paths': ['/media-other']},
     {'id': '8', 'type': 'movies', 'paths': ['/media']},
     {'id': '7', 'type': 'series', 'paths': ['/media']},
+    {'id': '7', 'type': 'music', 'paths': ['/media']},
 ])
 def test_silo_requires_matching_library_type_and_root(dispatch, library):
     dispatch.libraries[:] = [library]

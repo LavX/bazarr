@@ -15,6 +15,7 @@ from collections import OrderedDict
 
 from app import activity
 from app.jobs_queue import jobs_queue, JobCancelled, JobFailed, UNEXPECTED_JOB_ERROR
+from secret_store.scrub import scrub_text
 from utilities.job_dedupe import enqueue_or_existing
 
 from .services.openrouter_translator import OpenRouterTranslatorService
@@ -120,9 +121,11 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
         # job's error, which the editor, the failure toast and the drawer show.
         _rename(job_id, 'Failed')
         if job_id:
-            # The same sentence the queue records, so the editor can still say
-            # why after the job has left the queue.
-            message = str(exc) if isinstance(exc, JobFailed) else UNEXPECTED_JOB_ERROR['message']
+            # The same sentence the queue records, scrubbed the same way, so
+            # the editor can still say why after the job has left the queue
+            # without carrying a credential the reason quoted.
+            message = (scrub_text(str(exc)) if isinstance(exc, JobFailed)
+                       else UNEXPECTED_JOB_ERROR['message'])
             _retain_result(job_id, {'error': message})
         raise
 

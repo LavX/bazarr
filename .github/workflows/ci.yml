@@ -424,6 +424,7 @@ jobs:
             tests/bazarr/test_login_backdrops.py \
             tests/bazarr/test_onboarding_flag.py \
             tests/bazarr/test_session_auth.py \
+            tests/bazarr/test_password_confirm.py \
             tests/bazarr/test_socket_auth.py \
             tests/bazarr/test_session_cookie_policy.py \
             tests/bazarr/test_session_settings_roundtrip.py \
@@ -580,6 +581,7 @@ jobs:
             tests/bazarr/test_translate_job_media_name.py \
             tests/bazarr/test_translate_surface_refusals.py \
             tests/bazarr/test_translator_auth.py \
+            tests/bazarr/test_translator_sidecar_errors.py \
             tests/bazarr/test_upgrade_embedded_history.py \
             tests/bazarr/test_upgrade_subtitle_toggles.py \
             tests/subliminal_patch/test_animetosho.py \
@@ -670,6 +672,8 @@ jobs:
             tests/bazarr/test_package_info_location.py \
             tests/bazarr/test_translate_owner_threading.py \
             tests/bazarr/test_subtitle_delete_ownership.py \
+            tests/bazarr/test_upgrade_embedded_source.py \
+            tests/bazarr/test_embedded_history_retraction.py \
             tests/bazarr/test_sports_library_lookup_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q

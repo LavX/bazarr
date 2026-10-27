@@ -706,6 +706,7 @@ def test_profile_editor_changes_recompute_sports_missing(indexed_library, monkey
         monkeypatch.setitem(sys.modules, name, package)
     for name, filename in [
         ("utils", "utils.py"),
+        ("password_confirm", "password_confirm.py"),
         ("system.settings", "system/settings.py"),
     ]:
         spec = importlib.util.spec_from_file_location(

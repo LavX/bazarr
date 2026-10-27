@@ -7,11 +7,12 @@ from flask_restx import Resource, Namespace
 
 from app.config import settings
 from app.jobs_queue import jobs_queue
-from secret_store.scrub import scrub_text, scrub_value
+from secret_store.scrub import scrub_text
 from subtitles.tools.translate.availability import translation_available
 from subtitles.tools.translate.editor import (cancel_editor_translation, editor_translation_state,
                                               enqueue_editor_translation)
 from subtitles.tools.translate.services.auth import get_translator_auth_headers
+from subtitles.tools.translate.services.sidecar_errors import describe_sidecar_refusal
 from ..utils import authenticate
 
 api_ns_translator = Namespace('Translator', description='AI Subtitle Translator service operations')
@@ -295,13 +296,9 @@ class TranslatorTest(Resource):
             )
             if response.status_code == 200:
                 return response.json(), 200
-            else:
-                try:
-                    # The service's own error body can name the key it
-                    # rejected, so it is masked before it reaches the UI.
-                    return scrub_value(response.json()), 502
-                except (ValueError, requests.exceptions.JSONDecodeError):
-                    return {"error": f"Service returned {response.status_code}"}, 502
+            # The service's own body names which setting is wrong; the client
+            # turns its detail envelope into the sentence the toast shows.
+            return {"error": scrub_text(describe_sidecar_refusal(response))}, 502
         except requests.exceptions.ConnectionError:
             return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
         except requests.exceptions.Timeout:

@@ -9,7 +9,8 @@ from collections import OrderedDict
 from flask import session, request
 from flask_restx import Resource, Namespace, reqparse
 
-from app.auth import clear_authentication, establish_session
+from api.utils import authenticate
+from app.auth import clear_authentication, establish_session, is_session_authenticated, mark_password_confirmed
 from app.config import settings
 from utilities.helper import check_credentials, needs_password_upgrade, upgrade_password_hash
 
@@ -125,3 +126,56 @@ class SystemAccount(Resource):
                 return '', 204
 
         return 'Unknown action', 400
+
+
+@api_ns_system_account.hide
+@api_ns_system_account.route('system/account/confirm')
+class SystemAccountConfirm(Resource):
+    post_request_parser = reqparse.RequestParser()
+    post_request_parser.add_argument('username', type=str, required=False, help='Bazarr username')
+    post_request_parser.add_argument('password', type=str, required=False, help='Bazarr password')
+
+    @authenticate
+    @api_ns_system_account.doc(parser=post_request_parser)
+    @api_ns_system_account.response(204, 'Success')
+    @api_ns_system_account.response(401, 'Sign in first')
+    @api_ns_system_account.response(403, 'Authentication failed')
+    @api_ns_system_account.response(429, 'Too many failed attempts')
+    @api_ns_system_account.response(500, 'Unknown authentication type define in config')
+    def post(self):
+        """Confirm the signed-in user's password for actions that run code"""
+        if settings.auth.type not in ['form', 'basic']:
+            return 'Unknown authentication type define in config', 500
+
+        ip = _get_client_ip()
+        if _is_rate_limited(ip):
+            return 'Too many failed login attempts. Try again in 5 minutes.', 429
+
+        args = self.post_request_parser.parse_args()
+
+        # The prompt runs inside a signed-in UI. An expired session is answered
+        # as unauthenticated, so the client goes to the login page rather than
+        # being asked for a password it cannot confirm anything with.
+        if settings.auth.type == 'form' and not is_session_authenticated():
+            return 'Sign in first', 401
+
+        # Under basic login the request has to carry valid basic credentials
+        # as well: a browser sends them on its own, and the confirmation on top
+        # is what the API key alone never holds.
+        if settings.auth.type == 'basic':
+            auth = request.authorization
+            if not (auth and check_credentials(auth.username, auth.password, request, log_success=False)):
+                _record_failed_attempt(ip)
+                return 'Authentication failed', 403
+
+        # The confirmation is for the one signed-in account, so a request that
+        # names no username (the prompt could not read the settings) checks
+        # the password against the configured one.
+        username = args.get('username') or settings.auth.username
+        if not check_credentials(username, args.get('password'), request):
+            _record_failed_attempt(ip)
+            return 'Authentication failed', 403
+
+        _clear_failed_attempts(ip)
+        mark_password_confirmed()
+        return '', 204

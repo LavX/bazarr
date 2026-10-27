@@ -1280,6 +1280,11 @@ refresh_secret_values(settings)
 scrub_persisted_secrets()
 
 
+# What the settings read shows in place of a stored login password, and what a
+# save may send back to mean "keep the stored one".
+AUTH_PASSWORD_MASK = '***'
+
+
 def get_settings():
     from discover.metadata import CONFIG_LOCK
     with CONFIG_LOCK:
@@ -1357,6 +1362,13 @@ def _get_settings():
                     continue
                 if k == "discover" and subk.lower() in {"tmdb_configured", "tmdb_token_stored",
                                                         "metadata_revision"}:
+                    continue
+                if full_path == 'auth.password':
+                    # The stored login password is a one-way hash, and a hash
+                    # handed to anyone holding the API key is a password they
+                    # can test offline with no throttle. Masked like the
+                    # system secrets; empty stays empty.
+                    settings_to_return[k][subk] = AUTH_PASSWORD_MASK if subv else subv
                     continue
                 if is_system_secret(full_path):
                     # Keep empty values literally empty so the UI can
@@ -1513,6 +1525,27 @@ def _require_provider_order_for_custom_routing(settings_items):
     if not order:
         raise ValidationError('OpenRouter custom routing requires at least one provider slug. '
                               'Choose a provider, or pick another routing option.')
+
+
+def _validate_auth_password(settings_items):
+    """Refuse a new login password that is the mask the settings read hands out.
+
+    The mask stands for "keep the stored password": a save that sends it back
+    leaves the password as it is. With a password stored, that is the only
+    reading it can have, so a caller who really wants the password to be the
+    mask text gets the old one kept. With none stored there is nothing to keep,
+    and hashing the mask would set a password that later saves could never
+    resend as itself, so it is refused instead.
+    """
+    if settings.auth.password:
+        return
+    for key, value in settings_items:
+        if key.lower() != 'settings-auth-password':
+            continue
+        submitted = value[0] if isinstance(value, list) and len(value) == 1 else value
+        if submitted == AUTH_PASSWORD_MASK:
+            raise ValidationError(f'The password cannot be {AUTH_PASSWORD_MASK}: that text stands for '
+                                  'the stored password. Choose a different password.')
 
 
 def _validate_postprocessing_command(settings_items):
@@ -2589,6 +2622,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     ]
     _require_provider_order_for_custom_routing(settings_items)
     _validate_postprocessing_command(settings_items)
+    _validate_auth_password(settings_items)
 
     def _registered_credential(key):
         """Whether a submitted settings key names a registered at-rest
@@ -2775,6 +2809,11 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             value = None
 
         if key == 'settings-auth-password':
+            if value == AUTH_PASSWORD_MASK and settings.auth.password:
+                # The settings read hands out the mask, never the hash, and a
+                # client that sends back what it read means to keep the stored
+                # password.
+                value = settings.auth.password
             if value != settings.auth.password and value is not None:
                 from utilities.helper import hash_password
                 value = hash_password(value)
@@ -2975,7 +3014,16 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 _settings_mapping(settings, settings_keys[1])[settings_keys[2]] = value
             elif len(settings_keys) == 4:
                 section = _settings_mapping(settings, settings_keys[1])
-                _settings_mapping(section, settings_keys[2])[settings_keys[3]] = value
+                try:
+                    inner = section[settings_keys[2]]
+                except KeyError:
+                    inner = None
+                # Stored whole, merged with what is there: a mapping read back
+                # from the settings store can be a copy, and a value written
+                # into a copy never reaches the store.
+                merged = {} if inner is None else dict(inner)
+                merged[settings_keys[3]] = value
+                section[settings_keys[2]] = merged
 
         if settings_keys[0] == 'subzero':
             mod = settings_keys[1]

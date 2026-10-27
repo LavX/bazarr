@@ -15,9 +15,18 @@ refactor that stores something else under the key cannot quietly re-open the
 hole.
 """
 
+import time
+
 from flask import session
 
 SESSION_KEY = 'logged_in'
+
+# How long a password confirmation stays live: ten minutes, so one
+# confirmation covers a handful of installs without staying open all day.
+PASSWORD_CONFIRM_WINDOW = 600
+
+# The session key holding the moment the confirmation lapses.
+PASSWORD_CONFIRM_KEY = 'password_confirmed_until'
 
 
 def is_session_authenticated():
@@ -56,3 +65,20 @@ def clear_authentication():
     whole session, so it does not call this.
     """
     session.pop(SESSION_KEY, None)
+
+
+def mark_password_confirmed(window=PASSWORD_CONFIRM_WINDOW):
+    """Remember that this session just proved the password, for `window` seconds.
+
+    Only the confirm endpoint sets this, after it verified the password, and a
+    fresh login clears the whole session, so a confirmation never survives into
+    a session that did not sign in. The value is the moment the confirmation
+    lapses, compared against the clock on each gated request.
+    """
+    session[PASSWORD_CONFIRM_KEY] = time.time() + window
+
+
+def password_is_confirmed():
+    """True while this session's password confirmation is still in its window."""
+    until = session.get(PASSWORD_CONFIRM_KEY)
+    return isinstance(until, (int, float)) and until > time.time()

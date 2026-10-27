@@ -27,8 +27,10 @@ from subtitles.adaptive_searching import is_search_given_up
 from subtitles.embedded_hidden import hidden_languages
 from subtitles.mismatch import prune_mismatches_for_media
 from subtitles.indexer.entries import embedded_entry
-from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, get_external_subtitles_path,
+from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, embedded_codecs_by_language,
+                                     embedded_history_language, get_external_subtitles_path,
                                      guess_external_subtitles, normalize_subtitle_language_variant,
+                                     note_uncounted_track, retract_embedded_history,
                                      subtitle_language_with_combined_modifier, subtitle_language_with_sync_modifier)
 from subtitles.tools.subsync_engines import SyncOutputOwnerIndex, subtitle_write_locks
 from utilities.helper import get_subtitle_destination_folder, get_target_folder
@@ -334,6 +336,9 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
         if settings.general.use_embedded_subs or settings.general.parse_embedded_audio_track:
             data = _metadata(context, signature, cached, use_cache, cancel)
         embedded_codes = []
+        # Tracks the file holds but the indexer does not count (hidden, or skipped
+        # by an ignore switch), by the language their Embedded Source rows record.
+        uncounted_codes = {}
         if settings.general.use_embedded_subs:
             # Hidden tracks are skipped: not listed, and not counted by _missing.
             hidden = hidden_languages(database, 'sports', [context.event_id], context.arr_instance_id)
@@ -341,17 +346,24 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
                 if codec and ((settings.general.ignore_pgs_subs and codec.lower() == 'pgs') or
                               (settings.general.ignore_vobsub_subs and codec.lower() == 'vobsub') or
                               (settings.general.ignore_ass_subs and codec.lower() == 'ass')):
+                    if alpha2_from_alpha3(language):
+                        note_uncounted_track(
+                            uncounted_codes,
+                            normalize_subtitle_language_variant(alpha2_from_alpha3(language), forced=forced, hi=hi),
+                            codec)
                     continue
                 code = alpha2_from_alpha3(language)
                 if code:
                     code = normalize_subtitle_language_variant(code, forced=forced, hi=hi)
                     if code in hidden:
+                        note_uncounted_track(uncounted_codes, code, codec, hidden=True)
                         continue
                     actual.append(embedded_entry(code, codec))
                     embedded_codes.append(code)
         actual.extend(_external(context, mappings, ownership_index, cancel))
         with sports_transaction(database) as session:
             row = _validated_row(session, context, signature, cancel)
+            previous = embedded_codecs_by_language(row.subtitles)
             row.subtitles = str(actual)
             # Written BEFORE _missing reads it: the audio_exclude and
             # audio_only_include profile rules are evaluated off this column,
@@ -367,6 +379,9 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
             check_cancelled(cancel)
             # Committed with the index: an account of the tracks read from the
             # file, not a separate event that could land without its media state.
+            # A failed delete would abort this transaction, so it is not guarded.
+            retract_embedded_history(session, TableHistorySports, context.original_path, uncounted_codes,
+                                     embedded_codes, previous, context.arr_instance_id, guard=False)
             _log_embedded_history(session, context, embedded_codes, cancel)
             # The transaction session flushes only what this block flushes, so
             # the history rows above stay pending until they are flushed too.
@@ -402,12 +417,9 @@ def _log_embedded_history(session, context, embedded_codes, cancel=None):
 
     for code in embedded_codes:
         check_cancelled(cancel)
-        base, *variants = code.split(':')
-        variants = set(variants)
-        # The same canonical reduction the series and movies indexers use: a
-        # forced+hi track dedups against and records as the hi-priority code
-        # that ProcessSubtitlesResult.language_code actually stores.
-        canonical = base + (':hi' if 'hi' in variants else ':forced' if 'forced' in variants else '')
+        # The same code the series and movies indexers record: forced wins over
+        # HI, so a forced and HI track is not recorded as plain HI.
+        canonical = embedded_history_language(code)
         existing = session.execute(
             select(TableHistorySports.id)
             .where(TableHistorySports.event_id == context.event_id)
