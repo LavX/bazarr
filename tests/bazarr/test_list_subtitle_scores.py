@@ -345,6 +345,39 @@ def test_movies_embedded_multivariant_language_matches_canonical_record(schema_s
     assert result["data"][0]["lowest_subtitle_score"] == 100.0
 
 
+def test_movies_forced_and_hi_track_falls_back_to_the_hi_row_an_older_version_wrote(schema_session, monkeypatch):
+    movies = _prepare_movies(monkeypatch, schema_session)
+    _add_movie(schema_session, 100, "[['en:hi:forced', None, None]]")
+    _add_movie_history(schema_session, 1, 100, 7, None, "en:hi", 90, 100)
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 90.0
+
+
+def test_movies_forced_row_wins_over_the_older_hi_row_for_a_forced_and_hi_track(schema_session, monkeypatch):
+    movies = _prepare_movies(monkeypatch, schema_session)
+    _add_movie(schema_session, 100, "[['en:hi:forced', None, None]]")
+    _add_movie_history(schema_session, 1, 100, 7, None, "en:forced", 100, 100)
+    # The newer row is the older version's: the forced code row still wins.
+    _add_movie_history(schema_session, 2, 100, 7, None, "en:hi", 40, 100)
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 100.0
+
+
+def test_movies_hi_row_of_a_plain_hi_track_is_not_taken_for_the_forced_and_hi_one(schema_session, monkeypatch):
+    movies = _prepare_movies(monkeypatch, schema_session)
+    _add_movie(schema_session, 100, "[['en:hi:forced', None, None], ['en:hi', None, None]]")
+    _add_movie_history(schema_session, 1, 100, 7, None, "en:hi", 70, 100)
+    _add_movie_history(schema_session, 2, 100, 7, None, "en:forced", 100, 100)
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 70.0
+
+
 # --------------------------------------------------------------------------- #
 # Series                                                                       #
 # --------------------------------------------------------------------------- #

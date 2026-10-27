@@ -70,6 +70,9 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
     # their codecs; and the codecs the last stored listing counted per language.
     uncounted_embedded = {}
     previous_embedded = {}
+    # Set when the retraction below fails: the new listing is then not stored,
+    # so the next pass finds the track in the old one and retracts again.
+    retraction_failed = False
     if os.path.exists(reversed_path):
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
@@ -147,8 +150,13 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                 # Before the new listing is stored, so a pass that fails here
                 # still finds the track in the old one and tries again. What the
                 # listing about to be stored holds counts, a failed read's too.
-                retract_embedded_history(database, TableHistory, original_path, uncounted_embedded,
-                                         [entry[0] for entry in actual_subtitles], previous_embedded, owner_instance_id)
+                # A delete that fails (None) keeps the old listing for the next
+                # pass, since the one stored now would drop the track.
+                retraction_failed = retract_embedded_history(
+                    database, TableHistory, original_path, uncounted_embedded,
+                    [entry[0] for entry in actual_subtitles], previous_embedded, owner_instance_id) is None
+                if retraction_failed:
+                    embedded_languages = []
         destination = os.path.join(get_target_folder(reversed_path, create=False) or os.path.dirname(reversed_path),
                                    '.destination')
         with subtitle_write_locks(reversed_path, destination):
@@ -228,11 +236,16 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                         actual_subtitles.append([language_str, _prr(subtitle_path),
                                                  subtitle_size])
 
-            database.execute(
-                scoped(update(TableEpisodes)
-                       .values(subtitles=str(actual_subtitles))
-                       .where(TableEpisodes.path == original_path),
-                       TableEpisodes.arr_instance_id, owner_instance_id))
+            if retraction_failed:
+                logging.warning("BAZARR keeping the stored subtitles listing of %s, because the embedded "
+                                "subtitle history could not be updated. It is tried again on the next index.",
+                                reversed_path)
+            else:
+                database.execute(
+                    scoped(update(TableEpisodes)
+                           .values(subtitles=str(actual_subtitles))
+                           .where(TableEpisodes.path == original_path),
+                           TableEpisodes.arr_instance_id, owner_instance_id))
         matching_episodes = database.execute(
             scoped(select(TableEpisodes.sonarrEpisodeId, TableEpisodes.sonarrSeriesId,
                           TableEpisodes.arr_instance_id)

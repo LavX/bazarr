@@ -151,16 +151,33 @@ def retract_embedded_history(session, table, video_path, uncounted, counted, pre
 
     A language is retracted only when no counted track still covers it and
     either the user hid it and the last listing counted it, or a codec the last
-    listing counted is the one an ignore switch now skips. A track that is merely gone from the container is never retracted, nor is one whose
-    codec is not the skipped one: another tool may have copied it out next to the
-    video and stripped it, leaving a hidden or ignored track of the same
-    language behind, and the row is the only trace of the copy. The index on
-    (video_path, language) serves the delete.
+    listing counted is the one an ignore switch now skips. A track that is merely
+    gone from the container is never retracted, nor is one whose codec is not the
+    skipped one: another tool may have copied it out next to the video and
+    stripped it, leaving a hidden or ignored track of the same language behind,
+    and the row is the only trace of the copy.
 
-    The caller runs it before it stores the new listing, so a delete that fails
-    is tried again by the next pass, which still sees the track in the old
-    listing. With ``guard`` it never raises, so indexing goes on. A caller inside
-    a transaction that a failed statement would abort passes ``guard=False``.
+    Rows that an older version wrote for a forced and HI track sit under the HI
+    code, ``en:hi``, where a plain HI track's row sits too. Nothing in the row
+    tells the two apart (language, description, provider and score are the
+    same), and a plain HI track that has since left the container would leave
+    exactly such a row as its only trace. So they are not retracted here, and
+    only the rows written under the forced code are. An older ``en:hi`` row
+    stays whether or not the forced and HI track is hidden, and it keeps ending
+    the upgrades of a plain download of that language. Nothing in the app
+    deletes a single history row, so only a manual cleanup of the history
+    removes it.
+
+    The index on (video_path, language) serves the delete on the series and
+    movies history tables. The sports history table has no such index: its
+    delete reads the owner's rows, and it runs only when a track stops counting.
+
+    The caller runs it before it stores the new listing. A delete that fails
+    returns None, and the caller then leaves the stored listing as it is, so the
+    next pass sees the track in the old listing and tries again. Without
+    ``guard`` the error is raised instead, for a caller inside a transaction
+    that a failed statement would abort and roll back, which also leaves the old
+    listing in place.
     """
     try:
         covered = {embedded_history_language(key) for key in counted or ()}
@@ -184,7 +201,7 @@ def retract_embedded_history(session, table, video_path, uncounted, counted, pre
         if not guard:
             raise
         logging.exception("BAZARR error retracting embedded subtitle history for %s", video_path)
-        return 0
+        return None
 
 
 def partition_embedded_entries(stored, hidden=()):
