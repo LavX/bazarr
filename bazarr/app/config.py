@@ -1280,6 +1280,11 @@ refresh_secret_values(settings)
 scrub_persisted_secrets()
 
 
+# What the settings read shows in place of a stored login password, and what a
+# save may send back to mean "keep the stored one".
+AUTH_PASSWORD_MASK = '***'
+
+
 def get_settings():
     from discover.metadata import CONFIG_LOCK
     with CONFIG_LOCK:
@@ -1357,6 +1362,13 @@ def _get_settings():
                     continue
                 if k == "discover" and subk.lower() in {"tmdb_configured", "tmdb_token_stored",
                                                         "metadata_revision"}:
+                    continue
+                if full_path == 'auth.password':
+                    # The stored login password is a one-way hash, and a hash
+                    # handed to anyone holding the API key is a password they
+                    # can test offline with no throttle. Masked like the
+                    # system secrets; empty stays empty.
+                    settings_to_return[k][subk] = AUTH_PASSWORD_MASK if subv else subv
                     continue
                 if is_system_secret(full_path):
                     # Keep empty values literally empty so the UI can
@@ -2775,6 +2787,11 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             value = None
 
         if key == 'settings-auth-password':
+            if value == AUTH_PASSWORD_MASK and settings.auth.password:
+                # The settings read hands out the mask, never the hash, and the
+                # General page sends back what it read when a typed password is
+                # cleared again: that keeps the stored password.
+                value = settings.auth.password
             if value != settings.auth.password and value is not None:
                 from utilities.helper import hash_password
                 value = hash_password(value)

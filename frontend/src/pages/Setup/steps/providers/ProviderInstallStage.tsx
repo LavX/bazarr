@@ -34,6 +34,7 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import { parseManifest } from "@/pages/Settings/Providers/hub/utils";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
@@ -194,6 +195,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   const { restart } = useSystem({ inlineErrors: true });
   const settingsMutation = useSettingsMutation(false, { inlineErrors: true });
   const { data: systemSettings } = useSystemSettings();
+  const runGated = useGatedAction();
 
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -467,83 +469,89 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
       if (targets.length === 0) {
         return;
       }
-      setInstalling(true);
-      setEnableError(null);
-      // Installing the recommended set is 36 providers on a real catalog, and
-      // a single spinner over a run that long is indistinguishable from a
-      // frozen page. Each install is a backend job, and it settles when the
-      // jobs socket reports that job completed or failed in the [System, Jobs]
-      // cache (see useProviderHubInstall), so the bar moves with the jobs the
-      // drawer shows and the count is the truth rather than an animation.
-      setProgress({ done: 0, total: targets.length, latest: null });
-      const results = await Promise.allSettled(
-        targets.map((choice) =>
-          install.mutateAsync({ manifest: choice.manifest }).finally(() =>
-            setProgress((current) =>
-              current === null
-                ? current
-                : {
-                    ...current,
-                    done: current.done + 1,
-                    latest: choice.name,
-                  },
+      // The whole batch runs through the password confirmation gate, so the
+      // prompt appears once for the run rather than once per provider, and a
+      // cancelled prompt leaves nothing installing.
+      await runGated(async () => {
+        setInstalling(true);
+        setEnableError(null);
+        // Installing the recommended set is 36 providers on a real catalog, and
+        // a single spinner over a run that long is indistinguishable from a
+        // frozen page. Each install is a backend job, and it settles when the
+        // jobs socket reports that job completed or failed in the [System, Jobs]
+        // cache (see useProviderHubInstall), so the bar moves with the jobs the
+        // drawer shows and the count is the truth rather than an animation.
+        setProgress({ done: 0, total: targets.length, latest: null });
+        const results = await Promise.allSettled(
+          targets.map((choice) =>
+            install.mutateAsync({ manifest: choice.manifest }).finally(() =>
+              setProgress((current) =>
+                current === null
+                  ? current
+                  : {
+                      ...current,
+                      done: current.done + 1,
+                      latest: choice.name,
+                    },
+              ),
             ),
           ),
-        ),
-      );
-      setProgress(null);
-      const fresh: InstallOutcome[] = targets.map((choice, index) => {
-        const result = results[index];
-        return result.status === "fulfilled"
-          ? { providerId: choice.providerId, name: choice.name, staged: true }
-          : {
-              providerId: choice.providerId,
-              name: choice.name,
-              staged: false,
-              error: describeInstallError(result.reason),
-            };
-      });
+        );
+        setProgress(null);
+        const fresh: InstallOutcome[] = targets.map((choice, index) => {
+          const result = results[index];
+          return result.status === "fulfilled"
+            ? { providerId: choice.providerId, name: choice.name, staged: true }
+            : {
+                providerId: choice.providerId,
+                name: choice.name,
+                staged: false,
+                error: describeInstallError(result.reason),
+              };
+        });
 
-      const byId = new Map(
-        outcomesRef.current.map((outcome) => [outcome.providerId, outcome]),
-      );
-      for (const outcome of fresh) {
-        byId.set(outcome.providerId, outcome);
-      }
-      const merged = Array.from(byId.values());
-      outcomesRef.current = merged;
+        const byId = new Map(
+          outcomesRef.current.map((outcome) => [outcome.providerId, outcome]),
+        );
+        for (const outcome of fresh) {
+          byId.set(outcome.providerId, outcome);
+        }
+        const merged = Array.from(byId.values());
+        outcomesRef.current = merged;
 
-      // Before the restart, never after: the wizard leaves this page as soon as
-      // Bazarr+ answers again. Only the providers that actually staged are
-      // enabled, so a partial run enables exactly what installed.
-      const toEnable = merged
-        .filter(
-          (outcome) =>
-            outcome.staged && enableOnStageRef.current.has(outcome.providerId),
-        )
-        .map((outcome) => outcome.providerId);
-      if (toEnable.length > 0) {
-        await enableProviders(toEnable);
-      }
+        // Before the restart, never after: the wizard leaves this page as soon as
+        // Bazarr+ answers again. Only the providers that actually staged are
+        // enabled, so a partial run enables exactly what installed.
+        const toEnable = merged
+          .filter(
+            (outcome) =>
+              outcome.staged &&
+              enableOnStageRef.current.has(outcome.providerId),
+          )
+          .map((outcome) => outcome.providerId);
+        if (toEnable.length > 0) {
+          await enableProviders(toEnable);
+        }
 
-      setOutcomes(merged);
-      setInstalling(false);
-      setInstallSource(null);
+        setOutcomes(merged);
+        setInstalling(false);
+        setInstallSource(null);
 
-      // Nothing staged means nothing new to load, so a restart would only cost
-      // the user a minute and tell them nothing. Leave the failures on screen.
-      if (merged.every((outcome) => !outcome.staged)) {
-        return;
-      }
-      if (merged.every((outcome) => outcome.staged)) {
-        // Nothing left to report, so go straight to the restart.
-        beginRestart();
-        return;
-      }
-      // Partial: the outcomes stay readable, then the restart happens anyway.
-      setCountdown(PARTIAL_RESTART_SECONDS);
+        // Nothing staged means nothing new to load, so a restart would only cost
+        // the user a minute and tell them nothing. Leave the failures on screen.
+        if (merged.every((outcome) => !outcome.staged)) {
+          return;
+        }
+        if (merged.every((outcome) => outcome.staged)) {
+          // Nothing left to report, so go straight to the restart.
+          beginRestart();
+          return;
+        }
+        // Partial: the outcomes stay readable, then the restart happens anyway.
+        setCountdown(PARTIAL_RESTART_SECONDS);
+      }, "install the selected providers");
     },
-    [beginRestart, enableProviders, install],
+    [beginRestart, enableProviders, install, runGated],
   );
 
   useEffect(() => {

@@ -19,9 +19,50 @@ from subtitles.language_profiles import validate_combine_rule, CombineRuleError
 from subtitles.tools.translate.failure_record import clear_failed_translations
 from arr_instances.resolution import forget_deleted_language_profiles
 
+from ..password_confirm import password_confirm_refusal, password_confirmation_live
 from ..utils import authenticate
 
 api_ns_system_settings = Namespace('systemSettings', description='System settings API endpoint')
+
+# The keys a save may not carry on the API key alone: the post-processing keys
+# run a shell command after the next subtitle download, and the login keys
+# decide who may sign in, which decides whether this gate applies at all. A
+# leaked key that could switch login off would switch the gate off with it.
+GATED_SETTINGS_KEYS = frozenset({
+    'settings-general-postprocessing_cmd',
+    'settings-general-use_postprocessing',
+    'settings-auth-type',
+    'settings-auth-username',
+    'settings-auth-password',
+})
+
+
+def _settings_key_is_malformed(key):
+    """True for a settings key that does not name a setting the way the save writes it.
+
+    The save looks a section up by the exact segment, but creates a missing one
+    through the settings library, which strips whitespace and reads dots and
+    double underscores as nesting. A key spelled that way would land on a
+    setting under a name the checks below do not know, so it is refused.
+    Field names below the section are plain mapping keys, where a double
+    underscore is legal (a plugin's config field may carry one), so only the
+    section is held to that; no segment may be empty, padded or dotted.
+    """
+    segments = str(key).split('-')
+    if segments[0].strip().lower() != 'settings':
+        return False
+    if len(segments) > 1 and '__' in segments[1]:
+        return True
+    return any(not segment or segment != segment.strip() or '.' in segment
+               for segment in segments[1:])
+
+
+def _save_needs_password_confirmation(form_keys):
+    """True when the save changes a key that runs code or rewrites who may sign in.
+
+    A longer key under a gated setting counts as that setting.
+    """
+    return any('-'.join(str(key).lower().split('-')[:3]) in GATED_SETTINGS_KEYS for key in form_keys)
 
 
 def _write_settings_rows(enabled_languages, profiles, notifications):
@@ -194,6 +235,12 @@ class SystemSettings(Resource):
 
     @authenticate
     def post(self):
+        # Before any validation and before any save: a refused request must
+        # leave the settings, and above all the login settings, untouched.
+        if any(_settings_key_is_malformed(key) for key in request.form.keys()):
+            return 'Invalid settings key', 400
+        if _save_needs_password_confirmation(request.form.keys()) and not password_confirmation_live():
+            return password_confirm_refusal()
         try:
             validate_metadata_settings(list(zip(request.form.keys(), request.form.listvalues())))
         except ValidationError as error:

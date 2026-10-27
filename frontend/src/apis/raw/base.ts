@@ -1,5 +1,13 @@
-import { AxiosResponse } from "axios";
+import { AxiosRequestConfig, AxiosResponse } from "axios";
 import client from "./client";
+
+// The one extension the raw client reads off a request config: a request whose
+// caller reports the failure itself (the password confirm modal shows its own
+// inline message) asks the shared error handler to stay quiet for the statuses
+// it handles. Everything else still toasts as usual.
+export type SilentRequestConfig = AxiosRequestConfig & {
+  silentError?: boolean;
+};
 
 class BaseApi {
   prefix: string;
@@ -61,12 +69,16 @@ class BaseApi {
     path: string,
     formdata?: LooseObject,
     params?: LooseObject,
+    options?: { silentError?: boolean },
   ): Promise<AxiosResponse<T>> {
     const form = this.createFormdata(formdata);
     return client.axios.post(this.prefix + path, form, {
       params,
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    });
+      // A caller that surfaces the failure itself asks the shared client to
+      // stay quiet for the statuses it handles inline; see the interceptor.
+      silentError: options?.silentError === true,
+    } as SilentRequestConfig);
   }
 
   protected postRaw<T = void>(

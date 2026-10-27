@@ -26,6 +26,7 @@ import {
   useProviderHubRemoveCatalogSource,
 } from "@/apis/hooks";
 import type { ProviderHubCatalogSource } from "@/apis/raw/providerHub";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
 import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
 import {
@@ -58,6 +59,7 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
 }) => {
   const patch = useProviderHubPatchCatalogSource();
   const refresh = useProviderHubRefreshCatalog();
+  const runGated = useGatedAction();
 
   const stableRef = parseGitHubRef(source.url) ?? "main";
   const [devMode, setDevMode] = useState(Boolean(source.dev_ref));
@@ -79,7 +81,10 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
     dirty && (!devMode || trimmedBranch.length > 0) && !patch.isPending;
 
   const handleApply = () => {
-    patch.mutate({ name: source.id ?? source.name, dev_ref: wouldSet });
+    void runGated(
+      () => patch.mutate({ name: source.id ?? source.name, dev_ref: wouldSet }),
+      "change the catalog source ref",
+    );
   };
 
   return (
@@ -233,6 +238,7 @@ export const SourcesDrawer: FunctionComponent<SourcesDrawerProps> = ({
   const addSource = useProviderHubAddCatalogSource();
   const removeSource = useProviderHubRemoveCatalogSource();
   const refresh = useProviderHubRefreshCatalog();
+  const runGated = useGatedAction();
 
   useEffect(() => {
     if (!nameTouched) {
@@ -246,15 +252,19 @@ export const SourcesDrawer: FunctionComponent<SourcesDrawerProps> = ({
 
   const handleAdd = () => {
     if (!canAdd) return;
-    addSource.mutate(
-      { name: name.trim(), url: url.trim() },
-      {
-        onSuccess: () => {
-          setName("");
-          setUrl("");
-          setNameTouched(false);
-        },
-      },
+    void runGated(
+      () =>
+        addSource.mutate(
+          { name: name.trim(), url: url.trim() },
+          {
+            onSuccess: () => {
+              setName("");
+              setUrl("");
+              setNameTouched(false);
+            },
+          },
+        ),
+      "add this catalog source",
     );
   };
 
