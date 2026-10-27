@@ -835,6 +835,8 @@ jobs:
             tests/bazarr/test_embedded_extract_api.py \
             tests/bazarr/test_mass_extract.py \
             tests/bazarr/test_extracted_history.py \
+            tests/bazarr/test_embedded_ocr_to_file.py \
+            tests/bazarr/test_embedded_ocr_sports.py \
             tests/bazarr/test_upstream_db_adoption.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q

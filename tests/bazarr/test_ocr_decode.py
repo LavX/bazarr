@@ -284,3 +284,86 @@ def test_committed_fixtures_are_small_pgs_streams():
     for name in TEXT_FIXTURES:
         data = open(os.path.join(FIXTURES, name), "rb").read()
         assert data[:2] == b"PG" and len(data) < 200 * 1024, name
+
+def _probe_says(tmp_path, report):
+    import json
+
+    return _fake_ffmpeg(tmp_path, f"printf '%s' '{json.dumps(report)}'")
+
+
+def test_subtitle_clock_reads_start_and_duration(tmp_path):
+    ffprobe = _probe_says(tmp_path, {"streams": [{"start_time": "6.0", "duration": "10.0"}],
+                                     "format": {"duration": "99.0"}})
+    assert decode.subtitle_clock("/v.mkv", 2, ffprobe) == (6000, 10000)
+
+
+@pytest.mark.parametrize("report,expected", [
+    # Matroska: no stream duration, the muxer's DURATION tag stands in for it.
+    ({"streams": [{"start_time": "1.0", "duration": "N/A", "tags": {"DURATION": "00:00:11.500000000"}}],
+      "format": {"duration": "13.0"}}, (1000, 11500)),
+    # Neither: what is left of the container after the stream starts.
+    ({"streams": [{"start_time": "1.0", "duration": "N/A"}], "format": {"duration": "13.0"}}, (1000, 12000)),
+    # Nothing usable: a running message without a percentage.
+    ({"streams": [{"start_time": "1.0", "duration": "N/A"}], "format": {"duration": "N/A"}}, (0, 0)),
+    ({"streams": [{"start_time": "N/A", "duration": "N/A", "tags": {"DURATION": "garbage"}}],
+      "format": {}}, (0, 0)),
+    ({"streams": []}, (0, 0)),
+])
+def test_subtitle_clock_finds_a_span_when_the_stream_has_no_duration(tmp_path, report, expected):
+    assert decode.subtitle_clock("/v.mkv", 0, _probe_says(tmp_path, report)) == expected
+
+
+@pytest.mark.parametrize("report,expected", [
+    # A value that is not a sane time counts as N/A: the next source stands in, or (0, 0).
+    ({"streams": [{"start_time": "1.0", "duration": "inf"}], "format": {"duration": "13.0"}}, (1000, 12000)),
+    ({"streams": [{"start_time": "1.0", "duration": "inf"}]}, (0, 0)),
+    ({"streams": [{"start_time": "1.0", "duration": "N/A", "tags": {"DURATION": "1e999"}}],
+      "format": {}}, (0, 0)),
+    ({"streams": [{"start_time": "1.0", "duration": "N/A"}], "format": {"duration": "1e999"}}, (0, 0)),
+    ({"streams": [{"start_time": "inf", "duration": "5.0"}]}, (0, 5000)),
+    ({"streams": [{"start_time": "1e999", "duration": "N/A"}], "format": {"duration": "13.0"}}, (0, 13000)),
+    ({"streams": [{"start_time": "nan", "duration": "nan"}], "format": {"duration": "nan"}}, (0, 0)),
+    ({"streams": [{"start_time": "1.0", "duration": "1e12"}]}, (0, 0)),
+    ({"streams": [{"start_time": "1.0", "duration": "-5"}], "format": {"duration": "-9"}}, (0, 0)),
+    ({"streams": [{"start_time": "-2.0", "duration": "5.0"}]}, (0, 5000)),
+])
+def test_subtitle_clock_rejects_a_probe_value_that_is_not_a_sane_time(tmp_path, report, expected):
+    # Infinity used to overflow int() and end the job with an unexpected error.
+    assert decode.subtitle_clock("/v.mkv", 0, _probe_says(tmp_path, report)) == expected
+
+
+def test_subtitle_clock_reads_the_span_of_a_real_matroska_track(ffmpeg, media):
+    # eng_hd.sup starts at 1 s and the muxer tags the track 11 s long; ffprobe
+    # prints duration=N/A for the stream itself.
+    assert decode.subtitle_clock(media["pgs"], 0, shutil.which("ffprobe")) == (1000, 11000)
+
+
+def test_subtitle_clock_falls_back_to_zero(tmp_path):
+    ffprobe = _fake_ffmpeg(tmp_path, "exit 1")
+    assert decode.subtitle_clock("/v.mkv", 2, ffprobe) == (0, 0)
+
+
+def test_the_render_reports_its_total_for_a_matroska_track(ffmpeg, media, tmp_path):
+    # A slow render is not needed: the progress callback is first given the
+    # clock's span, so a stand-in ffmpeg that takes a few polls shows it.
+    seen = []
+    slow = _fake_ffmpeg(tmp_path, "sleep 2.5; exit 1")
+    with pytest.raises(OcrError):
+        decode.render_frames(media["pgs"], 0, str(tmp_path), ffmpeg=slow, ffprobe=shutil.which("ffprobe"),
+                             progress=lambda step, value, maximum: seen.append((step, maximum)))
+    assert seen and all(step == "render" and maximum == 11000 for step, maximum in seen)
+
+
+def test_last_frame_ms_reads_the_frame_log(tmp_path):
+    log = tmp_path / "frames.log"
+    log.write_text("0 90000 1/90000\n1 180000 1/90000\n")
+    assert decode.last_frame_ms(str(log)) == 2000
+    assert decode.last_frame_ms(str(log), start_ms=500) == 1500
+
+def test_progress_position_never_moves_backward():
+    assert decode.progress_position(0, 5000, 10000) == 5000
+    assert decode.progress_position(5000, 0, 10000) == 5000
+    assert decode.progress_position(5000, 6000, 10000) == 6000
+    assert decode.progress_position(5000, 12000, 10000) == 5000
+    assert decode.progress_position(0, 5000, 0) == 0
+
