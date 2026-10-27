@@ -4,12 +4,13 @@ from flask_restx import Resource, Namespace, inputs, reqparse, fields, marshal
 
 from arr_instances.resolution import scoped
 from app.database import TableMovies, TableHistoryMovie, database, update, select, func
-from radarr.sync.movies import update_one_movie, update_one_movie_for_instance
+from radarr.sync.movies import sync_one_movie
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 from subtitles.indexer.movies import movies_scan_disk
 from app.event_handler import event_stream
 from subtitles.wanted import wanted_search_missing_subtitles_movies, wanted_scan_subtitles_movies
 from subtitles.mass_download import movies_download_subtitles
+from api.queued_job import queued_job_model, queued_job_response
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model, job_queued_model
 
 from api.utils import authenticate, None_Keys, postprocess, lowest_subtitle_scores
@@ -252,11 +253,11 @@ class Movies(Resource):
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
-    patch_job_model = api_ns_movies.model('JobQueued', job_queued_model)
+    patch_job_model = api_ns_movies.model('JobQueuedInSession', {**job_queued_model, 'session': queued_job_model['session']})
 
     @authenticate
     @api_ns_movies.doc(parser=patch_request_parser)
-    @api_ns_movies.response(202, 'scan-disk queued as a job', patch_job_model)
+    @api_ns_movies.response(202, 'scan-disk and sync queued as a job', patch_job_model)
     @api_ns_movies.response(204, 'Success for every other action')
     @api_ns_movies.response(400, 'Unknown action')
     @api_ns_movies.response(401, 'Not Authenticated')
@@ -284,10 +285,6 @@ class Movies(Resource):
             wanted_scan_subtitles_movies()
             return '', 204
         elif action == "sync":
-            if arr_instance_id is not None:
-                update_one_movie_for_instance(arr_instance_id, radarrid, 'updated', defer_search=True)
-            else:
-                update_one_movie(radarrid, 'updated', True)
-            return '', 204
+            return queued_job_response(sync_one_movie(radarrid, arr_instance_id=arr_instance_id) or None), 202
 
         return 'Unknown action', 400

@@ -372,6 +372,7 @@ jobs:
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_retired_provider_config_compat.py \
             tests/bazarr/test_standard_job_actions.py \
+            tests/bazarr/test_detail_sync_jobs.py \
             tests/bazarr/test_health_recheck_job.py \
             tests/bazarr/test_jobs_result.py \
             tests/bazarr/test_jobs_session.py \

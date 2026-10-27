@@ -5,6 +5,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { usePaginationQuery } from "@/apis/queries/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
@@ -83,11 +84,14 @@ export function useMovieAction() {
     mutationKey: [QueryKeys.Actions, QueryKeys.Movies],
     mutationFn: (form: FormType.MoviesAction) => api.movies.action(form),
 
-    onSuccess: () => {
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Movies],
-      });
-    },
+    // Scan disk and sync are queued jobs, and what they change is only there
+    // once they have finished. The actions that answer at once refresh now.
+    onSuccess: (data) =>
+      refreshWhenJobFinishes(client, data?.job_id, () => {
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.Movies],
+        });
+      }),
   });
 }
 
