@@ -21,7 +21,7 @@ from app.event_handler import event_stream
 from subtitles.indexer.entries import embedded_entry
 from subtitles.indexer.utils import add_sync_engine_outputs, add_combined_outputs, guess_external_subtitles, \
     get_external_subtitles_path, kept_embedded_entries, normalize_subtitle_language_variant, \
-    embedded_history_language, retract_embedded_history, \
+    embedded_codecs_by_language, embedded_history_language, note_uncounted_track, retract_embedded_history, \
     subtitle_language_with_sync_modifier, subtitle_language_with_combined_modifier
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.utils import _get_scores
@@ -63,9 +63,11 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
     # Languages of embedded subtitle tracks detected on this pass. Used after
     # indexing to record a source-quality history entry (action=7) per language.
     embedded_languages = []
-    # Languages of tracks the file holds but the indexer does not count (hidden,
-    # or skipped by an ignore switch), as their Embedded Source rows record them.
-    uncounted_embedded = set()
+    # Tracks the file holds but the indexer does not count (hidden, or skipped by
+    # an ignore switch), by the language their Embedded Source rows record, with
+    # their codecs; and the codecs the last stored listing counted per language.
+    uncounted_embedded = {}
+    previous_embedded = {}
     if os.path.exists(reversed_path):
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
@@ -81,6 +83,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                 # Tracks the user hid on this movie are skipped, so they neither
                 # list nor satisfy their language, which makes it wanted again.
                 hidden = hidden_languages(database, 'movie', [item.id], owner_instance_id)
+                previous_embedded = embedded_codecs_by_language(item.subtitles)
                 try:
                     subtitle_languages = embedded_subs_reader(reversed_path,
                                                               file_size=item.file_size,
@@ -97,11 +100,13 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                                           (settings.general.ignore_ass_subs and codec == "ass")):
                                 logging.debug("BAZARR skipping %s sub for language: %s" % (subtitle_codec, alpha2_from_alpha3(subtitle_language)))  # noqa: G002
                                 if alpha2_from_alpha3(subtitle_language) is not None:
-                                    uncounted_embedded.add(embedded_history_language(
+                                    note_uncounted_track(
+                                        uncounted_embedded,
                                         normalize_subtitle_language_variant(
                                             alpha2_from_alpha3(subtitle_language),
                                             forced=subtitle_forced,
-                                            hi=subtitle_hi)))
+                                            hi=subtitle_hi),
+                                        codec)
                                 continue
 
                             if alpha2_from_alpha3(subtitle_language) is not None:
@@ -111,7 +116,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                                     hi=subtitle_hi)
                                 if lang in hidden:
                                     logging.debug("BAZARR skipping hidden embedded subtitles: %s", lang)
-                                    uncounted_embedded.add(embedded_history_language(lang))
+                                    note_uncounted_track(uncounted_embedded, lang, codec)
                                     continue
                                 logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
                                 actual_subtitles.append(embedded_entry(lang, subtitle_codec))
@@ -128,7 +133,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                     # They were recorded in history then, so not again now.
                     actual_subtitles = kept_embedded_entries(item.subtitles, hidden)
                     embedded_languages = []
-                    uncounted_embedded = set()
+                    uncounted_embedded = {}
 
         destination = os.path.join(get_target_folder(reversed_path, create=False) or os.path.dirname(reversed_path),
                                    '.destination')
@@ -229,7 +234,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                 list_missing_subtitles_movies(no=movie.radarrId,
                                               arr_instance_id=movie.arr_instance_id)
                 retract_embedded_history(database, TableHistoryMovie, original_path, uncounted_embedded,
-                                         embedded_languages, movie.arr_instance_id)
+                                         embedded_languages, previous_embedded, movie.arr_instance_id)
                 if embedded_languages:
                     # Pass the DB-side path (original_path), not the local
                     # filesystem path. history_log_movie stores result.path

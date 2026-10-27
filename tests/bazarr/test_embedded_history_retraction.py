@@ -34,6 +34,13 @@ def test_a_forced_track_is_recorded_as_forced_even_when_it_is_also_hi(key, recor
     assert embedded_history_language(key) == recorded
 
 
+def test_the_score_lookups_reduce_a_listing_key_the_way_the_row_is_recorded():
+    from api.utils import _canonical_embedded_language
+
+    assert _canonical_embedded_language("en:hi:forced") == "en:forced"
+    assert _canonical_embedded_language("en:hi") == "en:hi"
+
+
 def _movie_history(db, language, path=MOVIE_PATH, owner=1, movie_id=1, action=7):
     db.execute(sa.insert(TableHistoryMovie).values(
         arr_instance_id=owner, movie_id=movie_id, radarrId=7, action=action, description="x", language=language,
@@ -46,19 +53,25 @@ def _movie_rows(db):
         .where(TableHistoryMovie.action == 7)).all())
 
 
+def _movie_library(db):
+    db.add(TableMovies(id=1, arr_instance_id=1, radarrId=7, title="M", path=MOVIE_PATH, tmdbId="1"))
+    db.add(TableMovies(id=2, arr_instance_id=2, radarrId=7, title="M", path=MOVIE_PATH, tmdbId="1"))
+    db.commit()
+
+
 def test_retraction_deletes_only_the_uncounted_rows_of_this_video_and_owner(hidden_db):
     from subtitles.indexer.utils import retract_embedded_history
 
-    hidden_db.add(TableMovies(id=1, arr_instance_id=1, radarrId=7, title="M", path=MOVIE_PATH, tmdbId="1"))
-    hidden_db.add(TableMovies(id=2, arr_instance_id=2, radarrId=7, title="M", path=MOVIE_PATH, tmdbId="1"))
-    hidden_db.commit()
+    _movie_library(hidden_db)
     for language in ("en", "en:hi", "fr"):
         _movie_history(hidden_db, language)
     _movie_history(hidden_db, "en:hi", owner=2, movie_id=2)
     _movie_history(hidden_db, "en:hi", path="/movies/other.mkv")
     _movie_history(hidden_db, "en:hi", action=1)
+    previous = {"en:hi": {"subrip"}, "fr": {"pgs"}}
 
-    deleted = retract_embedded_history(hidden_db, TableHistoryMovie, MOVIE_PATH, {"en:hi", "fr"}, ["fr:forced"], 1)
+    deleted = retract_embedded_history(hidden_db, TableHistoryMovie, MOVIE_PATH,
+                                       {"en:hi": {"subrip"}, "fr": {"pgs"}}, ["fr:forced"], previous, 1)
 
     assert deleted == 2
     assert _movie_rows(hidden_db) == [(1, MOVIE_PATH, "en"), (1, "/movies/other.mkv", "en:hi"),
@@ -67,16 +80,33 @@ def test_retraction_deletes_only_the_uncounted_rows_of_this_video_and_owner(hidd
                              .where(TableHistoryMovie.action == 1)).scalar() == 1
 
 
-def test_a_language_another_counted_track_covers_keeps_its_row(hidden_db):
+@pytest.mark.parametrize("counted,previous,uncounted", [
+    # A forced and HI track hidden, a forced-only track still listed: both are recorded as en:forced.
+    (["en:forced"], {"en:forced": {"subrip"}}, {"en:forced": {"subrip"}}),
+    # The listing counted an SRT, which has since gone from the container, and a PGS is skipped now.
+    ([], {"en:forced": {"subrip"}}, {"en:forced": {"pgs"}}),
+    # No earlier listing to say the track was counted.
+    ([], {}, {"en:forced": {"subrip"}}),
+], ids=["covered", "other-codec-left", "never-counted"])
+def test_a_row_stays_unless_the_counted_track_itself_is_now_skipped(hidden_db, counted, previous, uncounted):
     from subtitles.indexer.utils import retract_embedded_history
 
-    hidden_db.add(TableMovies(id=1, arr_instance_id=1, radarrId=7, title="M", path=MOVIE_PATH, tmdbId="1"))
-    hidden_db.commit()
+    _movie_library(hidden_db)
     _movie_history(hidden_db, "en:forced")
 
-    # A forced and HI track hidden, a forced-only track still listed: both are recorded as en:forced.
-    assert retract_embedded_history(hidden_db, TableHistoryMovie, MOVIE_PATH, {"en:forced"}, ["en:forced"], 1) == 0
+    assert retract_embedded_history(hidden_db, TableHistoryMovie, MOVIE_PATH, uncounted, counted, previous, 1) == 0
     assert _movie_rows(hidden_db) == [(1, MOVIE_PATH, "en:forced")]
+
+
+def test_the_stored_listing_is_read_into_codecs_by_history_language():
+    from subtitles.indexer.utils import embedded_codecs_by_language
+
+    stored = str([["en", None, None, "subrip"], ["en:hi:forced", None, None, "pgs"], ["en:hi", None, None],
+                  ["fr", "/m/m.fr.srt", 10]])
+
+    assert embedded_codecs_by_language(stored) == {"en": {"subrip"}, "en:forced": {"pgs"}, "en:hi": {None}}
+    assert embedded_codecs_by_language("not a list") == {}
+    assert embedded_codecs_by_language(None) == {}
 
 
 def _stub_movie(db, monkeypatch):
@@ -84,8 +114,10 @@ def _stub_movie(db, monkeypatch):
 
     _stub_indexer(mv, db, monkeypatch, [])
     db.add(TableLanguagesProfiles(profileId=1, name="P", items=json.dumps(PROFILE)))
+    # The listing the last index stored for the tracks the stub reads below.
+    listing = str([["en", None, None, "subrip"], ["en:hi", None, None, "subrip"], ["fr", None, None, "pgs"]])
     db.add(TableMovies(id=1, arr_instance_id=1, radarrId=7, title="M", path=MOVIE_PATH, tmdbId="1",
-                       movie_file_id=700, file_size=111, profileId=1, subtitles="[]"))
+                       movie_file_id=700, file_size=111, profileId=1, subtitles=listing))
     db.add(TableMovies(id=2, arr_instance_id=2, radarrId=7, title="M", path=MOVIE_PATH, tmdbId="1",
                        movie_file_id=800, file_size=222, profileId=1, subtitles="[]"))
     db.commit()
@@ -128,6 +160,21 @@ def test_a_language_a_listed_track_still_covers_keeps_its_row(hidden_db, monkeyp
     assert _stored(hidden_db, TableMovies, 1)[0] == ["en"]
 
 
+def test_a_language_whose_counted_track_is_gone_keeps_its_row_when_another_codec_is_skipped(hidden_db, monkeypatch):
+    """An English SRT and an English PGS, ignore PGS on. Another tool copies the
+    SRT out and strips it, and the PGS stays. The PGS is skipped, but it is not
+    the track the row recorded, so the copy at the download's path keeps its row."""
+    mv = _stub_movie(hidden_db, monkeypatch)
+    hidden_db.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(
+        subtitles=str([["en", None, None, "subrip"]])))
+    monkeypatch.setattr(mv.settings.general, "ignore_pgs_subs", True, raising=False)
+    monkeypatch.setattr(mv, "embedded_subs_reader", lambda *a, **kw: [["eng", False, False, "pgs"]])
+
+    mv.store_subtitles_movie(MOVIE_PATH, "/local/m.mkv", arr_instance_id=1)
+
+    assert (1, MOVIE_PATH, "en") in _movie_rows(hidden_db)
+
+
 def test_a_track_gone_from_the_container_keeps_its_row(hidden_db, monkeypatch):
     """The reported flow: another tool copies the track out next to the video
     and strips it. The next index finds no track, and the row must stay."""
@@ -154,7 +201,8 @@ def test_an_unreadable_file_keeps_every_row(hidden_db, monkeypatch):
     assert len(_movie_rows(hidden_db)) == 4
 
 
-def test_hiding_an_episode_track_takes_the_row_of_every_episode_in_the_file(hidden_db, monkeypatch):
+@pytest.mark.parametrize("how", ["hide", "ignore"])
+def test_skipping_an_episode_track_takes_the_row_of_every_episode_in_the_file(hidden_db, monkeypatch, how):
     import subtitles.indexer.series as se
     from subtitles.embedded_hidden import hide_track
 
@@ -166,7 +214,8 @@ def test_hiding_an_episode_track_takes_the_row_of_every_episode_in_the_file(hidd
         hidden_db.add(TableEpisodes(
             id=episode_id, arr_instance_id=1, series_id=1, sonarrSeriesId=1, sonarrEpisodeId=10 + episode_id,
             title="E", path=EPISODE_PATH, season=1, episode=episode_id, episode_file_id=500, file_size=111,
-            subtitles="[]"))
+            subtitles=str([["en", None, None, "subrip"], ["en:hi", None, None, "subrip"],
+                           ["fr", None, None, "pgs"]])))
     hidden_db.commit()
     for episode_id in (1, 2):
         for language in ("en", "fr"):
@@ -175,7 +224,10 @@ def test_hiding_an_episode_track_takes_the_row_of_every_episode_in_the_file(hidd
                 sonarrEpisodeId=10 + episode_id, action=7, description="x", language=language,
                 provider="embedded", score=100, score_out_of=100, timestamp=datetime.now(),
                 video_path=EPISODE_PATH))
-    hide_track(hidden_db, "episode", 2, 1, "fr")
+    if how == "hide":
+        hide_track(hidden_db, "episode", 2, 1, "fr")
+    else:
+        monkeypatch.setattr(se.settings.general, "ignore_pgs_subs", True, raising=False)
 
     se.store_subtitles(EPISODE_PATH, "/local/e01-e02.mkv", arr_instance_id=1)
 

@@ -15,7 +15,7 @@ from constants import MAXIMUM_SUBTITLE_SIZE
 from app.config import settings
 from utilities.path_mappings import path_mappings
 from languages.custom_lang import CustomLanguage
-from subtitles.indexer.entries import entry_codec
+from subtitles.indexer.entries import entry_codec, normalize_codec
 from subtitles.tools.subsync_engines import SYNC_ENGINES, sync_engine_from_output_path, sync_output_owner_is_unique
 
 import re as _re_combine
@@ -104,23 +104,58 @@ def embedded_history_language(language):
     return base + (':forced' if 'forced' in variants else ':hi' if 'hi' in variants else '')
 
 
-def retract_embedded_history(session, table, video_path, uncounted, counted, arr_instance_id=None):
-    """Delete the Embedded Source rows of a video for tracks the indexer no longer counts.
+def embedded_codecs_by_language(stored):
+    """The codecs of the embedded entries of a stored listing, by history language.
+
+    A codec is None for an entry indexed before codecs were stored, or whose
+    format could not be named. An unreadable listing has no entries.
+    """
+    try:
+        listing = ast.literal_eval(stored) if stored else []
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return {}
+    found = {}
+    for entry in listing if isinstance(listing, list) else []:
+        if not isinstance(entry, (list, tuple)) or not entry or not isinstance(entry[0], str):
+            continue
+        if len(entry) > 1 and entry[1]:
+            continue
+        found.setdefault(embedded_history_language(entry[0]), set()).add(entry_codec(entry))
+    return found
+
+
+def note_uncounted_track(uncounted, key, codec):
+    """Record a track of this file that the indexer does not count (hidden, or skipped by an ignore switch)."""
+    uncounted.setdefault(embedded_history_language(key), set()).add(normalize_codec(codec))
+
+
+def retract_embedded_history(session, table, video_path, uncounted, counted, previous, arr_instance_id=None,
+                             guard=True):
+    """Delete the Embedded Source rows of a video for tracks the indexer stopped counting.
 
     A track the user hid, or that an ignore switch now skips, stops covering its
     language, so the row that recorded it must stop ending the upgrades of that
-    language. ``uncounted`` holds the history languages of such tracks seen on
-    this pass and ``counted`` the track keys it did list: a language another
-    counted track still covers keeps its row. A track that is merely gone from
-    the container is never retracted, since another tool may have copied it out
-    next to the video and the row is the only trace of that. The index on
+    language. ``uncounted`` maps the history language of each such track seen on
+    this pass to its codecs (see ``note_uncounted_track``), ``counted`` holds the
+    track keys the pass did list, and ``previous`` the codecs the last stored
+    listing counted for each language (``embedded_codecs_by_language``).
+
+    A language is retracted only when a codec the last listing counted is the
+    one now skipped, and no counted track still covers the language. A track
+    that is merely gone from the container is never retracted, nor is one whose
+    codec is not the skipped one: another tool may have copied it out next to the
+    video and stripped it, leaving a hidden or ignored track of the same
+    language behind, and the row is the only trace of the copy. The index on
     (video_path, language) serves the delete.
 
-    Never raises, so indexing goes on if the delete fails: the row then ends
-    upgrades a little longer.
+    With ``guard`` it never raises, so indexing goes on if the delete fails and
+    the row ends upgrades a little longer. A caller inside a transaction that a
+    failed statement would abort passes ``guard=False``.
     """
     try:
-        languages = sorted(set(uncounted or ()) - {embedded_history_language(key) for key in counted or ()})
+        covered = {embedded_history_language(key) for key in counted or ()}
+        languages = sorted(language for language, codecs in (uncounted or {}).items()
+                           if language not in covered and codecs & (previous or {}).get(language, set()))
         if not languages or not video_path:
             return 0
         statement = delete(table).where(table.action == 7, table.video_path == video_path,
@@ -129,6 +164,8 @@ def retract_embedded_history(session, table, video_path, uncounted, counted, arr
             statement = statement.where(table.arr_instance_id == arr_instance_id)
         return session.execute(statement).rowcount or 0
     except Exception:
+        if not guard:
+            raise
         logging.exception("BAZARR error retracting embedded subtitle history for %s", video_path)
         return 0
 

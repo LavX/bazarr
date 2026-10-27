@@ -296,14 +296,19 @@ def _family_of(files):
 
 def _source_score(track):
     """The score of the track's own action 7 row, else the media type's maximum."""
+    from subtitles.indexer.utils import embedded_history_language
+
     if track.media_type == "sports":
         table, where = TableHistorySports, [TableHistorySports.event_id == track.local_id]
     elif track.media_type == "episode":
         table, where = TableHistory, [TableHistory.sonarrEpisodeId == track.media_id]
     else:
         table, where = TableHistoryMovie, [TableHistoryMovie.radarrId == track.media_id]
+    # The track's own row, recorded under the code embedded_history_language() gives it.
+    row_language = embedded_history_language(
+        track.language + (":hi" if track.hi else "") + (":forced" if track.forced else ""))
     score = database.execute(scoped(
-        select(table.score).where(*where, table.language == track.language_code, table.action == 7)
+        select(table.score).where(*where, table.language == row_language, table.action == 7)
         .order_by(table.timestamp.desc()),
         table.arr_instance_id, track.arr_instance_id)).scalar()
     return score or MAX_SCORES["episode" if track.media_type == "episode" else "movie"]
