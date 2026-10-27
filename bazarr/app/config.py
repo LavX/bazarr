@@ -2810,9 +2810,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         if key == 'settings-auth-password':
             if value == AUTH_PASSWORD_MASK and settings.auth.password:
-                # The settings read hands out the mask, never the hash, and the
-                # General page sends back what it read when a typed password is
-                # cleared again: that keeps the stored password.
+                # The settings read hands out the mask, never the hash, and a
+                # client that sends back what it read means to keep the stored
+                # password.
                 value = settings.auth.password
             if value != settings.auth.password and value is not None:
                 from utilities.helper import hash_password
@@ -3021,7 +3021,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 # Stored whole, merged with what is there: a mapping read back
                 # from the settings store can be a copy, and a value written
                 # into a copy never reaches the store.
-                merged = dict(inner) if inner else {}
+                merged = {} if inner is None else dict(inner)
                 merged[settings_keys[3]] = value
                 section[settings_keys[2]] = merged
 
