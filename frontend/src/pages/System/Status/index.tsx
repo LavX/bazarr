@@ -33,7 +33,11 @@ import {
   faRefresh,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useSystemHealth, useSystemStatus } from "@/apis/hooks";
+import {
+  useRecheckHealth,
+  useSystemHealth,
+  useSystemStatus,
+} from "@/apis/hooks";
 import { useArrKindAvailability } from "@/apis/hooks/arrInstances";
 import { useAppTitle } from "@/apis/hooks/site";
 import api from "@/apis/raw";
@@ -185,6 +189,7 @@ const InfoContainer: FunctionComponent<
 
 const SystemStatusView: FunctionComponent = () => {
   const health = useSystemHealth();
+  const { mutate: recheckHealth, isPending: isRechecking } = useRecheckHealth();
   const statusQuery = useSystemStatus();
   const { data: status } = statusQuery;
   const { enabled: sonarrEnabled } = useArrKindAvailability("sonarr");
@@ -261,11 +266,9 @@ const SystemStatusView: FunctionComponent = () => {
                   <ActionIcon
                     variant="subtle"
                     size="sm"
-                    onClick={async () => {
-                      await api.system.recheckHealth();
-                      health.refetch();
-                    }}
-                    loading={health.isFetching}
+                    aria-label="Re-check health"
+                    onClick={() => recheckHealth()}
+                    loading={health.isFetching || isRechecking}
                   >
                     <FontAwesomeIcon icon={faRefresh} size="sm" />
                   </ActionIcon>

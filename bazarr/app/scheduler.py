@@ -403,11 +403,12 @@ class Scheduler:
             if settings.general.auto_update:
                 self.aps_scheduler.add_job(
                     check_if_new_update, 'interval', hours=6, max_instances=1, coalesce=True,
-                    misfire_grace_time=15, id='update_bazarr', name=task_name, replace_existing=True)
+                    misfire_grace_time=15, id='update_bazarr', name=task_name, replace_existing=True,
+                    kwargs=dict(wait_for_completion=True))
             else:
                 self.aps_scheduler.add_job(
                     check_if_new_update, 'cron', year=in_a_century(), hour=4, id='update_bazarr', name=task_name,
-                    replace_existing=True)
+                    replace_existing=True, kwargs=dict(wait_for_completion=True))
                 self.aps_scheduler.add_job(
                     check_releases, 'interval', hours=3, max_instances=1, coalesce=True, misfire_grace_time=15,
                     id='update_release', name='Update Release Info', replace_existing=True,

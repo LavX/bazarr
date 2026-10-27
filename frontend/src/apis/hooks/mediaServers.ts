@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { whenJobFinishes } from "@/apis/hooks/jobWatch";
 import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
 import api from "@/apis/raw";
 import { inlineWhen } from "@/apis/raw/inlineWrites";
@@ -231,7 +232,14 @@ export function useRetryPendingMediaServer(kind: MediaServerKind, id: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => api.mediaServers.retryPending(id),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: statusKey(kind, id) }),
+    onSuccess: ({ jobId }) => {
+      const refresh = () =>
+        queryClient.invalidateQueries({ queryKey: statusKey(kind, id) });
+      // The retry is a job, and what it drained is only known once it ends, so
+      // the status is read again then as well as now.
+      if (jobId !== null)
+        whenJobFinishes(queryClient, jobId, () => void refresh());
+      return refresh();
+    },
   });
 }

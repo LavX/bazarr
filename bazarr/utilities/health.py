@@ -23,8 +23,10 @@ from arr_instances.resolution import client_for_instance
 
 def check_health(job_id=None, wait_for_completion=False):
     if not job_id:
-        jobs_queue.add_job_from_function("Checking Health", is_progress=False, wait_for_completion=wait_for_completion)
-        return
+        # The id of the queued check, or of the identical one already queued or
+        # running, so a caller that has to answer can name the job to follow.
+        return jobs_queue.add_job_from_function("Checking Health", is_progress=False,
+                                                wait_for_completion=wait_for_completion, return_existing=True)
 
     # Re-validate rootfolders per enabled instance. Mirrors the scheduler's
     # fan-out: a single default instance keeps the unscoped scalar-client path

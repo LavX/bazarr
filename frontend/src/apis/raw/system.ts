@@ -129,8 +129,10 @@ class SystemApi extends BaseApi {
     return response.data;
   }
 
+  /** Queue the health re-check. Answers at once with the job doing it. */
   async recheckHealth() {
-    await this.post("/health");
+    const response = await this.post<{ job_id: number | null }>("/health");
+    return response.data;
   }
 
   // One page of the log, newest first, with the total that matches.

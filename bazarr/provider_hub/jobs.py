@@ -176,6 +176,20 @@ def update_provider(provider_id, name=None, job_id=None):
     return result
 
 
+def failed_catalog_sources():
+    """The catalog sources the last refresh could not fetch, each with its reason.
+
+    A source that could not be fetched is recorded on the source and the
+    refresh carries on with the others, so its reason is read back here.
+    """
+    sources = (service.load_state().get("catalog_sources") or {}).values()
+    return [
+        f"{source.get('name') or source.get('id') or 'source'} ({source['last_error']})"
+        for source in sources
+        if isinstance(source, dict) and source.get("last_error")
+    ]
+
+
 def refresh_catalog(job_id=None):
     try:
         result = service.refresh_catalog(checkpoint=_checkpoint(job_id))
@@ -183,14 +197,7 @@ def refresh_catalog(job_id=None):
         raise JobCancelled(str(stopped)) from stopped
     except Exception as error:
         raise JobFailed(f"Could not refresh the provider catalog: {reason_of(error)}") from error
-    # A source that could not be fetched is recorded on the source and the
-    # refresh carries on with the others, so its reason is read back here.
-    sources = (service.load_state().get("catalog_sources") or {}).values()
-    failed = [
-        f"{source.get('name') or source.get('id') or 'source'} ({source['last_error']})"
-        for source in sources
-        if isinstance(source, dict) and source.get("last_error")
-    ]
+    failed = failed_catalog_sources()
     if failed:
         raise JobFailed(f"Could not refresh the provider catalog from {', '.join(failed)}")
     return result
