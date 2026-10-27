@@ -633,6 +633,8 @@ _COUNT_GATED_REASONS = {"TooManyRequests", "ServiceUnavailable", "APIThrottled"}
     (WorkerError("fixture unreachable", remote_class_name="URLError", code="provider"),
      "connection failure", "10 minutes", 600, "WorkerError"),
     (WorkerError("fixture deadline", code="timeout"), "timed out", "1 hour", 3600, "Timeout"),
+    (WorkerError("fixture worker connection", remote_class_name="ConnectionError", code="provider"),
+     "connection failure", "10 minutes", 600, "ConnectionError"),
 ])
 def test_an_expected_failure_writes_one_line_and_the_unchanged_backoff(
         monkeypatch, tmp_path, caplog, error, words, description, seconds, reason):
@@ -691,6 +693,71 @@ def test_a_count_gated_failure_writes_one_line_and_no_backoff(monkeypatch, tmp_p
     assert "count 1 of 5" in message
     assert "no backoff" in message
     assert "next refresh" in message
+
+
+def test_a_worker_connection_failure_earns_the_providers_own_connection_backoff(monkeypatch, tmp_path):
+    """A plugin worker's ConnectionError reaches the table as a WorkerError
+    carrying the remote class name. It has to read the same per-provider
+    duration the same failure raised in process would, not the generic one."""
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(get_providers, "provider_throttle_map", lambda: {
+        "default": {},
+        name: {requests.exceptions.ConnectionError: (datetime.timedelta(minutes=5), "5 minutes")}})
+
+    error = WorkerError("fixture worker connection", remote_class_name="ConnectionError", code="provider")
+    assert get_providers.provider_throttle(name, error) is True
+
+    reason, _until, description = get_providers.tp[name]
+    assert (reason, description) == ("ConnectionError", "5 minutes")
+
+
+def _legacy_entry(reason):
+    return (reason, datetime.datetime.now() + datetime.timedelta(hours=12), "12 hours")
+
+
+def test_correcting_credentials_clears_a_throttle_stored_under_an_auth_subclass(monkeypatch, tmp_path):
+    """A throttle is stored under the concrete class name, so a provider that
+    raised a subclass of AuthenticationError sits in the table under that
+    name. The credential reset has to match the hierarchy, not three literals,
+    and an entry written by an older build must be matched the same way."""
+    from subliminal_patch.providers.opensubtitles import NoSession, Unauthorized
+
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    for subclass in (Unauthorized, NoSession):
+        monkeypatch.setitem(get_providers.tp, name, _legacy_entry(subclass.__name__))
+        assert get_providers.reset_throttled_provider(name) is True
+        assert name not in get_providers.tp
+
+
+def test_the_bulk_credential_reset_drops_auth_subclasses_and_keeps_the_rest(monkeypatch, tmp_path):
+    _throttle_test_state(monkeypatch, tmp_path)
+    names = ["subclassed", "base", "paid", "rate", "unknown"]
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", names)
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: names)
+    get_providers.tp.update({
+        "subclassed": _legacy_entry("Unauthorized"),
+        "base": _legacy_entry("AuthenticationError"),
+        "paid": _legacy_entry("PaymentRequired"),
+        "rate": _legacy_entry("TooManyRequests"),
+        "unknown": _legacy_entry("SomethingElseEntirely"),
+    })
+
+    get_providers.reset_throttled_providers(only_auth_or_conf_error=True)
+
+    assert sorted(get_providers.tp) == ["rate", "unknown"]
+
+
+def test_a_throttle_file_from_an_older_build_still_reads_after_the_reset_change(monkeypatch, tmp_path):
+    name = _throttle_test_state(monkeypatch, tmp_path)
+    until = datetime.datetime.now() + datetime.timedelta(hours=12)
+    (tmp_path / "config" / "throttled_providers.dat").write_text(
+        '{"%s": ["Unauthorized", "%s", "12 hours"]}' % (name, until.isoformat()))
+
+    loaded = get_providers.get_throttled_providers()
+
+    assert loaded[name] == ("Unauthorized", until, "12 hours")
+    monkeypatch.setattr(get_providers, "tp", loaded)
+    assert get_providers.reset_throttled_provider(name) is True
 
 
 def test_a_no_wait_rate_limit_writes_the_throttling_line_only(monkeypatch, tmp_path, caplog):

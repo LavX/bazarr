@@ -320,3 +320,34 @@ def test_omdb_key_failure_never_breaks_the_chain(no_v1_client):
     urls = [c[0] for c in calls]
     assert not any("omdbapi.com" in u for u in urls)
     assert not no_v1_client.mock_calls
+
+
+def test_movie_tmdb_resolution_carries_the_tmdb_id(keyless, no_v1_client):
+    """The SubDL TMDB fallback retries only when video.tmdb_id is set, so the
+    id the lookup just resolved has to land on the video."""
+    from compat.service import _refine_from_imdb
+
+    video = _movie()
+    assert not getattr(video, "tmdb_id", None)
+    client = _v4_client(search_results=None, series_record=None)
+    get, calls = _http({"themoviedb.org/3/find": TMDB_FIND_MOVIE})
+    with patch("subliminal_patch.refiners.tvdb_v4.get_client",
+               return_value=client), \
+         patch("requests.get", side_effect=get):
+        assert _refine_from_imdb(video, "movie") == ["tmdb=ok"]
+    assert video.tmdb_id == 278
+
+
+def test_movie_tmdb_resolution_keeps_a_tmdb_id_the_client_sent(keyless,
+                                                                no_v1_client):
+    from compat.service import _refine_from_imdb
+
+    video = _movie()
+    video.tmdb_id = 999
+    client = _v4_client(search_results=None, series_record=None)
+    get, calls = _http({"themoviedb.org/3/find": TMDB_FIND_MOVIE})
+    with patch("subliminal_patch.refiners.tvdb_v4.get_client",
+               return_value=client), \
+         patch("requests.get", side_effect=get):
+        _refine_from_imdb(video, "movie")
+    assert video.tmdb_id == 999

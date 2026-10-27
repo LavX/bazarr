@@ -1569,6 +1569,40 @@ def test_a_row_offered_early_stays_actionable_while_the_search_runs(authenticate
     assert offered["id"] in {row["id"] for row in response.json["results"]}
 
 
+def test_a_finished_search_gives_an_early_row_one_ttl_not_the_ttl_plus_the_wall(
+        authenticated_client, providers, monkeypatch):
+    """A handle offered mid-search is minted for the TTL plus the wall, so it
+    cannot expire on screen while the search runs. Once the search finishes
+    early, that padding is no longer needed, and the snapshot would otherwise
+    carry the longer deadline: a download id outliving the snapshot that
+    offered it by whatever the search did not use of its wall."""
+    import time
+
+    from app.config import settings
+    from compat.file_id_store import get_store
+    from discover.handles import resolve_result
+    from provider_hub.protocol import candidate_from_worker
+
+    for key in ("cache_ttl_seconds", "file_id_ttl_seconds"):
+        monkeypatch.setattr(settings.compat_endpoint, key, 100)
+    monkeypatch.setattr(settings.compat_endpoint, "search_timeout_seconds", 60)
+    providers.add("discover_fast", [candidate_from_worker("discover_fast", {
+        "id": "fast-1", "language": {"alpha3": "eng"}, "release_info": "The Matrix",
+        "matches": ["imdb_id"], "provider_payload": {}})])
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
+        "77777777-8888-9999-aaaa-bbbbbbbbbbbb")
+    assert response.status_code == 200
+    row = response.json["results"][0]
+
+    assert 90 < _seconds_from_now(row["expires_at"]) <= 101
+    record = resolve_result(row["id"])
+    assert record is not None
+    assert 90 < record["expires_at"] - time.time() <= 101
+    stored_until = get_store()._store[int(row["id"].split(".")[1])][0]
+    assert stored_until - time.time() <= 101
+
+
 def test_publishing_the_growing_row_list_is_charged_to_the_same_budget(authenticated_client,
                                                                        providers, monkeypatch):
     """Every outcome republishes the whole accumulated list and the observer
@@ -1665,9 +1699,64 @@ def test_a_provider_left_out_for_its_cooldown_is_not_reported_as_abandoned_again
     assert second["retry_at"] == first["retry_at"]
 
 
+def _saturated_search(monkeypatch, names_to_saturate):
+    from compat import service
+    from subliminal_patch.core import ProviderSearchResult
+
+    def search_title(video, languages, pool, names, on_outcome):
+        for name in names:
+            if name in names_to_saturate:
+                on_outcome(ProviderSearchResult(name, status="saturated", reason="capacity"), 0)
+        return []
+
+    monkeypatch.setattr(service, "search_title", search_title)
+
+
+def test_a_fully_saturated_fanout_is_not_reported_as_failed(authenticated_client, providers, monkeypatch):
+    """When the shared fanout has no free slot, no provider was asked. Calling
+    that a failed search says the providers failed, when none was called. The
+    outcome keeps its own capacity detail and its short retry delay."""
+    providers.add("discover_one")
+    providers.add("discover_two")
+    _saturated_search(monkeypatch, {"discover_one", "discover_two"})
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert response["status"] == "skipped"
+    assert response["coverage"]["complete"] is False
+    for item in response["coverage"]["providers"]:
+        assert (item["status"], item["reason"]) == ("saturated", "capacity")
+        assert 10 < _retry_seconds(item) < 30
+
+
+def test_a_saturated_provider_beside_a_success_does_not_claim_complete_coverage(
+        authenticated_client, providers, monkeypatch):
+    """A provider that was never asked leaves a hole where its answer would be."""
+    from compat import service
+    from provider_hub.protocol import candidate_from_worker
+    from subliminal_patch.core import ProviderSearchResult
+
+    providers.add("discover_found", [candidate_from_worker("discover_found", {
+        "id": "one", "language": {"alpha3": "eng"}, "provider_payload": {}})])
+    providers.add("discover_busy")
+    original = service.search_title
+
+    def search_title(video, languages, pool, names, on_outcome):
+        def report(outcome, elapsed):
+            if outcome.provider == "discover_busy":
+                outcome = ProviderSearchResult("discover_busy", status="saturated", reason="capacity")
+            on_outcome(outcome, elapsed)
+
+        return original(video, languages, pool, names, report)
+
+    monkeypatch.setattr(service, "search_title", search_title)
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert response["status"] == "partial"
+    assert response["coverage"]["complete"] is False
+
+
 @pytest.mark.parametrize("recorded,reason", [
     ("ReadTimeout", "timeout"),
     ("ServiceUnavailable", "unreachable"),
+    ("ConnectionError", "unreachable"),
     ("IPAddressBlocked", "automated_requests_blocked"),
 ])
 def test_a_provider_the_throttle_table_holds_back_is_cooling_down(authenticated_client, providers,

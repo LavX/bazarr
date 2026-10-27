@@ -30,7 +30,7 @@ class FileIdStore:
                 self._gc_locked()
             return fid
 
-    def renew(self, fid, ttl_seconds: int) -> float | None:
+    def renew(self, fid, ttl_seconds: int, *, shorten: bool = False) -> float | None:
         """Restart a live entry's lifetime, keeping its id and payload.
 
         For a caller that handed an id out before it had finished assembling
@@ -38,7 +38,9 @@ class FileIdStore:
         entry a full lifetime too, but it would retire an id the caller has
         already offered someone. Returns the new expiry, or None when the
         entry is gone. Never shortens: a renewal that lands behind the current
-        expiry leaves it alone.
+        expiry leaves it alone, unless ``shorten`` is set: the caller then
+        names the exact lifetime from now, for a handle that was given extra
+        time while it could not yet know how long it would need.
         """
         try:
             key = int(fid)
@@ -53,7 +55,7 @@ class FileIdStore:
             if exp < now:
                 self._store.pop(key, None)
                 return None
-            expires = max(exp, now + ttl_seconds)
+            expires = now + ttl_seconds if shorten else max(exp, now + ttl_seconds)
             payload = {**payload, "expires_at": expires} if "expires_at" in payload else payload
             self._store[key] = (expires, payload)
             return expires

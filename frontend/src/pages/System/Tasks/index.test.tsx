@@ -22,6 +22,21 @@ describe("System Tasks", () => {
     });
   });
 
+  it("should link to the Scheduler settings where intervals are changed", async () => {
+    server.use(
+      http.get("/api/system/tasks", () => {
+        return HttpResponse.json({ data: [] });
+      }),
+    );
+
+    customRender(<SystemTasksView />);
+
+    const link = await screen.findByRole("link", {
+      name: "Scheduler settings",
+    });
+    expect(link).toHaveAttribute("href", "/settings/scheduler");
+  });
+
   it("should render with system tasks", async () => {
     const mockTasks = [
       {

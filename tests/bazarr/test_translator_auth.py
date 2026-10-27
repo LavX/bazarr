@@ -55,12 +55,21 @@ class TestGetTranslatorAuthHeaders:
 
     def test_override_empty_key_returns_empty(self):
         """Explicit empty override should skip auth even if settings has a key."""
-        # When encryption_key="" is passed, the `or` falls through to settings
-        # This tests that the settings key is used as fallback
         with patch("subtitles.tools.translate.services.auth.settings") as mock_settings:
             mock_settings.translator.openrouter_encryption_key = ""
             result = get_translator_auth_headers(encryption_key="")
             assert result == {}
+
+    def test_explicit_empty_override_ignores_the_stored_key(self):
+        """An empty key typed into the form means encryption off, not "use the saved key"."""
+        with patch("subtitles.tools.translate.services.auth.settings") as mock_settings:
+            mock_settings.translator.openrouter_encryption_key = KEY_HEX
+            assert get_translator_auth_headers(encryption_key="") == {}
+
+    def test_omitted_override_still_uses_the_stored_key(self):
+        with patch("subtitles.tools.translate.services.auth.settings") as mock_settings:
+            mock_settings.translator.openrouter_encryption_key = KEY_HEX
+            assert "X-Auth-Token" in get_translator_auth_headers(encryption_key=None)
 
     def test_token_length(self):
         with patch("subtitles.tools.translate.services.auth.settings") as mock_settings:

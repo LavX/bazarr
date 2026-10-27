@@ -231,10 +231,6 @@ def build_routing_config():
     return _strip_routing_suffixes(model), {'sort': routing}
 
 
-def build_provider_config():
-    return build_routing_config()[1]
-
-
 def _cancel_remote_job(remote_job_id, base_url):
     if not remote_job_id or not base_url:
         return

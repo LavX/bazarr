@@ -402,12 +402,13 @@ KIND_JOBS = {"sonarr": ("sonarr.sync.series", "update_series_for_instance"),
 
 
 def _library_models():
-    from app.database import (TableBlacklist, TableBlacklistMovie, TableEpisodes, TableHistory,
-                              TableHistoryMovie, TableMovies, TableMoviesRootfolder,
-                              TableReleaseTypeMismatch, TableShows, TableShowsRootfolder)
+    from app.database import (TableBlacklist, TableBlacklistMovie, TableEmbeddedTrackHidden,
+                              TableEpisodes, TableHistory, TableHistoryMovie, TableMovies,
+                              TableMoviesRootfolder, TableReleaseTypeMismatch, TableShows,
+                              TableShowsRootfolder)
     return (TableShows, TableEpisodes, TableMovies, TableHistory, TableHistoryMovie,
             TableBlacklist, TableBlacklistMovie, TableShowsRootfolder, TableMoviesRootfolder,
-            TableReleaseTypeMismatch)
+            TableReleaseTypeMismatch, TableEmbeddedTrackHidden)
 
 
 def library_rows(engine):
@@ -430,9 +431,9 @@ def seed_library(engine, kind, name, n, *, default, enabled=True):
     recorded owner that is linked to this owner's media.
     """
     from app.database import (TableArrInstances, TableBlacklist, TableBlacklistMovie,
-                              TableEpisodes, TableHistory, TableHistoryMovie, TableMovies,
-                              TableMoviesRootfolder, TableReleaseTypeMismatch, TableShows,
-                              TableShowsRootfolder)
+                              TableEmbeddedTrackHidden, TableEpisodes, TableHistory,
+                              TableHistoryMovie, TableMovies, TableMoviesRootfolder,
+                              TableReleaseTypeMismatch, TableShows, TableShowsRootfolder)
 
     def insert(connection, model, **values):
         key = list(model.__table__.primary_key.columns)[0]
@@ -481,6 +482,10 @@ def seed_library(engine, kind, name, n, *, default, enabled=True):
             insert(c, TableMoviesRootfolder, arr_instance_id=owner, upstream_rootfolder_id=1, id=1,
                    path="/movies", accessible=1)
             media_type, media = "movie", [movie, movie]
+        # A hidden embedded track names its media row by a plain integer, with
+        # no foreign key, so removing the library has to take it along.
+        insert(c, TableEmbeddedTrackHidden, media_type="episode" if kind == "sonarr" else "movie",
+               media_id=media[0], arr_instance_id=owner, language="en")
         for language, media_id, flag_owner in (("en", media[0], owner), ("fr", media[1], 0),
                                                ("de", 900000 + n, owner)):
             insert(c, TableReleaseTypeMismatch, media_type=media_type, media_id=media_id,

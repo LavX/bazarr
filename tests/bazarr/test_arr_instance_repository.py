@@ -239,6 +239,43 @@ def test_delete_with_remove_library_takes_the_owned_rows_along(schema_session):
                                                "history": 0, "blacklist": 0, "root_folders": 1}
 
 
+def test_delete_with_remove_library_clears_the_hidden_embedded_tracks(schema_session):
+    from sqlalchemy import insert, select
+
+    from app.database import TableEmbeddedTrackHidden, TableEpisodes, TableMovies, TableShows
+
+    repo = _repo(schema_session)
+    shows = repo.create("sonarr", "Main", api_key="k", port=1)
+    films = repo.create("radarr", "Films", api_key="k")
+    other_films = repo.create("radarr", "Other", api_key="k", port=2)
+    schema_session.execute(insert(TableShows).values(
+        id=5, sonarrSeriesId=1, path="/tv/show", title="Show", arr_instance_id=shows.id))
+    episode_id = schema_session.execute(insert(TableEpisodes).values(
+        sonarrSeriesId=1, sonarrEpisodeId=2, series_id=5, path="/tv/show/e.mkv", title="E",
+        season=1, episode=1, arr_instance_id=shows.id)).inserted_primary_key[0]
+    movie_id = schema_session.execute(insert(TableMovies).values(
+        radarrId=1, tmdbId="1", path="/m.mkv", title="M",
+        arr_instance_id=films.id)).inserted_primary_key[0]
+    kept_id = schema_session.execute(insert(TableMovies).values(
+        radarrId=2, tmdbId="2", path="/k.mkv", title="K",
+        arr_instance_id=other_films.id)).inserted_primary_key[0]
+    schema_session.execute(insert(TableEmbeddedTrackHidden), [
+        {"media_type": "episode", "media_id": episode_id, "arr_instance_id": shows.id,
+         "language": "en"},
+        {"media_type": "movie", "media_id": movie_id, "arr_instance_id": films.id,
+         "language": "en"},
+        {"media_type": "movie", "media_id": kept_id, "arr_instance_id": other_films.id,
+         "language": "en"},
+    ])
+
+    assert repo.delete(shows.id, remove_library=True) is True
+    assert repo.delete(films.id, remove_library=True) is True
+
+    left = schema_session.execute(
+        select(TableEmbeddedTrackHidden.media_type, TableEmbeddedTrackHidden.media_id)).all()
+    assert left == [("movie", kept_id)]
+
+
 # ----------------------------------------------- default invariant maintenance
 
 def test_disabling_the_default_promotes_another_enabled_instance(schema_session):

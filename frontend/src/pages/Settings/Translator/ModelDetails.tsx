@@ -45,8 +45,9 @@ function useOpenRouterModelDetails(modelId: string) {
     queryFn: async () => {
       const response = await fetch("https://openrouter.ai/api/v1/models");
       const data = await response.json();
-      // :nitro and :floor are routing shortcuts rather than models, so they
-      // never appear in OpenRouter's model list. A saved config can still carry
+      // :nitro, :floor and :smartfast are routing shortcuts rather than models, so
+      // they never appear in OpenRouter's model list. :smartfast is the one to watch
+      // for, since OpenRouter has never heard of it. A saved config can still carry
       // one, and the details belong to the model underneath it.
       const { modelId: lookupId } = splitRoutingSuffix(modelId);
       const found = data.data?.find((m: OpenRouterModel) => m.id === lookupId);

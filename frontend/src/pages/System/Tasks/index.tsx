@@ -1,5 +1,6 @@
 import { FunctionComponent } from "react";
-import { Container } from "@mantine/core";
+import { Link } from "react-router";
+import { Anchor, Container, Text } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faSync } from "@fortawesome/free-solid-svg-icons";
 import { useSystemTasks } from "@/apis/hooks";
@@ -27,6 +28,13 @@ const SystemTasksView: FunctionComponent = () => {
             Refresh
           </Toolbox.Button>
         </Toolbox>
+        <Text size="sm" c="dimmed" mb="sm">
+          To change how often a task runs, use the{" "}
+          <Anchor component={Link} to="/settings/scheduler">
+            Scheduler settings
+          </Anchor>
+          .
+        </Text>
         <Table tasks={data ?? []}></Table>
       </Container>
     </QueryOverlay>

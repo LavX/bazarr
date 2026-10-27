@@ -200,6 +200,12 @@ _REMOTE_TIMEOUTS = {
     "ConnectTimeout": requests.exceptions.ConnectTimeout,
     "ReadTimeout": requests.exceptions.ReadTimeout,
 }
+# The same for a plugin that could not reach its upstream. The search outcome
+# already calls this name unreachable, so the backoff has to be the one a
+# ConnectionError raised in process earns, including any per-provider duration.
+_REMOTE_CONNECTION_FAILURES = {
+    "ConnectionError": requests.exceptions.ConnectionError,
+}
 
 
 def provider_is_usable(name):
@@ -774,7 +780,8 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
     if code == "timeout":
         cls = requests.exceptions.Timeout
     elif code == "provider":
-        cls = _REMOTE_TIMEOUTS.get(getattr(exception, "remote_class_name", None), cls)
+        remote_name = getattr(exception, "remote_class_name", None)
+        cls = _REMOTE_TIMEOUTS.get(remote_name) or _REMOTE_CONNECTION_FAILURES.get(remote_name) or cls
     cls_name = cls.__name__
     if cls not in VALID_THROTTLE_EXCEPTIONS:
         for valid_cls in VALID_THROTTLE_EXCEPTIONS:
@@ -1024,6 +1031,31 @@ def snapshot_throttled_providers():
 CREDENTIAL_THROTTLE_REASONS = ('AuthenticationError', 'ConfigurationError', 'PaymentRequired')
 
 
+def is_credential_throttle_reason(reason):
+    """Whether a stored throttle reason is one correcting credentials clears.
+
+    A throttle is stored under the concrete class name of the exception, so a
+    provider that raised a subclass (``Unauthorized``, ``NoSession``) sits in the
+    table under that name. Match the three base names and every class that
+    derives from the first two, which are read from the loaded hierarchy rather
+    than listed. The stored value stays the class name, so a table written by an
+    older build means the same thing it always did.
+    """
+    if reason in CREDENTIAL_THROTTLE_REASONS:
+        return True
+    pending, seen = [AuthenticationError, ConfigurationError], set()
+    while pending:
+        parent = pending.pop()
+        for subclass in parent.__subclasses__():
+            if subclass in seen:
+                continue
+            if subclass.__name__ == reason:
+                return True
+            seen.add(subclass)
+            pending.append(subclass)
+    return False
+
+
 def reset_throttled_provider(name):
     """Forget one provider's credential throttle.
 
@@ -1034,7 +1066,7 @@ def reset_throttled_provider(name):
     """
     with _THROTTLE_LOCK:
         reason = tp.get(name, (None, None, None))[0]
-        if reason not in CREDENTIAL_THROTTLE_REASONS:
+        if not is_credential_throttle_reason(reason):
             return False
         tp.pop(name, None)
         set_throttled_providers(tp)
@@ -1046,7 +1078,7 @@ def reset_throttled_provider(name):
 def reset_throttled_providers(only_auth_or_conf_error=False):
     with _THROTTLE_LOCK:
         for provider in list(tp):
-            if only_auth_or_conf_error and tp[provider][0] not in CREDENTIAL_THROTTLE_REASONS:
+            if only_auth_or_conf_error and not is_credential_throttle_reason(tp[provider][0]):
                 continue
             tp.pop(provider, None)
         set_throttled_providers(tp)
