@@ -10,6 +10,7 @@ declare namespace Server {
 declare namespace Manager {
   interface Jobs {
     job_id: number;
+    session?: string;
     progress_value: number;
     progress_max: number;
     progress_message: string;

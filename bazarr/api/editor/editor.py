@@ -20,6 +20,7 @@ from arr_instances.resolution import scoped
 from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableShows,  # noqa: F401
                           TableSportsEvents, database, select)
 from app.get_args import args
+from app.process_session import PROCESS_SESSION
 from utilities.path_mappings import path_mappings
 from utilities.waveform_peaks import request_peaks
 from api.subtitles.content import resolve_subtitle_path  # noqa: F401
@@ -1589,8 +1590,10 @@ class EditorSync(Resource):
 
         # The editor drives this job's outcome itself, through its own poll and
         # toasts, so the response carries the queued job's id for the frontend
-        # to claim the standard completion announcement.
-        return {'jobKey': job_key, 'jobId': queue_job_id, 'status': 'running'}, 202
+        # to claim the standard completion announcement. The id only means
+        # something within this backend run, so the run is named too: the
+        # panel binds its claim and its recovery to it.
+        return {'jobKey': job_key, 'jobId': queue_job_id, 'jobSession': PROCESS_SESSION, 'status': 'running'}, 202
 
     @authenticate_header_only
     def get(self):

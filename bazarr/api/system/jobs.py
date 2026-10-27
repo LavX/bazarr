@@ -32,6 +32,9 @@ class UtcTimestamp(fields.Raw):
 class SystemJobs(Resource):
     get_response_model = api_ns_system_jobs.model('SystemJobsGetResponse', {
         'job_id': fields.Integer(),
+        # The backend run that created the job. Ids restart with the backend,
+        # so a client keys what it keeps about a job by this and the id.
+        'session': fields.String(),
         'job_name': fields.String(),
         'status': fields.String(),
         'last_run_time': UtcTimestamp(),
@@ -148,3 +151,38 @@ class SystemJobs(Resource):
             if deleted:
                 return '', 204
         return 'Job ID not provided', 400
+
+
+@api_ns_system_jobs.route('system/jobs/result')
+class SystemJobResult(Resource):
+    """What a job produced, for the jobs whose point is a result, such as a search.
+
+    The listing and the socket events carry a job's progress and outcome and
+    never its result: a search's rows can be large, and they are not what the
+    drawer shows. A caller that queued such a job reads them here, once it
+    finished or, for a job that publishes partial results, while it runs.
+    """
+
+    get_response_model = api_ns_system_jobs.model('SystemJobResultGetResponse', {
+        'job_id': fields.Integer(),
+        'session': fields.String(),
+        'status': fields.String(),
+        'error': NullableRaw(),
+        'result': NullableRaw(),
+    })
+
+    get_request_parser = reqparse.RequestParser()
+    get_request_parser.add_argument('id', type=int, required=True, help='Job ID to return the result of')
+
+    @authenticate
+    @api_ns_system_jobs.doc(parser=get_request_parser)
+    @api_ns_system_jobs.response(200, 'Success', get_response_model)
+    @api_ns_system_jobs.response(401, 'Not Authenticated')
+    @api_ns_system_jobs.response(404, 'No such job, or it has left the jobs history')
+    def get(self):
+        """Read the result a job published"""
+        args = self.get_request_parser.parse_args()
+        outcome = jobs_queue.get_job_result(args.get('id'))
+        if outcome is None:
+            return {'message': 'This job is no longer listed.'}, 404
+        return marshal(outcome, self.get_response_model)

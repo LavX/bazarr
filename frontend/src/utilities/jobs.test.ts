@@ -5,7 +5,9 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { createDefaultReducer } from "@/modules/socketio/reducer";
 import {
+  awaitJobResult,
   JOB_FALLBACK_POLL_MS,
+  JOB_RESULT_GONE,
   JobFailedError,
   JobStoppedError,
   UNKNOWN_JOB_OUTCOME,
@@ -13,7 +15,7 @@ import {
 } from "./jobs";
 
 vi.mock("@/apis/raw", () => ({
-  default: { system: { jobs: vi.fn() } },
+  default: { system: { jobs: vi.fn(), jobResult: vi.fn() } },
 }));
 
 const mockedJobs = vi.mocked(api.system.jobs);
@@ -152,10 +154,13 @@ describe("waitForJob", () => {
   it("does not settle a reused id on the row a restarted backend left behind", async () => {
     // Job ids restart at 1 with the backend, so the finished job 1 of the
     // previous run is still cached when the socket connects again.
+    const session = createDefaultReducer().find(
+      (reducer) => reducer.key === "session",
+    )?.update as (sessions: string[]) => void;
+    session(["run-before"]);
     queryClient.setQueryData(JOBS_KEY, [job(1, "completed")]);
-    createDefaultReducer()
-      .find((reducer) => reducer.key === "connect")
-      ?.any?.();
+    // The socket connects again and the backend names a new run.
+    session(["run-after"]);
 
     let settled = false;
     const waiting = waitForJob(queryClient, 1).then(() => {
@@ -178,5 +183,59 @@ describe("waitForJob", () => {
 
     await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
     await outcome;
+  });
+});
+
+describe("awaitJobResult", () => {
+  let client: QueryClient;
+  const mockedResult = vi.mocked(api.system.jobResult);
+
+  beforeEach(() => {
+    client = new QueryClient();
+    mockedResult.mockReset();
+  });
+
+  const outcome = (result: unknown) =>
+    ({
+      // eslint-disable-next-line camelcase
+      job_id: 3,
+      session: "run-a",
+      status: "completed",
+      error: null,
+      result,
+    }) as System.JobResult;
+
+  it("hands back what the job published once it finished", async () => {
+    client.setQueryData(JOBS_KEY, [job(3, "completed")]);
+    mockedResult.mockResolvedValue(outcome([{ provider: "a" }]));
+
+    await expect(awaitJobResult(client, 3)).resolves.toEqual([
+      { provider: "a" },
+    ]);
+    expect(mockedResult).toHaveBeenCalledWith(3);
+  });
+
+  it("rejects with the job's reason when it failed, without asking for a result", async () => {
+    client.setQueryData(JOBS_KEY, [
+      job(3, "failed", { error: { reason: "x", message: "No provider." } }),
+    ]);
+
+    await expect(awaitJobResult(client, 3)).rejects.toThrow("No provider.");
+    expect(mockedResult).not.toHaveBeenCalled();
+  });
+
+  it("says so when the job finished without publishing, or left the history", async () => {
+    client.setQueryData(JOBS_KEY, [job(3, "completed")]);
+    mockedResult.mockResolvedValueOnce(outcome(null));
+    await expect(awaitJobResult(client, 3)).rejects.toThrow(JOB_RESULT_GONE);
+
+    mockedResult.mockRejectedValueOnce({ response: { status: 404 } });
+    await expect(awaitJobResult(client, 3)).rejects.toThrow(JOB_RESULT_GONE);
+  });
+
+  it("refuses a search that could not be queued", async () => {
+    await expect(awaitJobResult(client, null)).rejects.toThrow(
+      "could not be queued",
+    );
   });
 });

@@ -18,6 +18,8 @@ declare namespace System {
 
   interface Jobs {
     job_id: number;
+    /** The backend run that created the job. Ids restart with the backend, so a job is named by its id together with this. */
+    session?: string;
     job_name: string;
     status: "pending" | "running" | "completed" | "failed" | "cancelled";
     last_run_time: string;
@@ -38,6 +40,16 @@ declare namespace System {
     retryable?: boolean;
     /** The failed job this one retries. */
     retry_of?: number | null;
+  }
+
+  /** A job's outcome with the result it published, from `/system/jobs/result`. */
+  interface JobResult<T = unknown> {
+    job_id: number;
+    session: string;
+    status: Jobs["status"];
+    error: JobError | null;
+    /** What the job published; partial while it runs. Null before it publishes. */
+    result: T | null;
   }
 
   interface JobError {

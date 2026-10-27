@@ -12,10 +12,11 @@ import server from "@/tests/mocks/node";
 import {
   claimJobCompletion,
   dismissJobOutcome,
+  isJobCompletionClaimed,
   notifyJobOutcome,
+  observeJobSession,
   registerJobAction,
   releaseJobClaim,
-  resetJobNotifications,
 } from ".";
 
 let nextId = 5000;
@@ -246,12 +247,41 @@ it("takes back a completion announced before its feature claimed the job", async
   unregister();
 });
 
-it("claims a completion once until the job ids restart with a new socket session", () => {
+it("claims a completion once, and keys the claim by backend session", () => {
   const id = ++nextId;
-  expect(claimJobCompletion(id)).toBe(true);
-  expect(claimJobCompletion(id)).toBe(false);
-  resetJobNotifications();
-  expect(claimJobCompletion(id)).toBe(true);
+  expect(claimJobCompletion(id, "run-a")).toBe(true);
+  expect(claimJobCompletion(id, "run-a")).toBe(false);
+  // The same id in another backend run is another job.
+  expect(isJobCompletionClaimed(id, "run-b")).toBe(false);
+  expect(claimJobCompletion(id, "run-b")).toBe(true);
+});
+
+it("keeps a claim across a reconnect to the same backend and drops it on a restart", () => {
+  const id = ++nextId;
+  observeJobSession("run-1");
+  expect(claimJobCompletion(id, "run-1")).toBe(true);
+  // A transient reconnect reports the same session: nothing is forgotten.
+  expect(observeJobSession("run-1")).toBe("same");
+  expect(isJobCompletionClaimed(id, "run-1")).toBe(true);
+  expect(claimJobCompletion(id, "run-1")).toBe(false);
+  // A restart reports a new one. The old run's claims are gone, and its ids
+  // are about to be reused by unrelated jobs.
+  expect(observeJobSession("run-2")).toBe("changed");
+  expect(isJobCompletionClaimed(id, "run-1")).toBe(false);
+  expect(isJobCompletionClaimed(id, "run-2")).toBe(false);
+  expect(claimJobCompletion(id, "run-2")).toBe(true);
+});
+
+it("adopts a claim made before the session was known into the first session", async () => {
+  // The session is only unknown before the socket first answers, so this runs
+  // on a fresh copy of the module.
+  vi.resetModules();
+  const fresh = await import(".");
+  const id = ++nextId;
+  expect(fresh.claimJobCompletion(id)).toBe(true);
+  expect(fresh.observeJobSession("run-first")).toBe("first");
+  expect(fresh.isJobCompletionClaimed(id, "run-first")).toBe(true);
+  expect(fresh.isJobCompletionClaimed(id)).toBe(true);
 });
 
 it("keeps quiet a completion its feature claimed before the job finished", () => {
@@ -265,17 +295,39 @@ it("keeps quiet a completion its feature claimed before the job finished", () =>
   expect(screen.queryByText(own.job_name)).toBeNull();
 });
 
-it("keeps quiet a claimed finish a socket reconnect reset mid-run once its feature renewed the claim", () => {
+it("keeps quiet a claimed finish a socket reconnect interrupted, with no renewal needed", () => {
   rawRender(<AllProviders>{null}</AllProviders>);
-  // A transient jobs-socket reconnect mid-sync resets notification state,
-  // dropping the claim. The sync panel renews its claim every poll round, so
-  // its finish stays owned, and quiet, even across one.
-  const own = job({ progress_message: "Sync complete", origin: "user" });
-  act(() => claimJobCompletion(own.job_id));
-  act(() => resetJobNotifications());
-  act(() => claimJobCompletion(own.job_id));
+  // A transient jobs-socket reconnect mid-sync reaches the same backend, so
+  // the claim the sync panel made stays, and the finish landing right after
+  // the reconnect is still owned by the panel.
+  observeJobSession("run-claimed");
+  const own = job({
+    progress_message: "Sync complete",
+    origin: "user",
+    session: "run-claimed",
+  });
+  act(() => claimJobCompletion(own.job_id, "run-claimed"));
+  expect(observeJobSession("run-claimed")).toBe("same");
   act(() => notifyJobOutcome(own));
   expect(screen.queryByText(own.job_name)).toBeNull();
+});
+
+it("does not mistake a new backend's job for the claimed one that shared its id", async () => {
+  rawRender(<AllProviders>{null}</AllProviders>);
+  // The backend restarted mid-sync and its id counter began again: the new
+  // job that reuses the claimed id is announced like any other.
+  observeJobSession("run-before");
+  const id = ++nextId;
+  act(() => claimJobCompletion(id, "run-before"));
+  expect(observeJobSession("run-after")).toBe("changed");
+  const unrelated = job({
+    job_id: id,
+    progress_message: "Done",
+    origin: "user",
+    session: "run-after",
+  });
+  act(() => notifyJobOutcome(unrelated));
+  await screen.findByText(unrelated.job_name);
 });
 
 it("announces the late finish of a job its feature gave up following", async () => {

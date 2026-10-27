@@ -189,3 +189,41 @@ export function waitForJob(
     checkCache(client);
   });
 }
+
+/**
+ * The message a job result lookup gives when the job published nothing, or has
+ * left the history before its result was read.
+ */
+export const JOB_RESULT_GONE =
+  "The result is no longer available. Run it again.";
+
+/**
+ * Follow a queued job to its end and hand back what it published. The wait is
+ * the standard one, so a failure rejects with the job's own reason and a stop
+ * with its own error. A job that ended without a result, or that has left the
+ * jobs history since, says so rather than answering with nothing.
+ */
+export async function awaitJobResult<T>(
+  client: QueryClient,
+  jobId: number | null | undefined,
+): Promise<T> {
+  if (jobId === null || jobId === undefined) {
+    throw new Error("The job could not be queued.");
+  }
+  await waitForJob(client, jobId);
+  let outcome: System.JobResult<T>;
+  try {
+    outcome = await api.system.jobResult<T>(jobId);
+  } catch (error) {
+    if (
+      (error as { response?: { status?: number } }).response?.status === 404
+    ) {
+      throw new Error(JOB_RESULT_GONE, { cause: error });
+    }
+    throw error;
+  }
+  if (outcome.result === null) {
+    throw new Error(JOB_RESULT_GONE);
+  }
+  return outcome.result;
+}

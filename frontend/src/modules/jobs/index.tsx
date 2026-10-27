@@ -129,37 +129,84 @@ export const JobActions: FunctionComponent<{
   );
 };
 
-const notified = new Set<number>();
+/**
+ * Job ids restart with the backend, so a job is only named by its id together
+ * with the backend run it belongs to, the job's `session`. Everything this
+ * module remembers about a job is keyed by the pair: a transient socket
+ * reconnect to the same backend keeps it, and a backend restart cannot
+ * confuse an old job with a new one that reuses its id.
+ */
+let currentSession: string | null = null;
 
-function outcomeId(jobId: number) {
-  return `job-outcome-${jobId}`;
+// The session a feature names, else the one the socket and the jobs list last
+// reported. A feature that submitted a job passes the session it submitted
+// under, which is the one thing that keeps working across a restart.
+function jobKey(jobId: number, session?: string | null) {
+  return `${session ?? currentSession ?? ""}:${jobId}`;
+}
+
+const notified = new Set<string>();
+const claimed = new Set<string>();
+
+/**
+ * Take note of which backend run the socket or the jobs list is talking to,
+ * and tell the caller what changed:
+ *
+ * - `first`: nothing was known yet. Whatever was recorded before the session
+ *   was known belongs to this one.
+ * - `same`: a transient reconnect. Claims and announcements are kept, so a
+ *   feature that claimed a job keeps owning its finish.
+ * - `changed`: the backend restarted. What was recorded names jobs that no
+ *   longer exist, and their ids are about to be reused, so it is dropped.
+ */
+export function observeJobSession(
+  session: string,
+): "first" | "same" | "changed" {
+  if (currentSession === session) return "same";
+  const previous = currentSession;
+  currentSession = session;
+  for (const recorded of [notified, claimed]) {
+    for (const key of [...recorded]) {
+      if (previous === null && key.startsWith(":")) {
+        recorded.delete(key);
+        recorded.add(`${session}${key}`);
+      } else if (!key.startsWith(`${session}:`)) {
+        recorded.delete(key);
+      }
+    }
+  }
+  return previous === null ? "first" : "changed";
+}
+
+function outcomeId(key: string) {
+  return `job-outcome-${key}`;
 }
 
 /**
  * Take back a completion that was announced before the feature knew the job
  * was its own, and keep it from being announced later.
  */
-export function dismissJobOutcome(jobId: number) {
-  notified.add(jobId);
-  hideNotification(outcomeId(jobId));
+export function dismissJobOutcome(jobId: number, session?: string | null) {
+  const key = jobKey(jobId, session);
+  notified.add(key);
+  hideNotification(outcomeId(key));
 }
-
-const claimed = new Set<number>();
 
 /**
  * Claim a completed job for the feature that handles it itself. Answers false
  * when it was already claimed, so a completion reported twice is handled once.
  * Any announcement already shown for it is taken back.
  */
-export function claimJobCompletion(jobId: number) {
-  if (claimed.has(jobId)) return false;
-  claimed.add(jobId);
-  dismissJobOutcome(jobId);
+export function claimJobCompletion(jobId: number, session?: string | null) {
+  const key = jobKey(jobId, session);
+  if (claimed.has(key)) return false;
+  claimed.add(key);
+  dismissJobOutcome(jobId, session);
   return true;
 }
 
-export function isJobCompletionClaimed(jobId: number) {
-  return claimed.has(jobId);
+export function isJobCompletionClaimed(jobId: number, session?: string | null) {
+  return claimed.has(jobKey(jobId, session));
 }
 
 /**
@@ -167,19 +214,10 @@ export function isJobCompletionClaimed(jobId: number) {
  * finish is announced by the standard outcome after all, so a sync that
  * outlives the editor's patience is not lost in silence.
  */
-export function releaseJobClaim(jobId: number) {
-  claimed.delete(jobId);
-  notified.delete(jobId);
-}
-
-/**
- * Forget which jobs were announced or claimed. Job ids restart with the backend, so this
- * runs whenever the socket connects; no terminal event is ever replayed on a
- * reconnect, so nothing is announced twice.
- */
-export function resetJobNotifications() {
-  notified.clear();
-  claimed.clear();
+export function releaseJobClaim(jobId: number, session?: string | null) {
+  const key = jobKey(jobId, session);
+  claimed.delete(key);
+  notified.delete(key);
 }
 
 /**
@@ -194,7 +232,8 @@ export function resetJobNotifications() {
  */
 export function notifyJobOutcome(job: System.Jobs) {
   if (job.status !== "completed" && job.status !== "failed") return;
-  if (notified.has(job.job_id)) return;
+  const key = jobKey(job.job_id, job.session);
+  if (notified.has(key)) return;
   if (job.status === "completed") {
     if (job.stopped) return;
     const action = runnable(job);
@@ -203,12 +242,12 @@ export function notifyJobOutcome(job: System.Jobs) {
       // it is whoever started the job.
       if (job.origin !== "user") return;
     } else if (options.get(action.kind)?.handlesCompletion?.(job)) {
-      notified.add(job.job_id);
+      notified.add(key);
       return;
     }
   }
-  notified.add(job.job_id);
-  const id = outcomeId(job.job_id);
+  notified.add(key);
+  const id = outcomeId(key);
   const failed = job.status === "failed";
   showNotification({
     id,

@@ -23,6 +23,7 @@ from .get_args import args
 from .config import settings, base_url
 from .host_allowlist import HostAllowlistMiddleware, RAW_HOST_ENVIRON, front_refusal_notice
 from .host_policy import APPROVAL_SEGMENT
+from .process_session import PROCESS_SESSION
 
 socketio = SocketIO()
 
@@ -255,6 +256,20 @@ def _authorize_socket_connection(auth=None):
     except Exception:
         logging.exception('Socket authorization failed, refusing the connection')
         return False
+
+
+@socketio.on('session')
+def _report_process_session():
+    """Answer which backend run this socket is connected to.
+
+    Job ids restart with every backend start, so a client that reconnects needs
+    to know whether it is talking to the run it left or to a new one before it
+    decides what to keep. The answer rides back as the acknowledgement of the
+    client's own request, so it cannot arrive before the connect gate has let
+    the client in or be mistaken for a data event. The reply is the whole
+    protocol: the client compares it with the stamp it already holds.
+    """
+    return {'session': PROCESS_SESSION}
 
 
 def create_app():

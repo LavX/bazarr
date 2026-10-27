@@ -25,7 +25,7 @@ declare namespace SocketIO {
     | "settings"
     | "languages";
 
-  type SpecialEventType = "jobs";
+  type SpecialEventType = "jobs" | "session";
 
   type ActionType = "update" | "delete";
 
@@ -57,7 +57,8 @@ declare namespace SocketIO {
   type Reducer =
     | ReducerGroup<NumEventType, number>
     | ReducerGroup<NullEventType, undefined>
-    | ReducerGroup<"jobs", CustomEvent.Jobs, string>;
+    | ReducerGroup<"jobs", CustomEvent.Jobs, string>
+    | ReducerGroup<"session", string>;
 
   type ActionRecord = {
     [P in EventType]?: {
