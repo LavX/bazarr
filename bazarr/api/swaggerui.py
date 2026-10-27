@@ -9,34 +9,6 @@ swaggerui_api_params = {"version": os.environ["BAZARR_VERSION"],
                         "title": "Bazarr",
                         }
 
-subtitles_model = {
-        "name": fields.String(),
-        "code2": fields.String(),
-        "code3": fields.String(),
-        "language": fields.String(),
-        "modifier": fields.String(),
-        "path": fields.String(),
-        "forced": fields.Boolean(),
-        "hi": fields.Boolean(),
-        "file_size": fields.Integer(),
-        # Embedded tracks only: the lowercased knowit format, or null.
-        "codec": fields.String()
-    }
-
-subtitles_language_model = {
-        "name": fields.String(),
-        "code2": fields.String(),
-        "code3": fields.String(),
-        "forced": fields.Boolean(),
-        "hi": fields.Boolean()
-    }
-
-audio_language_model = {
-        "name": fields.String(),
-        "code2": fields.String(),
-        "code3": fields.String()
-    }
-
 class NullableInteger(fields.Integer):
     """An integer that the response can also send as null.
 
@@ -61,6 +33,39 @@ class NullableString(fields.String):
     def schema(self):
         return {**super().schema(), "x-nullable": True}
 
+
+subtitles_model = {
+        "name": fields.String(),
+        "code2": fields.String(),
+        "code3": fields.String(),
+        "language": fields.String(),
+        "modifier": fields.String(),
+        "path": fields.String(),
+        "forced": fields.Boolean(),
+        "hi": fields.Boolean(),
+        "file_size": fields.Integer(),
+        # Embedded tracks only: the lowercased knowit format, or null.
+        "codec": NullableString(),
+        # Embedded tracks only: the file's own track title, when it has one.
+        "title": fields.String(),
+        # Embedded tracks only: true when the row was indexed before codecs
+        # were stored, so a scan of the disk will fill the codec in.
+        "codec_pending": fields.Boolean(default=False)
+    }
+
+subtitles_language_model = {
+        "name": fields.String(),
+        "code2": fields.String(),
+        "code3": fields.String(),
+        "forced": fields.Boolean(),
+        "hi": fields.Boolean()
+    }
+
+audio_language_model = {
+        "name": fields.String(),
+        "code2": fields.String(),
+        "code3": fields.String()
+    }
 
 # What a route that queues its work answers with. Follow the job through
 # system/jobs or the jobs socket.

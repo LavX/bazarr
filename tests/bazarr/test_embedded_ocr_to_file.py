@@ -80,9 +80,6 @@ def test_the_stored_codec_decides_which_track_is_read(ocr_library):
      "OCR reads PGS and VobSub tracks only, and this English track is DVB. Extract to file copies it out as it is."),
     ([["en", None, None, "dvbsub"]], None,
      "OCR reads PGS and VobSub tracks only, and this English track is DVB. Extract to file copies it out as it is."),
-    ([["en", None, None]], None,
-     "OCR reads PGS and VobSub tracks only, and Bazarr+ does not know the format of this English track yet. "
-     "Scan the disk on this title, then try again."),
 ])
 def test_anything_but_pgs_and_vobsub_is_refused_naming_what_it_is(ocr_library, stored, requested, message):
     from subtitles.tools.embedded_extract import NotExtractable
@@ -696,4 +693,17 @@ def test_render_progress_names_the_total():
 
     assert progress_message("render", 5, 10) == "Rendering the image subtitles (50%)"
     assert progress_message("render", 5, 0) == "Rendering the image subtitles"
+
+def test_an_old_row_is_probed_for_its_codec(ocr_library, monkeypatch):
+    """A row stored before codecs were saved can still be read without a manual scan."""
+    import subtitles.tools.translate.batch as batch
+    from subtitles.tools.embedded_ocr import ocr_codec
+
+    session = ocr_library[0]
+    session.execute(sa.update(TableMovies).values(subtitles=str([["hu", None, None]])))
+    session.commit()
+    monkeypatch.setattr(batch, "embedded_subtitle_tracks", lambda *a, **k: [
+        {"format": "PGS", "language": "hun", "forced": False, "hearing_impaired": False}])
+
+    assert ocr_codec(_track(language="hu"), None) == "pgs"
 

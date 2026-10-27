@@ -253,8 +253,12 @@ const WantedMoviesView: FunctionComponent = () => {
       langOptions={langOptions}
       missingLangOptions={langOptions}
       dataFilter={hasActiveFilter ? dataFilter : undefined}
-      searchAll={() => mutateAsync({ action: "search-wanted" })}
-      scanAll={() => mutateAsync({ action: "scan-wanted" })}
+      searchAll={async () => {
+        await mutateAsync({ action: "search-wanted" });
+      }}
+      scanAll={async () => {
+        await mutateAsync({ action: "scan-wanted" });
+      }}
       getWantedItem={getWantedItem}
     />
   );

@@ -21,9 +21,17 @@ def normalize_codec(value):
     return value or None
 
 
-def embedded_entry(language, codec):
-    """The stored entry for an in-container track."""
-    return [language, None, None, normalize_codec(codec)]
+def embedded_entry(language, codec, title=None):
+    """The stored entry for an in-container track.
+
+    The title is a trailing fifth field, present only when the file names the
+    track, so entries of untitled and older tracks keep their four fields.
+    """
+    entry = [language, None, None, normalize_codec(codec)]
+    value = str(title).strip() if title else ""
+    if value:
+        entry.append(value)
+    return entry
 
 
 def entry_codec(entry):
@@ -35,3 +43,23 @@ def entry_codec(entry):
     if not isinstance(entry, (list, tuple)) or len(entry) < 4 or entry[1]:
         return None
     return normalize_codec(entry[3])
+
+
+def entry_predates_codecs(entry):
+    """Whether an embedded entry was stored before codecs were.
+
+    True for the three element ``[language, None, None]`` an old index left,
+    which a new scan replaces with a four element entry. False for an entry
+    that carries the codec field even when it holds None: knowit could not name
+    that track, and scanning again does not change it. False for an external
+    file, whose third field is its size.
+    """
+    return isinstance(entry, (list, tuple)) and len(entry) == 3 and not entry[1]
+
+
+def entry_title(entry):
+    """The embedded track's own title, or None for an external or older entry."""
+    if not isinstance(entry, (list, tuple)) or len(entry) < 5 or entry[1]:
+        return None
+    value = entry[4]
+    return str(value).strip() or None if value else None

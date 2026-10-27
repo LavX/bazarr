@@ -68,9 +68,6 @@ def test_vobsub_and_an_episode(endpoint):
      "Extract to file writes it as an SRT."),
     ([["en", None, None, "dvbsub"]], "dvbsub",
      "OCR reads PGS and VobSub tracks only, and this English track is DVB. Extract to file copies it out as it is."),
-    ([["en", None, None]], None,
-     "OCR reads PGS and VobSub tracks only, and Bazarr+ does not know the format of this English track yet. "
-     "Scan the disk on this title, then try again."),
 ])
 def test_dvb_unknown_and_text_tracks_answer_415_naming_the_codec(endpoint, stored, codec, message):
     call, queued, _root, session = endpoint
@@ -178,3 +175,15 @@ def test_the_pack_folder_setting_saves_and_reads_back(monkeypatch):
         assert config.get_settings()["ocr"]["tessdata_dir"] == "/srv/tessdata"
     finally:
         config.settings.ocr.tessdata_dir = before
+
+def test_an_old_row_is_probed_and_queues_ocr(endpoint):
+    """A row without a stored codec asks the video and queues instead of 415."""
+    call, queued, _root, session = endpoint
+    session.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(
+        subtitles=str([["en", None, None]])))
+
+    body, status = call(codec=None)
+
+    assert status == 202 and body["path"].endswith("Film.en.srt")
+    assert queued[0][1]["codec"] == "pgs"
+

@@ -137,3 +137,49 @@ def test_reindexed_row_reaches_the_api_with_its_codec(library, monkeypatch):
                    for s in utils.postprocess({"radarrId": 30, "subtitles": current})["subtitles"]}
 
     assert by_language == {"en": "subrip", "en:hi": "pgs", "fr:forced": "vobsub", "de": None}
+
+def test_the_embedded_track_title_reaches_the_api(library, monkeypatch):
+    from api import utils
+    from app.database import TableMovies
+
+    mv, _se, session, video = library
+    monkeypatch.setattr(utils.settings.general, "embedded_subs_show_desired", False)
+    monkeypatch.setattr(utils.path_mappings, "path_replace_movie", lambda path: path)
+    monkeypatch.setattr(mv, "embedded_subs_reader",
+                        lambda *a, **kw: [["eng", False, True, "PGS", "English SDH"]])
+
+    mv.store_subtitles_movie("/movies/movie.mkv", video, arr_instance_id=None)
+    session.expire_all()
+    current = session.execute(sa.select(TableMovies.subtitles)).scalar_one()
+    rows = utils.postprocess({"radarrId": 30, "subtitles": current})["subtitles"]
+
+    assert rows[0]["title"] == "English SDH"
+    assert rows[0]["hi"] is True and rows[0]["codec"] == "pgs"
+
+
+
+def test_only_an_entry_stored_before_codecs_is_flagged_codec_pending(library, monkeypatch):
+    """The page scans a title for the flag, never for a codec that is null on a current entry."""
+    from api import utils
+    from subtitles.indexer.entries import entry_predates_codecs
+
+    monkeypatch.setattr(utils.settings.general, "embedded_subs_show_desired", False)
+    monkeypatch.setattr(utils.path_mappings, "path_replace_movie", lambda path: path)
+    stored = str([["en", None, None], ["de", None, None, None], ["fr", None, None, "pgs"],
+                  ["en:hi", "/movies/movie.en.hi.srt", 1234]])
+
+    rows = utils.postprocess({"radarrId": 30, "subtitles": stored})["subtitles"]
+
+    assert {row["language"]: row.get("codec_pending", False) for row in rows} == {
+        "en": True, "de": False, "fr": False, "en:hi": False}
+    assert not entry_predates_codecs(None) and not entry_predates_codecs("en")
+
+
+def test_the_flag_is_part_of_the_api_model():
+    from flask_restx import fields, marshal
+
+    from api.swaggerui import subtitles_model
+
+    assert marshal({"code2": "en"}, subtitles_model)["codec_pending"] is False
+    assert marshal({"code2": "en", "codec_pending": True}, subtitles_model)["codec_pending"] is True
+    assert isinstance(subtitles_model["codec_pending"], fields.Boolean)

@@ -79,7 +79,11 @@ class MovieApi extends BaseApi {
   }
 
   async action(action: FormType.MoviesAction) {
-    await this.patch("", action);
+    const response = await this.patch<{ job_id: number | null } | undefined>(
+      "",
+      action,
+    );
+    return response.data;
   }
 
   async downloadSubtitles(

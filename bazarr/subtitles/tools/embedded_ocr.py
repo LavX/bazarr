@@ -81,6 +81,31 @@ def stored_codecs(track):
             and entry[0] == track.language_code]
 
 
+def probed_codecs(track):
+    """The codecs the video's own tracks report for this language and variant.
+
+    A row indexed before codecs were stored lists ``None``. Probing here keeps
+    OCR and OCR-first translation working without a manual Scan Disk, while a
+    language absent from the row (a hidden track) still returns [].
+    """
+    from languages.get_languages import alpha3_from_alpha2
+    from subtitles.tools.translate.batch import embedded_subtitle_tracks
+    from utilities.video_analyzer import _title_is_forced
+
+    tracks = embedded_subtitle_tracks(track.video_path, track.media_type, track.arr_instance_id) or []
+    # The probe reports the base language; the row key may carry :hi or :forced.
+    wanted = {track.language, alpha3_from_alpha2(track.language)}
+    matches = []
+    for item in tracks:
+        name = (item.get("name") or "").lower()
+        forced = bool(item.get("forced")) or _title_is_forced(name)
+        hi = bool(item.get("hearing_impaired"))
+        if (item.get("language") in wanted and forced == track.forced and hi == track.hi
+                and item.get("format")):
+            matches.append(normalize_codec(item.get("format")))
+    return matches
+
+
 def ocr_codec(track, requested=None):
     """The stored codec of the track OCR reads for ``track``.
 
@@ -90,6 +115,10 @@ def ocr_codec(track, requested=None):
     when the track is not PGS or VobSub, naming what it is.
     """
     codecs = stored_codecs(track)
+    if codecs and all(codec is None for codec in codecs):
+        # The row knows the track but predates codec storage; the video itself
+        # can still say what it is.
+        codecs = probed_codecs(track) or codecs
     requested = normalize_codec(requested)
     if not codecs or (requested is not None and requested not in codecs):
         kind = f" {codec_label(requested)}" if requested else ""

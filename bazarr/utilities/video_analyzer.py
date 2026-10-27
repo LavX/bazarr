@@ -151,7 +151,11 @@ def embedded_subtitles_from_metadata(data):
             forced = detected_language.get("forced", False) or _title_is_forced(name)
             hearing_impaired = detected_language.get("hearing_impaired", False)
             codec = detected_language.get("format")  # or None
-            subtitles_list.append([language, forced, hearing_impaired, codec])
+            title = (detected_language.get("name") or "").strip() or None
+            entry = [language, forced, hearing_impaired, codec]
+            if title:
+                entry.append(title)
+            subtitles_list.append(entry)
 
     return subtitles_list
 
