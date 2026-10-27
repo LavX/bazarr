@@ -238,6 +238,18 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             Hide Embedded Subtitles for languages that are not currently
             desired.
           </Message>
+          <Text
+            label="OCR Language Packs Folder"
+            placeholder="tessdata in the config folder"
+            settingKey="settings-ocr-tessdata_dir"
+          ></Text>
+          <Message>
+            OCR to text downloads the Tesseract language pack it needs into this
+            folder the first time it reads a language. Leave it empty to use the
+            tessdata folder in the config folder. Without internet access, put
+            the pack (for example hun.traineddata from tessdata_fast 4.1.0) here
+            yourself.
+          </Message>
         </CollapseBox>
       </Section>
       <Section header="Whisper As Fallback">

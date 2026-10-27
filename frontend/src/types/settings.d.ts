@@ -16,6 +16,7 @@ interface Settings {
   sportarr: Settings.Sportarr;
   backup: Settings.Backup;
   translator: Settings.Translator;
+  ocr?: Settings.Ocr;
   plex?: Settings.Plex;
   // Anitcaptcha
   anticaptcha: Settings.Anticaptcha;
@@ -35,6 +36,11 @@ interface Settings {
 }
 
 declare namespace Settings {
+  interface Ocr {
+    /** Where OCR language packs are kept; empty means {config}/tessdata. */
+    tessdata_dir: string;
+  }
+
   interface General {
     metadata_language?: string;
     adaptive_searching: boolean;

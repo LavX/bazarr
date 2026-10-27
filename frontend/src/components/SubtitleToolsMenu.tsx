@@ -7,6 +7,7 @@ import {
   ScrollArea,
   Stack,
   Text,
+  Tooltip,
 } from "@mantine/core";
 import {
   faAlignJustify,
@@ -28,6 +29,7 @@ import {
   faPlay,
   faRotateRight,
   faSearch,
+  faSpellCheck,
   faTextHeight,
   faTrash,
   IconDefinition,
@@ -35,6 +37,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useEmbeddedTrackExtract,
+  useEmbeddedTrackOcr,
   useSubtitleAction,
   useTranslationAvailability,
   useTranslationRefusal,
@@ -46,7 +49,11 @@ import { TranslationModal } from "@/components/forms/TranslationForm";
 import { useModals } from "@/modules/modals";
 import { ModalComponent } from "@/modules/modals/WithModal";
 import { toPython } from "@/utilities";
-import { isBitmapCodec, subtitleCodecLabel } from "@/utilities/subtitles";
+import {
+  isBitmapCodec,
+  isOcrCodec,
+  subtitleCodecLabel,
+} from "@/utilities/subtitles";
 import { SyncSubtitleModal } from "./forms/SyncSubtitleForm";
 import { TwoPointFitModal } from "./forms/TwoPointFit";
 
@@ -84,8 +91,15 @@ export function embeddedMenuMode(
 }
 
 export function bitmapTrackNote(codec: string | null | undefined): string {
-  return `Image-based track (${subtitleCodecLabel(codec) ?? "bitmap"}): the tools, View, Edit and Download need text. Extract to file copies it out as it is, for players.`;
+  const label = subtitleCodecLabel(codec) ?? "bitmap";
+  if (isOcrCodec(codec)) {
+    return `Image-based track (${label}): the tools, Translate, View, Edit and Download need text. OCR to text reads it into an SRT; Extract to file copies it out as it is, for players.`;
+  }
+  return `Image-based track (${label}): the tools, Translate, View, Edit and Download need text, and OCR cannot read ${label} tracks. Extract to file copies it out as it is, for players.`;
 }
+
+export const OCR_TOOLTIP =
+  "Reads the image subtitles with Tesseract and writes an SRT next to the video. Italics are not preserved.";
 
 export function useToolGroups() {
   return useMemo<ToolGroup[]>(
@@ -252,6 +266,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
 }) => {
   const { mutate, mutateAsync } = useSubtitleAction();
   const extract = useEmbeddedTrackExtract();
+  const ocr = useEmbeddedTrackOcr();
   // An embedded row's codec travels with every action on it: two text tracks
   // of one language with different codecs are two rows, and the backend picks
   // the track by it.
@@ -377,6 +392,23 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
         ))}
         <Divider></Divider>
         <Menu.Label>Actions</Menu.Label>
+        {embeddedMode === "bitmap" && isOcrCodec(embeddedTrack?.codec) && (
+          // No confirmation: the job in Jobs is the feedback.
+          <Tooltip label={OCR_TOOLTIP} position="left" multiline w={260}>
+            <Menu.Item
+              disabled={selections.length === 0}
+              leftSection={<FontAwesomeIcon icon={faSpellCheck} />}
+              onClick={() => {
+                ocr.mutate({
+                  ...selections[0],
+                  codec: embeddedTrack?.codec ?? undefined,
+                });
+              }}
+            >
+              OCR to text...
+            </Menu.Item>
+          </Tooltip>
+        )}
         {isEmbedded && (
           <Menu.Item
             disabled={selections.length === 0}
@@ -393,17 +425,25 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
         {/* Translate from source, for missing subtitles */}
         {isMissing && hasSources && (
           <>
-            {translationSources!.map((source) => {
+            {translationSources!.map((source, index) => {
               const sourceIsEmbedded = !source.path;
-              // Use language code as key for embedded tracks (no path)
-              const itemKey = `translate-${sourceIsEmbedded ? `embedded:${source.code2}` : source.path}`;
-              const label = sourceIsEmbedded
-                ? `Translate from ${source.name || source.code2} (embedded)`
-                : `Translate from ${source.name || source.code2}${source.hi ? " (HI)" : ""}`;
+              // An image-based track has no text to translate until it has
+              // been read with OCR (or, for DVB, not at all).
+              const sourceIsImage =
+                sourceIsEmbedded && isBitmapCodec(source.codec);
+              // Use language code as key for embedded tracks (no path). The
+              // index keeps two tracks of one language apart: an SRT and a
+              // PGS English track share the code.
+              const itemKey = `translate-${sourceIsEmbedded ? `embedded:${source.code2}:${index}` : source.path}`;
+              const label = sourceIsImage
+                ? `Translate from ${source.name || source.code2} (embedded ${subtitleCodecLabel(source.codec)}, ${isOcrCodec(source.codec) ? "OCR it first" : "no text"})`
+                : sourceIsEmbedded
+                  ? `Translate from ${source.name || source.code2} (embedded)`
+                  : `Translate from ${source.name || source.code2}${source.hi ? " (HI)" : ""}`;
               return (
                 <Menu.Item
                   key={itemKey}
-                  disabled={!translation.available}
+                  disabled={sourceIsImage || !translation.available}
                   leftSection={<FontAwesomeIcon icon={faLanguage} />}
                   onClick={async () => {
                     try {

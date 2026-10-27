@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import logging
+from contextlib import nullcontext
 from flask_restx import Resource, Namespace, fields
 from sqlalchemy import and_, or_, func
 
@@ -27,6 +28,7 @@ ACTION_LABELS = {
     'search-missing': 'Searching Missing Subtitles',
     'upgrade': 'Upgrading Subtitles',
     'extract': 'Extracting Embedded Tracks',
+    'ocr': 'Reading Image Subtitles with OCR',
 }
 
 logger = logging.getLogger(__name__)
@@ -142,17 +144,28 @@ class BatchOperation(Resource):
         label = ACTION_LABELS.get(action, f'Batch {action}')
         job_name = f"{label} ({len(items)} items)"
 
-        job_id = jobs_queue.feed_jobs_pending_queue(
-            job_name=job_name,
-            module='subtitles.mass_operations',
-            func='mass_batch_operation',
-            kwargs={
-                'items': items,
-                'action': action,
-                'options': options,
-            },
-            is_progress=True,
-        )
+        # One OCR job at a time, this request's own included: the check and
+        # the queueing are one step, so two requests cannot both find the
+        # queue empty and queue two runs where one slot exists.
+        queue_lock = nullcontext()
+        if action == 'ocr':
+            from subtitles.tools.embedded_ocr import BUSY, ocr_job_waiting_or_running, ocr_queue_lock
+
+            queue_lock = ocr_queue_lock()
+        with queue_lock:
+            if action == 'ocr' and ocr_job_waiting_or_running():
+                return {'error': BUSY}, 409
+            job_id = jobs_queue.feed_jobs_pending_queue(
+                job_name=job_name,
+                module='subtitles.mass_operations',
+                func='mass_batch_operation',
+                kwargs={
+                    'items': items,
+                    'action': action,
+                    'options': options,
+                },
+                is_progress=True,
+            )
 
         return {'queued': len(items), 'skipped': skipped, 'errors': errors, 'job_id': job_id}, 200
 

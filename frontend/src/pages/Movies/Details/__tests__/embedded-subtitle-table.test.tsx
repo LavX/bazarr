@@ -322,7 +322,7 @@ describe("Movies Detail Table, external subtitle path display", () => {
 // ---------------------------------------------------------------------------
 
 describe("Movies Detail Table, bitmap row", () => {
-  it("offers Extract to file only on a bitmap row", async () => {
+  it("offers OCR to text and Extract to file only on a bitmap row", async () => {
     /**
      * Why: A PGS or VobSub track has no text, so a tool or a translation on it
      * used to fail after the click (a 400 toast). The row knows its codec now,
@@ -352,12 +352,13 @@ describe("Movies Detail Table, bitmap row", () => {
 
     expect(
       await screen.findByText(
-        "Image-based track (PGS): the tools, View, Edit and Download need text. Extract to file copies it out as it is, for players.",
+        "Image-based track (PGS): the tools, Translate, View, Edit and Download need text. OCR to text reads it into an SRT; Extract to file copies it out as it is, for players.",
       ),
     ).toBeInTheDocument();
     // Items are looked up whether or not the dropdown is still visible.
     const item = (name: string) =>
       screen.getByRole("menuitem", { name, hidden: true });
+    expect(item("OCR to text...")).toBeEnabled();
     expect(item("Extract to file")).toBeEnabled();
     for (const name of [
       "Sync...",

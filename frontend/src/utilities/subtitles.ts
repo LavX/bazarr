@@ -303,6 +303,25 @@ export const BITMAP_SUBTITLE_CODECS = [
   "dvd",
 ] as const;
 
+// Mirrors OCR_CODECS in bazarr/subtitles/tools/embedded_streams.py: the
+// image-based codecs OCR to text reads. DVB is left out on purpose.
+export const OCR_SUBTITLE_CODECS = [
+  "pgs",
+  "hdmv_pgs_subtitle",
+  "vobsub",
+  "dvd_subtitle",
+  "dvd",
+] as const;
+
+export function isOcrCodec(codec: string | null | undefined): boolean {
+  if (!codec) {
+    return false;
+  }
+  return (OCR_SUBTITLE_CODECS as readonly string[]).includes(
+    codec.toLowerCase(),
+  );
+}
+
 const subtitleCodecLabels: Record<string, string> = {
   pgs: "PGS",
   vobsub: "VobSub",

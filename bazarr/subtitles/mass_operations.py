@@ -1,13 +1,15 @@
 # coding=utf-8
 
 import ast
+import json
 import logging
 import os
 
 from app.config import settings
 from app.event_handler import event_stream
-from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableHistory, TableHistoryMovie,
-                          TableHistorySports, TableShows, TableSportsEvents, database, select)
+from app.database import (TableArrInstances, TableEpisodes, TableLanguagesProfiles, TableMovies, TableHistory,
+                          TableHistoryMovie, TableHistorySports, TableShows, TableSportsEvents, TableSportsLeagues,
+                          database, get_audio_profile_languages, select)
 from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 from subtitles.sync import sync_subtitles
 from subtitles.tools.subsync_engines import is_sync_engine_output
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 VALID_ACTIONS = {
     'sync', 'translate', 'OCR_fixes', 'common', 'remove_HI',
     'remove_tags', 'fix_uppercase', 'reverse_rtl', 'emoji',
-    'scan-disk', 'search-missing', 'upgrade', 'extract',
+    'scan-disk', 'search-missing', 'upgrade', 'extract', 'ocr',
 }
 
 MEDIA_ACTIONS = {'scan-disk', 'search-missing', 'upgrade'}
@@ -134,6 +136,109 @@ def _extract_items(subtitles_raw, video_path, ids):
     return items, skipped
 
 
+def _profile_wants():
+    """Language profile id -> the subtitles it wants, as ``(language, hi, forced)`` keys.
+
+    One key per profile item, the way the wanted list names it: forced wins
+    over HI, and an item that is neither wants plain subtitles. The item's
+    audio rules go along, so the collectors can apply them like the wanted
+    list does: ``audio_exclude`` drops the item when the title's audio matches
+    it, ``audio_only_include`` when it does not.
+    """
+    wants = {}
+    for profile_id, items in database.execute(
+            select(TableLanguagesProfiles.profileId, TableLanguagesProfiles.items)).all():
+        try:
+            wants[profile_id] = [
+                (item['language'],
+                 item.get('hi') == 'True' and item.get('forced') != 'True',
+                 item.get('forced') == 'True',
+                 item.get('audio_exclude') == 'True',
+                 item.get('audio_only_include') == 'True')
+                for item in json.loads(items or '[]')]
+        except (ValueError, TypeError, KeyError, AttributeError):
+            wants[profile_id] = []
+    return wants
+
+
+def _audio_codes(audio_language):
+    """The title's audio languages as alpha-2 codes, for a profile item's audio rules."""
+    if not audio_language:
+        return set()
+    return {language['code2'] for language in get_audio_profile_languages(audio_language)
+            if language.get('code2')}
+
+
+def _wanted_for_audio(wanted, audio):
+    """The wants the profile's audio rules leave for a title with ``audio``.
+
+    ``wanted`` items are the shape ``_profile_wants()`` returns, or bare
+    ``(language, hi, forced)`` keys (which carry no audio restriction).
+    """
+    allowed = []
+    for want in wanted:
+        language, hi, forced = want[:3]
+        audio_exclude = len(want) > 3 and want[3]
+        audio_only_include = len(want) > 4 and want[4]
+        matches = language in audio
+        if audio_exclude and matches:
+            continue
+        if audio_only_include and not matches:
+            continue
+        allowed.append((language, hi, forced))
+    return allowed
+
+
+def _ocr_sources(subtitles_raw, wanted, audio=()):
+    """The image tracks a mass OCR reads, and how many wanted subtitles it leaves.
+
+    Read from the stored listing, which never holds a track the user hid. For
+    each subtitle the title's profile wants (``wanted``, ``_profile_wants()``
+    keys, filtered through the item's audio rules against ``audio``), one PGS
+    or VobSub track of exactly that variant is read, unless the variant has a
+    subtitle file or an embedded text track already (Extract to file gives
+    that text in seconds). A combined subtitle or a generated sync output is
+    not that subtitle and covers nothing. As for wanted subtitles, an HI subtitle also fills
+    a want for plain ones: a plain want is covered by either, and reads the HI
+    image track when the title has no plain one. A DVB track or one of unknown
+    format is never read. Returns ``([(language key, codec)], skipped)``, the
+    tracks in listing order.
+    """
+    from subtitles.tools.embedded_streams import is_bitmap_codec, is_ocr_codec
+
+    entries = _parse_subtitles_column(subtitles_raw, include_embedded=True, with_codec=True)
+    covered = {_subtitle_variant_key(lang) for lang, path, codec in entries
+               if (path and not _is_generated_artifact(lang, path))
+               or (codec is not None and not is_bitmap_codec(codec))}
+    images = {}
+    for lang, path, codec in entries:
+        if not path and is_ocr_codec(codec):
+            images.setdefault(_subtitle_variant_key(lang), (lang, codec))
+    chosen, skipped = set(), 0
+    for language, hi, forced in _wanted_for_audio(wanted, audio):
+        keys = [(language, hi, forced)] + ([(language, True, False)] if not hi and not forced else [])
+        readable = [key for key in keys if key in images]
+        if not readable:
+            continue
+        if any(key in covered for key in keys):
+            skipped += 1
+            continue
+        chosen.add(readable[0])
+    return [source for key, source in images.items() if key in chosen], skipped
+
+
+def _ocr_items(subtitles_raw, video_path, ids, wanted, audio=()):
+    """Mass OCR items for one media row; ``ids`` are the item's id fields."""
+    sources, skipped = _ocr_sources(subtitles_raw, wanted, audio=audio)
+    items = []
+    for lang, codec in sources:
+        base, hi, forced = _subtitle_variant_key(lang)
+        items.append({'video_path': video_path, 'srt_path': None, 'srt_lang': base, 'embedded': True,
+                      'hi': hi, 'forced': forced, 'codec': codec, 'sonarr_series_id': None,
+                      'sonarr_episode_id': None, 'radarr_id': None, **ids})
+    return items, skipped
+
+
 def _subtitle_variant_key(lang_string):
     """The identity that decides whether two sources collide.
 
@@ -147,6 +252,18 @@ def _subtitle_variant_key(lang_string):
     parts = lang_string.split(':')
     modifiers = {part.lower() for part in parts[1:]}
     return parts[0], 'hi' in modifiers, 'forced' in modifiers
+
+
+def _is_generated_artifact(lang_string, path):
+    """Whether a path-bearing entry is a combined subtitle or a sync engine output.
+
+    Neither is a subtitle the user asked for, so neither can stand in for an
+    embedded track: a source choice or a coverage check must not count them.
+    """
+    modifiers = [part.lower() for part in lang_string.split(':')[1:]]
+    if any(modifier.startswith('combined-') for modifier in modifiers):
+        return True
+    return is_sync_engine_output(path)
 
 
 def _usable_as_translate_source(lang_string, path):
@@ -163,10 +280,7 @@ def _usable_as_translate_source(lang_string, path):
     _base, _hi, forced = _subtitle_variant_key(lang_string)
     if forced:
         return False
-    modifiers = [part.lower() for part in lang_string.split(':')[1:]]
-    if any(modifier.startswith('combined-') for modifier in modifiers):
-        return False
-    return not is_sync_engine_output(path)
+    return not _is_generated_artifact(lang_string, path)
 
 
 def _translate_output_present(subtitles, target_lang, hi, usable):
@@ -480,6 +594,14 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
             TableShows.tvdbId,
         ])
         query = select(*columns).join(TableShows)
+    elif action == 'ocr':
+        # The series' language profile says which languages to read, and the
+        # episode's audio languages which of its items the audio rules leave.
+        # Outer join, so an episode whose show row is missing is still
+        # collected (and, wanting nothing, read for nothing).
+        columns.extend([TableShows.profileId, TableEpisodes.audio_language])
+        query = select(*columns).join(
+            TableShows, TableEpisodes.series_id == TableShows.id, isouter=True)
     else:
         query = select(*columns)
 
@@ -492,6 +614,7 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
         query = query.where(or_(*filters))
 
     episodes = database.execute(query).all()
+    wanted = _profile_wants() if action == 'ocr' else {}
 
     synced_paths = set()
     if action == 'sync' and not force_resync:
@@ -525,6 +648,16 @@ def _collect_episodes(series_ids=None, episode_ids=None, action='sync',
                 'arr_instance_id': ep.arr_instance_id})
             items.extend(extract_items)
             skipped += extract_skipped
+            continue
+
+        if action == 'ocr':
+            ocr_items, ocr_skipped = _ocr_items(
+                ep.subtitles, video_path,
+                {'sonarr_series_id': ep.sonarrSeriesId, 'sonarr_episode_id': ep.sonarrEpisodeId,
+                 'arr_instance_id': ep.arr_instance_id},
+                wanted.get(ep.profileId, []), audio=_audio_codes(ep.audio_language))
+            items.extend(ocr_items)
+            skipped += ocr_skipped
             continue
 
         if want_embedded:
@@ -657,12 +790,17 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
             TableMovies.imdbId,
             TableMovies.tmdbId,
         ])
+    elif action == 'ocr':
+        # The movie's language profile says which languages to read, and its
+        # audio languages which of its items the audio rules leave.
+        columns.extend([TableMovies.profileId, TableMovies.audio_language])
     query = select(*columns)
 
     if movie_ids:
         query = query.where(TableMovies.radarrId.in_(movie_ids))
 
     movies = database.execute(query).all()
+    wanted = _profile_wants() if action == 'ocr' else {}
 
     synced_paths = set()
     if action == 'sync' and not force_resync:
@@ -691,6 +829,15 @@ def _collect_movies(movie_ids=None, action='sync', force_resync=False,
                 'radarr_id': movie.radarrId, 'arr_instance_id': movie.arr_instance_id})
             items.extend(extract_items)
             skipped += extract_skipped
+            continue
+
+        if action == 'ocr':
+            ocr_items, ocr_skipped = _ocr_items(
+                movie.subtitles, video_path,
+                {'radarr_id': movie.radarrId, 'arr_instance_id': movie.arr_instance_id},
+                wanted.get(movie.profileId, []), audio=_audio_codes(movie.audio_language))
+            items.extend(ocr_items)
+            skipped += ocr_skipped
             continue
 
         if want_embedded:
@@ -837,10 +984,16 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
         .join(TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id)
         .where(TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
     )
+    if action == 'ocr':
+        # The league's language profile says which languages to read.
+        query = query.add_columns(TableSportsLeagues.profileId, TableSportsEvents.audio_language).join(
+            TableSportsLeagues, (TableSportsEvents.league_id == TableSportsLeagues.id)
+            & (TableSportsEvents.arr_instance_id == TableSportsLeagues.arr_instance_id), isouter=True)
     if event_ids:
         query = query.where(TableSportsEvents.id.in_(event_ids))
 
     events = database.execute(query).all()
+    wanted = _profile_wants() if action == 'ocr' else {}
 
     synced_paths = set()
     if action == 'sync' and not force_resync:
@@ -867,6 +1020,15 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
                 'sports_event_id': event.id, 'arr_instance_id': event.arr_instance_id})
             items.extend(extract_items)
             skipped += extract_skipped
+            continue
+
+        if action == 'ocr':
+            ocr_items, ocr_skipped = _ocr_items(
+                event.subtitles, video_path,
+                {'sports_event_id': event.id, 'arr_instance_id': event.arr_instance_id},
+                wanted.get(event.profileId, []), audio=_audio_codes(event.audio_language))
+            items.extend(ocr_items)
+            skipped += ocr_skipped
             continue
 
         if want_embedded:
@@ -1090,15 +1252,30 @@ def _process_subtitle_item(item, action, options, job_id):
         from subtitles.new_subtitle import SubtitleFileExists
         from subtitles.tools.embedded_extract import materialise_embedded_track
 
-        if item.get('sports_event_id'):
-            media_type, media_id = 'sports', item['sports_event_id']
-        elif item['sonarr_episode_id']:
-            media_type, media_id = 'episode', item['sonarr_episode_id']
-        else:
-            media_type, media_id = 'movie', item['radarr_id']
+        media_type, media_id = _embedded_item_media(item)
         try:
             materialise_embedded_track(media_type, media_id, item['arr_instance_id'], item['srt_lang'],
                                        hi=item['hi'], forced=item['forced'], codec=item.get('codec'))
+        except SubtitleFileExists:
+            # Written since the batch was collected: the language is covered.
+            return ITEM_SKIPPED
+        return True
+    elif action == 'ocr':
+        from subtitles.new_subtitle import SubtitleFileExists
+        from subtitles.tools.embedded_ocr import ocr_embedded, progress_message
+
+        media_type, media_id = _embedded_item_media(item)
+        name = _item_display_name(item)
+
+        def progress(step, value, maximum):
+            # The batch owns the progress bar; each step names itself, and a
+            # stopped batch stops the item's run here.
+            jobs_queue.update_job_progress(
+                job_id=job_id, progress_message=f"ocr: {name}: {progress_message(step, value, maximum)}")
+
+        try:
+            ocr_embedded(media_type, media_id, item['arr_instance_id'], item['srt_lang'], hi=item['hi'],
+                         forced=item['forced'], codec=item.get('codec'), progress=progress)
         except SubtitleFileExists:
             # Written since the batch was collected: the language is covered.
             return ITEM_SKIPPED
@@ -1134,6 +1311,15 @@ def _process_subtitle_item(item, action, options, job_id):
                 logger.exception('Sports subtitles were indexed but the UI refresh failed')
         return True
     return False
+
+
+def _embedded_item_media(item):
+    """(media type, id) of an embedded-track item, as the embedded primitives take them."""
+    if item.get('sports_event_id'):
+        return 'sports', item['sports_event_id']
+    if item['sonarr_episode_id']:
+        return 'episode', item['sonarr_episode_id']
+    return 'movie', item['radarr_id']
 
 
 def _scan_sports(item, job_id=None):
@@ -1489,6 +1675,17 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
             is_progress=True,
         )
         return
+
+    if action == 'ocr':
+        from subtitles.tools.embedded_ocr import BUSY, ocr_job_waiting_or_running
+        from subtitles.tools.ocr.tesseract import UNAVAILABLE, ocr_available
+
+        if not ocr_available():
+            raise JobFailed(UNAVAILABLE, retryable=False)
+        # One OCR job at a time, this batch included: a row's OCR to text or
+        # another batch queued or running first keeps this one from starting.
+        if ocr_job_waiting_or_running(exclude=job_id):
+            raise JobFailed(BUSY)
 
     # Media actions (scan-disk, search-missing) work on media items directly
     if action in MEDIA_ACTIONS:

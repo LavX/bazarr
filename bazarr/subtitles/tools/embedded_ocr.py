@@ -199,6 +199,20 @@ def one_run_at_a_time():
         _RUN_SLOT.release()
 
 
+# Serialises looking for a queued OCR job with queueing another one. Two
+# requests (or a request and a mass OCR) that both read an empty queue would
+# otherwise both queue a job, and the queue would hold two OCR runs where one
+# slot exists.
+_ENQUEUE_LOCK = threading.Lock()
+
+
+@contextmanager
+def ocr_queue_lock():
+    """Hold the lock that makes the one-OCR check and the queueing one step."""
+    with _ENQUEUE_LOCK:
+        yield
+
+
 def refuse_unwritable_folder(folder):
     """Raise ExtractionError when a new file cannot be created in ``folder``.
 

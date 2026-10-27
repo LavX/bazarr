@@ -23,6 +23,7 @@ import {
   faLanguage,
   faLayerGroup,
   faMagnifyingGlass,
+  faSpellCheck,
   faSync,
   faToolbox,
   faUndo,
@@ -452,6 +453,19 @@ const MovieView: FunctionComponent = () => {
                 </Menu.Item>
                 <Menu.Item
                   leftSection={
+                    <FontAwesomeIcon icon={faSpellCheck} size="sm" />
+                  }
+                  onClick={() =>
+                    modals.openContextModal(BatchModConfirmModal, {
+                      items: [batchItem],
+                      action: "ocr" as BatchAction,
+                    })
+                  }
+                >
+                  OCR Image Subtitles
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={
                     <FontAwesomeIcon icon={faMagnifyingGlass} size="sm" />
                   }
                   onClick={() =>
@@ -593,6 +607,17 @@ const MovieView: FunctionComponent = () => {
               }
             >
               Extract Embedded Tracks
+            </Menu.Item>
+            <Menu.Item
+              leftSection={<FontAwesomeIcon icon={faSpellCheck} size="sm" />}
+              onClick={() =>
+                modals.openContextModal(BatchModConfirmModal, {
+                  items: toBatchItems(),
+                  action: "ocr" as BatchAction,
+                })
+              }
+            >
+              OCR Image Subtitles
             </Menu.Item>
             <Menu.Item
               leftSection={
