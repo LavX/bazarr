@@ -6,6 +6,7 @@ import logging
 import unicodedata
 
 from guess_language import guess_language
+from sqlalchemy import delete
 from subliminal_patch import core
 from subzero.language import Language
 from charset_normalizer import detect
@@ -89,6 +90,47 @@ def normalize_subtitle_language_variant(language, forced=False, hi=False):
     if not normalized_variants:
         return base
     return ':'.join([base] + normalized_variants)
+
+
+def embedded_history_language(language):
+    """The language an Embedded Source history row records for a track.
+
+    Forced wins over HI here, unlike the language code a download is stored
+    under: a forced track covers only part of the dialogue, so a forced and HI
+    track must not be recorded as plain HI, where it would stand in for the
+    full-dialogue subtitles of that language.
+    """
+    base, *variants = normalize_subtitle_language_variant(language).split(':')
+    return base + (':forced' if 'forced' in variants else ':hi' if 'hi' in variants else '')
+
+
+def retract_embedded_history(session, table, video_path, uncounted, counted, arr_instance_id=None):
+    """Delete the Embedded Source rows of a video for tracks the indexer no longer counts.
+
+    A track the user hid, or that an ignore switch now skips, stops covering its
+    language, so the row that recorded it must stop ending the upgrades of that
+    language. ``uncounted`` holds the history languages of such tracks seen on
+    this pass and ``counted`` the track keys it did list: a language another
+    counted track still covers keeps its row. A track that is merely gone from
+    the container is never retracted, since another tool may have copied it out
+    next to the video and the row is the only trace of that. The index on
+    (video_path, language) serves the delete.
+
+    Never raises, so indexing goes on if the delete fails: the row then ends
+    upgrades a little longer.
+    """
+    try:
+        languages = sorted(set(uncounted or ()) - {embedded_history_language(key) for key in counted or ()})
+        if not languages or not video_path:
+            return 0
+        statement = delete(table).where(table.action == 7, table.video_path == video_path,
+                                        table.language.in_(languages))
+        if arr_instance_id is not None:
+            statement = statement.where(table.arr_instance_id == arr_instance_id)
+        return session.execute(statement).rowcount or 0
+    except Exception:
+        logging.exception("BAZARR error retracting embedded subtitle history for %s", video_path)
+        return 0
 
 
 def kept_embedded_entries(stored, hidden=()):

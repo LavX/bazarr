@@ -21,6 +21,7 @@ from app.event_handler import event_stream
 from subtitles.indexer.entries import embedded_entry
 from subtitles.indexer.utils import add_sync_engine_outputs, add_combined_outputs, guess_external_subtitles, \
     get_external_subtitles_path, kept_embedded_entries, normalize_subtitle_language_variant, \
+    embedded_history_language, retract_embedded_history, \
     subtitle_language_with_sync_modifier, subtitle_language_with_combined_modifier
 from subtitles.processing import ProcessSubtitlesResult
 from subtitles.utils import _get_scores
@@ -62,6 +63,9 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
     # Languages of embedded subtitle tracks detected on this pass. Used after
     # indexing to record a source-quality history entry (action=7) per language.
     embedded_languages = []
+    # Languages of tracks the file holds but the indexer does not count (hidden,
+    # or skipped by an ignore switch), as their Embedded Source rows record them.
+    uncounted_embedded = set()
     if os.path.exists(reversed_path):
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
@@ -92,6 +96,12 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                                           (settings.general.ignore_vobsub_subs and codec == "vobsub") or
                                           (settings.general.ignore_ass_subs and codec == "ass")):
                                 logging.debug("BAZARR skipping %s sub for language: %s" % (subtitle_codec, alpha2_from_alpha3(subtitle_language)))  # noqa: G002
+                                if alpha2_from_alpha3(subtitle_language) is not None:
+                                    uncounted_embedded.add(embedded_history_language(
+                                        normalize_subtitle_language_variant(
+                                            alpha2_from_alpha3(subtitle_language),
+                                            forced=subtitle_forced,
+                                            hi=subtitle_hi)))
                                 continue
 
                             if alpha2_from_alpha3(subtitle_language) is not None:
@@ -101,6 +111,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                                     hi=subtitle_hi)
                                 if lang in hidden:
                                     logging.debug("BAZARR skipping hidden embedded subtitles: %s", lang)
+                                    uncounted_embedded.add(embedded_history_language(lang))
                                     continue
                                 logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
                                 actual_subtitles.append(embedded_entry(lang, subtitle_codec))
@@ -117,6 +128,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                     # They were recorded in history then, so not again now.
                     actual_subtitles = kept_embedded_entries(item.subtitles, hidden)
                     embedded_languages = []
+                    uncounted_embedded = set()
 
         destination = os.path.join(get_target_folder(reversed_path, create=False) or os.path.dirname(reversed_path),
                                    '.destination')
@@ -216,6 +228,8 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                 # (no-op for the default/single-instance path).
                 list_missing_subtitles_movies(no=movie.radarrId,
                                               arr_instance_id=movie.arr_instance_id)
+                retract_embedded_history(database, TableHistoryMovie, original_path, uncounted_embedded,
+                                         embedded_languages, movie.arr_instance_id)
                 if embedded_languages:
                     # Pass the DB-side path (original_path), not the local
                     # filesystem path. history_log_movie stores result.path
@@ -251,19 +265,19 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path, ar
         _, score_out_of, _ = _get_scores('movie')
 
         for lang in embedded_languages:
-            lang = normalize_subtitle_language_variant(lang)
-            # Reduce the (possibly multi-variant, e.g. "en:hi:forced") normalized
-            # value to the canonical hi-priority code that ProcessSubtitlesResult
-            # actually stores, and use it for BOTH the dedup lookup and the written
-            # row so a forced+hi track matches an existing "en:hi" entry instead of
-            # creating a duplicate with a divergent "en:forced" code.
-            parts = lang.split(':')
-            base = parts[0]
-            variants = set(parts[1:])
+            # Forced wins over HI in the recorded code (see
+            # embedded_history_language): a forced and HI track must not be
+            # recorded as plain HI. The same code serves the dedup lookup and the
+            # written row, so a re-index finds the row it wrote.
+            canonical = embedded_history_language(lang)
+            base, *variants = canonical.split(':')
             is_hi = 'hi' in variants
             is_forced = 'forced' in variants
-            canonical = base + (':hi' if is_hi else ':forced' if is_forced else '')
-            # Dedup: skip if we already logged action=7 for this movie+language.
+            # Dedup: skip if we already logged action=7 for this movie+language
+            # of this video file. The path is part of the key because the upgrade
+            # check matches an Embedded Source row to a download by video path: a
+            # video replaced at a new path needs a row of its own, and the old
+            # path's row says nothing about the new file.
             # Not atomic under AUTOCOMMIT. Concurrent indexing of the same movie
             # could produce duplicates, but this is rare in practice and consistent
             # with how other parts of Bazarr dedup history entries.
@@ -275,6 +289,7 @@ def _log_embedded_history_movie(radarr_id, embedded_languages, reversed_path, ar
                     select(TableHistoryMovie.id)
                     .where(TableHistoryMovie.radarrId == radarr_id)
                     .where(TableHistoryMovie.language == canonical)
+                    .where(TableHistoryMovie.video_path == reversed_path)
                     .where(TableHistoryMovie.action == 7),
                     TableHistoryMovie.arr_instance_id, arr_instance_id)).first()
             if existing:

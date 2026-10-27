@@ -97,6 +97,7 @@ def upgrade_db(request, monkeypatch):
     settings = SimpleNamespace(
         general=SimpleNamespace(
             days_to_upgrade_subs=365,
+            use_embedded_subs=True,
             upgrade_manual=False,
             # The reader opted in to replacing translations with real subtitles.
             upgrade_translated=True,
