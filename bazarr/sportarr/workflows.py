@@ -64,6 +64,21 @@ class SportsJobSignal:
             return True
         return not self._owner_is_enabled()
 
+    def is_stop_requested(self):
+        """``is_set`` for a caller that asks several times a second: it reads, and publishes nothing.
+
+        ``is_set`` also publishes the job's progress, which the waits that ask it every few seconds want
+        and a listing polling five times a second does not. The job's stop flag is read (raising
+        ``JobCancelled`` as ``is_set`` does) and the owner is read at most once per ``OWNER_CACHE_SECONDS``.
+        """
+        if self.job_id:
+            jobs_queue.raise_if_cancelled(self.job_id)
+        if self.parent is not None:
+            ask_parent = getattr(self.parent, "is_stop_requested", None) or self.parent.is_set
+            if ask_parent():
+                return True
+        return not self._owner_is_enabled()
+
     def wait(self, timeout):
         if self.parent is not None:
             self.parent.wait(timeout)

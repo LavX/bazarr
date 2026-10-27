@@ -253,8 +253,11 @@ def _reads_with_ocr(job):
     Head of line: a translation that reads an image track holds a place in the
     translation lane for its whole life. With ``translator.openrouter_max_concurrent``
     at 1 that is the only place, and the jobs queued behind it wait for its
-    OCR and its translation; the queue starts jobs strictly in order, so this
-    does not reorder them.
+    OCR and its translation. The queue starts the job at the front of pending,
+    and only two kinds of job go ahead of it: one a person started that waited
+    for a full lane of its own, once that lane has room, and one started
+    through ``force_start_pending_job`` while its lane has room. Nothing is
+    reordered for the translation's sake.
     """
     func = job.get("func")
     kwargs = job.get("kwargs") or {}

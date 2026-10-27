@@ -15,7 +15,7 @@ from threading import Thread
 from app import activity
 from app.database import TableSportsEvents, database
 from app.event_handler import event_stream
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import USER_SEARCH_LANE, jobs_queue
 
 # Same sentence the route used for a failure that carried no reason.
 DOWNLOAD_FALLBACK = "Subtitle was not published. Check the file and provider before trying again."
@@ -28,7 +28,9 @@ def queue_sports_search(event_id, language, hi, forced, arr_instance_id):
     language that is not one. What fails after this is the search itself, and
     the job says why. A person pressing Search is waiting, so the job does not
     queue behind library work, and pressing it again for the same search
-    follows the one that is running.
+    follows the one that is running. The job is not retryable: the rows go to
+    the window that asked, so a retry from the drawer would run a search nobody
+    reads. Searching again is the retry.
 
     :return: The job id.
     """
@@ -38,7 +40,8 @@ def queue_sports_search(event_id, language, hi, forced, arr_instance_id):
         job_name=f"Searching subtitles for {title}", module=__name__, func="run_sports_search_job",
         kwargs={"event_id": event_id, "language": language, "hi": hi, "forced": forced,
                 "arr_instance_id": arr_instance_id},
-        is_progress=True, progress_max=2, retryable=True, return_existing=True)
+        is_progress=True, progress_max=2, retryable=False, return_existing=True,
+        lane=USER_SEARCH_LANE)
     Thread(target=jobs_queue.force_start_pending_job, args=(job_id, True), daemon=True).start()
     return job_id
 

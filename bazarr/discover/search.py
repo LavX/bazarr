@@ -706,14 +706,16 @@ def queue_search(request: SearchRequest) -> int:
     waiting, so the job does not queue behind library work. Asking again for
     the same search while it runs follows the one that is running. The rows,
     live while the providers answer and whole at the end, are the job's result.
+    The job is not retryable: the page that asked reads the rows, so a retry
+    from the drawer would run a search nobody reads.
 
     :return: The job id.
     """
-    from app.jobs_queue import jobs_queue
+    from app.jobs_queue import USER_SEARCH_LANE, jobs_queue
     job_id = jobs_queue.feed_jobs_pending_queue(
         job_name=f"Searching subtitles for {_job_label(request.context)}", module=__name__,
         func="run_search_job", kwargs={"request": request}, is_progress=True, progress_max=1,
-        retryable=True, return_existing=True)
+        retryable=False, return_existing=True, lane=USER_SEARCH_LANE)
     Thread(target=jobs_queue.force_start_pending_job, args=(job_id, True), daemon=True).start()
     return job_id
 

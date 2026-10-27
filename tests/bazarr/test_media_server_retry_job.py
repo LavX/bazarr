@@ -125,6 +125,7 @@ def test_the_press_is_queued_started_at_once_and_followed_when_pressed_again(mon
     job = queue.jobs_pending_queue[0]
     assert job.job_name == "Retrying pending refreshes for Living room"
     assert job.retryable is True and job.is_progress is True
+    assert job.lane == "user_action"
 
 
 def test_the_route_answers_at_once_with_the_job_and_queues_nothing_when_nothing_waits(monkeypatch):

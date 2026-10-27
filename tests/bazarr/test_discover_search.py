@@ -1876,9 +1876,11 @@ def test_the_route_queues_a_job_the_user_can_follow_and_asking_again_follows_it(
     assert queued.json == {"job_id": inline_jobs.FIRST_ID + 1, "session": PROCESS_SESSION}
     job = inline_jobs.queued[0]
     assert job["job_name"] == "Searching subtitles for The Matrix · en"
-    # Started at once, retryable, and a second press follows the running search.
-    assert job["options"]["retryable"] is True and job["options"]["return_existing"] is True
+    # Started at once, not retryable (the page that asked reads the rows), and
+    # a second press follows the running search.
+    assert job["options"]["retryable"] is False and job["options"]["return_existing"] is True
     assert job["options"]["is_progress"] is True
+    assert job["options"]["lane"] == "user_search"
 
 
 def test_the_job_reports_how_many_providers_have_answered(authenticated_client, providers):

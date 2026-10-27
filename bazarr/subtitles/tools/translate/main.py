@@ -312,8 +312,11 @@ def _extract_embedded_source(video_path, media_type, embedded_source, job_id, ar
     OCR job only until its reading is over. The cost is head of line: with
     ``translator.openrouter_max_concurrent`` at 1 this job fills the whole
     translation lane through its OCR and its translation, and the jobs queued
-    behind it wait (the queue starts only the job at the front). The queue's
-    order is not changed for it.
+    behind it wait (the queue starts the job at the front of pending). Nothing
+    is reordered for it: the only jobs that go ahead of the front are one a
+    person started that waited for a full lane of its own (once that lane has
+    room) and one started through ``force_start_pending_job`` while its lane
+    has room, and those exceptions apply to every job alike.
     """
     from app.jobs_queue import JobFailed
     from subtitles.new_subtitle import SubtitleFileExists

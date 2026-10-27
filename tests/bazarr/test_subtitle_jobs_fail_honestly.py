@@ -268,7 +268,7 @@ def test_a_manual_search_names_the_instance_it_searches_for(manual, monkeypatch,
 
     searched = []
 
-    def listing(videos, languages, pool, min_score):
+    def listing(videos, languages, pool, min_score, cancel=None):
         searched.extend(video.arr_instance_id for video in videos)
         return {video: [] for video in videos}
 
