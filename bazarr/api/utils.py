@@ -623,10 +623,14 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     current_paths = {}
     current_subtitle_paths = {}
     embedded_langs = {}
+    # The HI code an older version recorded a forced and HI track under, with
+    # the forced code it is recorded under now.
+    embedded_legacy_langs = {}
     for item_id, raw in subtitles_by_id.items():
         paths = {}
         full_paths = []
         langs = set()
+        legacy = {}
         if raw:
             for entry in ast.literal_eval(raw):
                 if entry[1]:
@@ -635,9 +639,15 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                     full_paths.append(entry[1])
                 else:
                     langs.add(_canonical_embedded_language(entry[0]))
+                    base, *parts = str(entry[0]).split(':')
+                    variants = {part.lower() for part in parts}
+                    if 'hi' in variants and 'forced' in variants:
+                        legacy[base + ':hi'] = base + ':forced'
         current_paths[item_id] = paths
         current_subtitle_paths[item_id] = full_paths
         embedded_langs[item_id] = langs
+        # A plain HI track of the item has the HI code for itself.
+        embedded_legacy_langs[item_id] = {old: new for old, new in legacy.items() if old not in langs}
 
     file_matches = {}
 
@@ -710,11 +720,19 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     # (item_id, kind, key) already resolved: the newest record wins, so an older
     # record for the same subtitle is ignored even when the newest had no score.
     seen = set()
+    embedded_rows = {(row.item_id, row.language) for row in rows if row.action == 7}
     for row in rows:
         if row.action == 7:
-            if row.language not in embedded_langs.get(row.item_id, ()):
-                continue
-            key = (row.item_id, 'embedded', row.language)
+            language = row.language
+            if language not in embedded_langs.get(row.item_id, ()):
+                # A forced and HI track is looked up under its forced code
+                # first, then under the HI code older versions recorded it
+                # under, as the detail tables do.
+                forced = embedded_legacy_langs.get(row.item_id, {}).get(language)
+                if forced is None or (row.item_id, forced) in embedded_rows:
+                    continue
+                language = forced
+            key = (row.item_id, 'embedded', language)
         else:
             name, windows = _subtitle_file_name(row.subtitles_path)
             names = current_paths.get(row.item_id, {})
