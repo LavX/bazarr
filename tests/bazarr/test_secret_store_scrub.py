@@ -404,6 +404,100 @@ def test_a_stored_leak_is_rewritten_at_rest(scrub_registry, tmp_path, monkeypatc
     assert scrub_persisted_secrets() is False
 
 
+def test_a_hub_job_row_masks_its_text_and_keeps_its_structure(scrub_registry, tmp_path, monkeypatch):
+    """A credential that equals a structural value (a password of "install", or
+    one matching a provider id) must not rewrite the row's action or ids, while
+    the rest of the same row is still masked."""
+    from provider_hub.service import list_jobs, record_job
+
+    scrub_registry([FAKE_KEY, "install", "examplehub"])
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+                          encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+
+    with pytest.raises(RuntimeError):
+        with record_job("install", target_kind="provider", target_id="examplehub",
+                        source_id="examplehub", from_version="1.0.0", to_version="1.1.0",
+                        details={"note": f"using {FAKE_KEY}"}) as job:
+            job.update(message=f"login with {FAKE_KEY}")
+            raise RuntimeError(f"rejected {FAKE_KEY}")
+
+    row = list_jobs()[-1]
+    assert row["action"] == "install"
+    assert row["target_id"] == "examplehub"
+    assert row["source_id"] == "examplehub"
+    assert row["state"] == "failed"
+    assert row["message"] == "login with ***"
+    assert row["error"] == "rejected ***"
+    assert row["details"]["note"] == "using ***"
+
+
+def test_a_hub_job_row_masks_a_credential_in_every_free_text_place(scrub_registry, tmp_path, monkeypatch):
+    """The row's display names, a config echo under the details and a tuple
+    inside them are masked too. The keys stay as they are, and a
+    structural field that equals a registered value is not rewritten."""
+    from provider_hub.service import list_jobs, record_job
+
+    scrub_registry([FAKE_KEY, "install", "examplehub"])
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}),
+                          encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+
+    with record_job("install", target_kind="provider", target_id="examplehub",
+                    target_name=f"Example {FAKE_KEY}", source_id="examplehub",
+                    source_name=f"Catalog {FAKE_KEY}", from_version="1.0.0", to_version="1.1.0",
+                    details={"config": {"api_key": FAKE_KEY, "mode": "install", "kept": "plain"},
+                             "tried": (f"a {FAKE_KEY}", "b"),
+                             "nested": [("c", {"x": FAKE_KEY})]}):
+        pass
+
+    row = list_jobs()[-1]
+    assert row["action"] == "install"
+    assert row["target_id"] == "examplehub"
+    assert row["source_id"] == "examplehub"
+    assert row["target_name"] == "Example ***"
+    assert row["source_name"] == "Catalog ***"
+    assert row["details"]["config"]["api_key"] == MASK
+    # The keys stay; only the values are scrubbed.
+    assert row["details"]["config"]["mode"] == MASK
+    assert row["details"]["config"]["kept"] == "plain"
+    assert row["details"]["tried"] == ["a ***", "b"]
+    assert row["details"]["nested"] == [["c", {"x": MASK}]]
+    assert FAKE_KEY not in state_path.read_text(encoding="utf-8")
+
+
+def test_a_job_row_field_nobody_listed_still_takes_the_exact_credential(scrub_registry):
+    """The structural fields are the ones spared, not the text fields the ones
+    scrubbed: a free-text field a later writer adds to the row (here ``note``)
+    is masked without anyone listing it, while the structural fields, the keys
+    and the non-string values stay as they are."""
+    from secret_store.scrub import scrub_job_secrets
+
+    scrub_registry([FAKE_KEY, "install", "examplehub"])
+    row = {
+        "id": "examplehub", "action": "install", "state": "install",
+        "target_kind": "provider", "target_id": "examplehub", "source_id": "examplehub",
+        "from_version": "install", "to_version": "examplehub",
+        "created_at": "2026-10-27T00:00:00Z", "duration_ms": 12,
+        "note": f"seen {FAKE_KEY}",
+        "extra": {FAKE_KEY: {"inner": [f"x {FAKE_KEY}", ("install", 3)]}},
+        "retries": 3, "flag": None,
+    }
+
+    assert scrub_job_secrets(row) is True
+
+    assert row["note"] == "seen ***"
+    assert row["extra"] == {FAKE_KEY: {"inner": ["x ***", [MASK, 3]]}}
+    assert row["retries"] == 3 and row["flag"] is None
+    for field in ("id", "action", "state", "target_id", "source_id", "from_version", "to_version"):
+        assert row[field] in ("install", "examplehub")
+    assert row["target_kind"] == "provider"
+    assert row["duration_ms"] == 12
+    assert row["created_at"] == "2026-10-27T00:00:00Z"
+
+
 def test_ordinary_lines_are_scrubbed_without_a_regression(scrub_registry):
     """The formatter runs this on every logged line, so a line with nothing
     to mask has to stay cheap with the live credentials registered."""
