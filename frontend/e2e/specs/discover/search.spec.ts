@@ -84,13 +84,31 @@ test.describe(
       await openDiscover(page);
       await openTitle(page, "Heat 1995", "Heat (1995)");
       await chooseLanguage(page, "English");
-      const answered = page.waitForResponse(
+      // The search is a job: the POST answers with the job it queued, and the
+      // finished job's result is the snapshot.
+      const queued = page.waitForResponse(
         (response) =>
           response.url().endsWith("/api/discover/search") &&
           response.request().method() === "POST",
         { timeout: SEARCH_TIMEOUT_MS },
       );
       await page.getByRole("button", { name: "Find subtitles" }).click();
+      const jobId = ((await (await queued).json()) as { job_id: number })
+        .job_id;
+      const answered = page.waitForResponse(
+        async (response) => {
+          const url = new URL(response.url());
+          if (
+            !url.pathname.endsWith("/api/system/jobs/result") ||
+            url.searchParams.get("id") !== String(jobId)
+          ) {
+            return false;
+          }
+          const body = (await response.json()) as { status: string };
+          return body.status === "completed";
+        },
+        { timeout: SEARCH_TIMEOUT_MS },
+      );
 
       // One query, so the row and the pending count are seen on the same page.
       const live = page
@@ -101,7 +119,9 @@ test.describe(
 
       const response = await answered;
       expect(response.ok()).toBe(true);
-      const snapshot = (await response.json()) as SearchSnapshot;
+      const snapshot = (
+        (await response.json()) as { result: { snapshot: SearchSnapshot } }
+      ).result.snapshot;
       const providers = snapshot.coverage.providers;
 
       await expect(

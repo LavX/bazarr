@@ -157,8 +157,8 @@ class SystemApi extends BaseApi {
    * What a job published for the caller that queued it, such as the rows of a
    * search. It is never part of the jobs list or its socket events.
    */
-  async jobResult<T>(id: number) {
-    return this.get<System.JobResult<T>>("/jobs/result", { id });
+  async jobResult<T>(id: number, signal?: AbortSignal) {
+    return this.get<System.JobResult<T>>("/jobs/result", { id }, signal);
   }
 
   async deleteJobs(id: number) {

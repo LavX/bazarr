@@ -47,6 +47,7 @@ import {
   recentEpisodeMismatch,
   searchSelection,
 } from "./discoverState";
+import { followSearch, SearchJobFailed } from "./searchJob";
 
 interface DiscoverContextValue {
   state: DiscoverState;
@@ -297,29 +298,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         generation: attempt,
         storageAvailable: stored,
       });
-      // getRandomValues also works on plain HTTP LAN installations.
-      const bytes = crypto.getRandomValues(new Uint8Array(16));
-      const hex = Array.from(bytes, (byte) =>
-        byte.toString(16).padStart(2, "0"),
-      ).join("");
-      const progressId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
       const controller = new AbortController();
-      let pollTimer: ReturnType<typeof setTimeout> | undefined;
-      const poll = async () => {
-        if (controller.signal.aborted || generation.current !== attempt) return;
-        try {
-          const progress = await api.discover.searchProgress(
-            progressId,
-            controller.signal,
-          );
-          dispatch({ type: "progress", generation: attempt, progress });
-        } catch {
-          // Losing observations does not cancel the search or discard results.
-        }
-        if (!controller.signal.aborted && generation.current === attempt)
-          pollTimer = setTimeout(() => void poll(), 600);
-      };
-      pollTimer = setTimeout(() => void poll(), 200);
       try {
         // matching_mode, the resolved copy and its physical revision are all
         // server-owned. Only the opaque copy identity is ever an input.
@@ -331,11 +310,19 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         delete selection.matching_mode;
         delete selection.copy;
         delete selection.file_revision;
-        const snapshot = await mutateAsync({
-          context: selection,
-          refresh,
-          progressId,
-        });
+        const queued = await mutateAsync({ context: selection, refresh });
+        // The page shows this search's outcome itself, so the standard job
+        // announcement stays quiet. The Jobs drawer still lists the job.
+        if (queued.job_id !== null) {
+          claimJobCompletion(queued.job_id, queued.session);
+        }
+        const snapshot = await followSearch(
+          queued.job_id,
+          controller.signal,
+          () => generation.current !== attempt,
+          (progress) =>
+            dispatch({ type: "progress", generation: attempt, progress }),
+        );
         dispatch({ type: "success", generation: attempt, key, snapshot });
       } catch (error) {
         const response = (
@@ -351,14 +338,15 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
             (response?.status === 400 || response?.status === 409) &&
             typeof response.data?.message === "string"
               ? response.data.message
-              : undefined,
+              : error instanceof SearchJobFailed
+                ? error.reason
+                : undefined,
           generation: attempt,
           key,
           now: Date.now(),
         });
       } finally {
         controller.abort();
-        clearTimeout(pollTimer);
       }
     },
     [mutateAsync],

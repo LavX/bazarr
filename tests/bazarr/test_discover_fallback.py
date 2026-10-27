@@ -218,7 +218,7 @@ job_events = download_fixtures.job_events
 
 @pytest.mark.parametrize("kind", ["movie", "show"])
 def test_fallback_selection_continues_real_explicit_search_and_exact_attachment(
-    authenticated_client, library_database, omdb_transport, choices, kind,
+    authenticated_client, library_database, omdb_transport, choices, kind, monkeypatch,
 ):
     import sqlalchemy as sa
     from app.database import Base
@@ -235,7 +235,9 @@ def test_fallback_selection_continues_real_explicit_search_and_exact_attachment(
                "title": item["title"], "year": item["year"], "language": "eng"}
     if kind == "show":
         payload.update(season=2, episode=1, manual_confirmed=True)
-    searched = authenticated_client.post("/api/discover/search", json=payload, headers={"X-API-KEY": "metadata-test-key"})
+    retrieval_fixtures.use_inline_jobs(authenticated_client, retrieval_fixtures.InlineJobs(), monkeypatch)
+    searched = retrieval_fixtures.finished(authenticated_client, authenticated_client.post(
+        "/api/discover/search", json=payload, headers={"X-API-KEY": "metadata-test-key"}))
     assert searched.status_code == 200
     row = next(row for row in searched.json["results"] if row["scope"] == "forced")
     downloaded = download_fixtures.get(authenticated_client, row, headers={"X-API-KEY": "metadata-test-key"})

@@ -11,6 +11,7 @@ import { useDiscover } from "@/contexts/Discover";
 import type { DiscoverDraft } from "@/contexts/discoverState";
 import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
+import { discoverSearchJob } from "@/tests/discoverSearchJob";
 import server from "@/tests/mocks/node";
 import type {
   DiscoverContext,
@@ -170,7 +171,7 @@ beforeEach(() => {
   save = vi.spyOn(files, "saveBlobAs").mockImplementation(() => undefined);
   save.mockClear();
   server.use(
-    http.post("/api/discover/search", () => HttpResponse.json(snapshot)),
+    discoverSearchJob(() => HttpResponse.json(snapshot)),
     http.get("/api/discover/preview", ({ request }) => {
       const url = new URL(request.url);
       previewRequests.push({
@@ -467,7 +468,7 @@ it("never reopens a preview closed while its bytes were pending", async () => {
 
 it("retains raw preview during inactive episode updates and invalidates it on query changes", async () => {
   server.use(
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       const body = (await request.json()) as {
         query: string;
         language: string;
@@ -552,11 +553,11 @@ it("retains the preview on failed refresh but discards it when refreshed results
   const { user } = renderPreview();
   await open(user);
   await screen.findByText(displayedCue);
-  server.use(http.post("/api/discover/search", () => HttpResponse.error()));
+  server.use(discoverSearchJob(() => HttpResponse.error()));
   await act(() => findSubtitles(true));
   expect(screen.getByText(displayedCue)).toBeInTheDocument();
   server.use(
-    http.post("/api/discover/search", () =>
+    discoverSearchJob(() =>
       HttpResponse.json({ ...snapshot, search_id: "replacement", results: [] }),
     ),
   );

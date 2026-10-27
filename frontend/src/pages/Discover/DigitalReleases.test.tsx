@@ -7,6 +7,7 @@ import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
+import { discoverSearchJob } from "@/tests/discoverSearchJob";
 import server from "@/tests/mocks/node";
 import {
   openSearchOptions,
@@ -151,7 +152,7 @@ beforeEach(() => {
         },
       }),
     ),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       searches.push(await request.json());
       return new HttpResponse(null, { status: 503 });
     }),

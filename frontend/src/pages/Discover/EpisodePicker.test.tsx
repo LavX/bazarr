@@ -8,6 +8,7 @@ import queryClient from "@/apis/queries";
 import { DiscoverSetupReturn } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor } from "@/tests";
+import { discoverSearchJob } from "@/tests/discoverSearchJob";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
 import { downloadJobHandlers } from "./downloadJobHarness";
@@ -116,7 +117,7 @@ beforeEach(() => {
     http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
       HttpResponse.json({ data: { ...envelope, episode } }),
     ),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       requests.push(await request.json());
       return new HttpResponse(null, { status: 503 });
     }),
@@ -266,7 +267,7 @@ it("retires results and pending responses when an exact episode changes while re
     http.get("/api/discover/metadata/shows/100/seasons/2/episodes/2", () =>
       HttpResponse.json({ data: { ...envelope, episode: second } }),
     ),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       const context = await request.json();
       requests.push(context);
       await new Promise<void>((resolve) => {
@@ -473,7 +474,7 @@ it.each([
       .spyOn(files, "saveBlobAs")
       .mockImplementation(() => undefined);
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         const context = await request.json();
         requests.push(context);
         if (requests.length > 1)
@@ -589,7 +590,7 @@ it.each([
       .spyOn(files, "saveBlobAs")
       .mockImplementation(() => undefined);
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         const context = await request.json();
         requests.push(context);
         const id = requests.length > 1 ? "refreshed" : "accepted";

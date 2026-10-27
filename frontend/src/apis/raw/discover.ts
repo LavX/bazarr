@@ -4,8 +4,6 @@ import type {
   DiscoverCopyOffer,
   DiscoverDownloadIdentity,
   DiscoverPreviewData,
-  DiscoverSearchProgress,
-  DiscoverSearchSnapshot,
   DiscoverSelection,
   DiscoverSummary,
   MetadataResponse,
@@ -13,6 +11,7 @@ import type {
   TrendingFeed,
   TrendingMediaType,
 } from "@/types/discover";
+import type { QueuedSearch } from "@/utilities/jobs";
 import BaseApi from "./base";
 import client from "./client";
 
@@ -21,31 +20,16 @@ class DiscoverApi extends BaseApi {
     super("/discover");
   }
 
-  async search(
-    context: DiscoverSelection,
-    refresh = false,
-    progressId?: string,
-  ) {
-    const response = await this.postRaw<DiscoverSearchSnapshot>(
-      "/search",
-      {
-        ...context,
-        refresh,
-      },
-      undefined,
-      progressId ? { "X-Discover-Progress": progressId } : undefined,
-    );
-    return response.data;
-  }
-
-  async searchProgress(progressId: string, signal: AbortSignal) {
-    const response = await client.axios.get<DiscoverSearchProgress>(
-      this.prefix + "/search",
-      {
-        params: { progress_id: progressId },
-        signal,
-      },
-    );
+  /**
+   * Queue a search as a job. The providers heard from, the rows built so far
+   * and finally the whole snapshot are the job's result, read from
+   * `system/jobs/result` while it runs and once it has finished.
+   */
+  async search(context: DiscoverSelection, refresh = false) {
+    const response = await this.postRaw<QueuedSearch>("/search", {
+      ...context,
+      refresh,
+    });
     return response.data;
   }
 

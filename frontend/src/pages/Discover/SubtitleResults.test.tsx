@@ -16,6 +16,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import { useDiscover } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
+import { discoverSearchJob } from "@/tests/discoverSearchJob";
 import server from "@/tests/mocks/node";
 import type { DiscoverSearchSnapshot } from "@/types/discover";
 import { setAuthenticated } from "@/utilities/event";
@@ -215,7 +216,7 @@ beforeEach(() => {
         { name: "Hungarian", code2: "hu", code3: "hun", enabled: false },
       ]),
     ),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       searches.push(await request.json());
       return HttpResponse.json(snapshot());
     }),
@@ -301,7 +302,7 @@ describe("Discover attachments", () => {
     ).toHaveTextContent("Breaking Bad S02 E01");
     expect(row().getByRole("button", { name: "Download SRT" })).toBeDisabled();
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         searches.push(await request.json());
         return HttpResponse.json(snapshot("search-2"));
       }),
@@ -332,7 +333,7 @@ describe("Discover attachments", () => {
     const { user } = renderDiscover();
     await search(user);
     server.use(
-      http.post("/api/discover/search", () =>
+      discoverSearchJob(() =>
         HttpResponse.json({
           ...snapshot("search-2"),
           status: "partial",
@@ -373,7 +374,7 @@ describe("Discover attachments", () => {
       http.post("/api/discover/download", () =>
         HttpResponse.json({}, { status: 410 }),
       ),
-      http.post("/api/discover/search", () => HttpResponse.error()),
+      discoverSearchJob(() => HttpResponse.error()),
     );
     await user.click(row().getByRole("button", { name: "Download SRT" }));
     await screen.findByText(/This result has expired/);
@@ -441,7 +442,7 @@ describe("Discover attachments", () => {
       else if (change === "logout") setAuthenticated(false);
       else {
         server.use(
-          http.post("/api/discover/search", () =>
+          discoverSearchJob(() =>
             HttpResponse.json({ ...snapshot("new"), results: [] }),
           ),
         );
@@ -802,7 +803,7 @@ it("releases pending download state when transport refresh retires its expired r
   first.results[1].expires_at = new Date(expiry).toISOString();
   let finish: (() => void) | undefined;
   server.use(
-    http.post("/api/discover/search", () => HttpResponse.json(first)),
+    discoverSearchJob(() => HttpResponse.json(first)),
     ...handlers({
       hold: () =>
         new Promise<void>((resolve) => {
@@ -816,7 +817,7 @@ it("releases pending download state when transport refresh retires its expired r
   await waitFor(() => expect(finish).toBeDefined());
   const now = vi.spyOn(Date, "now").mockReturnValue(expiry + 1);
   try {
-    server.use(http.post("/api/discover/search", () => HttpResponse.error()));
+    server.use(discoverSearchJob(() => HttpResponse.error()));
     await user.click(screen.getByRole("button", { name: /^Search again$/ }));
     await screen.findByText(/Refresh failed/);
     finish?.();
@@ -889,7 +890,7 @@ function copySnapshot(searchId = "search-1"): DiscoverSearchSnapshot {
 describe("Discover results against a chosen library copy", () => {
   it("names the copy as search context rather than proof of compatibility", async () => {
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         searches.push(await request.json());
         return HttpResponse.json(copySnapshot());
       }),
@@ -908,7 +909,7 @@ describe("Discover results against a chosen library copy", () => {
 
   it("separates known matches, conflicts and unknown compatibility per result", async () => {
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         searches.push(await request.json());
         return HttpResponse.json(copySnapshot());
       }),
@@ -930,7 +931,7 @@ describe("Discover results against a chosen library copy", () => {
 
   it("refuses a copy supplied in the same update that changes the target", async () => {
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         searches.push(await request.json());
         return HttpResponse.json(copySnapshot());
       }),
@@ -953,7 +954,7 @@ describe("Discover results against a chosen library copy", () => {
 
   it("recovers an expired handle with the same chosen copy it was captured with", async () => {
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         searches.push(await request.json());
         return HttpResponse.json(copySnapshot());
       }),
@@ -970,7 +971,7 @@ describe("Discover results against a chosen library copy", () => {
     await user.click(row().getByRole("button", { name: "Download SRT" }));
     await screen.findByText(/This result has expired/);
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         searches.push(await request.json());
         return HttpResponse.json(copySnapshot("search-2"));
       }),

@@ -484,8 +484,10 @@ def test_download_is_a_standard_job_and_the_file_is_fetched_by_ticket(authentica
     job_id = queued.json["job_id"]
     # Nothing is fetched until the queue runs the job.
     assert choices[1] == []
+    session = jobs_queue.list_jobs_from_queue(job_id=job_id)[0]["session"]
     assert {"type": "jobs", "action": "update",
-            "payload": {"job_id": job_id, "progress_value": None, "status": "pending"}} in job_events
+            "payload": {"job_id": job_id, "progress_value": None, "status": "pending",
+                        "session": session}} in job_events
     # A second click while the job waits answers with the same job.
     assert enqueue(authenticated_client, row).json["job_id"] == job_id
     job = jobs_queue.list_jobs_from_queue(job_id=job_id)[0]
@@ -501,7 +503,7 @@ def test_download_is_a_standard_job_and_the_file_is_fetched_by_ticket(authentica
     assert listed["error"] is None and listed["retryable"] is True and listed["stopped"] is False
     # The terminal socket event carries the same outcome.
     assert job_events[-1]["payload"] == {"job_id": job_id, "status": "completed", "progress_value": None,
-                                         "error": None, "action": listed["action"]}
+                                         "error": None, "action": listed["action"], "session": session}
     # Neither the bytes nor the authority scope ever reach the jobs list.
     everything = authenticated_client.get("/api/system/jobs", headers=HEADERS)
     assert b"Forced translation" not in everything.data and b"authority" not in everything.data

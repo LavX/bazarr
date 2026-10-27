@@ -121,9 +121,58 @@ function finished(results: ReturnType<typeof row>[]) {
 
 let observation: ReturnType<typeof running>;
 let releaseSearch: (() => void) | undefined;
-let holdProgress: ((value: unknown) => void) | undefined;
 let downloads: DownloadRequest[];
 let save: ReturnType<typeof vi.spyOn>;
+
+// The search is a job. It is queued at once and keeps running, publishing what
+// it has so far as its result, until the test releases it with the snapshot it
+// ends on. A look at a job can be held, which is how an answer of a search the
+// reader has already left is made to land after they left it.
+interface LiveJob {
+  snapshot: unknown;
+  released: boolean;
+}
+let liveJobs: Map<number, LiveJob>;
+let holdLook: ((jobId: number) => Promise<void> | undefined) | undefined;
+let queued: ((jobId: number, release: () => void) => void) | undefined;
+
+function liveSearch(snapshot: () => unknown) {
+  return [
+    http.post("/api/discover/search", () => {
+      const jobId = 700 + liveJobs.size;
+      const job: LiveJob = { snapshot: snapshot(), released: false };
+      liveJobs.set(jobId, job);
+      queued?.(jobId, () => {
+        job.released = true;
+      });
+      return HttpResponse.json(
+        { job_id: jobId, session: "run-live" },
+        { status: 202 },
+      );
+    }),
+    http.get("/api/system/jobs/result", async ({ request }) => {
+      const jobId = Number(new URL(request.url).searchParams.get("id"));
+      const job = liveJobs.get(jobId);
+      if (job === undefined) return new HttpResponse(null, { status: 404 });
+      const held = await holdLook?.(jobId);
+      const done = job.released && held === undefined;
+      return HttpResponse.json({
+        job_id: jobId,
+        session: "run-live",
+        status: done ? "completed" : "running",
+        error: null,
+        result: done
+          ? {
+              phase: "finished",
+              providers: [],
+              snapshot: job.snapshot,
+            }
+          : (heldObservation ?? observation),
+      });
+    }),
+  ];
+}
+let heldObservation: ReturnType<typeof running> | undefined;
 
 function renderDiscover() {
   const router = createMemoryRouter(
@@ -165,7 +214,12 @@ beforeEach(() => {
   localStorage.clear();
   observation = running([]);
   releaseSearch = undefined;
-  holdProgress = undefined;
+  liveJobs = new Map();
+  holdLook = undefined;
+  heldObservation = undefined;
+  queued = (_jobId, release) => {
+    releaseSearch = release;
+  };
   downloads = [];
   save = vi.spyOn(files, "saveBlobAs").mockImplementation(() => undefined);
   save.mockClear();
@@ -195,15 +249,6 @@ beforeEach(() => {
     http.get("/api/discover/metadata/movies/11", () =>
       HttpResponse.json({ data: { ...envelope, item: movie } }),
     ),
-    http.get("/api/discover/search", async () => {
-      // A held poll is how a response of a search the reader has already left
-      // is made to land after they left it.
-      if (holdProgress)
-        await new Promise((resolve) => {
-          holdProgress = resolve;
-        });
-      return HttpResponse.json(observation);
-    }),
     ...downloadJobHandlers({
       body: () => srt,
       filename: () => "live.en.srt",
@@ -213,14 +258,7 @@ beforeEach(() => {
 });
 
 it("shows each result as it lands and never reorders what is already read", async () => {
-  server.use(
-    http.post("/api/discover/search", async () => {
-      await new Promise<void>((resolve) => {
-        releaseSearch = resolve;
-      });
-      return HttpResponse.json(finished([row("live-1", "First.Release")]));
-    }),
-  );
+  server.use(...liveSearch(() => finished([row("live-1", "First.Release")])));
   const { user } = renderDiscover();
   await startSearch(user);
   expect(
@@ -263,14 +301,7 @@ it("shows each result as it lands and never reorders what is already read", asyn
 });
 
 it("downloads a row the running search has already published", async () => {
-  server.use(
-    http.post("/api/discover/search", async () => {
-      await new Promise<void>((resolve) => {
-        releaseSearch = resolve;
-      });
-      return HttpResponse.json(finished([row("live-1", "First.Release")]));
-    }),
-  );
+  server.use(...liveSearch(() => finished([row("live-1", "First.Release")])));
   const { user } = renderDiscover();
   await startSearch(user);
   observation = running([row("live-1", "First.Release")]);
@@ -289,52 +320,46 @@ it("downloads a row the running search has already published", async () => {
 });
 
 it("never renders partial results of a superseded search", async () => {
-  const posts: (() => void)[] = [];
-  let firstProgressId: string | undefined;
-  let releaseStalePoll: ((value: unknown) => void) | undefined;
-  let stalePollReleased = false;
+  const releases: (() => void)[] = [];
+  let firstJobId: number | undefined;
+  let releaseStaleLook: (() => void) | undefined;
+  let staleLookReleased = false;
+  queued = (jobId, release) => {
+    firstJobId ??= jobId;
+    releases.push(release);
+    releaseSearch = release;
+  };
+  // The first search's look is held open across the change of language, so its
+  // answer lands while the replacement search is the live one.
+  holdLook = (jobId) => {
+    if (jobId !== firstJobId || staleLookReleased) return undefined;
+    staleLookReleased = true;
+    heldObservation = running([row("live-9", "Superseded.Release")]);
+    return new Promise<void>((resolve) => {
+      releaseStaleLook = resolve;
+    });
+  };
   server.use(
-    http.post("/api/discover/search", async () => {
-      await new Promise<void>((resolve) => {
-        posts.push(resolve);
-        releaseSearch = resolve;
-      });
-      return HttpResponse.json(finished([row("live-9", "Superseded.Release")]));
-    }),
-    http.get("/api/discover/search", async ({ request }) => {
-      const id = new URL(request.url).searchParams.get("progress_id") ?? "";
-      firstProgressId ??= id;
-      // The first search's poll is held open across the change of language,
-      // so its answer lands while the replacement search is the live one.
-      if (id === firstProgressId && !stalePollReleased) {
-        await new Promise((resolve) => {
-          releaseStalePoll = resolve;
-        });
-        stalePollReleased = true;
-        return HttpResponse.json(
-          running([row("live-9", "Superseded.Release")]),
-        );
-      }
-      return HttpResponse.json(observation);
-    }),
+    ...liveSearch(() => finished([row("live-9", "Superseded.Release")])),
   );
   const { user } = renderDiscover();
   await startSearch(user);
-  await waitFor(() => expect(releaseStalePoll).toBeDefined(), {
+  await waitFor(() => expect(releaseStaleLook).toBeDefined(), {
     timeout: 5000,
   });
 
   // The reader changes the language and searches again. The first search is
-  // still running on the server and its poll is still open.
+  // still running on the server and its look is still open.
   await pickOption(user, "Subtitle language", "Hungarian");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
-  await waitFor(() => expect(posts).toHaveLength(2));
+  await waitFor(() => expect(releases).toHaveLength(2));
   expect(
     await screen.findByText("No results yet. Providers are still searching."),
   ).toBeVisible();
 
-  releaseStalePoll?.(undefined);
-  // The replacement search publishes its own row, which is proof the poll of
+  heldObservation = undefined;
+  releaseStaleLook?.();
+  // The replacement search publishes its own row, which is proof the look at
   // the live search is landing and the assertion below is not just early.
   observation = running([row("live-10", "Replacement.Release")]);
   await screen.findByRole(
@@ -343,21 +368,14 @@ it("never renders partial results of a superseded search", async () => {
     { timeout: 5000 },
   );
   expect(screen.queryByText("Superseded.Release")).toBeNull();
-  posts.forEach((release) => release());
+  releases.forEach((release) => release());
   await waitFor(() =>
     expect(screen.queryByText("Superseded.Release")).toBeNull(),
   );
 });
 
 it("tells nothing yet apart from nothing found", async () => {
-  server.use(
-    http.post("/api/discover/search", async () => {
-      await new Promise<void>((resolve) => {
-        releaseSearch = resolve;
-      });
-      return HttpResponse.json(finished([]));
-    }),
-  );
+  server.use(...liveSearch(() => finished([])));
   const { user } = renderDiscover();
   await startSearch(user);
   expect(
