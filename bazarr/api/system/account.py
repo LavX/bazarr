@@ -168,7 +168,11 @@ class SystemAccountConfirm(Resource):
                 _record_failed_attempt(ip)
                 return 'Authentication failed', 403
 
-        if not check_credentials(args.get('username'), args.get('password'), request):
+        # The confirmation is for the one signed-in account, so a request that
+        # names no username (the prompt could not read the settings) checks
+        # the password against the configured one.
+        username = args.get('username') or settings.auth.username
+        if not check_credentials(username, args.get('password'), request):
             _record_failed_attempt(ip)
             return 'Authentication failed', 403
 

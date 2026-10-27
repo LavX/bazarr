@@ -937,3 +937,19 @@ def test_a_new_password_is_still_hashed_on_save(monkeypatch, real_save):
     with app.test_request_context('/'):
         from flask import request
         assert check_credentials(USERNAME, 'a-new-password', request, log_success=False)
+
+
+def test_a_confirmation_that_names_no_username_checks_the_configured_account(monkeypatch):
+    _auth(monkeypatch)
+    client = _client()
+    _prime(client, confirmed=False)
+
+    wrong = client.post('/api/system/account/confirm', data={'username': '', 'password': 'nope'},
+                        headers=_api_headers())
+    right = client.post('/api/system/account/confirm', data={'username': '', 'password': PASSWORD},
+                        headers=_api_headers())
+
+    assert wrong.status_code == 403
+    assert right.status_code == 204
+    with client.session_transaction() as sess:
+        assert sess[CONFIRM_KEY] > time.time()
