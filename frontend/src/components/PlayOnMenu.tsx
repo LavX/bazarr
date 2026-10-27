@@ -107,7 +107,14 @@ const PlayOnRow: FunctionComponent<{
       href={url ?? undefined}
       target="_blank"
       rel="noopener noreferrer"
-      aria-disabled={url ? undefined : true}
+      // A row without a link must tell assistive tech it is unavailable and
+      // still be reached by the arrow keys. Mantine writes aria-disabled on a
+      // menu item from its own disabled state, over any value passed in, and
+      // a disabled item drops out of the arrow keys. So the row is not
+      // disabled, and the attribute goes on the root Mantine hands over.
+      renderRoot={(props) => (
+        <a {...props} aria-disabled={url ? undefined : true} />
+      )}
       closeMenuOnClick={Boolean(url)}
       onClick={(event: React.MouseEvent) => {
         if (!url) event.preventDefault();
