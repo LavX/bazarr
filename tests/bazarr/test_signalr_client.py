@@ -486,6 +486,66 @@ def test_signalr_callbacks_from_a_replaced_connection_are_ignored(monkeypatch, c
 
 
 @_CLIENT_CLASSES
+def test_signalr_automatic_reconnect_restores_connected_state(monkeypatch, client_cls):
+    """When signalrcore automatically reconnects an established feed, entering
+    TransportState.reconnecting marks the client disconnected and completing
+    the new handshake (TransportState.connected) marks it connected again."""
+    from signalrcore.transport.base_transport import TransportState
+    from signalrcore.transport.websockets.websocket_transport import WebsocketTransport
+
+    class _ReconnectingTransportConnection(_FakeConnection):
+        def __init__(self):
+            super().__init__()
+            with unittest_patch_init():
+                self.transport = WebsocketTransport()
+            self.transport.state = TransportState.disconnected
+            self.transport.logger = logging.getLogger("SignalRCoreClient")
+            self.transport._on_open = lambda: None
+            self.transport._on_reconnect = lambda: None
+            self.transport._on_close = lambda: None
+
+        def on_open(self, callback):
+            self.transport._on_open = callback
+
+        def on_reconnect(self, callback):
+            self.transport._on_reconnect = callback
+
+        def on_close(self, callback):
+            self.transport._on_close = callback
+
+        def on_error(self, callback):
+            pass
+
+        def on(self, event, callback):
+            pass
+
+        def start(self):
+            self.starts += 1
+            self.transport._set_state(TransportState.connecting)
+            self.transport._set_state(TransportState.connected)
+            return True
+
+    from unittest.mock import patch as _patch
+
+    def unittest_patch_init():
+        return _patch.object(WebsocketTransport, "__init__", lambda self, **kwargs: None)
+
+    connection = _ReconnectingTransportConnection()
+    client, sync_jobs = _configured_client(monkeypatch, client_cls, connection)
+
+    client.start()
+    assert client.connected is True
+    assert len(sync_jobs) == 1
+
+    connection.transport._set_state(TransportState.reconnecting)
+    assert client.connected is False
+
+    connection.transport._set_state(TransportState.connected)
+    assert client.connected is True
+    assert len(sync_jobs) == 2
+
+
+@_CLIENT_CLASSES
 def test_signalr_stop_marks_the_client_disconnected(client_cls):
     client = client_cls(4)
     client.connection = _FakeConnection()

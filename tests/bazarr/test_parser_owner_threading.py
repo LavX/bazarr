@@ -129,7 +129,8 @@ def test_sync_episodes_hands_the_parser_a_nondefault_parent_owner(schema_session
     seen = []
     ep_mod = _patch_episode_sync(monkeypatch, schema_session, seen)
 
-    ep_mod.sync_episodes(series_id=5, episodes_data=_episodes_payload(), defer_search=True)
+    ep_mod.sync_episodes(series_id=5, episodes_data=_episodes_payload(), defer_search=True,
+                         arr_instance_id=2, arr_client=object())
 
     assert seen == [2], (
         f"episodeParser must inherit the parent series' instance; got {seen!r}")

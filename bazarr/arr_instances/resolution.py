@@ -35,7 +35,11 @@ def default_instance_id(session, kind):
     return row.id if row is not None else None
 
 
-def skip_unscoped_sync(session, kind, kind_enabled, what):
+# Distinguishes "the caller already resolved the default" from "resolve it here".
+_UNRESOLVED = object()
+
+
+def skip_unscoped_sync(session, kind, kind_enabled, what, default_id=_UNRESOLVED):
     """Whether a single-item sync that names no instance must write nothing.
 
     The webhook URL without an instance key, the manual sync buttons and the
@@ -53,8 +57,16 @@ def skip_unscoped_sync(session, kind, kind_enabled, what):
     no instance at all, only disabled ones, or the kind switched off
     (``kind_enabled`` False, which only picks the reason logged). With a
     default it goes ahead as before. Logs the reason once per skipped sync.
+
+    ``default_id`` lets a caller that already resolved the default pass that
+    answer in, so the decision and the later scoped writes share one read. A
+    second read could return None after the default is disabled, and the sync
+    would then write unscoped. The caller's ``None`` means it already checked
+    and found no default; this function must not look again.
     """
-    if default_instance_id(session, kind) is not None:
+    if default_id is _UNRESOLVED:
+        default_id = default_instance_id(session, kind)
+    if default_id is not None:
         return False
     has_instance = session.execute(
         select(TableArrInstances.id).where(TableArrInstances.kind == kind).limit(1)
