@@ -831,3 +831,109 @@ def test_the_restore_that_runs_at_the_next_start_stays_ungated(monkeypatch, auth
     assert restarts == [True]
     # The staged set is consumed, so the next start does not restore again.
     assert list(restore_dir.iterdir()) == []
+
+
+# Settings keys that do not name a setting the way the save path writes it.
+# The save looks a section up by the exact segment but creates a missing one
+# through the settings library, which strips whitespace and reads dots and
+# double underscores as nesting, so each of these would reach a gated setting
+# (or replace the whole login section) under a name the gate does not know.
+MALFORMED_SETTINGS_KEYS = [
+    'settings- auth-type',
+    'settings-auth -type',
+    'settings-auth\t-type',
+    'settings-auth-type ',
+    'settings-auth__type-x',
+    'settings-auth.type-x',
+    'settings--auth-type',
+    'settings-general- postprocessing_cmd',
+]
+
+
+@pytest.mark.parametrize('key', MALFORMED_SETTINGS_KEYS)
+@pytest.mark.parametrize('confirmed', [False, True])
+def test_a_malformed_settings_key_is_refused_before_anything_is_saved(key, confirmed, monkeypatch,
+                                                                      settings_saves):
+    _auth(monkeypatch)
+    client = _client()
+    if confirmed:
+        _prime(client)
+
+    response = _settings_save(client, {key: 'None'})
+
+    assert response.status_code == 400
+    assert settings_saves == []
+    assert settings.auth.type == 'form'
+    assert settings.auth.password == PASSWORD_HASH
+
+
+def test_a_longer_key_under_a_gated_setting_is_refused_too(monkeypatch, settings_saves):
+    _auth(monkeypatch)
+    client = _client()
+
+    _assert_confirm_refusal(_settings_save(client, {'settings-auth-type-x': 'None'}))
+    assert settings_saves == []
+
+
+def test_the_settings_read_never_hands_out_the_password_hash(monkeypatch):
+    _auth(monkeypatch)
+    client = _client()
+
+    body = client.get('/api/system/settings', headers=_api_headers()).get_json()
+
+    assert body['auth']['password'] == '***'
+    assert PASSWORD_HASH not in client.get('/api/system/settings', headers=_api_headers()).get_data(as_text=True)
+
+
+def test_the_settings_read_keeps_an_unset_password_empty(monkeypatch):
+    _auth(monkeypatch)
+    monkeypatch.setitem(settings.auth, 'password', '')
+    client = _client()
+
+    body = client.get('/api/system/settings', headers=_api_headers()).get_json()
+
+    assert body['auth']['password'] == ''
+
+
+@pytest.fixture
+def real_save(monkeypatch):
+    """The real settings writer with the disk write and the database stubbed out."""
+    import sys
+    from app import config
+
+    class _FakeUpdate:
+        def values(self, **_kwargs):
+            return self
+
+    monkeypatch.setattr(config, 'write_config', lambda: True)
+    monkeypatch.setattr(config, 'validate_log_regex', lambda: None)
+    monkeypatch.setitem(sys.modules, 'app.database', types.SimpleNamespace(
+        database=types.SimpleNamespace(execute=lambda statement: None),
+        update=lambda _model: _FakeUpdate(),
+        System=object,
+    ))
+    return config
+
+
+def test_saving_the_masked_password_back_keeps_the_stored_one(monkeypatch, real_save):
+    # The General page resends what it read when a typed password is cleared
+    # again, and what it read is the mask, never the hash.
+    _auth(monkeypatch)
+
+    real_save.save_settings([('settings-auth-password', ['***'])])
+
+    assert settings.auth.password == PASSWORD_HASH
+
+
+def test_a_new_password_is_still_hashed_on_save(monkeypatch, real_save):
+    from utilities.helper import check_credentials
+
+    _auth(monkeypatch)
+
+    real_save.save_settings([('settings-auth-password', ['a-new-password'])])
+
+    assert settings.auth.password not in (PASSWORD_HASH, 'a-new-password')
+    app = Flask(__name__)
+    with app.test_request_context('/'):
+        from flask import request
+        assert check_credentials(USERNAME, 'a-new-password', request, log_success=False)

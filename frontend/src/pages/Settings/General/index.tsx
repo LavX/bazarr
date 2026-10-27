@@ -59,9 +59,10 @@ import RunSetupAgain from "./RunSetupAgain";
 // - User types "newpw": draft="newpw", touched=true, update("newpw")
 //   stages the new password. save_settings hashes it via hash_password.
 // - User clears the field after typing: draft="", touched=true. We push
-//   the ORIGINAL hash (snapshotted on first render via originalRef)
-//   back in via update(...) so save_settings's
-//   `value == settings.auth.password` matches and no re-hash happens.
+//   the ORIGINAL value (snapshotted on first render via originalRef)
+//   back in via update(...). The settings read hands out a mask ("***")
+//   in place of a stored password, never the hash, and save_settings
+//   keeps the stored password when the mask comes back.
 //
 // originalRef vs reading `stored` directly: useBaseInput returns the
 // staged form value, which becomes whatever update() last set it to.

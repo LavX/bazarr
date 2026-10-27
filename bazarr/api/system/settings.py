@@ -37,9 +37,27 @@ GATED_SETTINGS_KEYS = frozenset({
 })
 
 
+def _settings_key_is_malformed(key):
+    """True for a settings key that does not name a setting the way the save writes it.
+
+    The save looks a section up by the exact segment, but creates a missing one
+    through the settings library, which strips whitespace and reads dots and
+    double underscores as nesting. A key spelled that way would land on a
+    setting under a name the checks below do not know, so it is refused.
+    """
+    segments = str(key).split('-')
+    if segments[0].strip().lower() != 'settings':
+        return False
+    return any(not segment or segment != segment.strip() or '.' in segment or '__' in segment
+               for segment in segments[1:])
+
+
 def _save_needs_password_confirmation(form_keys):
-    """True when the save changes a key that runs code or rewrites who may sign in."""
-    return any(str(key).lower() in GATED_SETTINGS_KEYS for key in form_keys)
+    """True when the save changes a key that runs code or rewrites who may sign in.
+
+    A longer key under a gated setting counts as that setting.
+    """
+    return any('-'.join(str(key).lower().split('-')[:3]) in GATED_SETTINGS_KEYS for key in form_keys)
 
 
 def _write_settings_rows(enabled_languages, profiles, notifications):
@@ -214,6 +232,8 @@ class SystemSettings(Resource):
     def post(self):
         # Before any validation and before any save: a refused request must
         # leave the settings, and above all the login settings, untouched.
+        if any(_settings_key_is_malformed(key) for key in request.form.keys()):
+            return 'Invalid settings key', 400
         if _save_needs_password_confirmation(request.form.keys()) and not password_confirmation_live():
             return password_confirm_refusal()
         try:
