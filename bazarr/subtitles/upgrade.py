@@ -7,7 +7,8 @@ import ast
 
 from datetime import datetime, timedelta
 from functools import reduce
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, exists, or_
+from sqlalchemy.orm import aliased
 
 from app.config import settings
 from app.database import get_exclusion_clause, get_audio_profile_languages, TableShows, TableEpisodes, TableMovies, \
@@ -404,6 +405,37 @@ def latest_row_actions(query_actions):
     return [*query_actions, EXTRACTED_ACTION]
 
 
+# An Embedded Source row records that the video carries a track of its
+# language. It is never a candidate itself, and it also ends the candidacy of
+# any older row of the same video and language: from then on the language is
+# there at source quality, and the file at the older row's path need no longer
+# be that row's download. A tool that copies the track out next to the video
+# and strips it from the container leaves exactly that, the track as an
+# ordinary file at the download's path, which the upgrade would replace.
+EMBEDDED_SOURCE_ACTION = 7
+
+
+def newer_embedded_source(table):
+    """Holds for a history row when a newer Embedded Source row covers its language.
+
+    The Embedded Source row is for the same video and owner. Plain and HI
+    count as one language, as they do in the fallback to the current file of
+    a language, so a track flagged HI ends a plain download too. Forced stays
+    apart: a forced track covers only part of the dialogue. This is a
+    condition of its own, not an action in latest_row_actions(), because that
+    keys on the exact language.
+    """
+    embedded = aliased(table)
+    return exists().where(
+        embedded.action == EMBEDDED_SOURCE_ACTION,
+        embedded.video_path == table.video_path,
+        embedded.arr_instance_id.is_not_distinct_from(table.arr_instance_id),
+        embedded.timestamp > table.timestamp,
+        or_(embedded.language == table.language,
+            embedded.language == table.language + ':hi',
+            embedded.language + ':hi' == table.language))
+
+
 # Every action that puts a different file at a path, or removes it.
 _FILE_WRITING_ACTIONS = (0, 1, 2, 3, 4, 6, EXTRACTED_ACTION)
 
@@ -580,6 +612,7 @@ def get_upgradable_episode_subtitles(history_id_list=None):
 
     upgradable_episodes_conditions = [(TableHistory.action.in_(query_actions)),
                                       (TableHistory.timestamp > minimum_timestamp),
+                                      ~newer_embedded_source(TableHistory),
                                       ]
     episode_score_conditions = [and_(TableHistory.score.is_(None), TableHistory.action == 6),
                                 (TableHistory.score < TableHistory.score_out_of - 3)]
@@ -676,6 +709,7 @@ def get_upgradable_movies_subtitles(history_id_list=None):
 
     upgradable_movies_conditions = [(TableHistoryMovie.action.in_(query_actions)),
                                     (TableHistoryMovie.timestamp > minimum_timestamp),
+                                    ~newer_embedded_source(TableHistoryMovie),
                                     ]
     movie_score_conditions = [and_(TableHistoryMovie.score.is_(None), TableHistoryMovie.action == 6),
                               (TableHistoryMovie.score < TableHistoryMovie.score_out_of - 3)]
