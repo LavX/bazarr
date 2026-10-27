@@ -745,3 +745,46 @@ def test_signalr_receive_message_routes_movie_event_to_client_instance(monkeypat
     sc.dispatcher(sc.radarr_queue.popleft())
 
     assert captured["instance"] == 3
+
+
+def test_an_episodes_changed_event_passes_its_instance_and_client_to_the_sync(monkeypatch):
+    """The SignalR series handler names both the instance and the client built
+    for it, so the episode sync fetches and writes for the instance the event
+    belongs to instead of the default connection."""
+    import app.signalr_client as sc
+
+    client = object()
+    captured = {}
+    monkeypatch.setattr(sc, "client_for_instance", lambda db, iid: client)
+    monkeypatch.setattr(sc, "sync_episodes", lambda **kw: captured.update(kw))
+    monkeypatch.setattr(sc, "event_stream", lambda **kw: None)
+
+    event = {"name": "series", "_arr_instance_id": 4,
+             "body": {"action": "updated",
+                      "resource": {"id": 42, "title": "S", "year": 2020,
+                                   "episodesChanged": True}}}
+
+    sc.dispatcher(event)
+
+    assert captured["arr_instance_id"] == 4
+    assert captured["arr_client"] is client
+
+
+def test_the_single_series_refresh_passes_its_instance_and_client(monkeypatch):
+    """The per-series sync action builds the named instance's client and hands
+    both to update_one_series, which forwards them to the episode sync."""
+    import sonarr.sync.series as series
+
+    client = object()
+    captured = {}
+    monkeypatch.setattr(series, "client_for_instance", lambda db, iid: client)
+    monkeypatch.setattr(series, "update_one_series",
+                        lambda series_id, action, **kw: captured.update(
+                            {"series_id": series_id, "action": action, **kw}))
+
+    series.update_one_series_for_instance(4, 42, "updated")
+
+    assert captured["series_id"] == 42
+    assert captured["action"] == "updated"
+    assert captured["arr_instance_id"] == 4
+    assert captured["arr_client"] is client

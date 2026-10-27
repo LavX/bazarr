@@ -11,8 +11,6 @@ from media_servers.events import publication_callback
 import requests
 from typing import List, Dict, Any
 
-from retry.api import retry
-from deep_translator.exceptions import TooManyRequests, RequestError
 from dynaconf.validator import ValidationError
 
 from app.config import settings, normalize_openrouter_provider_order
@@ -25,6 +23,7 @@ from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
                                      translation_write_kwargs)
 from .auth import get_translator_auth_headers
+from .sidecar_errors import describe_sidecar_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +308,13 @@ class OpenRouterTranslatorService:
         }
 
     def _get_api_key_value(self):
-        """Get the API key, encrypted if an encryption key is configured."""
+        """Get the API key, encrypted if an encryption key is configured.
+
+        A blank encryption key is not a misconfiguration: the translator's
+        documented encryption-off mode expects the key in plaintext and no
+        X-Auth-Token. A translator that has encryption on refuses the request,
+        and the refusal names the encryption key.
+        """
         api_key = settings.translator.openrouter_api_key
         encryption_key = settings.translator.openrouter_encryption_key
         if encryption_key:
@@ -490,9 +495,13 @@ class OpenRouterTranslatorService:
             check_cancelled(self.cancel)
 
             if submit_response.status_code != 200:
-                # Fallback to sync endpoint if job queue not available
-                logger.debug('Job queue not available, falling back to sync endpoint')
-                return self._translate_sync(lines_list, payload)
+                # The refusal is the answer. Retrying it on the sync endpoint
+                # sent the same unusable request again, so a missing encryption
+                # key produced two refusals and the reason that reached the job
+                # was the second endpoint's status code, not the service's.
+                logger.error('AI Subtitle Translator refused the job: HTTP %s',
+                             submit_response.status_code)
+                raise TranslationServiceError(describe_sidecar_refusal(submit_response))
 
             job_data = submit_response.json()
             job_id = job_data.get("jobId")
@@ -662,30 +671,3 @@ class OpenRouterTranslatorService:
             positions.add(position)
             has_translation = has_translation or bool(line.strip())
         return result if has_translation else None
-
-    @retry(exceptions=(TooManyRequests, RequestError, requests.exceptions.RequestException), tries=3, delay=1, backoff=2, jitter=(0, 1))
-    def _translate_sync(self, lines_list: List[str], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Fallback synchronous translation (Lingarr-compatible)"""
-        base_url = settings.translator.openrouter_url.rstrip('/')
-        check_cancelled(self.cancel)
-
-        response = requests.post(
-            f"{base_url}/api/v1/translate/content",
-            json=payload,
-            headers={"Content-Type": "application/json", **get_translator_auth_headers()},
-            timeout=1800
-        )
-        check_cancelled(self.cancel)
-
-        if response.status_code == 200:
-            lines = self._validated_result_lines(response.json(), len(lines_list))
-            if lines is None:
-                raise TranslationServiceError('The AI Subtitle Translator returned no usable translated lines.')
-            return lines
-        elif response.status_code == 429:
-            raise TooManyRequests("Rate limit exceeded")
-        elif response.status_code >= 500:
-            raise RequestError(f"Server error: {response.status_code}")
-        else:
-            logger.error(f'API error: {response.status_code} - {response.text}')  # noqa: G004
-            raise TranslationServiceError(f'The AI Subtitle Translator refused the request (HTTP {response.status_code}).')

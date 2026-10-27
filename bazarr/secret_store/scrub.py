@@ -6,8 +6,9 @@ Two layers, because a leak has two shapes.
 PATTERNS covers text whose credential never passed through this install's
 settings: a third-party library that echoed back the request it built, a
 provider that named the key it rejected. The shapes are ``Bearer <token>``,
-``x-goog-api-key`` assignments, Google ``AIza...`` keys and OpenRouter
-``sk-or-v1-...`` keys.
+``x-goog-api-key`` assignments, Google ``AIza...`` keys, OpenRouter
+``sk-or-v1-...`` keys, and ciphertext in either the at-rest ``enc:v1:`` form
+or the translator's submitted ``enc:`` form.
 
 VALUES covers the exact credentials this install holds: every at-rest secret
 value in the settings tree plus every Provider Hub installation credential,
@@ -48,6 +49,12 @@ _BEARER_RE = re.compile(r'(?i)\b(Bearer\s+)([A-Za-z0-9\-._~+/=]{8,})')
 _GOOG_API_KEY_RE = re.compile(r'(?i)(x-goog-api-key["\']?\s*[:=]\s*["\']?)([A-Za-z0-9\-_]{8,})')
 _GOOGLE_KEY_RE = re.compile(r'\bAIza[0-9A-Za-z\-_]{35}\b')
 _OPENROUTER_KEY_RE = re.compile(r'\bsk-or-v1-[0-9a-fA-F]{64}\b')
+# Ciphertext is skipped by the value layer because it is not a plaintext
+# credential. A service that echoes the request, or an error body that quotes
+# the stored value, still carries it, so the shape is masked wherever it is
+# logged, stored on a job or returned by an endpoint. The token length floor
+# leaves the bare marker in prose alone.
+_ENC_CIPHERTEXT_RE = re.compile(r'\benc:(?:v1:)?[A-Za-z0-9_\-+/=.]{16,}')
 
 
 def _mask_bearer(match):
@@ -71,6 +78,7 @@ _PATTERNS = (
     (_GOOG_API_KEY_RE, r'\1' + MASK),
     (_GOOGLE_KEY_RE, MASK),
     (_OPENROUTER_KEY_RE, MASK),
+    (_ENC_CIPHERTEXT_RE, MASK),
 )
 
 # The exact credential values currently masked, with the regex that masks

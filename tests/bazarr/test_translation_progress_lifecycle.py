@@ -72,7 +72,7 @@ def test_reasoning_selection_reaches_sidecar_request(lifecycle, monkeypatch, mod
 
 @pytest.mark.parametrize('host_id', [None, 41])
 @pytest.mark.parametrize('exit_kind, reason', [
-    ('completed', None), ('partial', None), ('sync', None),
+    ('completed', None), ('partial', None),
     ('failed', 'Fixture failure'), ('cancelled', 'cancelled'), ('hard_cap', '12 hours'),
     ('unreachable', 'unreachable'), ('invalid_status', 'AI translation failed'),
     ('host_cancelled', None), ('submit_error', 'Cannot connect'), ('write_error', 'Fixture save failure'),
@@ -109,9 +109,6 @@ def test_every_exit_reports_through_the_job_only(lifecycle, monkeypatch, host_id
         def fail_post(*args, **kwargs):
             raise requests.ConnectionError('Fixture submit failure')
         monkeypatch.setattr(module.requests, 'post', fail_post)
-    if exit_kind == 'sync':
-        posts = iter([SimpleNamespace(status_code=404), response(lines)])
-        monkeypatch.setattr(module.requests, 'post', lambda *args, **kwargs: next(posts))
     if exit_kind == 'write_error':
         def fail_save(*args, **kwargs):
             raise OSError('Fixture save failure')

@@ -229,10 +229,12 @@ const TestConnectionButton: FunctionComponent = () => {
             });
           }
         },
-        onError: () => {
+        onError: (error: unknown) => {
+          const reason = (error as { response?: { data?: { error?: string } } })
+            ?.response?.data?.error;
           notifications.show({
             title: "Connection Failed",
-            message: "Could not reach the translator service",
+            message: reason ?? "Could not reach the translator service",
             color: "red",
           });
         },

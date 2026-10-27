@@ -205,8 +205,44 @@ def test_episode_insert_inherits_parent_owner_and_local_id(schema_session, monke
 def test_episode_insert_inherits_nondefault_owner(schema_session, monkeypatch):
     import sonarr.sync.episodes as ep_mod
 
-    _seed_default(schema_session, "sonarr")  # default exists but parent is owned elsewhere
+    _seed_default(schema_session, "sonarr")  # default exists but the sync names another instance
     # parent series owned by a DIFFERENT (non-default) instance id=2, local id=77
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=5, id=77, arr_instance_id=2, path="/tv/s", title="S",
+        audio_language="[]"))
+    monkeypatch.setattr(ep_mod, "database", schema_session)
+    monkeypatch.setattr(ep_mod, "store_subtitles", _noop)
+    monkeypatch.setattr(ep_mod, "event_stream", _noop)
+    monkeypatch.setattr(ep_mod, "get_sonarr_info", _SonarrInfoStub())
+    monkeypatch.setattr(ep_mod, "episodeParser", lambda e, **_kw: {
+        "sonarrSeriesId": 5, "sonarrEpisodeId": 100, "path": "/tv/s/e", "season": 1,
+        "episode": 1, "title": "E", "monitored": "True"})
+
+    episodes_data = [{"id": 100, "hasFile": True, "monitored": True, "episodeFileId": 100,
+                      "episodeFile": {"size": 999999, "path": "/tv/s/e"}}]
+    ep_mod.sync_episodes(series_id=5, episodes_data=episodes_data, defer_search=True,
+                         arr_instance_id=2, arr_client=object())
+
+    row = schema_session.execute(
+        select(TableEpisodes.arr_instance_id, TableEpisodes.series_id)
+        .where(TableEpisodes.sonarrEpisodeId == 100)).first()
+    assert row.arr_instance_id == 2  # NOT the default - inherited from the parent series
+    assert row.series_id == 77
+
+
+def test_episode_insert_inherits_the_default_owner_not_another_instances_parent(
+        schema_session, monkeypatch):
+    """A default-path sync must not adopt a parent series owned by another
+    instance that happens to share the upstream series id.
+
+    The call names no instance, so it is the default instance's sync and the
+    episodes it writes are its rows. The scoped parent lookup cannot see the
+    other instance's show row, and the episode keeps the default owner with no
+    local series ref (the pre-existing behaviour when the parent is missing).
+    """
+    import sonarr.sync.episodes as ep_mod
+
+    inst = _seed_default(schema_session, "sonarr")
     schema_session.execute(insert(TableShows).values(
         sonarrSeriesId=5, id=77, arr_instance_id=2, path="/tv/s", title="S",
         audio_language="[]"))
@@ -225,8 +261,14 @@ def test_episode_insert_inherits_nondefault_owner(schema_session, monkeypatch):
     row = schema_session.execute(
         select(TableEpisodes.arr_instance_id, TableEpisodes.series_id)
         .where(TableEpisodes.sonarrEpisodeId == 100)).first()
-    assert row.arr_instance_id == 2  # NOT the default - inherited from the parent series
-    assert row.series_id == 77
+    assert row is not None
+    assert row.arr_instance_id == inst
+    assert row.series_id != 77, (
+        "the default sync adopted another instance's local series ref")
+    other = schema_session.execute(
+        select(TableShows.arr_instance_id, TableShows.path)
+        .where(TableShows.id == 77)).first()
+    assert (other.arr_instance_id, other.path) == (2, "/tv/s")
 
 
 # -------------------------------------------------------------- movie stamping
@@ -352,6 +394,33 @@ def test_update_one_series_routes_arr_client_to_leaf_fetch(schema_session, monke
         skip_episode_sync=True, is_signalr=True, arr_client=sentinel)
 
     assert captured["arr_client"] is sentinel
+
+
+def test_the_single_series_refresh_forwards_its_instance_and_client_to_the_episode_sync(
+        schema_session, monkeypatch):
+    """The per-series sync action ends in sync_episodes. Both the instance and
+    the client built for it must travel the whole way, so the episode sync
+    fetches and writes for that instance instead of the default connection.
+    """
+    import sonarr.sync.series as series_mod
+
+    _seed_default(schema_session, "sonarr")
+    client = object()
+    captured = {}
+    monkeypatch.setattr(series_mod, "database", schema_session)
+    monkeypatch.setattr(series_mod, "event_stream", _noop)
+    monkeypatch.setattr(series_mod, "get_series_from_sonarr_api", lambda *a, **k: [{"id": 5}])
+    monkeypatch.setattr(series_mod, "seriesParser",
+                        lambda *a, **k: {"sonarrSeriesId": 5, "path": "/tv/s", "title": "S"})
+    monkeypatch.setattr(series_mod, "sync_episodes", lambda **kw: captured.update(kw))
+
+    series_mod.update_one_series(
+        5, action="updated", existing_in_db=False,
+        audio_profiles=[], tags_dict=[], language_profiles=[],
+        arr_instance_id=2, arr_client=client)
+
+    assert captured["arr_instance_id"] == 2
+    assert captured["arr_client"] is client
 
 
 def test_update_series_default_threads_none_everywhere(schema_session, monkeypatch):
@@ -502,7 +571,7 @@ def test_a_bulk_episode_sync_queues_each_search_for_the_owning_instance(
     video = tmp_path / "e.mkv"
     video.write_bytes(b"")
     _seed_default(schema_session, "sonarr")
-    # Owned by an instance other than the default, and synced without naming it.
+    # Owned by an instance other than the default, and synced for that instance.
     schema_session.execute(insert(TableShows).values(
         sonarrSeriesId=5, id=77, arr_instance_id=2, path="/tv/s", title="S",
         audio_language="[]"))
@@ -510,7 +579,8 @@ def test_a_bulk_episode_sync_queues_each_search_for_the_owning_instance(
 
     ep_mod.sync_episodes(series_id=5, defer_search=False, episodes_data=[
         {"id": 100, "hasFile": True, "monitored": True, "episodeFileId": 100,
-         "episodeFile": {"size": 999999, "path": str(video)}}])
+         "episodeFile": {"size": 999999, "path": str(video)}}],
+        arr_instance_id=2, arr_client=object())
 
     assert jobs.queued == [("subtitles.mass_download.series", "episode_download_subtitles",
                             {"no": 100, "arr_instance_id": 2})]
