@@ -121,9 +121,7 @@ class BazarrClient {
           (backendError.code === 403 || backendError.code === 429);
         this.handleError(
           backendError,
-          isBlobBody ||
-            error.config?.inlineErrors === true ||
-            silentByRequest,
+          isBlobBody || error.config?.inlineErrors === true || silentByRequest,
         );
 
         return Promise.reject(error);

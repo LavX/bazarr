@@ -11,14 +11,7 @@ import {
 } from "@/apis/hooks";
 import api from "@/apis/raw";
 import { forgetPasswordConfirmation } from "@/modules/passwordConfirm";
-import {
-  act,
-  customRender,
-  fireEvent,
-  screen,
-  waitFor,
-  within,
-} from "@/tests";
+import { act, customRender, fireEvent, screen, waitFor, within } from "@/tests";
 import ProviderInstallStage from "./ProviderInstallStage";
 import { redirectToSetup } from "./redirect";
 
