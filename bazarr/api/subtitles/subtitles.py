@@ -278,14 +278,18 @@ class Subtitles(Resource):
 
         # Embedded track: path is absent/empty, the subtitle comes out of the
         # video container into {config_dir}/extracted_subs/.
-        # Translate keeps this cache-only path: only the translated file lands
-        # next to the video, never a copy of the source track.
+        # An embedded text track is extracted into this cache-only path: only
+        # the translated file lands next to the video. An image track (PGS or
+        # VobSub) named by its codec is read with OCR first, and that SRT does
+        # land next to the video as an ordinary subtitle, because the user asked
+        # for the OCR by choosing "Translate from" on that row.
         # Episodes and movies extract inside the queued translation job, so this
         # request returns at once; ffmpeg takes seconds per track. A sports
         # translation binds its source file into the profile operation before
         # it is queued, so sports still extracts here.
         # The extracted_subs/ directory is intentionally persistent.
         embedded_source = None
+        ocr_source = False
         if not subtitles_path and action == "translate":
             from_language_arg = args.get("from_language")
             if not from_language_arg:
@@ -361,7 +365,22 @@ class Subtitles(Resource):
                 if not mv_meta:
                     return "Movie not found", 404
 
+            from subtitles.tools.embedded_streams import is_ocr_codec
+
+            source_codec = (args.get("codec") or "").strip().lower() or None
+            ocr_source = is_ocr_codec(source_codec)
             if media_type == "sports":
+                if ocr_source:
+                    # A sports translation binds its source file into the
+                    # profile operation before it is queued, so the source has
+                    # to exist at this point. Reading it with OCR is a job, so
+                    # the user reads the track first (OCR to text works on a
+                    # sports event) and translates the SRT that lands.
+                    return (
+                        "Translating from an image-based track is not available for sports events. "
+                        "Read the track with OCR to text first, then translate the subtitle it writes.",
+                        400,
+                    )
                 extracted = extract_embedded_subtitle(
                     embedded_video_path,
                     from_language_arg,
@@ -387,6 +406,18 @@ class Subtitles(Resource):
                     "hi": source_hi,
                     "forced": source_forced,
                 }
+                if source_codec:
+                    embedded_source["codec"] = source_codec
+                if ocr_source:
+                    from subtitles.tools.ocr.tesseract import UNAVAILABLE, ocr_available
+
+                    if not ocr_available():
+                        return UNAVAILABLE, 501
+                    refusal = _refuse_unreadable_ocr_source(
+                        media_type, id, arr_instance_id, from_language_arg, source_hi, source_forced,
+                        source_codec)
+                    if refusal:
+                        return refusal
 
         if media_type != "sports" and embedded_source is None and (
                 not subtitles_path or not os.path.exists(subtitles_path)):
@@ -620,24 +651,37 @@ class Subtitles(Resource):
                         id, arr_instance_id, subtitles_path, dest_language,
                         from_language=from_language, forced=forced, hi=hi,
                     )
-                job_id = translate_subtitles_file(
-                    video_path=video_path,
-                    source_srt_file=subtitles_path,
-                    from_lang=from_language,
-                    to_lang=dest_language,
-                    forced=forced,
-                    hi=hi,
-                    media_type=media_type,
-                    sonarr_series_id=metadata.sonarrSeriesId
-                    if media_type == "episode"
-                    else None,
-                    sonarr_episode_id=id if media_type == "episode" else None,
-                    radarr_id=id if media_type == "movie" else None,
-                    metadata=None if media_type == "sports" else metadata,
-                    arr_instance_id=arr_instance_id,
-                    sports_operation=sports_operation,
-                    embedded_source=embedded_source,
-                )
+                # A translation that reads an image track with OCR is one of
+                # the OCR jobs: one at a time, and the check and the queueing
+                # are one step, as for OCR to text and the mass OCR.
+                reads_with_ocr = embedded_source is not None and ocr_source
+                if reads_with_ocr:
+                    from subtitles.tools.embedded_ocr import BUSY, ocr_job_waiting_or_running, ocr_queue_lock
+
+                    queue_lock = ocr_queue_lock()
+                else:
+                    queue_lock = nullcontext()
+                with queue_lock:
+                    if reads_with_ocr and ocr_job_waiting_or_running():
+                        return BUSY, 409
+                    job_id = translate_subtitles_file(
+                        video_path=video_path,
+                        source_srt_file=subtitles_path,
+                        from_lang=from_language,
+                        to_lang=dest_language,
+                        forced=forced,
+                        hi=hi,
+                        media_type=media_type,
+                        sonarr_series_id=metadata.sonarrSeriesId
+                        if media_type == "episode"
+                        else None,
+                        sonarr_episode_id=id if media_type == "episode" else None,
+                        radarr_id=id if media_type == "movie" else None,
+                        metadata=None if media_type == "sports" else metadata,
+                        arr_instance_id=arr_instance_id,
+                        sports_operation=sports_operation,
+                        embedded_source=embedded_source,
+                    )
                 if media_type == "episode":
                     return {"job_id": job_id or None}, 202
             except ValueError as exc:
@@ -724,6 +768,30 @@ def _embedded_track_action(action, args, language, hi, forced, media_type, media
             },
             label=label, codec=codec)
     return {"job_id": job_id or None, "path": destinations[0]}, 202
+
+
+def _refuse_unreadable_ocr_source(media_type, media_id, arr_instance_id, language, hi, forced, codec):
+    """The (message, status) a translation from an image track is refused with, or None.
+
+    The same early checks as OCR to text: 404 for an unknown row or a track the
+    row does not list (a hidden one included), 415 for a track that is not PGS
+    or VobSub, 409 when the SRT the OCR would write is already there. Without
+    them these only surface as a failed job.
+    """
+    from subtitles.tools.embedded_extract import ExtractionError, resolve_track, taken_output
+    from subtitles.tools.embedded_ocr import ocr_codec
+    from subtitles.tools.embedded_streams import TEXT_OUTPUT_EXTENSIONS
+
+    try:
+        track = resolve_track(media_type, media_id, arr_instance_id, language, hi, forced)
+        ocr_codec(track, codec)
+    except ExtractionError as error:
+        return str(error), error.status
+    clash = taken_output(track, TEXT_OUTPUT_EXTENSIONS)
+    if clash:
+        return (f"A subtitle file named {os.path.basename(clash)} already exists. Delete it first to read this "
+                f"track with OCR."), 409
+    return None
 
 
 def _embedded_ocr_action(args, language, hi, forced, media_type, media_id, arr_instance_id):

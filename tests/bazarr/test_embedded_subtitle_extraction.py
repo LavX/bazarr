@@ -980,29 +980,65 @@ def test_forced_track_selected_by_title(tmp_path):
     )
 
 
-def test_a_bitmap_track_fails_the_translation_job_with_a_clear_reason(monkeypatch):
-    """The job's extraction step raises, so the job is failed and the reason
-    names the likely bitmap codec instead of the job ending completed."""
-    from app.jobs_queue import JobFailed
+def test_a_bitmap_source_is_read_with_ocr_before_translation(monkeypatch):
+    """An image source is OCR'd into an SRT, and that SRT is the source."""
+    import subtitles.tools.embedded_ocr as ocr
     from subtitles.tools.translate import batch, main
 
     calls = {}
+    written = "/media/film.en.srt"
 
     def extract(video_path, language, media_type, hi=False, forced=False, arr_instance_id=None):
-        calls.update(video_path=video_path, language=language, hi=hi, forced=forced,
-                     arr_instance_id=arr_instance_id)
+        calls.update(extract=(video_path, language, hi, forced, arr_instance_id))
         return None
 
+    def read(media_type, media_id, arr_instance_id, language, hi=False, forced=False, codec=None,
+             progress=None):
+        calls.update(ocr=(media_type, media_id, arr_instance_id, language, hi, forced, codec))
+        return written, object()
+
     monkeypatch.setattr(batch, "extract_embedded_subtitle", extract)
+    monkeypatch.setattr(ocr, "ocr_embedded", read)
     monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
 
-    with pytest.raises(JobFailed) as raised:
-        main._extract_embedded_source("/media/film.mkv", "movie",
-                                      {"language": "en", "hi": True, "forced": False}, 7, 3)
+    assert main._extract_embedded_source(
+        "/media/film.mkv", "movie",
+        {"language": "en", "hi": True, "forced": False, "codec": "pgs"}, 7, 3, media_id=30
+    ) == written
+    # An explicit image codec skips text extraction entirely.
+    assert calls == {"ocr": ("movie", 30, 3, "en", True, False, "pgs")}
 
-    assert "bitmap" in str(raised.value)
-    assert calls == {"video_path": "/media/film.mkv", "language": "en", "hi": True, "forced": False,
-                     "arr_instance_id": 3}
+
+def test_an_explicit_text_codec_uses_extraction(monkeypatch, tmp_path):
+    from subtitles.tools.translate import batch, main
+
+    extracted = tmp_path / "abc.en.srt"
+    extracted.write_text("1\n")
+    monkeypatch.setattr(batch, "extract_embedded_subtitle", lambda *a, **k: str(extracted))
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+
+    assert main._extract_embedded_source(
+        "/media/film.mkv", "movie",
+        {"language": "en", "hi": False, "forced": False, "codec": "subrip"}, 7, 3, media_id=30
+    ) == str(extracted)
+
+
+def test_an_ocr_failure_fails_the_translation_job(monkeypatch):
+    """The OCR reason reaches the translation job instead of a generic extraction error."""
+    from app.jobs_queue import JobFailed
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.ocr.errors import OcrError
+    from subtitles.tools.translate import batch, main
+
+    monkeypatch.setattr(batch, "extract_embedded_subtitle", lambda *a, **k: None)
+    monkeypatch.setattr(ocr, "ocr_embedded",
+                        lambda *a, **k: (_ for _ in ()).throw(OcrError("Could not download hun.traineddata")))
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+
+    with pytest.raises(JobFailed, match="Could not download hun.traineddata"):
+        main._extract_embedded_source("/media/film.mkv", "movie",
+                                      {"language": "hu", "hi": False, "forced": False, "codec": "vobsub"}, 7, 3,
+                                      media_id=30)
 
 
 def test_the_translation_job_extracts_before_it_translates(monkeypatch, tmp_path):
@@ -1015,3 +1051,176 @@ def test_the_translation_job_extracts_before_it_translates(monkeypatch, tmp_path
 
     assert main._extract_embedded_source("/media/film.mkv", "movie", {"language": "en"}, 7, None) == \
         str(extracted)
+
+def test_an_existing_ocr_srt_is_never_used_as_the_source(monkeypatch):
+    from app.jobs_queue import JobFailed
+    from subtitles.new_subtitle import SubtitleFileExists
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.translate import batch, main
+
+    monkeypatch.setattr(batch, "extract_embedded_subtitle", lambda *a, **k: None)
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+    monkeypatch.setattr(ocr, "ocr_embedded",
+                        lambda *a, **k: (_ for _ in ()).throw(SubtitleFileExists("/media/film.en.srt")))
+
+    with pytest.raises(JobFailed, match="Delete it first"):
+        main._extract_embedded_source(
+            "/media/film.mkv", "movie", {"language": "en", "codec": "pgs"}, 7, 3, media_id=30)
+
+
+def test_a_row_without_a_codec_never_starts_ocr_and_keeps_the_extraction_reason(monkeypatch):
+    """No codec means no OCR by accident: the failed text extraction reports itself."""
+    from app.jobs_queue import JobFailed
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.translate import batch, main
+
+    started = []
+    monkeypatch.setattr(batch, "extract_embedded_subtitle", lambda *a, **k: None)
+    monkeypatch.setattr(ocr, "ocr_embedded", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+
+    with pytest.raises(JobFailed) as raised:
+        main._extract_embedded_source("/media/film.mkv", "movie", {"language": "en"}, 7, 3, media_id=30)
+
+    assert started == []
+    message = str(raised.value)
+    assert message.startswith("Could not extract the embedded subtitle track.")
+    assert "scan the disk" in message
+    # Never the OCR refusal that describes a text track as "text already".
+    assert "text already" not in message and "OCR reads PGS and VobSub" not in message
+
+
+def test_a_text_codec_that_fails_to_extract_never_starts_ocr(monkeypatch):
+    from app.jobs_queue import JobFailed
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.translate import batch, main
+
+    started = []
+    monkeypatch.setattr(batch, "extract_embedded_subtitle", lambda *a, **k: None)
+    monkeypatch.setattr(ocr, "ocr_embedded", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+
+    with pytest.raises(JobFailed, match="Could not extract the embedded subtitle track"):
+        main._extract_embedded_source("/media/film.mkv", "movie", {"language": "en", "codec": "subrip"}, 7, 3,
+                                      media_id=30)
+    assert started == []
+
+
+def test_a_dvb_source_is_refused_without_extraction_or_ocr(monkeypatch):
+    from app.jobs_queue import JobFailed
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.translate import batch, main
+
+    touched = []
+    monkeypatch.setattr(batch, "extract_embedded_subtitle", lambda *a, **k: touched.append("extract"))
+    monkeypatch.setattr(ocr, "ocr_embedded", lambda *a, **k: touched.append("ocr"))
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+
+    with pytest.raises(JobFailed, match="DVB, an image format that OCR cannot read"):
+        main._extract_embedded_source("/media/film.mkv", "movie", {"language": "en", "codec": "dvbsub"}, 7, 3,
+                                      media_id=30)
+    assert touched == []
+
+
+def test_a_busy_ocr_slot_fails_the_translation_job_without_holding_the_item(monkeypatch):
+    """The slot being taken says nothing about the item, so no failed-translation hold is recorded."""
+    from app.jobs_queue import JobFailed
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.translate import failure_record, main
+
+    failure_record.clear_failed_translations()
+    monkeypatch.setattr(main, "activity", MagicMock())
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+    monkeypatch.setattr(main.jobs_queue, "get_job_name", lambda job_id: "Translating Film (EN to HU)")
+    monkeypatch.setattr(main.jobs_queue, "update_job_name", lambda **kwargs: True)
+    monkeypatch.setattr(ocr, "ocr_embedded", lambda *a, **k: (_ for _ in ()).throw(ocr.OcrBusy(ocr.BUSY)))
+
+    with pytest.raises(JobFailed, match="Another OCR run is queued or running"):
+        main.translate_subtitles_file(
+            "/media/film.mkv", None, "en", "hu", False, False, "movie", None, None, 30, None, job_id=9,
+            arr_instance_id=3, embedded_source={"language": "en", "hi": False, "forced": False, "codec": "pgs"})
+
+    assert not failure_record.translation_recently_failed(3, "movie", 30, "en", "hu", False, False)
+
+
+def test_any_other_failure_inside_the_translation_job_still_holds_the_item(monkeypatch):
+    from app.jobs_queue import JobFailed
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.ocr.errors import OcrError
+    from subtitles.tools.translate import failure_record, main
+
+    failure_record.clear_failed_translations()
+    monkeypatch.setattr(main, "activity", MagicMock())
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+    monkeypatch.setattr(main.jobs_queue, "get_job_name", lambda job_id: "Translating Film (EN to HU)")
+    monkeypatch.setattr(main.jobs_queue, "update_job_name", lambda **kwargs: True)
+    monkeypatch.setattr(ocr, "ocr_embedded", lambda *a, **k: (_ for _ in ()).throw(OcrError("no pack")))
+
+    with pytest.raises(JobFailed, match="no pack"):
+        main.translate_subtitles_file(
+            "/media/film.mkv", None, "en", "hu", False, False, "movie", None, None, 30, None, job_id=9,
+            arr_instance_id=3, embedded_source={"language": "en", "hi": False, "forced": False, "codec": "pgs"})
+
+    assert failure_record.translation_recently_failed(3, "movie", 30, "en", "hu", False, False)
+
+
+@pytest.mark.parametrize("kind,message", [
+    ("taken", "Delete it first"),
+    ("unlisted", "is listed for this title"),
+])
+def test_a_taken_name_or_an_unlisted_track_fails_the_translation_job_without_holding_the_item(
+        monkeypatch, kind, message):
+    """Both say nothing about whether the item can be translated; the hold would suppress the auto path.
+
+    An SRT already next to the video is the very file the 24 h hold would keep the auto translation from
+    reading.
+    """
+    from app.jobs_queue import JobFailed
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.new_subtitle import SubtitleFileExists
+    from subtitles.tools.embedded_extract import TrackNotFound
+    from subtitles.tools.translate import failure_record, main
+
+    failure = {"taken": lambda: SubtitleFileExists("/media/film.en.srt"),
+               "unlisted": lambda: TrackNotFound("No embedded English track is listed for this title.")}[kind]
+    failure_record.clear_failed_translations()
+    monkeypatch.setattr(main, "activity", MagicMock())
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+    monkeypatch.setattr(main.jobs_queue, "get_job_name", lambda job_id: "Translating Film (EN to HU)")
+    monkeypatch.setattr(main.jobs_queue, "update_job_name", lambda **kwargs: True)
+    monkeypatch.setattr(ocr, "ocr_embedded", lambda *a, **k: (_ for _ in ()).throw(failure()))
+
+    with pytest.raises(JobFailed, match=message):
+        main.translate_subtitles_file(
+            "/media/film.mkv", None, "en", "hu", False, False, "movie", None, None, 30, None, job_id=9,
+            arr_instance_id=3, embedded_source={"language": "en", "hi": False, "forced": False, "codec": "pgs"})
+
+    assert not failure_record.translation_recently_failed(3, "movie", 30, "en", "hu", False, False)
+
+
+def test_the_ocr_phase_of_a_translation_job_ends_when_the_reading_ends(monkeypatch):
+    """Done reading, the job only translates: it must not keep OCR requests out, whichever way the read ended."""
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.ocr.errors import OcrError
+    from subtitles.tools.translate import main
+
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+    source = {"language": "en", "hi": False, "forced": False, "codec": "pgs"}
+    seen = []
+
+    def read(*args, **kwargs):
+        seen.append(7 in ocr._OCR_PHASE_OVER)
+        return "/media/film.en.srt", object()
+
+    monkeypatch.setattr(ocr, "ocr_embedded", read)
+    ocr.ocr_phase_over(7)
+    assert main._extract_embedded_source("/media/film.mkv", "movie", source, 7, 3, media_id=30)
+    # It reads with the phase open, and closes it afterwards.
+    assert seen == [False] and 7 in ocr._OCR_PHASE_OVER
+
+    ocr._OCR_PHASE_OVER.discard(7)
+    monkeypatch.setattr(ocr, "ocr_embedded", lambda *a, **k: (_ for _ in ()).throw(OcrError("no pack")))
+    with pytest.raises(Exception, match="no pack"):
+        main._extract_embedded_source("/media/film.mkv", "movie", source, 7, 3, media_id=30)
+    assert 7 in ocr._OCR_PHASE_OVER
+    ocr._OCR_PHASE_OVER.discard(7)

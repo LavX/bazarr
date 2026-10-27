@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 from contextlib import contextmanager
+from unittest.mock import MagicMock
 
 import pysubs2
 import pytest
@@ -653,6 +654,51 @@ def test_stopping_the_job_mid_read_ends_the_worker_and_writes_nothing(ocr_librar
     assert _history(session) == [] and published == []
 
 
+def test_stopping_a_translation_from_an_image_track_ends_it_cancelled_and_leaves_nothing(
+        ocr_library, packs, monkeypatch):
+    """The real engine inside the translation job: Stop ends the job Cancelled, with no worker, no frames,
+    no half SRT next to the video and no failed-translation hold."""
+    from app.config import settings
+    from app.jobs_queue import JobCancelled
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.ocr import pipeline, tesseract
+    from subtitles.tools.translate import failure_record, main
+
+    session, root, _events, published = ocr_library
+    work = root / "ocr-work"
+    monkeypatch.setattr(settings.ocr, "tessdata_dir", packs)
+    monkeypatch.setattr(pipeline, "work_parent", lambda: str(work))
+    jobs = Jobs(cancel_at="Reading cue 2")
+    monkeypatch.setattr(ocr, "jobs_queue", jobs)
+    monkeypatch.setattr(main, "jobs_queue", jobs)
+    monkeypatch.setattr(main, "activity", MagicMock())
+    failure_record.clear_failed_translations()
+    workers = []
+    real_worker = tesseract.TesseractWorker
+
+    def recording_worker():
+        workers.append(real_worker())
+        return workers[-1]
+
+    monkeypatch.setattr(tesseract, "TesseractWorker", recording_worker)
+
+    with pytest.raises(JobCancelled):
+        main.translate_subtitles_file(
+            "/movies/Film (2020)/Film.mkv", None, "en", "hu", False, False, "movie", None, None, 30, None,
+            job_id=7, arr_instance_id=1,
+            embedded_source={"language": "en", "hi": False, "forced": False, "codec": "pgs"})
+
+    film = root / "owner1/movies/Film (2020)"
+    assert workers and all(worker.process.returncode is not None for worker in workers)
+    assert os.listdir(work) == []
+    assert sorted(path.name for path in film.iterdir()) == ["Film.mkv"], "no half SRT, no translation"
+    assert _history(session) == [] and published == []
+    assert not failure_record.translation_recently_failed(1, "movie", 30, "en", "hu", False, False)
+    # Stopped, the job is past its OCR phase: it must not keep OCR requests out.
+    assert 7 in ocr._OCR_PHASE_OVER
+    ocr._OCR_PHASE_OVER.discard(7)
+
+
 def test_the_real_engine_reads_the_pgs_track(ocr_library, packs, monkeypatch):
     from app.config import settings
     import subtitles.tools.embedded_ocr as ocr
@@ -707,3 +753,114 @@ def test_an_old_row_is_probed_for_its_codec(ocr_library, monkeypatch):
 
     assert ocr_codec(_track(language="hu"), None) == "pgs"
 
+
+
+@pytest.fixture
+def probe_languages(monkeypatch):
+    """The language table boot builds, with the custom Brazilian Portuguese code."""
+    from languages import get_languages
+
+    monkeypatch.setattr(get_languages, "languages_dict", [
+        {"code2": "en", "code3": "eng", "name": "English", "code3b": "eng"},
+        {"code2": "hu", "code3": "hun", "name": "Hungarian", "code3b": "hun"},
+        {"code2": "pt", "code3": "por", "name": "Portuguese", "code3b": "por"},
+        {"code2": "pb", "code3": "pob", "name": "Brazilian Portuguese", "code3b": None},
+    ], raising=False)
+
+
+def _probe_track(language="en", hi=False, forced=False):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(video_path="/media/film.mkv", media_type="movie", arr_instance_id=1,
+                           language=language, hi=hi, forced=forced)
+
+
+def _probe(monkeypatch, tracks):
+    import subtitles.tools.translate.batch as batch
+
+    monkeypatch.setattr(batch, "embedded_subtitle_tracks", lambda *a, **k: tracks)
+
+
+VARIANTS = [
+    {"format": "PGS", "language": "eng", "name": "", "forced": False, "hearing_impaired": False},
+    {"format": "SubRip", "language": "eng", "name": "SDH", "forced": False, "hearing_impaired": True},
+    {"format": "VobSub", "language": "eng", "name": "", "forced": True, "hearing_impaired": False},
+    {"format": "DVBSUB", "language": "eng", "name": "Forced", "forced": False, "hearing_impaired": False},
+    {"format": "PGS", "language": "hun", "name": "", "forced": False, "hearing_impaired": False},
+]
+
+
+@pytest.mark.parametrize("hi,forced,found", [
+    (False, False, ["pgs"]),
+    (True, False, ["subrip"]),
+    # The flag and a title that says "forced" are the same variant, as the indexer files them.
+    (False, True, ["vobsub", "dvbsub"]),
+])
+def test_a_probe_matches_only_the_rows_own_variant(probe_languages, monkeypatch, hi, forced, found):
+    from subtitles.tools.embedded_ocr import probed_codecs
+
+    _probe(monkeypatch, VARIANTS)
+
+    assert probed_codecs(_probe_track(hi=hi, forced=forced)) == found
+
+
+def test_a_probe_skips_commentary_and_takes_the_undefined_default_like_the_indexer(probe_languages, monkeypatch):
+    from app.config import settings
+    from subtitles.tools.embedded_ocr import probed_codecs
+
+    _probe(monkeypatch, [
+        {"format": "PGS", "language": "eng", "name": "Director's Commentary", "forced": False,
+         "hearing_impaired": False},
+        {"format": "VobSub", "name": "", "forced": False, "hearing_impaired": False},  # no language tag
+        {"format": "SubRip", "language": "eng", "name": "", "forced": False, "hearing_impaired": False},
+    ])
+    monkeypatch.setattr(settings.general, "default_und_embedded_subtitles_lang", "en")
+    assert probed_codecs(_probe_track()) == ["vobsub", "subrip"]
+
+    monkeypatch.setattr(settings.general, "default_und_embedded_subtitles_lang", "")
+    assert probed_codecs(_probe_track()) == ["subrip"]
+
+
+def test_a_probe_reads_a_bare_three_letter_tag_and_the_custom_brazilian_code(probe_languages, monkeypatch):
+    from subtitles.tools.embedded_ocr import probed_codecs
+
+    _probe(monkeypatch, [
+        {"format": "PGS", "language": "por", "name": "Brazilian Portuguese", "forced": False,
+         "hearing_impaired": False},
+        {"format": "VobSub", "language": "por", "name": "Portuguese", "forced": False,
+         "hearing_impaired": False},
+        {"format": "SubRip", "language": "eng", "name": "", "forced": False, "hearing_impaired": False},
+    ])
+
+    assert probed_codecs(_probe_track(language="pb")) == ["pgs"]
+    assert probed_codecs(_probe_track(language="pt")) == ["vobsub"]
+    assert probed_codecs(_probe_track(language="en")) == ["subrip"]
+
+
+def test_a_probe_that_finds_nothing_leaves_the_row_unknown_and_ocr_says_so(ocr_library, monkeypatch):
+    """The fallback: the probe has no such track, so the row's own None stays and the refusal names it."""
+    from subtitles.tools.embedded_extract import NotExtractable
+    from subtitles.tools.embedded_ocr import ocr_codec
+
+    session = ocr_library[0]
+    session.execute(sa.update(TableMovies).values(subtitles=str([["hu", None, None]])))
+    session.commit()
+    _probe(monkeypatch, [{"format": "PGS", "language": "eng", "name": "", "forced": False,
+                          "hearing_impaired": False}])
+
+    with pytest.raises(NotExtractable, match="does not know the format of this Hungarian track yet"):
+        ocr_codec(_track(language="hu"), None)
+
+
+def test_an_old_row_of_the_hi_variant_is_probed_for_that_variant(ocr_library, monkeypatch):
+    from subtitles.tools.embedded_ocr import ocr_codec
+
+    session = ocr_library[0]
+    session.execute(sa.update(TableMovies).values(subtitles=str([["en:hi", None, None]])))
+    session.commit()
+    _probe(monkeypatch, [
+        {"format": "VobSub", "language": "eng", "name": "", "forced": False, "hearing_impaired": False},
+        {"format": "PGS", "language": "eng", "name": "SDH", "forced": False, "hearing_impaired": True},
+    ])
+
+    assert ocr_codec(_track(language="en", hi=True), None) == "pgs"

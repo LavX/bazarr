@@ -61,6 +61,21 @@ def _report_destination_skip(job_id, from_lang, to_lang):
     jobs_queue.update_job_name(job_id=job_id, new_job_name=skip_name)
 
 
+# JobFailed reason of a translation that found the process's single OCR slot
+# taken while it was reading an image source.
+OCR_BUSY_REASON = 'ocr_busy'
+
+# JobFailed reasons of an OCR source that cannot be read for a cause that says
+# nothing about whether the item can be translated: the SRT OCR would write is
+# already there, or the row no longer lists the track (hidden or rescanned
+# since the request). No hold is recorded for them: the hold suppresses auto
+# translation of the item, and for a taken name that is the very SRT it would
+# read.
+OCR_SOURCE_TAKEN_REASON = 'ocr_output_exists'
+OCR_SOURCE_UNLISTED_REASON = 'ocr_track_unlisted'
+NO_HOLD_REASONS = frozenset({OCR_BUSY_REASON, OCR_SOURCE_TAKEN_REASON, OCR_SOURCE_UNLISTED_REASON})
+
+
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
                              media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata,
                              job_id=None, arr_instance_id=None, sports_operation=None, embedded_source=None,
@@ -68,8 +83,10 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     """Translate a subtitle file, as a queued job.
 
     ``embedded_source`` names an embedded track to translate instead of a file:
-    a dict with ``language`` (alpha2), ``hi`` and ``forced``. The track is
-    extracted by the job, so the request that queues it returns at once.
+    a dict with ``language`` (alpha2), ``hi`` and ``forced``, and the row's
+    ``codec`` when the request knows it. The track is extracted (a text track)
+    or read with OCR (a PGS or VobSub track named by its codec) by the job, so
+    the request that queues it returns at once.
 
     ``expected_destination_versions`` is what the auto paths capture with
     ``capture_subtitle_versions`` when they queue this job. The write refuses a
@@ -116,8 +133,10 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             cancel = SportsJobSignal(arr_instance_id, job_id)
             sports_operation.validate(wanted=True, cancel=cancel)
         if embedded_source:
+            media_id = radarr_id if media_type == "movie" else (
+                sonarr_episode_id if media_type == "episode" else None)
             source_srt_file = _extract_embedded_source(video_path, media_type, embedded_source, job_id,
-                                                       arr_instance_id)
+                                                       arr_instance_id, media_id=media_id)
         logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')  # noqa: G004
 
         validate_translation_params(video_path, source_srt_file, from_lang, to_lang)
@@ -251,11 +270,15 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         logging.error(f'Translation failed: {str(e)}', exc_info=True)  # noqa: G004, G201
         # Nothing was published, so the next scan would offer the same doomed
         # job again: hold this item back until the hold expires or the world
-        # it described changes. A cancelled job is not a failed translation.
-        record_failed_translation(arr_instance_id, media_type,
-                                  _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
-                                                           sports_operation),
-                                  from_lang, to_lang, forced, hi)
+        # it described changes. A cancelled job is not a failed translation,
+        # and neither is one that found the OCR slot taken, its OCR output
+        # name taken or its track unlisted: those say nothing about whether
+        # this item can be translated, and the user asked for it by hand.
+        if getattr(e, 'reason', None) not in NO_HOLD_REASONS:
+            record_failed_translation(arr_instance_id, media_type,
+                                      _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
+                                                               sports_operation),
+                                      from_lang, to_lang, forced, hi)
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
             fail_name = current_name.replace('Translating', 'Failed')
@@ -268,25 +291,101 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         raise
 
 
-def _extract_embedded_source(video_path, media_type, embedded_source, job_id, arr_instance_id):
-    """Extract the embedded track this translation reads, inside the job.
+def _extract_embedded_source(video_path, media_type, embedded_source, job_id, arr_instance_id,
+                             media_id=None):
+    """The text source this translation reads, inside the job.
 
-    The file lands in the persistent extracted_subs cache, so it is not removed
-    after the translation reads it.
+    An embedded text track is extracted into the persistent extracted_subs
+    cache. An image track (PGS or VobSub) is read with OCR into an ordinary SRT
+    next to the video, and that SRT is the translation source: translating
+    from an image track is a feature, the row's menu says so before it is
+    clicked. OCR runs only when the request names the track's image codec. A
+    request without a codec (a row whose format is not known) never starts an
+    OCR run by accident: a failed text extraction there keeps its own reason.
+
+    The OCR run happens inside this job, so the job keeps its place in the
+    jobs queue (and in the translation lane) for the whole run. That is
+    deliberate: one OCR run exists per process, a request that would start a
+    second one is refused up front with a 409, and a job that still finds the
+    slot taken ends at once with the busy reason instead of waiting. At most
+    one translation therefore sits in the lane doing OCR, and it counts as an
+    OCR job only until its reading is over. The cost is head of line: with
+    ``translator.openrouter_max_concurrent`` at 1 this job fills the whole
+    translation lane through its OCR and its translation, and the jobs queued
+    behind it wait (the queue starts only the job at the front). The queue's
+    order is not changed for it.
     """
     from app.jobs_queue import JobFailed
+    from subtitles.new_subtitle import SubtitleFileExists
+    from subtitles.tools.embedded_extract import ExtractionError, TrackNotFound
+    from subtitles.tools.embedded_ocr import (OcrBusy, job_progress, ocr_embedded, ocr_phase_over,
+                                              ocr_phase_started)
+    from subtitles.tools.embedded_streams import codec_label, is_bitmap_codec, is_ocr_codec
+    from subtitles.tools.ocr.errors import OcrError
     from subtitles.tools.translate.batch import extract_embedded_subtitle
 
-    jobs_queue.update_job_progress(job_id=job_id, progress_message='Extracting the embedded subtitle track')
-    extracted = extract_embedded_subtitle(
-        video_path,
-        embedded_source.get('language'),
-        media_type,
-        hi=bool(embedded_source.get('hi')),
-        forced=bool(embedded_source.get('forced')),
-        arr_instance_id=arr_instance_id,
-    )
-    if not extracted:
-        raise JobFailed('Could not extract the embedded subtitle track. Its codec may be bitmap '
-                               '(PGS or VobSub), or the language track was not found.')
-    return extracted
+    language = embedded_source.get('language')
+    hi = bool(embedded_source.get('hi'))
+    forced = bool(embedded_source.get('forced'))
+    requested_codec = embedded_source.get('codec')
+
+    if requested_codec and is_bitmap_codec(requested_codec) and not is_ocr_codec(requested_codec):
+        raise JobFailed(f'This track is {codec_label(requested_codec)}, an image format that OCR cannot read, '
+                        'so there is no text to translate.')
+
+    if not (requested_codec and is_ocr_codec(requested_codec)):
+        jobs_queue.update_job_progress(job_id=job_id,
+                                       progress_message='Extracting the embedded subtitle track')
+        extracted = extract_embedded_subtitle(
+            video_path,
+            language,
+            media_type,
+            hi=hi,
+            forced=forced,
+            arr_instance_id=arr_instance_id,
+        )
+        if extracted:
+            return extracted
+        if requested_codec:
+            raise JobFailed('Could not extract the embedded subtitle track, or the language track '
+                            'was not found.')
+        raise JobFailed('Could not extract the embedded subtitle track. If it is an image-based track (PGS or '
+                        'VobSub), scan the disk on this title so Bazarr+ knows its format, then translate '
+                        'from it again. Otherwise the language track was not found.')
+
+    # An image track the request named. OCR it into an SRT, then translate that file.
+    jobs_queue.update_job_progress(job_id=job_id,
+                                   progress_message='Reading the source track with OCR')
+    ocr_phase_started(job_id)
+    try:
+        path, _result = ocr_embedded(
+            media_type,
+            media_id,
+            arr_instance_id,
+            language,
+            hi,
+            forced,
+            codec=requested_codec,
+            progress=job_progress(job_id, language),
+        )
+    except SubtitleFileExists as error:
+        # An SRT at this name may be a download, or OCR of another image track
+        # under the same language key. Its origin cannot be proven, so it is
+        # never fed to the translator as this source.
+        raise JobFailed(f"{error}. Delete it first to read this track with OCR.",
+                        reason=OCR_SOURCE_TAKEN_REASON) from error
+    except OcrBusy as error:
+        # Another OCR run holds the process's slot. Nothing is wrong with this
+        # item, so the job's failure handler must not hold it back.
+        raise JobFailed(str(error), reason=OCR_BUSY_REASON) from error
+    except TrackNotFound as error:
+        raise JobFailed(str(error), reason=OCR_SOURCE_UNLISTED_REASON) from error
+    except (ExtractionError, OcrError) as error:
+        raise JobFailed(str(error)) from error
+    finally:
+        # However the reading ended, the job is past its OCR phase: it only
+        # translates (or is over), and must not keep OCR requests out.
+        ocr_phase_over(job_id)
+    jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=0,
+                                   progress_message='Translating the subtitle')
+    return path

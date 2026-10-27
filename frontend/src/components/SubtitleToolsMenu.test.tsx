@@ -375,7 +375,7 @@ describe("SubtitleToolsMenu OCR to text", () => {
     return user;
   }
 
-  const menuItem = (name: string) =>
+  const menuItem = (name: string | RegExp) =>
     screen.getByRole("menuitem", { name, hidden: true });
   const noItem = (name: string) =>
     screen.queryByRole("menuitem", { name, hidden: true });
@@ -442,43 +442,157 @@ describe("SubtitleToolsMenu OCR to text", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not offer an image-based track as a translation source", async () => {
-    const source = (codec: string | null): Subtitle => ({
-      code2: "en",
-      name: "English",
-      path: null,
-      hi: false,
-      forced: false,
-      codec,
-    });
-    const user = userEvent.setup();
-    customRender(
-      <SubtitleToolsMenu
-        selections={[]}
-        missingLanguage={{
-          code2: "hu",
-          name: "Hungarian",
-          hi: false,
-          forced: false,
-          path: null,
-        }}
-        translationSources={[source("pgs"), source("dvbsub"), source("subrip")]}
-        mediaId={5}
-        mediaType="movie"
-        onAction={vi.fn()}
-      >
-        <Button>Tools</Button>
-      </SubtitleToolsMenu>,
-    );
-    await user.click(screen.getByRole("button", { name: "Tools" }));
-    await screen.findByText("Remove HI Tags");
+  describe("Translate from an embedded source", () => {
+    const NOTE =
+      "Reads the track with OCR first and saves the result as a subtitle file in your subtitle folder, named like downloaded subtitles, then translates it.";
+    const source = (codec: string | null, extra: Partial<Subtitle> = {}) =>
+      ({
+        code2: "en",
+        name: "English",
+        path: null,
+        hi: false,
+        forced: false,
+        codec,
+        ...extra,
+      }) as Subtitle;
 
-    expect(
-      menuItem("Translate from English (embedded PGS, OCR it first)"),
-    ).toBeDisabled();
-    expect(
-      menuItem("Translate from English (embedded DVB, no text)"),
-    ).toBeDisabled();
-    expect(menuItem("Translate from English (embedded)")).toBeEnabled();
+    async function openMissing(
+      sources: Subtitle[],
+      mediaType: "movie" | "episode" | "sports" = "movie",
+    ) {
+      const user = userEvent.setup();
+      customRender(
+        <SubtitleToolsMenu
+          selections={[]}
+          missingLanguage={{
+            code2: "hu",
+            name: "Hungarian",
+            hi: false,
+            forced: false,
+            path: null,
+          }}
+          translationSources={sources}
+          mediaId={5}
+          mediaType={mediaType}
+          onAction={vi.fn()}
+        >
+          <Button>Tools</Button>
+        </SubtitleToolsMenu>,
+      );
+      await user.click(screen.getByRole("button", { name: "Tools" }));
+      await screen.findByText("Remove HI Tags");
+      return user;
+    }
+
+    beforeEach(() => {
+      vi.mocked(api.subtitles.modify).mockClear();
+    });
+
+    it.each([
+      ["pgs", "PGS"],
+      ["vobsub", "VobSub"],
+    ])(
+      "is enabled on a %s source and says it reads the track with OCR first",
+      async (codec, label) => {
+        await openMissing([source(codec)]);
+
+        const item = menuItem(
+          `Translate from English (embedded ${label}, read with OCR) ${NOTE}`,
+        );
+        expect(item).toBeEnabled();
+      },
+    );
+
+    it.each([["hdmv_pgs_subtitle"], ["dvd_subtitle"], ["dvd"]])(
+      "reads a %s source with OCR as well",
+      async (codec) => {
+        await openMissing([source(codec)]);
+
+        expect(
+          menuItem(/Translate from English \(embedded .*, read with OCR\)/),
+        ).toBeEnabled();
+      },
+    );
+
+    it("does not promise a file name or a folder the settings may change", async () => {
+      // The name takes the HI Extension setting (hi, sdh, cc), the language's
+      // own file code and forced over HI, and the folder is the configured
+      // subtitle folder, so the note names none of them.
+      await openMissing([
+        source("pgs", { hi: true }),
+        source("vobsub", { forced: true }),
+        source("pgs"),
+      ]);
+
+      expect(screen.getAllByText(NOTE)).toHaveLength(3);
+      expect(screen.queryByText(/<video>/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/\.hi\b/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/next to the video/)).not.toBeInTheDocument();
+    });
+
+    it("keeps DVB disabled, with no text to read", async () => {
+      await openMissing([source("dvbsub")]);
+
+      expect(
+        menuItem("Translate from English (embedded DVB, no text)"),
+      ).toBeDisabled();
+    });
+
+    it("leaves a text or unknown source as it was, with no OCR note", async () => {
+      await openMissing([source("subrip"), source(null, { hi: true })]);
+
+      const items = screen.getAllByRole("menuitem", {
+        name: /Translate from English \(embedded\)/,
+        hidden: true,
+      });
+      expect(items).toHaveLength(2);
+      items.forEach((item) => expect(item).toBeEnabled());
+      expect(screen.queryByText(/Reads the track with OCR/)).toBeNull();
+    });
+
+    it("disables an image source on a sports event and points to OCR to text", async () => {
+      await openMissing([source("pgs")], "sports");
+
+      const item = menuItem(/Translate from English \(embedded PGS/);
+      expect(item).toBeDisabled();
+      expect(
+        screen.getByText(
+          "Not available for sports events. Run OCR to text on this track first, then translate the file it writes.",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("sends the source row's codec with the request", async () => {
+      const user = await openMissing([source("pgs"), source("subrip")]);
+
+      await user.click(menuItem(/embedded PGS, read with OCR/));
+
+      await waitFor(() =>
+        expect(api.subtitles.modify).toHaveBeenCalledTimes(1),
+      );
+      const [action, form] = vi.mocked(api.subtitles.modify).mock.calls[0];
+      expect(action).toBe("translate");
+      expect(form).toMatchObject({
+        id: 5,
+        type: "movie",
+        language: "hu",
+        path: "",
+        // eslint-disable-next-line camelcase
+        from_language: "en",
+        codec: "pgs",
+      });
+    });
+
+    it("sends no codec for a source row whose format is not known", async () => {
+      const user = await openMissing([source(null)]);
+
+      await user.click(menuItem(/Translate from English \(embedded\)/));
+
+      await waitFor(() =>
+        expect(api.subtitles.modify).toHaveBeenCalledTimes(1),
+      );
+      const form = vi.mocked(api.subtitles.modify).mock.calls[0][1];
+      expect(form.codec).toBeUndefined();
+    });
   });
 });
