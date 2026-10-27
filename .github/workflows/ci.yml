@@ -375,6 +375,7 @@ jobs:
             tests/bazarr/test_jobs_result.py \
             tests/bazarr/test_jobs_session.py \
             tests/bazarr/test_manual_search_job.py \
+            tests/bazarr/test_sports_search_job.py \
             tests/bazarr/test_jellyfin_apikey_location.py \
             tests/bazarr/test_emby_api.py \
             tests/bazarr/test_silo_api.py \

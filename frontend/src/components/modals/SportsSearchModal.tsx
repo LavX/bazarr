@@ -11,7 +11,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import sports, { SportsEventReference } from "@/apis/raw/sports";
 import { withModal } from "@/modules/modals";
-import { waitForJob } from "@/utilities/jobs";
+import { searchAsJob, waitForJob } from "@/utilities/jobs";
 import {
   useEnabledLanguages,
   useLanguageProfileBy,
@@ -74,7 +74,10 @@ function SportsSearchView({
         hi,
         forced,
       ],
-      queryFn: () => sports.searchSubtitles(item, language, hi, forced),
+      queryFn: () =>
+        searchAsJob<SearchResultType[]>(client, () =>
+          sports.searchSubtitles(item, language, hi, forced),
+        ),
       enabled: false,
       retry: false,
     });

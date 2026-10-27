@@ -5,10 +5,12 @@ import sports, {
   SportsEvent,
   SportsEventReference,
   SportsFilters,
+  SportsJobStatus,
   SportsLeague,
   SportsRecord,
 } from "@/apis/raw/sports";
 import { useArrKindAvailability } from "./arrInstances";
+import { useSystemJobs } from "./system";
 
 // Kept as its own name because most of this module calls it, but the rule it
 // encodes is not specific to sports: see useArrKindAvailability.
@@ -461,19 +463,40 @@ export function useSportsSubtitleModification() {
   };
 }
 
+const SPORTS_JOB_ENDED = new Set(["completed", "failed", "cancelled"]);
+
+/**
+ * Follow one queued sports job the standard way. Its status and message come
+ * from the jobs cache the socket keeps current, the same entry the Jobs drawer
+ * shows, so nothing is polled while it runs. Once it has ended, the owner's own
+ * job endpoint is read one time for what it produced (the file status, the
+ * replacement and each outcome), which the jobs list never carries.
+ */
 export function useSportsJob(id?: number | null, owner?: number) {
   const { instances } = useSportsAvailability();
-  return useQuery({
+  const jobs = useSystemJobs();
+  const cached = id ? jobs.data?.find((job) => job.job_id === id) : undefined;
+  const ended = cached !== undefined && SPORTS_JOB_ENDED.has(cached.status);
+  const owned =
+    !!id && !!owner && instances.some((instance) => instance.id === owner);
+  const detail = useQuery({
     queryKey: [QueryKeys.Sports, "job", id, owner],
     queryFn: () => sports.jobStatus(id!, owner!),
-    enabled:
-      !!id && !!owner && instances.some((instance) => instance.id === owner),
-    refetchInterval: (query) =>
-      query.state.status === "error" ||
-      query.state.data?.status === "completed" ||
-      query.state.data?.status === "failed" ||
-      query.state.data?.status === "cancelled"
-        ? false
-        : 1000,
+    enabled: owned && ended,
+    retry: false,
   });
+  const data: SportsJobStatus | undefined =
+    owned && cached !== undefined
+      ? {
+          job_id: cached.job_id,
+          arr_instance_id: owner,
+          status: cached.status,
+          cancelled: cached.status === "cancelled",
+          message:
+            (cached.status === "failed" ? cached.error?.message : undefined) ||
+            cached.progress_message,
+          result: detail.data?.result ?? null,
+        }
+      : undefined;
+  return { data, isError: detail.isError };
 }

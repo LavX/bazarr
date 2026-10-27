@@ -662,16 +662,11 @@ def save_sports_subtitle(
     return outcome.finish()
 
 
-def manual_search_sports(
-    event_id, language, hi=False, forced=False, arr_instance_id=None, *, cancel=None
-):
+def requested_search_language(language, hi=False, forced=False):
+    """The language a sports search asks for, or the ValueError that says it is not valid."""
     from languages.get_languages import alpha3_from_alpha2
-    from subtitles.manual import manual_search
     from subtitles.utils import _get_lang_obj
 
-    check_cancelled(cancel)
-    context = resolve_event_in_session(database, event_id, arr_instance_id)
-    row = database.get(TableSportsEvents, event_id, populate_existing=True)
     code = (
         alpha3_from_alpha2(language)
         if isinstance(language, str) and len(language) == 2
@@ -685,9 +680,20 @@ def manual_search_sports(
     ):
         raise ValueError("A valid subtitle language and boolean variants are required")
     try:
-        requested = Language.rebuild(_get_lang_obj(code), hi=hi, forced=forced)
+        return Language.rebuild(_get_lang_obj(code), hi=hi, forced=forced)
     except (ValueError, KeyError) as exc:
         raise ValueError("Unknown subtitle language") from exc
+
+
+def manual_search_sports(
+    event_id, language, hi=False, forced=False, arr_instance_id=None, *, cancel=None, observed=True
+):
+    from subtitles.manual import manual_search
+
+    check_cancelled(cancel)
+    context = resolve_event_in_session(database, event_id, arr_instance_id)
+    row = database.get(TableSportsEvents, event_id, populate_existing=True)
+    requested = requested_search_language(language, hi, forced)
     profile = get_profiles_list(context.profile_id) if context.profile_id else None
     result = manual_search(
         context.mapped_path,
@@ -702,6 +708,7 @@ def manual_search_sports(
             profile and profile["originalFormat"] in (1, "1", True, "True")
         ),
         cancel=cancel,
+        observed=observed,
     )
     check_cancelled(cancel)
     if isinstance(result, str):

@@ -4,17 +4,18 @@ import os
 from io import BytesIO
 
 from flask import request
-from flask_restx import fields, marshal, Namespace, Resource, reqparse
+from flask_restx import Namespace, Resource, reqparse
 from werkzeug.datastructures import FileStorage
 
 from app.database import (database, select, TableArrInstances, TableSportsEvents,
                           TableSportsLeagues)
 from subliminal_patch.core import SUBTITLE_EXTENSIONS
 from sportarr.identity import resolve_event_in_session
-from sportarr.manual_jobs import sports_manually_download_subtitle
-from sportarr.subtitles import manual_search_sports
+from sportarr.manual_jobs import queue_sports_search, sports_manually_download_subtitle
+from sportarr.subtitles import requested_search_language
 from sportarr.workflows import require_sports_enabled
 from .leagues import _body, _optional_owner, _owner
+from ..queued_job import queued_job_model, queued_job_response
 from ..swaggerui import job_queued_model
 from ..utils import (MAX_SUBTITLE_UPLOAD_SIZE, UploadTooLarge, authenticate, read_bounded_upload,
                      upload_declared_too_large, upload_too_large_message)
@@ -45,54 +46,35 @@ def _league_owner(league_id, owner):
 
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/search")
 class SportsSearch(Resource):
-    # The same model the providers episodes/movies endpoints marshal through.
-    # Unmarshalled, this endpoint returned manual_search's raw dicts, so
-    # original_format came back as a JSON boolean while the series and movies
-    # searches return the string "False". Both feed the one shared
-    # SearchResultType in the frontend, so a consumer comparing against
-    # "True" read every sports row as false.
-    get_response_model = api_ns_sports_subtitles.model('SportsSearchResult', {
-        'dont_matches': fields.List(fields.String),
-        'forced': fields.String(),
-        'hearing_impaired': fields.String(),
-        'language': fields.String(),
-        'matches': fields.List(fields.String),
-        'original_format': fields.String(),
-        'orig_score': fields.Integer(),
-        'provider': fields.String(),
-        'release_info': fields.List(fields.String),
-        'score': fields.Integer(),
-        'score_without_hash': fields.Integer(),
-        'subtitle': fields.String(),
-        'uploader': fields.String(),
-        'url': fields.String(),
-    })
+    post_job_model = api_ns_sports_subtitles.model('SportsSearchQueued', queued_job_model)
 
     @authenticate
+    @api_ns_sports_subtitles.response(202, "Search queued as a job; its rows are the job result", post_job_model)
+    @api_ns_sports_subtitles.response(400, "Bad request, or Sportarr is turned off")
+    @api_ns_sports_subtitles.response(401, "Not Authenticated")
+    @api_ns_sports_subtitles.response(404, "Sports event not found for this owner")
     def post(self, event_id):
+        """Search manually for a sports event's subtitles as a job
+
+        The rows are the job's result, in the same shape the library searches publish: read them from
+        system/jobs/result once the job finishes."""
         try:
             body = _body()
             require_sports_enabled()
-            results = manual_search_sports(
-                event_id,
-                body.get("language"),
-                body.get("hi", False),
-                body.get("forced", False),
-                _owner(body.get("arr_instance_id")),
-            )
-            return {"data": marshal(results, self.get_response_model)}, 200
+            owner = _owner(body.get("arr_instance_id"))
+            language, hi, forced = body.get("language"), body.get("hi", False), body.get("forced", False)
+            # Answered here rather than by the job: a missing event or a
+            # language that is not one is the caller's to fix, and a 404 or
+            # 400 says so at once. What fails after this is the search, and
+            # the job says why.
+            resolve_event_in_session(database, event_id, owner)
+            requested_search_language(language, hi, forced)
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
-        except OSError as exc:
-            # manual_search answers with the reason as its return value and
-            # sportarr/subtitles.py re-raises it as the OSError argument, so the
-            # exception carries the sentence the user needs. The constant is
-            # only for a raise that arrived without one.
-            return {
-                "message": str(exc) or "Could not search this sports file. Check its accessibility and providers."
-            }, 409
+        job_id = queue_sports_search(event_id, language, hi, forced, owner)
+        return queued_job_response(job_id), 202
 
 
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/download")

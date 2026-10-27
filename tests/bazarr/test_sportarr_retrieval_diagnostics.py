@@ -99,14 +99,28 @@ def download_job(monkeypatch):
     return run
 
 
+class _Calls(list):
+    """The download calls, with the queued searches beside them."""
+
+
 @pytest.fixture
 def queued(monkeypatch):
     from api.sports import subtitles as api_mod
 
-    calls = []
+    calls = _Calls()
     monkeypatch.setattr(api_mod, "resolve_event_in_session", lambda *args, **kwargs: None)
     monkeypatch.setattr(api_mod, "sports_manually_download_subtitle",
                         lambda *args: calls.append(args) or 5)
+    searches = []
+    monkeypatch.setattr(api_mod, "queue_sports_search", lambda *args: searches.append(args) or 8)
+    # The language table is the database's; the 400 branches below pass the
+    # real check through inputs it rejects before any lookup.
+    real_check = api_mod.requested_search_language
+    monkeypatch.setattr(api_mod, "requested_search_language",
+                        lambda language, hi=False, forced=False: (
+                            None if language == "en" and hi is False and forced is False
+                            else real_check(language, hi, forced)))
+    calls.searches = searches
     return calls
 
 
@@ -124,10 +138,10 @@ def test_manual_search_download_and_upload_refuse_while_use_sportarr_is_off(monk
 
     from api.sports import subtitles as api_mod
     from app.config import settings
+    from app.process_session import PROCESS_SESSION
     from subtitles import upload
 
-    searched, uploaded = [], []
-    monkeypatch.setattr(api_mod, "manual_search_sports", lambda *args: searched.append(args) or [])
+    uploaded = []
     monkeypatch.setattr(upload, "manual_upload_subtitle", lambda **kwargs: uploaded.append(kwargs))
     monkeypatch.setattr(settings.general, "use_sportarr", False)
     off = ({"message": "Sportarr is turned off. Turn on Use Sportarr in Settings first."}, 400)
@@ -141,10 +155,11 @@ def test_manual_search_download_and_upload_refuse_while_use_sportarr_is_off(monk
               "file": (BytesIO(b"1\n00:00:00,000 --> 00:00:01,000\nHello\n"), "event.en.srt")},
     ):
         assert resource.post.__wrapped__(resource(), 61) == off
-    assert searched == [] and queued == [] and uploaded == []
+    assert queued.searches == [] and queued == [] and uploaded == []
 
     monkeypatch.setattr(settings.general, "use_sportarr", True)
-    assert search(arr_instance_id=1, language="en") == ({"data": []}, 200)
+    assert search(arr_instance_id=1, language="en") == ({"job_id": 8, "session": PROCESS_SESSION}, 202)
+    assert queued.searches == [(61, "en", False, False, 1)]
     assert download(arr_instance_id=1, candidate={"subtitle": "cached"}) == ({"job_id": 5}, 202)
 
 
@@ -163,27 +178,49 @@ def test_the_download_job_fails_with_the_reason_it_was_given(download_job, reaso
     assert download_job.progress == []
 
 
-def test_the_search_route_repeats_the_reason_it_was_given(monkeypatch):
-    from api.sports import subtitles as api_mod
+@pytest.fixture
+def search_job(monkeypatch):
+    """Run the queued sports search job inline against a stubbed search."""
+    from app.jobs_queue import jobs_queue
+    from sportarr import manual_jobs
+    from sportarr import subtitles as sports_subtitles
 
-    def fails(*args):
+    monkeypatch.setattr(manual_jobs.activity, "register", lambda *args, **kwargs: None)
+    monkeypatch.setattr(jobs_queue, "update_job_progress", lambda **kwargs: True)
+    published = []
+    monkeypatch.setattr(jobs_queue, "publish_job_result",
+                        lambda job_id, result: published.append(result) or True)
+
+    def run(searching):
+        monkeypatch.setattr(sports_subtitles, "manual_search_sports", searching)
+        return manual_jobs.run_sports_search_job(61, "en", False, False, 1, job_id=9)
+
+    run.published = published
+    return run
+
+
+def test_the_search_job_repeats_the_reason_it_was_given(search_job):
+    from app.jobs_queue import JobFailed
+
+    def fails(*args, **kwargs):
         raise OSError("All providers are throttled")
 
-    monkeypatch.setattr(api_mod, "manual_search_sports", fails)
-    body, status = search(arr_instance_id=1, language="en")
-    assert status == 409
-    assert body == {"message": "All providers are throttled"}
+    with pytest.raises(JobFailed) as failure:
+        search_job(fails)
+    assert str(failure.value) == "All providers are throttled"
+    assert failure.value.reason == "search_failed"
+    assert search_job.published == []
 
 
-def test_a_reasonless_failure_still_says_something(monkeypatch, download_job):
+def test_a_reasonless_failure_still_says_something(monkeypatch, download_job, search_job):
     """An argument-less OSError from anywhere below must not fail the job with
     a blank reason, which would leave the user with a failure and nothing to
     read."""
-    from api.sports import subtitles as api_mod
     from app.jobs_queue import JobFailed
 
-    monkeypatch.setattr(api_mod, "manual_search_sports", _failing)
-    assert search(arr_instance_id=1, language="en") == ({"message": SEARCH_FALLBACK}, 409)
+    with pytest.raises(JobFailed) as searching:
+        search_job(_failing)
+    assert str(searching.value) == SEARCH_FALLBACK
 
     with pytest.raises(JobFailed) as failure:
         download_job(_failing)
@@ -200,10 +237,13 @@ def test_the_not_found_and_malformed_branches_are_unchanged(monkeypatch, queued)
     def malformed(*args, **kwargs):
         raise ValueError("A valid subtitle language and boolean variants are required")
 
-    monkeypatch.setattr(api_mod, "manual_search_sports", missing)
+    # The search route answers these before queueing anything, as the download does.
+    monkeypatch.setattr(api_mod, "resolve_event_in_session", missing)
     assert search(arr_instance_id=1, language="en") == ({"message": "Sports event not found for this owner"}, 404)
-    monkeypatch.setattr(api_mod, "manual_search_sports", malformed)
-    assert search(arr_instance_id=1, language="en") == (
+    monkeypatch.setattr(api_mod, "resolve_event_in_session", lambda *args, **kwargs: None)
+    assert search(arr_instance_id=1, language="nonsense") == (
+        {"message": "A valid subtitle language and boolean variants are required"}, 400)
+    assert search(arr_instance_id=1, language="eng", hi="yes") == (
         {"message": "A valid subtitle language and boolean variants are required"}, 400)
 
     # The download route answers these before queueing anything.
