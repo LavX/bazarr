@@ -16,7 +16,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from .decode import decode_cues, render_workspace
+from .decode import decode_cues, render_workspace, require_ffmpeg
 from .errors import OcrError, TooLittleText
 from .tessdata import official_alpha3
 
@@ -79,6 +79,7 @@ def assemble(timed_texts, language, apply_fixes=True):
 def run_ocr(video_path, stream_index, language, engine, *, progress=None, canvas_size=None,
             parent=None, ffmpeg=None):
     """OCR one bitmap subtitle stream of ``video_path`` into SRT text."""
+    require_ffmpeg(ffmpeg)
     report = progress or (lambda step, value, maximum: None)
     engine.prepare(language, progress=report)
     report("pack", 1, 1)

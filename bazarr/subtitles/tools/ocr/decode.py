@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -106,6 +107,29 @@ def render_command(ffmpeg, video_path, stream_index, out_dir, canvas_size=None):
         "-f", "image2", "-start_number", "0", os.path.join(out_dir, "%08d.png"),
     ]
     return command
+
+
+def require_ffmpeg(ffmpeg=None):
+    """Resolve ffmpeg and check the version needed for per-frame timestamps."""
+    if ffmpeg is None:
+        from utilities.binaries import get_binary
+        try:
+            ffmpeg = get_binary("ffmpeg")
+        except Exception as error:
+            raise OcrUnavailable("OCR needs ffmpeg and ffprobe, and Bazarr+ could not find them") from error
+    unreadable = "OCR needs ffmpeg 6.1 or newer, but could not read its version"
+    try:
+        completed = subprocess.run([ffmpeg, "-version"], stdin=subprocess.DEVNULL, capture_output=True,
+                                   text=True, errors="replace", timeout=PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise OcrUnavailable(unreadable) from error
+    version = re.search(r"^ffmpeg version n?(\d+\.\d+(?:\.\d+)?)", completed.stdout)
+    if completed.returncode != 0 or version is None:
+        raise OcrUnavailable(unreadable)
+    found = version.group(1)
+    if tuple(int(part) for part in found.split(".")[:2]) < (6, 1):
+        raise OcrUnavailable(f"OCR needs ffmpeg 6.1 or newer, found {found}")
+    return ffmpeg
 
 
 def _ffprobe_beside(ffmpeg):

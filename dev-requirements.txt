@@ -1,6 +1,11 @@
 sympy
 vcrpy>=8.3.0
-pytest
+# pytest 9.2.0 changed monkeypatch.setattr undo for dict-backed objects: the
+# settings sections (dynaconf DataDict) serve attributes from dict items, so
+# the old value is no longer recorded and undo deletes the key. Every fixture
+# that patches settings.<section>.<name> then breaks the next test. Stay on
+# 9.1.x until those fixtures use setitem or a settings override helper.
+pytest>=9.1,<9.2
 pytest-asyncio>=1.4.0
 pytest-cov
 pytest-vcr
