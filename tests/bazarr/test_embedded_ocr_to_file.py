@@ -392,11 +392,20 @@ def test_an_offline_box_is_told_the_url_and_the_folder(ocr_library, monkeypatch,
 def test_one_ocr_run_at_a_time(ocr_run, monkeypatch):
     """A second run never waits for the first inside its job: it ends at once, having read nothing."""
     from app.jobs_queue import JobFailed
+    from subtitles.tools.ocr.decode import require_ffmpeg
+    from subtitles.tools.ocr.errors import OcrUnavailable
     import subtitles.tools.embedded_ocr as ocr
 
     session, root, _events, published, engine, jobs = ocr_run
     probed = []
-    monkeypatch.setattr(ocr, "ocr_stream", lambda *args, **kwargs: probed.append(args))
+    select_stream = ocr.ocr_stream
+
+    def probe(*args, **kwargs):
+        index = select_stream(*args, **kwargs)
+        probed.append(index)
+        return index
+
+    monkeypatch.setattr(ocr, "ocr_stream", probe)
 
     with ocr._RUN_SLOT:
         with pytest.raises(JobFailed, match="^Another OCR run is queued or running. Try again when it finishes"):
@@ -406,7 +415,12 @@ def test_one_ocr_run_at_a_time(ocr_run, monkeypatch):
     assert not (root / "owner1/movies/Film (2020)/Film.en.srt").exists()
     assert _history(session) == [] and published == []
 
+    try:
+        require_ffmpeg()
+    except OcrUnavailable as error:
+        pytest.skip(str(error))
     assert ocr.ocr_embedded_track("movie", 30, 1, "en", codec="pgs", job_id=8).endswith("Film.en.srt")
+    assert probed == [0]
 
 
 def quick_job(job_id=None):
