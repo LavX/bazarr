@@ -6,6 +6,7 @@ import {
   useLanguageProfiles,
   useSettingsMutation,
   useSystemSettings,
+  useSystemStatus,
 } from "@/apis/hooks";
 import {
   ConnectionTest,
@@ -73,6 +74,7 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
     useArrInstances: vi.fn(),
     useLanguageProfiles: vi.fn(),
     useSystemSettings: vi.fn(),
+    useSystemStatus: vi.fn(),
     useSettingsMutation: vi.fn(),
   };
 });
@@ -107,6 +109,7 @@ function renderInShell() {
 const mockedUseArrInstances = vi.mocked(useArrInstances);
 const mockedUseLanguageProfiles = vi.mocked(useLanguageProfiles);
 const mockedUseSystemSettings = vi.mocked(useSystemSettings);
+const mockedUseSystemStatus = vi.mocked(useSystemStatus);
 const mockedUseSettingsMutation = vi.mocked(useSettingsMutation);
 
 const mutate = vi.fn();
@@ -123,6 +126,18 @@ function setProfiles(data: unknown) {
   } as unknown as ReturnType<typeof useLanguageProfiles>);
 }
 
+// The backend's answer to whether an AI translator is set up: the translation
+// gate's own rule for an AI engine, never a read of the OpenRouter key.
+function setAiTranslator(configured: boolean | undefined) {
+  mockedUseSystemStatus.mockReturnValue({
+    data:
+      configured === undefined
+        ? undefined
+        : // eslint-disable-next-line camelcase
+          { ai_translator_configured: configured },
+  } as unknown as ReturnType<typeof useSystemStatus>);
+}
+
 // The four media server master switches always exist in the real settings, and
 // the recap reads them: the dispatcher checks use_<kind> before it looks at any
 // row, so a saved server whose switch never landed refreshes nothing. They
@@ -131,6 +146,8 @@ function setGeneral(
   general: Partial<Settings.General>,
   translator: Partial<Settings.Translator> = {},
 ) {
+  // The Finish step asks the backend whether an AI translator is set up, not
+  // the settings, so a test that stages one stages the system status.
   mockedUseSystemSettings.mockReturnValue({
     data: {
       general: {
@@ -158,6 +175,7 @@ describe("FinishStep", () => {
       { id: 2, kind: "radarr", name: "Main Radarr" },
     ]);
     setProfiles([{ name: "Default", profileId: 1 }]);
+    setAiTranslator(false);
     setGeneral({
       use_plex: true,
       use_jellyfin: false,
@@ -502,10 +520,8 @@ describe("FinishStep", () => {
     // A media server as well, because the picker is on this path too: with
     // none connected the recap has something still to offer.
     setMediaServers({ jellyfin: ["Jellyfin"] });
-    setGeneral(
-      { enabled_providers: ["opensubtitles"], use_seerr: true },
-      { openrouter_api_key: "sk-or-xyz" },
-    );
+    setGeneral({ enabled_providers: ["opensubtitles"], use_seerr: true });
+    setAiTranslator(true);
 
     customRender(<FinishStep onNext={vi.fn()} />);
 
@@ -519,6 +535,33 @@ describe("FinishStep", () => {
     expect(
       screen.queryByText("Still needed for subtitles"),
     ).not.toBeInTheDocument();
+  });
+
+  it("does not read the OpenRouter key to decide the translator is set up", () => {
+    // A sidecar that holds its own credential leaves the key empty and is
+    // configured; a key saved while another engine is selected configures
+    // nothing. The backend decides, the key does not.
+    setGeneral(
+      { enabled_providers: ["opensubtitles"], use_seerr: true },
+      // eslint-disable-next-line camelcase
+      { openrouter_api_key: "sk-or-leftover" },
+    );
+    setAiTranslator(false);
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      screen.getByText(/ai translation not configured/i),
+    ).toBeInTheDocument();
+  });
+
+  it("counts a sidecar-configured translator with an empty key as done", () => {
+    setGeneral({ enabled_providers: ["opensubtitles"], use_seerr: true });
+    setAiTranslator(true);
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(screen.getByText(/ai translation configured/i)).toBeInTheDocument();
   });
 
   it("names the media server a Discover reader connected", async () => {

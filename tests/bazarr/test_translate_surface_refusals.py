@@ -381,3 +381,17 @@ def test_the_editor_answer_is_closed_while_the_configured_engine_is_open(monkeyp
     assert body['data']['translation_availability'] == {'available': True, 'reason': ''}
     assert body['data']['editor_translation_availability'] == {
         'available': False, 'reason': 'The AI Subtitle Translator service URL is not configured'}
+
+
+def test_the_system_status_says_whether_an_ai_translator_is_configured(monkeypatch):
+    """Onboarding reads this instead of the OpenRouter key: the shipped Google
+    engine passes the gate without any AI setup, and a sidecar can hold its own
+    key."""
+    _editor_gate_settings(monkeypatch, 'google_translate',
+                          openrouter_url='http://subtitle-translator:8765')
+    assert _system_status_call(monkeypatch)['data']['ai_translator_configured'] is False
+
+    _editor_gate_settings(monkeypatch, 'openrouter',
+                          openrouter_url='http://subtitle-translator:8765',
+                          openrouter_encryption_key='a' * 64)
+    assert _system_status_call(monkeypatch)['data']['ai_translator_configured'] is True

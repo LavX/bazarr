@@ -203,3 +203,67 @@ def test_the_boot_normalization_writes_one_spelling_of_off(stored, expected):
     from app.config import normalize_translator_type
 
     assert normalize_translator_type(stored) == expected
+
+
+# ------------------------------------------------- the AI translator question
+#
+# Onboarding asks a narrower question than the gate: not "can anything
+# translate" (the shipped Google engine always can) but "is an AI translator
+# set up". It is the gate's own answer for an AI engine, so the nudge, the
+# wizard's Finish step and the gate cannot disagree.
+
+
+def test_the_shipped_default_engine_is_not_an_ai_translator(monkeypatch):
+    availability = _availability(monkeypatch, 'google_translate',
+                                 openrouter_url='http://subtitle-translator:8765')
+
+    assert availability.translation_available().available is True
+    assert availability.ai_translator_configured() is False
+
+
+@pytest.mark.parametrize('translator_type', [None, '', 'None', 'none', 'lingarr', 'unknown'])
+def test_other_engines_are_not_an_ai_translator(monkeypatch, translator_type):
+    availability = _availability(monkeypatch, translator_type,
+                                 lingarr_url='http://lingarr:9876',
+                                 openrouter_url='http://subtitle-translator:8765')
+
+    assert availability.ai_translator_configured() is False
+
+
+def test_openrouter_with_only_a_sidecar_key_is_an_ai_translator(monkeypatch):
+    # The API key stays empty when the sidecar holds its own credential.
+    availability = _availability(monkeypatch, 'openrouter',
+                                 openrouter_url='http://subtitle-translator:8765',
+                                 openrouter_encryption_key='a' * 64)
+
+    assert availability.ai_translator_configured() is True
+
+
+def test_openrouter_with_an_api_key_the_gate_refuses_is_not_an_ai_translator(monkeypatch):
+    # A saved key is not enough: the gate refuses a malformed encryption key.
+    availability = _availability(monkeypatch, 'openrouter', openrouter_api_key='sk-or-xyz',
+                                 openrouter_url='http://subtitle-translator:8765',
+                                 openrouter_encryption_key='not-hex')
+
+    assert availability.ai_translator_configured() is False
+
+
+def test_openrouter_without_a_service_url_is_not_an_ai_translator(monkeypatch):
+    availability = _availability(monkeypatch, 'openrouter', openrouter_api_key='sk-or-xyz')
+
+    assert availability.ai_translator_configured() is False
+
+
+@pytest.mark.parametrize('keys, expected', [([], False), (['  '], False), (['AIza-key'], True)])
+def test_gemini_is_an_ai_translator_once_it_has_a_key(monkeypatch, keys, expected):
+    availability = _availability(monkeypatch, 'gemini', gemini_keys=keys)
+
+    assert availability.ai_translator_configured() is expected
+
+
+def test_an_unreadable_configuration_is_not_an_ai_translator(monkeypatch):
+    from subtitles.tools.translate import availability
+
+    monkeypatch.setattr(availability, 'settings', SimpleNamespace(translator=_ExplodingTranslator()))
+
+    assert availability.ai_translator_configured() is False

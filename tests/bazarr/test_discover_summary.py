@@ -1203,30 +1203,60 @@ def test_optional_library_and_translator_are_onboarding_not_failure(summary_data
     assert summary["wanted"]["complete"] is True
 
 
-def test_translator_onboarding_item_tracks_the_api_key_not_the_service_url(summary_database,
-                                                                          quiet_queue,
-                                                                          monkeypatch):
-    """The item has to be able to fire on a default config.
-
-    openrouter_url ships with a non-empty placeholder host, so keying the item
-    off it meant it never appeared on the one install it is for. The API key is
-    empty until somebody sets translation up, and it is what the onboarding
-    wizard's Finish step reads, so the two cannot disagree.
-    """
+def _translator_item_present(monkeypatch):
     import sys
-    from app.config import settings
     from discover.summary import get_summary
     monkeypatch.setitem(sys.modules, "app.signalr_client", _started_signalr())
+    return "translator" in {item["id"] for item in get_summary()["onboarding"]["items"]}
 
-    # Default config: the service URL is set, the key is not.
+
+def test_translator_onboarding_item_fires_on_the_default_install(summary_database, quiet_queue,
+                                                                 monkeypatch):
+    """The item has to be able to fire on a default config.
+
+    The shipped engine is Google Translate, which the translation gate calls
+    available, and the service URL ships with a non-empty placeholder host. The
+    item is about the optional AI translator, so neither may retire it.
+    """
+    from app.config import settings
     assert (settings.translator.openrouter_url or "").strip()
+    monkeypatch.setattr(settings.translator, "translator_type", "google_translate")
     monkeypatch.setattr(settings.translator, "openrouter_api_key", "")
-    items = {item["id"] for item in get_summary()["onboarding"]["items"]}
-    assert "translator" in items
 
+    assert _translator_item_present(monkeypatch) is True
+
+
+def test_translator_onboarding_item_ignores_a_stray_api_key_on_another_engine(summary_database,
+                                                                             quiet_queue,
+                                                                             monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings.translator, "translator_type", "google_translate")
+    monkeypatch.setattr(settings.translator, "openrouter_api_key", "sk-or-leftover")
+
+    assert _translator_item_present(monkeypatch) is True
+
+
+def test_translator_onboarding_item_retires_for_a_sidecar_with_its_own_key(summary_database,
+                                                                           quiet_queue,
+                                                                           monkeypatch):
+    """The API key stays empty when the sidecar holds its own credential."""
+    from app.config import settings
+    monkeypatch.setattr(settings.translator, "translator_type", "openrouter")
+    monkeypatch.setattr(settings.translator, "openrouter_api_key", "")
+    monkeypatch.setattr(settings.translator, "openrouter_encryption_key", "a" * 64)
+
+    assert _translator_item_present(monkeypatch) is False
+
+
+def test_translator_onboarding_item_stays_while_the_gate_refuses_the_ai_engine(summary_database,
+                                                                              quiet_queue,
+                                                                              monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings.translator, "translator_type", "openrouter")
     monkeypatch.setattr(settings.translator, "openrouter_api_key", "sk-or-configured")
-    items = {item["id"] for item in get_summary()["onboarding"]["items"]}
-    assert "translator" not in items
+    monkeypatch.setattr(settings.translator, "openrouter_encryption_key", "not-hex")
+
+    assert _translator_item_present(monkeypatch) is True
 
 
 @pytest.mark.parametrize("configured", ["setup_complete", "use_sonarr", "provider"])

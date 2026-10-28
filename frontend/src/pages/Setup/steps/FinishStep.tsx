@@ -17,6 +17,7 @@ import {
   useLanguageProfiles,
   useSettingsMutation,
   useSystemSettings,
+  useSystemStatus,
 } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import type {
@@ -212,8 +213,12 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   const profileCount = (profiles ?? []).length;
   const providers = general?.enabled_providers ?? [];
   const useSeerr = general?.use_seerr ?? false;
-  const translatorReady =
-    (settings?.translator?.openrouter_api_key ?? "").length > 0;
+  // The backend's answer, by the translation gate's own rule for an AI engine.
+  // Not the OpenRouter key: a sidecar can hold its own and leave it empty, and a
+  // key saved while another engine is selected configures nothing. The Discover
+  // nudge reads the same answer.
+  const { data: status } = useSystemStatus();
+  const translatorReady = status?.ai_translator_configured ?? false;
 
   const libraryLines: SummaryLine[] = [sonarr.line, radarr.line, sportarr.line];
 
