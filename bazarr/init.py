@@ -124,7 +124,7 @@ settings['general'].pop('update_restart', None)
 write_config()
 
 
-# Remove deprecated providers from enabled providers in config.
+# Remove deprecated providers from enabled and disabled providers in config.
 #
 # CRITICAL: register Provider Hub plugins into the registry BEFORE the strip
 # filter runs. Otherwise any plugin provider in enabled_providers gets
@@ -180,8 +180,10 @@ except Exception:  # pragma: no cover - hub failures must not prevent startup
     logging.exception("Unable to register active Provider Hub providers on startup")
 existing_providers = provider_registry.names()
 enabled_providers = settings.general.enabled_providers
+disabled_providers = list(getattr(settings.general, 'disabled_providers', None) or [])
 if provider_hub_registration_ok:
     settings.general.enabled_providers = [x for x in enabled_providers if x in existing_providers]
+    settings.general.disabled_providers = [x for x in disabled_providers if x in existing_providers]
 
     # Drop the config section a retired built-in provider left behind.
     #
@@ -210,7 +212,7 @@ if provider_hub_registration_ok:
 
     write_config()
 else:
-    logging.warning("Skipping enabled_providers cleanup because Provider Hub registration failed")
+    logging.warning("Skipping provider list cleanup because Provider Hub registration failed")
 
 
 # Initialize provider_priorities if not exists
