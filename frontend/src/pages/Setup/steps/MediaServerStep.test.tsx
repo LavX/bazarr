@@ -1,4 +1,5 @@
 import { ReactElement } from "react";
+import { useMutation } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +11,7 @@ import {
   OnboardingSelectionProvider,
   useOnboardingSelection,
 } from "@/pages/Setup/useOnboardingSelection";
+import { StepBusyProvider, useStepBusy } from "@/pages/Setup/useStepBusy";
 import { act, customRender, renderHook, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import MediaServerStep from "./MediaServerStep";
@@ -101,6 +103,10 @@ function withSelection(ui: ReactElement) {
   return customRender(
     <OnboardingSelectionProvider>{ui}</OnboardingSelectionProvider>,
   );
+}
+
+function ShellBusy() {
+  return <span>{useStepBusy() ? "step busy" : "step free"}</span>;
 }
 
 describe("MediaServerStep", () => {
@@ -415,6 +421,45 @@ describe("MediaServerStep", () => {
         expect.anything(),
       ),
     );
+  });
+
+  it("holds the wizard until the refresh switch write settles", async () => {
+    setInstances({ emby: [row("emby", "Living room", "row-1")] });
+    // eslint-disable-next-line camelcase
+    setSettings({ use_emby: false });
+    let settleWrite!: () => void;
+    const held = new Promise<void>((resolve) => {
+      settleWrite = resolve;
+    });
+    mockedSettingsMutation.mockImplementation(
+      function usePendingSwitchMutation() {
+        return useMutation({
+          mutationFn: (changes: LooseObject) => {
+            mutate(changes);
+            return held;
+          },
+        }) as unknown as ReturnType<typeof useSettingsMutation>;
+      },
+    );
+    const user = userEvent.setup();
+    withSelection(
+      <StepBusyProvider>
+        <MediaServerStep onNext={onNext} />
+        <ShellBusy />
+      </StepBusyProvider>,
+    );
+
+    expect(screen.getByText("step free")).toBeInTheDocument();
+    await user.click(
+      await screen.findByRole("button", { name: /turn on emby refreshes/i }),
+    );
+
+    expect(mutate).toHaveBeenCalledWith({ "settings-general-use_emby": true });
+    expect(await screen.findByText("step busy")).toBeInTheDocument();
+
+    await act(async () => settleWrite());
+
+    expect(await screen.findByText("step free")).toBeInTheDocument();
   });
 
   it("says so when the switch cannot be turned on", async () => {

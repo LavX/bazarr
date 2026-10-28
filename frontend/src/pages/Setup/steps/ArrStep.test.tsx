@@ -14,6 +14,7 @@ import {
   readConnectionTests,
   recordConnectionTest,
 } from "@/pages/Setup/connectionTests";
+import { StepBusyProvider, useStepBusy } from "@/pages/Setup/useStepBusy";
 import { customRender, screen, waitFor } from "@/tests";
 import ArrStep from "./ArrStep";
 
@@ -112,6 +113,19 @@ async function fillValidConnection(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText(/api key/i), "abc123");
 }
 
+function ShellBusy() {
+  return <span>{useStepBusy() ? "step busy" : "step free"}</span>;
+}
+
+function stepWithBusyProbe() {
+  return (
+    <StepBusyProvider>
+      <ArrStep kind="sonarr" onNext={onNext} />
+      <ShellBusy />
+    </StepBusyProvider>
+  );
+}
+
 describe("ArrStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -138,6 +152,52 @@ describe("ArrStep", () => {
     succeedingMutation(createMutate);
     succeedingMutation(settingsMutate);
     succeedingMutation(updateMutate);
+  });
+
+  it.each([
+    {
+      name: "settings",
+      setPending: (isPending: boolean) =>
+        mockedUseSettingsMutation.mockReturnValue({
+          mutate: settingsMutate,
+          isPending,
+        } as unknown as ReturnType<typeof useSettingsMutation>),
+    },
+    {
+      name: "create",
+      setPending: (isPending: boolean) =>
+        mockedUseCreateArrInstance.mockReturnValue({
+          mutate: createMutate,
+          isPending,
+        } as unknown as ReturnType<typeof useCreateArrInstance>),
+    },
+    {
+      name: "update",
+      setPending: (isPending: boolean) =>
+        mockedUseUpdateArrInstance.mockReturnValue({
+          mutate: updateMutate,
+          isPending,
+        } as unknown as ReturnType<typeof useUpdateArrInstance>),
+    },
+  ])("reports busy while the $name write is pending", ({ setPending }) => {
+    const { rerender } = customRender(stepWithBusyProbe());
+    expect(screen.getByText("step free")).toBeInTheDocument();
+
+    setPending(true);
+    rerender(stepWithBusyProbe());
+    expect(screen.getByText("step busy")).toBeInTheDocument();
+
+    setPending(false);
+    rerender(stepWithBusyProbe());
+    expect(screen.getByText("step free")).toBeInTheDocument();
+  });
+
+  it("keeps the step free during a connection test", () => {
+    setTestState({ isPending: true });
+
+    customRender(stepWithBusyProbe());
+
+    expect(screen.getByText("step free")).toBeInTheDocument();
   });
 
   it("renders bespoke connection fields for the kind", () => {
