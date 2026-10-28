@@ -59,6 +59,7 @@ declare namespace Settings {
     dont_notify_manual_actions: boolean;
     embedded_subs_show_desired: boolean;
     enabled_providers: string[];
+    disabled_providers: string[];
     ignore_pgs_subs: boolean;
     ignore_vobsub_subs: boolean;
     instance_name: string;

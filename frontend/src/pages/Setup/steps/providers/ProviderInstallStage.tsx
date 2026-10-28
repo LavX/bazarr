@@ -447,11 +447,19 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         );
         return;
       }
+      const disabled = systemSettings?.general?.disabled_providers;
       try {
         await settingsMutation.mutateAsync({
           "settings-general-enabled_providers": Array.from(
             new Set([...current, ...ids]),
           ),
+          ...(disabled !== undefined
+            ? {
+                "settings-general-disabled_providers": disabled.filter(
+                  (id) => !ids.includes(id),
+                ),
+              }
+            : {}),
         });
         setEnableError(null);
       } catch (reason) {

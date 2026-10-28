@@ -395,6 +395,12 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
     const payload: LooseObject = {
       "settings-general-enabled_providers": enabled,
     };
+    const disabled = systemSettings?.general?.disabled_providers;
+    if (disabled !== undefined) {
+      payload["settings-general-disabled_providers"] = disabled.filter(
+        (id) => !enabled.includes(id),
+      );
+    }
 
     for (const provider of installed) {
       const providerId = provider.provider_id;

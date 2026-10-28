@@ -6510,6 +6510,65 @@ def test_enabled_providers_that_cannot_be_saved_are_put_back(monkeypatch):
     assert service._set_bazarr_provider_enabled("alpha", True) is True
 
 
+def test_enabling_a_provider_clears_its_disabled_entry_in_the_same_save(monkeypatch):
+    from app import config
+    from provider_hub import service
+
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
+    monkeypatch.setattr(
+        config.settings.general, "disabled_providers", ["beta", "other", "beta"], raising=False
+    )
+    saved = []
+
+    def write_config():
+        saved.append((list(config.settings.general.enabled_providers),
+                      list(config.settings.general.disabled_providers)))
+        return True
+
+    monkeypatch.setattr(config, "write_config", write_config)
+
+    assert service._set_bazarr_provider_enabled("beta", True) is True
+    assert saved == [(["alpha", "beta"], ["other"])]
+    assert list(config.settings.general.disabled_providers) == ["other"]
+
+
+@pytest.mark.parametrize("failure", ["false", "exception"])
+def test_failed_provider_activation_restores_both_provider_lists(monkeypatch, failure):
+    from app import config
+    from provider_hub import service
+
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
+    monkeypatch.setattr(config.settings.general, "disabled_providers", ["beta", "other"], raising=False)
+    attempted = []
+
+    def write_config():
+        attempted.append((list(config.settings.general.enabled_providers),
+                          list(config.settings.general.disabled_providers)))
+        if failure == "exception":
+            raise OSError("read-only configuration")
+        return False
+
+    monkeypatch.setattr(config, "write_config", write_config)
+
+    assert service._set_bazarr_provider_enabled("beta", True) is False
+    assert attempted == [(["alpha", "beta"], ["other"])]
+    assert list(config.settings.general.enabled_providers) == ["alpha"]
+    assert list(config.settings.general.disabled_providers) == ["beta", "other"]
+
+
+def test_disabling_a_hub_provider_preserves_the_disabled_list(monkeypatch):
+    from app import config
+    from provider_hub import service
+
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha", "beta"])
+    monkeypatch.setattr(config.settings.general, "disabled_providers", ["other"], raising=False)
+    monkeypatch.setattr(config, "write_config", lambda: True)
+
+    assert service._set_bazarr_provider_enabled("beta", False) is True
+    assert list(config.settings.general.enabled_providers) == ["alpha"]
+    assert list(config.settings.general.disabled_providers) == ["other"]
+
+
 def _installed_examplehub(tmp_path, monkeypatch):
     from provider_hub.state import load_state, save_state
 

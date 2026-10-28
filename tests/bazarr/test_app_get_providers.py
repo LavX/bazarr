@@ -227,6 +227,20 @@ class TestProviderIsUsable:
         monkeypatch.setattr(get_providers, "tp", {})
         assert not get_providers.provider_is_usable("podnapisi")
 
+    def test_disabled_provider_becomes_usable_when_reenabled(self, monkeypatch):
+        monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [])
+        monkeypatch.setattr(
+            get_providers.settings.general, "disabled_providers", ["podnapisi"], raising=False
+        )
+        monkeypatch.setattr(get_providers, "tp", {})
+
+        assert not get_providers.provider_is_usable("podnapisi")
+
+        get_providers.settings.general.enabled_providers = ["podnapisi"]
+        get_providers.settings.general.disabled_providers = []
+
+        assert get_providers.provider_is_usable("podnapisi")
+
     def test_enabled_unthrottled_provider_is_usable(self, monkeypatch):
         monkeypatch.setattr(
             get_providers.settings.general, "enabled_providers", ["opensubtitlescom"]

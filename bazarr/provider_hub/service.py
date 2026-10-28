@@ -135,8 +135,11 @@ def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
         else:
             return True
         previous = settings.general.enabled_providers
+        previous_disabled = getattr(settings.general, "disabled_providers", [])
         try:
             settings.general.enabled_providers = current
+            if enabled:
+                settings.general.disabled_providers = [item for item in previous_disabled if item != provider_id]
             saved = write_config()
         except Exception:
             logging.getLogger(__name__).exception(
@@ -145,6 +148,8 @@ def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
             saved = False
         if saved is not True:
             settings.general.enabled_providers = previous
+            if enabled:
+                settings.general.disabled_providers = previous_disabled
             return False
         return True
 
