@@ -97,3 +97,47 @@ def test_a_recording_replaced_during_ocr_publishes_nothing(sports_ocr, monkeypat
         ocr.ocr_embedded_track("sports", 61, 1, "en", codec="pgs", job_id=7)
     assert not (folder / "1" / "event.en.srt").exists()
     assert _ocr_rows(session) == [] and published == []
+
+
+def _translate_request(session, monkeypatch, **overrides):
+    from types import SimpleNamespace
+
+    from api.subtitles import subtitles as api_mod
+
+    monkeypatch.setattr(api_mod, "database", session)
+    monkeypatch.setattr(api_mod, "translation_available", lambda: SimpleNamespace(available=True, reason=""))
+    queued = []
+    monkeypatch.setattr(api_mod, "translate_subtitles_file", lambda **kwargs: queued.append(kwargs))
+    args = {"action": "translate", "language": "hu", "path": "", "type": "sports", "id": 61,
+            "arr_instance_id": 1, "forced": "False", "hi": "False", "from_language": "en",
+            "from_hi": "False", "from_forced": "False", "codec": "pgs"}
+    args.update(overrides)
+    stub = SimpleNamespace(patch_request_parser=SimpleNamespace(parse_args=lambda: args))
+    return api_mod.Subtitles.patch.__wrapped__(stub), queued
+
+
+def test_translating_a_sports_event_from_an_image_track_says_to_read_it_first(sports_ocr, monkeypatch):
+    """A sports translation binds an existing source file; reading one with OCR is a job, so it is refused."""
+    session, folder, _events, published, engine = sports_ocr
+
+    (body, status), queued = _translate_request(session, monkeypatch)
+
+    assert status == 400
+    assert body == ("Translating from an image-based track is not available for sports events. "
+                    "Read the track with OCR to text first, then translate the subtitle it writes.")
+    assert queued == [] and engine.prepared is None and published == []
+    assert not (folder / "1" / "event.en.srt").exists()
+
+
+def test_translating_a_sports_event_from_a_text_track_keeps_extracting_up_front(sports_ocr, monkeypatch):
+    """Without an image codec the old path is untouched: it extracts and answers its own failure."""
+    from api.subtitles import subtitles as api_mod
+
+    session, _folder, _events, _published, engine = sports_ocr
+    monkeypatch.setattr(api_mod, "extract_embedded_subtitle", lambda *args, **kwargs: None)
+
+    (body, status), queued = _translate_request(session, monkeypatch, codec=None)
+
+    assert status == 400 and body.startswith("Could not extract embedded subtitle: codec may be bitmap")
+    assert queued == [] and engine.prepared is None
+

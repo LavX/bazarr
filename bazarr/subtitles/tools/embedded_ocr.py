@@ -8,8 +8,9 @@ the folder downloads go to, never over an existing file, logged as history
 action 8 with the provider ``ocr-<engine>``, and indexed, so the result is an
 ordinary external subtitle every tool works on.
 
-Manual only: the row menu and the mass action start it; no search does. PGS
-and VobSub only. The row's stored codec decides whether a track can be read at
+Manual only: the row menu, the mass action and a manual Translate from an
+image track start it; no search and no automatic translation does. PGS and
+VobSub only. The row's stored codec decides whether a track can be read at
 all; the probe decides which stream of the video is read.
 """
 
@@ -81,27 +82,39 @@ def stored_codecs(track):
             and entry[0] == track.language_code]
 
 
+def _und_default_language():
+    """The alpha3 an undefined-language track takes, or None when none is configured."""
+    from app.config import settings
+
+    setting = settings.general.default_und_embedded_subtitles_lang
+    return alpha3_from_alpha2(setting) if setting else None
+
+
 def probed_codecs(track):
     """The codecs the video's own tracks report for this language and variant.
 
     A row indexed before codecs were stored lists ``None``. Probing here keeps
     OCR and OCR-first translation working without a manual Scan Disk, while a
     language absent from the row (a hidden track) still returns [].
+
+    A probed track counts for the row when the indexer would file it under the
+    row's language (``embedded_track_language``: custom codes such as pb,
+    undefined-language tracks, a bare three-letter tag, and commentary left
+    out) with the row's own HI and forced flags.
     """
-    from languages.get_languages import alpha3_from_alpha2
     from subtitles.tools.translate.batch import embedded_subtitle_tracks
-    from utilities.video_analyzer import _title_is_forced
+    from utilities.video_analyzer import _title_is_forced, embedded_track_language
 
     tracks = embedded_subtitle_tracks(track.video_path, track.media_type, track.arr_instance_id) or []
-    # The probe reports the base language; the row key may carry :hi or :forced.
-    wanted = {track.language, alpha3_from_alpha2(track.language)}
+    wanted = alpha3_from_alpha2(track.language)
+    und_default = _und_default_language()
     matches = []
     for item in tracks:
-        name = (item.get("name") or "").lower()
-        forced = bool(item.get("forced")) or _title_is_forced(name)
+        if not item.get("format") or embedded_track_language(item, und_default) != wanted:
+            continue
+        forced = bool(item.get("forced")) or _title_is_forced((item.get("name") or "").lower())
         hi = bool(item.get("hearing_impaired"))
-        if (item.get("language") in wanted and forced == track.forced and hi == track.hi
-                and item.get("format")):
+        if forced == track.forced and hi == track.hi:
             matches.append(normalize_codec(item.get("format")))
     return matches
 
@@ -145,16 +158,14 @@ def ocr_stream(track, codec):
     Only a track of the row's own image family with exactly its HI and forced
     flags: the text is written under that row's name.
     """
-    from app.config import settings
     from subtitles.tools.embedded_streams import select_subtitle_stream
     from subtitles.tools.translate.batch import embedded_subtitle_tracks
 
     family = bitmap_family(codec)
     tracks = embedded_subtitle_tracks(track.video_path, track.media_type, track.arr_instance_id) or []
-    und_setting = settings.general.default_und_embedded_subtitles_lang
     index = select_subtitle_stream(
         tracks, alpha3_from_alpha2(track.language), hi=track.hi, forced=track.forced, exact=True,
-        und_default_language=alpha3_from_alpha2(und_setting) if und_setting else None,
+        und_default_language=_und_default_language(),
         accept=lambda found: is_ocr_codec(found) and bitmap_family(found) == family)
     if index is None:
         raise NotExtractable(f"The video has no {track.label} {codec_label(codec)} track to read. Scan the disk "
@@ -203,17 +214,70 @@ def progress_message(step, value, maximum, pack=None):
     return step
 
 
-def ocr_job_waiting_or_running(exclude=None):
-    """Whether a job that reads with OCR is queued or running: a row's OCR to text or a mass OCR.
+# Translation jobs whose OCR phase is over. A translation of an image track is
+# an OCR job while it waits to start and while it reads the track; after that
+# it only translates, which is the translation lane's business and no reason
+# to refuse OCR. Ids, guarded by _ENQUEUE_LOCK (defined below) because the
+# check that reads them and the queueing it guards are one step. Ids of jobs
+# that left the queue are dropped on the next check.
+_OCR_PHASE_OVER = set()
 
-    ``exclude`` is the asking job's own id.
+
+def ocr_phase_started(job_id):
+    """A translation job begins reading its source: it counts as OCR again (a retried job keeps its id)."""
+    with _ENQUEUE_LOCK:
+        _OCR_PHASE_OVER.discard(job_id)
+
+
+def ocr_phase_over(job_id):
+    """A translation job finished reading its source, or failed to: from now on it does not count as OCR."""
+    with _ENQUEUE_LOCK:
+        _OCR_PHASE_OVER.add(job_id)
+
+
+def _reads_with_ocr(job):
+    """Whether a queued job reads an image track with OCR, now or still to come.
+
+    Three kinds do: a row's OCR to text, a mass OCR, and a manual translation
+    whose embedded source names an image codec (it reads that track with OCR
+    inside its own job before it translates). The translation stops counting
+    once its reading is over (see ``ocr_phase_over``).
+
+    Head of line: a translation that reads an image track holds a place in the
+    translation lane for its whole life. With ``translator.openrouter_max_concurrent``
+    at 1 that is the only place, and the jobs queued behind it wait for its
+    OCR and its translation; the queue starts jobs strictly in order, so this
+    does not reorder them.
     """
-    for job in jobs_queue.list_jobs_from_queue():
-        if job.get("job_id") == exclude or job.get("status") not in ("pending", "running"):
-            continue
-        if job.get("func") == "ocr_embedded_track" or (
-                job.get("func") == "mass_batch_operation" and (job.get("kwargs") or {}).get("action") == "ocr"):
-            return True
+    func = job.get("func")
+    kwargs = job.get("kwargs") or {}
+    if func == "ocr_embedded_track":
+        return True
+    if func == "mass_batch_operation":
+        return kwargs.get("action") == "ocr"
+    if func == "translate_subtitles_file":
+        return (is_ocr_codec((kwargs.get("embedded_source") or {}).get("codec"))
+                and job.get("job_id") not in _OCR_PHASE_OVER)
+    return False
+
+
+def ocr_job_waiting_or_running(exclude=None):
+    """Whether a job that reads with OCR is queued or running.
+
+    A row's OCR to text, a mass OCR and a translation of an image source that
+    has not finished reading it all count. ``exclude`` is the asking job's own
+    id. Callers hold ``ocr_queue_lock`` for the check and the queueing that
+    follows it; a job's own thread can call this without it (the lock is
+    reentrant).
+    """
+    jobs = jobs_queue.list_jobs_from_queue()
+    with _ENQUEUE_LOCK:
+        _OCR_PHASE_OVER.intersection_update(job.get("job_id") for job in jobs)
+        for job in jobs:
+            if job.get("job_id") == exclude or job.get("status") not in ("pending", "running"):
+                continue
+            if _reads_with_ocr(job):
+                return True
     return False
 
 
@@ -231,8 +295,8 @@ def one_run_at_a_time():
 # Serialises looking for a queued OCR job with queueing another one. Two
 # requests (or a request and a mass OCR) that both read an empty queue would
 # otherwise both queue a job, and the queue would hold two OCR runs where one
-# slot exists.
-_ENQUEUE_LOCK = threading.Lock()
+# slot exists. Reentrant: the check takes it again to read the phase marks.
+_ENQUEUE_LOCK = threading.RLock()
 
 
 @contextmanager

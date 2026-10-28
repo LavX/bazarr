@@ -379,6 +379,43 @@ def test_the_batch_route_refuses_a_second_ocr_before_queueing_anything(monkeypat
     assert fed == []
 
 
+TRANSLATE_OCR = {"job_id": 4, "func": "translate_subtitles_file", "status": "pending",
+                 "kwargs": {"embedded_source": {"language": "en", "hi": False, "forced": False, "codec": "pgs"}}}
+
+
+def test_the_batch_route_refuses_a_mass_ocr_while_a_translation_reads_an_image_track(monkeypatch):
+    from subtitles.tools.embedded_ocr import BUSY
+
+    answer, fed = _batch_ocr_call(monkeypatch, [TRANSLATE_OCR])
+
+    assert answer == ({"error": BUSY}, 409)
+    assert fed == []
+
+
+def test_a_translation_of_a_text_track_does_not_hold_up_a_mass_ocr(monkeypatch):
+    text = {**TRANSLATE_OCR, "kwargs": {"embedded_source": {"language": "en", "codec": "subrip"}}}
+
+    answer, fed = _batch_ocr_call(monkeypatch, [text])
+
+    assert answer[1] == 200 and len(fed) == 1
+
+
+def test_mass_ocr_fails_before_reading_while_a_translation_reads_an_image_track(monkeypatch):
+    from app.jobs_queue import JobFailed
+    from subtitles import mass_operations
+    import subtitles.tools.embedded_ocr as ocr
+    from subtitles.tools.ocr import tesseract
+
+    monkeypatch.setattr(tesseract, "ocr_available", lambda: True)
+    monkeypatch.setattr(mass_operations, "_collect_subtitle_items",
+                        lambda *a, **kw: pytest.fail("nothing is collected"))
+    monkeypatch.setattr(ocr, "jobs_queue", SimpleNamespace(list_jobs_from_queue=lambda **kwargs: [
+        {**TRANSLATE_OCR, "status": "running"}]))
+
+    with pytest.raises(JobFailed, match="^Another OCR run is queued or running"):
+        mass_operations.mass_batch_operation([{"type": "movie", "radarrId": 7}], "ocr", job_id=5)
+
+
 def test_the_batch_route_queues_a_mass_ocr_when_no_ocr_job_is_queued(monkeypatch):
     answer, fed = _batch_ocr_call(monkeypatch, [])
 

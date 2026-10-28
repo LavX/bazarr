@@ -156,4 +156,58 @@ describe("TranslationForm and the translation gate", () => {
       expect(screen.getByRole("button", { name: "Start" })).toBeDisabled(),
     );
   });
+
+  it("sends the source row's codec with the request, chosen by typing the language", async () => {
+    const user = userEvent.setup();
+    configure("gemini", { available: true, reason: "" });
+    let sent: Record<string, FormDataEntryValue> | undefined;
+    server.use(
+      http.patch("/api/subtitles", async ({ request }) => {
+        sent = Object.fromEntries((await request.formData()).entries());
+        return HttpResponse.json({ job_id: 3 }, { status: 202 });
+      }),
+    );
+    customRender(
+      <TranslationForm
+        selections={
+          [
+            {
+              id: 5,
+              type: "movie",
+              language: "en",
+              path: "",
+              hi: "False",
+              forced: "False",
+              from_language: "en",
+              codec: "subrip",
+              arr_instance_id: 2,
+            },
+          ] as FormType.ModifySubtitle[]
+        }
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState([
+          QueryKeys.System,
+          QueryKeys.Languages,
+          false,
+        ])?.status,
+      ).toBe("success"),
+    );
+    await user.type(screen.getByRole("combobox"), "Hung");
+    await user.click(
+      await screen.findByRole("option", { name: "Hungarian", hidden: true }),
+    );
+    await user.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(sent).toBeDefined());
+    expect(sent).toMatchObject({
+      language: "hu",
+      path: "",
+      from_language: "en",
+      codec: "subrip",
+    });
+  });
 });

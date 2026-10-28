@@ -98,6 +98,15 @@ export function bitmapTrackNote(codec: string | null | undefined): string {
   return `Image-based track (${label}): the tools, Translate, View, Edit and Download need text, and OCR cannot read ${label} tracks. Extract to file copies it out as it is, for players.`;
 }
 
+/**
+ * What the translate-from-image-track item says about the file OCR writes. The
+ * name takes the HI Extension setting, the language's own file code and
+ * forced over HI, and the folder is the configured subtitle folder (next to
+ * the video by default), so the note promises none of those.
+ */
+export const OCR_TRANSLATE_NOTE =
+  "Reads the track with OCR first and saves the result as a subtitle file in your subtitle folder, named like downloaded subtitles, then translates it.";
+
 export const OCR_TOOLTIP =
   "Reads the image subtitles with Tesseract and writes an SRT next to the video. Italics are not preserved.";
 
@@ -427,23 +436,39 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           <>
             {translationSources!.map((source, index) => {
               const sourceIsEmbedded = !source.path;
-              // An image-based track has no text to translate until it has
-              // been read with OCR (or, for DVB, not at all).
+              // An image-based track is translated by reading it with OCR into
+              // an SRT next to the video first. DVB cannot be read, and a
+              // sports event translates only from a file that exists when the
+              // request is made, so both are disabled with their reason.
               const sourceIsImage =
                 sourceIsEmbedded && isBitmapCodec(source.codec);
+              const sourceIsOcr = sourceIsEmbedded && isOcrCodec(source.codec);
+              const sourceIsUnreadable = sourceIsImage && !sourceIsOcr;
+              const ocrUnavailableHere = sourceIsOcr && mediaType === "sports";
               // Use language code as key for embedded tracks (no path). The
               // index keeps two tracks of one language apart: an SRT and a
               // PGS English track share the code.
               const itemKey = `translate-${sourceIsEmbedded ? `embedded:${source.code2}:${index}` : source.path}`;
-              const label = sourceIsImage
-                ? `Translate from ${source.name || source.code2} (embedded ${subtitleCodecLabel(source.codec)}, ${isOcrCodec(source.codec) ? "OCR it first" : "no text"})`
-                : sourceIsEmbedded
-                  ? `Translate from ${source.name || source.code2} (embedded)`
-                  : `Translate from ${source.name || source.code2}${source.hi ? " (HI)" : ""}`;
+              const label = sourceIsUnreadable
+                ? `Translate from ${source.name || source.code2} (embedded ${subtitleCodecLabel(source.codec)}, no text)`
+                : sourceIsOcr
+                  ? `Translate from ${source.name || source.code2} (embedded ${subtitleCodecLabel(source.codec)}, read with OCR)`
+                  : sourceIsEmbedded
+                    ? `Translate from ${source.name || source.code2} (embedded)`
+                    : `Translate from ${source.name || source.code2}${source.hi ? " (HI)" : ""}`;
+              const ocrNote = ocrUnavailableHere
+                ? "Not available for sports events. Run OCR to text on this track first, then translate the file it writes."
+                : sourceIsOcr
+                  ? OCR_TRANSLATE_NOTE
+                  : null;
               return (
                 <Menu.Item
                   key={itemKey}
-                  disabled={sourceIsImage || !translation.available}
+                  disabled={
+                    sourceIsUnreadable ||
+                    ocrUnavailableHere ||
+                    !translation.available
+                  }
                   leftSection={<FontAwesomeIcon icon={faLanguage} />}
                   onClick={async () => {
                     try {
@@ -469,6 +494,12 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
                           from_forced: sourceIsEmbedded
                             ? toPython(source.forced)
                             : undefined,
+                          // The source row's codec: it is what tells an image
+                          // track that needs OCR from a text one, and a row
+                          // without one never starts an OCR run.
+                          codec: sourceIsEmbedded
+                            ? (source.codec ?? undefined)
+                            : undefined,
                           // eslint-disable-next-line camelcase
                           arr_instance_id: arrInstanceId,
                         },
@@ -486,6 +517,11 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
                   {translation.available
                     ? label
                     : `${label} (${translation.reason})`}
+                  {ocrNote && (
+                    <Text size="xs" c="dimmed" maw={260}>
+                      {ocrNote}
+                    </Text>
+                  )}
                 </Menu.Item>
               );
             })}
