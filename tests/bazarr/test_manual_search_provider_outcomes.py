@@ -2,6 +2,7 @@
 
 import importlib
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -243,6 +244,18 @@ def test_throttled_provider_is_distinct_from_an_empty_provider(manual_endpoint):
     assert_provider_summary(body, "throttled")
 
 
+def test_backed_off_provider_is_reported_as_throttled_without_a_call(manual_endpoint):
+    backoff = ("APIThrottled", datetime.now() + timedelta(minutes=10), "10 minutes")
+    manual_endpoint.get_providers.tp["zeta_search"] = backoff
+
+    response = manual_endpoint.search("empty")
+
+    body = assert_legacy_rows(manual_endpoint, response)
+    assert manual_endpoint.calls == ["alpha_search", "middle_search"]
+    assert manual_endpoint.get_providers.tp["zeta_search"] == backoff
+    assert_provider_summary(body, "throttled")
+
+
 def test_busy_provider_is_visible_without_recording_a_failure(manual_endpoint):
     response = manual_endpoint.search("busy")
     body = assert_legacy_rows(manual_endpoint, response)
@@ -261,7 +274,7 @@ def test_excluded_provider_is_visible_without_being_called(manual_endpoint):
     assert_provider_summary(body, "excluded")
 
 
-def test_no_results_preserves_the_empty_data_list(manual_endpoint):
+def test_no_results_keeps_the_empty_data_list(manual_endpoint):
     manual_endpoint.state["alpha_search"] = "empty"
 
     response = manual_endpoint.search("empty")
@@ -272,6 +285,14 @@ def test_no_results_preserves_the_empty_data_list(manual_endpoint):
     assert type(body["data"]) is list
     assert manual_endpoint.raw_returns == [[]]
     assert manual_endpoint.calls == PROVIDER_ORDER
+
+
+def test_no_results_reports_every_provider_as_empty(manual_endpoint):
+    manual_endpoint.state["alpha_search"] = "empty"
+
+    response = manual_endpoint.search("empty")
+
+    body = response.get_json()
     assert body.get("providers") == [
         {"name": "zeta_search", "status": "empty", "results": 0},
         {"name": "alpha_search", "status": "empty", "results": 0},
@@ -279,6 +300,31 @@ def test_no_results_preserves_the_empty_data_list(manual_endpoint):
     ]
     for provider in body["providers"]:
         assert type(provider["results"]) is int
+
+
+def test_manual_search_job_publishes_providers_beside_rows(manual_endpoint, monkeypatch):
+    manual_endpoint.state["zeta_search"] = "found"
+    manual = manual_endpoint.manual
+    published = []
+    monkeypatch.setattr(manual, "jobs_queue", SimpleNamespace(
+        publish_job_result=lambda job_id, value: published.append((job_id, value)),
+        update_job_progress=lambda **kwargs: None,
+    ))
+    monkeypatch.setattr(manual.activity, "register", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manual, "_JobStop", lambda job_id: SimpleNamespace(is_set=lambda: False))
+
+    manual.run_manual_search_job(
+        manual_endpoint.path, 1, "None", "Example", manual_endpoint.media_type, job_id=77,
+    )
+
+    assert manual_endpoint.calls == PROVIDER_ORDER
+    assert len(published) == 1
+    job_id, body = published[0]
+    assert job_id == 77
+    assert isinstance(body, dict)
+    assert type(body["data"]) is list
+    assert [row["provider"] for row in body["data"]] == ["zeta_search", "zeta_search", "alpha_search"]
+    assert_provider_summary(body, "found", 2)
 
 
 def test_all_throttled_preserves_the_aggregate_error(manual_endpoint):

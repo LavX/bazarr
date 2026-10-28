@@ -97,8 +97,44 @@ function presentationOf(row: HTMLElement) {
   const clone = row.cloneNode(true) as HTMLElement;
   const originalElements = [row, ...Array.from(row.querySelectorAll("*"))];
   const clonedElements = [clone, ...Array.from(clone.querySelectorAll("*"))];
+  const paint: [string, string][][] = [];
 
-  for (const element of clonedElements) {
+  for (const [index, original] of originalElements.entries()) {
+    const element = clonedElements[index];
+    const style = window.getComputedStyle(original);
+    const background = style.getPropertyValue("background-color");
+    const hasBackground =
+      background !== "" &&
+      background !== "transparent" &&
+      !/^rgba\([^)]*,\s*0(?:\.0+)?\)$/.test(background);
+    const hasBorder = ["top", "right", "bottom", "left"].some(
+      (side) =>
+        Number.parseFloat(style.getPropertyValue(`border-${side}-width`)) > 0,
+    );
+    const shadow = style.getPropertyValue("box-shadow");
+    const hasShadow = shadow !== "" && shadow !== "none";
+
+    if (
+      !original.textContent?.trim() &&
+      original.children.length === 0 &&
+      !hasBackground &&
+      !hasBorder &&
+      !hasShadow
+    ) {
+      if (original === row) return { markup: "", paint };
+      element.remove();
+      continue;
+    }
+
+    const properties: [string, string][] = [];
+    for (let propertyIndex = 0; propertyIndex < style.length; propertyIndex++) {
+      const property = style.item(propertyIndex);
+      properties.push([property, style.getPropertyValue(property)]);
+    }
+    paint.push(
+      properties.sort(([first], [second]) => first.localeCompare(second)),
+    );
+
     for (const attribute of Array.from(element.attributes)) {
       if (
         attribute.name === "id" ||
@@ -106,6 +142,8 @@ function presentationOf(row: HTMLElement) {
         attribute.name === "role" ||
         attribute.name === "title" ||
         attribute.name === "href" ||
+        attribute.name === "alt" ||
+        attribute.name === "tabindex" ||
         attribute.name.startsWith("data-") ||
         attribute.name.startsWith("aria-")
       ) {
@@ -113,32 +151,14 @@ function presentationOf(row: HTMLElement) {
       }
     }
 
-    // Provider names, status labels and counts cannot establish a visual
-    // distinction. Keep element structure, inline styles and icons.
+    // Labels and metadata cannot establish a visual distinction. Compare
+    // the remaining structure alongside the original computed styles.
     for (const child of Array.from(element.childNodes)) {
       if (child.nodeType === Node.TEXT_NODE) {
         child.textContent = "";
       }
     }
   }
-
-  // Include computed paint so CSS driven by classes or data-status can
-  // distinguish the outcomes after those attributes leave the cloned markup.
-  const paint = originalElements.map((element) => {
-    const style = window.getComputedStyle(element);
-    return [
-      "color",
-      "background-color",
-      "border-color",
-      "font-weight",
-      "font-style",
-      "opacity",
-      "fill",
-      "stroke",
-      "text-decoration",
-      "box-shadow",
-    ].map((property) => style.getPropertyValue(property));
-  });
 
   return { markup: clone.outerHTML, paint };
 }
