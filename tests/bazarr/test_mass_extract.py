@@ -40,6 +40,47 @@ def _items(mass_operations, request):
             for item in items], skipped
 
 
+def test_pool_extraction_releases_the_thread_session_on_success(monkeypatch):
+    from subtitles import mass_operations
+
+    class Database:
+        def __init__(self):
+            self.removed = 0
+
+        def remove(self):
+            self.removed += 1
+
+    database = Database()
+    source_path = "/extracted/source.en.srt"
+    monkeypatch.setattr(mass_operations, "database", database)
+    monkeypatch.setattr(mass_operations, "_extract_translate_source", lambda item: source_path)
+
+    assert mass_operations._extract_translate_source_in_pool({}) == source_path
+    assert database.removed == 1
+
+
+def test_pool_extraction_releases_the_thread_session_on_failure(monkeypatch):
+    from subtitles import mass_operations
+
+    class Database:
+        def __init__(self):
+            self.removed = 0
+
+        def remove(self):
+            self.removed += 1
+
+    def fail(item):
+        raise RuntimeError("extraction failed")
+
+    database = Database()
+    monkeypatch.setattr(mass_operations, "database", database)
+    monkeypatch.setattr(mass_operations, "_extract_translate_source", fail)
+
+    with pytest.raises(RuntimeError, match="extraction failed"):
+        mass_operations._extract_translate_source_in_pool({})
+    assert database.removed == 1
+
+
 def test_mass_extract_never_extracts_a_hidden_track(mass, monkeypatch):
     import subtitles.indexer.movies as mv
     from subtitles.embedded_hidden import hide_track

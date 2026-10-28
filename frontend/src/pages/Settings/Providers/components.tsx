@@ -297,6 +297,7 @@ const resolveProviderLanguageExclusions = (
 
 interface SortableProviderTileProps {
   provider: ProviderInfo;
+  disabled: boolean;
   priority: number;
   rank: number;
   onSelect: () => void;
@@ -332,6 +333,7 @@ function authChipClass(auth: AuthKind): string | undefined {
 
 const SortableProviderTile: FunctionComponent<SortableProviderTileProps> = ({
   provider,
+  disabled,
   priority,
   rank,
   onSelect,
@@ -414,6 +416,11 @@ const SortableProviderTile: FunctionComponent<SortableProviderTileProps> = ({
               Plugin
             </Badge>
           )}
+          {disabled && (
+            <Badge size="xs" variant="light" color="gray">
+              Disabled
+            </Badge>
+          )}
         </span>
       </div>
       {provider.description && (
@@ -461,6 +468,9 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
   const settings = useSettings();
   const staged = useStagedValues();
   const providers = useSettingValue<string[]>(settingsKey);
+  const disabledProviders = useSettingValue<string[]>(
+    "settings-general-disabled_providers",
+  );
   const priorities = useMemo(
     () => resolveProviderPriorities(staged, settings),
     [staged, settings],
@@ -484,13 +494,16 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
   const closeDrawer = useCallback(() => setDrawerPayload(null), []);
 
   const sortedItems = useMemo(() => {
-    if (!providers) return [];
+    const listedProviders =
+      settingsKey === "settings-general-enabled_providers"
+        ? [...new Set([...(providers ?? []), ...(disabledProviders ?? [])])]
+        : (providers ?? []);
 
     // Never drop an enabled key just because its option isn't loaded yet
     // (e.g. plugin providers whose hub query hasn't returned on a fresh page
     // load after a restart). Render a minimal placeholder so the tile stays
     // visible and the saved enabled-providers list never silently shrinks.
-    const decorated = providers
+    const decorated = listedProviders
       .filter((key) => !excludedKeys?.includes(key))
       .map((key) => {
         const item = availableOptions.find((opt) => opt.key === key);
@@ -506,7 +519,14 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
     });
 
     return decorated;
-  }, [providers, availableOptions, priorities, excludedKeys]);
+  }, [
+    providers,
+    disabledProviders,
+    settingsKey,
+    availableOptions,
+    priorities,
+    excludedKeys,
+  ]);
 
   const itemIds = useMemo(
     () => sortedItems.map((item) => item.v.key),
@@ -555,6 +575,10 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
               <SortableProviderTile
                 key={v.key}
                 provider={v}
+                disabled={
+                  settingsKey === "settings-general-enabled_providers" &&
+                  !providers?.includes(v.key)
+                }
                 priority={priority}
                 rank={idx + 1}
                 onSelect={() => select(v)}
@@ -598,6 +622,7 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
           <ProviderTool
             payload={drawerPayload.payload}
             enabledProviders={providers ?? []}
+            disabledProviders={disabledProviders ?? []}
             staged={staged}
             settings={settings}
             onChange={update}
@@ -614,6 +639,7 @@ export const ProviderView: FunctionComponent<ProviderViewProps> = ({
 interface ProviderToolProps {
   payload: ProviderInfo | null;
   enabledProviders: readonly string[];
+  disabledProviders: readonly string[];
   staged: LooseObject;
   settings: Settings;
   onChange: (v: LooseObject) => void;
@@ -1000,6 +1026,7 @@ const ProviderSecretInput: FunctionComponent<{
 const ProviderTool: FunctionComponent<ProviderToolProps> = ({
   payload,
   enabledProviders,
+  disabledProviders,
   staged,
   settings,
   onChange,
@@ -1065,47 +1092,67 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
   }, [info?.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const deletePayload = useCallback(() => {
-    if (payload && enabledProviders) {
-      const idx = enabledProviders.findIndex((v) => v === payload.key);
-      if (idx !== -1) {
-        const newProviders = [...enabledProviders];
-        newProviders.splice(idx, 1);
+    if (payload) {
+      const changes: LooseObject = {
+        [settingsKey]: enabledProviders.filter((id) => id !== payload.key),
+      };
 
-        const changes: LooseObject = { [settingsKey]: newProviders };
+      const priorities = resolveProviderPriorities(staged, settings);
+      const nextPriorities = { ...priorities };
+      delete nextPriorities[payload.key];
+      changes["settings-general-provider_priorities"] =
+        JSON.stringify(nextPriorities);
 
-        const priorities = resolveProviderPriorities(staged, settings);
-        const nextPriorities = { ...priorities };
-        delete nextPriorities[payload.key];
-        changes["settings-general-provider_priorities"] =
-          JSON.stringify(nextPriorities);
+      if (settingsKey === "settings-general-enabled_providers") {
+        changes["settings-general-disabled_providers"] =
+          disabledProviders.filter((id) => id !== payload.key);
+        const providerLanguageExclusions = resolveProviderLanguageExclusions(
+          staged,
+          settings,
+        );
+        const nextProviderLanguageExclusions = {
+          ...providerLanguageExclusions,
+        };
+        delete nextProviderLanguageExclusions[payload.key];
+        changes["settings-general-provider_languages"] = JSON.stringify(
+          nextProviderLanguageExclusions,
+        );
 
-        if (settingsKey === "settings-general-enabled_providers") {
-          const providerLanguageExclusions = resolveProviderLanguageExclusions(
-            staged,
-            settings,
-          );
-          const nextProviderLanguageExclusions = {
-            ...providerLanguageExclusions,
-          };
-          delete nextProviderLanguageExclusions[payload.key];
-          changes["settings-general-provider_languages"] = JSON.stringify(
-            nextProviderLanguageExclusions,
-          );
-
-          const scoreModifiers = resolveProviderScoreModifiers(
-            staged,
-            settings,
-          );
-          changes["settings-general-provider_score_modifiers"] = JSON.stringify(
-            foldScoreModifier(scoreModifiers, payload.key, 0),
-          );
-        }
-
-        onChangeRef.current(changes);
-        onClose();
+        const scoreModifiers = resolveProviderScoreModifiers(staged, settings);
+        changes["settings-general-provider_score_modifiers"] = JSON.stringify(
+          foldScoreModifier(scoreModifiers, payload.key, 0),
+        );
       }
+
+      onChangeRef.current(changes);
+      onClose();
     }
-  }, [payload, enabledProviders, onClose, settingsKey, staged, settings]);
+  }, [
+    payload,
+    enabledProviders,
+    disabledProviders,
+    onClose,
+    settingsKey,
+    staged,
+    settings,
+  ]);
+
+  const togglePayload = useCallback(() => {
+    if (!payload || settingsKey !== "settings-general-enabled_providers") {
+      return;
+    }
+    const isEnabled = enabledProviders.includes(payload.key);
+    const changes: LooseObject = {
+      "settings-general-enabled_providers": isEnabled
+        ? enabledProviders.filter((id) => id !== payload.key)
+        : [...enabledProviders, payload.key],
+      "settings-general-disabled_providers": isEnabled
+        ? [...disabledProviders.filter((id) => id !== payload.key), payload.key]
+        : disabledProviders.filter((id) => id !== payload.key),
+    };
+    onChangeRef.current(changes);
+    onClose();
+  }, [payload, settingsKey, enabledProviders, disabledProviders, onClose]);
 
   const submit = useCallback(
     (values: FormValues) => {
@@ -1120,13 +1167,17 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         const hooks = values.hooks;
 
         const isNewProvider =
-          enabledProviders.find((v) => v === info.key) === undefined;
+          payload === null && !enabledProviders.includes(info.key);
         if (isNewProvider) {
           changes[settingsKey] = [...enabledProviders, info.key];
+          if (settingsKey === "settings-general-enabled_providers") {
+            changes["settings-general-disabled_providers"] =
+              disabledProviders.filter((id) => id !== info.key);
+          }
         }
 
         const priorities = resolveProviderPriorities(values.settings, settings);
-        if (isNewProvider) {
+        if (isNewProvider && priorities[info.key] === undefined) {
           const maxPriority = Object.values(priorities).reduce(
             (max, v) => (typeof v === "number" && v > max ? v : max),
             0,
@@ -1198,7 +1249,16 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         onClose();
       }
     },
-    [info, enabledProviders, onClose, settingsKey, form, settings],
+    [
+      info,
+      payload,
+      enabledProviders,
+      disabledProviders,
+      onClose,
+      settingsKey,
+      form,
+      settings,
+    ],
   );
 
   const canSave = info !== null;
@@ -1505,14 +1565,33 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
                   </MantineText>
                 </Stack>
               )}
+              {payload &&
+                settingsKey === "settings-general-enabled_providers" && (
+                  <MantineText size="xs" c="dimmed">
+                    Disable keeps this provider's settings and tuning. Remove
+                    deletes it from this list and deletes its tuning.
+                  </MantineText>
+                )}
             </Stack>
           </div>
 
-          <div className={styles.providerDrawerActions}>
+          <Group
+            className={styles.providerDrawerActions}
+            justify="space-between"
+          >
             {payload ? (
-              <Button color="red" variant="subtle" onClick={deletePayload}>
-                Remove
-              </Button>
+              <Group gap="xs">
+                {settingsKey === "settings-general-enabled_providers" && (
+                  <Button variant="light" onClick={togglePayload}>
+                    {enabledProviders.includes(payload.key)
+                      ? "Disable"
+                      : "Enable"}
+                  </Button>
+                )}
+                <Button color="red" variant="subtle" onClick={deletePayload}>
+                  Remove
+                </Button>
+              </Group>
             ) : (
               <span />
             )}
@@ -1529,7 +1608,7 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
                 Save
               </Button>
             </Group>
-          </div>
+          </Group>
         </div>
       </FormContext.Provider>
     </SettingsProvider>

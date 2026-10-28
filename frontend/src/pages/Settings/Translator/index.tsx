@@ -203,6 +203,14 @@ const TestConnectionButton: FunctionComponent = () => {
             });
             return;
           }
+          if (data.keyHeldByService) {
+            notifications.show({
+              title: "API Key",
+              message: data.message ?? "",
+              color: "blue",
+            });
+            return;
+          }
           if (data.encryption) {
             const encOk = data.encryption.status === "ok";
             notifications.show({

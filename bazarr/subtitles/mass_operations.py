@@ -4,6 +4,7 @@ import ast
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from app.config import settings
 from app.event_handler import event_stream
@@ -40,6 +41,7 @@ MOD_ACTIONS = {'OCR_fixes', 'common', 'remove_HI', 'remove_tags', 'fix_uppercase
 # Returned by _process_subtitle_item for an item that was deliberately left
 # alone, so it counts as skipped rather than failed.
 ITEM_SKIPPED = object()
+_SOURCE_SRT_FILE_UNSET = object()
 
 # Why an item that returned no result failed, for the job's failure reason.
 _NO_RESULT_REASONS = {
@@ -967,7 +969,8 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
     Embedded-track branch: only translation can use an in-container track, and
     only when the user still has embedded subtitles turned on. The extraction
     helper has its own sports arm, so the item runs exactly like an episodes one
-    would: it is extracted when the item runs, not when the batch was collected.
+    would: the batch's extraction window extracts it ahead of its turn, not when
+    the batch was collected.
     """
     sports_instance = sports_instance or {}
     # Joined to the owner and filtered to enabled Sportarr instances. A sports
@@ -1131,7 +1134,39 @@ def _item_outcome(sync_result):
     return ITEM_SKIPPED if sync_result is SYNC_SKIPPED else sync_result
 
 
-def _process_subtitle_item(item, action, options, job_id, children=None):
+def _extract_translate_source(item):
+    """Extract one translation source with its owning instance and track flags.
+
+    An extraction failure is usually a bitmap track (PGS, VobSub) that cannot
+    become an SRT. That is this item's problem; the batch carries on.
+    """
+    from subtitles.tools.translate.batch import extract_embedded_subtitle
+
+    if item.get('sports_event_id'):
+        media_type = 'sports'
+    else:
+        media_type = 'episode' if item.get('sonarr_series_id') else 'movies'
+    source_srt_file = extract_embedded_subtitle(
+        item['video_path'], item['srt_lang'], media_type,
+        hi=item.get('hi', False), forced=item.get('forced', False),
+        arr_instance_id=item.get('arr_instance_id'))
+    if not source_srt_file:
+        logger.warning(
+            'BAZARR could not extract the embedded %s track from %s, skipping translation',
+            item['srt_lang'], item['video_path'])
+    return source_srt_file
+
+
+def _extract_translate_source_in_pool(item):
+    """Run one extraction on a pool thread, then release that thread's database session."""
+    try:
+        return _extract_translate_source(item)
+    finally:
+        database.remove()
+
+
+def _process_subtitle_item(item, action, options, job_id, children=None, *,
+                           source_srt_file=_SOURCE_SRT_FILE_UNSET):
     """Process a single subtitle item based on the action.
 
     Returns True on success, False on failure, ITEM_SKIPPED for an item that
@@ -1139,6 +1174,8 @@ def _process_subtitle_item(item, action, options, job_id, children=None):
 
     ``children``, for a translate batch, is the list the id of the translation
     job queued for this item is appended to, so the batch can publish them.
+    ``source_srt_file`` supplies an extraction result, including None when
+    extraction failed. Without it, an embedded source is extracted inline.
     """
     if action == 'sync':
         sync_kwargs = {
@@ -1196,28 +1233,11 @@ def _process_subtitle_item(item, action, options, job_id, children=None):
         else:
             media_type = 'episode' if item['sonarr_series_id'] else 'movies'
 
-        source_srt_file = item['srt_path']
-        if item.get('embedded'):
-            # Extracted when the item runs rather than when the batch was
-            # collected, so a run that is cancelled or fails leaves behind only
-            # what it actually reached. A run that completes does extract every
-            # track, because every collected item is processed.
-            #
-            # The owning instance goes along (#156): the collector mapped the
-            # video path with that instance's mapping, so the reverse lookup
-            # inside has to use the same one or it finds no row at all.
-            from subtitles.tools.translate.batch import extract_embedded_subtitle
-            source_srt_file = extract_embedded_subtitle(
-                item['video_path'], item['srt_lang'], media_type,
-                hi=item.get('hi', False), forced=item.get('forced', False),
-                arr_instance_id=item.get('arr_instance_id'))
-            if not source_srt_file:
-                # Usually a bitmap track (PGS, VobSub) that cannot become an
-                # SRT. That is this item's problem; the batch carries on.
-                logger.warning(
-                    'BAZARR could not extract the embedded %s track from %s, skipping translation',
-                    item['srt_lang'], item['video_path'])
-                return False
+        if source_srt_file is _SOURCE_SRT_FILE_UNSET:
+            source_srt_file = (_extract_translate_source(item) if item.get('embedded')
+                               else item['srt_path'])
+        if item.get('embedded') and not source_srt_file:
+            return False
         sports_operation = None
         if media_type == 'sports':
             # Bound per item rather than once for the batch: the guard pins one
@@ -1716,7 +1736,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     # failure summary counts it in the total it is a share of.
     collection_skipped = total_skipped
 
-    # Process items sequentially within this single job
+    # Consume items in order, with bounded extraction ahead for translation.
     total_count = len(all_items)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=total_count)
 
@@ -1736,38 +1756,75 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     published_children = 0
     item_kwargs = {'children': children} if action == 'translate' else {}
 
-    for i, item in enumerate(all_items, start=1):
-        jobs_queue.update_job_progress(
-            job_id=job_id,
-            progress_value=i - 1,
-            progress_message=f"{action}: {_item_display_name(item)} ({i}/{total_count})"
-        )
+    extraction_pool = None
+    try:
+        if action == 'translate':
+            workers = settings.general.mass_embedded_extract_workers
+            extraction_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='mass-extract')
+            embedded_items = ((index, item) for index, item in enumerate(all_items, start=1)
+                              if item.get('embedded'))
+            pending_extractions = {}
 
-        try:
-            result = _process_subtitle_item(item, action, options, job_id, **item_kwargs)
-            if result is ITEM_SKIPPED:
-                total_skipped += 1
-            elif result:
-                processed += 1
-            else:
-                failed += 1
-                failures.append(f'{_item_display_name(item)} ({_NO_RESULT_REASONS.get(action, "no output was written")})')
-        except JobCancelled:
-            raise
-        except Exception as e:
-            logger.error(f'Error during {action} on {_item_display_name(item)}: {e}')  # noqa: G004
-            all_errors.append(str(e))
-            failures.append(f'{_item_display_name(item)} ({e})')
-            failed += 1
-        finally:
+            def refill_extractions():
+                while len(pending_extractions) < workers:
+                    next_item = next(embedded_items, None)
+                    if next_item is None:
+                        break
+                    index, embedded_item = next_item
+                    # A cancel or failure can leave up to one extracted track per
+                    # worker in the cache, counting any extraction still running.
+                    # These are harmless cache files, and the batch does not wait
+                    # for them.
+                    pending_extractions[index] = extraction_pool.submit(_extract_translate_source_in_pool, embedded_item)
+
+            refill_extractions()
+
+        for i, item in enumerate(all_items, start=1):
             jobs_queue.update_job_progress(
                 job_id=job_id,
-                progress_value=i,
+                progress_value=i - 1,
                 progress_message=f"{action}: {_item_display_name(item)} ({i}/{total_count})"
             )
-            if len(children) > published_children:
-                published_children = len(children)
-                jobs_queue.publish_job_result(job_id, {'child_jobs': list(children)})
+
+            try:
+                if action == 'translate' and item.get('embedded'):
+                    future = pending_extractions.pop(i)
+                    try:
+                        source_srt_file = future.result()
+                    finally:
+                        # Even a completed future occupies the window until
+                        # its result is consumed, including a failed result.
+                        refill_extractions()
+                    result = _process_subtitle_item(
+                        item, action, options, job_id, source_srt_file=source_srt_file, **item_kwargs)
+                else:
+                    result = _process_subtitle_item(item, action, options, job_id, **item_kwargs)
+                if result is ITEM_SKIPPED:
+                    total_skipped += 1
+                elif result:
+                    processed += 1
+                else:
+                    failed += 1
+                    failures.append(f'{_item_display_name(item)} ({_NO_RESULT_REASONS.get(action, "no output was written")})')
+            except JobCancelled:
+                raise
+            except Exception as e:
+                logger.error(f'Error during {action} on {_item_display_name(item)}: {e}')  # noqa: G004
+                all_errors.append(str(e))
+                failures.append(f'{_item_display_name(item)} ({e})')
+                failed += 1
+            finally:
+                jobs_queue.update_job_progress(
+                    job_id=job_id,
+                    progress_value=i,
+                    progress_message=f"{action}: {_item_display_name(item)} ({i}/{total_count})"
+                )
+                if len(children) > published_children:
+                    published_children = len(children)
+                    jobs_queue.publish_job_result(job_id, {'child_jobs': list(children)})
+    finally:
+        if extraction_pool is not None:
+            extraction_pool.shutdown(wait=False, cancel_futures=True)
 
     jobs_queue.update_job_name(
         job_id=job_id,

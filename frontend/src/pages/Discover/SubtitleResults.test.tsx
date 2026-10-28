@@ -1009,11 +1009,13 @@ describe("Discover results against a chosen library copy", () => {
       screen.getByRole("button", { name: "Choose episode and copy at once" }),
     );
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+    await screen.findByRole("heading", { name: "Breaking.Bad.S02E01.forced" });
     await waitFor(() => expect(searches).toHaveLength(1));
     expect(searches[0]).not.toHaveProperty("copy_id");
     // Naming it afterwards, with the target already in place, is accepted.
     await user.click(screen.getByRole("button", { name: "Choose copy" }));
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+    await screen.findByRole("heading", { name: "Breaking.Bad.S02E01.forced" });
     await waitFor(() => expect(searches).toHaveLength(2));
     expect(searches[1]).toMatchObject({ copy_id: chosenCopy.copy_id });
   });
@@ -1046,6 +1048,9 @@ describe("Discover results against a chosen library copy", () => {
       screen.getByRole("button", { name: "Search again for expired result" }),
     );
     await waitFor(() => expect(searches).toHaveLength(2));
+    await waitFor(() =>
+      expect(row().getByRole("button", { name: "Download SRT" })).toBeEnabled(),
+    );
     expect(searches[1]).toMatchObject({ copy_id: chosenCopy.copy_id });
     // Only the opaque copy identity is an input. The resolved copy and its
     // physical revision are server-owned and must never be sent back.
