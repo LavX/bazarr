@@ -2177,11 +2177,12 @@ class TestMassBatchOperationWithEmbeddedItems:
     reached os.path.basename and took the whole job down.
     """
 
+    @patch('subtitles.mass_operations._extract_translate_source', return_value='/extracted/test.en.srt')
     @patch('subtitles.mass_operations.jobs_queue')
     @patch('subtitles.mass_operations._process_subtitle_item', return_value=True)
     @patch('subtitles.mass_operations._collect_subtitle_items')
     def test_a_batch_of_embedded_items_runs_to_completion(
-            self, mock_collect, mock_process, mock_jq):
+            self, mock_collect, mock_process, mock_jq, mock_extract):
         from subtitles.mass_operations import mass_batch_operation
 
         mock_collect.return_value = ([
@@ -2197,11 +2198,12 @@ class TestMassBatchOperationWithEmbeddedItems:
         assert result['queued'] == 2
         assert mock_process.call_count == 2
 
+    @patch('subtitles.mass_operations._extract_translate_source', return_value='/extracted/test.en.srt')
     @patch('subtitles.mass_operations.jobs_queue')
     @patch('subtitles.mass_operations._process_subtitle_item', return_value=True)
     @patch('subtitles.mass_operations._collect_subtitle_items')
     def test_the_progress_message_names_the_video_for_an_embedded_item(
-            self, mock_collect, mock_process, mock_jq):
+            self, mock_collect, mock_process, mock_jq, mock_extract):
         """There is no subtitle file to name, so the video plus the track's
         language is the only thing that identifies what is being worked on."""
         from subtitles.mass_operations import mass_batch_operation
@@ -2236,11 +2238,12 @@ class TestMassBatchOperationWithEmbeddedItems:
                     for c in mock_jq.update_job_progress.call_args_list]
         assert any('ep1.en.srt' in m for m in messages), messages
 
+    @patch('subtitles.mass_operations._extract_translate_source', return_value='/extracted/test.en.srt')
     @patch('subtitles.mass_operations.jobs_queue')
     @patch('subtitles.mass_operations._process_subtitle_item', side_effect=RuntimeError('boom'))
     @patch('subtitles.mass_operations._collect_subtitle_items')
     def test_an_embedded_item_that_raises_is_counted_not_fatal(
-            self, mock_collect, mock_process, mock_jq):
+            self, mock_collect, mock_process, mock_jq, mock_extract):
         from subtitles.mass_operations import mass_batch_operation
 
         mock_collect.return_value = ([
