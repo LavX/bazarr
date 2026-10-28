@@ -20,6 +20,11 @@ api_ns_translator = Namespace('Translator', description='AI Subtitle Translator 
 
 logger = logging.getLogger(__name__)
 
+KEY_HELD_MESSAGE = (
+    "No OpenRouter key is saved in Bazarr. If the translator service holds its own key, "
+    "Bazarr cannot test it from here; a translation will show whether the service can use it."
+)
+
 
 def get_service_url():
     """Get the AI Subtitle Translator service URL from settings."""
@@ -284,9 +289,11 @@ class TranslatorTest(Resource):
         if not service_url:
             return {"error": "AI Subtitle Translator service URL not configured"}, 503
 
-        api_key = data.get("apiKey") or settings.translator.openrouter_api_key
-        if not api_key:
-            return {"error": "OpenRouter API key not configured"}, 400
+        api_key = data.get("apiKey") if "apiKey" in data else settings.translator.openrouter_api_key
+        if api_key is not None and not isinstance(api_key, str):
+            return {"error": "apiKey must be a string"}, 400
+        if not api_key or not api_key.strip():
+            return {"keyHeldByService": True, "message": KEY_HELD_MESSAGE}, 200
 
         encryption_key = data.get("encryptionKey") if "encryptionKey" in data else settings.translator.openrouter_encryption_key
         if encryption_key:

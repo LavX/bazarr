@@ -13,6 +13,7 @@ import { useSettingsMutation } from "@/apis/hooks";
 import { useSeerrTestConnectionMutation } from "@/apis/hooks/seerr";
 import { seerrEnabledKey } from "@/pages/Settings/keys";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
@@ -24,6 +25,7 @@ import type { WizardStepProps } from "./types";
  */
 const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const settings = useSettingsMutation(false, { inlineErrors: true });
+  useReportStepBusy(settings.isPending);
 
   // Held by the wizard so Back and forward do not empty the form. The key is
   // left out for the same reason it is on the arr steps: it is a credential.

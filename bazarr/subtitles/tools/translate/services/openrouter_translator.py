@@ -23,7 +23,7 @@ from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 from ..core.translator_utils import (add_translator_info, create_process_result, get_title,
                                      translation_write_kwargs)
 from .auth import get_translator_auth_headers
-from .sidecar_errors import describe_sidecar_refusal
+from .sidecar_errors import describe_sidecar_refusal, redact_service_text, MAX_REFUSAL_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -543,7 +543,8 @@ class OpenRouterTranslatorService:
             raise TranslationServiceError(f'AI translation failed: {e}') from e
 
     def _mark_partial(self, detail):
-        self.partial_error = ' '.join(str(detail).split())[:500] or 'Some translation batches failed.'
+        self.partial_error = (redact_service_text(' '.join(str(detail).split()))[:MAX_REFUSAL_LENGTH]
+                              or 'Some translation batches failed.')
         logger.warning("Translation partially completed: %s", self.partial_error)
 
     def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None) -> List[Any]:
@@ -621,12 +622,13 @@ class OpenRouterTranslatorService:
                     raise TranslationServiceError('The AI Subtitle Translator finished without returning any translated lines.')
 
                 elif status == "failed":
-                    error = job_status.get("error", "Unknown error")
+                    error = redact_service_text(str(job_status.get("error") or "Unknown error"))[:MAX_REFUSAL_LENGTH]
                     logger.error(f"Translation job failed: {error}")  # noqa: G004
                     raise TranslationServiceError(f"Translation failed: {error}")
 
                 elif status == "partial":
                     error = job_status.get("error") or message or "Partial translation"
+                    error = redact_service_text(str(error))[:MAX_REFUSAL_LENGTH]
                     lines = self._validated_result_lines(job_status.get("result"), total_lines)
                     if lines is not None:
                         self._mark_partial(error)

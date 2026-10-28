@@ -1527,6 +1527,27 @@ def metadata_save_environment(monkeypatch, tmp_path):
     return SimpleNamespace(config=config, settings=fake, path=path, executed=executed, resets=resets, metadata=metadata)
 
 
+@pytest.mark.parametrize("field", ["enabled_providers", "disabled_providers"])
+@pytest.mark.parametrize("submitted,expected", [
+    (["podnapisi"], ["podnapisi"]),
+    (["podnapisi", "unknown_provider", "podnapisi"],
+     ["podnapisi", "unknown_provider", "podnapisi"]),
+    ([""], []),
+    ([], []),
+])
+def test_provider_lists_round_trip_through_settings_save(
+    metadata_save_environment, field, submitted, expected,
+):
+    env = metadata_save_environment
+    env.config.save_settings([(f"settings-general-{field}", submitted)])
+
+    assert env.settings.general[field] == expected
+    env.settings.reload()
+    env.config.decrypt_settings_in_place(env.settings)
+    assert env.settings.general[field] == expected
+    assert env.config.get_settings()["general"][field] == expected
+
+
 @pytest.mark.parametrize("value", ["5ecafe11cafe11cafe11cafe11cafe11", "", "12345", "true", "null"])
 def test_tmdb_save_encrypts_exact_value_and_only_invalidates_metadata(metadata_save_environment, value):
     env = metadata_save_environment
