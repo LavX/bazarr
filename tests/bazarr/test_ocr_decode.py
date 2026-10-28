@@ -298,9 +298,19 @@ def test_subtitle_clock_reads_start_and_duration(tmp_path):
 
 
 @pytest.mark.parametrize("report,expected", [
-    # Matroska: no stream duration, the muxer's DURATION tag stands in for it.
+    # Matroska: no stream duration, the muxer's DURATION tag stands in for it. The
+    # tag is the track's end timestamp, so the span is what is left after the start.
     ({"streams": [{"start_time": "1.0", "duration": "N/A", "tags": {"DURATION": "00:00:11.500000000"}}],
-      "format": {"duration": "13.0"}}, (1000, 11500)),
+      "format": {"duration": "13.0"}}, (1000, 10500)),
+    ({"streams": [{"start_time": "31.0", "duration": "N/A", "tags": {"DURATION": "00:00:41.000000000"}}],
+      "format": {"duration": "45.0"}}, (31000, 10000)),
+    ({"streams": [{"start_time": "0.0", "duration": "N/A", "tags": {"DURATION": "00:00:41.000000000"}}],
+      "format": {"duration": "45.0"}}, (0, 41000)),
+    # A tag that ends before the stream starts cannot be an end timestamp: the next source stands in.
+    ({"streams": [{"start_time": "31.0", "duration": "N/A", "tags": {"DURATION": "00:00:10.000000000"}}],
+      "format": {"duration": "45.0"}}, (31000, 14000)),
+    ({"streams": [{"start_time": "31.0", "duration": "N/A", "tags": {"DURATION": "00:00:31.000000000"}}],
+      "format": {}}, (0, 0)),
     # Neither: what is left of the container after the stream starts.
     ({"streams": [{"start_time": "1.0", "duration": "N/A"}], "format": {"duration": "13.0"}}, (1000, 12000)),
     # Nothing usable: a running message without a percentage.
@@ -333,9 +343,22 @@ def test_subtitle_clock_rejects_a_probe_value_that_is_not_a_sane_time(tmp_path, 
 
 
 def test_subtitle_clock_reads_the_span_of_a_real_matroska_track(ffmpeg, media):
-    # eng_hd.sup starts at 1 s and the muxer tags the track 11 s long; ffprobe
-    # prints duration=N/A for the stream itself.
-    assert decode.subtitle_clock(media["pgs"], 0, shutil.which("ffprobe")) == (1000, 11000)
+    # eng_hd.sup starts at 1 s and ends at 11 s. The muxer tags the track 11 s,
+    # its end timestamp, and ffprobe prints duration=N/A for the stream itself.
+    assert decode.subtitle_clock(media["pgs"], 0, shutil.which("ffprobe")) == (1000, 10000)
+
+
+def test_subtitle_clock_subtracts_the_start_of_a_late_real_matroska_track(ffmpeg, tmp_path):
+    # The first cue shows at 3 s and the last one ends at 13 s: the muxer tags
+    # the track 13 s, and the render counts from the first cue, so the span is 10 s.
+    sup = tmp_path / "late.sup"
+    sup.write_bytes(build_sup((1920, 1080), [
+        (3000, 5000, 100, 900, box_rows(300, 40)),
+        (9000, 13000, 100, 900, box_rows(500, 40)),
+    ]))
+    video = mux_mkv(ffmpeg, str(tmp_path / "late.mkv"), [(str(sup), "copy", "eng")], seconds=16)
+
+    assert decode.subtitle_clock(video, 0, shutil.which("ffprobe")) == (3000, 10000)
 
 
 def test_subtitle_clock_falls_back_to_zero(tmp_path):
@@ -351,7 +374,7 @@ def test_the_render_reports_its_total_for_a_matroska_track(ffmpeg, media, tmp_pa
     with pytest.raises(OcrError):
         decode.render_frames(media["pgs"], 0, str(tmp_path), ffmpeg=slow, ffprobe=shutil.which("ffprobe"),
                              progress=lambda step, value, maximum: seen.append((step, maximum)))
-    assert seen and all(step == "render" and maximum == 11000 for step, maximum in seen)
+    assert seen and all(step == "render" and maximum == 10000 for step, maximum in seen)
 
 
 def test_last_frame_ms_reads_the_frame_log(tmp_path):
