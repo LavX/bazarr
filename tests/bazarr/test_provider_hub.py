@@ -6532,6 +6532,28 @@ def test_enabling_a_provider_clears_its_disabled_entry_in_the_same_save(monkeypa
     assert list(config.settings.general.disabled_providers) == ["other"]
 
 
+def test_enabling_an_enabled_provider_clears_its_stale_disabled_entry(monkeypatch):
+    from app import config
+    from provider_hub import service
+
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha", "beta"])
+    monkeypatch.setattr(
+        config.settings.general, "disabled_providers", ["beta", "other"], raising=False
+    )
+    saved = []
+
+    def write_config():
+        saved.append((list(config.settings.general.enabled_providers),
+                      list(config.settings.general.disabled_providers)))
+        return True
+
+    monkeypatch.setattr(config, "write_config", write_config)
+
+    assert service._set_bazarr_provider_enabled("beta", True) is True
+    assert saved == [(["alpha", "beta"], ["other"])]
+    assert list(config.settings.general.disabled_providers) == ["other"]
+
+
 @pytest.mark.parametrize("failure", ["false", "exception"])
 def test_failed_provider_activation_restores_both_provider_lists(monkeypatch, failure):
     from app import config

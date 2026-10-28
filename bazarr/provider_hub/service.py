@@ -132,7 +132,7 @@ def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
             current.append(provider_id)
         elif not enabled and provider_id in current:
             current = [item for item in current if item != provider_id]
-        else:
+        elif not enabled or provider_id not in getattr(settings.general, "disabled_providers", []):
             return True
         previous = settings.general.enabled_providers
         previous_disabled = getattr(settings.general, "disabled_providers", [])
