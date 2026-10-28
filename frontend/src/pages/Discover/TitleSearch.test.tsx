@@ -34,6 +34,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import { DiscoverSetupReturn } from "@/contexts/Discover";
 import DiscoverSettings from "@/pages/Settings/Discover";
 import { waitFor } from "@/tests";
+import { discoverSearchJob } from "@/tests/discoverSearchJob";
 import server from "@/tests/mocks/node";
 
 const movie = {
@@ -121,7 +122,7 @@ it("debounces title queries, opens mapped movie details, and submits only after 
       lookups.push(new URL(request.url).searchParams.get("q") ?? "");
       return HttpResponse.json({ data: { ...envelope, items: [movie] } });
     }),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       providers.push(await request.json());
       return new HttpResponse(null, { status: 503 });
     }),
@@ -369,7 +370,7 @@ it.each(["IMDb ID", "Media type"])(
   async (field) => {
     const submitted: unknown[] = [];
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         submitted.push(await request.json());
         return new HttpResponse(null, { status: 503 });
       }),
@@ -479,7 +480,7 @@ it.each([
           },
         });
       }),
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         searches += 1;
         const { refresh, ...context } = (await request.json()) as Record<
           string,
@@ -720,7 +721,7 @@ it("browses OMDB with TMDB absent and retains the source through explicit title-
         data: { ...envelope, source: "omdb", item: fallback },
       });
     }),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       submissions.push(await request.json());
       return new HttpResponse(null, { status: 503 });
     }),
@@ -780,7 +781,7 @@ it("keeps numeric local and TMDB movie identities separate and submits no copy f
         data: { ...envelope, source, item: source === "local" ? local : movie },
       });
     }),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       submitted.push(await request.json());
       return new HttpResponse(null, { status: 503 });
     }),
@@ -853,7 +854,7 @@ it("shows scoped local episode counts and requires explicit manual confirmation 
         data: { ...envelope, source: "local", item: show },
       });
     }),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       submitted.push(await request.json());
       return new HttpResponse(null, { status: 503 });
     }),
@@ -1130,7 +1131,7 @@ it.each([
           },
         }),
       ),
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         submissions.push(await request.json());
         return new HttpResponse(null, { status: 503 });
       }),
@@ -1203,7 +1204,7 @@ it.each([
           data: { ...envelope, source: "local", item: local },
         });
       }),
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         submissions.push(await request.json());
         return new HttpResponse(null, { status: 503 });
       }),
@@ -1243,7 +1244,7 @@ it("cancels a pending subtitle search when leaving the title", async () => {
   let release: (() => void) | undefined;
   const requests: unknown[] = [];
   server.use(
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       requests.push(await request.json());
       await new Promise<void>((resolve) => {
         release = resolve;

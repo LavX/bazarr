@@ -10,6 +10,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import { useDiscover } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
+import { discoverSearchJob } from "@/tests/discoverSearchJob";
 import server from "@/tests/mocks/node";
 import { describeCopy } from "./LocalCopyPicker";
 import {
@@ -231,7 +232,7 @@ beforeEach(() => {
       copyRequests.push(new URL(request.url).search);
       return HttpResponse.json(copyPayload);
     }),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       searches.push(await request.json());
       return new HttpResponse(null, { status: 503 });
     }),
@@ -423,7 +424,7 @@ it("requires an explicit recovery choice when the chosen copy disappears", async
   await pickOption(user, "Library copy", describeCopy(copyA));
   await pickOption(user, "Subtitle language", "English");
   server.use(
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       searches.push(await request.json());
       return HttpResponse.json(
         {

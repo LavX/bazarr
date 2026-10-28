@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import re
 import time
 import uuid
-from threading import Lock
+from threading import Lock, Thread
 
 from dogpile.cache.api import NO_VALUE
 from babelfish.exceptions import LanguageReverseError
@@ -469,7 +471,7 @@ def _result(sub, video, context, search_id, checked_at, ttl, parsed=None):
     }
 
 
-def search(request: SearchRequest, on_progress=None) -> dict:
+def search(request: SearchRequest, on_progress=None, *, observed: bool = True) -> dict:
     context, refresh = request.context, request.refresh
     pool = service._get_compat_pool(restore_available=True)
     state = _pool_state(pool)
@@ -614,13 +616,15 @@ def search(request: SearchRequest, on_progress=None) -> dict:
         # This is admission to one provider operation. Cache-creator and
         # preparation waits precede it; admitted work may finish after expiry.
         _admit_provider_search(request)
-        # A Discover search never becomes a queue job, so it is observed here or
-        # it is invisible to a status reader while it is the running work.
-        with activity.observed_operation(
+        # A search run directly is observed here, or it is invisible to a
+        # status reader while it is the running work. One run by a queue job
+        # is observed through the job, which registers the same operation.
+        with (activity.observed_operation(
                 "discover_search", scope_kind="request", language=context["language"],
                 media_type=context.get("media_type"),
                 title=context.get("title") or context.get("query") or context.get("imdb_id"),
-                season=context.get("season"), episode=context.get("episode")):
+                season=context.get("season"), episode=context.get("episode"))
+                if observed else nullcontext()):
             subtitles = service.search_title(video, [language], pool, providers, on_outcome)
         rows = []
         for sub in subtitles:
@@ -684,3 +688,78 @@ def search(request: SearchRequest, on_progress=None) -> dict:
     if not created and snapshot["cache_status"] != "stale":
         snapshot["cache_status"] = "cached"
     return snapshot
+
+
+def _job_label(context):
+    title = context.get("query") if context.get("mode") == "release" else (
+        context.get("title") or context.get("imdb_id"))
+    if context.get("media_type") == "episode" and context.get("season") is not None:
+        title = f"{title} S{context['season']:02d}E{context['episode']:02d}"
+    return " · ".join(str(part) for part in (title, context.get("language")) if part)
+
+
+def queue_search(request: SearchRequest) -> int:
+    """Queue an explicit search as a standard job and start it at once.
+
+    The caller has already validated the context, so what is left to fail is
+    the search itself, and the job says why. Someone pressing Search is
+    waiting, so the job does not queue behind library work. Asking again for
+    the same search while it runs follows the one that is running. The rows,
+    live while the providers answer and whole at the end, are the job's result.
+
+    :return: The job id.
+    """
+    from app.jobs_queue import jobs_queue
+    job_id = jobs_queue.feed_jobs_pending_queue(
+        job_name=f"Searching subtitles for {_job_label(request.context)}", module=__name__,
+        func="run_search_job", kwargs={"request": request}, is_progress=True, progress_max=1,
+        retryable=True, return_existing=True)
+    Thread(target=jobs_queue.force_start_pending_job, args=(job_id, True), daemon=True).start()
+    return job_id
+
+
+def run_search_job(request: SearchRequest, job_id=None):
+    """The job body: run the search and publish what it knows as it goes.
+
+    While the providers answer, the job's result is the latest observation:
+    the providers heard from so far and the rows already built, whose handles
+    are already minted, so a reader can act on them before the slowest provider
+    answers. At the end it is the whole snapshot.
+    """
+    from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
+
+    context = request.context
+    activity.register(activity.activity_id_for_job(job_id), operation="discover_search", scope_kind="request",
+                      language=context["language"], media_type=context.get("media_type"),
+                      title=context.get("title") or context.get("query") or context.get("imdb_id"),
+                      season=context.get("season"), episode=context.get("episode"))
+    jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=1,
+                                   progress_message="Preparing the search")
+    jobs_queue.publish_job_result(job_id, {"phase": "preparing", "providers": []})
+
+    def observe(observation):
+        observation = copy.deepcopy(observation)
+        providers = observation.get("providers", [])
+        answered = sum(item["status"] != "pending" for item in providers)
+        jobs_queue.publish_job_result(job_id, observation)
+        try:
+            jobs_queue.update_job_progress(
+                job_id=job_id, progress_value=answered, progress_max=len(providers) or None,
+                progress_message=f"{answered} of {len(providers)} providers answered" if providers else "")
+        except JobCancelled:
+            # The fan-out is shared, cached work: it is left to finish and the
+            # job ends at the check below, instead of tearing it down from
+            # inside a callback.
+            pass
+
+    try:
+        snapshot = search(request, on_progress=observe, observed=False)
+    except SearchAdmissionExpired as error:
+        logging.warning("Discover search failed: reason=metadata_expired: %s", error)
+        raise JobFailed(str(error), reason="metadata_expired", retryable=False) from None
+    # Raises JobCancelled if Stop was pressed at any point during the search.
+    jobs_queue.update_job_progress(job_id=job_id)
+    jobs_queue.publish_job_result(job_id, {"phase": "finished", "providers": snapshot["coverage"]["providers"],
+                                           "snapshot": snapshot})
+    jobs_queue.update_job_progress(job_id=job_id, progress_value="max", allow_cancelled=True,
+                                   progress_message="Search finished")

@@ -6,6 +6,7 @@ import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
+import { discoverSearchJob } from "@/tests/discoverSearchJob";
 import server from "@/tests/mocks/node";
 import { readableFeedDate } from "./feedText";
 import { selectInput } from "./selectTestHelpers";
@@ -163,7 +164,7 @@ beforeEach(() => {
     http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
       HttpResponse.json({ data: { ...envelope, episode: resolved() } }),
     ),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       searches.push(await request.json());
       return new HttpResponse(null, { status: 503 });
     }),

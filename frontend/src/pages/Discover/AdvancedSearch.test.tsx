@@ -14,6 +14,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import { DiscoverSetupReturn, useDiscover } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
+import { discoverSearchJob } from "@/tests/discoverSearchJob";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
 import { downloadJobHandlers, DownloadRequest } from "./downloadJobHarness";
@@ -206,7 +207,7 @@ beforeEach(() => {
         },
       }),
     ),
-    http.post("/api/discover/search", async ({ request }) => {
+    discoverSearchJob(async ({ request }) => {
       const selection = (await request.json()) as Record<string, unknown>;
       searches.push(selection);
       const context = { ...selection };
@@ -360,7 +361,7 @@ it.each(["mode", "query"])(
   async (change) => {
     let finish: (() => void) | undefined;
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         const context = (await request.json()) as Record<string, unknown>;
         searches.push(context);
         await new Promise<void>((resolve) => {
@@ -447,7 +448,7 @@ it("returns from settings to the preserved raw query without searching", async (
 
 it("keeps ambiguous release input and shows the server recovery message", async () => {
   server.use(
-    http.post("/api/discover/search", () =>
+    discoverSearchJob(() =>
       HttpResponse.json(
         {
           message:
@@ -471,7 +472,7 @@ it("keeps ambiguous release input and shows the server recovery message", async 
 
 it("does not label empty unverified provider output as no matches", async () => {
   server.use(
-    http.post("/api/discover/search", () =>
+    discoverSearchJob(() =>
       HttpResponse.json({
         ...snapshot({ mode: "release", query, language: "eng" }, "unverified"),
         status: "failed",

@@ -9,6 +9,112 @@ from flask import Flask
 from compat.service import _get_compat_pool as real_compat_pool
 
 
+class InlineJobs:
+    """A jobs queue that runs each search job at once, in the request's thread.
+
+    Discover searches are standard jobs, so the route answers 202 with a job id.
+    These tests are about what the search does, not about the queue, so the job
+    body runs for real and everything it hands to the queue is recorded here:
+    the observations it published while it ran, its progress, and how it ended.
+    Anything else (a download job, say) still goes to the real queue.
+    """
+
+    FIRST_ID = 1_000_000
+
+    def __init__(self, real=None):
+        self.real = real
+        self.next_id = 0
+        self.published = []   # (job_id, result) in publication order
+        self.progress = []
+        self.failed = {}
+        self.queued = []
+
+    def _mine(self, job_id):
+        return self.real is None or job_id <= self.FIRST_ID + self.next_id and job_id > self.FIRST_ID
+
+    def feed_jobs_pending_queue(self, job_name, module, func, kwargs=None, **options):
+        import copy
+        import importlib
+        from app.jobs_queue import JobFailed
+
+        if self.real is not None and module != "discover.search":
+            return self.real.feed_jobs_pending_queue(job_name=job_name, module=module, func=func,
+                                                     kwargs=kwargs, **options)
+        self.next_id += 1
+        job_id = self.FIRST_ID + self.next_id if self.real is not None else self.next_id
+        self.queued.append({"job_name": job_name, "options": options})
+        try:
+            getattr(importlib.import_module(module), func)(**copy.copy(kwargs), job_id=job_id)
+        except JobFailed as error:
+            self.failed[job_id] = error
+        return job_id
+
+    def force_start_pending_job(self, job_id, user_start=False):
+        if self._mine(job_id):
+            return True
+        return self.real.force_start_pending_job(job_id, user_start)
+
+    def update_job_progress(self, job_id, progress_value=None, progress_max=None, progress_message="", *,
+                            allow_cancelled=False):
+        if not self._mine(job_id):
+            return self.real.update_job_progress(job_id, progress_value, progress_max, progress_message,
+                                                 allow_cancelled=allow_cancelled)
+        self.progress.append((job_id, progress_value, progress_max, progress_message))
+        return True
+
+    def publish_job_result(self, job_id, result):
+        import copy
+
+        if not self._mine(job_id):
+            return self.real.publish_job_result(job_id, result)
+        self.published.append((job_id, copy.deepcopy(result)))
+        return True
+
+    def observations(self, job_id=None):
+        return [result for published_id, result in self.published if job_id in (None, published_id)]
+
+    def __getattr__(self, name):
+        if name == "real" or self.real is None:
+            raise AttributeError(name)
+        return getattr(self.real, name)
+
+
+def use_inline_jobs(client, jobs, monkeypatch):
+    """Put the inline queue in place of the real one, once the API (which builds the scheduler on the real
+    queue) has been imported."""
+    import app.jobs_queue as module
+
+    jobs.real = module.jobs_queue
+    jobs.FIRST_ID = 1_000_000
+    monkeypatch.setattr(module, "jobs_queue", jobs)
+    client.inline_jobs = jobs
+
+
+class JobResponse:
+    """What the search route used to answer, rebuilt from the job it queued."""
+
+    def __init__(self, status_code, json, observations=()):
+        self.status_code, self.json, self.observations = status_code, json, list(observations)
+
+    def get_data(self, as_text=False):
+        """Everything the job published, not just the snapshot it ended on."""
+        import json as json_module
+
+        return json_module.dumps([self.json, *self.observations])
+
+
+def finished(client, response):
+    """The search's outcome: the route's own refusal, or the finished job as the old answer."""
+    if response.status_code != 202:
+        return response
+    jobs = client.inline_jobs
+    job_id = response.json["job_id"]
+    if job_id in jobs.failed:
+        return JobResponse(400, {"message": str(jobs.failed[job_id])})
+    observations = jobs.observations(job_id)
+    return JobResponse(200, observations[-1]["snapshot"], observations)
+
+
 @pytest.fixture
 def authenticated_client(monkeypatch):
     import requests
@@ -31,7 +137,9 @@ def authenticated_client(monkeypatch):
         monkeypatch.setattr(settings.compat_endpoint, key, value)
     app = Flask(__name__)
     app.register_blueprint(api_bp)
-    return app.test_client()
+    client = app.test_client()
+    use_inline_jobs(client, InlineJobs(), monkeypatch)
+    return client
 
 
 @pytest.fixture
@@ -93,7 +201,8 @@ def providers(monkeypatch):
 
 
 def post(client, payload):
-    return client.post("/api/discover/search", json=payload, headers={"X-API-KEY": "discover-test-key"})
+    return finished(client, client.post("/api/discover/search", json=payload,
+                                        headers={"X-API-KEY": "discover-test-key"}))
 
 
 def test_auth_required_even_when_hub_disabled(authenticated_client):
@@ -1194,26 +1303,16 @@ def test_modes_without_source_linkage_do_not_acquire_metadata_deadlines(authenti
     assert response.status_code == 200 and len(providers.videos) == 1
 
 
-def _progress_post(client, payload, identity):
-    return client.post("/api/discover/search", json=payload,
-                       headers={"X-API-KEY": "discover-test-key", "X-Discover-Progress": identity})
+def _progress_post(client, payload, identity=None):
+    return post(client, payload)
 
 
-def test_rows_are_offered_while_other_providers_are_still_pending(authenticated_client, providers, monkeypatch):
+def test_rows_are_offered_while_other_providers_are_still_pending(authenticated_client, providers):
     """A finished provider's rows travel with the observation, not after the search."""
-    import copy as copy_module
-    from discover import progress
+    inline_jobs = authenticated_client.inline_jobs
     from discover.handles import resolve_result
     from provider_hub.protocol import candidate_from_worker
 
-    published = []
-    original = progress.publish
-
-    def record(identity, observation):
-        published.append(copy_module.deepcopy(observation))
-        original(identity, observation)
-
-    monkeypatch.setattr(progress, "publish", record)
     for name in ("discover_one", "discover_two"):
         providers.add(name, [candidate_from_worker(name, {
             "id": f"{name}-1", "language": {"alpha3": "eng"},
@@ -1223,6 +1322,7 @@ def test_rows_are_offered_while_other_providers_are_still_pending(authenticated_
     response = _progress_post(authenticated_client, {
         "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}, identity)
     assert response.status_code == 200
+    published = inline_jobs.observations()
     final = {row["id"]: row for row in response.json["results"]}
     assert len(final) == 2
 
@@ -1259,8 +1359,11 @@ def test_publishing_rows_early_does_not_mint_a_second_handle(authenticated_clien
     assert len(get_store()) - before == 1
 
 
-def test_search_without_an_observer_is_unchanged(authenticated_client, providers):
-    """No progress identity means no early rows and no early handles."""
+def test_a_finished_search_files_one_handle_per_row_and_publishes_the_snapshot_last(
+        authenticated_client, providers):
+    """The job's last publication is the whole snapshot, and the rows it offered early did not mint a second
+    handle each."""
+    inline_jobs = authenticated_client.inline_jobs
     from compat.file_id_store import get_store
     from provider_hub.protocol import candidate_from_worker
 
@@ -1273,6 +1376,9 @@ def test_search_without_an_observer_is_unchanged(authenticated_client, providers
     assert response.status_code == 200
     assert len(response.json["results"]) == 1
     assert len(get_store()) - before == 1
+    last = inline_jobs.observations()[-1]
+    assert last["phase"] == "finished" and last["snapshot"]["results"] == response.json["results"]
+    assert last["providers"] == response.json["coverage"]["providers"]
 
 
 def test_a_search_that_only_skipped_providers_is_not_reported_as_failed(authenticated_client, providers):
@@ -1451,15 +1557,14 @@ def _charge_row_building(monkeypatch, module, clock, seconds):
     monkeypatch.setattr(module, "_result", costly)
 
 
-def test_the_live_row_budget_is_spent_per_row_not_per_response(authenticated_client, providers,
-                                                               monkeypatch):
+def test_the_live_row_budget_is_spent_per_row_not_per_response(authenticated_client, providers, monkeypatch):
     """One provider answering with a large batch used to overrun the budget by
     as much as it liked: the check only ran on the way into the batch. Every
     millisecond of that scoring is charged to the shared wall the remaining
     providers are still being judged against, so the overrun is paid for by
     reporting working providers as abandoned."""
-    import copy as copy_module
-    from discover import progress, search as search_module
+    inline_jobs = authenticated_client.inline_jobs
+    from discover import search as search_module
     from provider_hub.protocol import candidate_from_worker
 
     # Building one row costs 0.6 of a second on a clock that moves only when a
@@ -1468,14 +1573,6 @@ def test_the_live_row_budget_is_spent_per_row_not_per_response(authenticated_cli
     # same point in five seconds instead of none.
     clock = _fake_clock(monkeypatch, search_module)
     _charge_row_building(monkeypatch, search_module, clock, 0.6)
-    published = []
-    original = progress.publish
-
-    def record(identity, observation):
-        published.append(copy_module.deepcopy(observation))
-        return original(identity, observation)
-
-    monkeypatch.setattr(progress, "publish", record)
 
     batch = [candidate_from_worker("discover_batch", {
         "id": f"batch-{index}", "language": {"alpha3": "eng"},
@@ -1486,7 +1583,7 @@ def test_the_live_row_budget_is_spent_per_row_not_per_response(authenticated_cli
         "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
         "33333333-4444-5555-6666-777777777777")
     assert response.status_code == 200
-    offered = [observation["results"] for observation in published if observation.get("results")]
+    offered = [observation["results"] for observation in inline_jobs.observations() if observation.get("results")]
     assert offered, "no observation carried a result"
     assert len(offered[-1]) == 3, "the budget did not stop the batch part way through"
     # The rest is built after the fanout, which is where all of it was built
@@ -1534,20 +1631,11 @@ def test_a_row_offered_early_stays_actionable_while_the_search_runs(authenticate
     cannot close that window either, because it refuses an entry that has
     already expired and mints a replacement id instead, retiring the one the
     reader was offered."""
-    import copy as copy_module
+    inline_jobs = authenticated_client.inline_jobs
     from app.config import settings
-    from discover import progress
     from discover.handles import resolve_result
     from provider_hub.protocol import candidate_from_worker
 
-    published = []
-    original = progress.publish
-
-    def record(identity, observation):
-        published.append(copy_module.deepcopy(observation))
-        original(identity, observation)
-
-    monkeypatch.setattr(progress, "publish", record)
     for key in ("cache_ttl_seconds", "file_id_ttl_seconds"):
         monkeypatch.setattr(settings.compat_endpoint, key, 2)
     providers.add("discover_fast", [candidate_from_worker("discover_fast", {
@@ -1559,7 +1647,7 @@ def test_a_row_offered_early_stays_actionable_while_the_search_runs(authenticate
         "66666666-7777-8888-9999-aaaaaaaaaaaa")
     assert response.status_code == 200
 
-    early = [observation for observation in published if observation.get("results")]
+    early = [observation for observation in inline_jobs.observations() if observation.get("results")]
     assert early, "no observation carried a result"
     offered = early[0]["results"][0]
     assert _seconds_from_now(offered["expires_at"]) > 0, "the offered row expired mid-search"
@@ -1609,21 +1697,19 @@ def test_publishing_the_growing_row_list_is_charged_to_the_same_budget(authentic
     copies it, so with enough rows the copying costs more than the building the
     budget was written to bound, and it comes out of the same wall. Charging it
     is what stops the list growing once that is where the budget is going."""
-    import copy as copy_module
-    from discover import progress, search as search_module
+    inline_jobs = authenticated_client.inline_jobs
+    from discover import search as search_module
     from provider_hub.protocol import candidate_from_worker
 
     clock = _fake_clock(monkeypatch, search_module)
-    published = []
-    original = progress.publish
+    original = inline_jobs.publish_job_result
 
-    def costly_publish(identity, observation):
-        published.append(copy_module.deepcopy(observation))
+    def costly_publish(job_id, result):
         # 0.8 a call: the first two exhaust the 1.5 second budget between them.
         clock.now += 0.8
-        return original(identity, observation)
+        return original(job_id, result)
 
-    monkeypatch.setattr(progress, "publish", costly_publish)
+    monkeypatch.setattr(inline_jobs, "publish_job_result", costly_publish)
 
     for name in ("discover_first", "discover_second"):
         providers.add(name, [candidate_from_worker(name, {
@@ -1635,7 +1721,7 @@ def test_publishing_the_growing_row_list_is_charged_to_the_same_budget(authentic
         "55555555-6666-7777-8888-999999999999")
     assert response.status_code == 200
 
-    offered = [observation["results"] for observation in published if observation.get("results")]
+    offered = [observation["results"] for observation in inline_jobs.observations() if observation.get("results")]
     assert offered, "no observation carried a result"
     assert len(offered[-1]) == 4, "publishing was not charged, so the list kept growing"
     assert len(response.json["results"]) == 8
@@ -1775,3 +1861,93 @@ def test_a_provider_the_throttle_table_holds_back_is_cooling_down(authenticated_
     assert (outcome["status"], outcome["reason"], outcome["elapsed_ms"]) == ("cooldown", reason, 0)
     assert 1700 < _retry_seconds(outcome) < 1900
     assert providers.videos == []
+
+
+def test_the_route_queues_a_job_the_user_can_follow_and_asking_again_follows_it(authenticated_client, providers):
+    inline_jobs = authenticated_client.inline_jobs
+    from app.process_session import PROCESS_SESSION
+
+    providers.add("discover_one")
+    payload = {"media_type": "movie", "imdb_id": "tt0133093", "title": "The Matrix", "language": "eng"}
+    queued = authenticated_client.post("/api/discover/search", json=payload,
+                                       headers={"X-API-KEY": "discover-test-key"})
+
+    assert queued.status_code == 202
+    assert queued.json == {"job_id": inline_jobs.FIRST_ID + 1, "session": PROCESS_SESSION}
+    job = inline_jobs.queued[0]
+    assert job["job_name"] == "Searching subtitles for The Matrix · en"
+    # Started at once, retryable, and a second press follows the running search.
+    assert job["options"]["retryable"] is True and job["options"]["return_existing"] is True
+    assert job["options"]["is_progress"] is True
+
+
+def test_the_job_reports_how_many_providers_have_answered(authenticated_client, providers):
+    inline_jobs = authenticated_client.inline_jobs
+    providers.add("discover_one")
+    providers.add("discover_two")
+    assert post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}
+                ).status_code == 200
+
+    messages = [message for _, _, _, message in inline_jobs.progress if message]
+    assert "Preparing the search" in messages
+    assert "1 of 2 providers answered" in messages and "2 of 2 providers answered" in messages
+    assert inline_jobs.progress[-1][1] == "max"
+    # The first thing the page can read is an empty observation, not nothing.
+    assert inline_jobs.observations()[0] == {"phase": "preparing", "providers": []}
+
+
+def test_a_search_whose_episode_metadata_expired_fails_the_job_with_that_sentence(authenticated_client, providers, monkeypatch):
+    inline_jobs = authenticated_client.inline_jobs
+    from discover import search as search_module
+
+    def expired(request):
+        raise search_module.SearchAdmissionExpired(
+            "Episode metadata expired before subtitle search started. Reload details and try again.")
+
+    monkeypatch.setattr(search_module, "_admit_provider_search", expired)
+    providers.add("discover_one")
+
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"})
+
+    assert response.status_code == 400
+    assert response.json == {"message": "Episode metadata expired before subtitle search started. "
+                                        "Reload details and try again."}
+    failure = inline_jobs.failed[inline_jobs.FIRST_ID + 1]
+    assert failure.reason == "metadata_expired"
+    assert failure.retryable is False
+    assert providers.videos == []
+
+
+def test_stop_ends_the_job_after_the_shared_search_finished_without_publishing_a_snapshot(
+        authenticated_client, providers, monkeypatch):
+    inline_jobs = authenticated_client.inline_jobs
+    from app.jobs_queue import JobCancelled
+
+    stopped = {"now": False}
+    original = inline_jobs.update_job_progress
+
+    def update(job_id, progress_value=None, progress_max=None, progress_message="", *, allow_cancelled=False):
+        if stopped["now"] and not allow_cancelled:
+            raise JobCancelled("stopped", job_id=job_id)
+        return original(job_id, progress_value, progress_max, progress_message, allow_cancelled=allow_cancelled)
+
+    monkeypatch.setattr(inline_jobs, "update_job_progress", update)
+    providers.add("discover_one")
+    from discover import search as search_module
+
+    real_search = search_module.search
+
+    def search_then_stop(request, on_progress=None, **kwargs):
+        snapshot = real_search(request, on_progress=on_progress, **kwargs)
+        # Stop is pressed while the providers are answering.
+        stopped["now"] = True
+        return snapshot
+
+    monkeypatch.setattr(search_module, "search", search_then_stop)
+
+    with pytest.raises(JobCancelled):
+        search_module.run_search_job(
+            search_module.validate_context({"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}),
+            job_id=inline_jobs.FIRST_ID + 7)
+    assert all(result.get("phase") != "finished"
+               for result in inline_jobs.observations(inline_jobs.FIRST_ID + 7))

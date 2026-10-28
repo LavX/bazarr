@@ -1,5 +1,6 @@
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
+import { searchJobResultHandler } from "@/tests/discoverSearchJob";
 
 // Default handlers. The multi-instance UI hooks (useArrInstances, used by the
 // Series/Movies list + detail pages for the instance badge/filter, #156) call
@@ -23,6 +24,8 @@ const server = setupServer(
   http.get("/api/system/media-server-links/destinations", () =>
     HttpResponse.json({ data: [] }),
   ),
+  // The searches the Discover tests queue finish with the answer they describe.
+  searchJobResultHandler,
 );
 
 export default server;

@@ -414,10 +414,12 @@ def test_empty_library_can_retrieve_the_exact_feed_episode(authenticated_client,
     detail = fixtures.get(authenticated_client, f"shows/{item['show_id']}/seasons/{item['season']}/episodes/{item['episode']}").json["data"]["episode"]
     assert detail["id"] == item["id"] and detail["air_date"] == item["air_date"]
     assert providers.videos == [] and fetched == []
-    response = authenticated_client.post("/api/discover/search", headers={"X-API-KEY": "metadata-test-key"}, json={
-        "media_type": "episode", "imdb_id": detail["show_imdb_id"], "language": "eng",
-        "title": detail["show_title"], "year": detail["show_year"], "show_id": detail["show_id"],
-        "season": detail["target_season"], "episode": detail["target_episode"], "episode_identity": detail})
+    search_fixtures.use_inline_jobs(authenticated_client, search_fixtures.InlineJobs(), monkeypatch)
+    response = search_fixtures.finished(authenticated_client, authenticated_client.post(
+        "/api/discover/search", headers={"X-API-KEY": "metadata-test-key"}, json={
+            "media_type": "episode", "imdb_id": detail["show_imdb_id"], "language": "eng",
+            "title": detail["show_title"], "year": detail["show_year"], "show_id": detail["show_id"],
+            "season": detail["target_season"], "episode": detail["target_episode"], "episode_identity": detail}))
     assert response.status_code == 200
     row = response.json["results"][0]
     downloaded = download_fixtures.get(authenticated_client, row, headers={"X-API-KEY": "metadata-test-key"})

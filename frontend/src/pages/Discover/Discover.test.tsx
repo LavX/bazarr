@@ -15,6 +15,7 @@ import queryClient from "@/apis/queries";
 import { useDiscover } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor } from "@/tests";
+import { discoverSearchJob } from "@/tests/discoverSearchJob";
 import server from "@/tests/mocks/node";
 import { setAuthenticated } from "@/utilities/event";
 import { readableTime } from "./feedText";
@@ -455,7 +456,7 @@ describe("Discover retrieval", () => {
   it("requires explicit language and Find subtitles; appearance and query refetch never search", async () => {
     const requests: unknown[] = [];
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         requests.push(await request.json());
         return HttpResponse.json(snapshot());
       }),
@@ -505,9 +506,7 @@ describe("Discover retrieval", () => {
   });
 
   it("keeps the saved task through settings navigation and appearance changes", async () => {
-    server.use(
-      http.post("/api/discover/search", () => HttpResponse.json(snapshot())),
-    );
+    server.use(discoverSearchJob(() => HttpResponse.json(snapshot())));
     const { user, router } = renderDiscover();
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
@@ -525,7 +524,7 @@ describe("Discover retrieval", () => {
   it("retains prior results and checked time after a failed refresh", async () => {
     let attempt = 0;
     server.use(
-      http.post("/api/discover/search", () => {
+      discoverSearchJob(() => {
         attempt += 1;
         return attempt === 1
           ? HttpResponse.json(snapshot())
@@ -554,7 +553,7 @@ describe("Discover retrieval", () => {
     first.results.push(retained);
     let attempt = 0;
     server.use(
-      http.post("/api/discover/search", () => {
+      discoverSearchJob(() => {
         attempt += 1;
         return HttpResponse.json(
           attempt === 1
@@ -609,7 +608,7 @@ describe("Discover retrieval", () => {
         });
       let attempt = 0;
       server.use(
-        http.post("/api/discover/search", () => {
+        discoverSearchJob(() => {
           attempt += 1;
           return attempt === 1
             ? HttpResponse.json(first)
@@ -637,7 +636,7 @@ describe("Discover retrieval", () => {
         if (!hasUsable) {
           let complete: (() => void) | undefined;
           server.use(
-            http.post("/api/discover/search", async () => {
+            discoverSearchJob(async () => {
               await new Promise<void>((resolve) => {
                 complete = resolve;
               });
@@ -683,7 +682,7 @@ describe("Discover retrieval", () => {
   it("ignores a late response after the language changes, and logout clears the task", async () => {
     let release: (() => void) | undefined;
     server.use(
-      http.post("/api/discover/search", async () => {
+      discoverSearchJob(async () => {
         await new Promise<void>((resolve) => {
           release = resolve;
         });
@@ -753,7 +752,7 @@ it("does not call a search failed when no provider was ever asked", async () => 
   // and got it wrong as soon as one real failure stood beside a correct skip.
   const full = snapshot();
   server.use(
-    http.post("/api/discover/search", () =>
+    discoverSearchJob(() =>
       HttpResponse.json({
         ...full,
         status: "skipped",
@@ -796,7 +795,7 @@ it("does not call a search failed when no provider was ever asked", async () => 
 it("never describes a provider that was never asked as having timed out", async () => {
   const full = snapshot();
   server.use(
-    http.post("/api/discover/search", () =>
+    discoverSearchJob(() =>
       HttpResponse.json({
         ...full,
         status: "partial",
@@ -847,7 +846,7 @@ it("never describes a provider that was never asked as having timed out", async 
 it("reports a provider left out for its cooldown as cooling down, not out of time", async () => {
   const full = snapshot();
   server.use(
-    http.post("/api/discover/search", () =>
+    discoverSearchJob(() =>
       HttpResponse.json({
         ...full,
         status: "partial",
@@ -956,11 +955,7 @@ it("distinguishes successful empty, partial, failed and provider setup states", 
       },
     },
   ];
-  server.use(
-    http.post("/api/discover/search", () =>
-      HttpResponse.json(responses.shift()),
-    ),
-  );
+  server.use(discoverSearchJob(() => HttpResponse.json(responses.shift())));
   const { user } = renderDiscover();
   await selectTarget(user);
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
@@ -1038,7 +1033,7 @@ it("says a seeded language is session-only once the search tries to remember it"
         },
       ]),
     ),
-    http.post("/api/discover/search", () => HttpResponse.json(snapshot())),
+    discoverSearchJob(() => HttpResponse.json(snapshot())),
   );
   const original = Storage.prototype.setItem;
   const blocked = vi
@@ -1081,9 +1076,7 @@ it("restores an explicit preference without deriving one from enabled library la
 });
 
 it("preserves results when the shell replaces its router", async () => {
-  server.use(
-    http.post("/api/discover/search", () => HttpResponse.json(snapshot())),
-  );
+  server.use(discoverSearchJob(() => HttpResponse.json(snapshot())));
   const { user, view } = renderDiscover();
   await selectTarget(user);
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
@@ -1104,7 +1097,7 @@ it("preserves results when the shell replaces its router", async () => {
 it("does not restore a logged-out task when its last request finishes", async () => {
   let finish: (() => void) | undefined;
   server.use(
-    http.post("/api/discover/search", async () => {
+    discoverSearchJob(async () => {
       await new Promise<void>((resolve) => {
         finish = resolve;
       });
@@ -1146,7 +1139,7 @@ it("keeps identified title retrieval focused on language and search", async () =
 it("restores completed subtitle results through Back and Forward inside Discover without another search", async () => {
   let searches = 0;
   server.use(
-    http.post("/api/discover/search", () => {
+    discoverSearchJob(() => {
       searches++;
       return HttpResponse.json(snapshot());
     }),
@@ -1198,7 +1191,7 @@ function pendingSearch(onRequest: () => void) {
     arrive = resolve;
   });
   return {
-    handler: http.post("/api/discover/search", async () => {
+    handler: discoverSearchJob(async () => {
       onRequest();
       await held;
       return HttpResponse.json(snapshot());
@@ -1689,7 +1682,7 @@ describe("Discover return from local work", () => {
   it("restores a control in the results region, which no other owner claims", async () => {
     discoverFixtures();
     server.use(
-      http.post("/api/discover/search", async ({ request }) => {
+      discoverSearchJob(async ({ request }) => {
         const context = (await request.json()) as Record<string, unknown>;
         return HttpResponse.json({
           search_id: "return-search",

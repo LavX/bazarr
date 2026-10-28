@@ -19,12 +19,10 @@ export function useDiscoverSearch() {
     mutationFn: ({
       context,
       refresh,
-      progressId,
     }: {
       context: DiscoverSelection;
       refresh: boolean;
-      progressId?: string;
-    }) => api.discover.search(context, refresh, progressId),
+    }) => api.discover.search(context, refresh),
     retry: false,
     networkMode: "always",
     gcTime: 0,
