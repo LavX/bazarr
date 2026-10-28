@@ -31,6 +31,7 @@ def queue(monkeypatch):
     fresh.events = events
     # A fresh queue numbers its jobs from 1 again, so earlier results must go.
     monkeypatch.setattr(editor, '_results', type(editor._results)())
+    monkeypatch.setattr(editor, '_followers', type(editor._followers)())
     return fresh
 
 
@@ -206,6 +207,156 @@ def test_cancelling_the_job_cancels_the_remote_translation(queue, sidecar, monke
     assert editor.editor_translation_state(job_id)['status'] == 'cancelled'
 
 
+def test_a_stop_after_the_synchronous_fallback_returned_still_ends_the_job_cancelled(queue, monkeypatch):
+    """The service's synchronous fallback has no cancel check of its own, so a Stop pressed while it ran
+    is only seen once it returns. The lines it brought back must not be kept as a finished translation."""
+    job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+
+    def fallback(self, lines, source_language, target_language, title, bazarr_job_id=None, **fields):
+        for running in queue.jobs_running_queue:
+            running.cancelled = True
+        return [{'position': 0, 'line': 'Szia'}, {'position': 1, 'line': 'Vilag'}]
+
+    monkeypatch.setattr(editor.OpenRouterTranslatorService, 'submit_content', fallback)
+
+    job = _run(queue, job_id)
+
+    assert job.status == 'cancelled'
+    # It was not renamed as translated, which would say the lines had landed.
+    assert job.job_name.startswith('Translating ')
+    assert editor._retained_result(job_id) is None
+    assert editor.editor_translation_state(job_id)['status'] == 'cancelled'
+
+
+def test_one_client_stopping_a_shared_translation_leaves_it_running_for_the_other(queue):
+    first = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    second = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    assert second == first
+
+    # The first client lets go; the second is still waiting on the same job.
+    assert editor.cancel_editor_translation(first) is True
+    assert [pending.job_id for pending in queue.jobs_pending_queue] == [first]
+
+    # The last one to let go stops it.
+    assert editor.cancel_editor_translation(first) is True
+    assert queue.jobs_pending_queue == type(queue.jobs_pending_queue)()
+    assert editor.cancel_editor_translation(first) is False
+
+
+def test_a_shared_running_translation_is_stopped_by_the_last_client_only(queue):
+    first = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    job = next(job for job in queue.jobs_pending_queue if job.job_id == first)
+    queue.jobs_pending_queue.remove(job)
+    queue.jobs_running_queue.append(job)
+
+    assert editor.cancel_editor_translation(first) is True
+    assert job.cancelled is False
+    assert editor.cancel_editor_translation(first) is True
+    assert job.cancelled is True
+
+
+def test_an_editor_that_only_closes_does_not_leave_the_last_stop_hollow(queue):
+    """A client that closes the editor without pressing Stop lets go of the translation. If it stayed counted,
+    the one still waiting would press Stop, be told it worked, and the translation would run on and spend
+    credits."""
+    first = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    job = next(job for job in queue.jobs_pending_queue if job.job_id == first)
+    queue.jobs_pending_queue.remove(job)
+    queue.jobs_running_queue.append(job)
+
+    # One editor closes: its release is not a Stop, and the job runs on for the other.
+    assert editor.release_editor_translation(first) is True
+    assert job.cancelled is False
+
+    # The one still waiting presses Stop and it is the stop.
+    assert editor.cancel_editor_translation(first) is True
+    assert job.cancelled is True
+
+
+def test_the_last_editor_closing_leaves_the_translation_running(queue):
+    first = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    job = next(job for job in queue.jobs_pending_queue if job.job_id == first)
+    queue.jobs_pending_queue.remove(job)
+    queue.jobs_running_queue.append(job)
+
+    assert editor.release_editor_translation(first) is True
+
+    # Closing is not stopping: the work was queued to outlive the editor.
+    assert job.cancelled is False
+    assert [running.job_id for running in queue.jobs_running_queue] == [first]
+    # Whoever asks for it next is its only follower, and their Stop is the stop.
+    assert editor.enqueue_editor_translation(LINES, 'English', 'Hungarian') == first
+    assert editor.cancel_editor_translation(first) is True
+    assert job.cancelled is True
+
+
+def test_only_an_editor_translation_can_be_released(queue):
+    other = queue.feed_jobs_pending_queue('Something else', 'utilities.cache', 'cache_maintenance')
+    assert editor.release_editor_translation(other) is False
+    assert editor.release_editor_translation(999) is False
+
+
+def test_the_stop_route_can_release_instead_of_stopping(queue):
+    from flask import Flask
+
+    from api.translator.translator import TranslatorEditorJobs
+
+    first = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    job = next(job for job in queue.jobs_pending_queue if job.job_id == first)
+    queue.jobs_pending_queue.remove(job)
+    queue.jobs_running_queue.append(job)
+    resource = TranslatorEditorJobs()
+
+    with Flask(__name__).test_request_context(f'/?jobId={first}&release=true', method='DELETE'):
+        assert TranslatorEditorJobs.delete.__wrapped__(resource) == ('', 204)
+    assert job.cancelled is False
+
+    with Flask(__name__).test_request_context(f'/?jobId={first}', method='DELETE'):
+        assert TranslatorEditorJobs.delete.__wrapped__(resource) == ('', 204)
+    assert job.cancelled is True
+
+    with Flask(__name__).test_request_context('/?jobId=999&release=true', method='DELETE'):
+        assert TranslatorEditorJobs.delete.__wrapped__(resource)[1] == 404
+
+
+def test_a_translation_asked_for_again_after_it_ended_starts_with_one_client(queue, sidecar):
+    first = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    sidecar.polls.append({'status': 'completed', 'result': {'lines': [{'position': 0, 'line': 'a'}]}})
+    _run(queue, first)
+
+    again = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+
+    assert again != first
+    # One client, so its stop is the stop.
+    assert editor.cancel_editor_translation(again) is True
+    assert queue.jobs_pending_queue == type(queue.jobs_pending_queue)()
+
+
+def test_stopping_a_shared_translation_that_already_ended_finds_nothing_to_stop(queue, sidecar):
+    """Two editors share the job and it finishes. Their followers are cleared with
+    it, so a late Stop answers that there is nothing left. A follower count that
+    survived the job would make the Stop look like one editor letting go of a job
+    that still runs, and answer success for a stop that did nothing."""
+    first = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    assert editor.enqueue_editor_translation(LINES, 'English', 'Hungarian') == first
+    sidecar.polls.append({'status': 'completed', 'result': {'lines': [{'position': 0, 'line': 'a'}]}})
+    _run(queue, first)
+
+    assert editor.cancel_editor_translation(first) is False
+
+
+def test_stopping_a_shared_translation_that_failed_finds_nothing_to_stop(queue, sidecar):
+    first = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    sidecar.polls.append({'status': 'failed', 'error': 'The model refused'})
+    assert _run(queue, first).status == 'failed'
+
+    assert editor.cancel_editor_translation(first) is False
+
+
 def test_the_state_answers_only_for_editor_translation_jobs(queue):
     other = queue.feed_jobs_pending_queue('Something else', 'utilities.cache', 'cache_maintenance')
     assert editor.editor_translation_state(other) is None
@@ -367,6 +518,14 @@ class TestEditorTranslationEndpoint:
         job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
         assert self._call('delete', query_string={'jobId': job_id}) == ('', 204)
         assert queue.list_jobs_from_queue() == []
+        assert self._call('delete', query_string={'jobId': job_id})[1] == 404
+
+    def test_delete_of_a_shared_translation_that_already_finished_answers_404(self, queue, sidecar):
+        job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+        editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+        sidecar.polls.append({'status': 'completed', 'result': {'lines': [{'position': 0, 'line': 'a'}]}})
+        _run(queue, job_id)
+
         assert self._call('delete', query_string={'jobId': job_id})[1] == 404
 
     def test_get_reads_the_job_state(self, queue, sidecar):

@@ -33,6 +33,33 @@ _results = OrderedDict()
 _results_lock = threading.Lock()
 
 
+# The editors following each job. The queue hands a second request for the same
+# lines the job already running, so two editors can wait on one translation; one
+# of them pressing Stop must not end the other's. Counted per job and bounded,
+# the way the results are.
+_followers = OrderedDict()
+_followers_lock = threading.Lock()
+
+
+def _follow(job_id):
+    with _followers_lock:
+        _followers[job_id] = _followers.get(job_id, 0) + 1
+        _followers.move_to_end(job_id)
+        while len(_followers) > RESULT_RETENTION_COUNT:
+            _followers.popitem(last=False)
+
+
+def _let_go(job_id):
+    """One editor stops waiting. True when others still are, so the job must go on."""
+    with _followers_lock:
+        remaining = _followers.get(job_id, 1) - 1
+        if remaining > 0:
+            _followers[job_id] = remaining
+            return True
+        _followers.pop(job_id, None)
+        return False
+
+
 def _retain_result(job_id, result):
     now = time.monotonic()
     with _results_lock:
@@ -82,8 +109,11 @@ def enqueue_editor_translation(lines, source_language, target_language, title=''
         'media_type': media_type or '',
     }
     label = editor_translation_label(title, source_language, target_language, len(ordered))
-    return enqueue_or_existing(label, EDITOR_TRANSLATION_MODULE, EDITOR_TRANSLATION_FUNC, kwargs,
-                               is_progress=True, progress_max=100)
+    job_id = enqueue_or_existing(label, EDITOR_TRANSLATION_MODULE, EDITOR_TRANSLATION_FUNC, kwargs,
+                                 is_progress=True, progress_max=100)
+    if job_id:
+        _follow(job_id)
+    return job_id
 
 
 def _rename(job_id, replacement):
@@ -106,40 +136,50 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
     jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=100,
                                    progress_message='Sending to the AI Subtitle Translator')
 
-    service = OpenRouterTranslatorService(
-        source_srt_file=None, dest_srt_file=None, lang_obj=None, to_lang=None, from_lang=None,
-        media_type=media_type, video_path=None, orig_to_lang=None, forced=False, hi=False,
-        sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None)
     try:
-        translated = service.submit_content(lines, source_language, target_language, title,
-                                            bazarr_job_id=job_id, mediaType=media_type)
-    except JobCancelled:
-        # submit_content has already cancelled the sidecar's job.
-        raise
-    except Exception as exc:
-        # A TranslationServiceError is a JobFailed, so its reason becomes the
-        # job's error, which the editor, the failure toast and the drawer show.
-        _rename(job_id, 'Failed')
+        service = OpenRouterTranslatorService(
+            source_srt_file=None, dest_srt_file=None, lang_obj=None, to_lang=None, from_lang=None,
+            media_type=media_type, video_path=None, orig_to_lang=None, forced=False, hi=False,
+            sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None)
+        try:
+            translated = service.submit_content(lines, source_language, target_language, title,
+                                                bazarr_job_id=job_id, mediaType=media_type)
+        except JobCancelled:
+            # submit_content has already cancelled the sidecar's job.
+            raise
+        except Exception as exc:
+            # A TranslationServiceError is a JobFailed, so its reason becomes the
+            # job's error, which the editor, the failure toast and the drawer show.
+            _rename(job_id, 'Failed')
+            if job_id:
+                # The same sentence the queue records, scrubbed the same way, so
+                # the editor can still say why after the job has left the queue
+                # without carrying a credential the reason quoted.
+                message = (scrub_text(str(exc)) if isinstance(exc, JobFailed)
+                           else UNEXPECTED_JOB_ERROR['message'])
+                _retain_result(job_id, {'error': message})
+            raise
+
         if job_id:
-            # The same sentence the queue records, scrubbed the same way, so
-            # the editor can still say why after the job has left the queue
-            # without carrying a credential the reason quoted.
-            message = (scrub_text(str(exc)) if isinstance(exc, JobFailed)
-                       else UNEXPECTED_JOB_ERROR['message'])
-            _retain_result(job_id, {'error': message})
-        raise
+            # The service's synchronous fallback has no cancel check of its own, so
+            # a Stop pressed while it ran is only seen here. Raising before the
+            # lines are kept leaves a stopped job stopped, not translated.
+            jobs_queue.update_job_progress(job_id=job_id, progress_message='Collecting the translation')
 
-    result_lines = []
-    for item in translated:
-        index = item.get('position') if isinstance(item, dict) else None
-        if isinstance(index, int) and 0 <= index < len(positions):
-            result_lines.append({'position': positions[index], 'line': item.get('line', '')})
+        result_lines = []
+        for item in translated:
+            index = item.get('position') if isinstance(item, dict) else None
+            if isinstance(index, int) and 0 <= index < len(positions):
+                result_lines.append({'position': positions[index], 'line': item.get('line', '')})
 
-    _rename(job_id, 'Partially translated' if service.partial_error else 'Translated')
-    result = {'lines': result_lines, 'partial': service.partial_error}
-    if job_id:
-        _retain_result(job_id, result)
-    return result
+        _rename(job_id, 'Partially translated' if service.partial_error else 'Translated')
+        result = {'lines': result_lines, 'partial': service.partial_error}
+        if job_id:
+            _retain_result(job_id, result)
+        return result
+    finally:
+        with _followers_lock:
+            _followers.pop(job_id, None)
 
 
 def cancel_editor_translation(job_id):
@@ -152,9 +192,28 @@ def cancel_editor_translation(job_id):
     job = next(iter(jobs_queue.list_jobs_from_queue(job_id=job_id)), None)
     if not job or job.get('module') != EDITOR_TRANSLATION_MODULE or job.get('func') != EDITOR_TRANSLATION_FUNC:
         return False
+    if _let_go(job_id):
+        # Another editor asked for the same translation and is still waiting.
+        return True
     if jobs_queue.remove_job_from_pending_queue(job_id=job_id):
         return True
     return jobs_queue.cancel_running_job(job_id=job_id)
+
+
+def release_editor_translation(job_id):
+    """One editor stops following a translation without stopping it.
+
+    An editor that is closed lets go of the job it was waiting on. That is not a Stop: the work was queued to
+    outlive the editor, so the job runs on even when this was the last follower. It only keeps the count
+    honest, so that a follower still waiting, pressing Stop later, is the last one and the stop takes effect.
+
+    Returns False when there is no editor translation with this id.
+    """
+    job = next(iter(jobs_queue.list_jobs_from_queue(job_id=job_id)), None)
+    if not job or job.get('module') != EDITOR_TRANSLATION_MODULE or job.get('func') != EDITOR_TRANSLATION_FUNC:
+        return False
+    _let_go(job_id)
+    return True
 
 
 def editor_translation_state(job_id):

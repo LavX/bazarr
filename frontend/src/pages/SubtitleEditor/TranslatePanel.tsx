@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { faSpinner, faTimes } from "@fortawesome/free-solid-svg-icons";
@@ -19,6 +20,7 @@ import {
   isTerminalJob,
   queueEditorTranslation,
   readEditorTranslation,
+  releaseEditorTranslation,
   useEditorJob,
 } from "./editorJobs";
 
@@ -201,6 +203,9 @@ export default function TranslatePanel({
   const [targetLanguage, setTargetLanguage] = useState("");
   const [phase, setPhase] = useState<TranslatePhase>("idle");
   const [jobId, setJobId] = useState<number | null>(null);
+  // The backend run the job was queued under, so a job of an earlier run that
+  // shares its id is never taken for it.
+  const [jobSession, setJobSession] = useState<string | undefined>();
   const [errorMsg, setErrorMsg] = useState("");
   const [translatedLines, setTranslatedLines] = useState<Map<number, string>>(
     new Map(),
@@ -232,9 +237,27 @@ export default function TranslatePanel({
     }
   }, [open, currentLanguage, targetLanguage]);
 
+  // The job this panel is waiting on, so closing the editor can let go of it.
+  // The server counts the editors following a shared translation, and one that
+  // left without saying so would make the last one's Stop a hollow success.
+  // Letting go is not stopping: the translation was queued to outlive the editor.
+  const following = useRef<number | null>(null);
+  following.current = phase === "translating" ? jobId : null;
+  useEffect(
+    () => () => {
+      if (following.current != null) {
+        void releaseEditorTranslation(following.current).catch(() => undefined);
+      }
+    },
+    [],
+  );
+
   // The translation is a Bazarr job: its progress and its end arrive on the
   // jobs socket, so the panel reads the shared jobs cache instead of polling.
-  const jobData = useEditorJob(phase === "translating" ? jobId : null);
+  const jobData = useEditorJob(
+    phase === "translating" ? jobId : null,
+    jobSession,
+  );
 
   // React to job status changes
   const effectiveSource =
@@ -336,7 +359,7 @@ export default function TranslatePanel({
       targetLanguage;
 
     try {
-      const queuedJobId = await queueEditorTranslation({
+      const queued = await queueEditorTranslation({
         lines,
         sourceLanguage: sourceLangName,
         targetLanguage: targetLangName,
@@ -344,8 +367,9 @@ export default function TranslatePanel({
         mediaType: "",
       });
 
-      if (queuedJobId) {
-        setJobId(queuedJobId);
+      if (queued.jobId) {
+        setJobId(queued.jobId);
+        setJobSession(queued.session);
         setPhase("translating");
         onTranslatingChange?.(true);
       } else {

@@ -66,12 +66,7 @@ import {
   subtitleDocumentReducer,
 } from "./document";
 import EditableCueTable from "./EditableCueTable";
-import {
-  isTerminalJob,
-  queueEditorTranslation,
-  readEditorTranslation,
-  useEditorJob,
-} from "./editorJobs";
+import { queueEditorTranslation } from "./editorJobs";
 import {
   buildEditorAutosaveKey,
   buildEditorSubtitlesUrl,
@@ -83,6 +78,9 @@ import {
 } from "./editorScope";
 import EditorToolbar from "./EditorToolbar";
 import JumpToCue from "./JumpToCue";
+import LineTranslationWatcher, {
+  type LineTranslationJob,
+} from "./LineTranslationWatcher";
 import { detectFormat, getParser } from "./parsers";
 import QCPanel from "./QCPanel";
 import SearchReplace from "./SearchReplace";
@@ -360,10 +358,11 @@ export default function EditorPage() {
     string | undefined
   >();
   const [referenceOpen, setReferenceOpen] = useState(false);
-  const [lineTranslationJob, setLineTranslationJob] = useState<{
-    jobId: number;
-    targetIdx: number;
-  } | null>(null);
+  // Every single-line translation still in flight. More than one can be: the
+  // reader can start another line while the first is translating.
+  const [lineTranslationJobs, setLineTranslationJobs] = useState<
+    LineTranslationJob[]
+  >([]);
   const [translatingLineIdx, setTranslatingLineIdx] = useState<number | null>(
     null,
   );
@@ -1532,14 +1531,14 @@ export default function EditorPage() {
     // click to queue a second job.
     setTranslatingLineIdx(selectedIndex);
     try {
-      const queuedJobId = await queueEditorTranslation({
+      const queued = await queueEditorTranslation({
         lines: [{ position: 0, line: sourceText }],
         sourceLanguage: referenceLanguage || "",
         targetLanguage: language || "",
         title: data?.mediaTitle || "",
         mediaType: mediaType || "",
       });
-      if (queuedJobId) {
+      if (queued.jobId) {
         if (insertion) {
           dispatch({
             type: "APPLY_OP",
@@ -1548,9 +1547,14 @@ export default function EditorPage() {
           // The selection and the hold move to the inserted cue together,
           // where the queued result lands.
           setSelectedIndex(insertion.idx);
-          setTranslatingLineIdx(insertion.idx);
         }
-        setLineTranslationJob({ jobId: queuedJobId, targetIdx });
+        // From here the job is what marks the cue as translating, and the hold
+        // on the initiating cue is let go, so the next line can be started.
+        setLineTranslationJobs((jobs) => [
+          ...jobs,
+          { jobId: queued.jobId, session: queued.session, targetIdx },
+        ]);
+        setTranslatingLineIdx(null);
       } else {
         setTranslatingLineIdx(null);
       }
@@ -1573,32 +1577,14 @@ export default function EditorPage() {
     showTranslationRefusal,
   ]);
 
-  // The single-line translation is a queued job like the panel's. Its end
+  // Each single-line translation is a queued job like the panel's. Its end
   // arrives through the jobs cache, and only then is the result read.
-  const lineJob = useEditorJob(lineTranslationJob?.jobId);
-  const lineJobFinished = isTerminalJob(lineJob);
-  useEffect(() => {
-    if (!lineTranslationJob || !lineJobFinished) return;
-    let active = true;
-    const { jobId, targetIdx } = lineTranslationJob;
-    readEditorTranslation(jobId)
-      .then((state) => {
-        const line = state.status === "completed" ? state.lines?.[0]?.line : "";
-        if (active && line) {
-          dispatch({ type: "APPLY_OP", op: createEditText(targetIdx, line) });
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (active) {
-          setLineTranslationJob(null);
-          setTranslatingLineIdx(null);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [lineTranslationJob, lineJobFinished]);
+  const applyTranslatedLine = useCallback((targetIdx: number, line: string) => {
+    dispatch({ type: "APPLY_OP", op: createEditText(targetIdx, line) });
+  }, []);
+  const finishLineTranslation = useCallback((jobId: number) => {
+    setLineTranslationJobs((jobs) => jobs.filter((job) => job.jobId !== jobId));
+  }, []);
 
   // Clear auto-focus flag after it fires
   useEffect(() => {
@@ -1986,6 +1972,14 @@ export default function EditorPage() {
         outline: "none",
       }}
     >
+      {lineTranslationJobs.map((job) => (
+        <LineTranslationWatcher
+          key={job.jobId}
+          job={job}
+          onLine={applyTranslatedLine}
+          onDone={finishLineTranslation}
+        />
+      ))}
       {/* Breadcrumb + badges */}
       <Group justify="space-between" px="md" pt="xs" pb={4}>
         <Breadcrumbs>
@@ -2549,7 +2543,10 @@ export default function EditorPage() {
             }
             onUseReference={selectedRefText ? handleUseReference : undefined}
             onTranslateLine={handleTranslateLine}
-            translatingLine={translatingLineIdx === selectedIndex}
+            translatingLine={
+              translatingLineIdx === selectedIndex ||
+              lineTranslationJobs.some((job) => job.targetIdx === selectedIndex)
+            }
             currentTimeMs={playbackTimeMs}
           />
         </div>

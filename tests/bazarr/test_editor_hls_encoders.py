@@ -129,6 +129,7 @@ def hls(monkeypatch, tmp_path):
     monkeypatch.setattr(editor, '_hls_encoders', {}, raising=False)
     monkeypatch.setattr(editor, '_hls_replaced_dirs', {}, raising=False)
     monkeypatch.setattr(editor, '_hls_stopping_dirs', set(), raising=False)
+    monkeypatch.setattr(editor, '_hls_failures', {}, raising=False)
     monkeypatch.setattr(editor, '_now', clock, raising=False)
     monkeypatch.setattr(editor, 'HLS_ENCODER_STOP_GRACE_SECONDS', 0.05, raising=False)
     # Each test drives sweeps itself unless it starts the real reaper.
@@ -461,7 +462,7 @@ def handler(hls, monkeypatch):
                 audio_track=track, start_time=start, filename=filename,
             )
             if isinstance(result, tuple):
-                return result[1], None
+                return result[1], result[0]
             result.direct_passthrough = False
             return result.status_code, result.get_data()
 
@@ -532,3 +533,116 @@ def test_malformed_player_and_filename_are_rejected(hls, handler):
     assert status == 200
     assert b'player=' not in body
     assert handler.get(0, '0.000', 'segment_001.m4s\n')[0] == 400
+
+
+class FailingProcess(FakeProcess):
+    """An ffmpeg that wrote nothing and exited with an error."""
+
+    def communicate(self):
+        self.finish(1)
+        return None, b'ffmpeg version n7.1\n[aist#0:1] Guessed Channel Layout\nInvalid data found when processing input\n'
+
+
+def test_an_encoder_that_failed_says_why_instead_of_asking_the_player_to_retry(hls, handler, monkeypatch):
+    monkeypatch.setattr(hls.editor.subprocess, 'Popen', lambda cmd, **_kwargs: FailingProcess(cmd))
+    # The failure must end the wait early, not run out the first-segment deadline.
+    monkeypatch.setattr(hls.editor, 'HLS_FIRST_SEGMENT_WAIT_SECONDS', 5.0)
+
+    started = time.monotonic()
+    status, body = handler.get(0, '0.000', 'playlist.m3u8')
+
+    assert status == 502
+    assert body == 'The audio could not be encoded: unreadable input'
+    assert time.monotonic() - started < 3
+    assert _wait_until(lambda: hls.editor._hls_encoders == {})
+    assert not os.path.exists(os.path.join(handler.cache_dir(0, '0.000'), '.encoding'))
+
+
+def _failing_with(stderr):
+    class Failing(FakeProcess):
+        def communicate(self):
+            self.finish(1)
+            return None, stderr
+
+    return Failing
+
+
+@pytest.mark.parametrize('line, reason', [
+    ('Invalid data found when processing input', 'unreadable input'),
+    ('Permission denied', 'unreadable input'),
+    ('Stream map \'0:a:3\' matches no streams.', 'unsupported audio stream'),
+    ('Decoder (codec truehd) not found for input stream #0:1', 'unsupported audio stream'),
+    ('Something nobody has seen before', None),
+])
+def test_the_failure_answer_gives_a_coarse_reason_and_never_the_path(hls, handler, monkeypatch, caplog, line, reason):
+    """ffmpeg's last line usually names the input file. The answer says what kind of failure it was and
+    nothing else; the line itself stays in the log."""
+    path = '/media/Movies/Private Film (2020)/Private.Film.2020.mkv'
+    stderr = f'{path}: {line}\n'.encode()
+    monkeypatch.setattr(hls.editor.subprocess, 'Popen', lambda cmd, **_kwargs: _failing_with(stderr)(cmd))
+
+    with caplog.at_level('ERROR', logger=hls.editor.logger.name):
+        status, body = handler.get(0, '0.000', 'playlist.m3u8')
+
+    assert status == 502
+    assert body == 'The audio could not be encoded' + (f': {reason}' if reason else '')
+    assert 'Private' not in body and '/media' not in body
+    assert _wait_until(lambda: line in caplog.text)
+
+
+def test_asking_again_after_a_failure_starts_the_encoder_again(hls, handler, monkeypatch):
+    """The failure is cleared when ffmpeg is started, so every request retries it: a transient error
+    recovers on the player's next attempt instead of being refused for good."""
+    started = []
+
+    def failing(cmd, **_kwargs):
+        started.append(cmd)
+        return _failing_with(b'Invalid data found\n')(cmd)
+
+    monkeypatch.setattr(hls.editor.subprocess, 'Popen', failing)
+
+    for attempt in (1, 2, 3):
+        assert handler.get(0, '0.000', 'playlist.m3u8')[0] == 502
+        assert _wait_until(lambda: hls.editor._hls_encoders == {})
+        assert len(started) == attempt
+
+
+def test_a_request_that_loses_the_spawn_race_is_not_told_about_the_previous_failure(hls, handler):
+    """Another request is starting ffmpeg for this session. The failure on record is the one it is about to
+    replace, so reporting it would blame the new encoder for the old one's error."""
+    cache_dir = handler.cache_dir(0, '0.000')
+    hls.editor._hls_failures[cache_dir] = 'The audio could not be encoded: unreadable input'
+    lock = hls.editor._hls_encoder_lock(cache_dir)
+    assert lock.acquire(blocking=False)
+    try:
+        status, body = handler.get(0, '0.000', 'playlist.m3u8')
+    finally:
+        lock.release()
+
+    assert status == 503
+    assert body == 'Encoding starting, retry shortly'
+
+
+def test_a_signalled_encoder_is_not_reported_as_a_failure(hls, handler, monkeypatch):
+    class Signalled(FailingProcess):
+        def communicate(self):
+            self.finish(-9)
+            return None, b'Killed\n'
+
+    monkeypatch.setattr(hls.editor.subprocess, 'Popen', lambda cmd, **_kwargs: Signalled(cmd))
+
+    status, body = handler.get(0, '0.000', 'playlist.m3u8')
+
+    assert status == 503
+    assert body == 'Encoding starting, retry shortly'
+    assert hls.editor._hls_failures == {}
+
+
+def test_an_encoder_that_starts_cleanly_forgets_an_earlier_failure(hls, handler):
+    cache_dir = handler.cache_dir(0, '0.000')
+    hls.editor._hls_failures[cache_dir] = 'Invalid data found when processing input'
+
+    status, _body = handler.get(0, '0.000', 'playlist.m3u8')
+
+    assert status == 200
+    assert cache_dir not in hls.editor._hls_failures

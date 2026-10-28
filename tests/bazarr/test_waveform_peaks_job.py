@@ -254,7 +254,9 @@ class TestPeaksEndpoint:
         body, status = self._get(monkeypatch, str(video))
 
         assert status == 202
-        assert body == {'jobId': queue.list_jobs_from_queue()[0]['job_id'], 'status': 'pending'}
+        job = queue.list_jobs_from_queue()[0]
+        # The id only means something within one backend run, so the run is named too.
+        assert body == {'jobId': job['job_id'], 'jobSession': job['session'], 'status': 'pending'}
 
     def test_cached_peaks_are_served_without_a_job(self, queue, monkeypatch, tmp_path):
         video = tmp_path / 'film.mkv'

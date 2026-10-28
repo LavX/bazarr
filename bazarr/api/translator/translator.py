@@ -10,6 +10,7 @@ from app.jobs_queue import jobs_queue
 from secret_store.scrub import scrub_text
 from subtitles.tools.translate.availability import translation_available
 from subtitles.tools.translate.editor import (cancel_editor_translation, editor_translation_state,
+                                              release_editor_translation,
                                               enqueue_editor_translation)
 from subtitles.tools.translate.services.auth import get_translator_auth_headers
 from subtitles.tools.translate.services.sidecar_errors import describe_sidecar_refusal
@@ -140,11 +141,19 @@ class TranslatorEditorJobs(Resource):
         responses={204: 'Stopped', 400: 'Bad Request', 404: 'Not Found'}
     )
     def delete(self):
-        """Stop an editor translation job, queued or running."""
+        """Stop an editor translation job, queued or running.
+
+        With ``release=true`` the caller only stops following it, as an editor does when it is closed: the job
+        goes on, and the count of editors waiting on it stays honest for the Stop of one that is still there.
+        """
         try:
             job_id = int(flask_request.args.get("jobId", ""))
         except (TypeError, ValueError):
             return {"error": "jobId must be an integer"}, 400
+        if flask_request.args.get("release", "").lower() == "true":
+            if not release_editor_translation(job_id):
+                return {"status": "not_found"}, 404
+            return '', 204
         if not cancel_editor_translation(job_id):
             return {"status": "not_found"}, 404
         return '', 204
