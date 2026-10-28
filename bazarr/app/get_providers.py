@@ -208,6 +208,12 @@ _REMOTE_CONNECTION_FAILURES = {
 }
 
 
+def provider_is_throttled(name):
+    """Whether a provider is still in its recorded backoff period."""
+    reason, until, _ = tp.get(name, (None, None, None))
+    return bool(reason and until and datetime.datetime.now() < until)
+
+
 def provider_is_usable(name):
     """Adoption gate for the provider pools (see SZProviderPool.__getitem__):
     True only when the provider is enabled in settings, not currently
@@ -217,8 +223,7 @@ def provider_is_usable(name):
     withheld the credential of."""
     if name not in settings.general.enabled_providers:
         return False
-    reason, until, _ = tp.get(name, (None, None, None))
-    if reason and until and datetime.datetime.now() < until:
+    if provider_is_throttled(name):
         return False
     if name in _decrypt_blocked_provider_ids():
         return False
@@ -317,7 +322,7 @@ def get_provider_language_hook(settings_=None):
     return provider_language_hook
 
 
-def get_providers():
+def get_providers(include_throttled=False):
     _ensure_provider_hub_registered()
     providers_list = []
     existing_providers = provider_registry.names()
@@ -330,7 +335,7 @@ def get_providers():
         reason, until, throttle_desc = tp.get(provider, (None, None, None))
         providers_list.append(provider)
 
-        if reason:
+        if reason and not include_throttled:
             now = datetime.datetime.now()
             if now < until:
                 # INFO rather than DEBUG: a provider being skipped until a later
@@ -374,9 +379,9 @@ def get_enabled_providers():
         return []
 
 
-def get_providers_sorted():
+def get_providers_sorted(include_throttled=False):
     """Get enabled providers sorted by priority (lower = higher priority)"""
-    providers_list = get_providers()
+    providers_list = get_providers(include_throttled=include_throttled)
     if not providers_list:
         return None
 
