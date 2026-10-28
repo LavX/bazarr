@@ -82,6 +82,15 @@ def test_renew_never_shortens_a_longer_lifetime():
     assert expires > time.time() + 500
 
 
+def test_renew_can_be_asked_for_an_exact_shorter_lifetime():
+    s = FileIdStore()
+    fid = s.put({"p": "x", "i": "1", "expires_at": 0.0}, ttl_seconds=600)
+    expires = s.renew(fid, 5, shorten=True)
+    assert time.time() + 3 < expires <= time.time() + 5
+    ok, payload = s.get(fid)
+    assert ok and payload["expires_at"] == expires
+
+
 def test_renew_refuses_an_entry_that_is_gone():
     s = FileIdStore()
     fid = s.put({"p": "x", "i": "1"}, ttl_seconds=1)

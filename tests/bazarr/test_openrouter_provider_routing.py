@@ -68,16 +68,16 @@ def _sidecar_health(monkeypatch, version):
 
 
 @pytest.mark.parametrize('value', ROUTING_VALUES)
-def test_build_provider_config_forwards_the_setting(monkeypatch, value):
+def test_routing_config_forwards_the_setting(monkeypatch, value):
     _sidecar_health(monkeypatch, '1.3.4')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', value)
-    assert openrouter_translator.build_provider_config() == {'sort': value}
+    assert openrouter_translator.build_routing_config()[1] == {'sort': value}
 
 
-def test_build_provider_config_falls_back_to_throughput_for_unknown_values(monkeypatch):
+def test_routing_config_falls_back_to_throughput_for_unknown_values(monkeypatch):
     _sidecar_health(monkeypatch, '1.3.4')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'cheapest')
-    assert openrouter_translator.build_provider_config() == {'sort': 'throughput'}
+    assert openrouter_translator.build_routing_config()[1] == {'sort': 'throughput'}
 
 
 @pytest.mark.parametrize('value, expected', [
@@ -92,21 +92,21 @@ def test_older_sidecars_get_the_plain_sort(monkeypatch, value, expected):
     # OpenRouter rejects nitro/floor/default there.
     _sidecar_health(monkeypatch, '1.3.3')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', value)
-    assert openrouter_translator.build_provider_config() == {'sort': expected}
+    assert openrouter_translator.build_routing_config()[1] == {'sort': expected}
 
 
 def test_unreachable_sidecar_gets_the_plain_sort(monkeypatch):
     _sidecar_health(monkeypatch, None)
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'floor')
-    assert openrouter_translator.build_provider_config() == {'sort': 'price'}
+    assert openrouter_translator.build_routing_config()[1] == {'sort': 'price'}
 
 
 def test_sidecar_version_is_probed_once_per_url(monkeypatch):
     calls = _sidecar_health(monkeypatch, '1.3.4')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_url', 'http://sidecar:8765/')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'floor')
-    assert openrouter_translator.build_provider_config() == {'sort': 'floor'}
-    assert openrouter_translator.build_provider_config() == {'sort': 'floor'}
+    assert openrouter_translator.build_routing_config()[1] == {'sort': 'floor'}
+    assert openrouter_translator.build_routing_config()[1] == {'sort': 'floor'}
     assert calls == ['http://sidecar:8765/health']
 
 
@@ -122,21 +122,24 @@ def test_typed_routing_suffix_aligns_the_sort(monkeypatch, version, suffix, sett
     _sidecar_health(monkeypatch, version)
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_model', f'deepseek/deepseek-v4-flash:{suffix}')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', setting)
-    assert openrouter_translator.build_provider_config() == {'sort': expected}
+    model, provider = openrouter_translator.build_routing_config()
+    assert provider == {'sort': expected}
+    # The id and the provider block are one answer: the id keeps the shortcut it was typed with.
+    assert model == f'deepseek/deepseek-v4-flash:{suffix}'
 
 
 def test_other_model_variants_do_not_touch_the_sort(monkeypatch):
     _sidecar_health(monkeypatch, '1.3.4')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_model', 'deepseek/deepseek-chat:thinking')
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'floor')
-    assert openrouter_translator.build_provider_config() == {'sort': 'floor'}
+    assert openrouter_translator.build_routing_config()[1] == {'sort': 'floor'}
 
 
 @pytest.mark.parametrize('version', ['1.3.4', '1.4.0', '2.0.0', '1.3.10', '1.3.4-rc1'])
 def test_versions_from_1_3_4_support_the_shortcuts(monkeypatch, version):
     _sidecar_health(monkeypatch, version)
     monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_provider_routing', 'nitro')
-    assert openrouter_translator.build_provider_config() == {'sort': 'nitro'}
+    assert openrouter_translator.build_routing_config()[1] == {'sort': 'nitro'}
 
 
 def _build_service():
@@ -434,7 +437,7 @@ def test_smartfast_support_uses_version_even_when_upstream_is_unhealthy(monkeypa
         json=lambda: {'status': 'unhealthy', 'version': '2.0.0', 'openrouterConfigured': True},
     ))
 
-    assert openrouter_translator.build_provider_config() == {'sort': 'smartfast'}
+    assert openrouter_translator.build_routing_config()[1] == {'sort': 'smartfast'}
 
 
 @pytest.mark.parametrize('boundary', ['queued', 'editor'])

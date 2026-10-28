@@ -10,7 +10,7 @@ from subliminal.video import Episode, Movie, Video
 from subliminal_patch.core_persistent import list_all_subtitles_parallel
 
 from app.config import settings
-from app.get_providers import (CREDENTIAL_THROTTLE_REASONS, announce_provider_throttle,
+from app.get_providers import (announce_provider_throttle, is_credential_throttle_reason,
                                get_provider_language_hook,
                                get_providers_sorted, get_providers_auth,
                                provider_is_usable, provider_throttle)
@@ -87,7 +87,7 @@ def _throttle_recorder(generation):
     """
     def record(name, exception, ids=None, language=None, sports_context=None, operation=None, announce=True):
         if generation != _pool_generation and (
-                exception.__class__.__name__ in CREDENTIAL_THROTTLE_REASONS):
+                is_credential_throttle_reason(exception.__class__.__name__)):
             logger.info("compat: not recording a %s backoff for %s, the configuration it "
                         "judged has already been replaced",
                         exception.__class__.__name__, name)
@@ -780,6 +780,13 @@ def _tmdb_lookup_by_imdb(video, media_type: str) -> bool:
             return False
         movie = (data.get("movie_results") or [None])[0]
         if movie:
+            # Providers with a TMDB id fallback (SubDL) only retry when the
+            # video carries the id, so keep the one this lookup resolved.
+            if not getattr(video, "tmdb_id", None) and movie.get("id"):
+                try:
+                    video.tmdb_id = int(movie["id"])
+                except (TypeError, ValueError):
+                    pass
             if not getattr(video, "title", None) and movie.get("title"):
                 video.title = movie["title"]
             if not getattr(video, "year", None) and movie.get("release_date"):

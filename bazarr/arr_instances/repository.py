@@ -474,12 +474,13 @@ class ArrInstanceRepository:
         whole removal as one ownership change rather than one per row."""
         from sqlalchemy import delete, update
 
-        from app.database import (TableEpisodes, TableHistory, TableHistoryMovie, TableMovies,
-                                  TableReleaseTypeMismatch)
+        from app.database import (TableEmbeddedTrackHidden, TableEpisodes, TableHistory,
+                                  TableHistoryMovie, TableMovies, TableReleaseTypeMismatch)
         from app.ownership_revision import owner_rows_deleted_in_bulk
 
         mismatches, tables = self._library(row)
         clauses = {model: clause for _name, model, clause in tables}
+        media = TableEpisodes if row.kind == 'sonarr' else TableMovies
 
         def doomed(model):
             # correlate(None): inside an UPDATE of the same table it would
@@ -488,6 +489,12 @@ class ArrInstanceRepository:
 
         # First, while the media rows the mismatch clause selects still exist.
         statements = [delete(TableReleaseTypeMismatch).where(mismatches)]
+        # The hidden-track records point at the media rows with a plain integer,
+        # not a foreign key, and SQLite reuses a deleted id, so a record left
+        # behind would hide a track on an unrelated new item.
+        statements.append(delete(TableEmbeddedTrackHidden).where(
+            TableEmbeddedTrackHidden.media_type == ('episode' if row.kind == 'sonarr' else 'movie'),
+            TableEmbeddedTrackHidden.media_id.in_(doomed(media))))
         # A history row outside the library can still name one inside it as
         # the entry it upgraded: a legacy row with no owner and no media link.
         # The link has no delete rule, so it would fail the whole removal. The
@@ -499,7 +506,6 @@ class ArrInstanceRepository:
                        .values(upgradedFromId=None)
                        for model in (TableHistory, TableHistoryMovie)]
         statements += [delete(model).where(clause) for _name, model, clause in tables]
-        media = TableEpisodes if row.kind == 'sonarr' else TableMovies
         with owner_rows_deleted_in_bulk(self._session.connection(),
                                         {media.__tablename__: doomed(media)}):
             for statement in statements:

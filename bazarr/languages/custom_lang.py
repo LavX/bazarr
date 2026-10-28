@@ -33,6 +33,10 @@ class CustomLanguage:
     # they match only as a whole word. "tc" as a substring otherwise
     # classifies "Dutch" as Traditional Chinese.
     _word_only_matches = ()
+    # Words that may sit directly against a word-only token in one run-together
+    # word ("ChineseTraditional"); digits after the token are always allowed
+    # ("CHT1"). Anything else against the token is another word.
+    _word_compound_affixes = ()
     _extensions = (".pt-br", ".pob", ".pb")
     _extensions_forced = (".pt-br.forced", ".pob.forced", ".pb.forced")
     _extensions_hi = (".pt-br.hi", ".pob.hi", ".pb.hi",
@@ -116,6 +120,11 @@ class CustomLanguage:
                     words = set(re.split(r'[^a-z0-9]+', name))
                 if token in words:
                     return True
+                affixes = '|'.join(re.escape(affix) for affix in self._word_compound_affixes)
+                affix_group = f'(?:{affixes})?' if affixes else ''
+                compound = re.compile(f'{affix_group}{re.escape(token)}{affix_group}[0-9]*')
+                if any(compound.fullmatch(word) for word in words):
+                    return True
             elif token in name:
                 return True
         return False
@@ -182,8 +191,14 @@ class ChineseTraditional(CustomLanguage):
         "traditional", "taiwan", "繁體", "繁体", "正體",
     )
     # "tc" is the one two-letter token here, and a substring test would make
-    # "Dutch" Traditional Chinese. It matches as a word only ("TC", "TC.1080p").
-    _word_only_matches = ("tc",)
+    # "Dutch" Traditional Chinese. "hant", "cht" and "traditional" sit inside
+    # ordinary words too ("Shantaram", "Yacht", "nontraditional"). All four
+    # match as a word only ("TC", "TC.1080p", "zh-Hant", "Traditional Chinese").
+    # The compound forms (zh-tw, zh-hant, zhhant) stay substring-matched.
+    _word_only_matches = ("tc", "hant", "cht", "traditional")
+    # "ChineseTraditional", "TraditionalChinese", "CHT1" and "Hant2" are
+    # written as one word; "Merchant1" and "Nontraditional1" are not them.
+    _word_compound_affixes = ("chinese",)
     _extensions = (
         ".cht", ".tc", ".zh-tw", ".zht", ".zh-hant", ".zhhant", ".zh_hant", ".hant", ".big5", ".traditional",
     )

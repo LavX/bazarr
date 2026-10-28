@@ -35,7 +35,10 @@ _COMPLETE = {"success", "empty"}
 # reader did not ask. "setup_required" belongs here because both ways to reach
 # it, missing configuration found before the search and ConfigurationError
 # raised instead of a listing, are the operator's to fix, not an upstream fault.
-_NOT_ATTEMPTED = {"skipped", "setup_required", "not_started"}
+# "saturated" is the same case one level up: every fanout slot was held by
+# other searches, so no request was made for this one. It keeps its own detail
+# and retry delay, only the verdict changes.
+_NOT_ATTEMPTED = {"skipped", "setup_required", "not_started", "saturated"}
 # ...but a provider that never started still leaves a hole where its answer
 # would have been, so it cannot count toward a search claiming complete
 # coverage the way a deliberate skip does. "setup_required" is the same kind of
@@ -43,8 +46,9 @@ _NOT_ATTEMPTED = {"skipped", "setup_required", "not_started"}
 # answer to give, while a provider missing its credentials has answers it was
 # never able to look for, and will have them the moment the operator fixes the
 # configuration. Claiming complete coverage there both overstates the search
-# and buys the finished snapshot the long cache lifetime.
-_NO_COVERAGE = {"not_started", "setup_required"}
+# and buys the finished snapshot the long cache lifetime. A saturated provider
+# was never asked either, so it leaves the same hole.
+_NO_COVERAGE = {"not_started", "setup_required", "saturated"}
 # Outcomes that must not put a provider on a Discover cooldown. A skip is a
 # decision about this target, and a call that never started is not evidence
 # about the provider, so neither earns a wait before asking again.
@@ -61,6 +65,7 @@ _THROTTLE_CAUSE = {
     "AuthenticationError": "authentication_required",
     "ConfigurationError": "setup_required",
     "ServiceUnavailable": "unreachable",
+    "ConnectionError": "unreachable",
     "IPAddressBlocked": "automated_requests_blocked",
     "ConnectTimeout": "timeout",
     "ReadTimeout": "timeout",
@@ -540,8 +545,10 @@ def search(request: SearchRequest, on_progress=None) -> dict:
         # reader sees them, clicks Download and is told they expired. Renewal
         # at completion cannot close that window, since it refuses an entry
         # that is already gone and mints a replacement for the id the reader
-        # was offered. Covering the wall as well leaves exactly the TTL once
-        # the completed snapshot renews it, because renewal never shortens.
+        # was offered. Covering the wall as well is padding for the running
+        # search only: the completed snapshot renews each live handle to
+        # exactly one TTL from then, shortening it, so the padding does not
+        # outlive the search that needed it.
         live_ttl = ttl + service.search_wall_seconds()
 
         def report_progress():
@@ -627,7 +634,7 @@ def search(request: SearchRequest, on_progress=None) -> dict:
             # slow search with a short TTL files rows whose handles are gone
             # before anyone is served them.
             existing = built.get(id(sub))
-            renewed = (renew_result(existing[1]["id"], ttl)
+            renewed = (renew_result(existing[1]["id"], ttl, shorten=True)
                        if existing is not None and existing[0] is sub else None)
             rows.append({**existing[1], "expires_at": _iso(renewed)} if renewed is not None
                         else _result(sub, video, context, search_id, checked, ttl, parsed))

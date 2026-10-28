@@ -54,6 +54,57 @@ def test_the_short_tc_token_matches_only_as_a_word(chinese_traditional, name):
     assert chinese_traditional.ffprobe_found({"name": name}) is True
 
 
+@pytest.mark.parametrize("name", [
+    "Shantaram",
+    "Shantaram S01E01 WEB-DL",
+    "Yacht Commentary",
+    "The Yacht (Director Commentary)",
+    "nontraditional audio",
+    "Merchant Ivory Commentary",
+    "Merchant1",
+    "Nontraditional1",
+    "Yacht2",
+    "Shantaram Chinese",
+])
+def test_bare_traditional_markers_do_not_match_inside_other_words(chinese_traditional, name):
+    # "hant", "cht" and "traditional" are substring-safe nowhere: each sits
+    # inside ordinary words in track titles.
+    assert chinese_traditional.ffprobe_found({"name": name}) is False
+
+
+@pytest.mark.parametrize("name", [
+    "Traditional Chinese",
+    "Chinese (Traditional)",
+    "Mandarin - Traditional",
+    "Chinese Hant",
+    "chi_hant",
+    "zh_Hant",
+    "zh-Hant",
+    "zh-Hant-TW",
+    "CHT",
+    "Movie.2019.CHT.1080p",
+    "chi.cht.forced",
+    "zhhant",
+])
+def test_traditional_markers_still_match_as_whole_words(chinese_traditional, name):
+    assert chinese_traditional.ffprobe_found({"name": name}) is True
+
+
+@pytest.mark.parametrize("name", [
+    "ChineseTraditional",
+    "TraditionalChinese",
+    "CHT1",
+    "Hant2",
+    "Chinese.Traditional2",
+    "TC1",
+])
+def test_traditional_markers_match_as_compounds_with_chinese_or_a_digit_suffix(chinese_traditional, name):
+    # Track titles are written run together or numbered ("CHT1", "Hant2");
+    # the whole word is still the unit, so only "chinese" or digits may sit
+    # against the marker.
+    assert chinese_traditional.ffprobe_found({"name": name}) is True
+
+
 def test_brazilian_portuguese_still_matches_its_own_titles(brazilian_portuguese):
     assert brazilian_portuguese.ffprobe_found({"name": "Portuguese (Brazil)"}) is True
     assert brazilian_portuguese.ffprobe_found({"name": "Brazilian"}) is True

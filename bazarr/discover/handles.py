@@ -19,7 +19,7 @@ def mint_result(subtitle, context: dict, search_id: str, ttl: int) -> tuple[str,
     return f"d1.{file_id}.{nonce}", expires_at
 
 
-def renew_result(result_id: str, ttl: int) -> float | None:
+def renew_result(result_id: str, ttl: int, *, shorten: bool = False) -> float | None:
     """Give a live handle a full lifetime again, without changing the handle.
 
     A row published while the search was still running started its TTL then,
@@ -30,10 +30,15 @@ def renew_result(result_id: str, ttl: int) -> float | None:
     already dropped. Minting replacements would fix the lifetime at the cost of
     retiring ids readers were already offered mid-search, so the lifetime moves
     instead of the id. Returns the new expiry, or None if the handle is gone.
+
+    A renewal never shortens a lifetime unless ``shorten`` is set. A live handle
+    is minted with the search wall added to its TTL, so it cannot expire on
+    screen while the search runs. When the search finishes, that padding has
+    done its job, and the completion path asks for exactly one TTL from now.
     """
     if resolve_result(result_id) is None:
         return None
-    return get_store().renew(result_id.split(".")[1], ttl)
+    return get_store().renew(result_id.split(".")[1], ttl, shorten=shorten)
 
 
 def resolve_result(result_id: str, search_id: str | None = None) -> dict | None:

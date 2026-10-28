@@ -38,7 +38,9 @@ export function parseProviderEndpoints(payload: unknown): ProviderEndpoint[] {
         typeof endpoint.provider_name === "string"
           ? endpoint.provider_name
           : tag,
-      available: endpoint.status === 0,
+      // Only a reported non-zero code marks an endpoint down. A status that is absent
+      // or not a number is unknown, like every other field here, rather than a verdict.
+      available: typeof endpoint.status !== "number" || endpoint.status === 0,
       inputPrice: number(pricing.prompt),
       outputPrice: number(pricing.completion),
       // Read as a plain number of tokens per second first, with the {p50} object as a

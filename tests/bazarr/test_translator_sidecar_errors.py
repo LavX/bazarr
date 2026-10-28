@@ -215,7 +215,7 @@ def test_every_refusal_shape_has_a_reason(status, body, expected):
     assert expected.lower() in module.describe_sidecar_refusal(response).lower()
 
 
-def _call_test_endpoint(monkeypatch, refusal, **settings_overrides):
+def _call_test_endpoint(monkeypatch, refusal, request_json=None, **settings_overrides):
     values = {
         'openrouter_url': 'http://sidecar:8765',
         'openrouter_api_key': 'sk-or-v1-fixture-key',
@@ -232,7 +232,7 @@ def _call_test_endpoint(monkeypatch, refusal, **settings_overrides):
 
     monkeypatch.setattr(api_mod.requests, 'post', post)
     app = Flask(__name__)
-    with app.test_request_context('/api/translator/test', method='POST', json={}):
+    with app.test_request_context('/api/translator/test', method='POST', json=request_json or {}):
         body, status = api_mod.TranslatorTest.post.__wrapped__(api_mod.TranslatorTest())
     return body, status, calls
 
@@ -245,6 +245,21 @@ def test_the_settings_test_button_explains_a_rejected_token(monkeypatch):
     assert 'encryption key' in body['error'].lower()
     assert 'regenerate-key' in body['error']
     assert [url for url, _ in calls] == ['http://sidecar:8765/api/v1/test']
+
+
+def test_an_emptied_encryption_key_field_sends_the_test_without_the_saved_key(monkeypatch):
+    # The form says encryption is off. The key in the payload and the key behind the
+    # auth header must agree: a plaintext key with a token derived from the saved key
+    # would authenticate as an installation the user just told us not to use.
+    saved_key = 'ab' * 32
+    body, status, calls = _call_test_endpoint(
+        monkeypatch, SimpleNamespace(status_code=200, json=lambda: {'encryption': None}),
+        request_json={'encryptionKey': ''}, openrouter_encryption_key=saved_key)
+
+    assert status == 200
+    (_, kwargs), = calls
+    assert kwargs['json'] == {'apiKey': 'sk-or-v1-fixture-key'}
+    assert 'X-Auth-Token' not in kwargs['headers']
 
 
 def test_the_settings_test_button_explains_a_missing_openrouter_key(monkeypatch):
