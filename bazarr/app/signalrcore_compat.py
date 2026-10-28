@@ -1,3 +1,4 @@
+import socket
 import threading
 import time
 
@@ -23,6 +24,18 @@ def _wait_for_handshake(self, wakeup, timeout=None):
         if wakeup.wait(wait_time):
             return False
     return False
+
+
+def _abandon_client(client):
+    client.on_message = client.on_close = client.on_error = lambda *args, **kwargs: None
+    try:
+        client.sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        client.dispose()
+    except Exception:
+        pass
 
 
 def patch_signalrcore_reconnect():
@@ -65,10 +78,7 @@ def patch_signalrcore_reconnect():
                                 timeout=getattr(self.reconnection_handler, "sleep_time", None)):
                             self.reconnection_handler.reset()
                         else:
-                            try:
-                                self._client.dispose()
-                            except Exception:
-                                pass
+                            _abandon_client(self._client)
                             self.deferred_reconnect(self.reconnection_handler.next())
                 finally:
                     lock.release()
@@ -109,10 +119,7 @@ def patch_signalrcore_reconnect():
                         timeout=getattr(self.reconnection_handler, "sleep_time", None)):
                     self.reconnection_handler.reset()
                     return
-                try:
-                    self._client.dispose()
-                except Exception:
-                    pass
+                _abandon_client(self._client)
                 sleep_time = self.reconnection_handler.next()
 
         deferred_reconnect._bazarr_deferred_reconnect_patch = True

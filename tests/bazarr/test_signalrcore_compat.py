@@ -1,10 +1,14 @@
+import base64
+import hashlib
+import socket
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 from unittest.mock import MagicMock, patch
 
 import signalrcore
 from signalrcore.transport.base_transport import TransportState
 from signalrcore.transport.reconnection import RawReconnectionHandler
+from signalrcore.transport.websockets.websocket_client import WebSocketClient
 from signalrcore.transport.websockets.websocket_transport import WebsocketTransport
 
 from app.signalrcore_compat import build_signalr_connection, patch_signalrcore_stop
@@ -295,6 +299,137 @@ def test_signalrcore_reconnect_retries_when_handshake_never_lands():
 
 def test_signalrcore_reconnect_retries_when_deferred_handshake_never_lands():
     _assert_reconnect_when_handshake_never_lands(fail_first_negotiation=True)
+
+
+def test_signalrcore_reconnect_releases_abandoned_socket_before_retry():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport(retry_interval=0.2)
+    transport.negotiate = MagicMock(return_value=None)
+    transport._set_state = MagicMock(wraps=transport._set_state)
+    first_eof = Event()
+    second_accepted = Event()
+    release_server = Event()
+    peers = []
+    clients = []
+    disposing_threads = []
+    receive_threads = []
+    server_errors = []
+    results = []
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(2)
+        listener.settimeout(5)
+
+        def serve():
+            try:
+                for attempt in range(2):
+                    peer, _ = listener.accept()
+                    peers.append(peer)
+                    peer.settimeout(5)
+                    request = b""
+                    while b"\r\n\r\n" not in request:
+                        chunk = peer.recv(4096)
+                        if not chunk:
+                            raise EOFError("Client closed before the websocket upgrade")
+                        request += chunk
+                    key = next(
+                        line.split(b":", 1)[1].strip()
+                        for line in request.split(b"\r\n")
+                        if line.lower().startswith(b"sec-websocket-key:")
+                    )
+                    accept = base64.b64encode(hashlib.sha1(
+                        key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+                    ).digest())
+                    peer.sendall(
+                        b"HTTP/1.1 101 Switching Protocols\r\n"
+                        b"Upgrade: websocket\r\n"
+                        b"Connection: Upgrade\r\n"
+                        b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+                    )
+                    if attempt == 0:
+                        while peer.recv(4096):
+                            pass
+                        first_eof.set()
+                    else:
+                        second_accepted.set()
+                        release_server.wait(timeout=5)
+            except Exception as ex:
+                server_errors.append(ex)
+
+        def create_client():
+            def on_open():
+                if len(clients) == 2:
+                    # Complete recovery in-process while the upgraded peer stays silent.
+                    transport.handshake_received = True
+                    transport._set_state(TransportState.connected)
+
+            client = WebSocketClient(
+                url="ws://127.0.0.1:%s/" % listener.getsockname()[1],
+                on_open=on_open,
+                on_message=transport.on_message,
+                on_error=transport.on_socket_error,
+                on_close=transport.on_socket_close,
+            )
+            if not clients:
+                dispose = client.dispose
+
+                def record_dispose():
+                    disposing_threads.append(current_thread())
+                    receive_threads.append(client.recv_thread)
+                    dispose()
+
+                client.dispose = MagicMock(side_effect=record_dispose)
+            clients.append(client)
+            return client
+
+        transport.create_client = MagicMock(side_effect=create_client)
+        server = Thread(target=serve, daemon=True)
+        worker = Thread(target=lambda: results.append(transport.handle_reconnect()), daemon=True)
+        server.start()
+        worker.start()
+
+        try:
+            assert first_eof.wait(timeout=3)
+            assert second_accepted.wait(timeout=3)
+            worker.join(timeout=3)
+            assert not worker.is_alive()
+            assert results == [True]
+            assert len(peers) == 2
+            assert transport.create_client.call_count == 2
+            assert disposing_threads == [worker]
+            assert receive_threads[0] is not worker
+            assert not receive_threads[0].is_alive()
+            assert clients[0].recv_thread is None
+            assert clients[0].dispose.call_count == 1
+            assert not server_errors
+            assert all(
+                call.args[0] != TransportState.disconnected
+                for call in transport._set_state.call_args_list
+            )
+            transport._on_close.assert_not_called()
+        finally:
+            transport.manually_closing = True
+            transport._bazarr_retry_wakeup.set()
+            for client in clients:
+                client.on_message = client.on_close = client.on_error = lambda *args: None
+                if client.sock is not None:
+                    try:
+                        client.sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+            release_server.set()
+            for peer in peers:
+                try:
+                    peer.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                peer.close()
+            server.join(timeout=5)
+            worker.join(timeout=5)
+            assert not server.is_alive()
+            assert not worker.is_alive()
+            transport.stop()
 
 
 def test_signalrcore_stop_during_first_start_disposes_new_client():
