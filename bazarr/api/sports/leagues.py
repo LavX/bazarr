@@ -7,6 +7,7 @@ from flask_restx import Namespace, Resource
 
 from app.database import database
 from app.jobs_queue import jobs_queue
+from app.process_session import PROCESS_SESSION
 from sportarr import library
 from sportarr.sync.leagues import require_sportarr
 from sportarr.workflows import require_sports_enabled
@@ -72,15 +73,16 @@ def _queued(job_id, queued_message):
     202 only when something was actually queued; a duplicate is a 200 saying
     so, which is what every other sports job endpoint already returns.
     """
-    return (
-        {
-            'queued': bool(job_id),
-            'job_id': job_id or None,
-            'message': queued_message if job_id
-            else 'No work queued; a matching sync is already active',
-        },
-        202 if job_id else 200,
-    )
+    body = {
+        'queued': bool(job_id),
+        'job_id': job_id or None,
+        'message': queued_message if job_id
+        else 'No work queued; a matching sync is already active',
+    }
+    if job_id:
+        # Ids restart with the backend, so the client names the job by its id together with the run.
+        body['session'] = PROCESS_SESSION
+    return body, 202 if job_id else 200
 
 
 @api_ns_sports_leagues.route('/sports/leagues')

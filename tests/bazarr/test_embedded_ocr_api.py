@@ -48,7 +48,10 @@ def test_ocr_queues_one_job_and_names_the_srt_it_will_write(endpoint):
     body, status = call()
 
     assert status == 202
-    assert body == {"job_id": 43, "path": str(root / "owner1/movies/Film (2020)/Film.en.srt")}
+    from app.process_session import PROCESS_SESSION
+
+    assert body == {"job_id": 43, "session": PROCESS_SESSION,
+                    "path": str(root / "owner1/movies/Film (2020)/Film.en.srt")}
     assert queued == [(("movie", 30, 1, "en", False, False), {"codec": "pgs", "label": "Film, English"})]
     assert not (root / "owner1/movies/Film (2020)/Film.en.srt").exists(), "the request reads nothing"
 
@@ -225,6 +228,7 @@ def translate_endpoint(endpoint, monkeypatch):
     def translate_stub(**kwargs):
         queued_translations.append(kwargs)
         jobs.append({"job_id": 44, "func": "translate_subtitles_file", "status": "pending", "kwargs": kwargs})
+        return 44
 
     monkeypatch.setattr(api_mod, "translate_subtitles_file", translate_stub)
 
@@ -247,6 +251,18 @@ def test_translating_from_an_image_track_queues_a_job_that_carries_its_codec(tra
     assert (body, status) == ("", 204)
     assert len(queued) == 1
     assert queued[0]["embedded_source"] == {"language": "en", "hi": False, "forced": False, "codec": "pgs"}
+
+
+def test_an_episode_translated_from_an_image_track_answers_with_its_job_and_session(translate_endpoint):
+    from app.process_session import PROCESS_SESSION
+
+    translate, queued, _call_ocr, _queued_ocr, _jobs = translate_endpoint
+
+    body, status = translate(type="episode", id=50)
+
+    assert status == 202
+    assert body == {"job_id": 44, "session": PROCESS_SESSION}
+    assert len(queued) == 1
 
 
 def test_translating_from_an_image_track_while_ocr_runs_answers_409(translate_endpoint):

@@ -354,14 +354,14 @@ def test_mass_ocr_while_another_ocr_job_is_queued_fails_before_reading_anything(
         mass_operations.mass_batch_operation([{"type": "movie", "radarrId": 7}], "ocr", job_id=5)
 
 
-def _batch_ocr_call(monkeypatch, queued):
+def _batch_ocr_call(monkeypatch, queued, job_id=None):
     from flask import Flask
     from api.subtitles import batch as batch_mod
     import subtitles.tools.embedded_ocr as ocr
 
     fed = []
     monkeypatch.setattr(batch_mod, "jobs_queue", SimpleNamespace(
-        feed_jobs_pending_queue=lambda **kwargs: fed.append(kwargs)))
+        feed_jobs_pending_queue=lambda **kwargs: fed.append(kwargs) or job_id))
     monkeypatch.setattr(ocr, "jobs_queue", SimpleNamespace(list_jobs_from_queue=lambda **kwargs: queued))
     body = {"action": "ocr", "items": [{"type": "movie", "radarrId": 7}], "options": {}}
     app = Flask(__name__)
@@ -391,6 +391,25 @@ def test_the_batch_route_refuses_a_mass_ocr_while_a_translation_reads_an_image_t
 
     assert answer == ({"error": BUSY}, 409)
     assert fed == []
+
+
+def test_a_queued_mass_ocr_answers_with_its_job_and_session(monkeypatch):
+    from app.process_session import PROCESS_SESSION
+
+    answer, fed = _batch_ocr_call(monkeypatch, [], job_id=9)
+
+    assert answer[1] == 200 and len(fed) == 1
+    assert answer[0]["job_id"] == 9
+    assert answer[0]["session"] == PROCESS_SESSION
+
+
+def test_a_batch_that_queued_nothing_new_answers_with_a_null_id_and_the_session(monkeypatch):
+    from app.process_session import PROCESS_SESSION
+
+    answer, _fed = _batch_ocr_call(monkeypatch, [], job_id=False)
+
+    assert answer[0]["job_id"] is None
+    assert answer[0]["session"] == PROCESS_SESSION
 
 
 def test_a_translation_of_a_text_track_does_not_hold_up_a_mass_ocr(monkeypatch):

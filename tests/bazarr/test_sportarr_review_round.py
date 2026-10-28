@@ -351,8 +351,10 @@ def test_a_duplicate_sync_is_not_reported_as_queued():
     assert 'already active' in body['message']
 
     body, status = _queued(42, 'Library sync queued')
+    from app.process_session import PROCESS_SESSION
+
     assert status == 202
-    assert body == {'queued': True, 'job_id': 42, 'message': 'Library sync queued'}
+    assert body == {'queued': True, 'job_id': 42, 'session': PROCESS_SESSION, 'message': 'Library sync queued'}
 
 
 def test_the_sync_routes_return_the_job_shape_the_client_declares():

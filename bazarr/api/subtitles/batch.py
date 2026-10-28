@@ -12,6 +12,8 @@ from app.jobs_queue import jobs_queue
 from sportarr.workflows import require_sports_enabled
 from subtitles.mass_operations import mass_batch_operation, VALID_ACTIONS  # noqa: F401
 from subtitles.tools.translate.availability import translation_available
+from ..queued_job import queued_job_model, queued_job_response
+from ..swaggerui import job_queued_model
 from ..utils import authenticate
 
 ACTION_LABELS = {
@@ -66,6 +68,8 @@ class BatchOperation(Resource):
         'queued': fields.Integer(description='Number of items processed'),
         'skipped': fields.Integer(description='Number of items skipped'),
         'errors': fields.List(fields.String(), description='Error messages'),
+        **job_queued_model,
+        'session': queued_job_model['session'],
     })
 
     @authenticate
@@ -167,7 +171,7 @@ class BatchOperation(Resource):
                 is_progress=True,
             )
 
-        return {'queued': len(items), 'skipped': skipped, 'errors': errors, 'job_id': job_id}, 200
+        return {'queued': len(items), 'skipped': skipped, 'errors': errors, **queued_job_response(job_id or None)}, 200
 
 
 def get_upgradable_media_ids():

@@ -26,6 +26,7 @@ from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.sync import sync_subtitles
 from app.config import settings, empty_values, get_array_from
 from app.event_handler import event_stream
+from api.queued_job import queued_job_response
 from api.swaggerui import job_queued_model
 
 
@@ -229,12 +230,21 @@ class Subtitles(Resource):
         help="Codec the embedded track's row shows (extract picks between same-language tracks by it)",
     )
 
-    patch_job_model = api_ns_subtitles.model('JobQueued', job_queued_model)
+    # Its own name: models register by name and the last wins, and series and
+    # movies answer with {job_id, session} under theirs. Not every answer here
+    # carries a session or a path, so neither is required.
+    patch_job_model = api_ns_subtitles.model('SubtitleJobQueued', {
+        **job_queued_model,
+        'session': fields.String(description='The backend run that owns the job, which job ids restart with. '
+                                             'Sent by the translate, extract and OCR answers; the sync and '
+                                             'subtitle mod answers carry the job id alone.'),
+        'path': fields.String(description='Embedded track extraction or OCR only: the file the job will write.'),
+    })
 
     @authenticate
     @api_ns_subtitles.doc(parser=patch_request_parser)
     @api_ns_subtitles.response(204, "Movie or sports sync/translation accepted")
-    @api_ns_subtitles.response(202, "Episode tool or subtitle mod queued as a job", patch_job_model)
+    @api_ns_subtitles.response(202, "Episode sync, translate or subtitle mod, or an embedded track tool, queued as a job", patch_job_model)
     @api_ns_subtitles.response(401, "Not Authenticated")
     @api_ns_subtitles.response(400, "Generated sync output files cannot be synchronized again")
     @api_ns_subtitles.response(404, "Episode/movie not found")
@@ -683,7 +693,7 @@ class Subtitles(Resource):
                         embedded_source=embedded_source,
                     )
                 if media_type == "episode":
-                    return {"job_id": job_id or None}, 202
+                    return queued_job_response(job_id or None), 202
             except ValueError as exc:
                 return str(exc), 409
             except OSError:
@@ -769,7 +779,7 @@ def _embedded_track_action(action, args, language, hi, forced, media_type, media
                 if args.get("enabled_engines") not in empty_values else None,
             },
             label=label, codec=codec)
-    return {"job_id": job_id or None, "path": destinations[0]}, 202
+    return {**queued_job_response(job_id or None), "path": destinations[0]}, 202
 
 
 def _refuse_unreadable_ocr_source(media_type, media_id, arr_instance_id, language, hi, forced, codec):
@@ -837,7 +847,7 @@ def _embedded_ocr_action(args, language, hi, forced, media_type, media_id, arr_i
         label = f"{track.title}, {track.label}" if track.title else track.label
         job_id = ocr_embedded_track(media_type, media_id, track.arr_instance_id, language, hi, forced,
                                     codec=codec, label=label)
-    return {"job_id": job_id or None, "path": destinations[0]}, 202
+    return {**queued_job_response(job_id or None), "path": destinations[0]}, 202
 
 
 def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, arr_instance_id=None):

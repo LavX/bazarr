@@ -215,7 +215,9 @@ def test_scan_disk_is_queued_and_the_route_answers_202(queue, monkeypatch, kind)
         body, status = type(resource).patch.__wrapped__(resource)
 
     [job] = pending(queue)
-    assert status == 202 and body == {"job_id": job.job_id}
+    from app.process_session import PROCESS_SESSION
+
+    assert status == 202 and body == {"job_id": job.job_id, "session": PROCESS_SESSION}
     assert job.func == func
     assert {key: job.kwargs[key] for key in ("arr_instance_id",)} == {"arr_instance_id": 3}
 

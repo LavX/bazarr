@@ -67,7 +67,10 @@ def test_extract_queues_one_job_and_names_the_file_it_will_write(endpoint):
     body, status = call()
 
     assert status == 202
-    assert body == {"job_id": 41, "path": str(root / "owner1/movies/Film (2020)/Film.en.srt")}
+    from app.process_session import PROCESS_SESSION
+
+    assert body == {"job_id": 41, "session": PROCESS_SESSION,
+                    "path": str(root / "owner1/movies/Film (2020)/Film.en.srt")}
     assert queued == [("extract", ("movie", 30, 1, "en", False, False),
                        {"codec": None, "label": "Film, English"})]
     assert not (root / "owner1/movies/Film (2020)/Film.en.srt").exists(), "the request runs no ffmpeg"

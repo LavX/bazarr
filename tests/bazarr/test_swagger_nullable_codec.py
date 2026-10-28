@@ -18,3 +18,12 @@ def test_the_subtitle_codec_is_still_a_string():
     from api.swaggerui import subtitles_model
 
     assert subtitles_model['codec'].schema()['type'] == 'string'
+
+
+def test_the_queued_answers_of_the_ocr_routes_document_their_session():
+    from api.subtitles.batch import BatchOperation
+    from api.subtitles.subtitles import Subtitles
+
+    for model in (Subtitles.patch_job_model, BatchOperation.post_response_model):
+        assert 'job_id' in model and 'session' in model
+    assert 'path' in Subtitles.patch_job_model

@@ -485,6 +485,8 @@ def test_download_is_a_standard_job_and_the_file_is_fetched_by_ticket(authentica
     # Nothing is fetched until the queue runs the job.
     assert choices[1] == []
     session = jobs_queue.list_jobs_from_queue(job_id=job_id)[0]["session"]
+    # The answer names the backend run too, so a reader does not take a job of another run for it.
+    assert queued.json["session"] == session
     assert {"type": "jobs", "action": "update",
             "payload": {"job_id": job_id, "progress_value": None, "status": "pending",
                         "session": session}} in job_events

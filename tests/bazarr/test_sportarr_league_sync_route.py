@@ -60,3 +60,22 @@ def test_the_job_table_names_a_module_per_function():
 
     assert _JOBS['sync_one_league'] == ('Sync league events', 'sportarr.sync.events')
     assert _JOBS['update_sports_for_instance'][1] == 'sportarr.sync.leagues'
+
+
+def test_a_queued_sports_job_names_the_backend_run_that_owns_it():
+    """Job ids restart with the backend, so the client follows a job by its id together with the run. A body
+    without the run made the client's guard accept any job that shared the id."""
+    from api.sports import leagues, workflows
+    from app.process_session import PROCESS_SESSION
+
+    for body, status in (workflows._queued(31), leagues._queued(31, "Sync queued")):
+        assert status == 202
+        assert body["job_id"] == 31 and body["session"] == PROCESS_SESSION
+
+
+def test_a_sports_request_that_queued_nothing_names_no_run():
+    from api.sports import leagues, workflows
+
+    for body, status in (workflows._queued(False), leagues._queued(False, "Sync queued")):
+        assert status == 200
+        assert body["job_id"] is None and "session" not in body

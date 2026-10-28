@@ -3,14 +3,14 @@
 import logging
 
 from flask import request
-from flask_restx import Namespace, Resource
+from flask_restx import Namespace, Resource, fields
 
 from app.database import database
 from media_servers import service
 from media_servers.dispatcher import _ERROR_CODES, _refusal_code, get_refresh_status
 from media_servers.http import MediaServerError
 from media_servers.retry_job import queue_retry_pending
-from ..queued_job import queued_job_response
+from ..queued_job import queued_job_model, queued_job_response
 from ..utils import authenticate
 
 api_ns_system_media_server_instances = Namespace('media_server_instances', description='Native media server destinations')
@@ -120,7 +120,14 @@ class MediaServerInstanceLibraryRefresh(Resource):
 
 @api_ns_system_media_server_instances.route(_ROOT + '/<string:instance_id>/retry-pending')
 class MediaServerInstanceRetry(Resource):
+    post_job_model = api_ns_system_media_server_instances.model('MediaServerRetryQueued', {
+        'queued': fields.Integer(description='How many refreshes were waiting when the retry was queued.'),
+        **queued_job_model,
+    })
+
     @authenticate
+    @api_ns_system_media_server_instances.response(200, 'Nothing was waiting, so nothing was queued')
+    @api_ns_system_media_server_instances.response(202, 'Retry queued as a job', post_job_model)
     def post(self, instance_id):
         """Retry the refreshes waiting for a destination, as a job.
 
