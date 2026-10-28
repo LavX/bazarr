@@ -264,7 +264,8 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
 
     if provider_outcomes is not None:
         for row in final_subtitles:
-            outcomes[row['provider']]['results'] += 1
+            outcomes.setdefault(row['provider'],
+                                dict(name=row['provider'], status='found', results=0))['results'] += 1
         for outcome in outcomes.values():
             if outcome['status'] == 'found' and not outcome['results']:
                 outcome['status'] = 'empty'

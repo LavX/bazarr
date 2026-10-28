@@ -220,6 +220,18 @@ def test_found_provider_reports_count_in_configured_order(manual_endpoint):
     assert_provider_summary(body, "found", 2)
 
 
+def test_unrecorded_result_provider_reports_found(manual_endpoint):
+    candidate = manual_endpoint.candidates["alpha_search"][0]
+    candidate.provider_name = "unrecorded_search"
+
+    response = manual_endpoint.search("empty")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [row["provider"] for row in body["data"]] == ["unrecorded_search"]
+    assert {"name": "unrecorded_search", "status": "found", "results": 1} in body["providers"]
+
+
 def test_empty_provider_remains_visible_without_a_result_row(manual_endpoint):
     response = manual_endpoint.search("empty")
     body = assert_legacy_rows(manual_endpoint, response)
