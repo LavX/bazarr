@@ -86,11 +86,6 @@ def patch_signalrcore_reconnect():
                 client = getattr(self, "_client", None)
                 if self.manually_closing or client is None or not client.is_connection_closed():
                     return True
-                sleep_time = getattr(self.reconnection_handler, "sleep_time", None)
-                if sleep_time is None:
-                    sleep_time = self.reconnection_handler.next()
-                if wakeup.wait(sleep_time) or self.manually_closing:
-                    return True
 
         handle_reconnect._bazarr_reconnect_patch = True
         WebsocketTransport.handle_reconnect = handle_reconnect
