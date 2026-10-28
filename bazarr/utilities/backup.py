@@ -1,11 +1,14 @@
 # coding=utf-8
 
+import ast
+import configparser
 import os
 import sqlite3
 import shutil
 import subprocess
 import logging
 import re
+import yaml
 
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -587,6 +590,68 @@ def _refuse_start_after_failed_restore(failed_dump_path):
     stop_bazarr(EXIT_RESTORE_ERROR)
 
 
+def _prepare_restored_configuration(source_path, staged_path):
+    """Stage a restored config with a generation no existing cookie can carry.
+
+    The Flask signing key stays as archived: named API tokens are HMACed with
+    it, and their plaintext is unavailable for re-keying. Legacy INI archives
+    become YAML here because a live config.yaml takes precedence at startup.
+    This runs before the database restore, while a refusal can leave both live
+    files untouched.
+    """
+    try:
+        if source_path.endswith('.ini'):
+            parser = configparser.RawConfigParser()
+            with open(source_path, encoding='utf-8') as handle:
+                parser.read_file(handle)
+            restored = {}
+            for section in parser.sections():
+                values = {}
+                for key, raw_value in parser.items(section):
+                    try:
+                        values[key] = ast.literal_eval(raw_value)
+                    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                        values[key] = raw_value
+                restored[section.lower()] = values
+        else:
+            with open(source_path, encoding='utf-8') as handle:
+                restored = yaml.safe_load(handle)
+    except (OSError, UnicodeError, configparser.Error, yaml.YAMLError) as error:
+        raise BackupError('The backup configuration could not be read') from error
+
+    if not isinstance(restored, dict):
+        raise BackupError('The backup configuration is not a mapping')
+
+    def existing_key(mapping, wanted):
+        matches = [key for key in mapping if isinstance(key, str) and key.lower() == wanted]
+        if len(matches) > 1:
+            raise BackupError('The backup authentication settings are ambiguous')
+        return matches[0] if matches else wanted
+
+    auth_key = existing_key(restored, 'auth')
+    auth = restored.setdefault(auth_key, {})
+    if not isinstance(auth, dict):
+        raise BackupError('The backup authentication settings are invalid')
+    generation_key = existing_key(auth, 'session_generation')
+    archived_generation = auth.get(generation_key, 0)
+    if type(archived_generation) is not int or archived_generation < 0:
+        raise BackupError('The backup session generation is invalid')
+
+    from app.auth.generation import generation_for_restore
+    auth[generation_key] = generation_for_restore(archived_generation)
+
+    prepared_path = f'{staged_path}.prepared'
+    try:
+        with open(prepared_path, 'w', encoding='utf-8') as handle:
+            yaml.safe_dump(restored, handle)
+        shutil.copymode(staged_path, prepared_path)
+        os.replace(prepared_path, staged_path)
+    except (yaml.YAMLError, TypeError) as error:
+        raise BackupError('The backup configuration could not be staged') from error
+    finally:
+        _delete_file(prepared_path)
+
+
 def restore_from_backup():
     failed_dump_path = os.path.join(get_restore_path(), POSTGRES_FAILED_ARCHIVE_NAME)
     if os.path.isfile(failed_dump_path):
@@ -595,10 +660,9 @@ def restore_from_backup():
 
     if os.path.isfile(os.path.join(get_restore_path(), 'config.yaml')):
         restore_config_path = os.path.join(get_restore_path(), 'config.yaml')
-        dest_config_path = os.path.join(args.config_dir, 'config', 'config.yaml')
     else:
         restore_config_path = os.path.join(get_restore_path(), 'config.ini')
-        dest_config_path = os.path.join(args.config_dir, 'config', 'config.ini')
+    dest_config_path = os.path.join(args.config_dir, 'config', 'config.yaml')
 
     # The database artifact is named after the engine this instance runs on: a
     # SQLite install restores the database file, a PostgreSQL install restores
@@ -629,10 +693,10 @@ def restore_from_backup():
     staged_config_path = f'{dest_config_path}.restore'
     try:
         shutil.copy(restore_config_path, staged_config_path)
-    except (OSError, shutil.Error):
-        logging.exception('Restoring the backup failed. Bazarr will not restart, and the files staged '
-                          'for the restore have been discarded so the next start does not retry it '
-                          'silently. The backup archive itself is untouched.')
+        _prepare_restored_configuration(restore_config_path, staged_config_path)
+    except (BackupError, OSError, shutil.Error):
+        logging.error('Restoring the backup configuration failed. Bazarr will not restart, and the '
+                      'files staged for the restore have been discarded. The backup archive is untouched.')
         _delete_file(staged_config_path)
         _clear_restore_directory()
         return False

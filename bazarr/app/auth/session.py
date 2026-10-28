@@ -30,12 +30,24 @@ PASSWORD_CONFIRM_KEY = 'password_confirmed_until'
 
 
 def is_session_authenticated():
-    """True only for a session established by a successful login."""
-    return session.get(SESSION_KEY) is True
+    """True only for a session established by a successful login.
+
+    A session also has to belong to the current generation (see
+    app.auth.generation): a cookie signed before the last logout, password
+    change or auth-type change is a valid signature on a revoked session.
+    """
+    from .generation import session_generation_is_current
+
+    return session.get(SESSION_KEY) is True and session_generation_is_current()
 
 
-def establish_session():
-    """Mark the current session as signed in.
+def establish_session(generation):
+    """Mark the current session as signed in under `generation`. True if it holds.
+
+    `generation` is the number read before the credentials were checked (see
+    app.auth.generation.between_saves). False means it moved while they were
+    checked, so the session carries a dead number and is not signed in: the
+    caller checks the credentials again against the settings as they are now.
 
     Every other key is dropped first. Releases before this one parked the
     admin's plaintext password in the session under _pw_for_upgrade, and that
@@ -51,9 +63,15 @@ def establish_session():
     lifetime as a signature max age either way, so this is about the browser
     discarding the cookie, not about the server starting to honour it.
     """
+    from .generation import stamp_session
+
     session.clear()
     session.permanent = True
     session[SESSION_KEY] = True
+    if stamp_session(generation):
+        return True
+    session.pop(SESSION_KEY, None)
+    return False
 
 
 def clear_authentication():
@@ -80,5 +98,8 @@ def mark_password_confirmed(window=PASSWORD_CONFIRM_WINDOW):
 
 def password_is_confirmed():
     """True while this session's password confirmation is still in its window."""
+    from .generation import session_generation_is_current
+
     until = session.get(PASSWORD_CONFIRM_KEY)
-    return isinstance(until, (int, float)) and until > time.time()
+    return (isinstance(until, (int, float)) and until > time.time()
+            and session_generation_is_current())

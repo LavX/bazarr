@@ -48,26 +48,51 @@ def _verify_password(pw, stored_hash):
         )
 
 
-def upgrade_password_hash(pw):
+def upgrade_password_hash(pw, expected_hash=None):
+    """Store a PBKDF2 hash of `pw` in place of the legacy hash it was checked against.
+
+    `expected_hash` is the stored hash the password was verified against. If the
+    password was changed since, the stored hash is no longer that one and the
+    upgrade stands down: it would otherwise write a hash of the OLD password over
+    the new one. Returns whether it upgraded.
+    """
+    from discover.metadata import CONFIG_LOCK
+
     new_hash = hash_password(pw)
-    old_hash = settings.auth.password
-    settings.auth.password = new_hash
-    try:
-        from app.config import write_config
-        write_config()
-        logging.info('Upgraded password hash from MD5 to PBKDF2-SHA256')
-    except Exception:
-        settings.auth.password = old_hash
-        logging.exception('Failed to persist password hash upgrade, reverted to previous hash')
-        raise
+    with CONFIG_LOCK:
+        old_hash = settings.auth.password
+        if expected_hash is not None and old_hash != expected_hash:
+            logging.info('Password hash upgrade skipped: the password changed since it was checked')
+            return False
+        settings.auth.password = new_hash
+        try:
+            from app.config import write_config
+            write_config()
+            logging.info('Upgraded password hash from MD5 to PBKDF2-SHA256')
+        except Exception:
+            settings.auth.password = old_hash
+            logging.exception('Failed to persist password hash upgrade, reverted to previous hash')
+            raise
+    return True
 
 
-def check_credentials(user, pw, request, log_success=True):
+def read_stored_login():
+    """The stored (username, password hash) pair a sign-in is checked against."""
+    return settings.auth.username, settings.auth.password
+
+
+def check_credentials(user, pw, request, log_success=True, stored=None):
+    """True when `user` and `pw` match the stored login.
+
+    `stored` is a (username, password hash) pair read earlier. A sign-in passes
+    the pair it took together with the session generation, so what is checked is
+    exactly the login that generation belongs to. Without it the live settings
+    are read.
+    """
     forwarded_for_ip_addr = request.environ.get('HTTP_X_FORWARDED_FOR')
     real_ip_addr = request.environ.get('HTTP_X_REAL_IP')
     ip_addr = forwarded_for_ip_addr or real_ip_addr or request.remote_addr
-    username = settings.auth.username
-    password = settings.auth.password
+    username, password = stored if stored is not None else read_stored_login()
     if user == username and _verify_password(pw, password):
         if log_success:
             logging.info(f'Successful authentication from {ip_addr} for user {user}')  # noqa: G004

@@ -18,6 +18,7 @@ import zipfile
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import utilities.backup as backup_module
 
@@ -317,8 +318,10 @@ def test_postgres_restore_runs_pg_restore_with_the_clean_flags(backup_env, monke
         assert flag in invocation
     assert 'PGPASSWORD sekrit' in invocation
     assert backup_env.restarts == [True]
-    assert (backup_env.config_dir / 'config' / 'config.yaml').read_text(encoding='utf-8') == \
-        'general:\n  port: 7000\n'
+    with open(backup_env.config_dir / 'config' / 'config.yaml', encoding='utf-8') as handle:
+        saved = yaml.safe_load(handle)
+    assert saved['general']['port'] == 7000
+    assert saved['auth']['session_generation'] > 0
 
 
 def test_postgres_restore_aborts_before_the_restart_when_pg_restore_fails(backup_env, monkeypatch):
@@ -365,6 +368,71 @@ def test_sqlite_restore_replaces_config_and_database(backup_env, monkeypatch):
     assert backup_env.stops == []
     assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'restored'
     assert os.listdir(backup_env.restore_dir) == []
+
+
+def test_restore_advances_past_live_and_archived_generations_without_rotating_the_signing_key(
+        backup_env, monkeypatch):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    monkeypatch.setattr(backup_env.settings.auth, 'session_generation', 7)
+    restored = {
+        'general': {'port': 7000, 'flask_secret_key': 'the-original-signing-key'},
+        'auth': {'session_generation': 3},
+    }
+    (backup_env.restore_dir / 'config.yaml').write_text(yaml.safe_dump(restored), encoding='utf-8')
+    _write_marker_database(backup_env.restore_dir / 'bazarr.db', 'restored')
+
+    assert backup_env.module.restore_from_backup() is True
+
+    with open(backup_env.config_dir / 'config' / 'config.yaml', encoding='utf-8') as handle:
+        saved = yaml.safe_load(handle)
+    assert saved['auth']['session_generation'] > 7
+    assert saved['general']['flask_secret_key'] == 'the-original-signing-key'
+    assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'restored'
+
+
+def test_restore_rejects_an_invalid_archived_generation_before_touching_the_database(backup_env, monkeypatch):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    (backup_env.restore_dir / 'config.yaml').write_text(
+        'general:\n  port: 7000\nauth:\n  session_generation: true\n', encoding='utf-8')
+    _write_marker_database(backup_env.restore_dir / 'bazarr.db', 'restored')
+
+    assert backup_env.module.restore_from_backup() is False
+
+    assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'live'
+    assert backup_env.restarts == []
+
+
+def test_restore_replaces_the_generation_even_when_yaml_uses_uppercase_keys(backup_env, monkeypatch):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    (backup_env.restore_dir / 'config.yaml').write_text(
+        'AUTH:\n  SESSION_GENERATION: 4\n', encoding='utf-8')
+    _write_marker_database(backup_env.restore_dir / 'bazarr.db', 'restored')
+
+    assert backup_env.module.restore_from_backup() is True
+
+    with open(backup_env.config_dir / 'config' / 'config.yaml', encoding='utf-8') as handle:
+        saved = yaml.safe_load(handle)
+    assert saved['AUTH']['SESSION_GENERATION'] > 4
+    assert 'auth' not in saved
+    assert 'session_generation' not in saved['AUTH']
+
+
+def test_legacy_ini_restore_becomes_the_active_yaml_config_with_a_new_generation(backup_env, monkeypatch):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    monkeypatch.setattr(backup_env.settings.auth, 'session_generation', 2)
+    (backup_env.restore_dir / 'config.ini').write_text(
+        '[general]\nport = 7000\nflask_secret_key = old-signing-key\n'
+        '[auth]\nsession_generation = 5\n', encoding='utf-8')
+    _write_marker_database(backup_env.restore_dir / 'bazarr.db', 'restored')
+
+    assert backup_env.module.restore_from_backup() is True
+
+    with open(backup_env.config_dir / 'config' / 'config.yaml', encoding='utf-8') as handle:
+        saved = yaml.safe_load(handle)
+    assert saved['general']['port'] == 7000
+    assert saved['general']['flask_secret_key'] == 'old-signing-key'
+    assert saved['auth']['session_generation'] > 5
+    assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'restored'
 
 
 def test_restore_refuses_a_partial_backup_and_clears_it(backup_env, monkeypatch):
@@ -646,7 +714,10 @@ def test_a_configuration_that_cannot_be_put_in_place_stops_the_start(backup_env,
     assert backup_env.restarts == []
     # The configuration from the backup is kept for the operator to put in place.
     staged = backup_env.config_dir / 'config' / 'config.yaml.restore'
-    assert staged.read_text(encoding='utf-8') == 'general:\n  port: 7000\n'
+    with open(staged, encoding='utf-8') as handle:
+        saved = yaml.safe_load(handle)
+    assert saved['general']['port'] == 7000
+    assert saved['auth']['session_generation'] > 0
     assert f'kept at {staged}: copy it over {dest_config}' in caplog.text
 
 

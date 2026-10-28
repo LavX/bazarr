@@ -427,6 +427,7 @@ jobs:
             tests/bazarr/test_password_confirm.py \
             tests/bazarr/test_socket_auth.py \
             tests/bazarr/test_session_cookie_policy.py \
+            tests/bazarr/test_session_generation.py \
             tests/bazarr/test_session_settings_roundtrip.py \
             tests/bazarr/test_ui.py \
             tests/bazarr/test_utilities_video_analyzer.py \

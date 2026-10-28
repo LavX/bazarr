@@ -12,7 +12,8 @@ from flask_restx import Resource, Namespace, reqparse
 from api.utils import authenticate
 from app.auth import clear_authentication, establish_session, is_session_authenticated, mark_password_confirmed
 from app.config import settings
-from utilities.helper import check_credentials, needs_password_upgrade, upgrade_password_hash
+from app.auth.generation import between_saves, revoke_signed_in_sessions, stamp_session
+from utilities.helper import check_credentials, needs_password_upgrade, read_stored_login, upgrade_password_hash
 
 api_ns_system_account = Namespace('System Account', description='Login or logout from Bazarr UI')
 
@@ -22,6 +23,9 @@ _login_lock = threading.Lock()
 _MAX_ATTEMPTS = 5
 _LOCKOUT_SECONDS = 300  # 5 minutes
 _MAX_TRACKED_IPS = 10000
+# How often one sign-in is checked again because the login settings or the
+# session generation moved while it was being verified.
+_SIGN_IN_ATTEMPTS = 3
 
 
 def _get_client_ip():
@@ -97,30 +101,50 @@ class SystemAccount(Resource):
 
             username = args.get('username')
             password = args.get('password')
-            if check_credentials(username, password, request):
-                _clear_failed_attempts(ip)
-                establish_session()
-                if needs_password_upgrade():
-                    # Re-hash here, where the plaintext already is. The old path
-                    # parked it in the session and re-read it on a follow-up
-                    # call, but the session is a signed, unencrypted cookie:
-                    # "server-side only" was never true of it. A write failure
-                    # must not reject credentials that were correct.
-                    try:
-                        upgrade_password_hash(password)
-                    except Exception:
-                        logging.exception('Password hash upgrade failed; the login itself stands')
-                return '', 204
-            else:
-                _record_failed_attempt(ip)
-                # Remove the key rather than storing False: a stored False is a
-                # value another gate may read as "present, therefore signed in".
-                clear_authentication()
-                return 'Authentication failed', 403
+            # The password check is slow, and a password change, an auth-type
+            # change or a logout can land while it runs. The generation and the
+            # stored login are therefore read together before it starts, the
+            # session is stamped with that generation, and if the generation
+            # moved meanwhile the check is made again against the settings as
+            # they are now. A sign-in is never stamped with a number it was not
+            # checked under.
+            for _ in range(_SIGN_IN_ATTEMPTS):
+                with between_saves() as generation:
+                    stored = read_stored_login()
+                if not check_credentials(username, password, request, stored=stored):
+                    _record_failed_attempt(ip)
+                    # Remove the key rather than storing False: a stored False is a
+                    # value another gate may read as "present, therefore signed in".
+                    clear_authentication()
+                    return 'Authentication failed', 403
+                if establish_session(generation):
+                    _clear_failed_attempts(ip)
+                    if needs_password_upgrade():
+                        # Re-hash here, where the plaintext already is. The old path
+                        # parked it in the session and re-read it on a follow-up
+                        # call, but the session is a signed, unencrypted cookie:
+                        # "server-side only" was never true of it. A write failure
+                        # must not reject credentials that were correct.
+                        try:
+                            upgrade_password_hash(password, expected_hash=stored[1])
+                        except Exception:
+                            logging.exception('Password hash upgrade failed; the login itself stands')
+                    return '', 204
+                if generation is None:
+                    break  # no readable number: another look cannot change that
+            # The login settings kept moving under every attempt, or no
+            # generation could be read: nothing was verified against a state
+            # that held still, so nobody is signed in. Not the caller's wrong
+            # password, so it is not counted against them.
+            clear_authentication()
+            return 'Authentication failed', 403
         elif action == 'logout':
             if settings.auth.type == 'basic':
                 return 'Browser must be closed to invalidate basic authentication', 406
             else:
+                # Asked before the session is cleared, because clearing is what
+                # it reads.
+                revoke_signed_in_sessions()
                 session.clear()
                 gc.collect()
                 return '', 204
@@ -153,29 +177,39 @@ class SystemAccountConfirm(Resource):
 
         args = self.post_request_parser.parse_args()
 
-        # The prompt runs inside a signed-in UI. An expired session is answered
-        # as unauthenticated, so the client goes to the login page rather than
-        # being asked for a password it cannot confirm anything with.
-        if settings.auth.type == 'form' and not is_session_authenticated():
-            return 'Sign in first', 401
+        # Take the login and generation together, as sign-in does. In basic
+        # mode there may be no cookie yet, so the response must not invent a
+        # confirmation under a generation newer than the password it checked.
+        with between_saves() as generation:
+            auth_type = settings.auth.type
+            stored = read_stored_login()
+            if auth_type == 'form' and not is_session_authenticated():
+                return 'Sign in first', 401
 
         # Under basic login the request has to carry valid basic credentials
         # as well: a browser sends them on its own, and the confirmation on top
         # is what the API key alone never holds.
-        if settings.auth.type == 'basic':
+        if auth_type == 'basic':
             auth = request.authorization
-            if not (auth and check_credentials(auth.username, auth.password, request, log_success=False)):
+            if not (auth and check_credentials(auth.username, auth.password, request,
+                                               log_success=False, stored=stored)):
                 _record_failed_attempt(ip)
                 return 'Authentication failed', 403
 
         # The confirmation is for the one signed-in account, so a request that
         # names no username (the prompt could not read the settings) checks
         # the password against the configured one.
-        username = args.get('username') or settings.auth.username
-        if not check_credentials(username, args.get('password'), request):
+        username = args.get('username') or stored[0]
+        if not check_credentials(username, args.get('password'), request, stored=stored):
             _record_failed_attempt(ip)
             return 'Authentication failed', 403
 
+        with between_saves() as current:
+            if (generation is None or current != generation or settings.auth.type != auth_type
+                    or read_stored_login() != stored):
+                return 'Authentication changed. Confirm your password again.', 403
+            if not stamp_session(generation):
+                return 'Authentication changed. Confirm your password again.', 403
+            mark_password_confirmed()
         _clear_failed_attempts(ip)
-        mark_password_confirmed()
         return '', 204

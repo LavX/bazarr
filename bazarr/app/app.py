@@ -17,6 +17,7 @@ from waitress.proxy_headers import proxy_headers_middleware
 from utilities.security_guards import api_key_matches
 
 from .auth import is_session_authenticated
+from .auth.generation import before_save_cleanup, open_session_cleanup
 from .database import database
 from .get_args import args
 from .config import settings, base_url
@@ -96,6 +97,28 @@ class SchemeAwareSessionInterface(SecureCookieSessionInterface):
         if policy == 'never':
             return False
         return bool(request and request.is_secure)
+
+    def open_session(self, app, request):
+        """Refuse a cookie from a revoked generation instead of carrying it on.
+
+        Without this a stale cookie is still re-signed on every request that
+        carries it, which is how a read already in flight at logout handed the
+        browser a fresh copy of the session it had just deleted. The gate
+        refuses such a cookie anyway; this also keeps its contents away from
+        every handler and stops it being renewed. It is not deleted either:
+        see open_session_cleanup.
+        """
+        return open_session_cleanup(super().open_session(app, request))
+
+    def save_session(self, app, session, response):
+        if not before_save_cleanup(session):
+            # A stale session sends no cookie header, neither a renewal nor a
+            # deletion (see before_save_cleanup). The Vary header that a
+            # session read earns is still owed.
+            if session.accessed:
+                response.vary.add("Cookie")
+            return None
+        return super().save_session(app, session, response)
 
 
 def configure_session_cookie(app, config=settings):
