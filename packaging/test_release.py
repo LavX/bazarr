@@ -23,6 +23,15 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_ROOT.parent
 COMMAND = PACKAGE_ROOT / "release.py"
 WORKFLOW = REPO_ROOT / ".github/workflows/platform-packages.yml"
+GIT_NO_AUTO_MAINTENANCE = {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "gc.auto",
+    "GIT_CONFIG_VALUE_0": "0",
+    "GIT_CONFIG_KEY_1": "maintenance.auto",
+    "GIT_CONFIG_VALUE_1": "false",
+    "GIT_CONFIG_KEY_2": "receive.autogc",
+    "GIT_CONFIG_VALUE_2": "false",
+}
 BASE_DIGEST = "sha256:90a5c184b0af41602ff78ea7286e0c5f2c4c284c9b18f71427d9ddbeb0b6531c"
 NEXT_DIGEST = "sha256:" + "a" * 64
 
@@ -838,6 +847,9 @@ class WorkflowRunLaneTests(unittest.TestCase):
                 if (major, minor, patch) < following]
 
     def setUp(self):
+        environment = patch.dict(os.environ, GIT_NO_AUTO_MAINTENANCE)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
