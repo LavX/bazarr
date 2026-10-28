@@ -340,23 +340,73 @@ def update_movies_for_instance(arr_instance_id, job_id=None, wait_for_completion
     update_movies(job_id=job_id, arr_instance_id=arr_instance_id, arr_client=arr_client)
 
 
-def update_one_movie_for_instance(arr_instance_id, movie_id, action, **kwargs):
+def sync_one_movie(movie_id, arr_instance_id=None, job_id=None):
+    """Sync one movie with Radarr from its detail page, as a queued job.
+
+    The request used to fetch the movie itself, which held the page's request
+    for as long as Radarr took to answer. Pressing it again while it runs
+    follows the job that is running.
+    """
+    if not job_id:
+        return jobs_queue.add_job_from_function("Syncing movie with Radarr", is_progress=False,
+                                               return_existing=True)
+
+    from app.job_errors import ArrSyncFailed, ArrSyncSkipped, reason_of
+    from app.jobs_queue import JobFailed
+
+    movie = database.execute(
+        scoped(select(TableMovies.title).where(TableMovies.radarrId == movie_id),
+               TableMovies.arr_instance_id, arr_instance_id)).first()
+    title = movie.title if movie else f"movie {movie_id}"
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Syncing {title} with Radarr")
+    try:
+        # The search for subtitles the sync would trigger is left to the
+        # scheduled search, as it always was for this button.
+        if arr_instance_id is not None:
+            update_one_movie_for_instance(arr_instance_id, movie_id, 'updated', defer_search=True,
+                                          raise_on_failure=True)
+        else:
+            update_one_movie(movie_id, 'updated', True, raise_on_failure=True)
+    except ArrSyncSkipped as skipped:
+        # Left alone on purpose, so the job ends as a skip and not as a sync that happened.
+        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Skipped syncing {title} with Radarr: {skipped.reason}")
+        return
+    except Exception as error:
+        logging.warning('BAZARR syncing movie %s with Radarr failed: reason=%s', movie_id, reason_of(error))
+        raise JobFailed(f"Syncing {title} with Radarr failed: {reason_of(error)}",
+                        reason=error.reason if isinstance(error, ArrSyncFailed) else "failed") from error
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Synced {title} with Radarr")
+
+
+def update_one_movie_for_instance(arr_instance_id, movie_id, action, raise_on_failure=False, **kwargs):
     """Single-movie sync scoped to one instance (webhook/signalr entry)."""
     arr_client = client_for_instance(database, arr_instance_id)
     if arr_client is None:
+        if raise_on_failure:
+            from app.job_errors import ArrSyncFailed
+            raise ArrSyncFailed(f"Radarr instance {arr_instance_id} is not configured", "arr_instance_unknown")
         logging.warning('BAZARR skipping Radarr movie %s for unknown instance %s',
                         movie_id, arr_instance_id)
         return
     update_one_movie(movie_id, action, arr_instance_id=arr_instance_id,
-                     arr_client=arr_client, **kwargs)
+                     arr_client=arr_client, raise_on_failure=raise_on_failure, **kwargs)
 
 
 def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
-                     arr_instance_id=None, arr_client=None):
+                     arr_instance_id=None, arr_client=None, raise_on_failure=False):
+    """Update or delete one movie in the DB.
+
+    ``raise_on_failure`` makes a movie Radarr cannot return raise
+    ``ArrSyncFailed`` instead of being logged and skipped, for the detail
+    page's job, which has to tell the user the sync did not happen.
+    """
     logging.debug('BAZARR syncing this specific movie from Radarr: %s', movie_id)
 
     if arr_instance_id is None and skip_unscoped_sync(
             database, 'radarr', settings.general.use_radarr, f'movie {movie_id}'):
+        if raise_on_failure:
+            from app.job_errors import ArrSyncSkipped
+            raise ArrSyncSkipped("no enabled Radarr instance owns it")
         return
 
     # Check if there's a row in the database for this movie ID
@@ -406,6 +456,10 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
         movie_data = get_movies_from_radarr_api(apikey_radarr=settings.radarr.apikey, radarr_id=movie_id,
                                                 arr_client=arr_client)
         if not movie_data:
+            # The fetch helper has already logged why when Radarr did not answer.
+            if raise_on_failure:
+                from app.job_errors import ArrSyncFailed
+                raise ArrSyncFailed(f"Radarr did not return movie {movie_id}", "radarr_unreachable")
             return
         else:
             if action == 'updated' and existing_movie:
@@ -416,7 +470,13 @@ def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
                 movie = movieParser(movie_data, action='insert', tags_dict=tagsDict, language_profiles=language_profiles,
                                     movie_default_profile=movie_default_profile, audio_profiles=audio_profiles,
                                     arr_instance_id=instance_id)
-    except Exception:
+    except Exception as error:
+        if raise_on_failure:
+            from app.job_errors import ArrSyncFailed, reason_of
+            if isinstance(error, ArrSyncFailed):
+                raise
+            raise ArrSyncFailed(f"Radarr could not return movie {movie_id}: {reason_of(error)}",
+                                "radarr_unreachable") from error
         logging.exception('BAZARR cannot get movie returned by SignalR feed from Radarr API.')
         return
 

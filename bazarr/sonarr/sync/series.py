@@ -323,23 +323,78 @@ def update_series_for_instance(arr_instance_id, job_id=None, wait_for_completion
     update_series(job_id=job_id, arr_instance_id=arr_instance_id, arr_client=arr_client)
 
 
-def update_one_series_for_instance(arr_instance_id, series_id, action, **kwargs):
+def sync_one_series(series_id, arr_instance_id=None, job_id=None):
+    """Sync one series with Sonarr from its detail page, as a queued job.
+
+    The request used to fetch the series and its episodes itself, which held
+    the page's request for as long as Sonarr took to answer. Pressing it again
+    while it runs follows the job that is running.
+    """
+    if not job_id:
+        return jobs_queue.add_job_from_function("Syncing series with Sonarr", is_progress=False,
+                                               return_existing=True)
+
+    from app.job_errors import ArrSyncFailed, ArrSyncSkipped, reason_of
+    from app.jobs_queue import JobFailed
+
+    show = database.execute(
+        scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == series_id),
+               TableShows.arr_instance_id, arr_instance_id)).first()
+    title = show.title if show else f"series {series_id}"
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Syncing {title} with Sonarr")
+    try:
+        if arr_instance_id is not None:
+            update_one_series_for_instance(arr_instance_id, series_id, 'updated', raise_on_failure=True)
+        else:
+            update_one_series(series_id, 'updated', raise_on_failure=True)
+    except ArrSyncSkipped as skipped:
+        # Left alone on purpose, so the job ends as a skip and not as a sync that happened.
+        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Skipped syncing {title} with Sonarr: {skipped.reason}")
+        return
+    except Exception as error:
+        logging.warning('BAZARR syncing series %s with Sonarr failed: reason=%s', series_id, reason_of(error))
+        raise JobFailed(f"Syncing {title} with Sonarr failed: {reason_of(error)}",
+                        reason=error.reason if isinstance(error, ArrSyncFailed) else "failed") from error
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Synced {title} with Sonarr")
+
+
+def update_one_series_for_instance(arr_instance_id, series_id, action, raise_on_failure=False, **kwargs):
     """Single-series sync scoped to one instance (webhook/signalr entry)."""
     arr_client = client_for_instance(database, arr_instance_id)
     if arr_client is None:
+        if raise_on_failure:
+            from app.job_errors import ArrSyncFailed
+            raise ArrSyncFailed(f"Sonarr instance {arr_instance_id} is not configured", "arr_instance_unknown")
         logging.warning('BAZARR skipping Sonarr series %s for unknown instance %s',
                         series_id, arr_instance_id)
         return
     update_one_series(series_id, action, arr_instance_id=arr_instance_id,
-                      arr_client=arr_client, **kwargs)
+                      arr_client=arr_client, raise_on_failure=raise_on_failure, **kwargs)
+
+
+def _raise_if_episodes_skipped(episodes_outcome, raise_on_failure):
+    """Tell the detail page's job that the series was written but its episodes were not synced.
+
+    sync_episodes leaves the episodes alone when Sonarr's answer cannot be read or no enabled default
+    instance owns the series. The series row is already updated, so this is raised last, and only for a
+    caller that asked to hear about it: the job then ends as a named skip and not as a sync that ran.
+    """
+    if raise_on_failure and episodes_outcome is SYNC_SKIPPED_UNREADABLE_EPISODE_FILES:
+        from app.job_errors import ArrSyncSkipped
+        raise ArrSyncSkipped("its episodes were left unchanged, because Sonarr's episode list could not be "
+                             "read or no enabled default Sonarr instance owns the series")
 
 
 def update_one_series(series_id, action, is_signalr=False, series_data=None,
                       audio_profiles=None, tags_dict=None, language_profiles=None,
                       existing_in_db=None, skip_episode_sync=False,
                       arr_instance_id=None, arr_client=None,
-                      serie_default_profile=_UNRESOLVED):
+                      serie_default_profile=_UNRESOLVED, raise_on_failure=False):
     """Update or delete one series in the DB.
+
+    ``raise_on_failure`` makes a series Sonarr cannot return raise
+    ``ArrSyncFailed`` instead of being logged and skipped, for the detail
+    page's job, which has to tell the user the sync did not happen.
 
     Optional injected arguments let the bulk `update_series()` caller
     skip the per-series Sonarr HTTP fetch and the three invariant
@@ -355,12 +410,16 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     the inline behavior.
     """
     logging.debug('BAZARR syncing this specific series from Sonarr: %s', series_id)
+    episodes_outcome = None
 
     # Single-series callers only. The bulk sync always answers existing_in_db
     # and runs only while Sonarr is switched on, when the startup backfill
     # builds an instance for what it writes anyway.
     if arr_instance_id is None and existing_in_db is None and skip_unscoped_sync(
             database, 'sonarr', settings.general.use_sonarr, f'series {series_id}'):
+        if raise_on_failure:
+            from app.job_errors import ArrSyncSkipped
+            raise ArrSyncSkipped("no enabled Sonarr instance owns it")
         return
 
     # Check if there's a row in database for this series ID. The
@@ -404,10 +463,18 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
             series_data_list = get_series_from_sonarr_api(apikey_sonarr=settings.sonarr.apikey,
                                                           sonarr_series_id=int(series_id),
                                                           arr_client=arr_client)
-        except Exception:
+        except Exception as error:
+            if raise_on_failure:
+                from app.job_errors import ArrSyncFailed, reason_of
+                raise ArrSyncFailed(f"Sonarr could not return series {series_id}: {reason_of(error)}",
+                                    "sonarr_unreachable") from error
             logging.exception(f'BAZARR cannot get series with ID {series_id} from Sonarr API.')  # noqa: G004
             return
         if not series_data_list:
+            # The fetch helper has already logged why when Sonarr did not answer.
+            if raise_on_failure:
+                from app.job_errors import ArrSyncFailed
+                raise ArrSyncFailed(f"Sonarr did not return series {series_id}", "sonarr_unreachable")
             return
         series_payload = series_data_list[0]
     else:
@@ -459,11 +526,12 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                 # The one that gets there doesn't include the episodeChanged flag.
                 # The episodes are synced only when this function is called from the
                 # frontend sync button in the episodes' page.
-                sync_episodes(series_id=int(series_id),
-                              arr_instance_id=arr_instance_id, arr_client=arr_client)
+                episodes_outcome = sync_episodes(series_id=int(series_id),
+                                                 arr_instance_id=arr_instance_id, arr_client=arr_client)
             event_stream(type='series', action='update', payload=int(series_id))
             logging.debug(
                 'BAZARR updated this series into the database:%s', path_mappings.path_replace(series["path"]))
+            _raise_if_episodes_skipped(episodes_outcome, raise_on_failure)
     elif action == 'updated' and not existing_in_db:
         # Insert new series in DB
         series = seriesParser(series_payload, action='insert', tags_dict=tags_dict,
@@ -485,8 +553,9 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
                 # bulk update_series() loop relies on this call to
                 # populate them. signalr callers get their own episode
                 # events from Sonarr and skip this path.
-                sync_episodes(series_id=int(series_id),
-                              arr_instance_id=arr_instance_id, arr_client=arr_client)
+                episodes_outcome = sync_episodes(series_id=int(series_id),
+                                                 arr_instance_id=arr_instance_id, arr_client=arr_client)
             event_stream(type='series', action='update', payload=int(series_id))
             logging.debug(
                 'BAZARR inserted this series into the database:%s', path_mappings.path_replace(series["path"]))
+            _raise_if_episodes_skipped(episodes_outcome, raise_on_failure)
