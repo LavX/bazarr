@@ -24,6 +24,7 @@ import {
   Code,
   Collapse,
   Divider,
+  Group,
   Stack,
   Text,
 } from "@mantine/core";
@@ -50,12 +51,41 @@ import { GetItemId } from "@/utilities";
 // keys on league_id, both of which survive the narrower shape.
 type SupportType = Item.Movie | Item.Episode | SportsSearchTarget;
 
+type ManualSearchQueryResult = Pick<
+  UseQueryResult<SearchResultType[] | undefined>,
+  "data" | "isFetching" | "isError" | "error"
+> & {
+  refetch: () => Promise<unknown>;
+  providers?: Array<
+    Omit<System.ProviderSearchOutcome, "status"> & { status: string }
+  >;
+};
+
 interface Props<T extends SupportType> {
   download: (item: T, result: SearchResultType) => Promise<void>;
-  query: (id?: number) => UseQueryResult<SearchResultType[] | undefined>;
+  query: (id?: number) => ManualSearchQueryResult;
   item: T;
   searchDisabled?: boolean;
   preventRepeatDownload?: boolean;
+}
+
+function providerOutcomeLabel(status: string): string {
+  switch (status) {
+    case "found":
+      return "Results found";
+    case "empty":
+      return "No results";
+    case "failed":
+      return "Failed";
+    case "throttled":
+      return "Throttled";
+    case "busy":
+      return "Busy";
+    case "excluded":
+      return "Excluded";
+    default:
+      return "Unknown";
+  }
 }
 
 // Stable identity for a search result. SearchResultType has no id field, so we
@@ -299,6 +329,37 @@ export function ManualSearchView<T extends SupportType>(props: Props<T>) {
         <Code hidden={!bSceneNameAvailable}>{item?.sceneName}</Code>
       </Alert>
       <Collapse expanded={haveResult && !results.isFetching}>
+        {results.providers && results.providers.length > 0 && (
+          <Stack gap="xs" mb="md" aria-label="Provider outcomes">
+            {results.providers.map((provider) => (
+              <Group
+                key={provider.name}
+                justify="space-between"
+                gap="sm"
+                data-testid="provider-outcome"
+                data-status={provider.status}
+                style={
+                  provider.status === "failed"
+                    ? {
+                        borderLeft: "3px solid #fa5252",
+                        paddingLeft: "0.5rem",
+                      }
+                    : undefined
+                }
+              >
+                <Text c={provider.status === "empty" ? "dimmed" : undefined}>
+                  {provider.name}
+                </Text>
+                <Text
+                  size="sm"
+                  c={provider.status === "failed" ? "#fa5252" : "dimmed"}
+                >
+                  {providerOutcomeLabel(provider.status)}
+                </Text>
+              </Group>
+            ))}
+          </Stack>
+        )}
         <PageTable
           autoScroll={false}
           tableStyles={{ emptyText: "No result", placeholder: 10 }}

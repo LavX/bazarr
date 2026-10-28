@@ -169,6 +169,12 @@ declare namespace System {
     retry: string;
   }
 
+  interface ProviderSearchOutcome {
+    name: string;
+    status: "found" | "empty" | "failed" | "throttled" | "busy" | "excluded";
+    results: number;
+  }
+
   type LogType = "INFO" | "WARNING" | "ERROR" | "DEBUG" | "CRITICAL";
 
   interface Log {
