@@ -487,9 +487,12 @@ def _events(event_id=None, league_id=None, arr_instance_id=None):
     return database.execute(query.order_by(TableSportsEvents.id)).all()
 
 
-def list_missing_subtitles_sports(event_id=None, league_id=None, arr_instance_id=None):
+def list_missing_subtitles_sports(event_id=None, league_id=None, arr_instance_id=None, cancel=None):
     ids = _events(event_id, league_id, arr_instance_id)
     for local_id, owner in ids:
+        # Raises when the job running this was stopped.
+        if cancel is not None:
+            cancel()
         with sports_transaction(database) as session:
             require_sportarr(session, owner)
             context = resolve_event_in_session(session, local_id, owner)

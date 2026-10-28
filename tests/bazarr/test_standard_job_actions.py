@@ -116,6 +116,40 @@ def test_a_mod_job_that_cannot_write_fails_with_the_reason(queue, mod_job, monke
     assert job["error"]["message"] == "Remove HI Tags failed on Movie.en.srt: Read-only file system"
 
 
+def test_a_mod_job_checks_again_that_the_subtitle_is_still_inside_the_media_library(queue, mod_job, monkeypatch,
+                                                                                   tmp_path, caplog):
+    """The route checks the path when it queues the job. The file system can have moved the path since, so
+    the job checks it again before it writes anything."""
+    mods, subtitle = mod_job
+    applied = []
+    monkeypatch.setattr(mods, "subtitles_apply_mods", lambda **kwargs: applied.append(kwargs) or str(subtitle))
+    library = tmp_path / "library"
+    library.mkdir()
+    monkeypatch.setattr(mods.settings.general, "subfolder", "current")
+
+    # Inside: the subtitle sits beside the video.
+    mods.apply_subtitle_mods("en", str(subtitle), ["common"], str(tmp_path / "Movie.mkv"),
+                             media_type="movie", media_id=5, require_within_area=True)
+    assert run_next(queue)["status"] == "completed"
+
+    # Outside: the video is somewhere else now, and the subtitle is not under it.
+    mods.apply_subtitle_mods("en", str(subtitle), ["common"], str(library / "Movie.mkv"),
+                             media_type="movie", media_id=5, require_within_area=True)
+    with caplog.at_level("WARNING"):
+        job = run_next(queue)
+
+    assert job["status"] == "failed"
+    assert job["error"]["reason"] == "outside_media_library"
+    assert job["retryable"] is False
+    assert len(applied) == 1, "the mod ran on a path outside the library"
+    assert len([record for record in caplog.records if record.levelname == "WARNING"]) == 1
+
+    # A server-generated path, such as an extracted track, is not checked.
+    mods.apply_subtitle_mods("en", str(subtitle), ["common"], str(library / "Movie.mkv"),
+                             media_type="movie", media_id=5)
+    assert run_next(queue)["status"] == "completed"
+
+
 def test_a_mod_that_produces_nothing_fails_instead_of_completing(queue, mod_job, monkeypatch):
     """subtitles_apply_mods answers None for an unreadable file. That used to be
     a 409 nobody saw; as a job it must not end green."""
@@ -158,7 +192,8 @@ def test_the_subtitles_route_queues_the_mod_and_answers_202(monkeypatch, tmp_pat
     assert response == ({"job_id": 12}, 202)
     assert time.monotonic() - started < 1
     assert queued == [dict(language="en", subtitle_path=str(subtitle), mods=["remove_HI"],
-                           video_path=str(video), media_type="movie", media_id=5, arr_instance_id=2)]
+                           video_path=str(video), media_type="movie", media_id=5, arr_instance_id=2,
+                           require_within_area=True)]
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +259,7 @@ def test_scan_disk_job_that_works_completes_and_announces(queue, monkeypatch, ki
     events, scanned = [], []
     monkeypatch.setattr(module, "event_stream", lambda **kwargs: events.append(kwargs))
     monkeypatch.setattr(module, "series_scan_subtitles" if kind == "series" else "movies_scan_subtitles",
-                        lambda no, arr_instance_id=None: scanned.append((no, arr_instance_id)))
+                        lambda no, arr_instance_id=None, cancel=None: scanned.append((no, arr_instance_id)))
     wrapper = module.series_scan_disk if kind == "series" else module.movies_scan_disk
     wrapper(7, arr_instance_id=3)
     job = run_next(queue)
@@ -247,10 +282,12 @@ def recalculation(queue, monkeypatch):
     from subtitles.indexer import missing_refresh
 
     calls = []
+    # Every pass is given the call that ends it at Stop; what it was asked to
+    # recalculate is what the tests look at.
     monkeypatch.setattr(series_indexer, "list_missing_subtitles",
-                        lambda **kwargs: calls.append(("series", kwargs)))
+                        lambda cancel=None, **kwargs: calls.append(("series", kwargs)))
     monkeypatch.setattr(movies_indexer, "list_missing_subtitles_movies",
-                        lambda **kwargs: calls.append(("movies", kwargs)))
+                        lambda cancel=None, **kwargs: calls.append(("movies", kwargs)))
     monkeypatch.setattr(missing_refresh, "event_stream", lambda **kwargs: None)
     monkeypatch.setattr(settings.general, "use_sonarr", True)
     monkeypatch.setattr(settings.general, "use_radarr", True)
@@ -333,7 +370,7 @@ def test_the_recalculation_job_fails_with_what_failed(recalculation, monkeypatch
 
     missing_refresh, _ = recalculation
 
-    def locked(**kwargs):
+    def locked(cancel=None, **kwargs):
         raise RuntimeError("database is locked")
 
     monkeypatch.setattr(movies_indexer, "list_missing_subtitles_movies", locked)
@@ -341,7 +378,7 @@ def test_the_recalculation_job_fails_with_what_failed(recalculation, monkeypatch
     job = run_next(missing_refresh.jobs_queue)
 
     assert job["status"] == "failed"
-    assert job["error"]["message"] == "Recalculating missing subtitles for movies failed: database is locked"
+    assert job["error"]["message"] == "Recalculating missing subtitles failed for movies (database is locked)"
 
 
 def test_mass_edit_recalculates_only_the_edited_items_in_a_job(recalculation, monkeypatch):
@@ -1333,3 +1370,94 @@ def test_force_starting_a_pending_job_makes_its_outcome_the_users(monkeypatch, q
 
     assert response.status_code == 204
     assert queue.list_jobs_from_queue(job_id=job.job_id)[0]["origin"] == "user"
+
+
+def test_the_recalculation_job_carries_on_past_a_failure_and_names_everything_that_failed(recalculation,
+                                                                                         monkeypatch):
+    from subtitles.indexer import movies as movies_indexer
+    from subtitles.indexer import series as series_indexer
+
+    missing_refresh, calls = recalculation
+    events = []
+    monkeypatch.setattr(missing_refresh, "event_stream", lambda **kwargs: events.append(kwargs))
+
+    class Rows:
+        def all(self):
+            return []
+
+    monkeypatch.setattr("app.database.database", SimpleNamespace(execute=lambda statement: Rows()))
+
+    def failing_for_four(cancel=None, no=None, **kwargs):
+        if no == 4:
+            raise RuntimeError("database is locked")
+        calls.append(("series", {"no": no}))
+
+    monkeypatch.setattr(series_indexer, "list_missing_subtitles", failing_for_four)
+    monkeypatch.setattr(movies_indexer, "list_missing_subtitles_movies", lambda cancel=None, **kwargs: (
+        _ for _ in ()).throw(RuntimeError("no disk")))
+
+    missing_refresh.queue_missing_subtitles_recalculation(series=[(4, None), (5, None)], movies=[(8, None)])
+    job = run_next(missing_refresh.jobs_queue)
+
+    assert job["status"] == "failed"
+    assert job["error"]["message"] == ("Recalculating missing subtitles failed for series 4 (database is locked), "
+                                       "movie 8 (no disk)")
+    # The series after the failing one was still recalculated, and announced.
+    assert ("series", {"no": 5}) in calls
+    assert {"type": "series", "payload": 5} in events
+    assert {"type": "series", "payload": 4} not in events
+
+
+def test_stop_ends_a_recalculation_between_items_instead_of_after_the_whole_pass(recalculation, monkeypatch):
+    from subtitles.indexer import series as series_indexer
+
+    missing_refresh, _ = recalculation
+    cancelled = []
+
+    def walks(cancel=None, **kwargs):
+        # The pass walks its items and asks the job before each one.
+        for item in range(5):
+            if item == 2:
+                missing_refresh.jobs_queue.cancel_running_job(
+                    missing_refresh.jobs_queue.jobs_running_queue[0].job_id)
+            cancel()
+            cancelled.append(item)
+
+    monkeypatch.setattr(series_indexer, "list_missing_subtitles", walks)
+    missing_refresh.queue_missing_subtitles_recalculation()
+    job = run_next(missing_refresh.jobs_queue)
+
+    assert job["status"] == "cancelled"
+    assert cancelled == [0, 1]
+
+
+def test_stop_ends_a_series_scan_between_episodes(queue, monkeypatch):
+    from subtitles.indexer import series as module
+
+    scanned = []
+    episodes = [SimpleNamespace(path=f"/tv/e{n}.mkv", arr_instance_id=None) for n in range(4)]
+
+    class Rows:
+        def all(self):
+            return episodes
+
+        def first(self):
+            return SimpleNamespace(title="Dark")
+
+    monkeypatch.setattr(module, "database", SimpleNamespace(execute=lambda statement: Rows()))
+    monkeypatch.setattr(module, "path_mappings", SimpleNamespace(path_replace_instance=lambda path, owner, kind: path))
+    monkeypatch.setattr(module, "event_stream", lambda **kwargs: None)
+
+    def store(path, mapped, **kwargs):
+        scanned.append(path)
+        if len(scanned) == 2:
+            queue.cancel_running_job(queue.jobs_running_queue[0].job_id)
+
+    monkeypatch.setattr(module, "store_subtitles", store)
+    monkeypatch.setattr(module, "SyncOutputOwnerIndex", lambda: None)
+
+    module.series_scan_disk(7)
+    job = run_next(queue)
+
+    assert job["status"] == "cancelled"
+    assert scanned == ["/tv/e0.mkv", "/tv/e1.mkv"]

@@ -524,10 +524,12 @@ def test_a_sync_inside_another_job_still_answers_false(sync_run):
 
 
 def test_a_skipped_sync_completes(sync_run):
+    from subtitles.sync import SYNC_SKIPPED
     from subtitles.tools.subsync_engines import REASON_GENERATED_SOURCE
 
     sync_run.outcome.results = [_engine('skipped', REASON_GENERATED_SOURCE)]
-    assert sync_run.call() is False
+    # A deliberate skip answers the falsy SYNC_SKIPPED marker, not plain False.
+    assert sync_run.call() is SYNC_SKIPPED
 
 
 def test_a_successful_sync_still_returns_true(sync_run):

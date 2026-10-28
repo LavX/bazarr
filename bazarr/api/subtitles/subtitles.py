@@ -703,6 +703,8 @@ class Subtitles(Resource):
                 media_id=id,
                 # Resolve keep-lyrics against the owning instance (#227).
                 arr_instance_id=arr_instance_id,
+                # Checked above for this request, and again when the job runs.
+                require_within_area=bool(user_supplied_path),
             )
             return {"job_id": job_id or None}, 202
 

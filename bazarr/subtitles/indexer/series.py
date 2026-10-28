@@ -345,7 +345,12 @@ def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_pa
         logging.exception("BAZARR error writing embedded subtitle history for episode %s", episode_id)
 
 
-def list_missing_subtitles(no=None, epno=None, arr_instance_id=None):
+def list_missing_subtitles(no=None, epno=None, arr_instance_id=None, cancel=None):
+    """Recalculate the missing subtitles of one episode, one series, or every episode.
+
+    ``cancel`` is called before each episode and raises when the job running this was stopped, so a
+    library-wide recalculation ends at Stop instead of running to the end.
+    """
     stmt = select(TableShows.sonarrSeriesId,
                   TableEpisodes.sonarrEpisodeId,
                   TableEpisodes.id,
@@ -375,6 +380,8 @@ def list_missing_subtitles(no=None, epno=None, arr_instance_id=None):
                                 episode_subtitles.audio_language))
 
     for episode_subtitles in episodes_subtitles:
+        if cancel is not None:
+            cancel()
         missing_subtitles_text = '[]'
         if episode_subtitles.profileId:
             # get desired subtitles
@@ -549,7 +556,7 @@ def series_full_scan_subtitles(job_id=None, use_cache=None, wait_for_completion=
     gc.collect()
 
 
-def series_scan_subtitles(no, arr_instance_id=None):
+def series_scan_subtitles(no, arr_instance_id=None, cancel=None):
     episodes = database.execute(
         scoped(
             select(TableEpisodes.path, TableEpisodes.arr_instance_id)
@@ -560,6 +567,9 @@ def series_scan_subtitles(no, arr_instance_id=None):
 
     ownership_index = SyncOutputOwnerIndex()
     for episode in episodes:
+        # Raises when the job running this scan was stopped.
+        if cancel is not None:
+            cancel()
         store_subtitles(episode.path,
                         path_mappings.path_replace_instance(episode.path,
                                                             episode.arr_instance_id, 'series'),
@@ -578,7 +588,7 @@ def series_scan_disk(series_id, arr_instance_id=None, job_id=None):
                                                return_existing=True)
 
     from app.job_errors import reason_of
-    from app.jobs_queue import JobFailed
+    from app.jobs_queue import JobCancelled, JobFailed
 
     show = database.execute(
         scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == series_id),
@@ -587,7 +597,12 @@ def series_scan_disk(series_id, arr_instance_id=None, job_id=None):
         raise JobFailed(f"Scanning disk failed: series {series_id} is no longer in the library")
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Scanning disk for {show.title}")
     try:
-        series_scan_subtitles(series_id, arr_instance_id=arr_instance_id)
+        # The queue raises JobCancelled from a progress update once Stop was
+        # pressed, so the scan ends between two episodes instead of running on.
+        series_scan_subtitles(series_id, arr_instance_id=arr_instance_id,
+                              cancel=lambda: jobs_queue.update_job_progress(job_id=job_id))
+    except JobCancelled:
+        raise
     except Exception as error:
         raise JobFailed(f"Scanning disk for {show.title} failed: {reason_of(error)}") from error
     event_stream(type='series', payload=series_id)

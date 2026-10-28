@@ -108,18 +108,32 @@ def _library_steps():
 
 def recalculate_missing_subtitles(series=None, movies=None, request=None, job_id=None):
     from app.job_errors import reason_of
-    from app.jobs_queue import JobFailed
+    from app.jobs_queue import JobCancelled, JobFailed
+
+    # Raises JobCancelled once Stop was pressed. It is called between the items
+    # a pass walks, so Stop ends the recalculation there instead of after it.
+    def cancel():
+        jobs_queue.update_job_progress(job_id=job_id)
 
     if series is None and movies is None:
         steps = _library_steps()
         jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=max(len(steps), 1))
+        failures = []
         for index, (name, recalculate) in enumerate(steps):
             jobs_queue.update_job_progress(job_id=job_id, progress_value=index,
                                            progress_message=f"Recalculating {name}")
             try:
-                recalculate()
+                recalculate(cancel=cancel)
+            except JobCancelled:
+                raise
             except Exception as error:
-                raise JobFailed(f"Recalculating missing subtitles for {name} failed: {reason_of(error)}") from error
+                # The other kinds are still recalculated: one failing library
+                # does not leave the others out of date.
+                logging.warning("BAZARR recalculating missing subtitles for %s failed: reason=%s", name,
+                                reason_of(error))
+                failures.append(f"{name} ({reason_of(error)})")
+        if failures:
+            raise JobFailed(f"Recalculating missing subtitles failed for {', '.join(failures)}")
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Done')
         return
 
@@ -133,28 +147,41 @@ def recalculate_missing_subtitles(series=None, movies=None, request=None, job_id
     total = len(series) + len(movies)
     jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=max(total, 1))
     done = 0
+    failures = []
     for series_id, owner in series:
         try:
-            list_missing_subtitles(no=series_id, arr_instance_id=owner)
+            list_missing_subtitles(no=series_id, arr_instance_id=owner, cancel=cancel)
+        except JobCancelled:
+            raise
         except Exception as error:
-            raise JobFailed(f"Recalculating missing subtitles for series {series_id} failed: "
-                            f"{reason_of(error)}") from error
-        event_stream(type='series', payload=series_id)
-        episodes = database.execute(
-            scoped(select(TableEpisodes.sonarrEpisodeId).where(TableEpisodes.sonarrSeriesId == series_id),
-                   TableEpisodes.arr_instance_id, owner)).all()
-        for episode in episodes:
-            event_stream(type='episode-wanted', payload=episode.sonarrEpisodeId)
+            # The rest of the batch is still recalculated, and the job fails
+            # at the end naming what could not be.
+            logging.warning("BAZARR recalculating missing subtitles for series %s failed: reason=%s", series_id,
+                            reason_of(error))
+            failures.append(f"series {series_id} ({reason_of(error)})")
+        else:
+            event_stream(type='series', payload=series_id)
+            episodes = database.execute(
+                scoped(select(TableEpisodes.sonarrEpisodeId).where(TableEpisodes.sonarrSeriesId == series_id),
+                       TableEpisodes.arr_instance_id, owner)).all()
+            for episode in episodes:
+                event_stream(type='episode-wanted', payload=episode.sonarrEpisodeId)
         done += 1
         jobs_queue.update_job_progress(job_id=job_id, progress_value=done)
     for radarr_id, owner in movies:
         try:
-            list_missing_subtitles_movies(no=radarr_id, arr_instance_id=owner)
+            list_missing_subtitles_movies(no=radarr_id, arr_instance_id=owner, cancel=cancel)
+        except JobCancelled:
+            raise
         except Exception as error:
-            raise JobFailed(f"Recalculating missing subtitles for movie {radarr_id} failed: "
-                            f"{reason_of(error)}") from error
-        event_stream(type='movie', payload=radarr_id)
-        event_stream(type='movie-wanted', payload=radarr_id)
+            logging.warning("BAZARR recalculating missing subtitles for movie %s failed: reason=%s", radarr_id,
+                            reason_of(error))
+            failures.append(f"movie {radarr_id} ({reason_of(error)})")
+        else:
+            event_stream(type='movie', payload=radarr_id)
+            event_stream(type='movie-wanted', payload=radarr_id)
         done += 1
         jobs_queue.update_job_progress(job_id=job_id, progress_value=done)
     event_stream(type='badges')
+    if failures:
+        raise JobFailed(f"Recalculating missing subtitles failed for {', '.join(failures)}")
