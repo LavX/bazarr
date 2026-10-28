@@ -290,7 +290,9 @@ class TranslatorTest(Resource):
             return {"error": "AI Subtitle Translator service URL not configured"}, 503
 
         api_key = data.get("apiKey") if "apiKey" in data else settings.translator.openrouter_api_key
-        if not isinstance(api_key, str) or not api_key.strip():
+        if api_key is not None and not isinstance(api_key, str):
+            return {"error": "apiKey must be a string"}, 400
+        if not api_key or not api_key.strip():
             return {"keyHeldByService": True, "message": KEY_HELD_MESSAGE}, 200
 
         encryption_key = data.get("encryptionKey") if "encryptionKey" in data else settings.translator.openrouter_encryption_key

@@ -278,19 +278,13 @@ def test_an_empty_api_key_field_does_not_test_the_saved_key(monkeypatch, api_key
     assert calls == []
 
 
-@pytest.mark.parametrize('api_key', [123, ['key']])
-def test_a_non_string_api_key_is_answered_like_an_empty_field(monkeypatch, api_key):
+@pytest.mark.parametrize('api_key', [123, True, ['sk-or-v1-x']])
+def test_a_non_string_api_key_is_refused_before_any_service_call(monkeypatch, api_key):
     body, status, calls = _call_test_endpoint(
         monkeypatch, _refusal(401, message='No key'), request_json={'apiKey': api_key})
 
-    assert status == 200
-    assert body == {
-        'keyHeldByService': True,
-        'message': (
-            'No OpenRouter key is saved in Bazarr. If the translator service holds its own key, '
-            'Bazarr cannot test it from here; a translation will show whether the service can use it.'
-        ),
-    }
+    assert status == 400
+    assert body == {'error': 'apiKey must be a string'}
     assert calls == []
 
 
