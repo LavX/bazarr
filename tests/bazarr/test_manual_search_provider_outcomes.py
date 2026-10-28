@@ -19,8 +19,7 @@ def manual_endpoint(request, monkeypatch):
     # Load just these routes, without booting unrelated API namespaces or
     # subtitles' automatic-search entry points.
     root = Path(__file__).resolve().parents[2] / "bazarr"
-    for name, directory in (("api", "api"), ("api.providers", "api/providers"),
-                            ("subtitles", "subtitles")):
+    for name, directory in (("subtitles", "subtitles"),):
         if name not in sys.modules:
             package = ModuleType(name)
             package.__path__ = [str(root / directory)]
@@ -123,6 +122,8 @@ def manual_endpoint(request, monkeypatch):
     monkeypatch.setattr(manual, "_get_pool", lambda *args, **kwargs: provider_pool)
     monkeypatch.setattr(manual, "_get_language_obj", lambda profile_id: ({language}, False))
     monkeypatch.setattr(manual, "get_video", lambda *args, **kwargs: video)
+    suffix = "episodes" if kind == "episode" else "movies"
+    routes = importlib.import_module(f"api.providers.providers_{suffix}")
     monkeypatch.setattr(subliminal, "region", SimpleNamespace(backend=SimpleNamespace(sync=lambda: None)))
     original_search = manual._manual_search
 
@@ -132,8 +133,6 @@ def manual_endpoint(request, monkeypatch):
         return result
 
     monkeypatch.setattr(manual, "_manual_search", record_return)
-    suffix = "episodes" if kind == "episode" else "movies"
-    routes = importlib.import_module(f"api.providers.providers_{suffix}")
     target = {"path": path, "title": "Example", "sceneName": "None", "profileId": 1,
               "arr_instance_id": 7, "season": 1, "episode": 2, "year": "2001"}
     target_function = "_episode_search_target" if kind == "episode" else "_movie_search_target"
