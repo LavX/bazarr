@@ -28,11 +28,13 @@ function Harness({
   enabled = ["example", "other"],
   disabled = ["paused"],
   staged = tuning,
+  savedPriority = 80,
   source,
 }: {
   enabled?: string[];
   disabled?: string[];
   staged?: LooseObject;
+  savedPriority?: number;
   source?: ProviderInfo["source"];
 }) {
   const form = useForm<FormValues>({
@@ -42,7 +44,7 @@ function Harness({
     general: {
       enabled_providers: enabled,
       disabled_providers: disabled,
-      provider_priorities: JSON.stringify({ example: 80 }),
+      provider_priorities: JSON.stringify({ example: savedPriority }),
       provider_languages: JSON.stringify({ example: ["de"] }),
       provider_score_modifiers: JSON.stringify({ example: 5 }),
     },
@@ -198,4 +200,31 @@ it("clears a disabled id when it is added through the existing picker", async ()
     "example",
   ]);
   expect(stagedSettings()["settings-general-disabled_providers"]).toEqual([]);
+});
+
+it("keeps the saved priority when a disabled provider is added back", async () => {
+  const user = userEvent.setup();
+  customRender(
+    <Harness
+      enabled={["other"]}
+      disabled={["example"]}
+      staged={{}}
+      savedPriority={35}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "Add provider" }));
+  const drawer = await screen.findByRole("dialog");
+  await user.click(
+    within(drawer).getByRole("button", { name: /Example Provider/ }),
+  );
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  const staged = stagedSettings();
+  expect(JSON.parse(staged["settings-general-provider_priorities"])).toEqual({
+    example: 35,
+  });
+  expect(staged["settings-general-enabled_providers"]).toContain("example");
+  expect(staged["settings-general-disabled_providers"]).not.toContain(
+    "example",
+  );
 });

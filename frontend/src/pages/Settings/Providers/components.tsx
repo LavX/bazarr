@@ -1177,7 +1177,7 @@ const ProviderTool: FunctionComponent<ProviderToolProps> = ({
         }
 
         const priorities = resolveProviderPriorities(values.settings, settings);
-        if (isNewProvider) {
+        if (isNewProvider && priorities[info.key] === undefined) {
           const maxPriority = Object.values(priorities).reduce(
             (max, v) => (typeof v === "number" && v > max ? v : max),
             0,
