@@ -1131,11 +1131,14 @@ def _item_outcome(sync_result):
     return ITEM_SKIPPED if sync_result is SYNC_SKIPPED else sync_result
 
 
-def _process_subtitle_item(item, action, options, job_id):
+def _process_subtitle_item(item, action, options, job_id, children=None):
     """Process a single subtitle item based on the action.
 
     Returns True on success, False on failure, ITEM_SKIPPED for an item that
     was deliberately left alone.
+
+    ``children``, for a translate batch, is the list the id of the translation
+    job queued for this item is appended to, so the batch can publish them.
     """
     if action == 'sync':
         sync_kwargs = {
@@ -1237,7 +1240,7 @@ def _process_subtitle_item(item, action, options, job_id):
         # Don't pass the batch job_id to translate. translate_subtitles_file
         # has its own job/progress lifecycle that would hijack the batch job.
         # Calling without job_id makes it queue as its own separate job.
-        translate_subtitles_file(
+        child_id = translate_subtitles_file(
             video_path=item['video_path'],
             source_srt_file=source_srt_file,
             from_lang=options.get('from_lang', item['srt_lang']),
@@ -1252,6 +1255,11 @@ def _process_subtitle_item(item, action, options, job_id):
             arr_instance_id=item.get('arr_instance_id'),
             sports_operation=sports_operation,
         )
+        # An identical job that was already queued answers with its own id, and
+        # two items can share it. The batch itself is never its own child.
+        if (children is not None and isinstance(child_id, int) and not isinstance(child_id, bool)
+                and child_id != job_id and child_id not in children):
+            children.append(child_id)
         return True
     elif action == 'extract':
         from subtitles.new_subtitle import SubtitleFileExists
@@ -1720,6 +1728,13 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     all_errors = []
     # One line per failed item, "name (reason)", for the job's failure reason.
     failures = []
+    # A translate batch only queues one translation job per item and ends, so
+    # it publishes their ids for the client to wait on before it refreshes the
+    # tables. It never waits on them itself: a job that waits on jobs queued
+    # behind it deadlocks a queue that runs one job at a time.
+    children = []
+    published_children = 0
+    item_kwargs = {'children': children} if action == 'translate' else {}
 
     for i, item in enumerate(all_items, start=1):
         jobs_queue.update_job_progress(
@@ -1729,7 +1744,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
         )
 
         try:
-            result = _process_subtitle_item(item, action, options, job_id)
+            result = _process_subtitle_item(item, action, options, job_id, **item_kwargs)
             if result is ITEM_SKIPPED:
                 total_skipped += 1
             elif result:
@@ -1750,6 +1765,9 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                 progress_value=i,
                 progress_message=f"{action}: {_item_display_name(item)} ({i}/{total_count})"
             )
+            if len(children) > published_children:
+                published_children = len(children)
+                jobs_queue.publish_job_result(job_id, {'child_jobs': list(children)})
 
     jobs_queue.update_job_name(
         job_id=job_id,

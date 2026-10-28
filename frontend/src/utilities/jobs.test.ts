@@ -13,6 +13,7 @@ import {
   JobStoppedError,
   UNKNOWN_JOB_OUTCOME,
   waitForJob,
+  waitForJobs,
 } from "./jobs";
 
 vi.mock("@/apis/raw", () => ({
@@ -221,6 +222,344 @@ describe("waitForJob", () => {
 
     await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
     await outcome;
+  });
+});
+
+describe("waitForJobs", () => {
+  let client: QueryClient;
+
+  beforeEach(() => {
+    client = new QueryClient();
+    mockedJobs.mockReset();
+    mockedJobs.mockImplementation(async () => []);
+  });
+
+  const scans = (spy: ReturnType<typeof vi.spyOn>) =>
+    spy.mock.calls.filter(
+      ([key]: unknown[]) => JSON.stringify(key) === JSON.stringify(JOBS_KEY),
+    ).length;
+
+  it("reads the jobs cache once for a whole batch of children, not once per child", async () => {
+    const count = 3000;
+    const ids = Array.from({ length: count }, (_, index) => index + 1);
+    client.setQueryData(
+      JOBS_KEY,
+      ids.map((id) => job(id, "pending")),
+    );
+    const spy = vi.spyOn(client, "getQueryData");
+
+    const startedAt = Date.now();
+    const waiting = waitForJobs(client, ids);
+    // One scan to see which already ended, whatever the number of children.
+    expect(scans(spy)).toBe(1);
+    // Generous: the per-child scan took 25 s at this size.
+    expect(Date.now() - startedAt).toBeLessThan(5000);
+
+    spy.mockClear();
+    client.setQueryData(
+      JOBS_KEY,
+      ids.map((id) => job(id, "completed")),
+    );
+    const results = await waiting;
+    expect(scans(spy)).toBeLessThanOrEqual(2);
+    expect(results).toHaveLength(count);
+    expect(results.every((entry) => entry.status === "fulfilled")).toBe(true);
+  });
+
+  it("settles each child on its own outcome and waits for the one still running", async () => {
+    client.setQueryData(JOBS_KEY, [
+      job(1, "failed", { error: { reason: "failed", message: "boom" } }),
+      job(2, "running"),
+      job(3, "cancelled"),
+    ]);
+    let done = false;
+    const waiting = waitForJobs(client, [1, 2, 3]).then((results) => {
+      done = true;
+      return results;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(done).toBe(false);
+
+    client.setQueryData(JOBS_KEY, [
+      job(1, "failed", { error: { reason: "failed", message: "boom" } }),
+      job(2, "completed"),
+      job(3, "cancelled"),
+    ]);
+    const results = await waiting;
+    expect(results.map((entry) => entry.status)).toEqual([
+      "rejected",
+      "fulfilled",
+      "rejected",
+    ]);
+    expect((results[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+      JobFailedError,
+    );
+    expect((results[2] as PromiseRejectedResult).reason).toBeInstanceOf(
+      JobStoppedError,
+    );
+  });
+
+  it("keeps the session check: a row of another backend run is not the child", async () => {
+    client.setQueryData(JOBS_KEY, [job(1, "completed", { session: "old" })]);
+    let done = false;
+    const waiting = waitForJobs(client, [1], "new").then((results) => {
+      done = true;
+      return results;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(done).toBe(false);
+
+    client.setQueryData(JOBS_KEY, [job(1, "completed", { session: "new" })]);
+    expect((await waiting)[0].status).toBe("fulfilled");
+  });
+
+  it("reports a child the backend stopped listing as unknown, not as done", async () => {
+    vi.useFakeTimers();
+    try {
+      const waiting = waitForJobs(client, [7, null]);
+      await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
+      const results = await waiting;
+      expect((results[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+        JobOutcomeUnknownError,
+      );
+      // An id that could not be queued resolves at once.
+      expect(results[1].status).toBe("fulfilled");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("a pass that settles many children", () => {
+  let client: QueryClient;
+
+  beforeEach(() => {
+    client = new QueryClient();
+    mockedJobs.mockReset();
+    mockedJobs.mockImplementation(async () => []);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const count = 10000;
+  const ids = Array.from({ length: count }, (_, index) => index + 1);
+
+  // Counts the subscriptions the module takes and gives back, so a leak or a
+  // double release shows.
+  function watchSubscriptions(target: QueryClient) {
+    const cache = target.getQueryCache();
+    const real = cache.subscribe.bind(cache);
+    const released = vi.fn();
+    const taken = vi.fn();
+    vi.spyOn(cache, "subscribe").mockImplementation((listener) => {
+      taken();
+      const unsubscribe = real(listener);
+      return () => {
+        released();
+        unsubscribe();
+      };
+    });
+    return { taken, released };
+  }
+
+  // The fallback poll is the one interval here; the query cache's own timers
+  // are not counted.
+  function watchIntervals() {
+    const live = new Set<unknown>();
+    const set = globalThis.setInterval;
+    const clear = globalThis.clearInterval;
+    vi.spyOn(globalThis, "setInterval").mockImplementation(((
+      ...args: Parameters<typeof setInterval>
+    ) => {
+      const id = set(...args);
+      live.add(id);
+      return id;
+    }) as typeof setInterval);
+    vi.spyOn(globalThis, "clearInterval").mockImplementation(((
+      id: Parameters<typeof clearInterval>[0],
+    ) => {
+      live.delete(id);
+      clear(id);
+    }) as typeof clearInterval);
+    return live;
+  }
+
+  // The release after a settle looked over the map of waiters once per settled
+  // job. Map iteration is the unit of that work: the pass itself iterates the
+  // map a fixed number of times.
+  function countMapScans() {
+    const values = vi.spyOn(Map.prototype, "values");
+    const entries = vi.spyOn(Map.prototype, "entries");
+    return () => values.mock.calls.length + entries.mock.calls.length;
+  }
+
+  it("settles children the backend stopped listing without a pass over the waiters per child", async () => {
+    const intervals = watchIntervals();
+    const subscriptions = watchSubscriptions(client);
+    const waiting = waitForJobs(client, ids, "run-a");
+    const scans = countMapScans();
+    const startedAt = Date.now();
+
+    // A backend restart mid-batch: the poll finds none of them.
+    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
+    const results = await waiting;
+
+    expect(results).toHaveLength(count);
+    expect(
+      results.every(
+        (entry) =>
+          entry.status === "rejected" &&
+          entry.reason instanceof JobOutcomeUnknownError,
+      ),
+    ).toBe(true);
+    expect(scans()).toBeLessThan(100);
+    // Generous: the pass per child took seconds at this size.
+    expect(Date.now() - startedAt).toBeLessThan(JOB_FALLBACK_POLL_MS + 1500);
+    // Nothing is left behind once the last waiter settled.
+    expect(subscriptions.taken).toHaveBeenCalledTimes(1);
+    expect(subscriptions.released).toHaveBeenCalledTimes(1);
+    expect(intervals.size).toBe(0);
+  });
+
+  it("settles children a queue clear took out of the list the same way", async () => {
+    const intervals = watchIntervals();
+    client.setQueryData(
+      JOBS_KEY,
+      ids.map((id) => job(id, "pending")),
+    );
+    const subscriptions = watchSubscriptions(client);
+    const waiting = waitForJobs(client, ids, "run-a");
+    const scans = countMapScans();
+
+    // The drawer clears the pending queue without a per-job event, and the
+    // list that comes back no longer has them.
+    client.setQueryData(JOBS_KEY, []);
+    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
+    const results = await waiting;
+
+    expect(results.every((entry) => entry.status === "rejected")).toBe(true);
+    expect(scans()).toBeLessThan(100);
+    expect(subscriptions.released).toHaveBeenCalledTimes(1);
+    expect(intervals.size).toBe(0);
+  });
+
+  it("settles in the order the jobs were queued", async () => {
+    const order: number[] = [];
+    const some = ids.slice(0, 50);
+    const waiting = Promise.allSettled(
+      some.map((id) =>
+        waitForJob(client, id).catch(() => {
+          order.push(id);
+        }),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
+    await waiting;
+    expect(order).toEqual(some);
+  });
+
+  it("keeps listening while some children are still waiting, and lets go after the last", async () => {
+    const intervals = watchIntervals();
+    const subscriptions = watchSubscriptions(client);
+    client.setQueryData(JOBS_KEY, [job(1, "pending"), job(2, "pending")]);
+    const first = waitForJob(client, 1);
+    const second = waitForJob(client, 2);
+
+    client.setQueryData(JOBS_KEY, [job(1, "completed"), job(2, "running")]);
+    await first;
+    expect(subscriptions.released).not.toHaveBeenCalled();
+    expect(intervals.size).toBe(1);
+
+    client.setQueryData(JOBS_KEY, [job(1, "completed"), job(2, "completed")]);
+    await second;
+    expect(subscriptions.taken).toHaveBeenCalledTimes(1);
+    expect(subscriptions.released).toHaveBeenCalledTimes(1);
+    expect(intervals.size).toBe(0);
+  });
+
+  it("listens and polls again for a job followed after the last wait ended", async () => {
+    const intervals = watchIntervals();
+    const subscriptions = watchSubscriptions(client);
+    const earlier = waitForJob(client, 1);
+    client.setQueryData(JOBS_KEY, [job(1, "completed")]);
+    await earlier;
+    expect(intervals.size).toBe(0);
+
+    const later = waitForJob(client, 2);
+    expect(subscriptions.taken).toHaveBeenCalledTimes(2);
+    expect(intervals.size).toBe(1);
+    client.setQueryData(JOBS_KEY, [job(2, "completed")]);
+    await expect(later).resolves.toMatchObject({
+      // eslint-disable-next-line camelcase
+      job_id: 2,
+    });
+    expect(subscriptions.released).toHaveBeenCalledTimes(2);
+    expect(intervals.size).toBe(0);
+  });
+
+  it("lets go of a client nothing waits on while another still does", async () => {
+    const intervals = watchIntervals();
+    const other = new QueryClient();
+    const mine = watchSubscriptions(client);
+    const theirs = watchSubscriptions(other);
+    const first = waitForJob(client, 1);
+    const second = waitForJob(other, 2);
+
+    client.setQueryData(JOBS_KEY, [job(1, "completed")]);
+    await first;
+    expect(mine.released).toHaveBeenCalledTimes(1);
+    expect(theirs.released).not.toHaveBeenCalled();
+    expect(intervals.size).toBe(1);
+
+    other.setQueryData(JOBS_KEY, [job(2, "completed")]);
+    await second;
+    expect(theirs.released).toHaveBeenCalledTimes(1);
+    expect(intervals.size).toBe(0);
+  });
+
+  it("polls a long list for many children without a scan of it per child", async () => {
+    const list = ids.map((id) => job(id, "pending"));
+    mockedJobs.mockImplementation(async () => list);
+    const waiting = waitForJobs(client, ids, "run-a");
+    const find = vi.spyOn(Array.prototype, "find");
+
+    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
+    // Looking each child up in the list is a scan per child. The lookups left
+    // are over the one or two rows that share an id.
+    const longScans = find.mock.contexts.filter(
+      (context) => (context as unknown[]).length >= count,
+    ).length;
+    expect(longScans).toBe(0);
+
+    mockedJobs.mockImplementation(async () =>
+      ids.map((id) => job(id, "completed")),
+    );
+    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
+    expect((await waiting).every((entry) => entry.status === "fulfilled")).toBe(
+      true,
+    );
+  });
+
+  it("reads the jobs cache only when the jobs list changes", async () => {
+    client.setQueryData(JOBS_KEY, [job(1, "pending")]);
+    const waiting = waitForJob(client, 1);
+    const spy = vi.spyOn(client, "getQueryData");
+
+    client.setQueryData([QueryKeys.System, "unrelated"], { busy: true });
+    client.setQueryData([QueryKeys.Series], []);
+    client.getQueryCache().find({ queryKey: [QueryKeys.Series] });
+    expect(spy).not.toHaveBeenCalled();
+
+    client.setQueryData(JOBS_KEY, [job(1, "completed")]);
+    await waiting;
+    expect(spy).toHaveBeenCalled();
   });
 });
 

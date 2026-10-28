@@ -93,6 +93,11 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     destination that moved since, so a subtitle that landed while the job
     waited is not replaced, and the job reports that as a skip. A manual
     translation passes nothing and may replace its destination.
+
+    Called without ``job_id`` it only queues, for every media type, and returns
+    the id of the job to follow: the one it queued, or the identical one already
+    pending or running. It returns None when nothing could be queued. Called
+    inside its own job it returns the translation result.
     """
     if not job_id:
         # Build the label inline: add_job_from_function captures the frame,
@@ -103,8 +108,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                 get_title(media_type, radarr_id, sonarr_series_id, sonarr_episode_id,
                           arr_instance_id,
                           **({'sports_context': sports_operation.context} if sports_operation else {}))),
-            is_progress=True, return_existing=media_type == 'episode')
-        return job_id if media_type == 'episode' else None
+            is_progress=True, return_existing=True)
+        return job_id or None
 
     translator_label = settings.translator.translator_type.replace("_", " ").title()
     # Observation only. The queue records a generic completed envelope for every

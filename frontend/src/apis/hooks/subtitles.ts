@@ -1,6 +1,11 @@
 import { useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { AxiosError } from "axios";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
@@ -17,6 +22,7 @@ import {
 } from "@/apis/raw/subtitles";
 import { notification } from "@/modules/notification";
 import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
+import { waitForJobs } from "@/utilities/jobs";
 import { hiddenTrackOutcome } from "@/utilities/subtitles";
 
 /** Refresh the tables a subtitle of this media type is listed in. */
@@ -475,7 +481,7 @@ export function useBatchAction() {
     onSuccess: (data, params) => {
       // The request only queues the batch, so refreshing now would refetch the
       // tables before anything changed. Refresh when the job finishes instead.
-      refreshWhenJobFinishes(client, data?.job_id, () => {
+      const refresh = () => {
         params.items.forEach((item) => {
           if (item.type === "episode" || item.type === "series") {
             void invalidateEpisodeHistory(client, {
@@ -503,9 +509,41 @@ export function useBatchAction() {
         void client.invalidateQueries({
           queryKey: [QueryKeys.Translator],
         });
+      };
+      const jobId = data?.job_id;
+      refreshWhenJobFinishes(client, jobId, () => {
+        if (params.action === "translate" && typeof jobId === "number") {
+          // A translate batch ends once it has queued one translation job per
+          // item, so its own end says nothing about the tables. It publishes
+          // those jobs' ids; refresh when they have ended too.
+          void waitForBatchChildren(client, jobId).then(refresh);
+        } else {
+          refresh();
+        }
       });
     },
   });
+}
+
+/**
+ * Wait for the translation jobs a finished translate batch queued. Every child
+ * is followed to its own end, whether it completed, failed or was stopped, so
+ * one that ended early never cuts the wait for the ones still running. What
+ * cannot be known at all (the batch published nothing, or its result left the
+ * history) ends the wait at once: the caller refreshes either way.
+ */
+async function waitForBatchChildren(client: QueryClient, batchJobId: number) {
+  try {
+    const outcome = await api.system.jobResult<{ child_jobs?: number[] }>(
+      batchJobId,
+    );
+    const children = outcome.result?.child_jobs ?? [];
+    // One registration pass and one cache read for all of them: a batch can
+    // queue thousands of children.
+    await waitForJobs(client, children, outcome.session);
+  } catch {
+    // Nothing to wait on.
+  }
 }
 
 export function useSubtitleContent(
