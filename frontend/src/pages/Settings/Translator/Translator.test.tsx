@@ -141,6 +141,55 @@ describe("Translator Test Connection button", () => {
     });
   });
 
+  it("names the HTTP status when a 500 comes back with no error body", async () => {
+    mutate.mockImplementation(
+      (_params: unknown, options: { onError?: (error: unknown) => void }) => {
+        options.onError?.({ response: { status: 500, data: "" } });
+      },
+    );
+    customRender(
+      <TestButtonHarness
+        settings={{
+          translator: { ["openrouter_url"]: "http://localhost:8990" },
+        }}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
+    expect(notifications.show).toHaveBeenCalledTimes(1);
+    expect(notifications.show).toHaveBeenCalledWith({
+      title: "Connection Failed",
+      message: "Could not reach the translator service (HTTP 500)",
+      color: "red",
+    });
+  });
+
+  it("keeps the plain unreachable message for other statuses without an error body", async () => {
+    mutate.mockImplementation(
+      (_params: unknown, options: { onError?: (error: unknown) => void }) => {
+        options.onError?.({ response: { status: 502, data: "" } });
+      },
+    );
+    customRender(
+      <TestButtonHarness
+        settings={{
+          translator: { ["openrouter_url"]: "http://localhost:8990" },
+        }}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
+    expect(notifications.show).toHaveBeenCalledWith({
+      title: "Connection Failed",
+      message: "Could not reach the translator service",
+      color: "red",
+    });
+  });
+
   it("explains a service-held API key without claiming it was validated", async () => {
     mutate.mockImplementation(
       (
@@ -197,8 +246,8 @@ describe("Translator Test Connection button", () => {
     await user.click(button);
 
     // The call carries the configured service URL. The Bazarr-side key is
-    // passed through as the empty string the field holds, and the test
-    // endpoint treats an empty key as absent, so nothing here pins it.
+    // passed through as the empty string the field holds. This test does not
+    // assert that key; the endpoint answers an empty key with the held-key note.
     expect(mutate).toHaveBeenCalledTimes(1);
     expect(mutate.mock.calls[0][0]).toMatchObject({
       serviceUrl: "http://localhost:8990",
