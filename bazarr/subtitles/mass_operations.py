@@ -1134,7 +1134,11 @@ def _item_outcome(sync_result):
 
 
 def _extract_translate_source(item):
-    """Extract one translation source with its owning instance and track flags."""
+    """Extract one translation source with its owning instance and track flags.
+
+    An extraction failure is usually a bitmap track (PGS, VobSub) that cannot
+    become an SRT. That is this item's problem; the batch carries on.
+    """
     from subtitles.tools.translate.batch import extract_embedded_subtitle
 
     if item.get('sports_event_id'):
@@ -1766,6 +1770,9 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                     if next_item is None:
                         break
                     index, embedded_item = next_item
+                    # A cancel or failure can leave up to one extracted track per
+                    # worker in the cache, plus the one extraction still running.
+                    # These are harmless cache files, and nothing waits for them.
                     pending_extractions[index] = extraction_pool.submit(_extract_translate_source_in_pool, embedded_item)
 
             refill_extractions()

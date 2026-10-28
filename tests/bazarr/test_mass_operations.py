@@ -2197,6 +2197,7 @@ class TestMassBatchOperationWithEmbeddedItems:
 
         assert result['queued'] == 2
         assert mock_process.call_count == 2
+        assert mock_extract.call_count == 2
 
     @patch('subtitles.mass_operations._extract_translate_source', return_value='/extracted/test.en.srt')
     @patch('subtitles.mass_operations.jobs_queue')
@@ -2220,6 +2221,7 @@ class TestMassBatchOperationWithEmbeddedItems:
                     for c in mock_jq.update_job_progress.call_args_list]
         assert any('Show.S01E01.mkv' in m and 'en' in m for m in messages), messages
         assert not any('None' in m for m in messages), messages
+        assert mock_extract.call_count == 1
 
     @patch('subtitles.mass_operations.jobs_queue')
     @patch('subtitles.mass_operations._process_subtitle_item', return_value=True)
@@ -2261,6 +2263,7 @@ class TestMassBatchOperationWithEmbeddedItems:
 
         # Every item still ran; the batch fails at the end with both named.
         assert mock_process.call_count == 2
+        assert mock_extract.call_count == 2
         assert '2 of 2 items failed' in str(raised.value)
         assert 'ep1.mkv (en track)' in str(raised.value)
         assert 'ep2.mkv (en track)' in str(raised.value)

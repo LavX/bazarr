@@ -466,6 +466,46 @@ def test_mixed_file_and_embedded_sources_keep_their_order(mass, monkeypatch):
     assert mass.published[-1] == (5, {'child_jobs': [101, 102, 103]})
 
 
+def test_sports_embedded_source_uses_the_pool_and_keeps_its_owner_and_order(mass, monkeypatch):
+    from sportarr import profile_hooks
+
+    mass.items = [_item(1),
+                  _item(2, video_path='/video/event2.mkv', sonarr_series_id=None,
+                        sonarr_episode_id=None, sports_event_id=61),
+                  _item(3)]
+    pools = _use_executor(monkeypatch, mass)
+    calls = []
+    extract = mass.extract_module.extract_embedded_subtitle
+
+    def record_extraction(video_path, language, media_type, **kwargs):
+        calls.append((video_path, media_type, kwargs['arr_instance_id']))
+        return extract(video_path, language, media_type, **kwargs)
+
+    def translate(**kwargs):
+        mass.translated.append(kwargs)
+        return 100 + len(mass.translated)
+
+    monkeypatch.setattr(mass.extract_module, 'extract_embedded_subtitle', record_extraction)
+    monkeypatch.setattr(mass.translate_module, 'translate_subtitles_file', translate)
+    monkeypatch.setattr(profile_hooks, 'manual_translation_operation', lambda *args, **kwargs: None)
+
+    assert mass.run() == {'queued': 3, 'skipped': 0, 'errors': []}
+
+    assert len(pools) == 1
+    assert [number for event, number in pools[0].events if event == 'submit'] == [1, None, 3]
+    assert calls == [('/video/ep1.mkv', 'episode', 7),
+                     ('/video/event2.mkv', 'sports', 7),
+                     ('/video/ep3.mkv', 'episode', 7)]
+    assert [(item['video_path'], item['source_srt_file']) for item in mass.translated] == [
+        ('/video/ep1.mkv', '/extracted/ep1.en.srt'),
+        ('/video/event2.mkv', '/extracted/event2.en.srt'),
+        ('/video/ep3.mkv', '/extracted/ep3.en.srt'),
+    ]
+    assert mass.translated[1]['media_type'] == 'sports'
+    assert mass.translated[1]['arr_instance_id'] == 7
+    assert mass.published[-1] == (5, {'child_jobs': [101, 102, 103]})
+
+
 def test_file_only_translation_uses_existing_paths_without_extraction(mass, monkeypatch):
     mass.items = [_item(1, embedded=False, srt_path='/subs/ep1.en.srt'),
                   _item(2, embedded=False, srt_path='/subs/ep2.en.srt')]
@@ -479,6 +519,7 @@ def test_file_only_translation_uses_existing_paths_without_extraction(mass, monk
     assert mass.run() == {'queued': 2, 'skipped': 0, 'errors': []}
 
     assert [item['source_srt_file'] for item in mass.translated] == ['/subs/ep1.en.srt', '/subs/ep2.en.srt']
+    assert len(pools) == 1
     assert all(pool.futures == [] for pool in pools)
     assert mass.published[-1] == (5, {'child_jobs': [101, 102]})
 
