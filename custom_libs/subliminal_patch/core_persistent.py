@@ -18,7 +18,7 @@ from subliminal.core import check_video
 logger = logging.getLogger(__name__)
 
 # list_all_subtitles, list_supported_languages, list_supported_video_types, download_subtitles, download_best_subtitles
-def list_all_subtitles(videos, languages, pool_instance, min_score=0):
+def list_all_subtitles(videos, languages, pool_instance, min_score=0, cancel=None):
     listed_subtitles = defaultdict(list)
 
     # return immediatly if no video passed the checks
@@ -27,9 +27,11 @@ def list_all_subtitles(videos, languages, pool_instance, min_score=0):
 
     for video in videos:
         logger.info("Listing subtitles for %r", video)
+        # Only a caller that can be stopped passes a check, so a pool that has no use for one is not asked.
+        stoppable = {'cancel': cancel} if cancel is not None else {}
         subtitles = pool_instance.list_subtitles_prioritized(
             video, languages - video.subtitle_languages, min_score=min_score,
-            exhaustive=True,
+            exhaustive=True, **stoppable,
         )
         listed_subtitles[video].extend(subtitles)
         logger.info("Found %d subtitle(s)", len(subtitles))

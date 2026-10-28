@@ -47,6 +47,17 @@ JOB_HISTORY_DEPTH = 50
 # searches a person is likely to come back to and drops them from older jobs.
 JOB_RESULTS_KEPT = 10
 
+# Jobs a person starts by pressing a button are forced to run at once, past the
+# general limit, because they are waiting on them. Each one is a thread, so a
+# lane caps how many such jobs run together. A job over its lane's cap is not
+# refused: it stays on the pending queue and runs in its turn.
+USER_SEARCH_LANE = "user_search"
+USER_ACTION_LANE = "user_action"
+LANE_LIMITS = {USER_SEARCH_LANE: 4, USER_ACTION_LANE: 4}
+LANE_FULL_MESSAGE = "Waiting for your other requests to finish"
+# How often the consumer loop logs an error it survived, so a fault that repeats every pass is not a flood.
+CONSUMER_ERROR_LOG_SECONDS = 60
+
 
 def _job_event(action: str, payload: dict):
     """Send one jobs event, stamped with the backend session it belongs to.
@@ -95,6 +106,10 @@ class JobFailed(Exception):
 # carry paths or provider payloads, so it stays in the log.
 UNEXPECTED_JOB_ERROR = {"reason": "unexpected_error",
                         "message": "The job failed unexpectedly. Check the logs for details."}
+
+# What a user sees for a job whose thread the operating system would not start.
+COULD_NOT_START_JOB_ERROR = {"reason": "could_not_start",
+                             "message": "The job could not be started. Check the logs for details."}
 
 # The jobs that call the AI Subtitle Translator, by the module and function
 # they run: a library translation and an editor translation. They share the
@@ -175,10 +190,13 @@ class Job:
         for one the scheduler's task pool enqueued, None when nothing knows. Sent with the job, so the
         client can announce the user's own work and leave routine work quiet.
     :type origin: str, optional
+    :ivar lane: The lane a job a person starts is counted in, one of ``LANE_LIMITS``, or None. Forcing a
+        job to start at once is held to its lane's cap.
+    :type lane: str, optional
     """
     def __init__(self, job_id: int, job_name: str, module: str, func: str, args: list = None, kwargs: dict = None,
                  is_progress: bool = False, is_signalr: bool = False, progress_max: int = 0, job_returned_value=None,
-                 retryable: bool = False, retry_of: int = None):
+                 retryable: bool = False, retry_of: int = None, lane: str = None):
         self.job_id = job_id
         self.session = PROCESS_SESSION
         self.job_name = job_name
@@ -199,6 +217,10 @@ class Job:
         self.result = None
         self.retryable = retryable
         self.retry_of = retry_of
+        self.lane = lane
+        # Set when a person started the job and its lane was full, so it sits on pending
+        # waiting for a lane slot. The queue starts such a job as soon as the lane has room.
+        self.lane_waiting = False
         self.cancelled = False
         self.stopped = False
         # Who started the job, read from the enqueuing thread: an
@@ -273,7 +295,8 @@ class JobsQueue:
 
     def feed_jobs_pending_queue(self, job_name, module, func, args: list = None, kwargs: dict = None,
                                 is_progress=False, is_signalr=False, progress_max: int = 0,
-                                retryable: bool = False, retry_of: int = None, return_existing: bool = False):
+                                retryable: bool = False, retry_of: int = None, return_existing: bool = False,
+                                lane: str = None):
         """
         Adds a new job to the pending jobs queue with specified details and triggers an event
         to notify about the queue update. Each job is uniquely identified by a job ID,
@@ -305,6 +328,9 @@ class JobsQueue:
             match, under the queue lock, so the caller gets a job to follow even when that job finishes a
             moment later.
         :type return_existing: bool
+        :param lane: The lane a job a person starts is counted in, one of ``LANE_LIMITS``. Forcing the job to
+            start at once is held to that lane's cap.
+        :type lane: str
         :return: The unique job ID assigned to the newly queued job, or False when an identical job is already
             pending or running.
         :rtype: int | bool
@@ -346,7 +372,8 @@ class JobsQueue:
                     is_signalr=is_signalr,
                     progress_max=progress_max,
                     retryable=retryable,
-                    retry_of=retry_of,)
+                    retry_of=retry_of,
+                    lane=lane,)
             )
 
         logging.debug(f"Task {job_name} ({new_job_id}) added to queue")  # noqa: G004
@@ -789,17 +816,20 @@ class JobsQueue:
                  True if the job was removed, otherwise False.
         :rtype: bool
         """
-        for job in self.jobs_pending_queue:
-            if job.job_id == job_id and job.status == 'pending':
-                try:
-                    self.jobs_pending_queue.remove(job)
-                except ValueError:
-                    return False
-                else:
-                    logging.debug(f"Task {job.job_name} ({job.job_id}) removed from queue")  # noqa: G004
-                    _job_event('delete', {"job_id": job.job_id})
-                    return True
-        return False
+        # The consumer scans pending under this lock, so an edit made without it can end that scan with
+        # "deque mutated during iteration". The event goes out after the lock is let go.
+        with self._queue_lock:
+            job = next((item for item in list(self.jobs_pending_queue)
+                        if item.job_id == job_id and item.status == 'pending'), None)
+            if job is None:
+                return False
+            try:
+                self.jobs_pending_queue.remove(job)
+            except ValueError:
+                return False
+        logging.debug(f"Task {job.job_name} ({job.job_id}) removed from queue")  # noqa: G004
+        _job_event('delete', {"job_id": job.job_id})
+        return True
 
     def move_job_in_pending_queue(self, job_id: int, move_destination: str) -> bool:
         """
@@ -817,30 +847,31 @@ class JobsQueue:
         :return: A boolean indicating whether the operation was successful.
         :rtype: bool
         """
-        for job in self.jobs_pending_queue:
-            if job.job_id == job_id and job.status == 'pending':
-                try:
-                    self.jobs_pending_queue.remove(job)
-                except ValueError:
-                    return False
-                except Exception as e:
-                    logging.exception(f"Unhandled exception while trying to move job {job.job_name} ({job.job_id}) in "  # noqa: G004
-                                      f"pending queue: {e}")
-                    return False
-                else:
-                    if move_destination == 'top':
-                        self.jobs_pending_queue.appendleft(job)
-                    elif move_destination == 'bottom':
-                        self.jobs_pending_queue.append(job)
-                    else:
-                        logging.error(f"Invalid move destination: {move_destination}. Accepted values are 'top' and "  # noqa: G004
-                                      f"'bottom'")
-                        return False
-                    logging.debug(f"Task {job.job_name} ({job.job_id}) moved to {move_destination} of the pending "  # noqa: G004
-                                  f"queue")
-                    _job_event('update', {"job_id": job.job_id})
-                    return True
-        return False
+        with self._queue_lock:
+            job = next((item for item in list(self.jobs_pending_queue)
+                        if item.job_id == job_id and item.status == 'pending'), None)
+            if job is None:
+                return False
+            if move_destination not in ('top', 'bottom'):
+                logging.error(f"Invalid move destination: {move_destination}. Accepted values are 'top' and "  # noqa: G004
+                              f"'bottom'")
+                return False
+            try:
+                self.jobs_pending_queue.remove(job)
+            except ValueError:
+                return False
+            except Exception as e:
+                logging.exception(f"Unhandled exception while trying to move job {job.job_name} ({job.job_id}) in "  # noqa: G004
+                                  f"pending queue: {e}")
+                return False
+            if move_destination == 'top':
+                self.jobs_pending_queue.appendleft(job)
+            else:
+                self.jobs_pending_queue.append(job)
+        logging.debug(f"Task {job.job_name} ({job.job_id}) moved to {move_destination} of the pending "  # noqa: G004
+                      f"queue")
+        _job_event('update', {"job_id": job.job_id})
+        return True
 
     def cancel_running_job(self, job_id: int) -> bool:
         """
@@ -859,6 +890,21 @@ class JobsQueue:
                 return True
         return False
 
+    def raise_if_cancelled(self, job_id: int) -> None:
+        """
+        Raises ``JobCancelled`` when the running job was told to stop. It reads the flag and nothing
+        else: unlike ``update_job_progress`` it publishes no progress, so work that checks often may
+        call it as often as it likes.
+
+        :param job_id: The unique identifier of the running job.
+        :type job_id: int
+        :raises JobCancelled: If Stop was pressed on the job.
+        """
+        with self._queue_lock:
+            job = next((item for item in self.jobs_running_queue if item.job_id == job_id), None)
+            if job is not None and job.cancelled:
+                raise JobCancelled(f"Job {job.job_name} ({job.job_id}) was cancelled", job_id=job_id)
+
     def force_start_pending_job(self, job_id: int, user_start: bool = False) -> bool:
         """
         Forces the execution of a job currently in the pending queue. Only jobs with
@@ -872,7 +918,8 @@ class JobsQueue:
             scheduled it, so its origin is written here and not at creation. Internal
             callers leave it off and the origin stays as it was.
         :type user_start: bool
-        :return: A boolean value indicating whether the job was successfully initiated.
+        :return: A boolean value indicating whether the job was successfully initiated. False as well when
+            the job's lane is full: it stays pending, says so in its progress message, and runs in its turn.
         :rtype: bool
         """
         with self._queue_lock:
@@ -881,18 +928,74 @@ class JobsQueue:
             if job is None:
                 return False
 
-            # Deliberately without a capacity check: forcing a job is an
-            # explicit user action. It still reserves the same way, so the job
-            # is counted exactly once and never sits in neither queue.
-            self.jobs_pending_queue.remove(job)
-            self.jobs_running_queue.append(job)
+            # Deliberately past the general limit: forcing a job is an explicit
+            # user action. Its lane still caps how many run together, and a
+            # job over the cap stays pending and runs in its turn. It reserves
+            # the same way otherwise, so the job is counted exactly once and
+            # never sits in neither queue.
+            #
+            # The lane's free slots go to the searches that have waited longest first. A press that
+            # finds a slot free does not take it from an older search waiting for it: that one starts,
+            # and the press joins the line unless the lane has room for it as well.
             if user_start:
                 job.origin = 'user'
+            starting = self._starting_with(job)
+            for item in starting:
+                self.jobs_pending_queue.remove(item)
+                self.jobs_running_queue.append(item)
+                self._clear_lane_wait(item)
+            started = job in starting
+            waits_for_lane = not started
+            if waits_for_lane:
+                job.progress_message = LANE_FULL_MESSAGE
+                job.lane_waiting = True
 
-        job_thread = Thread(target=self._run_job, args=(job,))
-        job_thread.daemon = True
-        job_thread.start()
-        return True
+        # A press whose own job could not get a thread has failed, which its own event announces.
+        for item in starting:
+            if not self._start_job_thread(item) and item is job:
+                started = False
+        if waits_for_lane:
+            _job_event('update', {"job_id": job.job_id})
+        return started
+
+    def _start_job_thread(self, job) -> bool:
+        """Start the thread that runs ``job``, which the caller already moved from pending to running.
+
+        The operating system can refuse a thread. The job then has nothing behind it, and it would sit on
+        running holding its general and lane slots for good, so repeated refusals would fill all the
+        capacity. It fails instead, with a reason the user can read, and its slots are free again.
+        """
+        try:
+            job_thread = Thread(target=self._run_job, args=(job,))
+            job_thread.daemon = True
+            job_thread.start()
+            return True
+        except Exception:
+            logging.exception("BAZARR could not start a thread for job %s (id %s)", job.job_name, job.job_id)
+            job.error = dict(COULD_NOT_START_JOB_ERROR)
+            self._mark_failed(job)
+            try:
+                _job_event('update', {"job_id": job.job_id, "status": job.status, "progress_value": None,
+                                      "error": job.error, "action": job.action})
+            except Exception:
+                logging.exception("BAZARR could not announce that job %s failed to start", job.job_id)
+            return False
+
+    def _starting_with(self, job) -> list:
+        """The jobs a press on ``job`` starts now, in pending order, ``job`` among them when it is its turn.
+
+        An unlaned job, or one in a lane with room for it and every search already waiting there, starts
+        at once. A lane that cannot take them all starts the waiters in the order the consumer promotes
+        them, which is the order of the pending queue: the longest waiter first until someone moves a
+        search to the top or the bottom. Call with ``_queue_lock`` held.
+        """
+        limit = LANE_LIMITS.get(job.lane)
+        if limit is None:
+            return [job]
+        waiting = [item for item in self.jobs_pending_queue
+                   if item.lane == job.lane and item.status == 'pending' and (item.lane_waiting or item is job)]
+        free = limit - sum(1 for running in self.jobs_running_queue if running.lane == job.lane)
+        return waiting[:max(free, 0)]
 
     def empty_jobs_queue(self, queue_name: str):
         """
@@ -908,7 +1011,8 @@ class JobsQueue:
         """
         if queue_name in ['pending', 'failed', 'completed']:
             logging.debug(f"Emptying jobs queue for {queue_name} jobs")  # noqa: G004
-            getattr(self, f'jobs_{queue_name}_queue').clear()
+            with self._queue_lock:
+                getattr(self, f'jobs_{queue_name}_queue').clear()
             return True
         return False
 
@@ -917,11 +1021,14 @@ class JobsQueue:
         Continuously consumes jobs from the pending jobs queue and processes them by starting a new thread
         for each job, subject to the limit of concurrent jobs allowed in the running queue.
 
-        The function will terminate in response to a KeyboardInterrupt or SystemExit exception.
+        The function will terminate in response to a KeyboardInterrupt or SystemExit exception. Any other
+        error ends only the pass it happened in: this thread is the only one that starts queued jobs, so
+        it is logged (with its traceback, at most once a minute) and the loop goes on.
 
         :raises KeyboardInterrupt: If the execution is interrupted manually.
         :raises SystemExit: If the execution is interrupted by a system exit event.
         """
+        last_logged = None
         while True:
             try:
                 job = self._reserve_next_job()
@@ -929,11 +1036,15 @@ class JobsQueue:
                     sleep(0.5)
                     continue
 
-                job_thread = Thread(target=self._run_job, args=(job,))
-                job_thread.daemon = True
-                job_thread.start()
+                self._start_job_thread(job)
             except (KeyboardInterrupt, SystemExit):
                 break
+            except Exception:
+                now = time.monotonic()
+                if last_logged is None or now - last_logged >= CONSUMER_ERROR_LOG_SECONDS:
+                    last_logged = now
+                    logging.exception("BAZARR the jobs queue consumer hit an error and goes on")
+                sleep(0.5)
 
     def _has_capacity_for(self, job) -> bool:
         """Whether ``job`` may start now. Call with ``_queue_lock`` held.
@@ -978,13 +1089,45 @@ class JobsQueue:
             if not self.jobs_pending_queue:
                 return None
 
-            job = self.jobs_pending_queue[0]
-            if not self._has_capacity_for(job):
-                return None
+            # A job a person started that waited for its lane goes first once the lane has room.
+            # Like any started job it is past the general limit, and the lane cap is its only gate.
+            # Scans walk a copy: nothing may end one by changing the queue underneath it.
+            pending = list(self.jobs_pending_queue)
+            waiting = next((item for item in pending
+                            if item.lane_waiting and item.status == 'pending' and self._lane_has_room(item)), None)
+            if waiting is not None:
+                self.jobs_pending_queue.remove(waiting)
+                self.jobs_running_queue.append(waiting)
+                self._clear_lane_wait(waiting)
+                return waiting
 
-            self.jobs_pending_queue.popleft()
-            self.jobs_running_queue.append(job)
-            return job
+            # The oldest job that may start. A job whose lane is full is passed over, not waited
+            # for: the lane caps its own jobs, and library work queued behind it runs meanwhile.
+            # Any other job that cannot start holds the line, as it always did.
+            for job in pending:
+                if not self._lane_has_room(job):
+                    continue
+                if not self._has_capacity_for(job):
+                    return None
+
+                self.jobs_pending_queue.remove(job)
+                self.jobs_running_queue.append(job)
+                self._clear_lane_wait(job)
+                return job
+            return None
+
+    def _lane_has_room(self, job) -> bool:
+        """Whether the lane ``job`` is counted in can take one more running job. Call with ``_queue_lock`` held."""
+        limit = LANE_LIMITS.get(job.lane)
+        return limit is None or sum(1 for running in self.jobs_running_queue if running.lane == job.lane) < limit
+
+    @staticmethod
+    def _clear_lane_wait(job):
+        """Drop the waiting-for-the-lane note once the job starts, so it never reads as still waiting."""
+        if job.lane_waiting:
+            job.lane_waiting = False
+            if job.progress_message == LANE_FULL_MESSAGE:
+                job.progress_message = ""
 
     def _run_job(self, job_instance=None) -> bool:
         """

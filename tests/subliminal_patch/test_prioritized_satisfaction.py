@@ -126,3 +126,124 @@ def test_a_movie_candidate_is_judged_on_score_alone(monkeypatch, language):
 
     assert candidate in listed
     assert later not in listed
+
+
+# A listing a person can stop. A manual search lists the providers one after another, and a slow one can take
+# half a minute to answer or time out, so a stop that was only read once the loop returned never ended it.
+
+class _Stop(Exception):
+    """What the caller's stop check names as its reason when the person pressed Stop."""
+
+
+def _stop():
+    """What the caller's stop check raises to end the listing: ``ListingStopped`` carrying its reason."""
+    from subliminal_patch.core import ListingStopped
+
+    return ListingStopped(_Stop())
+
+
+def _slow_pool(monkeypatch, durations, calls):
+    """A pool whose providers each take as long as ``durations`` says, and that records who was asked."""
+    import time
+
+    def list_provider(self, name, video, languages, **kwargs):
+        calls.append(name)
+        time.sleep(durations[name])
+        return []
+
+    monkeypatch.setattr(SZProviderPool, 'list_subtitles_provider', list_provider)
+    return SZProviderPool(providers=list(durations))
+
+
+def test_a_stop_between_providers_asks_no_later_provider(monkeypatch, episode, language):
+    from subliminal_patch.core import ListingStopped
+
+    calls = []
+    pool = _slow_pool(monkeypatch, {'first': 0.05, 'second': 0.05, 'third': 0.05}, calls)
+    stopped = []
+
+    def cancel():
+        if calls:
+            stopped.append(True)
+            raise _stop()
+
+    with pytest.raises(ListingStopped) as stop:
+        pool.list_subtitles_prioritized(episode, {language}, exhaustive=True,
+                                        provider_order=['first', 'second', 'third'], cancel=cancel)
+
+    assert isinstance(stop.value.original, _Stop)
+    assert calls == ['first']
+
+
+def test_a_stop_ends_the_listing_while_one_provider_is_still_answering(monkeypatch, episode, language):
+    """The worst case: the stop arrives while a provider's request is in flight. The listing ends within the
+    poll, the slow request is left to finish on its own, and it is the only thing left running."""
+    import threading
+    import time
+    from subliminal_patch.core import ListingStopped
+
+    calls = []
+    pool = _slow_pool(monkeypatch, {'slow': 2.0, 'never': 0.01}, calls)
+    pressed = time.monotonic() + 0.2
+
+    def cancel():
+        if time.monotonic() >= pressed:
+            raise _stop()
+
+    started = time.monotonic()
+    with pytest.raises(ListingStopped):
+        pool.list_subtitles_prioritized(episode, {language}, exhaustive=True,
+                                        provider_order=['slow', 'never'], cancel=cancel)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert calls == ['slow']
+    workers = [thread for thread in threading.enumerate() if thread.name.startswith('listing-')]
+    assert len(workers) == 1 and workers[0].daemon
+    workers[0].join(5)
+    assert not workers[0].is_alive()
+
+
+def test_a_stop_check_that_fails_for_its_own_reasons_does_not_end_the_listing(monkeypatch, episode, language):
+    """A check that cannot read its answer (a database that is locked for a moment) has not been told to stop.
+    The listing carries on and asks again at the next poll."""
+    import time
+
+    calls = []
+    pool = _slow_pool(monkeypatch, {'first': 0.5, 'second': 0.01}, calls)
+    checks = []
+
+    def cancel():
+        checks.append(time.monotonic())
+        if len(checks) == 1:
+            raise OSError('database is locked')
+
+    pool.list_subtitles_prioritized(episode, {language}, exhaustive=True,
+                                    provider_order=['first', 'second'], cancel=cancel)
+
+    assert calls == ['first', 'second']
+    assert len(checks) >= 3, 'the check was not asked again after it failed'
+
+
+def test_a_listing_nobody_stops_returns_what_the_providers_gave(monkeypatch, episode, language):
+    first = _Subtitle('first', {'series', 'year'}, language)
+    pool = _pool_listing(monkeypatch, {'first': [first], 'second': []})
+    checks = []
+
+    listed = pool.list_subtitles_prioritized(episode, {language}, exhaustive=True,
+                                             provider_order=['first', 'second'], cancel=lambda: checks.append(1))
+
+    assert listed == [first]
+    assert len(checks) >= 2
+
+
+def test_a_provider_error_reaches_the_caller_of_a_stoppable_listing(monkeypatch, episode, language):
+    def broken(self, name, video, languages, **kwargs):
+        raise RuntimeError('provider blew up')
+
+    monkeypatch.setattr(SZProviderPool, 'list_subtitles_provider', broken)
+    pool = SZProviderPool(providers=['first'])
+
+    with pytest.raises(RuntimeError, match='provider blew up'):
+        pool.list_subtitles_prioritized(episode, {language}, exhaustive=True, provider_order=['first'],
+                                        cancel=lambda: None)

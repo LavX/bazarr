@@ -6,6 +6,8 @@ import os
 import logging
 import datetime
 import socket
+import contextvars
+import threading
 import traceback
 import time
 import operator
@@ -425,6 +427,23 @@ class ProviderBusyError(Exception):
     its own timeout. Deliberately not a ProviderExcludedError: an excluded
     provider is discarded for the pool, and a busy one is healthy, so this
     records no backoff and no discard."""
+
+
+class ListingStopped(Exception):
+    """A listing's stop check raised, so the listing ended without asking any more provider.
+
+    ``original`` is what the check gave as its reason, for the caller to raise in its own terms. The
+    check raises this to stop and returns to go on, so a provider's own error is never mistaken for it,
+    and neither is an error the check hit while reading its answer.
+    """
+
+    def __init__(self, original):
+        super().__init__(repr(original))
+        self.original = original
+
+
+#: How often a stoppable listing looks at its stop check while a provider's request is in flight.
+LISTING_STOP_POLL_SECONDS = 0.2
 
 
 def _outcome_recorded(provider):
@@ -1019,8 +1038,48 @@ class SZProviderPool(ProviderPool):
         return ({"season", "episode"}.issubset(orig_matches)
                 and ("series" in orig_matches or "imdb_id" in orig_matches))
 
+    def _list_provider_stoppable(self, name, video, languages, cancel):
+        """List one provider, ending early when ``cancel`` raises ``ListingStopped``.
+
+        ``cancel`` is called before the provider is asked and every ``LISTING_STOP_POLL_SECONDS`` while
+        its request is in flight. The request runs on a thread of its own so that a stop does not have
+        to wait for it: it is abandoned, finishes when the provider answers or times out, and its
+        answer is dropped. That one request is all that outlives the stop.
+        """
+        def check():
+            try:
+                cancel()
+            except ListingStopped:
+                raise
+            except Exception:
+                # The check could not read its answer, which is not the answer "stop". A database that is
+                # locked for a moment must not end a search; the next poll asks again.
+                logger.debug('The stop check of the listing failed; the listing goes on', exc_info=True)
+
+        check()
+        outcome = {}
+        done = threading.Event()
+
+        def ask():
+            try:
+                outcome['value'] = SZProviderPool.list_subtitles_provider(self, name, video, languages,
+                                                                          discard_on_failure=True)
+            except BaseException as error:
+                outcome['error'] = error
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=contextvars.copy_context().run, args=(ask,), name=f'listing-{name}',
+                                  daemon=True)
+        worker.start()
+        while not done.wait(LISTING_STOP_POLL_SECONDS):
+            check()
+        if 'error' in outcome:
+            raise outcome['error']
+        return outcome['value']
+
     def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None,
-                                   exhaustive=False, report_stop=False):
+                                   exhaustive=False, report_stop=False, cancel=None):
         """List subtitles with priority-based provider search.
 
         Search providers in priority order. Stop only when every requested
@@ -1035,6 +1094,11 @@ class SZProviderPool(ProviderPool):
         the name of the provider that satisfied every language, or None when
         the listing ran to the end. A caller resumes after that provider when
         what it listed could not be downloaded.
+
+        ``cancel``, when given, is a callable that raises ``ListingStopped`` to stop the listing and
+        returns to go on. It is consulted before every provider and while a provider's request is in
+        flight, and the ``ListingStopped`` ends the listing, carrying the reason the check gave. Any other
+        error from it is logged at debug and the listing goes on.
         """
         from .score import compute_score as default_compute_score
         compute_score = compute_score or default_compute_score
@@ -1050,8 +1114,11 @@ class SZProviderPool(ProviderPool):
                 continue
 
             # Search this provider
-            provider_subtitles = SZProviderPool.list_subtitles_provider(self, name, video, languages,
-                                                                        discard_on_failure=True)
+            if cancel is None:
+                provider_subtitles = SZProviderPool.list_subtitles_provider(self, name, video, languages,
+                                                                            discard_on_failure=True)
+            else:
+                provider_subtitles = self._list_provider_stoppable(name, video, languages, cancel)
 
             if provider_subtitles is None:
                 logger.info('Discarding provider %s', name)

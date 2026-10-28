@@ -9,7 +9,7 @@ from media_servers.events import publication_callback
 import subliminal
 
 from subzero.language import Language
-from subliminal_patch.core import save_subtitles
+from subliminal_patch.core import ListingStopped, save_subtitles
 from subtitles.tools.subsync_engines import subtitle_write_locks, write_subtitle_file
 from subliminal_patch.core_persistent import list_all_subtitles, download_subtitles
 from subliminal_patch.score import compute_score, DEFAULT_SCORES
@@ -21,7 +21,7 @@ from utilities.path_mappings import path_mappings
 from app.database import (database, get_profiles_list, select, TableEpisodes, TableShows, get_audio_profile_languages,
                           TableMovies)
 from app import activity
-from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
+from app.jobs_queue import jobs_queue, JobCancelled, JobFailed, USER_SEARCH_LANE
 from app.notifier import send_notifications, send_notifications_movie
 from sonarr.history import history_log
 from radarr.history import history_log_movie
@@ -64,6 +64,48 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type, *, 
                               arr_instance_id=arr_instance_id)
 
 
+class _Stopped(Exception):
+    """The caller's cancel signal said stop without raising anything itself."""
+
+
+def _stop_check(cancel):
+    """The check a listing consults before and while each provider answers, or None when nothing can stop it.
+
+    ``cancel`` is the caller's signal: ``is_set()`` returns True to stop, or raises ``JobCancelled`` when
+    the job was stopped. Either ends the listing as ``ListingStopped``. Any other error from it is not a
+    stop: the listing logs it and asks again at its next poll.
+
+    A signal that is costly to ask offers ``is_stop_requested`` as well, the same question without the
+    side effects of ``is_set`` (the sports signal publishes the job's progress from ``is_set``), and the
+    listing asks that one, as often as it polls.
+    """
+    if cancel is None:
+        return None
+
+    ask = getattr(cancel, "is_stop_requested", None) or cancel.is_set
+
+    def check():
+        try:
+            stopped = ask()
+        except JobCancelled as error:
+            raise ListingStopped(error) from error
+        if stopped:
+            raise ListingStopped(_Stopped())
+
+    return check
+
+
+class _JobStop:
+    """The stop signal of a queue job: Stop pressed on it raises ``JobCancelled`` from ``is_set``."""
+
+    def __init__(self, job_id):
+        self.job_id = job_id
+
+    def is_set(self):
+        jobs_queue.raise_if_cancelled(self.job_id)
+        return False
+
+
 def _manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
                    language_set=None, original_format=False, cancel=None, arr_instance_id=None):
     final_subtitles = []
@@ -96,10 +138,18 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
                 minimum_score = settings.general.minimum_score
                 minimum_score_movie = settings.general.minimum_score_movie
                 min_score, _, _ = _get_scores(media_type, minimum_score_movie, minimum_score)
-                subtitles = list_all_subtitles([video], language_set, pool, min_score=int(min_score))
+                subtitles = list_all_subtitles([video], language_set, pool, min_score=int(min_score),
+                                               cancel=_stop_check(cancel))
             else:
                 logging.info("BAZARR All providers are throttled")
                 return 'All providers are throttled'
+        except ListingStopped as stopped:
+            # Stop was pressed while the providers were being listed. What was listed so far is not a
+            # result, so none is built: the check's own exception goes to the caller, and a stop that
+            # only said so (``is_set`` returned True) leaves the caller to read it and act, as before.
+            if isinstance(stopped.original, _Stopped):
+                return []
+            raise stopped.original from None
         except Exception as e:
             logging.exception(f"BAZARR Error trying to get Subtitle list from provider for this file {path}: {repr(e)}")  # noqa: G004
         else:
@@ -195,7 +245,9 @@ def queue_manual_search(path, profile_id, scene_name, title, media_type, label, 
     A person pressing Search is waiting, so the job does not queue behind a
     backlog of library work: it starts the way an editor sync does. Pressing
     Search again for the same file while that search runs follows it instead
-    of starting a second one. The rows come back as the job's result.
+    of starting a second one. The rows come back as the job's result. The job
+    is not retryable: the rows go to the window that asked, so a retry from the
+    drawer would run a search nobody reads. Searching again is the retry.
 
     :return: The job id.
     """
@@ -203,7 +255,8 @@ def queue_manual_search(path, profile_id, scene_name, title, media_type, label, 
         job_name=f"Searching subtitles for {label}", module=__name__, func="run_manual_search_job",
         kwargs={"path": path, "profile_id": profile_id, "scene_name": scene_name, "title": title,
                 "media_type": media_type, "arr_instance_id": arr_instance_id},
-        is_progress=True, progress_max=2, retryable=True, return_existing=True)
+        is_progress=True, progress_max=2, retryable=False, return_existing=True,
+        lane=USER_SEARCH_LANE)
     Thread(target=jobs_queue.force_start_pending_job, args=(job_id, True), daemon=True).start()
     return job_id
 
@@ -216,12 +269,14 @@ def run_manual_search_job(path, profile_id, scene_name, title, media_type, arr_i
                       media_type='episode' if media_type == 'series' else 'movie', title=title)
     jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=2,
                                    progress_message="Searching the providers")
+    # The job's own stop, read before and while each provider answers, so Stop ends the search at the
+    # provider it is waiting on instead of after the last one.
     found = manual_search(path, profile_id, get_providers_sorted(), scene_name, title, media_type,
-                          arr_instance_id=arr_instance_id, observed=False)
+                          arr_instance_id=arr_instance_id, observed=False, cancel=_JobStop(job_id))
     if isinstance(found, str):
         # The search says why it could not run as its return value.
         logging.warning("Manual search failed: reason=providers_unavailable title=%s: %s", title, found)
-        raise JobFailed(found, reason="providers_unavailable", retryable=True)
+        raise JobFailed(found, reason="providers_unavailable")
     jobs_queue.update_job_progress(job_id=job_id, progress_value=1,
                                    progress_message=f"Preparing {len(found)} result(s)")
     jobs_queue.publish_job_result(job_id, marshal_search_results(found))

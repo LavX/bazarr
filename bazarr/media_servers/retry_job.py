@@ -13,7 +13,7 @@ destination gave when some of them could not be confirmed.
 import logging
 from threading import Thread
 
-from app.jobs_queue import JobFailed, jobs_queue
+from app.jobs_queue import JobFailed, USER_ACTION_LANE, jobs_queue
 
 from .dispatcher import _get_dispatcher, get_refresh_status
 
@@ -40,7 +40,7 @@ def queue_retry_pending(instance_id, name=None):
     job_id = jobs_queue.feed_jobs_pending_queue(
         job_name=f"Retrying pending refreshes for {name or 'a media server'}", module=__name__,
         func="retry_pending_job", kwargs={"instance_id": instance_id, "name": name}, is_progress=True,
-        progress_max=1, retryable=True, return_existing=True)
+        progress_max=1, retryable=True, return_existing=True, lane=USER_ACTION_LANE)
     Thread(target=jobs_queue.force_start_pending_job, args=(job_id, True), daemon=True).start()
     return job_id
 

@@ -26,7 +26,7 @@ def harness(monkeypatch):
         kwargs = {"event_id": 61, "language": "en", "hi": False, "forced": False, "arr_instance_id": 1, **overrides}
         job_id = queue.feed_jobs_pending_queue(job_name="Search", module="sportarr.manual_jobs",
                                                func="run_sports_search_job", kwargs=kwargs, is_progress=True,
-                                               progress_max=2, retryable=True)
+                                               progress_max=2, retryable=False)
         job = next(item for item in queue.jobs_pending_queue if item.job_id == job_id)
         queue.jobs_pending_queue.remove(job)
         queue.jobs_running_queue.append(job)
@@ -67,7 +67,7 @@ def test_a_search_that_names_its_failure_fails_the_job_with_that_sentence(harnes
 
     assert job.status == "failed"
     assert job.error == {"reason": "search_failed", "message": "All providers are throttled"}
-    assert job.retryable is True
+    assert job.retryable is False
 
 
 def test_an_event_that_vanished_before_the_job_ran_is_not_retryable(harness):
@@ -104,3 +104,5 @@ def test_pressing_search_again_follows_the_running_search_and_starts_it_at_once(
     assert first == again and other_language != first
     assert started == [(first, True), (first, True), (other_language, True)]
     assert harness.queue.jobs_pending_queue[0].job_name == "Searching subtitles for Race"
+    assert harness.queue.jobs_pending_queue[0].lane == "user_search"
+    assert harness.queue.jobs_pending_queue[0].retryable is False
