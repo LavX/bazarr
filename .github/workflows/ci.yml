@@ -377,6 +377,7 @@ jobs:
             tests/bazarr/test_jobs_result.py \
             tests/bazarr/test_jobs_session.py \
             tests/bazarr/test_manual_search_job.py \
+            tests/bazarr/test_manual_search_provider_outcomes.py \
             tests/bazarr/test_media_server_retry_job.py \
             tests/bazarr/test_sports_search_job.py \
             tests/bazarr/test_update_check_jobs.py \
