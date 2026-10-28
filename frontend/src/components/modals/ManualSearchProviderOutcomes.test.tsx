@@ -115,13 +115,13 @@ function presentationOf(row: HTMLElement) {
     const hasShadow = shadow !== "" && shadow !== "none";
 
     if (
+      original !== row &&
       !original.textContent?.trim() &&
       original.children.length === 0 &&
       !hasBackground &&
       !hasBorder &&
       !hasShadow
     ) {
-      if (original === row) return { markup: "", paint };
       element.remove();
       continue;
     }
