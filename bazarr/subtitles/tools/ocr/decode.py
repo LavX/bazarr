@@ -196,17 +196,18 @@ def subtitle_clock(video_path, stream_index, ffprobe):
     """The subtitle stream's start and span in ms, for render progress.
 
     ``start_time`` is the stream's own first timestamp, not the container's;
-    transport streams often start well after zero. Matroska does not store a
-    stream's duration (ffprobe prints N/A), so the span falls back to the
-    stream's DURATION tag, then to what is left of the container after the
-    stream starts. The tag is the track's end timestamp, not its length (a
-    track whose first cue shows at 3 s and whose last cue ends at 13 s is
-    tagged 13 s), so the start is taken off it, and one that ends before the
-    stream starts leaves nothing and is passed over. A probe that fails
-    returns (0, 0) and the job keeps a running message without a percentage.
+    transport streams often start well after zero. Prefer the stream's duration,
+    then its DURATION tag. When the container's ENCODER starts with Lavf or
+    contains FFmpeg, the tag is an end timestamp, so subtract the stream's start.
+    For every other or missing writer, including MKVToolNix, use the tag unchanged
+    as the track span, as Matroska specifies. This avoids shortening the span when
+    the writer is unknown. Tag names are matched without regard to case.
+    If no positive span remains, use what is left of the container after the
+    stream starts. Nothing usable, or a failed probe, returns (0, 0) and the job
+    keeps a running message without a percentage.
     """
     command = [ffprobe, "-v", "error", "-select_streams", f"s:{stream_index}",
-               "-show_entries", "stream=start_time,duration:stream_tags=DURATION:format=duration",
+               "-show_entries", "stream=start_time,duration:stream_tags=DURATION:format=duration:format_tags=ENCODER",
                "-of", "json", video_path]
     try:
         completed = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
@@ -218,8 +219,14 @@ def subtitle_clock(video_path, stream_index, ffprobe):
         start = _seconds(stream.get("start_time")) or 0
         duration = _seconds(stream.get("duration"))
         if not duration or duration <= 0:
-            end = _seconds((stream.get("tags") or {}).get("DURATION"))
-            duration = end - start if end is not None else None
+            stream_tags = {key.lower(): value for key, value in (stream.get("tags") or {}).items()}
+            duration = _seconds(stream_tags.get("duration"))
+            format_tags = {key.lower(): value for key, value in
+                           ((report.get("format") or {}).get("tags") or {}).items()}
+            writer = format_tags.get("encoder", "")
+            if (duration is not None and isinstance(writer, str)
+                    and (writer.startswith("Lavf") or "FFmpeg" in writer)):
+                duration -= start
         if not duration or duration <= 0:
             container = _seconds((report.get("format") or {}).get("duration"))
             duration = container - start if container else None

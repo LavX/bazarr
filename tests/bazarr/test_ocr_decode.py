@@ -326,19 +326,26 @@ def test_subtitle_clock_reads_start_and_duration(tmp_path):
 
 
 @pytest.mark.parametrize("report,expected", [
-    # Matroska: no stream duration, the muxer's DURATION tag stands in for it. The
-    # tag is the track's end timestamp, so the span is what is left after the start.
+    # FFmpeg-written Matroska: DURATION is the track's end timestamp, so the span
+    # is what is left after the start. The container's ENCODER identifies the writer.
     ({"streams": [{"start_time": "1.0", "duration": "N/A", "tags": {"DURATION": "00:00:11.500000000"}}],
-      "format": {"duration": "13.0"}}, (1000, 10500)),
+      "format": {"duration": "13.0", "tags": {"ENCODER": "Lavf62.12.103"}}}, (1000, 10500)),
     ({"streams": [{"start_time": "31.0", "duration": "N/A", "tags": {"DURATION": "00:00:41.000000000"}}],
-      "format": {"duration": "45.0"}}, (31000, 10000)),
+      "format": {"duration": "45.0", "tags": {"ENCODER": "Lavf62.12.103"}}}, (31000, 10000)),
     ({"streams": [{"start_time": "0.0", "duration": "N/A", "tags": {"DURATION": "00:00:41.000000000"}}],
-      "format": {"duration": "45.0"}}, (0, 41000)),
-    # A tag that ends before the stream starts cannot be an end timestamp: the next source stands in.
+      "format": {"duration": "45.0", "tags": {"ENCODER": "Lavf62.12.103"}}}, (0, 41000)),
+    # An FFmpeg tag at or before the stream start leaves no span: use the next source.
     ({"streams": [{"start_time": "31.0", "duration": "N/A", "tags": {"DURATION": "00:00:10.000000000"}}],
-      "format": {"duration": "45.0"}}, (31000, 14000)),
+      "format": {"duration": "45.0", "tags": {"ENCODER": "Lavf62.12.103"}}}, (31000, 14000)),
     ({"streams": [{"start_time": "31.0", "duration": "N/A", "tags": {"DURATION": "00:00:31.000000000"}}],
-      "format": {}}, (0, 0)),
+      "format": {"tags": {"ENCODER": "Lavf62.12.103"}}}, (0, 0)),
+    # Other writers, including MKVToolNix, and absent writer information use the tag as a span.
+    ({"streams": [{"start_time": "1.0", "duration": "N/A", "tags": {"DURATION": "00:00:10.000000000"}}],
+      "format": {"duration": "13.0", "tags": {"ENCODER": "mkvmerge (MKVToolNix)"}}}, (1000, 10000)),
+    ({"streams": [{"start_time": "1.0", "duration": "N/A", "tags": {"DURATION": "00:00:10.000000000"}}],
+      "format": {"duration": "13.0", "tags": {"ENCODER": "unknown muxer"}}}, (1000, 10000)),
+    ({"streams": [{"start_time": "1.0", "duration": "N/A", "tags": {"DURATION": "00:00:10.000000000"}}],
+      "format": {"duration": "13.0"}}, (1000, 10000)),
     # Neither: what is left of the container after the stream starts.
     ({"streams": [{"start_time": "1.0", "duration": "N/A"}], "format": {"duration": "13.0"}}, (1000, 12000)),
     # Nothing usable: a running message without a percentage.
@@ -351,12 +358,25 @@ def test_subtitle_clock_finds_a_span_when_the_stream_has_no_duration(tmp_path, r
     assert decode.subtitle_clock("/v.mkv", 0, _probe_says(tmp_path, report)) == expected
 
 
+@pytest.mark.parametrize("duration_key,writer_key,writer", [
+    ("duration", "encoder", "Lavf62.12.103"),
+    ("DuRaTiOn", "EnCoDeR", "FFmpeg 8.1.3"),
+    ("duration", "encoder", "a muxer using FFmpeg 8.1.3"),
+])
+def test_subtitle_clock_matches_tag_names_case_insensitively(tmp_path, duration_key, writer_key, writer):
+    report = {"streams": [{"start_time": "1.0", "duration": "N/A",
+                           "tags": {duration_key: "00:00:11.000000000"}}],
+              "format": {"duration": "13.0", "tags": {writer_key: writer}}}
+
+    assert decode.subtitle_clock("/v.mkv", 0, _probe_says(tmp_path, report)) == (1000, 10000)
+
+
 @pytest.mark.parametrize("report,expected", [
     # A value that is not a sane time counts as N/A: the next source stands in, or (0, 0).
     ({"streams": [{"start_time": "1.0", "duration": "inf"}], "format": {"duration": "13.0"}}, (1000, 12000)),
     ({"streams": [{"start_time": "1.0", "duration": "inf"}]}, (0, 0)),
     ({"streams": [{"start_time": "1.0", "duration": "N/A", "tags": {"DURATION": "1e999"}}],
-      "format": {}}, (0, 0)),
+      "format": {"tags": {"ENCODER": "Lavf62.12.103"}}}, (0, 0)),
     ({"streams": [{"start_time": "1.0", "duration": "N/A"}], "format": {"duration": "1e999"}}, (0, 0)),
     ({"streams": [{"start_time": "inf", "duration": "5.0"}]}, (0, 5000)),
     ({"streams": [{"start_time": "1e999", "duration": "N/A"}], "format": {"duration": "13.0"}}, (0, 13000)),
@@ -371,13 +391,13 @@ def test_subtitle_clock_rejects_a_probe_value_that_is_not_a_sane_time(tmp_path, 
 
 
 def test_subtitle_clock_reads_the_span_of_a_real_matroska_track(ffmpeg, media):
-    # eng_hd.sup starts at 1 s and ends at 11 s. The muxer tags the track 11 s,
+    # eng_hd.sup starts at 1 s and ends at 11 s. FFmpeg tags the track 11 s,
     # its end timestamp, and ffprobe prints duration=N/A for the stream itself.
     assert decode.subtitle_clock(media["pgs"], 0, shutil.which("ffprobe")) == (1000, 10000)
 
 
 def test_subtitle_clock_subtracts_the_start_of_a_late_real_matroska_track(ffmpeg, tmp_path):
-    # The first cue shows at 3 s and the last one ends at 13 s: the muxer tags
+    # The first cue shows at 3 s and the last one ends at 13 s: FFmpeg tags
     # the track 13 s, and the render counts from the first cue, so the span is 10 s.
     sup = tmp_path / "late.sup"
     sup.write_bytes(build_sup((1920, 1080), [
