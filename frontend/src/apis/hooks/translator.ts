@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import client from "@/apis/raw/client";
+import { withInlineErrors } from "@/apis/raw/inlineWrites";
 
 export interface TranslatorJob {
   jobId: string;
@@ -198,6 +199,8 @@ export interface TranslatorTestResponse {
     isFreeTier: boolean;
   } | null;
   error?: string;
+  keyHeldByService?: boolean;
+  message?: string;
 }
 
 export interface TranslatorTestParams {
@@ -209,9 +212,8 @@ export interface TranslatorTestParams {
 export function useTestTranslator() {
   return useMutation({
     mutationFn: async (params?: TranslatorTestParams) => {
-      const response = await client.axios.post<TranslatorTestResponse>(
-        "/translator/test",
-        params,
+      const response = await withInlineErrors(() =>
+        client.axios.post<TranslatorTestResponse>("/translator/test", params),
       );
       return response.data;
     },

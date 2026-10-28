@@ -1,5 +1,9 @@
+import { createElement, PropsWithChildren } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useTestTranslator } from "@/apis/hooks/translator";
 import type { SilentRequestConfig } from "@/apis/raw/base";
 import {
   forgetPasswordConfirmation,
@@ -46,6 +50,40 @@ describe("inline write errors, per request", () => {
   it("skips the toast for the request a claimed call sends", async () => {
     failingWrites();
     await withInlineErrors(() => post("inline-probe/a"));
+    expect(showNotification).not.toHaveBeenCalled();
+  });
+
+  it("leaves a refused translator test to its caller", async () => {
+    server.use(
+      http.post("/api/translator/test", () =>
+        HttpResponse.json(
+          { detail: "reason text", message: "Request refused" },
+          { status: 400 },
+        ),
+      ),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false, networkMode: "offlineFirst" },
+      },
+    });
+    const wrapper = ({ children }: PropsWithChildren) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useTestTranslator(), { wrapper });
+    const onError = vi.fn();
+
+    await act(async () => {
+      await expect(
+        result.current.mutateAsync(
+          { serviceUrl: "http://localhost:8990" },
+          { onError },
+        ),
+      ).rejects.toMatchObject({
+        response: { status: 400, data: { detail: "reason text" } },
+      });
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
     expect(showNotification).not.toHaveBeenCalled();
   });
 
