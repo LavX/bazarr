@@ -2147,7 +2147,14 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
             continue
 
         # create subtitle path
-        if (subtitle.text and subtitle.format == 'srt' and (hasattr(subtitle.language, 'hi') and
+        # Explicit, verifiable non-HI metadata takes precedence over punctuation.
+        # Missing metadata must still use the heuristic; a default False on the
+        # legacy hearing_impaired flag is not an explicit provider declaration.
+        reports_verified_non_hi = (
+            getattr(subtitle, 'hearing_impaired_verifiable', False) is True
+            and getattr(subtitle, '_reported_hearing_impaired', None) is False
+        )
+        if (not reports_verified_non_hi and subtitle.text and subtitle.format == 'srt' and (hasattr(subtitle.language, 'hi') and
                                                             not subtitle.language.hi) and
                 parse_for_hi_regex(subtitle_text=subtitle.text, alpha3_language=subtitle.language.alpha3 if
                                    (hasattr(subtitle, 'language') and hasattr(subtitle.language, 'alpha3')) else None)):
