@@ -238,19 +238,11 @@ const TestConnectionButton: FunctionComponent = () => {
           }
         },
         onError: (error: unknown) => {
-          const response = (
-            error as {
-              response?: { status?: number; data?: { error?: string } };
-            }
-          )?.response;
-          const reason = response?.data?.error;
-          const unreachable =
-            response?.status === 500
-              ? "Could not reach the translator service (HTTP 500)"
-              : "Could not reach the translator service";
+          const reason = (error as { response?: { data?: { error?: string } } })
+            ?.response?.data?.error;
           notifications.show({
             title: "Connection Failed",
-            message: reason ?? unreachable,
+            message: reason ?? "Could not reach the translator service",
             color: "red",
           });
         },

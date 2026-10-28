@@ -141,31 +141,6 @@ describe("Translator Test Connection button", () => {
     });
   });
 
-  it("names the HTTP status when a 500 comes back with no error body", async () => {
-    mutate.mockImplementation(
-      (_params: unknown, options: { onError?: (error: unknown) => void }) => {
-        options.onError?.({ response: { status: 500, data: "" } });
-      },
-    );
-    customRender(
-      <TestButtonHarness
-        settings={{
-          translator: { ["openrouter_url"]: "http://localhost:8990" },
-        }}
-      />,
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /test connection/i }));
-
-    expect(notifications.show).toHaveBeenCalledTimes(1);
-    expect(notifications.show).toHaveBeenCalledWith({
-      title: "Connection Failed",
-      message: "Could not reach the translator service (HTTP 500)",
-      color: "red",
-    });
-  });
-
   it("keeps the plain unreachable message for other statuses without an error body", async () => {
     mutate.mockImplementation(
       (_params: unknown, options: { onError?: (error: unknown) => void }) => {
