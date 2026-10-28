@@ -145,6 +145,50 @@ def test_signalrcore_reconnect_accepts_closed_client_in_reconnecting_state():
         transport.stop()
 
 
+def test_signalrcore_reconnect_retries_first_attempt_closed_before_handshake():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    first_attempt_opened = Event()
+    handshake_landed = Event()
+    opened = MagicMock()
+    opened.is_connection_closed.return_value = False
+    opened.connect.side_effect = first_attempt_opened.set
+    recovered = MagicMock()
+    recovered.is_connection_closed.return_value = False
+
+    def finish_handshake():
+        transport.handshake_received = True
+        transport._set_state(TransportState.connected)
+        handshake_landed.set()
+
+    recovered.connect.side_effect = finish_handshake
+    transport.create_client = MagicMock(side_effect=[opened, recovered])
+    transport.negotiate = MagicMock(return_value=None)
+    reconnect_results = []
+
+    def reconnect():
+        reconnect_results.append(transport.handle_reconnect())
+
+    reconnect_thread = Thread(target=reconnect, daemon=True)
+    reconnect_thread.start()
+
+    try:
+        assert first_attempt_opened.wait(timeout=2)
+        assert transport.create_client.call_count == 1
+        opened.is_connection_closed.return_value = True
+        transport.on_socket_close()
+        assert handshake_landed.wait(timeout=5)
+        assert transport.negotiate.call_count == 2
+        assert transport.is_connected()
+        reconnect_thread.join(timeout=5)
+        assert reconnect_results == [True]
+        assert not transport.reconnection_handler.reconnecting
+    finally:
+        transport.stop()
+        reconnect_thread.join(timeout=5)
+        assert not reconnect_thread.is_alive()
+
+
 def test_signalrcore_stop_ends_repeated_failed_negotiations():
     patch_signalrcore_stop()
     transport = _make_reconnecting_transport()

@@ -44,8 +44,18 @@ def patch_signalrcore_reconnect():
                     self.start(reconnection=True)
                 except Exception as ex:
                     self.logger.error(ex)
-                    sleep_time = self.reconnection_handler.next()
-                    self.deferred_reconnect(sleep_time)
+                    self.deferred_reconnect(self.reconnection_handler.next())
+                    return True
+                if self.manually_closing:
+                    try:
+                        self._client.dispose()
+                    except Exception:
+                        pass
+                    return True
+                if _wait_for_handshake(self, _bazarr_retry_wakeup(self)):
+                    self.reconnection_handler.reset()
+                    return True
+                self.deferred_reconnect(self.reconnection_handler.next())
                 return True
             finally:
                 lock.release()
