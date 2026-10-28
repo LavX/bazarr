@@ -1,8 +1,10 @@
 from pathlib import Path
+from threading import Event, Thread
 from unittest.mock import MagicMock, patch
 
 import signalrcore
 from signalrcore.transport.base_transport import TransportState
+from signalrcore.transport.reconnection import RawReconnectionHandler
 from signalrcore.transport.websockets.websocket_transport import WebsocketTransport
 
 from app.signalrcore_compat import build_signalr_connection, patch_signalrcore_stop
@@ -99,3 +101,169 @@ def test_signalrcore_reconnect_transitions_fire_lost_then_open_callbacks():
     assert transport._on_open.call_count == 2
     assert transport._on_reconnect.call_count == 1
     transport._on_close.assert_not_called()
+
+
+def _make_reconnecting_transport(retry_interval=0.01):
+    transport = _make_transport(state=TransportState.connected)
+    transport.url = "http://example.invalid/signalr/messages"
+    transport.manually_closing = False
+    transport.reconnection_handler = RawReconnectionHandler(retry_interval, None)
+    transport._client = MagicMock()
+    transport._client.is_connection_closed.return_value = True
+    transport.create_client = MagicMock(return_value=transport._client)
+    return transport
+
+
+def test_signalrcore_reconnect_retries_failed_negotiation_until_connected():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    transport.negotiate = MagicMock(side_effect=[OSError("connection refused"), None])
+    transport._client.connect.side_effect = lambda: transport._set_state(TransportState.connected)
+
+    try:
+        assert transport.handle_reconnect() is True
+        assert transport.negotiate.call_count == 2
+        assert transport.is_connected()
+        assert not transport.reconnection_handler.reconnecting
+    finally:
+        transport.stop()
+
+
+def test_signalrcore_reconnect_accepts_closed_client_in_reconnecting_state():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    transport._set_state(TransportState.reconnecting)
+    transport.negotiate = MagicMock()
+    transport._client.connect.side_effect = lambda: transport._set_state(TransportState.connected)
+
+    try:
+        assert transport.handle_reconnect() is True
+        transport.negotiate.assert_called_once()
+        assert transport.is_connected()
+        assert not transport.is_reconnecting()
+    finally:
+        transport.stop()
+
+
+def test_signalrcore_stop_ends_repeated_failed_negotiations():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    retried = Event()
+
+    def fail_negotiate():
+        if transport.negotiate.call_count >= 2:
+            retried.set()
+        raise OSError("connection refused")
+
+    transport.negotiate = MagicMock(side_effect=fail_negotiate)
+    reconnect_thread = Thread(target=transport.handle_reconnect, daemon=True)
+    reconnect_thread.start()
+
+    try:
+        assert retried.wait(timeout=2)
+        transport.stop()
+        reconnect_thread.join(timeout=5)
+        assert not reconnect_thread.is_alive()
+        stopped_attempts = transport.negotiate.call_count
+        Event().wait(timeout=0.05)
+        assert transport.negotiate.call_count == stopped_attempts
+        assert transport.is_disconnected()
+    finally:
+        transport.stop()
+        reconnect_thread.join(timeout=5)
+
+
+def test_signalrcore_reconnect_rejects_concurrent_negotiation():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    negotiating = Event()
+    release_negotiate = Event()
+
+    def block_negotiate():
+        if transport.negotiate.call_count == 1:
+            negotiating.set()
+            release_negotiate.wait(timeout=5)
+        raise OSError("connection refused")
+
+    transport.negotiate = MagicMock(side_effect=block_negotiate)
+    reconnect_thread = Thread(target=transport.handle_reconnect, daemon=True)
+    reconnect_thread.start()
+
+    try:
+        assert negotiating.wait(timeout=2)
+        transport.on_socket_close()
+        assert transport.is_disconnected()
+        assert transport.handle_reconnect() is False
+        assert transport.negotiate.call_count == 1
+    finally:
+        transport.stop()
+        release_negotiate.set()
+        reconnect_thread.join(timeout=5)
+
+    assert not reconnect_thread.is_alive()
+
+
+def test_signalrcore_reconnect_retries_when_deferred_handshake_closes():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    connecting = Event()
+    connected = Event()
+    pending_client = MagicMock()
+    pending_client.is_connection_closed.return_value = False
+    pending_client.connect.side_effect = connecting.set
+    recovered_client = MagicMock()
+    recovered_client.is_connection_closed.return_value = False
+
+    def finish_handshake():
+        transport.handshake_received = True
+        transport._set_state(TransportState.connected)
+        connected.set()
+
+    recovered_client.connect.side_effect = finish_handshake
+    transport.create_client.side_effect = [pending_client, recovered_client]
+    transport.negotiate = MagicMock(side_effect=[OSError("connection refused"), None, None])
+    reconnect_thread = Thread(target=transport.handle_reconnect, daemon=True)
+    reconnect_thread.start()
+
+    try:
+        assert connecting.wait(timeout=2)
+        assert transport.negotiate.call_count == 2
+        pending_client.is_connection_closed.return_value = True
+        transport.on_socket_close()
+        assert connected.wait(timeout=2)
+        reconnect_thread.join(timeout=5)
+        assert not reconnect_thread.is_alive()
+        assert transport.negotiate.call_count == 3
+        assert transport.is_connected()
+        assert not transport.reconnection_handler.reconnecting
+    finally:
+        transport.stop()
+        reconnect_thread.join(timeout=5)
+
+
+def test_signalrcore_stop_wakes_long_reconnect_wait():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport(retry_interval=30)
+    retry_wait = Event()
+    next_retry = transport.reconnection_handler.next
+
+    def record_retry_wait():
+        interval = next_retry()
+        retry_wait.set()
+        return interval
+
+    transport.reconnection_handler.next = record_retry_wait
+    transport.negotiate = MagicMock(side_effect=OSError("connection refused"))
+    reconnect_thread = Thread(target=transport.handle_reconnect, daemon=True)
+    reconnect_thread.start()
+
+    try:
+        assert retry_wait.wait(timeout=2)
+        transport.stop()
+        reconnect_thread.join(timeout=5)
+        assert not reconnect_thread.is_alive()
+        assert transport.negotiate.call_count == 1
+        assert transport.is_disconnected()
+    finally:
+        transport.stop()
+        reconnect_thread.join(timeout=5)
