@@ -252,6 +252,51 @@ def test_signalrcore_reconnect_reruns_when_first_socket_closes_after_handshake_w
     _assert_reconnect_after_handshake_close(0.6)
 
 
+def _assert_reconnect_when_handshake_never_lands(fail_first_negotiation=False):
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport(retry_interval=0.05)
+    abandoned = MagicMock()
+    abandoned.is_connection_closed.return_value = False
+    abandoned.connect.return_value = None
+    recovered = MagicMock()
+    recovered.is_connection_closed.return_value = False
+
+    def finish_handshake():
+        transport.handshake_received = True
+        transport.reconnection_handler.reconnecting = False
+        transport._set_state(TransportState.connected)
+
+    recovered.connect.side_effect = finish_handshake
+    transport.create_client = MagicMock(side_effect=[abandoned, recovered])
+    transport.negotiate = MagicMock(return_value=None)
+    if fail_first_negotiation:
+        transport.negotiate.side_effect = [OSError("connection refused"), None, None]
+    results = []
+    worker = Thread(target=lambda: results.append(transport.handle_reconnect()), daemon=True)
+    worker.start()
+
+    try:
+        worker.join(timeout=5)
+        assert transport.create_client.call_count == 2
+        assert abandoned.dispose.call_count == 1
+        assert transport.negotiate.call_count == (3 if fail_first_negotiation else 2)
+        assert transport.is_connected()
+        assert not worker.is_alive()
+        assert results == [True]
+    finally:
+        transport.stop()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+
+def test_signalrcore_reconnect_retries_when_handshake_never_lands():
+    _assert_reconnect_when_handshake_never_lands()
+
+
+def test_signalrcore_reconnect_retries_when_deferred_handshake_never_lands():
+    _assert_reconnect_when_handshake_never_lands(fail_first_negotiation=True)
+
+
 def test_signalrcore_stop_ends_repeated_failed_negotiations():
     patch_signalrcore_stop()
     transport = _make_reconnecting_transport()

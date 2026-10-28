@@ -1,18 +1,26 @@
 import threading
+import time
 
 
 def _bazarr_retry_wakeup(self):
     return self.__dict__.setdefault("_bazarr_retry_wakeup", threading.Event())
 
 
-def _wait_for_handshake(self, wakeup):
+def _wait_for_handshake(self, wakeup, timeout=None):
+    deadline = None if timeout is None else time.monotonic() + timeout
     while not self.manually_closing:
         if self.is_connected():
             return True
         client = getattr(self, "_client", None)
         if client is None or client.is_connection_closed():
             return False
-        if wakeup.wait(0.5):
+        wait_time = 0.5
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            wait_time = min(wait_time, remaining)
+        if wakeup.wait(wait_time):
             return False
     return False
 
@@ -52,9 +60,15 @@ def patch_signalrcore_reconnect():
                             except Exception:
                                 pass
                             return True
-                        if _wait_for_handshake(self, wakeup):
+                        if _wait_for_handshake(
+                                self, wakeup,
+                                timeout=getattr(self.reconnection_handler, "sleep_time", None)):
                             self.reconnection_handler.reset()
                         else:
+                            try:
+                                self._client.dispose()
+                            except Exception:
+                                pass
                             self.deferred_reconnect(self.reconnection_handler.next())
                 finally:
                     lock.release()
@@ -90,9 +104,15 @@ def patch_signalrcore_reconnect():
                     except Exception:
                         pass
                     return
-                if _wait_for_handshake(self, wakeup):
+                if _wait_for_handshake(
+                        self, wakeup,
+                        timeout=getattr(self.reconnection_handler, "sleep_time", None)):
                     self.reconnection_handler.reset()
                     return
+                try:
+                    self._client.dispose()
+                except Exception:
+                    pass
                 sleep_time = self.reconnection_handler.next()
 
         deferred_reconnect._bazarr_deferred_reconnect_patch = True
