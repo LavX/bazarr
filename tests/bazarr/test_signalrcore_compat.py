@@ -297,6 +297,28 @@ def test_signalrcore_reconnect_retries_when_deferred_handshake_never_lands():
     _assert_reconnect_when_handshake_never_lands(fail_first_negotiation=True)
 
 
+def test_signalrcore_stop_during_first_start_disposes_new_client():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    created = MagicMock()
+    transport.create_client = MagicMock(return_value=created)
+
+    def stop_during_negotiate():
+        transport.stop()
+        return None
+
+    transport.negotiate = MagicMock(side_effect=stop_during_negotiate)
+
+    try:
+        returned = transport.handle_reconnect()
+        assert transport.create_client.call_count == 1
+        assert transport.negotiate.call_count == 1
+        assert created.dispose.call_count == 1
+        assert returned is True
+    finally:
+        transport.stop()
+
+
 def test_signalrcore_stop_ends_repeated_failed_negotiations():
     patch_signalrcore_stop()
     transport = _make_reconnecting_transport()
