@@ -2,6 +2,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
 import { useSeerrTestConnectionMutation } from "@/apis/hooks/seerr";
+import { StepBusyProvider, useStepBusy } from "@/pages/Setup/useStepBusy";
 import { customRender, screen } from "@/tests";
 import SeerrStep from "./SeerrStep";
 
@@ -30,6 +31,19 @@ const onNext = vi.fn();
 const mutate = vi.fn();
 const testMutate = vi.fn();
 
+function ShellBusy() {
+  return <span>{useStepBusy() ? "step busy" : "step free"}</span>;
+}
+
+function StepWithBusyProbe() {
+  return (
+    <StepBusyProvider>
+      <SeerrStep onNext={onNext} />
+      <ShellBusy />
+    </StepBusyProvider>
+  );
+}
+
 function setTestState(state: Record<string, unknown>) {
   mockedTestMutation.mockReturnValue({
     mutate: testMutate,
@@ -46,7 +60,35 @@ describe("SeerrStep", () => {
     setTestState({});
     mockedSettingsMutation.mockReturnValue({
       mutate,
+      isPending: false,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+  });
+
+  it("reports busy while the settings save is pending and clears after it settles", () => {
+    mockedSettingsMutation.mockReturnValue({
+      mutate,
+      isPending: true,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+
+    const { rerender } = customRender(<StepWithBusyProbe />);
+
+    expect(screen.getByText("step busy")).toBeInTheDocument();
+
+    mockedSettingsMutation.mockReturnValue({
+      mutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+    rerender(<StepWithBusyProbe />);
+
+    expect(screen.getByText("step free")).toBeInTheDocument();
+  });
+
+  it("stays free while the connection test is pending", () => {
+    setTestState({ isPending: true });
+
+    customRender(<StepWithBusyProbe />);
+
+    expect(screen.getByText("step free")).toBeInTheDocument();
   });
 
   it("is named for what it gives the reader and names the servers", () => {

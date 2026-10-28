@@ -148,6 +148,7 @@ def _reindex(media_type, media_id, original_path, mapped_path, owner, ids):
     if media_type == 'movie':
         from subtitles.indexer.movies import store_subtitles_movie
         store_subtitles_movie(original_path, mapped_path, arr_instance_id=owner)
+        event_stream(type='movie', action='update', payload=ids[0])
         event_stream(type='movie-wanted', action='update', payload=ids[0])
     elif media_type == 'episode':
         from subtitles.indexer.series import store_subtitles
