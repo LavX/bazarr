@@ -3,6 +3,7 @@ import hashlib
 import socket
 from pathlib import Path
 from threading import Event, Thread, current_thread
+from time import monotonic
 from unittest.mock import MagicMock, patch
 
 import signalrcore
@@ -161,7 +162,7 @@ def test_signalrcore_reconnect_accepts_closed_client_in_reconnecting_state():
 
 def test_signalrcore_reconnect_retries_first_attempt_closed_before_handshake():
     patch_signalrcore_stop()
-    transport = _make_reconnecting_transport()
+    transport = _make_reconnecting_transport(retry_interval=0.5)
     first_attempt_opened = Event()
     handshake_landed = Event()
     opened = MagicMock()
@@ -203,14 +204,27 @@ def test_signalrcore_reconnect_retries_first_attempt_closed_before_handshake():
         assert not reconnect_thread.is_alive()
 
 
-def _assert_reconnect_after_handshake_close(delay):
+def test_signalrcore_reconnect_reruns_when_first_socket_closes_after_handshake():
     patch_signalrcore_stop()
-    transport = _make_reconnecting_transport()
-    first_up = Event()
+    retry_interval = 1.0
+    transport = _make_reconnecting_transport(retry_interval=retry_interval)
     landed = Event()
+    closed_at = []
+    negotiated_at = []
     first = MagicMock()
     first.is_connection_closed.return_value = False
-    first.connect.side_effect = first_up.set
+
+    def close_after_handshake():
+        assert current_thread() is worker
+        assert transport._bazarr_reconnect_lock.locked()
+        transport.handshake_received = True
+        transport.reconnection_handler.reconnecting = False
+        transport._set_state(TransportState.connected)
+        first.is_connection_closed.return_value = True
+        closed_at.append(monotonic())
+        transport.on_socket_close()
+
+    first.connect.side_effect = close_after_handshake
     second = MagicMock()
     second.is_connection_closed.return_value = False
 
@@ -222,22 +236,15 @@ def _assert_reconnect_after_handshake_close(delay):
 
     second.connect.side_effect = finish_handshake
     transport.create_client = MagicMock(side_effect=[first, second])
-    transport.negotiate = MagicMock(return_value=None)
+    transport.negotiate = MagicMock(side_effect=lambda: negotiated_at.append(monotonic()))
     results = []
     worker = Thread(target=lambda: results.append(transport.handle_reconnect()), daemon=True)
     worker.start()
 
     try:
-        assert first_up.wait(timeout=2)
-        transport.handshake_received = True
-        transport.reconnection_handler.reconnecting = False
-        transport._set_state(TransportState.connected)
-        if delay:
-            Event().wait(timeout=delay)
-        first.is_connection_closed.return_value = True
-        transport.on_socket_close()
         worker.join(timeout=5)
         assert transport.negotiate.call_count == 2
+        assert negotiated_at[1] - closed_at[0] < retry_interval
         assert transport.is_connected()
         assert landed.is_set()
         assert not worker.is_alive()
@@ -248,20 +255,14 @@ def _assert_reconnect_after_handshake_close(delay):
         assert not worker.is_alive()
 
 
-def test_signalrcore_reconnect_reruns_when_first_socket_closes_after_handshake():
-    _assert_reconnect_after_handshake_close(0.0)
-
-
-def test_signalrcore_reconnect_reruns_when_first_socket_closes_after_handshake_with_delay():
-    _assert_reconnect_after_handshake_close(0.6)
-
-
 def _assert_reconnect_when_handshake_never_lands(fail_first_negotiation=False):
     patch_signalrcore_stop()
     transport = _make_reconnecting_transport(retry_interval=0.05)
     abandoned = MagicMock()
     abandoned.is_connection_closed.return_value = False
     abandoned.connect.return_value = None
+    events = []
+    abandoned.dispose.side_effect = lambda: events.append("dispose")
     recovered = MagicMock()
     recovered.is_connection_closed.return_value = False
 
@@ -271,7 +272,13 @@ def _assert_reconnect_when_handshake_never_lands(fail_first_negotiation=False):
         transport._set_state(TransportState.connected)
 
     recovered.connect.side_effect = finish_handshake
-    transport.create_client = MagicMock(side_effect=[abandoned, recovered])
+    clients = iter([abandoned, recovered])
+
+    def create_client():
+        events.append("create")
+        return next(clients)
+
+    transport.create_client = MagicMock(side_effect=create_client)
     transport.negotiate = MagicMock(return_value=None)
     if fail_first_negotiation:
         transport.negotiate.side_effect = [OSError("connection refused"), None, None]
@@ -283,6 +290,7 @@ def _assert_reconnect_when_handshake_never_lands(fail_first_negotiation=False):
         worker.join(timeout=5)
         assert transport.create_client.call_count == 2
         assert abandoned.dispose.call_count == 1
+        assert events == ["create", "dispose", "create"]
         assert transport.negotiate.call_count == (3 if fail_first_negotiation else 2)
         assert transport.is_connected()
         assert not worker.is_alive()
@@ -413,9 +421,10 @@ def test_signalrcore_reconnect_releases_abandoned_socket_before_retry():
             transport._bazarr_retry_wakeup.set()
             for client in clients:
                 client.on_message = client.on_close = client.on_error = lambda *args: None
-                if client.sock is not None:
+                raw_socket = getattr(client, "sock", None)
+                if raw_socket is not None:
                     try:
-                        client.sock.shutdown(socket.SHUT_RDWR)
+                        raw_socket.shutdown(socket.SHUT_RDWR)
                     except OSError:
                         pass
             release_server.set()
@@ -437,6 +446,7 @@ def test_signalrcore_stop_during_first_start_disposes_new_client():
     transport = _make_reconnecting_transport()
     created = MagicMock()
     transport.create_client = MagicMock(return_value=created)
+    transport.deferred_reconnect = MagicMock()
 
     def stop_during_negotiate():
         transport.stop()
@@ -449,6 +459,7 @@ def test_signalrcore_stop_during_first_start_disposes_new_client():
         assert transport.create_client.call_count == 1
         assert transport.negotiate.call_count == 1
         assert created.dispose.call_count == 1
+        transport.deferred_reconnect.assert_not_called()
         assert returned is True
     finally:
         transport.stop()
@@ -514,7 +525,7 @@ def test_signalrcore_reconnect_rejects_concurrent_negotiation():
 
 def test_signalrcore_reconnect_retries_when_deferred_handshake_closes():
     patch_signalrcore_stop()
-    transport = _make_reconnecting_transport()
+    transport = _make_reconnecting_transport(retry_interval=0.5)
     connecting = Event()
     connected = Event()
     pending_client = MagicMock()
