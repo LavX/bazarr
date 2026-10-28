@@ -376,6 +376,8 @@ Every sensitive credential Bazarr+ stores on disk is AES-encrypted under a per-i
 
 A central `secret_store` module owns crypto: every sensitive field is registered up front (no field is encrypted by accident, no field is left in cleartext by accident). On first boot after upgrade, Bazarr+ auto-migrates existing cleartext values into the encrypted store. Key rotation is supported with end-to-end tests covering rotation, masking, migration, decrypt-on-read, encrypt-on-write, force-migrate, and the supervisor's index.html injection path.
 
+Logs and job text are scrubbed for credentials too. A configured secret is masked wherever its exact value appears, and bearer tokens, Google and OpenRouter API keys and ciphertext are masked by their shape. Exact-value masking skips secrets shorter than six characters, because masking a short value would redact ordinary words wherever they appear. A provider error that echoes a credential that short is therefore not masked, so use longer passwords for the proxy, PostgreSQL and provider logins.
+
 Encryption covers both the disk surface (the credentials above, at rest) and keys in transit between Bazarr+ and the AI translator (AES-256-GCM).
 
 ### OpenSubtitles.org (Native Provider Hub Plugin)

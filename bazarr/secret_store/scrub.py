@@ -40,9 +40,14 @@ logger = logging.getLogger(__name__)
 # both "a secret was configured here".
 MASK = '***'
 
-# A credential shorter than this is not registered as an exact value: masking
-# a two-character string would redact ordinary text wherever it appears, and
-# no real credential is that short.
+# A credential shorter than this is not registered as an exact value. Exact
+# masking replaces the value wherever it appears, so a password of "test" would
+# redact every "test" in logs and job text. The trade-off is deliberate and
+# stays: a configured credential of five characters or fewer is not masked by
+# value, and a provider error that echoes one reaches logs and job text as is.
+# Proxy, PostgreSQL and some provider password validators accept values that
+# short, so use a longer one. The patterns below (bearer tokens, Google and
+# OpenRouter keys, ciphertext) match by shape and are not affected.
 _MIN_VALUE_LENGTH = 6
 
 _BEARER_RE = re.compile(r'(?i)\b(Bearer\s+)([A-Za-z0-9\-._~+/=]{8,})')
@@ -388,6 +393,57 @@ def scrub_state_secrets(state) -> bool:
                     walk(value, in_text)
 
     walk(state, False)
+    return changed
+
+
+# The job-row fields that are structure, not text: the action, the target, the
+# ids, the versions, the state and the timings. A credential that happens to
+# read "install" or equal a provider id must not rewrite them, so they take the
+# credential shapes only. The list is of what to spare, not of what to scrub:
+# every other field of the row (the message, the error, the details with any
+# config echo, the display names, and any field a later writer adds) takes the
+# exact registered values, so a new free-text field fails closed. Keys are never
+# rewritten, so a masked value still sits behind its own name.
+_JOB_STRUCTURAL_FIELDS = frozenset({
+    'id', 'action', 'state', 'target_kind', 'target_id', 'source_id',
+    'from_version', 'to_version', 'duration_ms',
+    'created_at', 'started_at', 'completed_at', 'updated_at',
+})
+
+
+def scrub_job_secrets(job) -> bool:
+    """Mask every registered credential and known shape in one Provider Hub
+    job row, in place. Returns True when it masked something.
+
+    The structural fields (``_JOB_STRUCTURAL_FIELDS``) take the credential
+    shapes only: a password that reads "install" must not rewrite the action.
+    Every other top-level field takes the exact registered values, everywhere
+    inside it, including a config echo and the members of a tuple (rebuilt as a
+    list, as the stored document would read back). Non-string values are left
+    as they are.
+    """
+    if not isinstance(job, dict):
+        return False
+    changed = False
+
+    def walk(node, in_text):
+        nonlocal changed
+        if isinstance(node, str):
+            masked = scrub_text(node) if in_text else _mask_patterns(node)
+            if masked != node:
+                changed = True
+            return masked
+        if isinstance(node, dict):
+            for key, value in list(node.items()):
+                node[key] = walk(value, in_text)
+            return node
+        if isinstance(node, (list, tuple)):
+            return [walk(value, in_text) for value in node]
+        return node
+
+    for key, value in list(job.items()):
+        structural = isinstance(key, str) and key in _JOB_STRUCTURAL_FIELDS
+        job[key] = walk(value, not structural)
     return changed
 
 

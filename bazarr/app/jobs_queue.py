@@ -199,7 +199,14 @@ class Job:
                  retryable: bool = False, retry_of: int = None, lane: str = None):
         self.job_id = job_id
         self.session = PROCESS_SESSION
-        self.job_name = job_name
+        # A name is built from a media title or an uploaded filename and the jobs API returns it
+        # as is, so a credential-shaped title is masked where the name is set.
+        # Trade-off: the name is scrubbed against every registered value of
+        # six or more characters, so a username that is also a word in a title
+        # or a path (a Postgres user "bazarr") is masked there too. A leak in
+        # a name reaches the API and the logs; a masked title only costs
+        # readability.
+        self.job_name = scrub_text(job_name)
         self.module = module
         self.func = func
         self.args = args
@@ -523,7 +530,9 @@ class JobsQueue:
         
         for job in queues:
             if job.job_id == job_id:
-                job.job_name = new_job_name
+                # Same trade-off as in Job.__init__: a registered value inside
+                # the name is masked, even when it is also an ordinary word.
+                job.job_name = scrub_text(new_job_name)
                 _job_event('update', {"job_id": job.job_id})
                 return True
         return False

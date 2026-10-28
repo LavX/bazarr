@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import logging
@@ -22,7 +23,7 @@ from urllib.parse import urlparse
 from subliminal_patch.extensions import provider_registry
 
 from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KEY
-from secret_store.scrub import scrub_text, scrub_value
+from secret_store.scrub import scrub_job_secrets, scrub_text
 
 from .manifest import validate_manifest
 from .bundle import verify_bundle_tree
@@ -156,8 +157,13 @@ def _persist_job(job: dict[str, Any]) -> None:
     # One row's message, error and details come from whatever raised, which
     # for a plugin failure is the plugin's own words. The row is read by the
     # API and, after a restart, by the boot that loads it, so it is scrubbed
-    # once here: no writer of a row has to remember to.
-    stored = scrub_value(job)
+    # once here: no writer of a row has to remember to. Every field takes an
+    # exact credential value except the structural ones (the action, the ids,
+    # the versions, the state and the timings): a password that happens to read
+    # "install" must not rewrite those. The credential shapes are masked
+    # everywhere.
+    stored = copy.deepcopy(job)
+    scrub_job_secrets(stored)
 
     def persist(state: dict[str, Any]) -> None:
         jobs = state.setdefault("jobs", [])

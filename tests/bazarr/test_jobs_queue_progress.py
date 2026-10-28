@@ -219,6 +219,29 @@ def test_a_job_action_is_scrubbed_before_the_socket_and_the_api(scrub_registry):
     assert key not in str(job.action)
 
 
+def test_a_job_name_is_scrubbed_at_creation_and_when_renamed(scrub_registry):
+    """A job name is built from a media title or an uploaded filename, and
+    /api/system/jobs returns it verbatim, so a credential-shaped title is
+    masked where the name is set, both when the job is queued and when it is
+    renamed later."""
+    from pytest import MonkeyPatch
+    from test_sportarr_workflows import private_queue
+
+    key = "sk-fake-provider-key-0123456789"  # pragma: allowlist secret
+    scrub_registry([key])
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        queue.feed_jobs_pending_queue(f"Translate Show.{key}.srt", __name__, "noop")
+        job = queue.jobs_pending_queue[0]
+        assert job.job_name == "Translate Show.***.srt"
+        assert key not in str(queue.list_jobs_from_queue())
+
+        assert queue.update_job_name(job.job_id, f"Upload {key}.srt") is True
+        assert job.job_name == "Upload ***.srt"
+        assert queue.get_job_name(job.job_id) == "Upload ***.srt"
+        assert key not in str(queue.list_jobs_from_queue())
+
+
 def test_a_job_action_keeps_its_handler_name_when_a_credential_matches_it(scrub_registry):
     """``kind`` is dispatch: a credential that happens to equal a handler name
     must not stop the frontend finding that handler."""

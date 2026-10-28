@@ -41,6 +41,11 @@ def add_sync_status(session, rows, data):
         if kwargs.get('srt_path'):
             path = os.path.normcase(os.path.abspath(kwargs['srt_path']))
             active.setdefault((owner, event_id, path), state)
+        # Only a job without the srt_path kwarg reaches the name lookup below,
+        # and its name is scrubbed (a registered value in the path is masked),
+        # so such a legacy row can miss `path in name` and show no job. A job
+        # with the kwarg is matched by the path and is not affected. Nothing
+        # but the name identifies a legacy row, so there is no better key.
         elif 'sync' in (getattr(job, 'job_name', '') or '').lower():
             legacy.append((owner, event_id, job.job_name, state))
     for row, result in zip(rows, data):
