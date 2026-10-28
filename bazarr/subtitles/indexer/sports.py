@@ -342,7 +342,9 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
         if settings.general.use_embedded_subs:
             # Hidden tracks are skipped: not listed, and not counted by _missing.
             hidden = hidden_languages(database, 'sports', [context.event_id], context.arr_instance_id)
-            for language, forced, hi, codec in embedded_subtitles_from_metadata(data):
+            for track in embedded_subtitles_from_metadata(data):
+                language, forced, hi, codec = track[:4]
+                title = track[4] if len(track) > 4 else None
                 if codec and ((settings.general.ignore_pgs_subs and codec.lower() == 'pgs') or
                               (settings.general.ignore_vobsub_subs and codec.lower() == 'vobsub') or
                               (settings.general.ignore_ass_subs and codec.lower() == 'ass')):
@@ -358,7 +360,7 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
                     if code in hidden:
                         note_uncounted_track(uncounted_codes, code, codec, hidden=True)
                         continue
-                    actual.append(embedded_entry(code, codec))
+                    actual.append(embedded_entry(code, codec, title))
                     embedded_codes.append(code)
         actual.extend(_external(context, mappings, ownership_index, cancel))
         with sports_transaction(database) as session:

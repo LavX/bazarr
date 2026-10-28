@@ -62,6 +62,7 @@ interface Props {
   disabled?: boolean;
   profile?: Language.Profile;
   history?: History.Movie[];
+  metadataPending?: boolean;
 }
 
 const ScoreBadge: React.FC<{ score?: string | number | null }> = ({
@@ -173,11 +174,43 @@ const SubtitleLanguageBadges: FunctionComponent<{
     return <CombinedSubtitleBadge subtitle={subtitle} />;
   }
 
+  const trackTitle = subtitle.title?.trim() ?? "";
+  const languageName = (subtitle.name ?? "").trim();
+  let shortTitle = trackTitle;
+  if (
+    languageName &&
+    trackTitle.toLowerCase().startsWith(languageName.toLowerCase())
+  ) {
+    const rest = trackTitle.slice(languageName.length);
+    // Only a whole-word prefix is the language; "Englishman" is a title.
+    if (!rest || /^[\s:\u2013\u2014-]/.test(rest)) {
+      shortTitle = rest.replace(/^[\s:\u2013\u2014-]+/, "");
+    }
+  }
+  if (subtitle.forced && shortTitle.toLowerCase() === "forced") {
+    shortTitle = "";
+  }
+  const shownTitle =
+    Array.from(shortTitle).length > 40
+      ? `${Array.from(shortTitle).slice(0, 40).join("")}…`
+      : shortTitle;
+
   return (
     <Group gap={4} wrap="nowrap">
       <Badge style={{ whiteSpace: "nowrap" }}>
         <Language.Text value={subtitle} long></Language.Text>
       </Badge>
+      {shownTitle && (
+        <Badge
+          size="xs"
+          variant="light"
+          color="gray"
+          title={trackTitle}
+          style={{ whiteSpace: "nowrap" }}
+        >
+          {shownTitle}
+        </Badge>
+      )}
       <SyncEngineBadge subtitle={subtitle} />
     </Group>
   );
@@ -635,14 +668,14 @@ const CodeCell: FunctionComponent<{ item: Subtitle }> = ({ item }) => {
   );
 };
 
-const columns: ColumnDef<Subtitle>[] = [
+const columns = (metadataPending: boolean): ColumnDef<Subtitle>[] => [
   {
     header: "Subtitle Path",
     accessorKey: "path",
     meta: { className: styles.pathCell },
     cell: ({
       row: {
-        original: { path, codec },
+        original: { path, codec, codec_pending: codecPending },
       },
     }) => {
       const props: TextProps = {
@@ -654,7 +687,7 @@ const columns: ColumnDef<Subtitle>[] = [
         return (
           <Group gap={6} wrap="nowrap">
             <Text className="table-primary">Video File Subtitle Track</Text>
-            {codecLabel && (
+            {codecLabel ? (
               <Badge
                 size="xs"
                 variant="light"
@@ -663,6 +696,13 @@ const columns: ColumnDef<Subtitle>[] = [
               >
                 {codecLabel}
               </Badge>
+            ) : (
+              metadataPending &&
+              codecPending && (
+                <Badge size="xs" variant="light" color="gray">
+                  Reading track metadata…
+                </Badge>
+              )
             )}
           </Group>
         );
@@ -734,10 +774,15 @@ const Table: FunctionComponent<Props> = ({
   profile,
   history,
   disabled,
+  metadataPending = false,
 }) => {
   const onlyDesired = useShowOnlyDesired();
   const [compareSelection, setCompareSelection] =
     useState<CompareSelection>(null);
+  const tableColumns = useMemo(
+    () => columns(metadataPending),
+    [metadataPending],
+  );
 
   const profileItems = useProfileItemsToLanguages(profile);
 
@@ -868,7 +913,7 @@ const Table: FunctionComponent<Props> = ({
     <MovieTableContext.Provider value={tableValue}>
       <SimpleTable
         className={styles.table}
-        columns={columns}
+        columns={tableColumns}
         data={data}
         getRowId={(sub) => {
           // Missing rows all share the sentinel path "Missing Subtitles" and

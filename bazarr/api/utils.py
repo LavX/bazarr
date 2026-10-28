@@ -17,7 +17,7 @@ from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
 from app.database import get_audio_profile_languages, get_desired_languages, select, func
 from sqlalchemy import case
 from utilities.path_mappings import path_mappings, _apply_mapping, _instance_path_mapping
-from subtitles.indexer.entries import entry_codec
+from subtitles.indexer.entries import entry_codec, entry_predates_codecs, entry_title
 
 None_Keys = ['null', 'undefined', '', None]
 
@@ -381,6 +381,14 @@ def postprocess(item):
                                     "hi": language["hi"],
                                     "file_size": file_size,
                                     "codec": entry_codec(subs)}
+            title = entry_title(subs)
+            if title:
+                item['subtitles'][i]["title"] = title
+            # Set only for an embedded entry stored before codecs were, which
+            # one Scan Disk fills in; a codec of null on a current entry stays
+            # null however often it is scanned.
+            if entry_predates_codecs(subs):
+                item['subtitles'][i]["codec_pending"] = True
         if settings.general.embedded_subs_show_desired and item.get('profileId'):
             desired_lang_list = get_desired_languages(item['profileId'])
             item['subtitles'] = [x for x in item['subtitles'] if x['code2'] in desired_lang_list or x['path']]

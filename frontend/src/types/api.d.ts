@@ -67,6 +67,13 @@ interface Subtitle {
   /** Embedded tracks only: knowit's format lowercased ("pgs", "subrip"), or
    *  null when it is unknown or the row was indexed before it was stored. */
   codec?: string | null;
+  /** Embedded tracks only: true when the row was indexed before codecs were
+   *  stored, so one Scan Disk fills the codec in. Never set for a current
+   *  entry whose codec is null. */
+  codec_pending?: boolean;
+  /** Embedded tracks only: the track's own title, such as "English SDH" or
+   *  "Signs and Songs", when the file names it. */
+  title?: string | null;
 }
 
 interface AudioTrack {

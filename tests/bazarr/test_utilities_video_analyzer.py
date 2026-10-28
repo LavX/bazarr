@@ -362,9 +362,9 @@ def test_embedded_subs_reader_forced_from_title(video_file):
         "utilities.video_analyzer.alpha3_from_alpha2", return_value=None
     ):
         result = video_analyzer.embedded_subs_reader(video_file, 1e6)
-        assert ["eng", True, False, "SubRip"] in result   # forced derived from title
+        assert ["eng", True, False, "SubRip", "Forced"] in result   # forced derived from title
         assert ["eng", False, False, "SubRip"] in result  # plain track stays non-forced
-        assert ["eng", False, True, "SubRip"] in result   # hi untouched by the forced heuristic
+        assert ["eng", False, True, "SubRip", "SDH"] in result   # hi untouched by the forced heuristic
 
 
 def test_embedded_subs_reader_disposition_forced_preserved(video_file):
@@ -385,7 +385,7 @@ def test_embedded_subs_reader_disposition_forced_preserved(video_file):
         "utilities.video_analyzer.alpha3_from_alpha2", return_value=None
     ):
         result = video_analyzer.embedded_subs_reader(video_file, 1e6)
-        assert ["eng", True, False, "SubRip"] in result
+        assert ["eng", True, False, "SubRip", "English"] in result
 
 
 # A real-shaped languages table, patched over the DB-backed module global so the

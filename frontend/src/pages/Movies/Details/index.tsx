@@ -1,4 +1,10 @@
-import { FunctionComponent, useCallback, useRef } from "react";
+import {
+  FunctionComponent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, Navigate, useParams } from "react-router";
 import {
   Anchor,
@@ -26,6 +32,7 @@ import {
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useQueryClient } from "@tanstack/react-query";
 import { isNumber } from "lodash";
 import {
   useDownloadMovieSubtitles,
@@ -33,6 +40,7 @@ import {
   useMoviesProvider,
 } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { whenJobFinishes } from "@/apis/hooks/jobWatch";
 import {
   useMovieAction,
   useMovieById,
@@ -40,6 +48,7 @@ import {
   useMovieModification,
 } from "@/apis/hooks/movies";
 import { useAppTitle } from "@/apis/hooks/site";
+import api from "@/apis/raw";
 import { Action, FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
@@ -87,6 +96,89 @@ const MovieDetailView: FunctionComponent = () => {
   const mutation = useMovieModification();
   const { mutateAsync: action } = useMovieAction();
   const { mutateAsync: downloadAsync } = useDownloadMovieSubtitles();
+  const client = useQueryClient();
+  // The title the background scan was started for, and how to stop following
+  // it. One scan per visit to a title.
+  const autoScan = useRef<{ id: number; stop: () => void } | null>(null);
+  const [metadataPending, setMetadataPending] = useState(false);
+
+  // A title indexed before codecs were stored has embedded rows the server
+  // flags as codec_pending. Read its metadata in the background, without
+  // blocking the page, and refresh the row when the scan job finishes. A row
+  // whose codec is null on a current entry is not flagged: the format could
+  // not be named then and a scan names it no better, so it is never rescanned.
+  const needsMetadata = Boolean(
+    movie?.subtitles.some(
+      (subtitle) => !subtitle.path && subtitle.codec_pending,
+    ),
+  );
+  const refetchMovie = movieQuery.refetch;
+
+  useEffect(() => {
+    if (!movie || !needsMetadata || autoScan.current?.id === id) {
+      return;
+    }
+    setMetadataPending(true);
+    let cancelled = false;
+    let stopWatching: () => void = () => undefined;
+    const scan = {
+      id,
+      stop: () => {
+        cancelled = true;
+        stopWatching();
+      },
+    };
+    autoScan.current = scan;
+    const done = () => {
+      if (cancelled) {
+        return;
+      }
+      setMetadataPending(false);
+      void refetchMovie();
+    };
+    api.movies
+      .action({
+        action: "scan-disk",
+        radarrid: movie.radarrId,
+        arr_instance_id: movie.arr_instance_id,
+      })
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+        const jobId = result?.job_id;
+        if (typeof jobId === "number") {
+          stopWatching = whenJobFinishes(client, jobId, done);
+        } else {
+          done();
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setMetadataPending(false);
+        }
+      });
+    // No cleanup here: the movie refetching with its codecs filled in flips
+    // needsMetadata, which re-runs this effect, and that must not end the
+    // watch on the job. Leaving the title does, below.
+  }, [client, id, movie, needsMetadata, refetchMovie]);
+
+  // A refetch can fill every codec before the job's terminal event arrives:
+  // nothing is pending then, whatever the job still says.
+  useEffect(() => {
+    if (!needsMetadata) {
+      setMetadataPending(false);
+    }
+  }, [needsMetadata]);
+
+  // Leaving the title, or the page, stops following its scan.
+  useEffect(
+    () => () => {
+      autoScan.current?.stop();
+      autoScan.current = null;
+    },
+    [id],
+  );
 
   const download = useCallback(
     (item: Item.Movie, result: SearchResultType) => {
@@ -368,6 +460,7 @@ const MovieDetailView: FunctionComponent = () => {
             profile={profile}
             disabled={hasTask}
             history={movieHistory}
+            metadataPending={metadataPending}
           ></Table>
         </Stack>
       </QueryOverlay>

@@ -94,7 +94,9 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                                                               movie_file_id=item.movie_file_id,
                                                               use_cache=use_cache,
                                                               arr_instance_id=owner_instance_id)
-                    for subtitle_language, subtitle_forced, subtitle_hi, subtitle_codec in subtitle_languages:
+                    for subtitle_track in subtitle_languages:
+                        subtitle_language, subtitle_forced, subtitle_hi, subtitle_codec = subtitle_track[:4]
+                        subtitle_title = subtitle_track[4] if len(subtitle_track) > 4 else None
                         try:
                             # A track whose format the parser cannot name has no
                             # codec, so no ignore switch can match it: keep it.
@@ -123,7 +125,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                                     note_uncounted_track(uncounted_embedded, lang, codec, hidden=True)
                                     continue
                                 logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
-                                actual_subtitles.append(embedded_entry(lang, subtitle_codec))
+                                actual_subtitles.append(embedded_entry(lang, subtitle_codec, subtitle_title))
                                 embedded_languages.append(lang)
                         except Exception as error:
                             logging.debug(f"BAZARR unable to index this unrecognized language: {subtitle_language} "  # noqa: G004

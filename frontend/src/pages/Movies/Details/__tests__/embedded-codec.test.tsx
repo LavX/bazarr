@@ -157,4 +157,116 @@ describe("Movies Detail Table, embedded track codec", () => {
     await screen.findByText("test.da.srt");
     expect(screen.getByText("PGS").closest("tr")).toBe(before);
   });
+
+  it("shows the track's own title when the file carries one", async () => {
+    server.use(
+      http.get("/api/subtitles/sync-status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+    const titled: Subtitle = {
+      ...embedded("en", "pgs"),
+      name: "English",
+      hi: true,
+      title: "English SDH",
+    };
+
+    customRender(
+      <Table movie={makeMovie([titled])} profile={undefined} history={[]} />,
+    );
+
+    expect(await screen.findByText("SDH")).toBeInTheDocument();
+  });
+
+  it("does not strip a title that only starts with the same letters", async () => {
+    server.use(
+      http.get("/api/subtitles/sync-status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+    const titled: Subtitle = {
+      ...embedded("en", "pgs"),
+      name: "English",
+      title: "Englishman [日本語]",
+    };
+
+    customRender(
+      <Table movie={makeMovie([titled])} profile={undefined} history={[]} />,
+    );
+
+    expect(await screen.findByText("Englishman [日本語]")).toBeInTheDocument();
+  });
+
+  it("caps a long title and keeps the full text in the tooltip", async () => {
+    server.use(
+      http.get("/api/subtitles/sync-status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+    const long = "A".repeat(60);
+    const titled: Subtitle = {
+      ...embedded("en", "pgs"),
+      name: "English",
+      title: long,
+    };
+
+    customRender(
+      <Table movie={makeMovie([titled])} profile={undefined} history={[]} />,
+    );
+
+    const badge = await screen.findByTitle(long);
+    expect(Array.from(badge.textContent ?? "")).toHaveLength(41);
+  });
+
+  it("does not crash when the language name is empty", async () => {
+    server.use(
+      http.get("/api/subtitles/sync-status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+    const titled: Subtitle = {
+      ...embedded("en", "pgs"),
+      name: "",
+      title: "Signs and Songs",
+    };
+
+    customRender(
+      <Table movie={makeMovie([titled])} profile={undefined} history={[]} />,
+    );
+
+    expect(await screen.findByText("Signs and Songs")).toBeInTheDocument();
+  });
+
+  it("shows a metadata placeholder without hiding the row", async () => {
+    server.use(
+      http.get("/api/subtitles/sync-status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+
+    customRender(
+      <Table
+        movie={makeMovie([
+          { ...embedded("en", null), codec_pending: true },
+          embedded("de", null),
+        ])}
+        profile={undefined}
+        history={[]}
+        metadataPending
+      />,
+    );
+
+    // Only the row stored before codecs existed is being read; the other row's
+    // format is unknown for good and a scan would not change that.
+    expect(
+      await screen.findByText("Reading track metadata…"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Reading track metadata…")).toHaveLength(1);
+    expect(screen.getAllByText("Video File Subtitle Track")).toHaveLength(2);
+  });
 });

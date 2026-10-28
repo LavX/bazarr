@@ -63,7 +63,7 @@ class _FakeField:
 _fake_flask_restx = MagicMock()
 _fake_flask_restx.Namespace = _FakeNamespace
 _fake_flask_restx.Resource = _FakeResource
-_fake_flask_restx.fields = MagicMock(Raw=_FakeField, Integer=_FakeField)
+_fake_flask_restx.fields = MagicMock(Raw=_FakeField, Integer=_FakeField, String=_FakeField)
 _fake_flask_restx.reqparse = MagicMock()
 
 _api_utils_mock = MagicMock()
