@@ -50,7 +50,10 @@ vi.mock("@/utilities/console", () => ({ LOG: logMock }));
 
 vi.mock("@/utilities/event", () => ({ setOnlineStatus: setOnlineStatusMock }));
 
-import { createDefaultReducer } from "@/modules/socketio/reducer";
+import {
+  createDefaultReducer,
+  MAX_JOBS_IN_CACHE,
+} from "@/modules/socketio/reducer";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -303,9 +306,9 @@ describe("jobs reducer (inline progress_value path)", () => {
     expect(updated!.progress_message).toBe("Halfway");
   });
 
-  it("trims the cache to 100 entries when it exceeds 100 jobs", () => {
+  it("trims the cache to its cap, dropping the oldest ended job and keeping the running one", () => {
     /* eslint-disable camelcase */
-    const existing = Array.from({ length: 100 }, (_, i) => ({
+    const existing = Array.from({ length: MAX_JOBS_IN_CACHE }, (_, i) => ({
       job_id: i,
       progress_value: 0,
       status: "done",
@@ -316,7 +319,7 @@ describe("jobs reducer (inline progress_value path)", () => {
     update("jobs", [
       /* eslint-disable camelcase */
       {
-        job_id: 200,
+        job_id: 1000,
         progress_value: 1,
         progress_max: 10,
         progress_message: "New",
@@ -330,7 +333,10 @@ describe("jobs reducer (inline progress_value path)", () => {
       unknown[],
     ][];
     const [, result] = calls2[0];
-    expect((result as unknown[]).length).toBe(100);
+    const ids = (result as { job_id: number }[]).map((job) => job.job_id);
+    expect(ids).toHaveLength(MAX_JOBS_IN_CACHE);
+    expect(ids).not.toContain(0);
+    expect(ids).toContain(1000);
   });
 
   it("does not call setQueryData when progress_value is null (API fetch path)", () => {

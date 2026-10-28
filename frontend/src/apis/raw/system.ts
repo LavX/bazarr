@@ -131,7 +131,10 @@ class SystemApi extends BaseApi {
 
   /** Queue the health re-check. Answers at once with the job doing it. */
   async recheckHealth() {
-    const response = await this.post<{ job_id: number | null }>("/health");
+    const response = await this.post<{
+      job_id: number | null;
+      session?: string;
+    }>("/health");
     return response.data;
   }
 

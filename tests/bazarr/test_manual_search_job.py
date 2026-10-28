@@ -186,3 +186,14 @@ def test_the_movie_route_queues_the_search_and_a_missing_movie_is_a_404(schema_s
     with app.test_request_context("/api/providers/movies/search", method="POST", data={"radarrid": 999}):
         assert resource.post.__wrapped__(resource()) == ("Movie not found", 404)
     assert len(queued) == 1
+
+
+def test_a_finished_search_keeps_its_rows_only_while_it_is_among_the_most_recent(real_queue, monkeypatch):
+    monkeypatch.setattr(real_queue.manual, "manual_search", lambda *args, **kwargs: _rows())
+
+    jobs = [real_queue.run(path=f"/tv/Show/e{number}.mkv") for number in range(12)]
+
+    kept = [job.job_id for job in jobs if real_queue.queue.get_job_result(job.job_id)["result"] is not None]
+    assert kept == [job.job_id for job in jobs[2:]]
+    # The two oldest are still in the list, with the status they ended in.
+    assert real_queue.queue.get_job_result(jobs[0].job_id)["status"] == "completed"

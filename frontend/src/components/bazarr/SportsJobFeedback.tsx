@@ -13,7 +13,7 @@ export default function SportsJobFeedback({
   queued?: SportsJob;
   owner?: number;
 }) {
-  const job = useSportsJob(queued?.job_id, owner);
+  const job = useSportsJob(queued?.job_id, owner, queued?.session);
   const client = useQueryClient();
   const status = job.data;
   useEffect(() => {

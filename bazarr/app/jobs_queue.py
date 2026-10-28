@@ -35,6 +35,19 @@ from secret_store.scrub import scrub_text, scrub_value
 bazarr_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# How many failed and how many completed jobs the queue remembers, each. Ten
+# was enough for a drawer nobody scrolled; with more actions on the standard
+# path it dropped a job before its owner had read how it ended. The client
+# keeps its own cache at least this deep for both histories plus whatever is
+# still active, so a trimmed cache never drops an active job first.
+JOB_HISTORY_DEPTH = 50
+
+# How many of the most recent ended jobs may still hold a published result. A
+# result can be the rows of a whole search, so the history keeps them for the
+# searches a person is likely to come back to and drops them from older jobs.
+JOB_RESULTS_KEPT = 10
+
+
 def _job_event(action: str, payload: dict):
     """Send one jobs event, stamped with the backend session it belongs to.
 
@@ -226,10 +239,10 @@ class JobsQueue:
     :ivar jobs_running_queue: Queue containing jobs that are currently being executed.
     :type jobs_running_queue: deque
     :ivar jobs_failed_queue: Queue containing jobs that failed during execution. It maintains a
-        maximum size of 10 entries.
+        maximum size of ``JOB_HISTORY_DEPTH`` entries.
     :type jobs_failed_queue: deque
     :ivar jobs_completed_queue: Queue containing jobs that were executed successfully. It maintains
-        a maximum size of 10 entries.
+        a maximum size of ``JOB_HISTORY_DEPTH`` entries.
     :type jobs_completed_queue: deque
     :ivar current_job_id: Identifier of the latest job, incremented with each new job added to the queue.
     :type current_job_id: int
@@ -237,8 +250,8 @@ class JobsQueue:
     def __init__(self):
         self.jobs_pending_queue = deque()
         self.jobs_running_queue = deque()
-        self.jobs_failed_queue = deque(maxlen=10)
-        self.jobs_completed_queue = deque(maxlen=10)
+        self.jobs_failed_queue = deque(maxlen=JOB_HISTORY_DEPTH)
+        self.jobs_completed_queue = deque(maxlen=JOB_HISTORY_DEPTH)
         self.current_job_id = 0
         
         # Add locks for thread safety
@@ -303,6 +316,10 @@ class JobsQueue:
 
         with self._queue_lock:
             existing = self._find_existing_job(module, func, args, kwargs)
+            if existing is not None and existing.cancelled and return_existing:
+                # A caller that wants to follow the running job has nothing to gain from one that was told
+                # to stop and only ends at its next check: it would read as stopped. It gets a job of its own.
+                existing = None
             if existing is not None:
                 logging.debug(f"Task {job_name} already exists in pending and running queue")  # noqa: G004
                 return existing.job_id if return_existing else False
@@ -1027,6 +1044,7 @@ class JobsQueue:
             with self._queue_lock:
                 self.jobs_running_queue.remove(job)
             self.jobs_completed_queue.append(job)
+            self._trim_results()
             return False
         except JobFailed as e:
             logging.debug(f"Job {job.job_name} ({job.job_id}) failed: {e}")  # noqa: G004
@@ -1055,6 +1073,7 @@ class JobsQueue:
             with self._queue_lock:
                 self.jobs_running_queue.remove(job)
             self.jobs_completed_queue.append(job)
+            self._trim_results()
             return True
         finally:
             try:
@@ -1075,6 +1094,22 @@ class JobsQueue:
             except Exception as e:
                 logging.exception(f"Exception raised while sending event: {e}")  # noqa: G004
 
+    def _trim_results(self):
+        """Keep a published result on only the most recent ended jobs.
+
+        The history is ``JOB_HISTORY_DEPTH`` deep for each outcome, but a
+        result can be the rows of a whole search. Older jobs keep their row in
+        the list and lose the rows they once offered.
+        """
+        with self._queue_lock:
+            holders = [job for job in (*self.jobs_failed_queue, *self.jobs_completed_queue)
+                       if job.result is not None]
+            if len(holders) <= JOB_RESULTS_KEPT:
+                return
+            holders.sort(key=lambda job: job.observed_finished_at or datetime.min.replace(tzinfo=timezone.utc))
+            for job in holders[:-JOB_RESULTS_KEPT]:
+                job.result = None
+
     def _mark_failed(self, job):
         job.status = 'failed'
         job.last_run_time = datetime.now(timezone.utc)
@@ -1083,6 +1118,7 @@ class JobsQueue:
         with self._queue_lock:
             self.jobs_running_queue.remove(job)
         self.jobs_failed_queue.append(job)
+        self._trim_results()
 
     def _is_an_existing_job(self, module, func, args, kwargs):
         """

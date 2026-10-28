@@ -31,6 +31,25 @@ export class JobFailedError extends Error {
   }
 }
 
+/**
+ * The job is no longer reported, so whether it worked is not known. It is a
+ * failure to follow the job, not a failure of the job, and says so: a caller
+ * that wants to tell the two apart checks for this class first.
+ */
+export class JobOutcomeUnknownError extends JobFailedError {
+  constructor(jobId: number) {
+    super({
+      // eslint-disable-next-line camelcase -- the transport field name
+      job_id: jobId,
+      // eslint-disable-next-line camelcase
+      job_name: "",
+      status: "failed",
+      error: { reason: "unknown", message: UNKNOWN_JOB_OUTCOME },
+    } as JobRecord);
+    this.name = "JobOutcomeUnknownError";
+  }
+}
+
 // A job that ended at Stop is recorded as cancelled (and flagged stopped).
 // It did not finish, so it is not reported as done.
 export class JobStoppedError extends Error {
@@ -54,6 +73,8 @@ function failureMessage(job: JobRecord): string {
 
 interface Waiter {
   client: QueryClient;
+  /** The backend run the job belongs to, when the caller knows it. */
+  session?: string;
   registeredAt: number;
   resolve: (job: JobRecord | undefined) => void;
   reject: (error: Error) => void;
@@ -71,7 +92,11 @@ function settle(jobId: number, job: JobRecord | undefined) {
   waiters.delete(jobId);
   for (const waiter of list) {
     if (job?.status === "failed") {
-      waiter.reject(new JobFailedError(job));
+      waiter.reject(
+        job.error?.reason === "unknown"
+          ? new JobOutcomeUnknownError(job.job_id)
+          : new JobFailedError(job),
+      );
     } else if (job?.status === "cancelled" || job?.stopped) {
       // The status is the stop; the flag says the same on a row recorded
       // while a stopped job still read as completed.
@@ -118,13 +143,33 @@ function settleUnknown(jobId: number) {
   } as JobRecord);
 }
 
+/**
+ * A job id only names a job within one backend run. A row from another run
+ * that shares the id is not the job that was queued, which matters when the
+ * backend restarted and its ids began again. Either side not knowing its run
+ * cannot tell them apart, and counts as the same.
+ */
+export function isSameRun(followed?: string, row?: string) {
+  return followed === undefined || row === undefined || followed === row;
+}
+
+function sameRun(waiter: Waiter, job: JobRecord) {
+  return isSameRun(waiter.session, job.session);
+}
+
 function checkCache(client: QueryClient) {
   const jobs = client.getQueryData<JobRecord[]>(JOBS_KEY) ?? [];
   for (const [jobId, entries] of Array.from(waiters.entries())) {
     if (!entries.some((waiter) => waiter.client === client)) {
       continue;
     }
-    const job = jobs.find((entry) => entry.job_id === jobId);
+    const job = jobs.find(
+      (entry) =>
+        entry.job_id === jobId &&
+        entries.some(
+          (waiter) => waiter.client === client && sameRun(waiter, entry),
+        ),
+    );
     if (job !== undefined && TERMINAL.has(job.status)) {
       settle(jobId, job);
     }
@@ -138,7 +183,11 @@ function pollOnce() {
     .then((jobs) => {
       const list = (jobs ?? []) as JobRecord[];
       for (const [jobId, pending] of Array.from(waiters.entries())) {
-        const job = list.find((entry) => entry.job_id === jobId);
+        const job = list.find(
+          (entry) =>
+            entry.job_id === jobId &&
+            pending.some((waiter) => sameRun(waiter, entry)),
+        );
         if (job !== undefined) {
           if (TERMINAL.has(job.status)) {
             settle(jobId, job);
@@ -161,21 +210,25 @@ function pollOnce() {
 
 /**
  * Resolves with the job once it completed, rejects with a JobFailedError
- * carrying the job's reason once it failed, or once the backend stops
- * reporting it at all, and rejects with a JobStoppedError once it ended at
- * Stop. A null id, which the backend answers when it could not queue anything
+ * carrying the job's reason once it failed, and rejects with its subclass
+ * JobOutcomeUnknownError once the backend stops reporting it at all, which says
+ * nothing about whether the job worked. It rejects with a JobStoppedError once
+ * the job ended at Stop. A caller that knows the backend run the job belongs to
+ * passes its `session`, so a row from another run that shares the id is never
+ * taken for it. A null id, which the backend answers when it could not queue anything
  * to follow, resolves at once.
  */
 export function waitForJob(
   client: QueryClient,
   jobId: number | null | undefined,
+  session?: string,
 ): Promise<JobRecord | undefined> {
   if (jobId === null || jobId === undefined) {
     return Promise.resolve(undefined);
   }
   return new Promise((resolve, reject) => {
     const list = waiters.get(jobId) ?? [];
-    list.push({ client, registeredAt: Date.now(), resolve, reject });
+    list.push({ client, session, registeredAt: Date.now(), resolve, reject });
     waiters.set(jobId, list);
     if (!subscriptions.has(client)) {
       subscriptions.set(
@@ -207,11 +260,12 @@ export const JOB_RESULT_GONE =
 export async function awaitJobResult<T>(
   client: QueryClient,
   jobId: number | null | undefined,
+  session?: string,
 ): Promise<T> {
   if (jobId === null || jobId === undefined) {
     throw new Error("The job could not be queued.");
   }
-  await waitForJob(client, jobId);
+  await waitForJob(client, jobId, session);
   let outcome: System.JobResult<T>;
   try {
     outcome = await api.system.jobResult<T>(jobId);
@@ -223,7 +277,11 @@ export async function awaitJobResult<T>(
     }
     throw error;
   }
-  if (outcome.result === null) {
+  // A job of another backend run that shares the id is not the one followed.
+  if (
+    (session !== undefined && outcome.session !== session) ||
+    outcome.result === null
+  ) {
     throw new Error(JOB_RESULT_GONE);
   }
   return outcome.result;
@@ -251,5 +309,5 @@ export async function searchAsJob<T>(
   if (queued.job_id !== null) {
     claimJobCompletion(queued.job_id, queued.session);
   }
-  return awaitJobResult<T>(client, queued.job_id);
+  return awaitJobResult<T>(client, queued.job_id, queued.session);
 }

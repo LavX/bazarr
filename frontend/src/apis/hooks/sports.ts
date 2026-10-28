@@ -9,6 +9,7 @@ import sports, {
   SportsLeague,
   SportsRecord,
 } from "@/apis/raw/sports";
+import { isSameRun } from "@/utilities/jobs";
 import { useArrKindAvailability } from "./arrInstances";
 import { useSystemJobs } from "./system";
 
@@ -472,10 +473,20 @@ const SPORTS_JOB_ENDED = new Set(["completed", "failed", "cancelled"]);
  * job endpoint is read one time for what it produced (the file status, the
  * replacement and each outcome), which the jobs list never carries.
  */
-export function useSportsJob(id?: number | null, owner?: number) {
+export function useSportsJob(
+  id?: number | null,
+  owner?: number,
+  session?: string,
+) {
   const { instances } = useSportsAvailability();
   const jobs = useSystemJobs();
-  const cached = id ? jobs.data?.find((job) => job.job_id === id) : undefined;
+  // Ids restart with the backend, so a row of another run that shares the id
+  // is not the job that was queued.
+  const cached = id
+    ? jobs.data?.find(
+        (job) => job.job_id === id && isSameRun(session, job.session),
+      )
+    : undefined;
   const ended = cached !== undefined && SPORTS_JOB_ENDED.has(cached.status);
   const owned =
     !!id && !!owner && instances.some((instance) => instance.id === owner);

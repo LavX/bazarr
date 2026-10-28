@@ -57,7 +57,7 @@ declare namespace SocketIO {
   type Reducer =
     | ReducerGroup<NumEventType, number>
     | ReducerGroup<NullEventType, undefined>
-    | ReducerGroup<"jobs", CustomEvent.Jobs, string>
+    | ReducerGroup<"jobs", CustomEvent.Jobs>
     | ReducerGroup<"session", string>;
 
   type ActionRecord = {

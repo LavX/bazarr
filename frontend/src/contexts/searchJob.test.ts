@@ -2,13 +2,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import api from "@/apis/raw";
 import type { DiscoverSearchSnapshot } from "@/types/discover";
-import { followSearch, SearchJobFailed } from "./searchJob";
+import { followSearch, SearchJobFailed, stopSearchJob } from "./searchJob";
 
 vi.mock("@/apis/raw", () => ({
-  default: { system: { jobResult: vi.fn() } },
+  default: {
+    system: {
+      jobResult: vi.fn(),
+      jobs: vi.fn(),
+      deleteJobs: vi.fn(),
+      actionOnJobs: vi.fn(),
+    },
+  },
 }));
 
 const jobResult = vi.mocked(api.system.jobResult);
+const jobs = vi.mocked(api.system.jobs);
+const deleteJobs = vi.mocked(api.system.deleteJobs);
+const actionOnJobs = vi.mocked(api.system.actionOnJobs);
 const snapshot = {
   search_id: "s",
   results: [],
@@ -28,12 +38,16 @@ function outcome(
   } as System.JobResult<never>;
 }
 
-function follow(onProgress = vi.fn(), retired = () => false) {
+function follow(
+  onProgress = vi.fn(),
+  retired = () => false,
+  session: string | undefined = "run-a",
+) {
   const controller = new AbortController();
   return {
     controller,
     onProgress,
-    done: followSearch(5, controller.signal, retired, onProgress),
+    done: followSearch(5, controller.signal, retired, onProgress, session),
   };
 }
 
@@ -140,10 +154,82 @@ describe("following a search job", () => {
     expect(jobResult.mock.calls.length).toBe(asked);
   });
 
+  it("does not take another backend run's job with the same id for its own", async () => {
+    jobResult.mockResolvedValue(
+      outcome("completed", {
+        session: "run-b",
+        result: { phase: "finished", providers: [], snapshot } as never,
+      }),
+    );
+    const other = follow();
+    const failure = expect(other.done).rejects.toMatchObject({
+      reason: "The result is no longer available. Run it again.",
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await failure;
+    // It looked once and stopped, instead of asking every 600 ms for ever.
+    expect(jobResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops asking once the job completed without a snapshot", async () => {
+    jobResult.mockResolvedValue(
+      outcome("completed", { result: { phase: "finished", providers: [] } }),
+    );
+    const bare = follow();
+    const failure = expect(bare.done).rejects.toMatchObject({
+      reason: "The result is no longer available. Run it again.",
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await failure;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(jobResult).toHaveBeenCalledTimes(1);
+  });
+
   it("cannot follow a search that was never queued", async () => {
     const controller = new AbortController();
     await expect(
       followSearch(null, controller.signal, () => false, vi.fn()),
     ).rejects.toBeInstanceOf(SearchJobFailed);
+  });
+});
+
+describe("stopping a search nobody reads", () => {
+  function listed(status: string, session = "run-a") {
+    jobs.mockResolvedValue([{ job_id: 5, status, session }] as never);
+  }
+
+  beforeEach(() => {
+    jobs.mockReset();
+    deleteJobs.mockReset();
+    actionOnJobs.mockReset();
+    vi.useRealTimers();
+  });
+
+  it("takes a search that is still waiting for a slot off the queue", async () => {
+    listed("pending");
+    await stopSearchJob(5, "run-a");
+    expect(deleteJobs).toHaveBeenCalledWith(5);
+    expect(actionOnJobs).not.toHaveBeenCalled();
+  });
+
+  it("asks a running search to stop", async () => {
+    listed("running");
+    await stopSearchJob(5, "run-a");
+    expect(actionOnJobs).toHaveBeenCalledWith(5, "cancel");
+    expect(deleteJobs).not.toHaveBeenCalled();
+  });
+
+  it("leaves a finished search and a job of another backend run alone", async () => {
+    listed("completed");
+    await stopSearchJob(5, "run-a");
+    listed("running", "run-b");
+    await stopSearchJob(5, "run-a");
+    expect(deleteJobs).not.toHaveBeenCalled();
+    expect(actionOnJobs).not.toHaveBeenCalled();
+  });
+
+  it("ignores a failure to ask", async () => {
+    jobs.mockRejectedValue(new Error("offline"));
+    await expect(stopSearchJob(5, "run-a")).resolves.toBeUndefined();
   });
 });

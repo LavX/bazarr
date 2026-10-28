@@ -178,6 +178,16 @@ export function observeJobSession(
   return previous === null ? "first" : "changed";
 }
 
+/**
+ * The backend run the socket and the jobs list last reported, or null before
+ * either has. A feature that queues a job through a route that does not name
+ * the run reads it at the moment of queueing, which is the run the job belongs
+ * to.
+ */
+export function currentJobSession() {
+  return currentSession;
+}
+
 function outcomeId(key: string) {
   return `job-outcome-${key}`;
 }
