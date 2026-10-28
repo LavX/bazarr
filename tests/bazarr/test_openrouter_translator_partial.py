@@ -90,12 +90,25 @@ def test_poll_job_redacts_and_caps_failed_reasons(caplog):
             f"Translation job failed: {detail}") in caplog.record_tuples
 
 
+def test_poll_job_answers_a_blank_failed_reason_with_the_default(caplog):
+    service = _build_service()
+    openrouter_translator.requests.get.return_value.json.return_value = {
+        "status": "failed", "error": " \t\n ",
+    }
+
+    with pytest.raises(openrouter_translator.TranslationServiceError) as raised:
+        service._poll_job("http://translator", "job-1", 1)
+
+    assert str(raised.value) == "Translation failed: Unknown error"
+
+
+@pytest.mark.parametrize("key", ["message", "error"])
 @pytest.mark.parametrize("result", [None, [{"position": 0, "line": "Szia"}]])
-def test_poll_job_redacts_and_caps_partial_reasons(result, caplog):
+def test_poll_job_redacts_and_caps_partial_reasons(result, key, caplog):
     service = _build_service()
     api_key = "sk-or-v1-" + "b" * 40
     openrouter_translator.requests.get.return_value.json.return_value = {
-        "status": "partial", "result": result, "message": f"Rejected {api_key}: " + "x" * 2000,
+        "status": "partial", "result": result, key: f"Rejected {api_key}: " + "x" * 2000,
     }
 
     with caplog.at_level(logging.WARNING, logger=openrouter_translator.__name__):

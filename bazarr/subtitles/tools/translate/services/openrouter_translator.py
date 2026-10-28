@@ -622,7 +622,8 @@ class OpenRouterTranslatorService:
                     raise TranslationServiceError('The AI Subtitle Translator finished without returning any translated lines.')
 
                 elif status == "failed":
-                    error = redact_service_text(str(job_status.get("error") or "Unknown error"))[:MAX_REFUSAL_LENGTH]
+                    error = (redact_service_text(str(job_status.get("error") or ""))[:MAX_REFUSAL_LENGTH].strip()
+                             or "Unknown error")
                     logger.error(f"Translation job failed: {error}")  # noqa: G004
                     raise TranslationServiceError(f"Translation failed: {error}")
 
