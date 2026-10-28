@@ -51,9 +51,9 @@ const SEARCH_RESPONSE = {
   ],
 };
 
-// This double models the modal query boundary. The subtitle data remains an
-// array, with provider outcomes beside it. The current queued transport only
-// carries subtitle rows, so transporting the metadata is a separate change.
+// This double models the modal query boundary. The subtitle rows stay in the
+// data array, with provider outcomes beside them. The hook that reads this
+// envelope from the job result is covered by manualSearchOutcomes.test.tsx.
 function useSearchResponse(id?: number) {
   const result = useQuery({
     queryKey: ["manual-search-provider-outcomes", id],
