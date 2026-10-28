@@ -1125,6 +1125,85 @@ describe("ProviderInstallStage", () => {
     });
   });
 
+  it("saves the enabled and disabled lists together after recommended installs", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry, tvsubtitlesEntry]);
+    mockedSystemSettings.mockReturnValue({
+      data: {
+        general: {
+          enabled_providers: ["opensubtitlescom", "subtitlecat"],
+          disabled_providers: [
+            "subdl",
+            "opensubtitlescom",
+            "subtitlecat",
+            "tvsubtitles",
+            "gestdown",
+          ],
+        },
+      },
+    } as unknown as ReturnType<typeof useSystemSettings>);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /install 2 recommended providers/i }),
+    );
+
+    await waitFor(() => {
+      expect(restart).toHaveBeenCalledTimes(1);
+    });
+    expect(settingsMutateAsync).toHaveBeenCalledTimes(1);
+    expect(settingsMutateAsync).toHaveBeenCalledWith({
+      "settings-general-enabled_providers": [
+        "opensubtitlescom",
+        "subtitlecat",
+        "tvsubtitles",
+      ],
+      "settings-general-disabled_providers": [
+        "subdl",
+        "opensubtitlescom",
+        "gestdown",
+      ],
+    });
+  });
+
+  it("omits the disabled list from the enable save when it is unknown", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry]);
+    setEnabledProviders(["opensubtitlescom"]);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /install 1 recommended provider/i }),
+    );
+
+    await waitFor(() => {
+      expect(restart).toHaveBeenCalledTimes(1);
+    });
+    expect(settingsMutateAsync).toHaveBeenCalledTimes(1);
+    expect(settingsMutateAsync).toHaveBeenCalledWith({
+      "settings-general-enabled_providers": ["opensubtitlescom", "subtitlecat"],
+    });
+    expect(settingsMutateAsync.mock.calls[0][0]).not.toHaveProperty(
+      "settings-general-disabled_providers",
+    );
+  });
+
   it("reads the recommended set off the catalog, not off the search box", async () => {
     const user = userEvent.setup();
     setCatalog([subtitlecatEntry, tvsubtitlesEntry, subdlEntry]);
@@ -1180,6 +1259,53 @@ describe("ProviderInstallStage", () => {
     expect(
       screen.getByText(/installed, waiting for the restart/i),
     ).toBeInTheDocument();
+  });
+
+  it("keeps failed recommendations and unrelated ids disabled", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry, tvsubtitlesEntry]);
+    failOnly("tvsubtitles");
+    mockedSystemSettings.mockReturnValue({
+      data: {
+        general: {
+          enabled_providers: ["opensubtitlescom"],
+          disabled_providers: [
+            "subtitlecat",
+            "subdl",
+            "opensubtitlescom",
+            "tvsubtitles",
+            "gestdown",
+          ],
+        },
+      },
+    } as unknown as ReturnType<typeof useSystemSettings>);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /install 2 recommended providers/i }),
+    );
+
+    expect(
+      await screen.findByText(/some providers did not install/i),
+    ).toBeInTheDocument();
+    expect(settingsMutateAsync).toHaveBeenCalledTimes(1);
+    expect(settingsMutateAsync).toHaveBeenCalledWith({
+      "settings-general-enabled_providers": ["opensubtitlescom", "subtitlecat"],
+      "settings-general-disabled_providers": [
+        "subdl",
+        "opensubtitlescom",
+        "tvsubtitles",
+        "gestdown",
+      ],
+    });
   });
 
   it("reports an enable that failed, and restarts anyway", async () => {

@@ -130,7 +130,51 @@ describe("ProviderConfigureStage", () => {
       },
       expect.anything(),
     );
+    expect(settingsMutate.mock.calls[0][0]).not.toHaveProperty(
+      "settings-general-disabled_providers",
+    );
     expect(onNext).toHaveBeenCalled();
+  });
+
+  it("removes enabled providers from the disabled list in the same save", async () => {
+    const user = userEvent.setup();
+    setProviders([
+      opensubtitles,
+      {
+        provider_id: "subtitlecat",
+        name: "SubtitleCat",
+        state: "active",
+        manifest: { id: "subtitlecat", name: "SubtitleCat" },
+      },
+    ]);
+    setSettings(["opensubtitles"], {
+      general: {
+        enabled_providers: ["opensubtitles"],
+        disabled_providers: [
+          "subdl",
+          "subtitlecat",
+          "opensubtitles",
+          "subscene",
+        ],
+      },
+      opensubtitles: { username: "alice", password: "stored" },
+    });
+
+    customRender(
+      <ProviderConfigureStage onNext={onNext} onInstallMore={onInstallMore} />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: /subtitlecat/i }));
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(settingsMutate).toHaveBeenCalledTimes(1);
+    expect(settingsMutate).toHaveBeenCalledWith(
+      {
+        "settings-general-enabled_providers": ["opensubtitles", "subtitlecat"],
+        "settings-general-disabled_providers": ["subdl", "subscene"],
+      },
+      expect.anything(),
+    );
   });
 
   it("calls onInstallMore from the Install more providers link", async () => {
