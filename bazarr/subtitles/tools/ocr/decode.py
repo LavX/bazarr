@@ -21,6 +21,7 @@ cached between runs.
 """
 
 import hashlib
+import json
 import logging
 import math
 import os
@@ -107,14 +108,6 @@ def render_command(ffmpeg, video_path, stream_index, out_dir, canvas_size=None):
     return command
 
 
-def _count_lines(path):
-    try:
-        with open(path, "rb") as handle:
-            return sum(1 for _ in handle)
-    except OSError:
-        return 0
-
-
 def _ffprobe_beside(ffmpeg):
     """The ffprobe that ships with ``ffmpeg``, else the one on PATH."""
     sibling = os.path.join(os.path.dirname(ffmpeg), "ffprobe")
@@ -141,6 +134,88 @@ def input_start_ms(video_path, ffprobe):
         return 0  # N/A: the container has no start time, so its timestamps count from zero
 
 
+def progress_position(previous, sample, maximum):
+    """The render position after a sample: never backward, never out of range."""
+    if maximum > 0 and 0 <= sample <= maximum and sample > previous:
+        return sample
+    return previous
+
+
+# No real subtitle stream or container runs longer than this; a larger number is
+# a damaged tag, and render progress is only a hint.
+_MAX_SPAN_SECONDS = 7 * 24 * 3600
+
+
+def _seconds(value):
+    """Seconds from ffprobe's number or an ``HH:MM:SS.fff`` tag, or None when it is not a sane time.
+
+    "N/A", a tag that is not a time, infinity, NaN and absurdly large values all
+    give None, as does anything negative.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    try:
+        if ":" in text:
+            hours, minutes, seconds = text.split(":")
+            seconds_total = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        else:
+            seconds_total = float(text)
+    except (ValueError, OverflowError):
+        return None  # "N/A", or a tag that is not a time
+    if not math.isfinite(seconds_total) or not 0 <= seconds_total <= _MAX_SPAN_SECONDS:
+        return None
+    return seconds_total
+
+
+def subtitle_clock(video_path, stream_index, ffprobe):
+    """The subtitle stream's start and span in ms, for render progress.
+
+    ``start_time`` is the stream's own first timestamp, not the container's;
+    transport streams often start well after zero. Matroska does not store a
+    stream's duration (ffprobe prints N/A), so the span falls back to the
+    stream's DURATION tag, then to what is left of the container after the
+    stream starts. A probe that fails returns (0, 0) and the job keeps a
+    running message without a percentage.
+    """
+    command = [ffprobe, "-v", "error", "-select_streams", f"s:{stream_index}",
+               "-show_entries", "stream=start_time,duration:stream_tags=DURATION:format=duration",
+               "-of", "json", video_path]
+    try:
+        completed = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+                                   text=True, errors="replace", timeout=PROBE_TIMEOUT)
+        if completed.returncode != 0:
+            return 0, 0
+        report = json.loads(completed.stdout or "{}")
+        stream = (report.get("streams") or [{}])[0]
+        start = _seconds(stream.get("start_time")) or 0
+        duration = _seconds(stream.get("duration"))
+        if not duration or duration <= 0:
+            duration = _seconds((stream.get("tags") or {}).get("DURATION"))
+        if not duration or duration <= 0:
+            container = _seconds((report.get("format") or {}).get("duration"))
+            duration = container - start if container else None
+        if not duration or duration <= 0:
+            return 0, 0
+        return int(start * 1000), int(duration * 1000)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, OverflowError):
+        return 0, 0
+
+
+def last_frame_ms(log, start_ms=0):
+    """The last rendered frame's time from the container's origin, in ms, or 0."""
+    try:
+        with open(log, encoding="utf-8", errors="replace") as handle:
+            lines = [line for line in handle if line.strip()]
+        if not lines:
+            return 0
+        _number, pts, timebase = lines[-1].split()[:3]
+        numerator, denominator = timebase.split("/")
+        return int(int(pts) * int(numerator) / int(denominator) * 1000) - start_ms
+    except (OSError, ValueError, IndexError, ZeroDivisionError):
+        return 0
+
+
 def render_frames(video_path, stream_index, out_dir, *, canvas_size=None, progress=None,
                   ffmpeg=None, ffprobe=None, timeout=RENDER_TIMEOUT):
     """Run ffmpeg; return ``[(time_ms, png_path)]`` in render order."""
@@ -152,8 +227,10 @@ def render_frames(video_path, stream_index, out_dir, *, canvas_size=None, progre
         except Exception as error:
             raise OcrUnavailable("OCR needs ffmpeg and ffprobe, and Bazarr+ could not find them") from error
     ffprobe = ffprobe or _ffprobe_beside(ffmpeg)
+    clock_start, render_duration = subtitle_clock(video_path, stream_index, ffprobe) if progress else (0, 0)
     command = render_command(ffmpeg, video_path, stream_index, out_dir, canvas_size)
     log = os.path.join(out_dir, FRAME_LOG)
+    last_position = 0
     deadline = time.monotonic() + timeout
     with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                           stderr=subprocess.PIPE, text=True, errors="replace") as process:
@@ -167,7 +244,12 @@ def render_frames(video_path, stream_index, out_dir, *, canvas_size=None, progre
                         raise OcrError(f"Rendering subtitle stream {stream_index} took longer than "
                                        f"{timeout // 60} minutes")
                     if progress:
-                        progress("render", _count_lines(log), 0)
+                        elapsed = last_frame_ms(log, clock_start)
+                        # Keep the last valid position: a partial log line or a
+                        # wrapped flush timestamp must not move the ring back or
+                        # stop the cancellation check from running.
+                        last_position = progress_position(last_position, elapsed, render_duration)
+                        progress("render", last_position, render_duration)
         except BaseException:
             process.kill()
             process.communicate()

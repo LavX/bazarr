@@ -72,6 +72,22 @@ def is_ocr_codec(codec):
     return "dvb" not in codec and any(name in codec for name in OCR_CODECS)
 
 
+# How the row's badge names a stored codec; anything else is shown upper-cased.
+# The bitmap aliases are the names ffprobe gives the same formats.
+CODEC_LABELS = {
+    "pgs": "PGS", "hdmv_pgs_subtitle": "PGS", "vobsub": "VobSub", "dvd_subtitle": "VobSub", "dvd": "VobSub",
+    "dvbsub": "DVB", "dvb_subtitle": "DVB", "subrip": "SRT", "ass": "ASS", "ssa": "SSA", "mov text": "MOV Text",
+}
+
+
+def codec_label(codec):
+    """The codec as the row's badge names it (PGS, VobSub, DVB, SRT), or None when unknown."""
+    codec = (codec or "").strip().lower()
+    if not codec:
+        return None
+    return CODEC_LABELS.get(codec, codec.upper())
+
+
 def select_subtitle_stream(tracks, target_alpha3, *, hi=False, forced=False,
                            und_default_language=None, accept=None, exact=False):
     """Index of the stream to use among ``tracks``, or None.
