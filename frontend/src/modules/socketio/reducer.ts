@@ -8,7 +8,7 @@ import {
 } from "@/apis/queries/subtitleScores";
 import api from "@/apis/raw";
 import type { HiddenTrackMediaType } from "@/apis/raw/subtitles";
-import { notifyJobOutcome, resetJobNotifications } from "@/modules/jobs";
+import { notifyJobOutcome, observeJobSession } from "@/modules/jobs";
 import { LOG } from "@/utilities/console";
 import { setOnlineStatus } from "@/utilities/event";
 
@@ -19,6 +19,30 @@ function invalidateHiddenTracks(mediaType: HiddenTrackMediaType) {
   void queryClient.invalidateQueries({
     queryKey: [QueryKeys.Subtitles, QueryKeys.EmbeddedHidden, mediaType],
   });
+}
+
+const JOBS_KEY = [QueryKeys.System, QueryKeys.Jobs];
+
+// A job is its id within one backend run. A row from another run only shares
+// the id by chance, so it is never the one an event is about.
+function isSameJob(
+  row: LooseObject,
+  job: { job_id: number; session?: string },
+) {
+  return (
+    row.job_id === job.job_id &&
+    (row.session === undefined ||
+      job.session === undefined ||
+      row.session === job.session)
+  );
+}
+
+function refreshJobsForSession(session: string | undefined) {
+  if (session !== undefined && observeJobSession(session) === "changed") {
+    void queryClient.resetQueries({ queryKey: JOBS_KEY, exact: true });
+    return;
+  }
+  void queryClient.invalidateQueries({ queryKey: JOBS_KEY, exact: true });
 }
 
 export function createDefaultReducer(): SocketIO.Reducer[] {
@@ -34,16 +58,24 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     {
       key: "connect",
       any: () => {
-        resetJobNotifications();
-        // Job ids restart with the backend too, so a finished row cached
-        // before the restart can carry the id of the next new job and settle
-        // its waiter before that job has run. Drop the list and read it again.
-        void queryClient.resetQueries({
-          queryKey: [QueryKeys.System, QueryKeys.Jobs],
-          exact: true,
-        });
+        // Whether this is the backend the page was talking to or a new run of
+        // it is not known yet: the session event that follows says, and
+        // decides what to keep.
         setOnlineStatus(true);
       },
+    },
+    {
+      key: "session",
+      // Sent after every connect with the backend run the socket reached. A
+      // reconnect to the same run keeps what the page recorded about its jobs,
+      // claims included, and reads the list again for what the gap missed.
+      // Job ids restart with a new run, so a finished row cached before the
+      // restart can carry the id of the next new job and settle its waiter
+      // before that job has run: the list is dropped, and read again.
+      // Without a session the answer is unknown, and the list is only
+      // marked stale.
+      update: (sessions) =>
+        refreshJobsForSession(sessions[sessions.length - 1]),
     },
     {
       key: "connect_error",
@@ -313,15 +345,22 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
         const MAX_JOBS_IN_CACHE = 100;
 
         items.forEach((payload) => {
+          // A job event names the backend run it came from. One from a run the
+          // page has not seen means a restart the connect handshake missed.
+          if (payload.session !== undefined) {
+            if (observeJobSession(payload.session) === "changed") {
+              void queryClient.resetQueries({ queryKey: keys, exact: true });
+            }
+          }
           // Payload is always a JSON string:
           // {"job_id": <number>, "progress_value": <number|null>, "progress_message": <string>, "status": <string>}
           // If progress_value is present (not null/undefined), apply (with progress_message and status) directly to
           // cache without an API call
           if (isNumber(payload.progress_value)) {
             const current = queryClient.getQueryData<LooseObject[]>(keys) || [];
-            const idx = current.findIndex((j) => j.job_id === payload.job_id);
+            const idx = current.findIndex((j) => isSameJob(j, payload));
 
-            const initialJob =
+            const initialJob: LooseObject =
               // eslint-disable-next-line camelcase
               idx >= 0 ? { ...current[idx] } : { job_id: payload.job_id };
 
@@ -332,6 +371,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
               progress_value: payload.progress_value,
               progress_max: payload.progress_max,
               progress_message: payload.progress_message,
+              session: payload.session ?? initialJob.session,
               /* eslint-enable camelcase */
             };
 
@@ -372,14 +412,12 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
               if (isEmpty(incomingJobs)) {
                 return;
               }
-              const incoming = incomingJobs[0];
+              const incoming = incomingJobs[0] as System.Jobs;
 
               const current =
                 queryClient.getQueryData<LooseObject[]>(keys) || [];
 
-              const idx = current.findIndex(
-                (j) => j.job_id === incoming.job_id,
-              );
+              const idx = current.findIndex((j) => isSameJob(j, incoming));
               const next =
                 idx >= 0
                   ? [

@@ -1211,6 +1211,8 @@ class TestEditorSyncPost:
             assert body['status'] == 'running'
             assert 'jobKey' in body
             assert body['jobId'] == 'queue_id_1'
+            # The id only means something within this backend run.
+            assert body['jobSession'] == editor_module.PROCESS_SESSION
 
     def test_video_not_found_on_disk(self):
         mock_request = self._make_post_request({

@@ -153,6 +153,14 @@ class SystemApi extends BaseApi {
     return response.data;
   }
 
+  /**
+   * What a job published for the caller that queued it, such as the rows of a
+   * search. It is never part of the jobs list or its socket events.
+   */
+  async jobResult<T>(id: number) {
+    return this.get<System.JobResult<T>>("/jobs/result", { id });
+  }
+
   async deleteJobs(id: number) {
     await this.delete("/jobs", { id });
   }

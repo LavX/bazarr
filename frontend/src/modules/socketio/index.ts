@@ -153,6 +153,29 @@ class SocketIOClient {
     LOG("info", "Socket.IO has connected");
     onlineManager.setOnline(true);
     this.onEvent({ type: "connect", action: "update" });
+    this.askSession();
+  }
+
+  // Job ids restart with the backend, so whoever follows a job needs to know
+  // whether this connection reached the run it left. The backend answers with
+  // its session stamp; the session reducer compares it with the one it holds.
+  // Unanswered, the reducer still hears of the connect and reads the jobs
+  // again, it just cannot tell a restart.
+  private askSession() {
+    this.socket
+      .timeout(10 * 1000)
+      .emit("session", (error: Error | null, reply?: { session?: string }) => {
+        if (error || typeof reply?.session !== "string") {
+          LOG("warning", "Socket.IO did not report the backend session");
+          this.onEvent({ type: "session", action: "update" });
+          return;
+        }
+        this.onEvent({
+          type: "session",
+          action: "update",
+          payload: reply.session,
+        });
+      });
   }
 
   private onConnectError() {

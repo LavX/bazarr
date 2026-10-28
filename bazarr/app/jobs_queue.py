@@ -14,6 +14,7 @@ from threading import Thread, Lock, RLock
 
 from app import activity
 from app.event_handler import event_stream
+from app.process_session import PROCESS_SESSION
 from app.config import settings
 from secret_store.scrub import scrub_text, scrub_value
 
@@ -32,6 +33,16 @@ from secret_store.scrub import scrub_text, scrub_value
 # worker subprocess per pool and provider, so the split also bought a second
 # worker fleet on any warm install.
 bazarr_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _job_event(action: str, payload: dict):
+    """Send one jobs event, stamped with the backend session it belongs to.
+
+    Job ids restart with the backend, so the stamp is what lets a client tell
+    an event about one of its own jobs from one about a new job that reuses the
+    id after a restart.
+    """
+    event_stream(type='jobs', action=action, payload={**payload, "session": PROCESS_SESSION})
 
 
 class JobCancelled(Exception):
@@ -99,6 +110,9 @@ class Job:
 
     :ivar job_id: Unique identifier of the job.
     :type job_id: int
+    :ivar session: The backend run that created the job. Ids restart with the backend, so a job is only
+        named by its id together with this.
+    :type session: str
     :ivar job_name: Descriptive name of the job.
     :type job_name: str
     :ivar module: Name of the module where the job function resides.
@@ -130,6 +144,11 @@ class Job:
     :ivar action: What the user can do with the finished job, set by the job itself:
         ``{"kind", "label", ...}``. The frontend knows how to run each kind.
     :type action: dict, optional
+    :ivar result: What the job offers its caller beyond ``job_returned_value``: a JSON-safe value the job
+        published on purpose, such as the rows of a search. It is never part of a job's listing or of its events,
+        and is read through ``get_job_result`` only. The job may publish it again while it runs, so a caller can
+        follow a partial result. None until the job publishes one.
+    :type result: Any
     :ivar retryable: Whether a failed job may be queued again with the same arguments.
     :type retryable: bool
     :ivar retry_of: The id of the failed job this one retries, or None.
@@ -148,6 +167,7 @@ class Job:
                  is_progress: bool = False, is_signalr: bool = False, progress_max: int = 0, job_returned_value=None,
                  retryable: bool = False, retry_of: int = None):
         self.job_id = job_id
+        self.session = PROCESS_SESSION
         self.job_name = job_name
         self.module = module
         self.func = func
@@ -163,6 +183,7 @@ class Job:
         self.job_returned_value = job_returned_value
         self.error = None
         self.action = None
+        self.result = None
         self.retryable = retryable
         self.retry_of = retry_of
         self.cancelled = False
@@ -312,8 +333,7 @@ class JobsQueue:
             )
 
         logging.debug(f"Task {job_name} ({new_job_id}) added to queue")  # noqa: G004
-        event_stream(type='jobs', action='update', payload={"job_id": new_job_id, "progress_value": None,
-                                                            "status": "pending"})
+        _job_event('update', {"job_id": new_job_id, "progress_value": None, "status": "pending"})
         return new_job_id
 
     def list_jobs_from_queue(self, job_id: int = None, status: str = None):
@@ -460,7 +480,7 @@ class JobsQueue:
         for job in queues:
             if job.job_id == job_id:
                 job.job_name = new_job_name
-                event_stream(type='jobs', action='update', payload={"job_id": job.job_id})
+                _job_event('update', {"job_id": job.job_id})
                 return True
         return False
 
@@ -496,6 +516,42 @@ class JobsQueue:
                     job.action = scrubbed
                     return True
         return False
+
+    def publish_job_result(self, job_id: int, result) -> bool:
+        """Offer ``result`` to whoever follows this running job.
+
+        The value must be JSON-safe and fit to be shown to the user: it is
+        served as is by ``get_job_result``. It replaces any earlier one, so a
+        job may publish a partial result and finish with the whole one. A
+        value that carries anything that must not leave the process belongs in
+        the job's own store instead, as the Discover download keeps its file.
+        Publishing never stops a job: a cancelled job still answers True, and
+        the next progress update is where it learns of the stop.
+
+        :return: False when no running job has this id.
+        """
+        with self._queue_lock:
+            for job in self.jobs_running_queue:
+                if job.job_id == job_id:
+                    job.result = result
+                    return True
+        return False
+
+    def get_job_result(self, job_id: int):
+        """The job's outcome for a caller that wants what it produced, or None for an unknown id.
+
+        ``{"job_id", "session", "status", "error", "result"}``. ``result`` is
+        whatever the job published, which is the partial one while it is still
+        running and the last one once it has ended, or None.
+        """
+        with self._queue_lock:
+            queues = (list(self.jobs_pending_queue) + list(self.jobs_running_queue)
+                      + list(self.jobs_failed_queue) + list(self.jobs_completed_queue))
+            job = next((item for item in queues if item.job_id == job_id), None)
+            if job is None:
+                return None
+            return {"job_id": job.job_id, "session": job.session, "status": job.status,
+                    "error": job.error, "result": job.result}
 
     def retry_job(self, job_id: int) -> Union[int, bool]:
         """Queue a failed, retryable job again with its original arguments.
@@ -540,7 +596,7 @@ class JobsQueue:
                 payloads = list(self._progress_buffer.values())
                 self._progress_buffer.clear()
             for payload in payloads:
-                event_stream(type='jobs', action='update', payload=payload)
+                _job_event('update', payload)
 
     def update_job_progress(self, job_id: int, progress_value: Union[int, str, None] = None,
                             progress_max: Union[int, None] = None, progress_message: str = "", *,
@@ -635,7 +691,7 @@ class JobsQueue:
         for job in self.jobs_running_queue:
             if job.job_id == job_id:
                 job.is_progress = is_progress
-                event_stream(type='jobs', action='update', payload={"job_id": job.job_id})
+                _job_event('update', {"job_id": job.job_id})
                 return True
         return False
 
@@ -724,7 +780,7 @@ class JobsQueue:
                     return False
                 else:
                     logging.debug(f"Task {job.job_name} ({job.job_id}) removed from queue")  # noqa: G004
-                    event_stream(type='jobs', action='delete', payload={"job_id": job.job_id})
+                    _job_event('delete', {"job_id": job.job_id})
                     return True
         return False
 
@@ -765,7 +821,7 @@ class JobsQueue:
                         return False
                     logging.debug(f"Task {job.job_name} ({job.job_id}) moved to {move_destination} of the pending "  # noqa: G004
                                   f"queue")
-                    event_stream(type='jobs', action='update', payload={"job_id": job.job_id})
+                    _job_event('update', {"job_id": job.job_id})
                     return True
         return False
 
@@ -946,7 +1002,7 @@ class JobsQueue:
                 payload["progress_value"] = None
                 payload["progress_max"] = job.progress_max
                 payload["progress_message"] = job.progress_message
-            event_stream(type='jobs', action='update', payload=payload)
+            _job_event('update', payload)
 
             # Never the arguments: they can hold API keys or a whole uploaded
             # package, and an f-string formatted them even with debug off.
@@ -1015,7 +1071,7 @@ class JobsQueue:
                     "error": job.error,
                     "action": job.action,
                 }
-                event_stream(type='jobs', action='update', payload=payload)
+                _job_event('update', payload)
             except Exception as e:
                 logging.exception(f"Exception raised while sending event: {e}")  # noqa: G004
 
