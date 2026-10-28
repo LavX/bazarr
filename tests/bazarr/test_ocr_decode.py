@@ -252,6 +252,34 @@ def _fake_ffmpeg(tmp_path, body):
     return str(script)
 
 
+@pytest.mark.parametrize("version", ["4.2.2", "5.1.1-static", "6.0"])
+def test_ffmpeg_preflight_reports_the_installed_old_version(tmp_path, version):
+    binary = _fake_ffmpeg(tmp_path, f"echo 'ffmpeg version {version} Copyright'")
+    found = version.split("-")[0]
+
+    with pytest.raises(OcrUnavailable, match=rf"OCR needs ffmpeg 6\.1 or newer, found {found}$"):
+        decode.require_ffmpeg(binary)
+
+
+@pytest.mark.parametrize("version", ["6.1-static", "6.1.1-ubuntu", "n6.1.1", "7.0", "8.1.3"])
+def test_ffmpeg_preflight_accepts_supported_versions(tmp_path, version):
+    binary = _fake_ffmpeg(tmp_path, f"test \"$1\" = '-version' || exit 1\necho 'ffmpeg version {version} Copyright'")
+
+    assert decode.require_ffmpeg(binary) == binary
+
+
+@pytest.mark.parametrize("body", ["exit 1", "echo 'not a version'",
+                                "echo 'ffmpeg version 6.1 Copyright'; exit 1"])
+def test_ffmpeg_preflight_refuses_an_unreadable_version(tmp_path, body):
+    with pytest.raises(OcrUnavailable, match="could not read its version"):
+        decode.require_ffmpeg(_fake_ffmpeg(tmp_path, body))
+
+
+def test_ffmpeg_preflight_reports_a_missing_binary(tmp_path):
+    with pytest.raises(OcrUnavailable, match="could not read its version"):
+        decode.require_ffmpeg(str(tmp_path / "absent"))
+
+
 @pytest.mark.parametrize("option", [
     "stats_enc_pre",  # ffmpeg 5.1 to 6.0 (Debian 12)
     "fps_mode",       # before 5.1 (Ubuntu 22.04, the 4.2.2 build get_binary downloads)

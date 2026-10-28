@@ -167,6 +167,8 @@ Two limits worth knowing before you set this up:
 
 **CPU requirement:** on x86-64 hardware the Docker image and a native install need an x86-64-v2 CPU (SSE4.2 and POPCNT, roughly 2009 and later), because numpy 2.4 and newer raise that baseline. On an older x86-64 CPU Bazarr+ stops at startup with an illegal instruction error. ARM64 is not affected.
 
+**OCR requirement:** reading PGS or VobSub subtitles into text needs ffmpeg 6.1 or newer and ffprobe. OCR uses ffmpeg's per-frame timestamp log, which is unavailable before 6.1. Each OCR run checks the ffmpeg version before preparing its language pack or rendering images.
+
 ### Option 1: Docker Compose (Recommended)
 
 ```bash
