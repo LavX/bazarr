@@ -12,7 +12,7 @@ import sys
 from shutil import rmtree
 from zipfile import ZipFile
 
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import JobFailed, jobs_queue
 from app.get_args import args
 from app.config import settings
 
@@ -220,12 +220,24 @@ def check_releases(job_id=None, startup=False, wait_for_completion=False):
         jobs_queue.update_job_name(job_id=job_id, new_job_name="Updated Release Info")
 
 
-def check_if_new_update():
+def check_if_new_update(job_id=None, startup=False, wait_for_completion=False):
+    # The scheduler and the Tasks page's Run now call this without a job, and
+    # it queues itself: the check then shows in the Jobs list, and a failure
+    # reaches the drawer with its reason. Startup runs it on the main thread
+    # before the queue exists, where it only logs.
+    if not startup and not job_id:
+        jobs_queue.add_job_from_function("Checking for Bazarr+ updates", is_progress=False,
+                                         wait_for_completion=wait_for_completion)
+        return
+
     # Skip auto-update when running from source (no BAZARR_VERSION set)
     bazarr_version = os.environ.get("BAZARR_VERSION", "")
     if not bazarr_version:
         logging.debug('BAZARR running from source, skipping auto-update')
         check_releases(startup=True)
+        if job_id:
+            jobs_queue.update_job_name(job_id=job_id,
+                                       new_job_name="Skipped the update check: Bazarr+ is running from source")
         return
 
     if settings.general.branch == 'master':
@@ -234,6 +246,9 @@ def check_if_new_update():
         use_prerelease = True
     else:
         logging.error(f'BAZARR unknown branch provided to updater: {settings.general.branch}')  # noqa: G004
+        if job_id:
+            raise JobFailed(f"The update branch '{settings.general.branch}' is not one Bazarr+ knows. Choose master "
+                            "or development in the general settings.", reason="unknown_branch", retryable=False)
         return
     logging.debug(f'BAZARR updater is using {settings.general.branch} branch')  # noqa: G004
 
@@ -276,12 +291,12 @@ def check_if_new_update():
             # skip update process if latest release is v0.9.1.1 which is the latest pre-semver compatible release
             if new_version and release['name'] != 'v0.9.1.1':
                 logging.debug(f'BAZARR newer release available and will be downloaded: {release["name"]}')  # noqa: G004
-                download_release(url=release['download_link'])
+                download_release(url=release['download_link'], job_id=job_id)
             # rolling back from nightly to stable release
             elif current_version:
                 if current_version.prerelease and not use_prerelease:
                     logging.debug(f'BAZARR previous stable version will be downloaded: {release["name"]}')  # noqa: G004
-                    download_release(url=release['download_link'])
+                    download_release(url=release['download_link'], job_id=job_id)
             else:
                 logging.debug('BAZARR no newer release have been found')
         else:
@@ -289,8 +304,16 @@ def check_if_new_update():
     else:
         logging.debug('BAZARR --no_update have been used as an argument')
 
+    if job_id:
+        jobs_queue.update_job_name(job_id=job_id, new_job_name="Checked for Bazarr+ updates")
 
-def download_release(url):
+
+def download_release(url, job_id=None):
+    """Download a release and install it.
+
+    Run by the queue (``job_id`` set), a failure raises with what to do about
+    it. Run at startup, where nothing can show it, it is only logged as before.
+    """
     if not url:
         logging.debug('BAZARR release has no download URL, skipping update')
         return
@@ -300,17 +323,36 @@ def download_release(url):
         os.makedirs(update_dir, exist_ok=True)
     except Exception:
         logging.debug(f'BAZARR unable to create update directory {update_dir}')  # noqa: G004
+        if job_id:
+            logging.warning('Bazarr+ update failed: reason=update_folder_unwritable')
+            raise JobFailed("Bazarr+ could not create its update folder. Check that the config folder is writable.",
+                            reason="update_folder_unwritable") from None
     else:
         logging.debug(f'BAZARR downloading release from Github: {url}')  # noqa: G004
-        r = requests.get(url, allow_redirects=True, timeout=300)
+        try:
+            r = requests.get(url, allow_redirects=True, timeout=300)
+        except requests.RequestException as error:
+            if not job_id:
+                raise
+            logging.warning('Bazarr+ update failed: reason=download_failed: %s', type(error).__name__)
+            raise JobFailed("Bazarr+ could not download the new release from GitHub. Check the connection and try "
+                            "again.", reason="download_failed") from None
     if r:
         try:
             with open(os.path.join(update_dir, 'bazarr.zip'), 'wb') as f:
                 f.write(r.content)
         except Exception:
             logging.exception('BAZARR unable to download new release and save it to disk')
+            if job_id:
+                logging.warning('Bazarr+ update failed: reason=update_not_saved')
+                raise JobFailed("Bazarr+ downloaded the new release but could not save it. Check that the config "
+                                "folder is writable and has space.", reason="update_not_saved") from None
         else:
-            apply_update()
+            apply_update(job_id=job_id)
+    elif r is not None and job_id:
+        logging.warning('Bazarr+ update failed: reason=download_refused: status=%s', r.status_code)
+        raise JobFailed(f"GitHub answered {r.status_code} when Bazarr+ asked for the new release. Try again later.",
+                        reason="download_refused")
 
 
 def install_downloaded_update():
@@ -354,7 +396,7 @@ def discard_stale_update():
                      'for this install, so it was not unpacked.')
 
 
-def apply_update():
+def apply_update(job_id=None):
     is_updated = False
     update_dir = os.path.join(args.config_dir, 'update')
     bazarr_zip = os.path.join(update_dir, 'bazarr.zip')
@@ -390,6 +432,11 @@ def apply_update():
                                     f.write(archive.read(file))
             except Exception:
                 logging.exception('BAZARR unable to unzip release')
+                if job_id:
+                    logging.warning('Bazarr+ update failed: reason=update_not_applied')
+                    raise JobFailed("Bazarr+ downloaded the new release but could not unpack it over the current "
+                                    "install. Check the logs and the folder permissions.",
+                                    reason="update_not_applied") from None
             else:
                 is_updated = True
                 try:

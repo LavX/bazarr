@@ -10,6 +10,7 @@ import {
   useMediaServerLibraries,
   useMediaServerStatus,
   useMediaServerTest,
+  useRetryPendingMediaServer,
   useSaveMediaServerInstance,
 } from "./mediaServers";
 
@@ -293,4 +294,50 @@ it("saves a credential from its closure and keeps only safe DTO state on success
     unmount();
     client.clear();
   }
+});
+
+it("reads the status again when the retry job ends, not only when it is queued", async () => {
+  let reads = 0;
+  server.use(
+    http.get("/api/system/media-server-instances/a/status", () => {
+      reads += 1;
+      return HttpResponse.json({
+        pending: reads > 1 ? 0 : 2,
+        state: reads > 1 ? "confirmed" : "unconfirmed",
+        error_code: null,
+      });
+    }),
+    http.post("/api/system/media-server-instances/a/retry-pending", () =>
+      HttpResponse.json(
+        { queued: 2, job_id: 44, session: "run-a" },
+        { status: 202 },
+      ),
+    ),
+  );
+  const { wrapper, client } = queryWrapper();
+  const { result } = renderHook(
+    () => ({
+      status: useMediaServerStatus("emby", "a"),
+      retry: useRetryPendingMediaServer("emby", "a"),
+    }),
+    { wrapper },
+  );
+  await waitFor(() => expect(result.current.status.data?.pending).toBe(2));
+
+  let queued: unknown;
+  await act(async () => {
+    queued = await result.current.retry.mutateAsync();
+  });
+  expect(queued).toEqual({ queued: 2, jobId: 44 });
+  const afterQueueing = reads;
+
+  // The job ends: the socket writes it into the jobs cache.
+  act(() => {
+    client.setQueryData(
+      ["system", "jobs"],
+      [{ job_id: 44, status: "completed", progress_message: "3 of 3" }],
+    );
+  });
+  await waitFor(() => expect(reads).toBeGreaterThan(afterQueueing));
+  await waitFor(() => expect(result.current.status.data?.pending).toBe(0));
 });

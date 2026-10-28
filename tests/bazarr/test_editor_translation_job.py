@@ -89,7 +89,8 @@ def test_an_editor_translation_is_queued_with_progress_and_a_readable_name(queue
     assert job['module'] == 'subtitles.tools.translate.editor'
     assert job['func'] == 'translate_editor_lines'
     assert job['is_progress'] is True
-    assert queue.events[-1]['payload'] == {'job_id': job_id, 'progress_value': None, 'status': 'pending'}
+    assert queue.events[-1]['payload'] == {'job_id': job_id, 'progress_value': None, 'status': 'pending',
+                                           'session': job['session']}
     # The kwargs hold the lines only, never the API key.
     assert 'sk-or-key' not in repr(job['kwargs'])
 

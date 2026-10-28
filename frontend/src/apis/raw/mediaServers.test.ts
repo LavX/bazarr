@@ -116,7 +116,10 @@ it.each(["emby", "silo"] as const)(
       state: "unconfirmed",
       error_code: "timeout",
     });
-    expect(await api.mediaServers.retryPending(id)).toEqual({ queued: 2 });
+    expect(await api.mediaServers.retryPending(id)).toEqual({
+      queued: 2,
+      jobId: null,
+    });
     expect(body).toEqual({});
   },
 );

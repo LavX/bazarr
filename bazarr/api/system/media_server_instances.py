@@ -7,9 +7,10 @@ from flask_restx import Namespace, Resource
 
 from app.database import database
 from media_servers import service
-from media_servers.dispatcher import (_ERROR_CODES, _refusal_code, get_refresh_status,
-                                      retry_pending_refreshes)
+from media_servers.dispatcher import _ERROR_CODES, _refusal_code, get_refresh_status
 from media_servers.http import MediaServerError
+from media_servers.retry_job import queue_retry_pending
+from ..queued_job import queued_job_response
 from ..utils import authenticate
 
 api_ns_system_media_server_instances = Namespace('media_server_instances', description='Native media server destinations')
@@ -121,13 +122,23 @@ class MediaServerInstanceLibraryRefresh(Resource):
 class MediaServerInstanceRetry(Resource):
     @authenticate
     def post(self, instance_id):
-        _body, status = service.get_instance(database, instance_id)
+        """Retry the refreshes waiting for a destination, as a job.
+
+        Answers at once. What is waiting is retried by a job that reports how
+        many it has drained and fails with the destination's reason, so the
+        press shows in the Jobs list instead of only on the status card. Nothing
+        waiting queues nothing."""
+        instance, status = service.get_instance(database, instance_id)
         if status != 200:
-            return _body, status
+            return instance, status
         body = request.get_json(silent=True) if request.data else {}
         if not isinstance(body, dict) or body:
             return {'error_code': 'invalid_settings'}, 400
         try:
-            return {'queued': retry_pending_refreshes(instance_id)}, 200
+            pending = get_refresh_status(instance_id)['pending']
         except MediaServerError:
             return {'queued': 0}, 200
+        if not pending:
+            return {'queued': 0}, 200
+        job_id = queue_retry_pending(instance_id, instance.get('name'))
+        return {'queued': pending, **queued_job_response(job_id)}, 202

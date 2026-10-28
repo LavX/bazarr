@@ -1,13 +1,16 @@
 /* eslint-disable camelcase */
+import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { HttpResponse } from "msw";
 import { expect, it } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import {
   radarrDefault,
   sonarrDefault,
   sportarr,
 } from "@/pages/Settings/Connections/__tests__/fixtures";
-import { customRender, screen, waitFor } from "@/tests";
+import { act, customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import SystemStatusView from ".";
 
@@ -351,5 +354,42 @@ describe("System Status", () => {
     await waitFor(() => {
       expect(screen.queryByText("Build")).toBeNull();
     });
+  });
+
+  it("re-checks health as a job and reads the list again when the job has finished", async () => {
+    statusWith({});
+    let reads = 0;
+    let queued = 0;
+    server.use(
+      http.get("/api/system/health", () => {
+        reads += 1;
+        return HttpResponse.json({ data: [] });
+      }),
+      http.post("/api/system/health", () => {
+        queued += 1;
+        return HttpResponse.json(
+          { job_id: 61, session: "run-health" },
+          { status: 202 },
+        );
+      }),
+    );
+    customRender(<SystemStatusView />);
+    const user = userEvent.setup();
+    await waitFor(() => expect(reads).toBe(1), { timeout: 8000 });
+
+    await user.click(
+      await screen.findByRole("button", { name: "Re-check health" }),
+    );
+    await waitFor(() => expect(queued).toBe(1));
+    // The request answered at once: the list is not read before the job ends.
+    expect(reads).toBe(1);
+
+    act(() => {
+      queryClient.setQueryData(
+        [QueryKeys.System, QueryKeys.Jobs],
+        [{ job_id: 61, job_name: "Checking Health", status: "completed" }],
+      );
+    });
+    await waitFor(() => expect(reads).toBe(2));
   });
 });

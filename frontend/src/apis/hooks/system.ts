@@ -14,6 +14,7 @@ import { inlineWhen } from "@/apis/raw/inlineWrites";
 import { notification } from "@/modules/notification";
 import { Environment } from "@/utilities";
 import { setAuthenticated } from "@/utilities/event";
+import { JobFailedError, JobStoppedError, waitForJob } from "@/utilities/jobs";
 
 export function useBadges() {
   return useQuery({
@@ -498,6 +499,34 @@ export function useSystemHealth() {
   return useQuery({
     queryKey: [QueryKeys.System, "health"],
     queryFn: () => api.system.health(),
+  });
+}
+
+/**
+ * Re-check health as a standard job. The request answers at once, so the list
+ * is read again when the job has finished, which is what the button's spinner
+ * waits for. A failed check is announced by the standard outcome, so only the
+ * wait ends here.
+ */
+export function useRecheckHealth() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [QueryKeys.System, "health", "recheck"],
+    mutationFn: async () => {
+      const queued = await api.system.recheckHealth();
+      try {
+        await waitForJob(client, queued.job_id);
+      } catch (error) {
+        if (
+          !(error instanceof JobFailedError || error instanceof JobStoppedError)
+        )
+          throw error;
+      } finally {
+        await client.invalidateQueries({
+          queryKey: [QueryKeys.System, "health"],
+        });
+      }
+    },
   });
 }
 

@@ -1521,9 +1521,11 @@ def test_provider_hub_update_task_refreshes_catalog_before_checking_updates(monk
 
     calls = []
     monkeypatch.setattr(tasks, "refresh_catalog", lambda: calls.append("refresh"))
+    monkeypatch.setattr(tasks, "failed_catalog_sources", lambda: [])
     monkeypatch.setattr(tasks, "check_updates", lambda: calls.append("check") or {"state": "completed"})
 
-    assert tasks.provider_hub_check_updates() == {"state": "completed"}
+    # Run by the queue, which hands the job its id.
+    assert tasks.provider_hub_check_updates(job_id=1) == {"state": "completed"}
     assert calls == ["refresh", "check"]
 
 

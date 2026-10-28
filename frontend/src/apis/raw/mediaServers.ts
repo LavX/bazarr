@@ -358,13 +358,17 @@ class MediaServersApi extends BaseApi {
 
   retryPending(id: string) {
     return safeRequest(async () => {
-      const { data } = await this.postRaw<{ queued: number }>(
-        `${itemPath(id)}/retry-pending`,
-        {},
-      );
+      const { data } = await this.postRaw<{
+        queued: number;
+        job_id?: number | null;
+      }>(`${itemPath(id)}/retry-pending`, {});
       if (!data || !Number.isInteger(data.queued) || data.queued < 0)
         throw new Error();
-      return { queued: data.queued };
+      // What is waiting is retried by a job, which answers when anything was.
+      return {
+        queued: data.queued,
+        jobId: Number.isInteger(data.job_id) ? (data.job_id as number) : null,
+      };
     }, "Could not queue pending refreshes");
   }
 }
