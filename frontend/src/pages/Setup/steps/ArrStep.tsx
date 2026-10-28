@@ -32,6 +32,7 @@ import {
   recordConnectionTest,
 } from "@/pages/Setup/connectionTests";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
@@ -161,6 +162,12 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
   const remove = useDeleteArrInstance({ inlineErrors: true });
   const update = useUpdateArrInstance({ inlineErrors: true });
   const settings = useSettingsMutation(false, { inlineErrors: true });
+  useReportStepBusy(
+    settings.isPending ||
+      create.isPending ||
+      update.isPending ||
+      remove.isPending,
+  );
   const { data: systemSettings } = useSystemSettings();
 
   // An enabled row first: with one of the kind on and another off, the one
