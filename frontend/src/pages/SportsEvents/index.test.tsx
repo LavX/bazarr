@@ -994,7 +994,10 @@ describe("sports event detail", () => {
       ),
       http.post("/api/sports/events/61/search", async ({ request }) => {
         searched = await request.json();
-        return HttpResponse.json({ data: [] });
+        return HttpResponse.json(
+          { job_id: 12, session: "run-sports" },
+          { status: 202 },
+        );
       }),
     );
     renderDetail();
@@ -1208,8 +1211,19 @@ it("queues the sports download as a job and refreshes the event", async () => {
         hi: false,
         forced: false,
       });
-      return HttpResponse.json({
-        data: [
+      // The search runs as a job and its rows are the job's result.
+      return HttpResponse.json(
+        { job_id: 13, session: "run-sports" },
+        { status: 202 },
+      );
+    }),
+    http.get("/api/system/jobs/result", () =>
+      HttpResponse.json({
+        job_id: 13,
+        session: "run-sports",
+        status: "completed",
+        error: null,
+        result: [
           {
             provider: "fixture",
             subtitle: "owned-candidate",
@@ -1225,8 +1239,8 @@ it("queues the sports download as a job and refreshes the event", async () => {
             original_format: false,
           },
         ],
-      });
-    }),
+      }),
+    ),
     http.post("/api/sports/events/61/download", async ({ request }) => {
       const body = (await request.json()) as {
         arr_instance_id: number;
@@ -1238,6 +1252,25 @@ it("queues the sports download as a job and refreshes the event", async () => {
       return HttpResponse.json({ job_id: 9 }, { status: 202 });
     }),
   );
+  act(() => {
+    queryClient.setQueryData(
+      [QueryKeys.System, QueryKeys.Jobs],
+      [
+        {
+          job_id: 13,
+          session: "run-sports",
+          job_name: "Searching subtitles for Event",
+          status: "completed",
+          last_run_time: "",
+          is_progress: true,
+          is_signalr: false,
+          progress_value: 2,
+          progress_max: 2,
+          progress_message: "1 subtitle(s) found",
+        },
+      ],
+    );
+  });
   renderDetail();
   await userEvent.click(
     await screen.findByRole("button", { name: "Manual Search" }),

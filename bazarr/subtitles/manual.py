@@ -40,12 +40,21 @@ from .search_result import marshal_search_results
 
 @update_pools
 def manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
-                  language_set=None, original_format=False, cancel=None, arr_instance_id=None):
+                  language_set=None, original_format=False, cancel=None, arr_instance_id=None, observed=True):
     logging.debug(f'BAZARR Manually searching subtitles for this file: {path}')  # noqa: G004
 
-    # A manual search runs synchronously on the request thread and never enters
-    # the jobs queue, so without this observation it is invisible to any status
-    # reader while it is the only thing the server is actually doing.
+    if not observed:
+        # A search run by a queue job is observed through the job itself.
+        # Observing it here too would list one search as two operations.
+        return _manual_search(path, profile_id, providers, sceneName, title, media_type,
+                              context=context, language_set=language_set,
+                              original_format=original_format, cancel=cancel,
+                              arr_instance_id=arr_instance_id)
+
+    # A manual search that answers a request runs on the request thread and
+    # never enters the jobs queue, so without this observation it is invisible
+    # to any status reader while it is the only thing the server is actually
+    # doing.
     with activity.observed_operation('manual_search', scope_kind='media',
                                      media_type='episode' if media_type == 'series' else 'movie',
                                      title=title):
@@ -180,11 +189,6 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
     return final_subtitles
 
 
-# The search without the observation wrapper: the queue already observes a job,
-# and observing it a second time would list one search as two operations.
-_search_in_job = update_pools(_manual_search)
-
-
 def queue_manual_search(path, profile_id, scene_name, title, media_type, label, arr_instance_id=None):
     """Queue a manual search as a standard job and start it at once.
 
@@ -212,8 +216,8 @@ def run_manual_search_job(path, profile_id, scene_name, title, media_type, arr_i
                       media_type='episode' if media_type == 'series' else 'movie', title=title)
     jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=2,
                                    progress_message="Searching the providers")
-    found = _search_in_job(path, profile_id, get_providers_sorted(), scene_name, title, media_type,
-                           arr_instance_id=arr_instance_id)
+    found = manual_search(path, profile_id, get_providers_sorted(), scene_name, title, media_type,
+                          arr_instance_id=arr_instance_id, observed=False)
     if isinstance(found, str):
         # The search says why it could not run as its return value.
         logging.warning("Manual search failed: reason=providers_unavailable title=%s: %s", title, found)

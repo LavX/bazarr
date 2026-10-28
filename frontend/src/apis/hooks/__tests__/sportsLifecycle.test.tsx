@@ -40,7 +40,10 @@ vi.mock("../arrInstances", () => ({
     isLoading: availability.enabled === undefined,
   }),
 }));
+// The jobs cache the socket keeps current, which a sports job is followed through.
+const jobsCache = vi.hoisted(() => ({ data: [] as unknown[] }));
 vi.mock("../system", () => ({
+  useSystemJobs: () => ({ data: jobsCache.data }),
   useSystemSettings: () => ({
     data:
       availability.enabled === undefined
@@ -64,6 +67,7 @@ let client: QueryClient;
 beforeEach(() => {
   vi.resetAllMocks();
   availability.enabled = undefined;
+  jobsCache.data = [];
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 });
 afterEach(() => {
@@ -121,61 +125,98 @@ it("fetches after enabling the master toggle without changing owner IDs", async 
   await waitFor(() => expect(result.current.data?.total).toBe(5));
 });
 
-it.each([false, true])(
-  "stops polling an unavailable job, previously running: %s",
-  async (running) => {
-    availability.enabled = true;
-    const status = vi.spyOn(sports, "jobStatus");
-    if (running)
-      status.mockResolvedValueOnce({
-        job_id: 9,
-        arr_instance_id: 42,
-        cancelled: false,
-        result: null,
-        status: "running",
-        message: "Running",
-      });
-    status.mockRejectedValue({ response: { status: 404 } });
-    const { result } = renderHook(() => useSportsJob(9, 42), { wrapper });
-    await waitFor(() => expect(result.current.isError).toBe(true), {
-      timeout: 2000,
-    });
-    const requests = status.mock.calls.length;
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 2200));
-    });
-    expect(status).toHaveBeenCalledTimes(requests);
-  },
-);
+function cachedJob(status: string, extra: object = {}) {
+  return {
+    job_id: 9,
+    job_name: "Searching",
+    status,
+    progress_message: status === "running" ? "Running" : "Done",
+    ...extra,
+  };
+}
 
-it("continues polling running work and stops when it completes", async () => {
+it("follows a job through the jobs cache and never asks for it while it runs", async () => {
   availability.enabled = true;
-  const status = vi
-    .spyOn(sports, "jobStatus")
-    .mockResolvedValueOnce({
-      job_id: 9,
-      arr_instance_id: 42,
-      cancelled: false,
-      result: null,
-      status: "running",
-      message: "Running",
-    })
-    .mockResolvedValue({
-      job_id: 9,
-      arr_instance_id: 42,
-      cancelled: false,
-      result: null,
-      status: "completed",
-      message: "Done",
-    });
+  jobsCache.data = [cachedJob("running")];
+  const status = vi.spyOn(sports, "jobStatus");
   const { result } = renderHook(() => useSportsJob(9, 42), { wrapper });
-  await waitFor(() => expect(result.current.data?.status).toBe("completed"), {
-    timeout: 2000,
+  expect(result.current.data).toMatchObject({
+    status: "running",
+    message: "Running",
+    cancelled: false,
+    result: null,
   });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  });
+  // Nothing polls beside the jobs socket.
+  expect(status).not.toHaveBeenCalled();
+});
+
+it("reads what the job produced one time, once it has ended", async () => {
+  availability.enabled = true;
+  jobsCache.data = [cachedJob("running")];
+  const status = vi.spyOn(sports, "jobStatus").mockResolvedValue({
+    job_id: 9,
+    arr_instance_id: 42,
+    cancelled: false,
+    status: "completed",
+    message: "Done",
+    result: { file_status: "preserved" },
+  });
+  const { result, rerender } = renderHook(() => useSportsJob(9, 42), {
+    wrapper,
+  });
+  jobsCache.data = [cachedJob("completed")];
+  rerender();
+  await waitFor(() =>
+    expect(result.current.data?.result?.file_status).toBe("preserved"),
+  );
+  expect(result.current.data?.status).toBe("completed");
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 1200));
   });
-  expect(status).toHaveBeenCalledTimes(2);
+  expect(status).toHaveBeenCalledTimes(1);
+});
+
+it("says a stopped job was cancelled and a failed one why", async () => {
+  availability.enabled = true;
+  vi.spyOn(sports, "jobStatus").mockResolvedValue({
+    job_id: 9,
+    arr_instance_id: 42,
+    cancelled: true,
+    status: "cancelled",
+    message: "",
+    result: null,
+  });
+  jobsCache.data = [cachedJob("cancelled")];
+  const { result: stopped } = renderHook(() => useSportsJob(9, 42), {
+    wrapper,
+  });
+  expect(stopped.current.data?.cancelled).toBe(true);
+
+  jobsCache.data = [
+    cachedJob("failed", {
+      error: { reason: "x", message: "The provider refused." },
+    }),
+  ];
+  const { result: failed } = renderHook(() => useSportsJob(9, 42), { wrapper });
+  expect(failed.current.data?.message).toBe("The provider refused.");
+});
+
+it("reports a job its owner cannot read, and does not ask again", async () => {
+  availability.enabled = true;
+  jobsCache.data = [cachedJob("completed")];
+  const status = vi
+    .spyOn(sports, "jobStatus")
+    .mockRejectedValue({ response: { status: 404 } });
+  const { result } = renderHook(() => useSportsJob(9, 42), { wrapper });
+  await waitFor(() => expect(result.current.isError).toBe(true));
+  const requests = status.mock.calls.length;
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+  });
+  expect(status).toHaveBeenCalledTimes(requests);
 });
 
 it("polls the owned event listing once for running syncs and stops when complete", async () => {

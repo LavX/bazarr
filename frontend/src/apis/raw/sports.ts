@@ -1,4 +1,5 @@
 /* eslint-disable camelcase */
+import type { QueuedSearch } from "@/utilities/jobs";
 import type { SubtitleSyncStatus } from "@/utilities/subtitles";
 import BaseApi from "./base";
 import client from "./client";
@@ -254,13 +255,17 @@ class SportsApi extends BaseApi {
   sync(owner: number) {
     return this.postRaw("/leagues/sync", { arr_instance_id: owner });
   }
+  /**
+   * Queue the manual search for a sports event as a job. The rows are the
+   * job's result, read once it finishes.
+   */
   async searchSubtitles(
     event: Pick<SportsEventReference, "id" | "arr_instance_id">,
     language: string,
     hi: boolean,
     forced: boolean,
-  ) {
-    const response = await this.postRaw<{ data: SearchResultType[] }>(
+  ): Promise<QueuedSearch> {
+    const response = await this.postRaw<QueuedSearch>(
       `/events/${event.id}/search`,
       {
         arr_instance_id: event.arr_instance_id,
@@ -269,7 +274,7 @@ class SportsApi extends BaseApi {
         forced,
       },
     );
-    return response.data.data;
+    return response.data;
   }
   async downloadSubtitle(
     event: Pick<SportsEventReference, "id" | "arr_instance_id">,

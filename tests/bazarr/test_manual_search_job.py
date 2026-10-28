@@ -45,7 +45,7 @@ def real_queue(monkeypatch):
 
 def test_the_job_publishes_the_rows_as_the_api_sends_them(real_queue, monkeypatch):
     calls = []
-    monkeypatch.setattr(real_queue.manual, "_search_in_job",
+    monkeypatch.setattr(real_queue.manual, "manual_search",
                         lambda *args, **kwargs: calls.append((args, kwargs)) or _rows())
 
     job = real_queue.run()
@@ -60,12 +60,13 @@ def test_the_job_publishes_the_rows_as_the_api_sends_them(real_queue, monkeypatc
     # The search got what the request resolved, and the instance it belongs to.
     args, kwargs = calls[0]
     assert args[0] == "/tv/Show/e1.mkv" and args[2] == ["opensubtitles"] and args[5] == "series"
-    assert kwargs == {"arr_instance_id": 7}
+    # The queue observes the job, so the search does not observe itself again.
+    assert kwargs == {"arr_instance_id": 7, "observed": False}
     assert job.progress_message == "1 subtitle(s) found"
 
 
 def test_an_empty_search_is_a_finished_job_with_an_empty_result(real_queue, monkeypatch):
-    monkeypatch.setattr(real_queue.manual, "_search_in_job", lambda *args, **kwargs: [])
+    monkeypatch.setattr(real_queue.manual, "manual_search", lambda *args, **kwargs: [])
 
     job = real_queue.run()
 
@@ -75,7 +76,7 @@ def test_an_empty_search_is_a_finished_job_with_an_empty_result(real_queue, monk
 
 
 def test_a_search_that_cannot_run_fails_the_job_with_its_reason(real_queue, monkeypatch, caplog):
-    monkeypatch.setattr(real_queue.manual, "_search_in_job", lambda *args, **kwargs: "All providers are throttled")
+    monkeypatch.setattr(real_queue.manual, "manual_search", lambda *args, **kwargs: "All providers are throttled")
 
     with caplog.at_level("WARNING"):
         job = real_queue.run()
@@ -94,7 +95,7 @@ def test_a_stop_before_the_rows_are_published_ends_the_job_cancelled(real_queue,
         real_queue.queue.cancel_running_job(real_queue.queue.jobs_running_queue[0].job_id)
         return _rows()
 
-    monkeypatch.setattr(real_queue.manual, "_search_in_job", search)
+    monkeypatch.setattr(real_queue.manual, "manual_search", search)
 
     job = real_queue.run()
 

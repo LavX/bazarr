@@ -29,6 +29,20 @@ const candidate: SearchResultType = {
   original_format: "False",
 };
 
+// The search runs as a job: the request queues it and its rows are the result.
+const SEARCH_JOB = {
+  job_id: 11,
+  session: "run-sports",
+  job_name: "Searching subtitles for Race",
+  status: "completed",
+  last_run_time: "",
+  is_progress: true,
+  is_signalr: false,
+  progress_value: 2,
+  progress_max: 2,
+  progress_message: "1 subtitle(s) found",
+};
+
 function Launch() {
   const modals = useModals();
   return (
@@ -50,6 +64,7 @@ function finishJob(overrides: Partial<System.Jobs>) {
     queryClient.setQueryData(
       [QueryKeys.System, QueryKeys.Jobs],
       [
+        SEARCH_JOB,
         {
           job_id: 7,
           job_name: "Downloading Race subtitles",
@@ -80,7 +95,9 @@ async function searchAndDownload(jobId: number | null) {
 }
 
 beforeEach(() => {
-  act(() => queryClient.setQueryData([QueryKeys.System, QueryKeys.Jobs], []));
+  act(() =>
+    queryClient.setQueryData([QueryKeys.System, QueryKeys.Jobs], [SEARCH_JOB]),
+  );
   server.use(
     http.get("/api/system/languages", () =>
       HttpResponse.json([
@@ -90,7 +107,16 @@ beforeEach(() => {
     http.get("/api/system/languages/profiles", () => HttpResponse.json([])),
     http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
     http.post("/api/sports/events/:id/search", () =>
-      HttpResponse.json({ data: [candidate] }),
+      HttpResponse.json({ job_id: 11, session: "run-sports" }, { status: 202 }),
+    ),
+    http.get("/api/system/jobs/result", () =>
+      HttpResponse.json({
+        job_id: 11,
+        session: "run-sports",
+        status: "completed",
+        error: null,
+        result: [candidate],
+      }),
     ),
   );
 });

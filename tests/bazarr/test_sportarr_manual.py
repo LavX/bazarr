@@ -218,6 +218,7 @@ def test_manual_api_requires_owner_and_returns_refreshed_event(
     for name, path in [
         ("utils", "utils.py"),
         ("swaggerui", "swaggerui.py"),
+        ("queued_job", "queued_job.py"),
         ("sports.leagues", "sports/leagues.py"),
         ("sports.subtitles", "sports/subtitles.py"),
     ]:
@@ -249,12 +250,30 @@ def test_manual_api_requires_owner_and_returns_refreshed_event(
         ).status_code
         == 400
     )
+    # The search is a queued job now: the route answers 202 with its id, and
+    # the rows are the job's result. Run it inline.
+    from types import SimpleNamespace
+
+    from sportarr import manual_jobs
+
+    searches = []
+    monkeypatch.setattr(routes, "queue_sports_search",
+                        lambda *args: searches.append(args) or 2)
     response = client.post(
         "/api/sports/events/61/search",
         json={"language": "en", "arr_instance_id": 1},
         headers=headers,
     )
-    assert response.status_code == 200 and response.json["data"]
+    assert response.status_code == 202 and response.json["job_id"] == 2
+    assert searches == [(61, "en", False, False, 1)]
+    published = []
+    with monkeypatch.context() as inline:
+        inline.setattr(manual_jobs, "jobs_queue", SimpleNamespace(
+            update_job_progress=lambda **kwargs: True,
+            publish_job_result=lambda job_id, rows: published.append(rows) or True))
+        inline.setattr(manual_jobs.activity, "register", lambda *args, **kwargs: None)
+        manual_jobs.run_sports_search_job(*searches[0], job_id=2)
+    assert published and published[0]
     if index_failure:
         from subtitles.indexer import sports as indexer
 
@@ -272,14 +291,12 @@ def test_manual_api_requires_owner_and_returns_refreshed_event(
         monkeypatch.setattr(indexer, "store_subtitles_sports", failed_refresh)
     # The download is a queued job now: the route answers 202 with its id, and
     # the publication outcome is the job's result. Run it inline.
-    from sportarr import manual_jobs
-
     queued = []
     monkeypatch.setattr(routes, "sports_manually_download_subtitle",
                         lambda *args: queued.append(args) or 3)
     monkeypatch.setattr(manual_jobs, "database", session)
     monkeypatch.setattr(manual_jobs, "event_stream", lambda **kwargs: None)
-    candidate = response.json["data"][0]
+    candidate = published[0][0]
     response = client.post(
         "/api/sports/events/61/download",
         json={"candidate": candidate, "arr_instance_id": 1},

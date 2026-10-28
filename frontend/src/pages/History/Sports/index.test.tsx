@@ -61,6 +61,19 @@ it("filters history and cancels, reopens, then excludes only the selected owner"
         message: "Search queued",
       });
     }),
+    // The job is followed through the jobs list; what it produced is read once.
+    http.get("/api/system/jobs", () =>
+      HttpResponse.json({
+        data: [
+          {
+            job_id: 100,
+            job_name: "Excluding release",
+            status: "completed",
+            progress_message: "Release excluded",
+          },
+        ],
+      }),
+    ),
     http.get("/api/sports/jobs/100", () =>
       HttpResponse.json({
         status: "completed",

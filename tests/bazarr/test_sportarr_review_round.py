@@ -622,12 +622,14 @@ def test_the_optional_owner_is_actually_optional():
 def test_the_sports_search_is_marshalled_like_the_other_providers():
     """Unmarshalled, original_format came back as a JSON boolean while the
     series and movies searches return the string "False". Both feed the one
-    shared SearchResultType in the frontend."""
-    from api.sports.subtitles import SportsSearch
+    shared SearchResultType in the frontend. The rows a search job publishes
+    go through the one field list every search shares."""
+    from subtitles.search_result import SEARCH_RESULT_FIELDS, marshal_search_results
 
-    model = SportsSearch.get_response_model
+    model = SEARCH_RESULT_FIELDS
     assert model['original_format'].__class__.__name__ == 'String'
     assert 'score' in model and 'provider' in model
+    assert marshal_search_results([{'original_format': False, 'score': 88.4}])[0]['original_format'] == 'False'
 
 
 def test_the_upgradable_endpoint_carries_sports():
