@@ -243,11 +243,41 @@ def test_frames_are_removed_when_progress_raises_mid_recognition(media, ffmpeg, 
     assert os.listdir(tmp_path) == []
 
 
-def test_language_failure_happens_before_anything_is_rendered(media, tmp_path):
+def test_old_ffmpeg_is_refused_before_the_engine_prepares(tmp_path):
+    binary = tmp_path / "ffmpeg"
+    binary.write_text("#!/bin/sh\necho 'ffmpeg version 5.1.1-static Copyright'\n")
+    binary.chmod(0o700)
+    engine = FakeEngine([])
+    work = tmp_path / "work"
+
+    with pytest.raises(OcrUnavailable, match=r"OCR needs ffmpeg 6\.1 or newer, found 5\.1\.1$"):
+        pipeline.run_ocr("/not-read.mkv", 0, "eng", engine, parent=str(work), ffmpeg=str(binary))
+
+    assert engine.prepared is None and not work.exists()
+
+
+def test_preflight_keeps_managed_ffprobe_available(media, ffmpeg, tmp_path, monkeypatch):
+    from utilities import binaries
+
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    renderer = managed / "ffmpeg"
+    renderer.symlink_to(ffmpeg)
+    paths = {"ffmpeg": str(renderer), "ffprobe": shutil.which("ffprobe")}
+    monkeypatch.setattr(binaries, "get_binary", paths.__getitem__)
+    monkeypatch.setenv("PATH", str(managed))
+
+    result = pipeline.run_ocr(media["pgs"], 0, "eng", FakeEngine(["a", "b", "c"]),
+                              parent=str(tmp_path / "work"))
+
+    assert _texts(result.srt) == ["a", "b", "c"]
+
+
+def test_language_failure_happens_before_anything_is_rendered(media, tmp_path, ffmpeg):
     engine = FakeEngine([], fail_prepare=LanguagePackError("No OCR language pack for xxx"))
 
     with pytest.raises(LanguagePackError):
-        pipeline.run_ocr(media["pgs"], 0, "xxx", engine, parent=str(tmp_path / "w"), ffmpeg="/nonexistent")
+        pipeline.run_ocr(media["pgs"], 0, "xxx", engine, parent=str(tmp_path / "w"), ffmpeg=ffmpeg)
     assert not (tmp_path / "w").exists()
 
 

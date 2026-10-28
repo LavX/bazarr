@@ -43,3 +43,8 @@ updates:
       # Moving past 2.6.x needs a rebase of subliminal_patch, not a pin bump.
       - dependency-name: "subliminal"
         versions: [">=2.7.0"]
+      # pytest 9.2.0 monkeypatch.setattr undo deletes attributes that live in
+      # dict items (the settings sections), failing the compat and backend
+      # fixtures. Lift together with the dev-requirements.txt pin.
+      - dependency-name: "pytest"
+        versions: [">=9.2.0"]
