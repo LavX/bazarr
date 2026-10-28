@@ -87,6 +87,69 @@ describe("inline write errors, per request", () => {
     expect(showNotification).not.toHaveBeenCalled();
   });
 
+  it("hands a 500 with no error body to the caller", async () => {
+    server.use(
+      http.post(
+        "/api/translator/test",
+        () => new HttpResponse(null, { status: 500 }),
+      ),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false, networkMode: "offlineFirst" },
+      },
+    });
+    const wrapper = ({ children }: PropsWithChildren) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useTestTranslator(), { wrapper });
+    const onError = vi.fn();
+
+    await act(async () => {
+      await expect(
+        result.current.mutateAsync(
+          { serviceUrl: "http://localhost:8990" },
+          { onError },
+        ),
+      ).rejects.toMatchObject({ response: { status: 500 } });
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(showNotification).not.toHaveBeenCalled();
+  });
+
+  it("resolves a held-key answer from the translator test with its message", async () => {
+    server.use(
+      http.post("/api/translator/test", () =>
+        HttpResponse.json({
+          keyHeldByService: true,
+          message: "The translator service holds its own key.",
+        }),
+      ),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false, networkMode: "offlineFirst" },
+      },
+    });
+    const wrapper = ({ children }: PropsWithChildren) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useTestTranslator(), { wrapper });
+
+    let data: unknown;
+    await act(async () => {
+      data = await result.current.mutateAsync({
+        serviceUrl: "http://localhost:8990",
+        apiKey: "",
+      });
+    });
+
+    expect(data).toEqual({
+      keyHeldByService: true,
+      message: "The translator service holds its own key.",
+    });
+    expect(showNotification).not.toHaveBeenCalled();
+  });
+
   it("still toasts an unclaimed write sent while a claimed one is in flight", async () => {
     // The flag was once global for as long as setup was mounted, and a Plex
     // sign-out or a refused restart with no handler of its own then failed in
