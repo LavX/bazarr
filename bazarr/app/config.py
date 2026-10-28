@@ -300,6 +300,7 @@ validators = [
     Validator('general.minimum_score_sports', must_exist=True, default=70, is_type_of=int, gte=0, lte=100),
     Validator('general.use_embedded_subs', must_exist=True, default=True, is_type_of=bool),
     Validator('general.embedded_subs_show_desired', must_exist=True, default=True, is_type_of=bool),
+    Validator('general.mass_embedded_extract_workers', must_exist=True, default=2, is_type_of=int, gte=1, lte=4),
     Validator('general.utf8_encode', must_exist=True, default=True, is_type_of=bool),
     Validator('general.ignore_pgs_subs', must_exist=True, default=False, is_type_of=bool),
     Validator('general.ignore_vobsub_subs', must_exist=True, default=False, is_type_of=bool),

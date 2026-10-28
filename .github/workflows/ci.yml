@@ -778,6 +778,7 @@ jobs:
             tests/bazarr/test_provider_blacklist_instance_scope.py \
             tests/bazarr/test_series_identity_counts.py \
             tests/bazarr/test_system_searches.py \
+            tests/bazarr/test_mass_embedded_extract.py \
             tests/bazarr/test_mass_operations.py \
             tests/bazarr/test_embedded_extraction_instance_scope.py \
             tests/bazarr/test_sonarr_sync_memory.py \
