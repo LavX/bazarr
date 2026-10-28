@@ -138,7 +138,10 @@ def test_hiding_a_movie_track_records_it_and_reindexes(hidden_api, tmp_path):
     assert _hidden(session) == [("movie", 1, 2, "en", "subrip")]
     assert calls["reindex"] == [("movie", "/movies/m.mkv", str(tmp_path) + "/movies/m.mkv",
                                  {"arr_instance_id": 2})]
-    assert calls["events"] == [{"type": "movie-wanted", "action": "update", "payload": 7}]
+    assert calls["events"] == [
+        {"type": "movie", "action": "update", "payload": 7},
+        {"type": "movie-wanted", "action": "update", "payload": 7},
+    ]
 
     # The re-index took the track out of the listing, so a second request
     # finds nothing to hide and records nothing more.
