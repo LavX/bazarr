@@ -20,6 +20,7 @@ The frames live in a temporary directory that is removed when the caller's
 cached between runs.
 """
 
+import atexit
 import hashlib
 import json
 import logging
@@ -27,8 +28,10 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -40,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 FRAME_LOG = "frames.txt"
 RENDER_TIMEOUT = 3 * 60 * 60
+# How often the render loop calls ``progress`` while ffmpeg runs, whether or not
+# ffmpeg has logged anything new. A stopped job raises from that call, so this
+# is the longest a Stop waits for the render to end.
+POLL_S = 1
 PROBE_TIMEOUT = 120
 # The flush frame ffmpeg emits at end of stream carries a wrapped timestamp,
 # 2**32 ms past the start. No real cue is anywhere near 2**31 ms (24 days).
@@ -69,11 +76,65 @@ class Cue:
         return prepare_image(self.frame, self.bbox)
 
 
+# Each workspace names the process that made it, so the sweep that runs when the
+# next render starts can tell a folder a killed run left behind from one another
+# run is using.
+OWNER_FILE = ".owner"
+
+# What this process has running, for ``stop_live_renders``: the ffmpeg
+# processes (each leads a process group of its own, see ``render_frames``) and
+# the workspaces holding their frames.
+_registry_lock = threading.Lock()
+_live_renders = set()
+_live_workspaces = set()
+
+
+def _normal(path):
+    """One spelling per directory: the live check is by this, never by the raw string.
+
+    The work parent comes from the config directory as typed (``-c data``,
+    ``/config//x``), ``tempfile.mkdtemp`` returns its own spelling and a directory
+    scan keeps the parent as given, so three strings can name one folder.
+    """
+    return os.path.realpath(path)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists, owned by someone else
+    return True
+
+
+def _owner_of(path):
+    try:
+        with open(os.path.join(path, OWNER_FILE)) as handle:
+            pid = int(handle.read().strip())
+    except (OSError, ValueError):
+        return None  # no marker, an empty one (killed while writing it) or a damaged one
+    return pid if pid > 0 else None  # 0 and negative numbers name process groups, not a process
+
+
+def _orphaned(path, mtime, cutoff):
+    owner = _owner_of(path)
+    with _registry_lock:
+        if _normal(path) in _live_workspaces:
+            return False
+    if owner is None or os.name != "posix":
+        return mtime < cutoff
+    # Another process that is still running owns it; this process, or one that
+    # is gone, does not (a restart in a container reuses the same pid).
+    return owner == os.getpid() or not _pid_alive(owner) or mtime < cutoff
+
+
 def _sweep_stale_workspaces(parent):
     cutoff = time.time() - STALE_WORKSPACE_S
     for entry in os.scandir(parent):
         if entry.name.startswith("ocr-") and entry.is_dir(follow_symlinks=False) \
-                and entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                and _orphaned(entry.path, entry.stat(follow_symlinks=False).st_mtime, cutoff):
             shutil.rmtree(entry.path, ignore_errors=True)
 
 
@@ -83,10 +144,44 @@ def render_workspace(parent):
     os.makedirs(parent, exist_ok=True)
     _sweep_stale_workspaces(parent)
     path = tempfile.mkdtemp(prefix="ocr-", dir=parent)
+    live = _normal(path)
+    with _registry_lock:
+        _live_workspaces.add(live)
     try:
+        with open(os.path.join(path, OWNER_FILE), "w") as handle:
+            handle.write(str(os.getpid()))
         yield path
     finally:
+        with _registry_lock:
+            _live_workspaces.discard(live)
         shutil.rmtree(path, ignore_errors=True)
+
+
+def stop_live_renders():
+    """End every ffmpeg render this process has running and remove their frames.
+
+    ffmpeg runs in a session of its own, so a terminal's Ctrl+C or a SIGTERM to
+    Bazarr no longer reaches it; Bazarr's shutdown path (and the interpreter's
+    exit) calls this instead. It installs no signal handler, so the app's own
+    signal handling is untouched.
+
+    Covered: a source install stopped from a terminal or by SIGTERM, and a restart
+    from the UI. Not covered: SIGKILL of Bazarr, a crash, or a power loss, where
+    nothing in the process runs. ffmpeg then ends on its own when it fails to
+    write into the folder that the sweep removes. That sweep runs when the next
+    OCR render starts, not when Bazarr boots (see ``_sweep_stale_workspaces``).
+    Docker and systemd end the whole container or cgroup anyway.
+    """
+    with _registry_lock:
+        processes = list(_live_renders)
+        workspaces = list(_live_workspaces)
+    for process in processes:
+        _signal_tree(process)
+    for path in workspaces:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+atexit.register(stop_live_renders)
 
 
 def render_command(ffmpeg, video_path, stream_index, out_dir, canvas_size=None):
@@ -251,6 +346,42 @@ def last_frame_ms(log, start_ms=0):
         return 0
 
 
+def _signal_tree(process):
+    """Kill ffmpeg and everything in its group, without waiting for it.
+
+    Nothing is sent once the render thread has reaped the leader: its pid is then
+    free for any process to take, and the group id with it. This looks at the
+    reaped state instead of polling, so a caller on another thread (the exit hook)
+    never reaps the leader out from under the render thread, which would leave a
+    child that still holds the stderr pipe unsignalled.
+    """
+    if process.returncode is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        pass  # already gone, or no group to signal: the plain kill is the fallback
+
+
+def _kill_tree(process):
+    """End ffmpeg and anything it started, then reap it.
+
+    ffmpeg runs in a session of its own (see ``render_frames``) so one signal
+    reaches its whole group. Killing only the leader would leave a child holding
+    the stderr pipe, and the reap would wait for that child.
+    """
+    _signal_tree(process)
+    process.kill()
+    try:
+        process.communicate(timeout=PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        logger.warning("OCR could not reap ffmpeg process %s after it was killed", process.pid)
+
+
 def render_frames(video_path, stream_index, out_dir, *, canvas_size=None, progress=None,
                   ffmpeg=None, ffprobe=None, timeout=RENDER_TIMEOUT):
     """Run ffmpeg; return ``[(time_ms, png_path)]`` in render order."""
@@ -268,11 +399,14 @@ def render_frames(video_path, stream_index, out_dir, *, canvas_size=None, progre
     last_position = 0
     deadline = time.monotonic() + timeout
     with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                          stderr=subprocess.PIPE, text=True, errors="replace") as process:
+                          stderr=subprocess.PIPE, text=True, errors="replace",
+                          start_new_session=os.name == "posix") as process:
+        with _registry_lock:
+            _live_renders.add(process)
         try:
             while True:
                 try:
-                    _, stderr = process.communicate(timeout=1)
+                    _, stderr = process.communicate(timeout=POLL_S)
                     break
                 except subprocess.TimeoutExpired:
                     if time.monotonic() > deadline:
@@ -286,9 +420,11 @@ def render_frames(video_path, stream_index, out_dir, *, canvas_size=None, progre
                         last_position = progress_position(last_position, elapsed, render_duration)
                         progress("render", last_position, render_duration)
         except BaseException:
-            process.kill()
-            process.communicate()
+            _kill_tree(process)
             raise
+        finally:
+            with _registry_lock:
+                _live_renders.discard(process)
     if process.returncode != 0:
         stderr = (stderr or "").strip()
         if any(marker in stderr for marker in _OPTION_ERRORS):
@@ -296,6 +432,11 @@ def render_frames(video_path, stream_index, out_dir, *, canvas_size=None, progre
             raise OcrUnavailable("OCR needs ffmpeg 6.1 or newer; the ffmpeg Bazarr+ uses is older")
         reason = stderr.splitlines()[-1:] or ["no error output"]
         raise OcrError(f"ffmpeg could not render subtitle stream {stream_index}: {reason[0]}")
+    if progress:
+        # ffmpeg is done, and with it the render's own reports. What follows (the
+        # container's start time, then every frame read in segment) must not look
+        # like a render stuck short of its end, so say what is next.
+        progress("segment", 0, 0)
     return read_frame_log(log, out_dir, input_start_ms(video_path, ffprobe))
 
 
@@ -338,11 +479,18 @@ def _signature(path):
     return (bbox, digest), bbox
 
 
-def segment(frames):
-    """Cues from ``[(time_ms, png_path)]``: runs of one picture, closed by the next change."""
+def segment(frames, progress=None):
+    """Cues from ``[(time_ms, png_path)]``: runs of one picture, closed by the next change.
+
+    Reading a frame takes tens of milliseconds, so a film's worth is a minute or
+    more of work: ``progress("segment", frames_read, total)`` is called before
+    each one, and a stopped job raises from it.
+    """
     cues = []
     current = None  # (start_ms, signature, path, bbox)
-    for time_ms, path in frames:
+    for number, (time_ms, path) in enumerate(frames):
+        if progress:
+            progress("segment", number, len(frames))
         signature, bbox = _signature(path)
         if current is not None and signature == current[1]:
             continue
@@ -372,4 +520,4 @@ def prepare_image(path, bbox):
 def decode_cues(video_path, stream_index, work_dir, *, canvas_size=None, progress=None, ffmpeg=None):
     frames = render_frames(video_path, stream_index, work_dir, canvas_size=canvas_size,
                            progress=progress, ffmpeg=ffmpeg)
-    return segment(frames)
+    return segment(frames, progress=progress)

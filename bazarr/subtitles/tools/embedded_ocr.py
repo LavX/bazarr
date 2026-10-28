@@ -207,6 +207,13 @@ def progress_message(step, value, maximum, pack=None):
             percent = max(0, min(100, int(value * 100 / maximum)))
             return f"Rendering the image subtitles ({percent}%)"
         return "Rendering the image subtitles"
+    if step == "segment":
+        # After ffmpeg exits, every rendered frame is read to find where cues
+        # start and end; a long film takes a minute or more.
+        if maximum > 0:
+            percent = max(0, min(100, int(value * 100 / maximum)))
+            return f"Finding the subtitle cues ({percent}%)"
+        return "Finding the subtitle cues"
     if step == "recognise":
         return f"Reading cue {value} of {maximum}"
     if step == "write":
@@ -403,7 +410,7 @@ def job_progress(job_id, language):
 
     def report(step, value, maximum):
         message = progress_message(step, value, maximum, pack=pack)
-        if step in ("recognise", "render") or (step == "pack" and maximum > 1):
+        if step in ("recognise", "render", "segment") or (step == "pack" and maximum > 1):
             jobs_queue.update_job_progress(job_id=job_id, progress_value=value, progress_max=maximum,
                                            progress_message=message)
         elif step == "write":
@@ -419,7 +426,8 @@ def ocr_embedded_track(media_type, media_id, arr_instance_id, language, hi=False
     """OCR to text, as a queued job. Returns the job id when it queues one.
 
     Stopping the job stops the run at its next step (between cues, or within
-    a second while ffmpeg renders): the Tesseract worker ends and the rendered
+    a second while ffmpeg renders, and between frames while they are read for
+    cues): ffmpeg and anything it started end, the Tesseract worker ends and the rendered
     frames are removed.
     """
     if not job_id:
