@@ -1,3 +1,4 @@
+import type { QueuedSearch } from "@/utilities/jobs";
 import BaseApi from "./base";
 
 class ProviderApi extends BaseApi {
@@ -16,10 +17,17 @@ class ProviderApi extends BaseApi {
     await this.post("", { action: "reset" });
   }
 
-  async movies(id: number) {
-    const response = await this.get<DataWrapper<SearchResultType[]>>(
-      "/movies",
-      { radarrid: id },
+  /**
+   * Queue the manual search for a movie as a job. The rows are the job's
+   * result, read once it finishes.
+   */
+  async searchMovie(id: number): Promise<QueuedSearch> {
+    const response = await this.post<QueuedSearch>(
+      "/movies/search",
+      undefined,
+      {
+        radarrid: id,
+      },
     );
     return response.data;
   }
@@ -37,12 +45,12 @@ class ProviderApi extends BaseApi {
     });
   }
 
-  async episodes(episodeid: number) {
-    const response = await this.get<DataWrapper<SearchResultType[]>>(
-      "/episodes",
-      {
-        episodeid,
-      },
+  /** Queue the manual search for an episode as a job. */
+  async searchEpisode(id: number): Promise<QueuedSearch> {
+    const response = await this.post<QueuedSearch>(
+      "/episodes/search",
+      undefined,
+      { episodeid: id },
     );
     return response.data;
   }
