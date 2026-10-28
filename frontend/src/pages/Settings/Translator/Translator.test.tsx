@@ -1,7 +1,9 @@
 import { FunctionComponent } from "react";
 import { useForm } from "@mantine/form";
+import { notifications } from "@mantine/notifications";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { TranslatorTestResponse } from "@/apis/hooks/translator";
 import {
   FormContext,
   type FormValues,
@@ -83,9 +85,7 @@ describe("Translator options", () => {
 
 const mutate = vi.fn();
 
-// The rows below render the real button through the settings form it lives in,
-// with only the mutation swapped out: what is asserted is what the button
-// sends and when it can be pressed at all, never what the service answers.
+// Render the button through its settings form and control request outcomes.
 vi.mock("@/apis/hooks/translator", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/apis/hooks/translator")>()),
   useTestTranslator: () => ({ mutate, isPending: false }),
@@ -113,6 +113,65 @@ const TestButtonHarness: FunctionComponent<{ settings: LooseObject }> = ({
 describe("Translator Test Connection button", () => {
   beforeEach(() => {
     mutate.mockReset();
+    vi.spyOn(notifications, "show").mockClear();
+  });
+
+  it("shows the refusal reason once when the connection test fails", async () => {
+    mutate.mockImplementation(
+      (_params: unknown, options: { onError?: (error: unknown) => void }) => {
+        options.onError?.({ response: { data: { error: "reason text" } } });
+      },
+    );
+    customRender(
+      <TestButtonHarness
+        settings={{
+          translator: { ["openrouter_url"]: "http://localhost:8990" },
+        }}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
+    expect(notifications.show).toHaveBeenCalledTimes(1);
+    expect(notifications.show).toHaveBeenCalledWith({
+      title: "Connection Failed",
+      message: "reason text",
+      color: "red",
+    });
+  });
+
+  it("explains a service-held API key without claiming it was validated", async () => {
+    mutate.mockImplementation(
+      (
+        _params: unknown,
+        options: {
+          onSuccess?: (data: TranslatorTestResponse) => void;
+        },
+      ) => {
+        options.onSuccess?.({ keyHeldByService: true, message: "held" });
+      },
+    );
+    customRender(
+      <TestButtonHarness
+        settings={{
+          translator: { ["openrouter_url"]: "http://localhost:8990" },
+        }}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /test connection/i }));
+
+    expect(notifications.show).toHaveBeenCalledTimes(1);
+    expect(notifications.show).toHaveBeenCalledWith({
+      title: "API Key",
+      message: "held",
+      color: "blue",
+    });
+    expect(notifications.show).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Connected" }),
+    );
   });
 
   it("tests an open gate with no Bazarr-side API key, because the sidecar can hold its own", async () => {
