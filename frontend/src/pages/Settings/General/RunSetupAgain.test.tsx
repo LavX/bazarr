@@ -1,6 +1,7 @@
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
+import { PendingChangesProvider } from "@/contexts";
 import { readOnboardingValue } from "@/pages/Setup/onboardingStorage";
 import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
 import { customRender, screen, waitFor } from "@/tests";
@@ -69,6 +70,56 @@ describe("RunSetupAgain", () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/setup"));
   });
 
+  it("writes nothing while the settings page holds unsaved changes", async () => {
+    // The page answers the navigation with its unsaved-changes prompt, and
+    // Keep editing used to leave the reader on Settings with the flag already
+    // cleared, so the next visit to the home page opened the wizard.
+    const user = userEvent.setup();
+
+    customRender(
+      <PendingChangesProvider value>
+        <RunSetupAgain />
+      </PendingChangesProvider>,
+    );
+
+    const button = screen.getByRole("button", {
+      name: /run first-time setup/i,
+    });
+    // Unavailable but still in the tab order, so the reason is reachable.
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).not.toBeDisabled();
+    expect(
+      screen.getByText(/save or discard your unsaved changes/i),
+    ).toBeVisible();
+    expect(button).toHaveAccessibleDescription(/save or discard/i);
+    await user.tab();
+    expect(button).toHaveFocus();
+    await user.click(button);
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("is available again once the changes are saved or discarded", () => {
+    const view = customRender(
+      <PendingChangesProvider value>
+        <RunSetupAgain />
+      </PendingChangesProvider>,
+    );
+    view.rerender(
+      <PendingChangesProvider value={false}>
+        <RunSetupAgain />
+      </PendingChangesProvider>,
+    );
+
+    const button = screen.getByRole("button", {
+      name: /run first-time setup/i,
+    });
+    expect(button).toBeEnabled();
+    expect(button).not.toHaveAttribute("aria-disabled");
+    expect(screen.queryByText(/save or discard/i)).toBeNull();
+  });
+
   it("forgets the step, intent and drafts a previous run left behind", async () => {
     // A browser that still held a later step reopened the wizard there, so
     // Run first-time setup did not start at Welcome.
@@ -76,10 +127,11 @@ describe("RunSetupAgain", () => {
     localStorage.setItem("bazarr.onboarding.step", "sonarr");
     localStorage.setItem("bazarr.onboarding.intent", "library");
     localStorage.setItem("bazarr.onboarding.media-servers", "[]");
+    localStorage.setItem("bazarr.onboarding.skipped", '["sonarr"]');
     let storedAtNavigate: (string | null)[] = [];
     navigate.mockImplementation(() => {
-      storedAtNavigate = ["step", "intent", "media-servers"].map((name) =>
-        localStorage.getItem(`bazarr.onboarding.${name}`),
+      storedAtNavigate = ["step", "intent", "media-servers", "skipped"].map(
+        (name) => localStorage.getItem(`bazarr.onboarding.${name}`),
       );
     });
     mutate.mockImplementation(
@@ -95,7 +147,7 @@ describe("RunSetupAgain", () => {
     );
 
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/setup"));
-    expect(storedAtNavigate).toEqual([null, null, null]);
+    expect(storedAtNavigate).toEqual([null, null, null, null]);
   });
 
   it("reopens at Welcome under a base URL too", async () => {

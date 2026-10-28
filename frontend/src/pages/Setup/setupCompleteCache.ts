@@ -3,6 +3,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import { clearPersistedConnectionTests } from "./connectionTests";
 import { clearPersistedIntent } from "./useOnboardingIntent";
 import { clearPersistedSelection } from "./useOnboardingSelection";
+import { clearPersistedSkips } from "./useSkippedSteps";
 import { clearPersistedStep } from "./useWizardStep";
 
 /**
@@ -37,12 +38,13 @@ export async function settleSetupComplete(
 }
 
 /**
- * Forgets the wizard's stored step, intent, media server drafts and connection
- * test results.
+ * Forgets the wizard's stored step, intent, media server drafts, connection
+ * test results and skipped steps.
  */
 export function clearPersistedOnboarding() {
   clearPersistedStep();
   clearPersistedIntent();
   clearPersistedSelection();
   clearPersistedConnectionTests();
+  clearPersistedSkips();
 }

@@ -39,18 +39,56 @@ const REGIONAL_CODES: Record<string, string> = {
 };
 
 /**
- * The browser's language as one of Bazarr's code2 values. "en-GB" and "en"
- * both give "en"; the regional ones above keep their own code.
+ * The countries of Latin America a browser can report for Spanish, beside the
+ * UN M.49 region es-419 that names them all. Bazarr defines Spanish (Latino)
+ * as its own language, "ea", so a tag in this set prefers it and falls back to
+ * plain Spanish when the list does not carry it.
+ *
+ * es-US is left out on purpose. It is Spanish as spoken in the United States,
+ * which is not Latin America as a region, and a browser reporting it says
+ * nothing about which Spanish the reader's subtitles are in, so it takes plain
+ * Spanish like es-ES does.
  */
-function browserCode2(): string | null {
+const LATIN_AMERICAN_REGIONS = new Set([
+  "419",
+  "ar",
+  "bo",
+  "cl",
+  "co",
+  "cr",
+  "cu",
+  "do",
+  "ec",
+  "gt",
+  "hn",
+  "mx",
+  "ni",
+  "pa",
+  "pe",
+  "pr",
+  "py",
+  "sv",
+  "uy",
+  "ve",
+]);
+
+/**
+ * The browser's language as Bazarr's code2 values, best guess first. "en-GB"
+ * and "en" both give "en"; the regional ones above keep their own code, and
+ * Latin American Spanish names "ea" ahead of the "es" it falls back to.
+ */
+function browserCandidates(): string[] {
   const tag = typeof navigator === "undefined" ? "" : navigator.language;
   const lower = tag.toLowerCase();
   const regional = REGIONAL_CODES[lower];
   if (regional !== undefined) {
-    return regional;
+    return [regional];
   }
-  const code = lower.split("-")[0] ?? "";
-  return code.length === 2 ? code : null;
+  const [code = "", region = ""] = lower.split("-");
+  if (code === "es" && LATIN_AMERICAN_REGIONS.has(region)) {
+    return ["ea", "es"];
+  }
+  return code.length === 2 ? [code] : [];
 }
 
 /**
@@ -84,11 +122,11 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   // empty selection is still a selection: once the reader clears the field,
   // the draft holds [] and nothing puts the guess back.
   const preselected = useMemo(() => {
-    const code = browserCode2();
-    if (code === null) {
-      return [];
-    }
-    return (languages ?? []).some((lang) => lang.code2 === code) ? [code] : [];
+    const offered = languages ?? [];
+    const code = browserCandidates().find((candidate) =>
+      offered.some((lang) => lang.code2 === candidate),
+    );
+    return code === undefined ? [] : [code];
   }, [languages]);
 
   const [draft, patchDraft] = useStepDraft<{ selected: string[] | null }>(

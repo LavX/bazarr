@@ -112,6 +112,63 @@ describe("LanguagesStep", () => {
     expect(mutate.mock.calls[0][0]["languages-enabled"]).toEqual(["pb"]);
   });
 
+  describe("Latin American Spanish", () => {
+    // Bazarr defines Spanish (Latino) as its own language, "ea", beside "es".
+    // es-419 is a UN M.49 region rather than a country, and the countries a
+    // browser reports for it are many, so the guess matches on the region.
+    const WITH_LATINO: Language.Server[] = [
+      { code2: "es", code3: "spa", name: "Spanish", enabled: false },
+      {
+        code2: "ea",
+        code3: "spl",
+        name: "Spanish (Latino)",
+        enabled: false,
+      },
+    ];
+
+    it.each(["es-419", "es-MX", "es-AR", "es-CO"])(
+      "preselects Spanish (Latino) for %s when the list offers it",
+      async (tag) => {
+        setBrowserLanguage(tag);
+        setLanguages(WITH_LATINO);
+        const user = userEvent.setup();
+
+        customRender(<LanguagesStep onNext={onNext} />);
+
+        await user.click(screen.getByRole("button", { name: /continue/i }));
+
+        expect(mutate.mock.calls[0][0]["languages-enabled"]).toEqual(["ea"]);
+      },
+    );
+
+    it.each(["es-419", "es-MX"])(
+      "falls back to Spanish for %s when the list has no Latino entry",
+      async (tag) => {
+        setBrowserLanguage(tag);
+        setLanguages(LANGUAGES);
+        const user = userEvent.setup();
+
+        customRender(<LanguagesStep onNext={onNext} />);
+
+        await user.click(screen.getByRole("button", { name: /continue/i }));
+
+        expect(mutate.mock.calls[0][0]["languages-enabled"]).toEqual(["es"]);
+      },
+    );
+
+    it("keeps European Spanish for es-ES even when Latino is offered", async () => {
+      setBrowserLanguage("es-ES");
+      setLanguages(WITH_LATINO);
+      const user = userEvent.setup();
+
+      customRender(<LanguagesStep onNext={onNext} />);
+
+      await user.click(screen.getByRole("button", { name: /continue/i }));
+
+      expect(mutate.mock.calls[0][0]["languages-enabled"]).toEqual(["es"]);
+    });
+  });
+
   it("says the list is loading instead of showing an empty selector", () => {
     // An interactive, empty selector beside a disabled Continue reads as
     // broken, and nothing on the step said the list was still on its way.

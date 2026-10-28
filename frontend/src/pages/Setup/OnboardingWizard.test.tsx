@@ -7,7 +7,7 @@ import { compileString } from "sass-embedded";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
 import client from "@/apis/raw/client";
-import { customRender, screen, waitFor, within } from "@/tests";
+import { cleanup, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import OnboardingWizardView from "./OnboardingWizard";
 import { settleSetupComplete } from "./setupCompleteCache";
@@ -1015,6 +1015,135 @@ describe("small text colours", () => {
     for (const fill of [paletteHex("yellow", 1), "#ffffff"]) {
       expect(contrast(title, fill)).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+describe("the rail, visited and completed", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    routeParams = {};
+    vi.clearAllMocks();
+    mockedSettingsMutation.mockReturnValue({
+      mutate,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  const rail = () =>
+    screen.getByRole("progressbar", { name: "Setup progress" });
+  // The check is an icon with no text, so it is found by what it draws.
+  const checks = () =>
+    // eslint-disable-next-line testing-library/no-node-access
+    rail().querySelectorAll('svg[data-icon="check"]');
+  const dotFor = (numeral: string) => within(rail()).getByText(numeral);
+
+  async function skipTo(user: UserEvent, heading: RegExp) {
+    // The library path's Connect steps, in order: Sonarr, Radarr, Sportarr,
+    // the media server picker and Requests.
+    for (let i = 0; i < 5; i += 1) {
+      await user.click(
+        await screen.findByRole("button", { name: /do this later/i }),
+      );
+    }
+    await screen.findByRole("heading", { name: heading });
+  }
+
+  it("draws no check for a phase every step of which was skipped", async () => {
+    // Four skipped steps drew four green checks, which said the reader had
+    // done something they had been told they could leave for later.
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await user.click(
+      await screen.findByRole("radio", { name: /sonarr, radarr or sportarr/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await skipTo(user, /subtitle languages/i);
+
+    // Getting started was answered, Connect was walked past.
+    expect(checks()).toHaveLength(1);
+    expect(dotFor("2")).toHaveClass(wizardStyles.dotSkipped);
+    expect(dotFor("2")).not.toHaveClass(wizardStyles.dotDone);
+    expect(rail()).toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("skipped: Connect"),
+    );
+  });
+
+  it("draws the check once one step of the phase was answered", async () => {
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await user.click(
+      await screen.findByRole("radio", { name: /sonarr, radarr or sportarr/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    // Sonarr, Radarr and Sportarr skipped, the picker answered with nothing
+    // ticked, Requests skipped.
+    for (let i = 0; i < 3; i += 1) {
+      await user.click(
+        await screen.findByRole("button", { name: /do this later/i }),
+      );
+    }
+    await user.click(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /do this later/i }),
+    );
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+
+    expect(checks()).toHaveLength(2);
+    expect(within(rail()).queryByText("2")).toBeNull();
+    expect(rail()).not.toHaveAttribute(
+      "aria-valuetext",
+      expect.stringContaining("skipped"),
+    );
+  });
+
+  it("remembers what was skipped across a reload", async () => {
+    // The providers step restarts Bazarr+ and the wizard resumes through a
+    // hard redirect, so the record cannot live in memory alone.
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await user.click(
+      await screen.findByRole("radio", { name: /sonarr, radarr or sportarr/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await skipTo(user, /subtitle languages/i);
+    expect(localStorage.getItem("bazarr.onboarding.skipped")).not.toBeNull();
+
+    cleanup();
+    customRender(<OnboardingWizardView />);
+
+    await screen.findByRole("heading", { name: /subtitle languages/i });
+    expect(dotFor("2")).toHaveClass(wizardStyles.dotSkipped);
+  });
+
+  it("answering a step the reader skipped earlier takes the skip back", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "media-servers");
+    localStorage.setItem(
+      "bazarr.onboarding.skipped",
+      JSON.stringify(["media-servers", "seerr"]),
+    );
+    customRender(<OnboardingWizardView />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    );
+    await screen.findByRole("heading", { name: /^requests$/i });
+
+    expect(
+      JSON.parse(localStorage.getItem("bazarr.onboarding.skipped") ?? "[]"),
+    ).toEqual(["seerr"]);
   });
 });
 

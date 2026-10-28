@@ -38,6 +38,7 @@ import {
   OnboardingSelectionProvider,
   useOnboardingSelection,
 } from "./useOnboardingSelection";
+import { clearPersistedSkips, useSkippedSteps } from "./useSkippedSteps";
 import { StepBusyProvider, useStepBusy } from "./useStepBusy";
 import { StepDraftProvider, useClearStepDrafts } from "./useStepDrafts";
 import { useWizardStep } from "./useWizardStep";
@@ -61,6 +62,12 @@ const OnboardingWizardBody: FunctionComponent = () => {
   const { drafts, clearSelection } = useOnboardingSelection();
   const clearStepDrafts = useClearStepDrafts();
   const stepBusy = useStepBusy();
+  const {
+    skipped,
+    markSkipped,
+    markAnswered,
+    reset: resetSkipped,
+  } = useSkippedSteps();
   const navigate = useNavigate();
   const { stepKey } = useParams<{ stepKey?: string }>();
   const mutation = useSettingsMutation(false, { inlineErrors: true });
@@ -166,11 +173,21 @@ const OnboardingWizardBody: FunctionComponent = () => {
     // The cursor moves here rather than waiting on the history move, because
     // the step list is this component's, not the browser's.
     goTo(target);
-    if (trail.current[trail.current.length - 1] === target) {
+    // Entries on top of the trail that name a step this run no longer walks (a
+    // media server's configure step is gone the moment its save lands) sit
+    // between here and the step being gone back to. Landing on one moves
+    // nothing the reader can see, so they are gone over in the same move.
+    let passedOver = 0;
+    let top = trail.current.length - 1;
+    while (top >= 0 && !steps.some((s) => s.key === trail.current[top])) {
+      passedOver += 1;
+      top -= 1;
+    }
+    if (top >= 0 && trail.current[top] === target) {
       // The entry underneath is the step being gone back to, so go back to it
       // rather than writing a third entry over the two that already say it.
-      trail.current.pop();
-      navigate(-1);
+      trail.current.length = top;
+      navigate(-(passedOver + 1));
       return;
     }
     // The list changed under the history (a media server was unticked, say),
@@ -178,6 +195,49 @@ const OnboardingWizardBody: FunctionComponent = () => {
     // earlier step stacked on a later one turns browser Back into forward.
     navigate(`/setup/${target}`, { replace: true });
   }, [goTo, navigate, steps, index]);
+
+  // What a step is handed to move the wizard with. A step's write can answer
+  // after the reader has already left it (only the provider stages report
+  // themselves busy, so browser Back unmounts any other step with its save in
+  // the air), and the callback it holds then advanced the wizard to the step
+  // it had been heading for, over wherever the reader went. The callbacks are
+  // tied to the mount they were handed to and do nothing once it is no longer
+  // the one on screen. A step key would not do for that: Back and then Forward
+  // before the old save lands puts the same key on screen again, as a fresh
+  // mount, and the old save would advance it. Each visit gets the next number
+  // instead. The callbacks also call the latest move rather than the one in
+  // force when they were made, so a list that changed in between is not
+  // walked from a stale index.
+  const visit = useRef({ key: current.key, id: 0 });
+  if (visit.current.key !== current.key) {
+    visit.current = { key: current.key, id: visit.current.id + 1 };
+  }
+  const shownVisit = useRef(visit.current.id);
+  shownVisit.current = visit.current.id;
+  const moves = useRef({ next, back });
+  moves.current = { next, back };
+  // The list and cursor as they stand now, for the history effect, which must
+  // not run again every time the list changes.
+  const latest = useRef({ steps, index });
+  latest.current = { steps, index };
+  const movesFor = useCallback(
+    (forStep: string, forVisit: number) => ({
+      next: () => {
+        if (shownVisit.current === forVisit) {
+          // The step's own Continue is an answer, whatever it wrote, so an
+          // earlier skip of this step no longer stands.
+          markAnswered(forStep);
+          moves.current.next();
+        }
+      },
+      back: () => {
+        if (shownVisit.current === forVisit) {
+          moves.current.back();
+        }
+      },
+    }),
+    [markAnswered],
+  );
 
   useEffect(() => {
     if (left.current) {
@@ -208,6 +268,30 @@ const OnboardingWizardBody: FunctionComponent = () => {
         trail.current.push(current.key);
       }
       goTo(stepKey);
+      return;
+    }
+    if (
+      stepKey !== undefined &&
+      trail.current[trail.current.length - 1] === stepKey
+    ) {
+      // An entry this wizard pushed for a step that has since gone. Replacing
+      // it with the current step left the press looking like it did nothing,
+      // so it is passed over: the entry beneath it is the one to land on.
+      trail.current.pop();
+      if (trail.current.length > 0) {
+        navigate(-1);
+        return;
+      }
+      // Nothing this wizard pushed is beneath it: the run was entered at the
+      // step that has gone (a reload, or a link) and the entry underneath is
+      // whatever the reader was on before. Passing over it would leave the
+      // wizard altogether on a press of Back, so the entry is replaced with
+      // the live step just before the cursor instead.
+      const { steps: live, index: at } = latest.current;
+      const target = live[Math.max(at - 1, 0)].key;
+      pendingUrl.current = target;
+      goTo(target);
+      navigate(`/setup/${target}`, { replace: true });
       return;
     }
     // The URL names no step, or names one this run does not walk. Neither is
@@ -254,6 +338,17 @@ const OnboardingWizardBody: FunctionComponent = () => {
       ? `${current.segment} ${inSegment.findIndex((s) => s.key === current.key) + 1} of ${inSegment.length}`
       : `${inPhase.findIndex((s) => s.key === current.key) + 1} of ${inPhase.length}`;
   const progressText = `${PHASE_LABELS[current.phase]}${showCount ? `, ${counter}` : ""}`;
+  // A phase behind the reader is completed unless everything in it was walked
+  // past with the skip control. It is then visited, which the rail draws as
+  // its number rather than a check: four skipped steps used to show four.
+  const skippedPhases = WIZARD_PHASES.filter((phase, position) => {
+    const inIt = steps.filter((s) => s.phase === phase);
+    return (
+      position < phaseIndex &&
+      inIt.length > 0 &&
+      inIt.every((s) => skipped.includes(s.key))
+    );
+  });
 
   // A step change swaps the whole card, and the control that was pressed goes
   // with it, so focus fell to the body and a keyboard reader started again from
@@ -331,6 +426,8 @@ const OnboardingWizardBody: FunctionComponent = () => {
           // still be there to restore on the next visit to setup.
           clearPersistedSelection();
           clearPersistedConnectionTests();
+          resetSkipped();
+          clearPersistedSkips();
           setLeaving(false);
           // The Redirector picks routing back up once setup is marked complete.
           navigate("/");
@@ -433,14 +530,21 @@ const OnboardingWizardBody: FunctionComponent = () => {
             aria-valuemin={0}
             aria-valuemax={WIZARD_PHASES.length}
             aria-valuenow={phaseIndex}
-            aria-valuetext={`Part ${phaseIndex + 1} of ${WIZARD_PHASES.length}: ${progressText}`}
+            aria-valuetext={`Part ${phaseIndex + 1} of ${WIZARD_PHASES.length}: ${progressText}${
+              skippedPhases.length > 0
+                ? `, skipped: ${skippedPhases.map((phase) => PHASE_LABELS[phase]).join(", ")}`
+                : ""
+            }`}
           >
             {WIZARD_PHASES.map((phase, position) => {
-              const done = position < phaseIndex;
+              const passed = position < phaseIndex;
+              const skippedPhase = skippedPhases.includes(phase);
+              const done = passed && !skippedPhase;
               const active = position === phaseIndex;
               const dotClass = [
                 styles.dot,
                 done ? styles.dotDone : "",
+                skippedPhase ? styles.dotSkipped : "",
                 active ? styles.dotActive : "",
               ]
                 .filter(Boolean)
@@ -466,7 +570,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
                     <span
                       className={[
                         styles.connector,
-                        done ? styles.connectorDone : "",
+                        passed ? styles.connectorDone : "",
                       ]
                         .filter(Boolean)
                         .join(" ")}
@@ -496,12 +600,16 @@ const OnboardingWizardBody: FunctionComponent = () => {
               next server's screen. */}
             <StepComponent
               key={current.key}
-              onNext={next}
+              onNext={movesFor(current.key, visit.current.id).next}
               // No Back while the step is finishing work either. Back moves the
               // cursor itself, which unmounts the step before any history guard
               // can see it, and an install that loses its screen still restarts
               // Bazarr+ at a reader who is no longer there.
-              onBack={index > 0 && !stepBusy ? back : undefined}
+              onBack={
+                index > 0 && !stepBusy
+                  ? movesFor(current.key, visit.current.id).back
+                  : undefined
+              }
               draftId={current.draftId}
               stepKey={current.key}
             />
@@ -509,7 +617,14 @@ const OnboardingWizardBody: FunctionComponent = () => {
 
           {current.optional && !stepBusy ? (
             <div className={styles.stepSkip}>
-              <Button variant="subtle" color="gray" onClick={next}>
+              <Button
+                variant="subtle"
+                color="gray"
+                onClick={() => {
+                  markSkipped(current.key);
+                  next();
+                }}
+              >
                 {current.skipLabel ?? "Do this later"}
               </Button>
             </div>

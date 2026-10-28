@@ -29,7 +29,7 @@ import {
 } from "@/apis/hooks";
 import { useAppTitle } from "@/apis/hooks/site";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
-import { LoadingProvider } from "@/contexts";
+import { LoadingProvider, PendingChangesProvider } from "@/contexts";
 import {
   FormContext,
   FormValues,
@@ -263,29 +263,35 @@ const Layout: FunctionComponent<Props> = (props) => {
         <form onSubmit={onFormSubmit} style={{ position: "relative" }}>
           <LoadingOverlay visible={settings === undefined} />
           <FormContext.Provider value={form}>
-            <Container
-              data-testid="settings-layout-content"
-              fluid={fluid}
-              size="xl"
-              mx={0}
-              pb={80}
-              style={
-                fluid
-                  ? {
-                      maxWidth: "none",
-                      width: "100%",
-                    }
-                  : undefined
+            <PendingChangesProvider
+              value={
+                totalStagedCount > 0 ? true : metadataRefreshFailed && "refresh"
               }
             >
-              {metadataRefreshFailed && (
-                <Alert color="yellow" mb="md">
-                  Your previous settings were saved, but application refresh
-                  failed. Leaving keeps the saved settings.
-                </Alert>
-              )}
-              {children}
-            </Container>
+              <Container
+                data-testid="settings-layout-content"
+                fluid={fluid}
+                size="xl"
+                mx={0}
+                pb={80}
+                style={
+                  fluid
+                    ? {
+                        maxWidth: "none",
+                        width: "100%",
+                      }
+                    : undefined
+                }
+              >
+                {metadataRefreshFailed && (
+                  <Alert color="yellow" mb="md">
+                    Your previous settings were saved, but application refresh
+                    failed. Leaving keeps the saved settings.
+                  </Alert>
+                )}
+                {children}
+              </Container>
+            </PendingChangesProvider>
           </FormContext.Provider>
           {/* Floating save, sticky bottom, after form fields in DOM for correct tab order */}
           <Transition

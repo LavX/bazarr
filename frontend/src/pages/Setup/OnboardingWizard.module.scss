@@ -152,6 +152,17 @@
   }
 }
 
+// A phase the reader walked past without answering anything in it: visited,
+// not completed, so it keeps its number and loses the fill. The ring has to be
+// a shape the eye can find, so it takes the tertiary text colour (4.6:1 or
+// better on the light rail, 6.5:1 or better on the dark one) rather than the
+// card hairline, which sits near 1.1:1 and read as no ring at all. It is 2px
+// because a 1px dashed ring on a circle renders as a faint dotted blur.
+.dotSkipped {
+  background: transparent;
+  border: 2px dashed var(--bz-text-tertiary);
+}
+
 .dotActive {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--dot-fill) 22%, transparent);
 }
