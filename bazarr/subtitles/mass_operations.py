@@ -969,7 +969,8 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
     Embedded-track branch: only translation can use an in-container track, and
     only when the user still has embedded subtitles turned on. The extraction
     helper has its own sports arm, so the item runs exactly like an episodes one
-    would: it is extracted when the item runs, not when the batch was collected.
+    would: the batch's extraction window extracts it ahead of its turn, not when
+    the batch was collected.
     """
     sports_instance = sports_instance or {}
     # Joined to the owner and filtered to enabled Sportarr instances. A sports
@@ -1771,8 +1772,9 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                         break
                     index, embedded_item = next_item
                     # A cancel or failure can leave up to one extracted track per
-                    # worker in the cache, plus the one extraction still running.
-                    # These are harmless cache files, and nothing waits for them.
+                    # worker in the cache, counting any extraction still running.
+                    # These are harmless cache files, and the batch does not wait
+                    # for them.
                     pending_extractions[index] = extraction_pool.submit(_extract_translate_source_in_pool, embedded_item)
 
             refill_extractions()
