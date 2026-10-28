@@ -12,12 +12,6 @@ export function useSystemProviders(history?: boolean) {
   });
 }
 
-function normalizeManualSearchResponse(
-  result: ManualSearchResponse | SearchResultType[],
-): ManualSearchResponse {
-  return Array.isArray(result) ? { data: result, providers: [] } : result;
-}
-
 // The manual searches run as standard jobs: the request queues one and the
 // query follows it to its rows. Closing the modal does not stop the job, and
 // pressing Search again for the same item follows the search that is running.
@@ -33,10 +27,9 @@ export function useMoviesProvider(radarrId?: number) {
 
     queryFn: () => {
       if (radarrId) {
-        return searchAsJob<ManualSearchResponse | SearchResultType[]>(
-          client,
-          () => api.providers.searchMovie(radarrId),
-        ).then(normalizeManualSearchResponse);
+        return searchAsJob<ManualSearchResponse>(client, () =>
+          api.providers.searchMovie(radarrId),
+        );
       }
 
       return { data: [], providers: [] };
@@ -64,10 +57,9 @@ export function useEpisodesProvider(episodeId?: number) {
 
     queryFn: () => {
       if (episodeId) {
-        return searchAsJob<ManualSearchResponse | SearchResultType[]>(
-          client,
-          () => api.providers.searchEpisode(episodeId),
-        ).then(normalizeManualSearchResponse);
+        return searchAsJob<ManualSearchResponse>(client, () =>
+          api.providers.searchEpisode(episodeId),
+        );
       }
 
       return { data: [], providers: [] };
