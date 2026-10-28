@@ -26,6 +26,10 @@ vi.mock("@/apis/raw", async (importOriginal) => {
           .fn()
           // eslint-disable-next-line camelcase
           .mockResolvedValue({ job_id: 5, path: "/m/a.en.srt" }),
+        ocrEmbedded: vi
+          .fn()
+          // eslint-disable-next-line camelcase
+          .mockResolvedValue({ job_id: 6, path: "/m/a.en.srt" }),
       },
     },
   };
@@ -240,19 +244,24 @@ describe("SubtitleToolsMenu modes", () => {
   );
 
   it.each([
-    ["pgs", "PGS"],
-    ["vobsub", "VobSub"],
-    ["dvbsub", "DVB"],
+    [
+      "pgs",
+      "Image-based track (PGS): the tools, Translate, View, Edit and Download need text. OCR to text reads it into an SRT; Extract to file copies it out as it is, for players.",
+    ],
+    [
+      "vobsub",
+      "Image-based track (VobSub): the tools, Translate, View, Edit and Download need text. OCR to text reads it into an SRT; Extract to file copies it out as it is, for players.",
+    ],
+    [
+      "dvbsub",
+      "Image-based track (DVB): the tools, Translate, View, Edit and Download need text, and OCR cannot read DVB tracks. Extract to file copies it out as it is, for players.",
+    ],
   ])(
-    "embedded image-based track (%s): Extract to file and Hide only",
-    async (codec, label) => {
+    "embedded image-based track (%s): OCR where it can read it, Extract to file and Hide",
+    async (codec, note) => {
       await open({ embeddedTrack: { codec } });
 
-      expect(
-        screen.getByText(
-          `Image-based track (${label}): the tools, View, Edit and Download need text. Extract to file copies it out as it is, for players.`,
-        ),
-      ).toBeInTheDocument();
+      expect(screen.getByText(note)).toBeInTheDocument();
       for (const name of [
         ...TOOLS,
         "Two-Point Fit...",
@@ -343,5 +352,133 @@ describe("SubtitleToolsMenu, View, Edit and Download on an embedded track", () =
     await item("View");
 
     expect(screen.getAllByText(/Image-based track/)).toHaveLength(1);
+  });
+});
+
+describe("SubtitleToolsMenu OCR to text", () => {
+  const OCR_TOOLTIP =
+    "Reads the image subtitles with Tesseract and writes an SRT next to the video. Italics are not preserved.";
+
+  async function open(props: Partial<Parameters<typeof SubtitleToolsMenu>[0]>) {
+    const user = userEvent.setup();
+    customRender(
+      <SubtitleToolsMenu
+        selections={[selection("")]}
+        onAction={vi.fn()}
+        {...props}
+      >
+        <Button>Tools</Button>
+      </SubtitleToolsMenu>,
+    );
+    await user.click(screen.getByRole("button", { name: "Tools" }));
+    await screen.findByText("Remove HI Tags");
+    return user;
+  }
+
+  const menuItem = (name: string) =>
+    screen.getByRole("menuitem", { name, hidden: true });
+  const noItem = (name: string) =>
+    screen.queryByRole("menuitem", { name, hidden: true });
+
+  beforeEach(() => {
+    vi.mocked(api.subtitles.ocrEmbedded).mockClear();
+  });
+
+  it.each([["pgs"], ["vobsub"], ["hdmv_pgs_subtitle"], ["dvd_subtitle"]])(
+    "is offered on a %s row, above Extract to file",
+    async (codec) => {
+      await open({ embeddedTrack: { codec } });
+
+      const ocr = menuItem("OCR to text...");
+      expect(ocr).toBeEnabled();
+      expect(
+        ocr.compareDocumentPosition(menuItem("Extract to file")) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    },
+  );
+
+  it.each([
+    ["DVB", { embeddedTrack: { codec: "dvbsub" } }],
+    ["an unknown codec", { embeddedTrack: { codec: null } }],
+    ["a text track", { embeddedTrack: { codec: "subrip" } }],
+    ["an external file", { selections: [selection("/m/a.en.srt")] }],
+  ])("is absent on %s", async (_kind, props) => {
+    await open(props);
+
+    expect(noItem("OCR to text...")).not.toBeInTheDocument();
+  });
+
+  it("explains itself on hover", async () => {
+    const user = await open({ embeddedTrack: { codec: "pgs" } });
+
+    await user.hover(menuItem("OCR to text..."));
+
+    expect(await screen.findByText(OCR_TOOLTIP)).toBeInTheDocument();
+  });
+
+  it("queues the job for the row with its codec, with no confirmation", async () => {
+    const user = await open({ embeddedTrack: { codec: "vobsub" } });
+
+    await user.click(menuItem("OCR to text..."));
+
+    await waitFor(() =>
+      expect(api.subtitles.ocrEmbedded).toHaveBeenCalledTimes(1),
+    );
+    expect(vi.mocked(api.subtitles.ocrEmbedded).mock.calls[0][0]).toMatchObject(
+      {
+        id: 5,
+        type: "movie",
+        language: "en",
+        path: "",
+        codec: "vobsub",
+      },
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "Reading the track into a.en.srt. Follow it in Jobs.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("does not offer an image-based track as a translation source", async () => {
+    const source = (codec: string | null): Subtitle => ({
+      code2: "en",
+      name: "English",
+      path: null,
+      hi: false,
+      forced: false,
+      codec,
+    });
+    const user = userEvent.setup();
+    customRender(
+      <SubtitleToolsMenu
+        selections={[]}
+        missingLanguage={{
+          code2: "hu",
+          name: "Hungarian",
+          hi: false,
+          forced: false,
+          path: null,
+        }}
+        translationSources={[source("pgs"), source("dvbsub"), source("subrip")]}
+        mediaId={5}
+        mediaType="movie"
+        onAction={vi.fn()}
+      >
+        <Button>Tools</Button>
+      </SubtitleToolsMenu>,
+    );
+    await user.click(screen.getByRole("button", { name: "Tools" }));
+    await screen.findByText("Remove HI Tags");
+
+    expect(
+      menuItem("Translate from English (embedded PGS, OCR it first)"),
+    ).toBeDisabled();
+    expect(
+      menuItem("Translate from English (embedded DVB, no text)"),
+    ).toBeDisabled();
+    expect(menuItem("Translate from English (embedded)")).toBeEnabled();
   });
 });

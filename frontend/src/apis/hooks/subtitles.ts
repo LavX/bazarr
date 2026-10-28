@@ -153,6 +153,33 @@ export function useEmbeddedTrackExtract() {
   });
 }
 
+/**
+ * OCR to text: an embedded image-based track is read into an SRT next to the
+ * video by a queued job. The job is the feedback; the toast names the file it
+ * will write, and the tables refresh once it has.
+ */
+export function useEmbeddedTrackOcr() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "ocr"],
+    mutationFn: (form: FormType.ModifySubtitle) =>
+      api.subtitles.ocrEmbedded(form),
+    onSuccess: (result, form) => {
+      const name = result.path.split(/[\\/]/).pop();
+      showNotification(
+        notification.info(
+          "OCR to text",
+          `Reading the track into ${name}. Follow it in Jobs.`,
+        ),
+      );
+      refreshWhenJobFinishes(client, result.job_id, () =>
+        refreshSubtitleOwner(client, form),
+      );
+    },
+    onError: toastConflict("Not started"),
+  });
+}
+
 export function useEpisodeSubtitleModification() {
   const client = useQueryClient();
 

@@ -17,8 +17,14 @@ const ACTION_LABELS: Record<string, string> = {
   "search-missing": "Search Missing Subtitles",
   upgrade: "Upgrade Subtitles",
   extract: "Extract Embedded Tracks",
+  ocr: "OCR Image Subtitles",
 };
 /* eslint-enable camelcase */
+
+// What an action does when its name alone does not say which files it touches.
+const ACTION_NOTES: Record<string, string> = {
+  ocr: "For each subtitle the title's language profile wants, reads its PGS or VobSub track into an SRT next to the video, unless that subtitle has a file or an embedded text track already. One track at a time; a film takes minutes.",
+};
 
 interface BatchModConfirmFormProps {
   items: BatchItem[];
@@ -65,6 +71,11 @@ const BatchModConfirmForm: FunctionComponent<BatchModConfirmFormProps> = ({
           Apply <strong>{label}</strong> to <strong>{items.length}</strong>{" "}
           selected item(s)?
         </Text>
+        {ACTION_NOTES[action] && (
+          <Text size="sm" c="dimmed">
+            {ACTION_NOTES[action]}
+          </Text>
+        )}
 
         <Divider />
 

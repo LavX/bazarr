@@ -40,7 +40,8 @@ export type BatchAction =
   | "scan-disk"
   | "search-missing"
   | "upgrade"
-  | "extract";
+  | "extract"
+  | "ocr";
 
 /** What Extract to file answers: the queued job and the file it will write. */
 export interface EmbeddedExtractResult {
@@ -274,6 +275,16 @@ class SubtitlesApi extends BaseApi {
   ): Promise<EmbeddedExtractResult> {
     const response = await this.patch<EmbeddedExtractResult>("", form, {
       action: "extract",
+    });
+    return response.data;
+  }
+
+  /** Read an embedded image-based track into an SRT next to the video, as a queued job. */
+  async ocrEmbedded(
+    form: FormType.ModifySubtitle,
+  ): Promise<EmbeddedExtractResult> {
+    const response = await this.patch<EmbeddedExtractResult>("", form, {
+      action: "ocr",
     });
     return response.data;
   }

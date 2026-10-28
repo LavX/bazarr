@@ -239,8 +239,9 @@ class Subtitles(Resource):
     @api_ns_subtitles.response(400, "Generated sync output files cannot be synchronized again")
     @api_ns_subtitles.response(404, "Episode/movie not found")
     @api_ns_subtitles.response(409, "Unable to edit subtitles file. Check logs.")
-    @api_ns_subtitles.response(415, "The embedded track is image-based and the tool needs text")
+    @api_ns_subtitles.response(415, "The embedded track is image-based and the tool needs text, or OCR cannot read it")
     @api_ns_subtitles.response(500, "Subtitles file not found. Path mapping issue?")
+    @api_ns_subtitles.response(501, "OCR is not available on this installation")
     def patch(self):
         """Apply mods/tools on external subtitles"""
         args = self.patch_request_parser.parse_args()
@@ -267,8 +268,10 @@ class Subtitles(Resource):
 
         if action == "extract" and subtitles_path:
             return "Extract to file works on an embedded track, which has no path.", 400
+        if action == "ocr" and subtitles_path:
+            return "OCR to text works on an embedded image-based track, which has no path.", 400
         # Embedded track (empty path), anything but translate: Extract to file,
-        # or a tool that runs on the extracted file next to the video.
+        # OCR to text, or a tool that runs on the extracted file next to the video.
         if not subtitles_path and action != "translate":
             return _embedded_track_action(action, args, language, hi, forced, media_type, id,
                                           arr_instance_id)
@@ -677,6 +680,8 @@ def _embedded_track_action(action, args, language, hi, forced, media_type, media
 
     if media_type not in ("movie", "episode", "sports"):
         return "Invalid media type", 400
+    if action == "ocr":
+        return _embedded_ocr_action(args, language, hi, forced, media_type, media_id, arr_instance_id)
     if action != "extract" and not embedded_tool_allowed(action):
         return f"{action} cannot run on an embedded track.", 400
     if not language or len(language) != 2 or not alpha3_from_alpha2(language):
@@ -718,6 +723,50 @@ def _embedded_track_action(action, args, language, hi, forced, media_type, media
                 if args.get("enabled_engines") not in empty_values else None,
             },
             label=label, codec=codec)
+    return {"job_id": job_id or None, "path": destinations[0]}, 202
+
+
+def _embedded_ocr_action(args, language, hi, forced, media_type, media_id, arr_instance_id):
+    """Queue OCR to text for one embedded image-based track.
+
+    Answers before anything is read: 501 when OCR cannot run here, 404 for an
+    unknown row or a track the row does not list (a hidden one included), 415
+    for a track that is not PGS or VobSub (naming what it is), 409 when the
+    SRT it would write is already there or another OCR job is queued or
+    running, then 202 with the job id and the file the job will write.
+    """
+    from subtitles.tools.embedded_extract import ExtractionError, output_paths, resolve_track, taken_output
+    from subtitles.tools.embedded_ocr import (BUSY, ocr_codec, ocr_embedded_track, ocr_job_waiting_or_running,
+                                              ocr_queue_lock)
+    from subtitles.tools.embedded_streams import TEXT_OUTPUT_EXTENSIONS
+    from subtitles.tools.ocr.tesseract import UNAVAILABLE, ocr_available
+
+    if not language or len(language) != 2 or not alpha3_from_alpha2(language):
+        return "language must be a valid alpha2 language code", 400
+    if not ocr_available():
+        return UNAVAILABLE, 501
+    try:
+        track = resolve_track(media_type, media_id, arr_instance_id, language, hi, forced)
+        codec = ocr_codec(track, args.get("codec"))
+    except ExtractionError as error:
+        return str(error), error.status
+    destinations = output_paths(track.video_path, language, hi, forced, TEXT_OUTPUT_EXTENSIONS)
+    # The language-less name a download takes in single-language mode counts
+    # too, and the file next to the video when a subfolder is set: neither is
+    # ever replaced.
+    clash = taken_output(track, TEXT_OUTPUT_EXTENSIONS)
+    if clash:
+        return (f"A subtitle file named {os.path.basename(clash)} already exists. Delete it first to read this "
+                f"track with OCR."), 409
+    # One OCR job at a time: a second one would sit in a running slot of the
+    # jobs queue for the whole first run. The check and the queueing are one
+    # step, so two requests cannot both find the queue empty.
+    with ocr_queue_lock():
+        if ocr_job_waiting_or_running():
+            return BUSY, 409
+        label = f"{track.title}, {track.label}" if track.title else track.label
+        job_id = ocr_embedded_track(media_type, media_id, track.arr_instance_id, language, hi, forced,
+                                    codec=codec, label=label)
     return {"job_id": job_id or None, "path": destinations[0]}, 202
 
 
