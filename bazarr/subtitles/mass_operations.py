@@ -1152,6 +1152,14 @@ def _extract_translate_source(item):
     return source_srt_file
 
 
+def _extract_translate_source_in_pool(item):
+    """Run one extraction on a pool thread, then release that thread's database session."""
+    try:
+        return _extract_translate_source(item)
+    finally:
+        database.remove()
+
+
 def _process_subtitle_item(item, action, options, job_id, children=None, *,
                            source_srt_file=_SOURCE_SRT_FILE_UNSET):
     """Process a single subtitle item based on the action.
@@ -1758,7 +1766,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                     if next_item is None:
                         break
                     index, embedded_item = next_item
-                    pending_extractions[index] = extraction_pool.submit(_extract_translate_source, embedded_item)
+                    pending_extractions[index] = extraction_pool.submit(_extract_translate_source_in_pool, embedded_item)
 
             refill_extractions()
 
