@@ -53,7 +53,7 @@ const SEARCH_RESPONSE = {
 
 // This double models the modal query boundary. The subtitle rows stay in the
 // data array, with provider outcomes beside them. The hook that reads this
-// envelope from the job result is covered by manualSearchOutcomes.test.tsx.
+// envelope from the job result is covered by frontend/src/apis/hooks/__tests__/manualSearchOutcomes.test.tsx.
 function useSearchResponse(id?: number) {
   const result = useQuery({
     queryKey: ["manual-search-provider-outcomes", id],

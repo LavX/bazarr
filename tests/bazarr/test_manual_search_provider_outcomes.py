@@ -16,8 +16,8 @@ PROVIDER_ORDER = ["zeta_search", "alpha_search", "middle_search"]
 
 @pytest.fixture(params=["episode", "movie"])
 def manual_endpoint(request, monkeypatch):
-    # Load just these routes, without booting unrelated API namespaces or
-    # subtitles' automatic-search entry points.
+    # Only the subtitles package is stubbed.
+    # The real bazarr/api package loads before Api(app) runs.
     root = Path(__file__).resolve().parents[2] / "bazarr"
     for name, directory in (("subtitles", "subtitles"),):
         if name not in sys.modules:
