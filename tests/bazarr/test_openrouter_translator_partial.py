@@ -71,6 +71,68 @@ def test_poll_job_rejects_partial_without_lines(result, caplog):
             f"Translation partially failed: {error}") in caplog.record_tuples
 
 
+def test_poll_job_redacts_and_caps_failed_reasons(caplog):
+    service = _build_service()
+    api_key = "sk-or-v1-" + "a" * 40
+    openrouter_translator.requests.get.return_value.json.return_value = {
+        "status": "failed", "error": f"Rejected {api_key}: " + "x" * 2000,
+    }
+
+    with pytest.raises(openrouter_translator.TranslationServiceError) as raised:
+        service._poll_job("http://translator", "job-1", 1)
+
+    reason = str(raised.value)
+    assert api_key not in reason
+    assert "***" in reason
+    assert len(reason) <= len("Translation failed: ") + 500
+    detail = reason.removeprefix("Translation failed: ")
+    assert (openrouter_translator.__name__, logging.ERROR,
+            f"Translation job failed: {detail}") in caplog.record_tuples
+
+
+@pytest.mark.parametrize("key", ["message", "error"])
+@pytest.mark.parametrize("result", [None, [{"position": 0, "line": "Szia"}]])
+def test_poll_job_redacts_and_caps_partial_reasons(result, key, caplog):
+    service = _build_service()
+    api_key = "sk-or-v1-" + "b" * 40
+    openrouter_translator.requests.get.return_value.json.return_value = {
+        "status": "partial", "result": result, key: f"Rejected {api_key}: " + "x" * 2000,
+    }
+
+    with caplog.at_level(logging.WARNING, logger=openrouter_translator.__name__):
+        if result:
+            assert service._poll_job("http://translator", "job-1", 1) == result
+            reason = service.partial_error
+        else:
+            with pytest.raises(openrouter_translator.TranslationServiceError) as raised:
+                service._poll_job("http://translator", "job-1", 1)
+            reason = str(raised.value).removeprefix("Translation failed (partial): ")
+
+    assert api_key not in reason
+    assert "***" in reason
+    assert len(reason) <= 500
+    assert api_key not in caplog.text
+    level = logging.WARNING if result else logging.ERROR
+    prefix = "Translation partially completed: " if result else "Translation partially failed: "
+    assert (openrouter_translator.__name__, level, f"{prefix}{reason}") in caplog.record_tuples
+
+
+@pytest.mark.parametrize("detail, expected", [
+    (" \t\n", "Some translation batches failed."),
+    ("Rejected\n  sk-or-v1-" + "c" * 40 + ": " + "x" * 2000,
+     "Rejected ***: " + "x" * 486),
+], ids=["blank", "credential"])
+def test_mark_partial_redacts_and_caps_stored_reasons(detail, expected, caplog):
+    service = _build_service()
+
+    with caplog.at_level(logging.WARNING, logger=openrouter_translator.__name__):
+        service._mark_partial(detail)
+
+    assert service.partial_error == expected
+    assert (openrouter_translator.__name__, logging.WARNING,
+            f"Translation partially completed: {expected}") in caplog.record_tuples
+
+
 @pytest.mark.parametrize("structured", [True, False])
 def test_poll_job_returns_completed_lines(structured):
     service = _build_service()
