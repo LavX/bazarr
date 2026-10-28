@@ -828,7 +828,11 @@ def test_the_restore_that_runs_at_the_next_start_stays_ungated(monkeypatch, auth
     assert backup_module.restore_from_backup() is True
     assert swaps == [(str(restore_dir / 'bazarr.db'), False)]
     assert (tmp_path / 'db' / 'bazarr.db').read_bytes() == b'the restored database'
-    assert (tmp_path / 'config' / 'config.yaml').read_text() == 'general:\n  theme: dark\n'
+    import yaml
+
+    restored = yaml.safe_load((tmp_path / 'config' / 'config.yaml').read_text())
+    assert restored['general']['theme'] == 'dark'
+    assert restored['auth']['session_generation'] > 0
     assert restarts == [True]
     # The staged set is consumed, so the next start does not restore again.
     assert list(restore_dir.iterdir()) == []

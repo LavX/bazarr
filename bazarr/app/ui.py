@@ -10,7 +10,7 @@ import requests
 import mimetypes
 
 from flask import (request, abort, render_template, Response, send_file, send_from_directory,
-                   stream_with_context, Blueprint, jsonify, redirect)
+                   stream_with_context, Blueprint, jsonify, redirect, make_response)
 from functools import wraps
 from urllib.parse import unquote, urlparse
 
@@ -154,7 +154,16 @@ def catch_all(path):
     if not template_url.endswith("/"):
         template_url += "/"
 
-    return render_template("index.html", BAZARR_SERVER_INJECT=inject, baseUrl=template_url)
+    page = make_response(render_template("index.html", BAZARR_SERVER_INJECT=inject, baseUrl=template_url))
+    if 'apiKey' in inject:
+        # The document carries the API key, so it is per signed-in browser and
+        # must never be stored or replayed: a shared cache or the back button
+        # would hand one visitor's key to the next, and a copy kept from before
+        # a logout would still show it. The bundle files are separate routes and
+        # keep their own caching.
+        page.headers['Cache-Control'] = 'no-store'
+        page.vary.add('Cookie')
+    return page
 
 
 @ui_bp.route('/' + FILE_LOG)

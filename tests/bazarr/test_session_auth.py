@@ -218,7 +218,7 @@ def test_login_response_and_session_never_carry_the_password(monkeypatch):
     )
     monkeypatch.setattr(account, "check_credentials", lambda *a, **k: True)
     monkeypatch.setattr(account, "needs_password_upgrade", lambda: True)
-    monkeypatch.setattr(account, "upgrade_password_hash", lambda pw: None)
+    monkeypatch.setattr(account, "upgrade_password_hash", lambda pw, **kwargs: None)
     account._login_attempts.clear()
 
     secret = "correct-horse-battery-staple"
@@ -239,7 +239,7 @@ def test_a_failed_hash_upgrade_does_not_fail_a_valid_login(monkeypatch):
     """A config write problem must not reject credentials that were correct."""
     from api.system import account
 
-    def boom(_pw):
+    def boom(_pw, **kwargs):
         raise OSError("config.yaml is read-only")
 
     monkeypatch.setattr(

@@ -28,8 +28,9 @@ def _app(cookie_secure="auto", lifetime_days=30):
     @flask_app.route("/sign-in")
     def sign_in():
         from app.auth import establish_session
+        from app.auth.generation import current_generation
 
-        establish_session()
+        establish_session(current_generation())
         return "ok"
 
     return flask_app
@@ -105,10 +106,11 @@ def test_the_session_survives_a_round_trip():
 def test_establish_session_marks_the_session_permanent():
     """Without this the configured lifetime is never applied."""
     from app.auth import establish_session
+    from app.auth.generation import current_generation
 
     app = _app()
     with app.test_request_context("/"):
-        establish_session()
+        establish_session(current_generation())
         assert session.permanent is True
 
 

@@ -1,11 +1,19 @@
 import os
 import logging
+from pathlib import Path
 
 import pytest
 
 os.environ["NO_CLI"] = "true"
 os.environ["SZ_USER_AGENT"] = "test"
 os.environ["BAZARR_VERSION"] = "test" # fixme
+
+# App imports may run startup before a test fixture can intercept HTTP.
+# Seed the two cached documents so an isolated run never fetches them.
+for _document in ("releases.txt", "announcements.txt"):
+    _cached_document = Path(os.environ["BAZARR_CONFIG_DIR"]) / "config" / _document
+    if not _cached_document.exists():
+        _cached_document.write_text("[]", encoding="utf-8")
 
 logging.getLogger("rebulk").setLevel(logging.WARNING)
 
@@ -85,3 +93,38 @@ def scheduler_runtime(schema_session, monkeypatch):
     monkeypatch.setattr(sports_scheduler, 'ArrInstanceRepository',
                         lambda _session: ArrInstanceRepository(schema_session))
     monkeypatch.setattr(BackgroundScheduler, 'start', lambda self: None)
+
+
+@pytest.fixture(autouse=True)
+def _keep_the_session_generation():
+    """Undo what a test does to the process-wide session generation.
+
+    A save that changes the password, the username or the auth type advances
+    the generation, and the settings object outlives the test. Left alone, a
+    later test that hands a plain session cookie to the form-login gate would
+    meet a generation it never set up. The auth section is looked up again at
+    the end, because a settings save replaces it with a new object. Only
+    touched when the settings were already loaded, so a test that never needed
+    them does not pay for them.
+    """
+    import sys
+
+    def live_auth():
+        config = sys.modules.get("app.config")
+        return getattr(getattr(config, "settings", None), "auth", None)
+
+    def forget_issued_numbers():
+        # The mark of numbers already handed out belongs to the process, so it
+        # is reset together with the number it follows.
+        generation = sys.modules.get("app.auth.generation")
+        if generation is not None:
+            generation._issued_high_water = 0
+
+    auth = live_auth()
+    before = auth.get("session_generation") if auth is not None else None
+    forget_issued_numbers()
+    yield
+    forget_issued_numbers()
+    auth = live_auth()
+    if auth is not None and before is not None:
+        auth["session_generation"] = before

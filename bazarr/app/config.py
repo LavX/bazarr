@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from typing import NamedTuple
 
 import configparser
 import yaml
@@ -393,6 +394,12 @@ validators = [
     # this instance cannot detect (see general.trusted_proxy).
     Validator('auth.cookie_secure', must_exist=True, default='auto', is_type_of=str,
               is_in=['auto', 'always', 'never']),
+    # Which batch of signed session cookies is still honoured. Logout, a
+    # password change and an auth-type change advance it, and a cookie issued
+    # under an earlier number stops working. Server-owned: the settings read
+    # hides it and the settings save refuses it.
+    Validator('auth.session_generation', must_exist=True, default=0, is_type_of=int, gte=0,
+              condition=is_not_bool),
 
     # cors section
     Validator('cors.enabled', must_exist=True, default=False, is_type_of=bool),
@@ -1318,6 +1325,8 @@ def _get_settings():
             secret_descriptors = {}
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
+                if full_path == SESSION_GENERATION_PATH:
+                    continue
                 if is_write_only_secret(full_path):
                     continue
                 if is_plugin_secret(full_path):
@@ -1627,23 +1636,45 @@ def validate_metadata_settings(settings_items):
                 raise ValidationError("Invalid TMDB access token.") from None
         elif not isinstance(values[0], str) or not re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", values[0]):
             raise ValidationError("Invalid metadata language.")
+class ReloadedSettings(NamedTuple):
+    """What a reload from disk found in the file, as opposed to what memory then holds.
+
+    `generation` is the session generation the file carries (None when it is not
+    a readable integer) and `login` the login identity it carries.
+    """
+    generation: int | None
+    login: tuple
+
+
 def restore_persisted_settings():
     """Return the live settings object to what is actually saved on disk.
+
+    Returns the ReloadedSettings the file held.
 
     Re-decrypt after reload: settings.reload() pulls the on-disk ciphertext back
     into the live Dynaconf object, so without this second pass downstream code
     would see `enc:v1:` strings for API keys, auth credentials, provider
     passwords, and compat tokens until the next process restart.
+
+    The session generation is the one value a reload never moves backwards:
+    see app.auth.generation.never_going_backwards.
     """
-    settings.reload()
-    migrate_legacy_plex_encryption(settings)
-    decrypt_settings_in_place(settings)
+    from app.auth.generation import current_generation, never_going_backwards
+    with never_going_backwards():
+        settings.reload()
+        migrate_legacy_plex_encryption(settings)
+        decrypt_settings_in_place(settings)
+        # What the file itself held, read before the generation is put back to
+        # the larger of the two: a refused login-change save decides on this
+        # whether its login reached the disk.
+        reloaded = ReloadedSettings(generation=current_generation(), login=_auth_identity())
     # The registry follows the live store: a refused save registered the
     # credential it proposed, and this is where those values are put back as
     # they were. Without this the restored credential would escape scrubbing
     # until the next settings write or boot.
     from secret_store.scrub import refresh_secret_values
     refresh_secret_values(settings)
+    return reloaded
 
 
 _native_settings_save_lock = threading.RLock()
@@ -2601,6 +2632,44 @@ def save_settings(settings_items):
             raise
 
 
+# The server-owned counter behind session revocation. It is never read out by
+# the settings API and never written by it: a client that could set it could
+# bring a revoked cookie back to life.
+SESSION_GENERATION_PATH = 'auth.session_generation'
+
+
+def _auth_identity():
+    """The login settings a session depends on: the mode, the account and its password."""
+    return (settings.auth.type, settings.auth.username, settings.auth.password)
+
+
+def _withdraw_login_advance(login_changed, advance, reloaded, identity_before):
+    """A refused login-change save gives back the generation it advanced, if its login is not on disk.
+
+    A refusal does not prove the file is untouched: the write can report failure
+    after the new file is already in place (a rename that fell back to a copy and
+    then failed on the file's mode). Then the new login is on disk, in force
+    after the reload, and every earlier cookie has to stay revoked, so the
+    advance stays. It is given back only when the reloaded file carries neither
+    the advance nor a login other than the one before this save. `reloaded` is
+    what restore_persisted_settings read from the file; None means a caller that
+    has nothing to say about the disk, which is treated as a write that landed
+    nothing.
+    """
+    if not login_changed:
+        return
+    if reloaded is not None:
+        generation_landed = reloaded.generation is None or reloaded.generation >= advance.number
+        login_landed = reloaded.login != identity_before
+        if generation_landed or login_landed:
+            logging.error('A settings save was refused but its login change had already reached the '
+                          'disk. The new login is in force and session generation %s stays, so earlier '
+                          'sessions remain signed out.', advance.number)
+            return
+    from app.auth.generation import withdraw_advance
+    withdraw_advance(advance)
+
+
 def _save_settings(settings_items, native_configuration=None, *, strict_metadata=False,
                    on_persisted=None):
     # Validate repeated form values before applying any changes, including the
@@ -2680,6 +2749,10 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     provider_hub_status_clears = set()
     clear_disabled_provider_hub_statuses = False
 
+    # Who may sign in, as it stands before this save. A change to any of it
+    # revokes the sessions signed under the old one, once the loop is done.
+    auth_identity_before = _auth_identity()
+
     # Subzero Mods
     update_subzero = False
     subzero_mods = get_array_from(settings.general.subzero_mods)
@@ -2690,6 +2763,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     for key, value in settings_items:
 
         settings_keys = key.split('-')
+
+        if '.'.join(part.lower() for part in settings_keys[1:3]) == SESSION_GENERATION_PATH:
+            continue
 
         if settings_keys[-1].startswith('__'):
             # The settings API's own descriptor key and anything else the
@@ -3049,6 +3125,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     if update_subzero:
         settings.general.subzero_mods = ','.join(subzero_mods)
 
+    login_changed = _auth_identity() != auth_identity_before
+    session_was_in_force, advance = False, None
+
     try:
         settings.validators.validate()
         validate_log_regex()
@@ -3056,11 +3135,21 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         restore_persisted_settings()
         raise
     else:
+        if login_changed:
+            # In memory only: the write below saves it with the rest of this
+            # save. A save that is refused after this point takes its own
+            # advance back (a reload cannot, it never moves the number
+            # backwards). After validation, so a save that is refused for its
+            # values never moves it.
+            from app.auth.generation import advance_for_login_change
+            session_was_in_force, advance = advance_for_login_change()
+
         if strict_metadata:
             try:
                 saved = write_config(strict_metadata=True)
             except Exception:
-                restore_persisted_settings()
+                reloaded = restore_persisted_settings()
+                _withdraw_login_advance(login_changed, advance, reloaded, auth_identity_before)
                 raise MetadataPersistenceError("Metadata settings could not be saved. Try again.") from None
         else:
             saved = write_config()
@@ -3076,8 +3165,15 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             # covers every save rather than only those. The cause write_config
             # swallowed (an encryption failure, a permission error) stays in
             # the chain so the refusal says what happened.
-            restore_persisted_settings()
+            reloaded = restore_persisted_settings()
+            _withdraw_login_advance(login_changed, advance, reloaded, auth_identity_before)
             raise ValidationError('Unable to save settings to disk') from _last_write_error
+
+        if login_changed:
+            # The save is on disk, so the browser that made it carries on under
+            # the new generation; every other browser has to sign in again.
+            from app.auth.generation import keep_current_session_signed_in
+            keep_current_session_signed_in(session_was_in_force, advance)
 
         # Before anything below can fail: the save is on disk now, and a failure
         # from here on must not be taken for an unsaved one, which would put the
