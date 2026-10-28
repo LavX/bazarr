@@ -681,6 +681,23 @@ def test_translation_for_another_folder_under_a_mapped_root_does_not_shadow(plac
     assert score() == 90.0
 
 
+def test_subtitle_moved_to_another_folder_does_not_inherit_the_old_score(placed_media):
+    # The subtitle file moved (the subtitle folder setting changed, or it was
+    # moved by hand) while the video stayed. The detail view keys a score by
+    # the current subtitle path, so the old record scores nothing there and the
+    # list must agree.
+    add, score = placed_media('/media/Title.mkv', '/subs/Title.de.srt')
+    add(1, 1, 40, '/media/Title.de.srt', '/media/Title.mkv')
+    assert score() is None
+
+
+def test_subtitle_moved_to_another_folder_scores_a_download_in_its_new_place(placed_media):
+    add, score = placed_media('/media/Title.mkv', '/subs/Title.de.srt')
+    add(1, 1, 40, '/media/Title.de.srt', '/media/Title.mkv')
+    add(2, 1, 85, '/subs/Title.de.srt', '/media/Title.mkv')
+    assert score() == 85.0
+
+
 def test_unix_video_paths_differing_only_by_case_are_two_files(placed_media):
     # The record names another folder's subtitle and a video that differs from
     # the item's only by case, which on Unix is another file.

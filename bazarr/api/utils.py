@@ -592,11 +592,13 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
     record per item and file or embedded track.
 
     ``videos_by_id`` maps id -> (video path, arr_instance_id). A file record
-    counts only when it names the item's current file: its subtitle path is a
-    current subtitle path, as the detail views key a score, or its video path
-    is the item's current video path. So a record left in an item's old folder
-    does not score a same-named subtitle after a move, while a subtitle kept in
-    place (a custom subtitle folder, a new video container) keeps its score.
+    counts only when its subtitle path is one of the item's current subtitle
+    paths, which is how the detail views key a score. The record's video path
+    plays no part: it names the video as it was when the record was written,
+    so it says nothing about where the subtitle file lives now. A record left
+    in an old folder does not score a same-named subtitle after the video or
+    the subtitle moved, and a subtitle kept in place (a custom subtitle folder,
+    a new video container) keeps its score.
     Paths compare as stored, or both mapped to local with the mapping each was
     reversed with: the owning instance's effective mapping for the item and
     most records, the global mapping for ``media_type`` ('movie' or 'series')
@@ -611,14 +613,12 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                       else path_mappings.path_mapping_series)
     instance_mappings = {}
     item_mappings = {}
-    current_videos = {}
-    for item_id, (video_path, arr_instance_id) in videos_by_id.items():
+    for item_id, (_video_path, arr_instance_id) in videos_by_id.items():
         if arr_instance_id not in instance_mappings:
             mapping = _instance_path_mapping(arr_instance_id, media_type)
             # The same choice path_replace_instance makes.
             instance_mappings[arr_instance_id] = global_mapping if mapping is None else mapping
         item_mappings[item_id] = instance_mappings[arr_instance_id]
-        current_videos[item_id] = video_path
 
     # Current file-subtitle paths and embedded-track languages per item, read
     # straight from the raw subtitles column.
@@ -652,19 +652,17 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
 
     file_matches = {}
 
-    def same_file(item_id, action, subtitles_path, video_path):
+    def same_file(item_id, action, subtitles_path):
         # Translations reverse their paths with the global mapping, every other
         # file record with the owning instance's.
         translated = action == 6
-        key = (item_id, translated, subtitles_path, video_path)
+        key = (item_id, translated, subtitles_path)
         if key not in file_matches:
             instance_mapping = item_mappings.get(item_id)
             writer_mapping = global_mapping if translated else instance_mapping
-            file_matches[key] = (
-                any(_same_media_path(current, subtitles_path, instance_mapping, writer_mapping)
-                    for current in current_subtitle_paths.get(item_id, ()))
-                or _same_media_path(current_videos.get(item_id), video_path,
-                                    instance_mapping, writer_mapping))
+            file_matches[key] = any(
+                _same_media_path(current, subtitles_path, instance_mapping, writer_mapping)
+                for current in current_subtitle_paths.get(item_id, ()))
         return file_matches[key]
 
     # Chunk the id list so the IN (...) clause stays within SQLite's
@@ -690,15 +688,13 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                    history_table.action,
                    history_table.language,
                    history_table.subtitles_path,
-                   history_table.video_path,
                    history_table.score,
                    history_table.score_out_of,
                    func.row_number().over(
                        partition_by=(id_column,
                                      case((embedded, 1), (translated, 2), else_=0),
                                      history_table.language,
-                                     case((embedded, None), else_=history_table.subtitles_path),
-                                     case((embedded, None), else_=history_table.video_path)),
+                                     case((embedded, None), else_=history_table.subtitles_path)),
                        order_by=(history_table.timestamp.desc(), history_table.id.desc()),
                    ).label('position'))
             .where(id_column.in_(chunk))
@@ -710,7 +706,6 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                    ranked.c.action,
                    ranked.c.language,
                    ranked.c.subtitles_path,
-                   ranked.c.video_path,
                    ranked.c.score,
                    ranked.c.score_out_of)
             .where(ranked.c.position == 1)
@@ -746,7 +741,7 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                 if not folded or not (windows or any(names[other] for other in folded)):
                     continue
                 current_name = sorted(folded)[0]
-            if not same_file(row.item_id, row.action, row.subtitles_path, row.video_path):
+            if not same_file(row.item_id, row.action, row.subtitles_path):
                 continue
             # The current file is the canonical identity: a row that matched it
             # by exact name and one that matched it case-insensitively belong to
