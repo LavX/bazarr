@@ -1277,6 +1277,10 @@ def test_provider_order_setting_saves_normalized_lists(monkeypatch, submitted, e
         database=SimpleNamespace(execute=lambda _statement: None),
         update=lambda _model: _FakeUpdate(), System=object,
     ))
+    # Translation failure rows are a database side effect, outside list normalization.
+    monkeypatch.setitem(sys.modules, 'subtitles.tools.translate.failure_record', SimpleNamespace(
+        clear_failed_translations=lambda: None,
+    ))
     monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['previous'])
 
     config.save_settings([('settings-translator-openrouter_provider_order', submitted)])
@@ -1334,6 +1338,9 @@ def _settings_save_harness(monkeypatch):
     monkeypatch.setitem(sys.modules, 'app.database', SimpleNamespace(
         database=SimpleNamespace(execute=lambda _statement: None),
         update=lambda _model: _FakeUpdate(), System=object,
+    ))
+    monkeypatch.setitem(sys.modules, 'subtitles.tools.translate.failure_record', SimpleNamespace(
+        clear_failed_translations=lambda: None,
     ))
     return saved
 
