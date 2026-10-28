@@ -118,7 +118,12 @@ def test_signalrcore_reconnect_retries_failed_negotiation_until_connected():
     patch_signalrcore_stop()
     transport = _make_reconnecting_transport()
     transport.negotiate = MagicMock(side_effect=[OSError("connection refused"), None])
-    transport._client.connect.side_effect = lambda: transport._set_state(TransportState.connected)
+
+    def finish_handshake():
+        transport._client.is_connection_closed.return_value = False
+        transport._set_state(TransportState.connected)
+
+    transport._client.connect.side_effect = finish_handshake
 
     try:
         assert transport.handle_reconnect() is True
@@ -134,7 +139,12 @@ def test_signalrcore_reconnect_accepts_closed_client_in_reconnecting_state():
     transport = _make_reconnecting_transport()
     transport._set_state(TransportState.reconnecting)
     transport.negotiate = MagicMock()
-    transport._client.connect.side_effect = lambda: transport._set_state(TransportState.connected)
+
+    def finish_handshake():
+        transport._client.is_connection_closed.return_value = False
+        transport._set_state(TransportState.connected)
+
+    transport._client.connect.side_effect = finish_handshake
 
     try:
         assert transport.handle_reconnect() is True
@@ -187,6 +197,59 @@ def test_signalrcore_reconnect_retries_first_attempt_closed_before_handshake():
         transport.stop()
         reconnect_thread.join(timeout=5)
         assert not reconnect_thread.is_alive()
+
+
+def _assert_reconnect_after_handshake_close(delay):
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    first_up = Event()
+    landed = Event()
+    first = MagicMock()
+    first.is_connection_closed.return_value = False
+    first.connect.side_effect = first_up.set
+    second = MagicMock()
+    second.is_connection_closed.return_value = False
+
+    def finish_handshake():
+        transport.handshake_received = True
+        transport.reconnection_handler.reconnecting = False
+        transport._set_state(TransportState.connected)
+        landed.set()
+
+    second.connect.side_effect = finish_handshake
+    transport.create_client = MagicMock(side_effect=[first, second])
+    transport.negotiate = MagicMock(return_value=None)
+    results = []
+    worker = Thread(target=lambda: results.append(transport.handle_reconnect()), daemon=True)
+    worker.start()
+
+    try:
+        assert first_up.wait(timeout=2)
+        transport.handshake_received = True
+        transport.reconnection_handler.reconnecting = False
+        transport._set_state(TransportState.connected)
+        if delay:
+            Event().wait(timeout=delay)
+        first.is_connection_closed.return_value = True
+        transport.on_socket_close()
+        worker.join(timeout=5)
+        assert transport.negotiate.call_count == 2
+        assert transport.is_connected()
+        assert landed.is_set()
+        assert not worker.is_alive()
+        assert results == [True]
+    finally:
+        transport.stop()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+
+def test_signalrcore_reconnect_reruns_when_first_socket_closes_after_handshake():
+    _assert_reconnect_after_handshake_close(0.0)
+
+
+def test_signalrcore_reconnect_reruns_when_first_socket_closes_after_handshake_with_delay():
+    _assert_reconnect_after_handshake_close(0.6)
 
 
 def test_signalrcore_stop_ends_repeated_failed_negotiations():

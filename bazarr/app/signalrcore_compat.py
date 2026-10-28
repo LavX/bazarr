@@ -23,42 +23,50 @@ def patch_signalrcore_reconnect():
 
     if not getattr(WebsocketTransport.handle_reconnect, "_bazarr_reconnect_patch", False):
         def handle_reconnect(self) -> bool:
-            if self.manually_closing:
-                return False
-            if self.reconnection_handler is None:
-                return False
-
             lock = self.__dict__.setdefault("_bazarr_reconnect_lock", threading.Lock())
-            if not lock.acquire(blocking=False):
-                return False
-
-            try:
-                client = getattr(self, "_client", None)
-                if client is None or not client.is_connection_closed():
+            wakeup = _bazarr_retry_wakeup(self)
+            while True:
+                if self.manually_closing:
+                    return False
+                if self.reconnection_handler is None:
+                    return False
+                if not lock.acquire(blocking=False):
                     return False
 
                 try:
-                    self.reconnection_handler.reconnecting = True
-                    self._set_state(TransportState.reconnecting)
-                    client.dispose()
-                    self.start(reconnection=True)
-                except Exception as ex:
-                    self.logger.error(ex)
-                    self.deferred_reconnect(self.reconnection_handler.next())
-                    return True
-                if self.manually_closing:
+                    client = getattr(self, "_client", None)
+                    if client is None or not client.is_connection_closed():
+                        return False
                     try:
-                        self._client.dispose()
-                    except Exception:
-                        pass
+                        self.reconnection_handler.reconnecting = True
+                        self._set_state(TransportState.reconnecting)
+                        client.dispose()
+                        self.start(reconnection=True)
+                    except Exception as ex:
+                        self.logger.error(ex)
+                        self.deferred_reconnect(self.reconnection_handler.next())
+                    else:
+                        if self.manually_closing:
+                            try:
+                                self._client.dispose()
+                            except Exception:
+                                pass
+                            return True
+                        if _wait_for_handshake(self, wakeup):
+                            self.reconnection_handler.reset()
+                        else:
+                            self.deferred_reconnect(self.reconnection_handler.next())
+                finally:
+                    lock.release()
+
+                client = getattr(self, "_client", None)
+                if self.manually_closing or client is None or not client.is_connection_closed():
                     return True
-                if _wait_for_handshake(self, _bazarr_retry_wakeup(self)):
-                    self.reconnection_handler.reset()
+                sleep_time = getattr(self.reconnection_handler, "sleep_time", None)
+                if sleep_time is None:
+                    sleep_time = self.reconnection_handler.next()
+                if wakeup.wait(sleep_time) or self.manually_closing:
                     return True
-                self.deferred_reconnect(self.reconnection_handler.next())
-                return True
-            finally:
-                lock.release()
 
         handle_reconnect._bazarr_reconnect_patch = True
         WebsocketTransport.handle_reconnect = handle_reconnect
