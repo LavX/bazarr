@@ -1277,6 +1277,10 @@ def test_provider_order_setting_saves_normalized_lists(monkeypatch, submitted, e
         database=SimpleNamespace(execute=lambda _statement: None),
         update=lambda _model: _FakeUpdate(), System=object,
     ))
+    # Translation failure rows are a database side effect, outside list normalization.
+    monkeypatch.setitem(sys.modules, 'subtitles.tools.translate.failure_record', SimpleNamespace(
+        clear_failed_translations=lambda: None,
+    ))
     monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['previous'])
 
     config.save_settings([('settings-translator-openrouter_provider_order', submitted)])
@@ -1334,6 +1338,9 @@ def _settings_save_harness(monkeypatch):
     monkeypatch.setitem(sys.modules, 'app.database', SimpleNamespace(
         database=SimpleNamespace(execute=lambda _statement: None),
         update=lambda _model: _FakeUpdate(), System=object,
+    ))
+    monkeypatch.setitem(sys.modules, 'subtitles.tools.translate.failure_record', SimpleNamespace(
+        clear_failed_translations=lambda: None,
     ))
     return saved
 
@@ -1525,6 +1532,27 @@ def metadata_save_environment(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "compat.cache", SimpleNamespace(invalidate_all=lambda: resets.append("cache")))
     monkeypatch.setitem(sys.modules, "compat.service", SimpleNamespace(reset_compat_pool=lambda: resets.append("pool")))
     return SimpleNamespace(config=config, settings=fake, path=path, executed=executed, resets=resets, metadata=metadata)
+
+
+@pytest.mark.parametrize("field", ["enabled_providers", "disabled_providers"])
+@pytest.mark.parametrize("submitted,expected", [
+    (["podnapisi"], ["podnapisi"]),
+    (["podnapisi", "unknown_provider", "podnapisi"],
+     ["podnapisi", "unknown_provider", "podnapisi"]),
+    ([""], []),
+    ([], []),
+])
+def test_provider_lists_round_trip_through_settings_save(
+    metadata_save_environment, field, submitted, expected,
+):
+    env = metadata_save_environment
+    env.config.save_settings([(f"settings-general-{field}", submitted)])
+
+    assert env.settings.general[field] == expected
+    env.settings.reload()
+    env.config.decrypt_settings_in_place(env.settings)
+    assert env.settings.general[field] == expected
+    assert env.config.get_settings()["general"][field] == expected
 
 
 @pytest.mark.parametrize("value", ["5ecafe11cafe11cafe11cafe11cafe11", "", "12345", "true", "null"])

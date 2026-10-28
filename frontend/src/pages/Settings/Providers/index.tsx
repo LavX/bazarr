@@ -190,7 +190,11 @@ const EnabledProvidersSection: FunctionComponent<{
   const enabled = useSettingValue<string[]>(
     "settings-general-enabled_providers",
   );
-  const isEmpty = Array.isArray(enabled) && enabled.length === 0;
+  const disabled = useSettingValue<string[]>(
+    "settings-general-disabled_providers",
+  );
+  const isEmpty =
+    Array.isArray(enabled) && enabled.length === 0 && !disabled?.length;
   return (
     <Stack gap="xs">
       <Check
