@@ -156,7 +156,7 @@ RUNTIME_REQUIREMENTS = {
     "six": ("six", "==1.17.0"),
     "sqlalchemy": ("sqlalchemy", "==2.1.4"),
     "srt": ("srt", "==3.5.3"),
-    "subliminal": ("subliminal", "==2.6.0"),
+    "subliminal": ("subliminal", "==2.7.1"),
     "textdistance": ("textdistance", "==4.6.3"),
     "tld": ("tld", "==0.13.2"),
     "tomlkit": ("tomlkit", ">=0.15.1"),

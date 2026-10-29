@@ -6,9 +6,12 @@ behavior now belongs in `custom_libs/subliminal_patch`.
 
 ## Upstream Artifacts
 
-- Target: `subliminal[rar]==2.6.0`
-- Source distribution SHA256: `e6e7aee1b218d543dcb3b7b2248ea0f92afc4c223ce3e7af8d2c3843e31bafe5`
-- Wheel SHA256: `b03316094668cdbd7e3a08289b4cdb51d75ad62209822c089acbbf33dee7751f`
+- Target: `subliminal[rar]==2.7.1` (requires Python >=3.10; Bazarr's floor is 3.12)
+- Source distribution SHA256: `f2649914d3067904effa2b4ce8d83aae994cd47008253311d5ae7949f467939f`
+- Wheel SHA256: `a52db51fde5fbe3f7d3afa6c939bd4337a1ede610c701ee1d89a6f7a066ecd80`
+- Previous target: `subliminal[rar]==2.6.0` (Source distribution SHA256
+  `e6e7aee1b218d543dcb3b7b2248ea0f92afc4c223ce3e7af8d2c3843e31bafe5`, wheel SHA256
+  `b03316094668cdbd7e3a08289b4cdb51d75ad62209822c089acbbf33dee7751f`)
 - Confirmed upstream changes: provider add/remove churn, `knowit` metadata extraction, optional `rarfile`,
   UTF-8 subtitle output default, FPS scoring changes, `Provider.hash_video`, and
   `get_default_providers()` / `get_default_refiners()` replacing the removed globals.
@@ -19,9 +22,9 @@ behavior now belongs in `custom_libs/subliminal_patch`.
 | --- | --- |
 | Provider additions and removals | Upstream 2.6 providers are imported from pip. Providers Bazarr still uses but upstream removed are restored in `subliminal_patch`. Registry tests lock both the Bazarr provider ids and the vanilla upstream `subliminal` provider ids. Upstream `opensubtitlesvip` and `opensubtitlescomvip` remain config-driven through Bazarr's existing OpenSubtitles providers, and upstream `subtitulamos` remains exposed through Bazarr's legacy `subtitulamostv` id. |
 | OpenSubtitles.com changes | The upstream 2.6 provider and converter are included. Bazarr still keeps its patched provider layer and OpenSubtitles converter registration. Credential-backed tests remain environment gated. |
-| Python `>=3.9` requirement | No shim is added. Runtime and image builds must stay on Python 3.9 or newer. |
+| Python `>=3.10` requirement | No shim is added. Runtime and image builds must stay on Python 3.10 or newer. Bazarr's floor is 3.12, so no shim is needed. |
 | `knowit` metadata extraction | `knowit` and `pymediainfo` are installed through the pip dependency tree. Linux images should still keep `mediainfo` or `libmediainfo` available for best metadata extraction. |
-| Optional RAR support | Bazarr pins `subliminal[rar]==2.6.0`, so `rarfile` remains installed for archive providers. |
+| Optional RAR support | Bazarr pins `subliminal[rar]==2.7.1`, so `rarfile` remains installed for archive providers. |
 | Subtitle parser/converter dependency changes | Pip Subliminal pulls its parser/converter dependencies. Bazarr also keeps direct requirement pins for dependencies it imports directly. |
 | CLI refactor | The upstream CLI now comes from the pip package. Bazarr runtime tests do not currently exercise the standalone CLI. |
 | Encoding and save behavior | Bazarr's patched `save_subtitles` and `Subtitle` class remain the active runtime surface, and regression tests assert the monkey patching. |
@@ -74,7 +77,7 @@ behavior now belongs in `custom_libs/subliminal_patch`.
 - `podnapisi`, `subscenter` and `xsubs` were retired after this inventory was taken: their sites are gone,
   so the wrapper notes they used to have no longer describe anything Bazarr ships.
 
-- Prefer upstream `subliminal 2.6.0` provider protocol code when a provider exists upstream. Bazarr patch
+- Prefer upstream `subliminal 2.7.1` provider protocol code when a provider exists upstream. Bazarr patch
   wrappers should keep only Bazarr-specific behavior: extra language variants, HI/forced language handling,
   release metadata, custom score matches, throttling/auth behavior, and archive selection.
 - `tvsubtitles`: upstream 2.6 owns most protocol code. Bazarr keeps the working `search1.php` search endpoint,

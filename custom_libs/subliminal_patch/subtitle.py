@@ -4,6 +4,7 @@
 from __future__ import absolute_import
 import logging
 import traceback
+from enum import Enum
 
 import chardet
 import pysrt
@@ -13,7 +14,7 @@ from copy import deepcopy
 from subzero.modification import SubtitleModifications
 from subzero.language import Language
 from subliminal import Subtitle as Subtitle_
-from subliminal.subtitle import LanguageType
+from subliminal.subtitle import SubtitleCategory
 from subliminal.score import get_equivalent_release_groups
 from subliminal.utils import sanitize_release_group
 from subliminal.video import Episode, Movie
@@ -37,6 +38,52 @@ ftfy_defaults = {
     "uncurl_quotes": False,
     "fix_character_width": False,
 }
+
+
+class LanguageType(Enum):
+    """Subtitle language types, with the semantics subliminal 2.6.0 defined.
+
+    hearing_impaired and foreign_only are read as True, False or None, and None
+    means the provider did not say. subliminal 2.7 merged both flags into one
+    category and dropped that unknown state, so the compat layer keeps this enum.
+    """
+
+    UNKNOWN = 'unknown'
+    FOREIGN_ONLY = 'foreign_only'
+    NORMAL = 'normal'
+    HEARING_IMPAIRED = 'hearing_impaired'
+
+    @classmethod
+    def from_flags(cls, *, hearing_impaired: bool | None = None, foreign_only: bool | None = None) -> 'LanguageType':
+        """Convert to LanguageType from flags."""
+        language_type = cls.UNKNOWN
+        # hearing_impaired takes precedence over foreign_only if both are True
+        if hearing_impaired:
+            language_type = cls.HEARING_IMPAIRED
+        elif foreign_only:
+            language_type = cls.FOREIGN_ONLY
+        # if hearing_impaired or foreign_only is specified to be False
+        # then for sure the subtitle is normal.
+        elif hearing_impaired is False or foreign_only is False:
+            language_type = cls.NORMAL
+
+        return language_type
+
+    def is_hearing_impaired(self) -> bool | None:
+        """Flag for hearing impaired."""
+        if self == LanguageType.HEARING_IMPAIRED:
+            return True
+        if self == LanguageType.UNKNOWN:
+            return None
+        return False
+
+    def is_foreign_only(self) -> bool | None:
+        """Flag for foreign only."""
+        if self == LanguageType.FOREIGN_ONLY:
+            return True
+        if self == LanguageType.UNKNOWN:
+            return None
+        return False
 
 
 class Subtitle(Subtitle_):
@@ -115,6 +162,9 @@ class Subtitle(Subtitle_):
             force_guess_encoding=force_guess_encoding,
             auto_fix_srt=auto_fix_srt,
         )
+        # Set after the base constructor, which only knows the 2.7 category and
+        # would turn an unknown (None) flag into a normal one.
+        self.language_type = LanguageType.from_flags(hearing_impaired=hearing_impaired, foreign_only=foreign_only)
         self.mods = mods
         self._is_valid = False
         self.use_original_format = original_format
@@ -151,6 +201,23 @@ class Subtitle(Subtitle_):
         self.language_type = LanguageType.from_flags(
             hearing_impaired=hearing_impaired,
             foreign_only=value,
+        )
+
+    # subliminal 2.7 stores a SubtitleCategory and its base __init__ assigns it.
+    # It is derived from language_type here so the two never disagree. Unknown
+    # reads as narrative, which is what the 2.7 category does for it.
+    @property
+    def category(self):
+        return SubtitleCategory.from_flags(
+            hearing_impaired=self.hearing_impaired,
+            foreign_only=self.foreign_only,
+        )
+
+    @category.setter
+    def category(self, value):
+        self.language_type = LanguageType.from_flags(
+            hearing_impaired=value.is_hearing_impaired(),
+            foreign_only=value.is_foreign_only(),
         )
 
     @property

@@ -1,3 +1,4 @@
+import pytest
 import subliminal
 import subliminal_patch
 from subzero.language import Language
@@ -62,7 +63,7 @@ EXPECTED_PROVIDER_NAMES = [
     "zimuku",
 ]
 
-# Vanilla upstream 2.6 entry points. podnapisi stays on this list even though
+# Vanilla upstream 2.7.1 entry points. podnapisi stays on this list even though
 # Bazarr retired its own podnapisi wrapper: upstream still ships and registers
 # the provider, and this list exists to prove Bazarr does not mutate upstream's
 # registry. Bazarr's own registry is EXPECTED_PROVIDER_NAMES above, and
@@ -83,8 +84,8 @@ EXPECTED_SUBLIMINAL_PROVIDER_NAMES = [
 ]
 
 
-def test_subliminal_version_is_rebased_to_260():
-    assert subliminal.__version__ == "2.6.0"
+def test_subliminal_version_is_rebased_to_271():
+    assert subliminal.__version__ == "2.7.1"
 
 
 def test_subliminal_patch_monkey_patches_core_surface():
@@ -150,7 +151,7 @@ def test_provider_registry_subtitle_classes_use_patch_subtitle_base():
         assert issubclass(subtitle_class, subliminal_patch.subtitle.Subtitle), provider_name
 
 
-def test_subliminal_provider_manager_stays_vanilla_upstream_26():
+def test_subliminal_provider_manager_stays_vanilla_upstream_27():
     assert sorted(subliminal.provider_manager.names()) == EXPECTED_SUBLIMINAL_PROVIDER_NAMES
 
 
@@ -354,6 +355,87 @@ def test_patched_subtitle_accepts_upstream_26_constructor_shape():
     assert subtitle.page_link == "https://example.test/subtitle"
     assert subtitle.subtitle_format == "ass"
     assert subtitle.fps == 23.976
+
+
+# hearing_impaired and foreign_only are True, False or None on compat subtitles.
+# None means the provider did not say, so it must stay distinct from False.
+@pytest.mark.parametrize("hearing_impaired, foreign_only, expected_hi, expected_fo, expected_category", [
+    (None, None, None, None, "NARRATIVE"),
+    (False, False, False, False, "NARRATIVE"),
+    (False, None, False, False, "NARRATIVE"),
+    (True, None, True, False, "HEARING_IMPAIRED"),
+    (None, True, False, True, "FOREIGN_ONLY"),
+])
+def test_compat_subtitle_keeps_hearing_impaired_and_foreign_only_tri_state(
+        hearing_impaired, foreign_only, expected_hi, expected_fo, expected_category):
+    subtitle = subliminal_patch.subtitle.Subtitle(
+        Language("eng"), "provider-id", hearing_impaired=hearing_impaired, foreign_only=foreign_only)
+
+    assert subtitle.hearing_impaired is expected_hi
+    assert subtitle.foreign_only is expected_fo
+    # The 2.7 category that upstream reads. Unknown flags read as narrative.
+    assert subtitle.category.name == expected_category
+
+
+def test_default_subtitle_is_neither_hearing_impaired_nor_foreign_only():
+    subtitle = subliminal_patch.subtitle.Subtitle(Language("eng"), "id")
+
+    assert subtitle.hearing_impaired is False
+    assert subtitle.foreign_only is False
+
+
+def test_subliminal_subtitle_module_exposes_the_compat_language_type():
+    from subliminal_patch.subtitle import LanguageType
+
+    assert subliminal.subtitle.LanguageType is LanguageType
+
+
+@pytest.mark.parametrize("payload", [
+    # Protocol 2 pickle of subliminal 2.6's LanguageType.NORMAL, written by hand
+    # so that 2.6 is not needed: GLOBAL subliminal.subtitle.LanguageType, the
+    # value 'normal', TUPLE1, REDUCE, STOP. It has the opcodes of the protocol 2
+    # output of Enum.__reduce_ex__, without that output's memo entries.
+    pytest.param(b"\x80\x02csubliminal.subtitle\nLanguageType\nX\x06\x00\x00\x00normal\x85R.",
+                 id="protocol-2"),
+    # Protocol 5 pickle of the same member, as fcache writes it on Python 3.14
+    # (pickle.dumps with no protocol argument). Generated once from a stub
+    # LanguageType whose __module__ is 'subliminal.subtitle' and whose NORMAL
+    # value is 'normal', so it uses STACK_GLOBAL and memo frames.
+    pytest.param(b'\x80\x05\x955\x00\x00\x00\x00\x00\x00\x00\x8c\x13subliminal.subtitle\x94\x8c\x0cLanguageType\x94\x93\x94\x8c\x06normal\x94\x85\x94R\x94.',
+                 id="protocol-5"),
+])
+def test_cache_pickle_written_under_subliminal_26_loads_as_the_compat_enum(payload):
+    import pickle
+    from subliminal_patch.subtitle import LanguageType
+
+    assert pickle.loads(payload) is LanguageType.NORMAL
+
+
+def test_compat_download_applies_no_upstream_category_filter_to_a_scored_candidate(monkeypatch):
+    # Bazarr sorts and filters candidates itself. In subliminal 2.7 the category
+    # filter is applied in ProviderPool.download_best_subtitles through
+    # filter_and_sort_categories. The compat SZProviderPool.download_best_subtitles
+    # never calls super(), so that path must stay unreached while a real candidate
+    # is scored and downloaded through the pool.
+    from test_core_persistent import _Candidate, _Waterfall
+
+    calls = []
+
+    def record(*args, **kwargs):
+        calls.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr(subliminal.core.ProviderPool, "download_best_subtitles", record)
+    monkeypatch.setattr(subliminal.core, "filter_and_sort_categories", record)
+
+    fake = _Waterfall(monkeypatch, {"a": [_Candidate("a", "a1")]})
+    sink = []
+
+    assert fake.search(candidate_sink=sink) == ["a1"]
+    assert len(sink) == 1
+    assert sink[0]["provider_name"] == "a"
+    assert sink[0]["downloaded"] is True
+    assert calls == []
 
 
 def test_tvsubtitles_patch_uses_upstream_26_search_request_shape():

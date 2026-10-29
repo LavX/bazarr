@@ -25,9 +25,11 @@ if '.strm' not in subliminal.video.VIDEO_EXTENSIONS:
     subliminal.video.VIDEO_EXTENSIONS = subliminal.video.VIDEO_EXTENSIONS + ('.strm',)
 
 # patch subliminal's subtitle and provider base
-from .subtitle import Subtitle, guess_matches
+from .subtitle import Subtitle, LanguageType, guess_matches
 subliminal.subtitle.Subtitle = Subtitle
 subliminal.subtitle.guess_matches = guess_matches
+# Cache entries written under subliminal 2.6 pickle this enum by its old path.
+subliminal.subtitle.LanguageType = LanguageType
 from .providers import Provider as Provider  # noqa: E402
 
 from .core import scan_video, search_external_subtitles, list_all_subtitles, save_subtitles, refine, \

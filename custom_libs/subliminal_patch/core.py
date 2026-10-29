@@ -22,6 +22,7 @@ from os import scandir
 from collections import defaultdict
 from bs4 import UnicodeDammit
 from babelfish import Language as BabelfishLanguage, LanguageReverseError
+from guessit import guessit
 from guessit.jsonutils import GuessitEncoder
 from subliminal import refiner_manager
 from concurrent.futures import as_completed
@@ -30,7 +31,7 @@ from .extensions import provider_registry
 from .exceptions import APIThrottled, MustGetBlacklisted, SubtitleCandidateRejected
 from .score import compute_score, MAX_SCORES
 from subliminal.video import VIDEO_EXTENSIONS, Video, Episode, Movie
-from subliminal.core import guessit, ProviderPool, ThreadPoolExecutor, check_video
+from subliminal.core import ProviderPool, ThreadPoolExecutor, check_video
 
 try:
     from subliminal.core import is_windows_special_path
