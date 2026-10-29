@@ -399,26 +399,21 @@ def get_queries_condition_parameters():
 EXTRACTED_ACTION = 8
 
 # A hand upload replaces the file at its path, so it is final in the same way:
-# it is never a candidate (whatever upgrade_manual says). With upgrade_manual
-# on it also ends the candidacy of any older row of the same video and
-# language, and retires a translation; with it off, it does neither.
+# it is never a candidate, whatever upgrade_manual says. In both modes it also
+# ends the candidacy of any older row of the same video and language, and
+# retires an older translation of that language. With upgrade_manual off (the
+# default on a new install), a hand upload also retires an older download or
+# translation of the same item and language.
 UPLOAD_ACTION = 4
-
-
-def _uploads_count_as_evidence():
-    """Whether a hand upload counts as a later file for the rows it replaces."""
-    return bool(getattr(settings.general, 'upgrade_manual', False))
 
 
 def latest_row_actions(query_actions):
     """The actions that decide which row is the latest for a video and language.
 
-    Extractions always count here, though they are never a candidate, so a
-    newer one ends the candidacy of an older download. Uploads count only with
-    upgrade_manual on.
+    Extractions and hand uploads always count here, though neither is ever a
+    candidate, so a newer one ends the candidacy of an older download.
     """
-    upload = [UPLOAD_ACTION] if _uploads_count_as_evidence() else []
-    return [*query_actions, *upload, EXTRACTED_ACTION]
+    return [*query_actions, UPLOAD_ACTION, EXTRACTED_ACTION]
 
 
 # An Embedded Source row records that the video carries a track of its
@@ -500,11 +495,10 @@ def _retirement_evidence_actions(query_actions):
     """The actions whose rows retire a translated row: real subtitle files.
 
     That is every candidate action except the translation (6), plus a hand
-    upload (UPLOAD_ACTION) when upgrade_manual is on. The manual download
+    upload (UPLOAD_ACTION) in both modes of upgrade_manual. The manual download
     actions only appear here when the user opted into upgrading them.
     """
-    upload = [UPLOAD_ACTION] if _uploads_count_as_evidence() else []
-    return [action for action in query_actions if action != 6] + upload
+    return [action for action in query_actions if action != 6] + [UPLOAD_ACTION]
 
 
 def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
@@ -527,12 +521,12 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
 
     One row of provider_actions for the same video, instance and language is
     what retires the translated row (see _retirement_evidence_actions for what
-    those are, hand uploads included when upgrade_manual is on), so a translation is replaced by a real
-    subtitle once rather than once per cycle. The language comparison ignores
-    the :hi and :forced variant and runs here, in Python: no portable SQL
-    expression for it reads the same on SQLite and PostgreSQL. The timestamp
-    bound only keeps the read inside the upgrade window the candidates
-    themselves are drawn from.
+    those are: a hand upload always counts, whatever upgrade_manual says), so a
+    translation is replaced by a real subtitle once rather than once per cycle.
+    The language comparison ignores the :hi and :forced variant and runs here,
+    in Python: no portable SQL expression for it reads the same on SQLite and
+    PostgreSQL. The timestamp bound only keeps the read inside the upgrade
+    window the candidates themselves are drawn from.
     """
     translated_rows = [row for row in rows if row.action == 6]
     if not translated_rows:
