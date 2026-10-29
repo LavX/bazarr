@@ -40,7 +40,9 @@ def _listed_language(listing, subtitles_path):
     raise ValueError(f"{subtitles_path} is not a subtitle listed for this media")
 
 
-def set_score_override(database, media, item_id, subtitles_path, score_percent, arr_instance_id=None):
+def set_score_override(
+    database, media, item_id, subtitles_path, score_percent, arr_instance_id=None
+):
     """Pin ``score_percent`` (0 to 100) on one listed subtitle.
 
     ``media`` is 'movie' (``item_id`` is the Radarr movie id) or 'episode'
@@ -57,16 +59,18 @@ def set_score_override(database, media, item_id, subtitles_path, score_percent, 
         raise ValueError("a subtitles path is required")
 
     if media == "movie":
-        item = database.execute(scoped(
-            select(
-                TableMovies.id,
-                TableMovies.path,
+        item = database.execute(
+            scoped(
+                select(
+                    TableMovies.id,
+                    TableMovies.path,
+                    TableMovies.arr_instance_id,
+                    TableMovies.subtitles,
+                ).where(TableMovies.radarrId == item_id),
                 TableMovies.arr_instance_id,
-                TableMovies.subtitles,
-            ).where(TableMovies.radarrId == item_id),
-            TableMovies.arr_instance_id,
-            arr_instance_id,
-        )).first()
+                arr_instance_id,
+            )
+        ).first()
         if item is None:
             raise LookupError(f"no movie with radarr id {item_id}")
         language = _listed_language(item.subtitles, subtitles_path)
@@ -88,18 +92,20 @@ def set_score_override(database, media, item_id, subtitles_path, score_percent, 
             )
         )
     else:
-        item = database.execute(scoped(
-            select(
-                TableEpisodes.id,
-                TableEpisodes.series_id,
-                TableEpisodes.sonarrSeriesId,
-                TableEpisodes.path,
+        item = database.execute(
+            scoped(
+                select(
+                    TableEpisodes.id,
+                    TableEpisodes.series_id,
+                    TableEpisodes.sonarrSeriesId,
+                    TableEpisodes.path,
+                    TableEpisodes.arr_instance_id,
+                    TableEpisodes.subtitles,
+                ).where(TableEpisodes.sonarrEpisodeId == item_id),
                 TableEpisodes.arr_instance_id,
-                TableEpisodes.subtitles,
-            ).where(TableEpisodes.sonarrEpisodeId == item_id),
-            TableEpisodes.arr_instance_id,
-            arr_instance_id,
-        )).first()
+                arr_instance_id,
+            )
+        ).first()
         if item is None:
             raise LookupError(f"no episode with sonarr episode id {item_id}")
         language = _listed_language(item.subtitles, subtitles_path)
