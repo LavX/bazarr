@@ -130,4 +130,4 @@ def set_score_override(
             )
         )
     database.commit()
-    event_stream(type='movie-history' if media == 'movie' else 'episode-history')
+    event_stream(type="movie-history" if media == "movie" else "episode-history")

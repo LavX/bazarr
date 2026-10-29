@@ -6,7 +6,13 @@ import pytest
 from flask import Flask
 from sqlalchemy import select
 
-from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows
+from app.database import (
+    TableEpisodes,
+    TableHistory,
+    TableHistoryMovie,
+    TableMovies,
+    TableShows,
+)
 from subtitles.score_override import MANUAL_SCORE_ACTION
 
 HEADERS = {"X-API-KEY": "synthetic-bazarr-key"}
@@ -16,11 +22,13 @@ ROOT = "/api/subtitles/score-override"
 @pytest.fixture
 def score_api(schema_session, monkeypatch):
     import api.subtitles.subtitles as api_mod
+    import subtitles.score_override as score_override
     from api import api_bp
     from app.config import settings as app_settings
 
     monkeypatch.setitem(app_settings.auth, "apikey", "synthetic-bazarr-key")
     monkeypatch.setattr(api_mod, "database", schema_session)
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: None)
     app = Flask(__name__)
     app.register_blueprint(api_bp)
     return app.test_client(), schema_session
@@ -191,7 +199,16 @@ def _add_movie(session, subtitles=None):
 
 
 def _add_episode(session):
-    session.add(TableShows(id=10, arr_instance_id=1, sonarrSeriesId=10, path="/series/show", title="Show"))
+    session.add(
+        TableShows(
+            id=10,
+            arr_instance_id=1,
+            sonarrSeriesId=10,
+            path="/series/show",
+            title="Show",
+        )
+    )
+    session.commit()
     session.add(
         TableEpisodes(
             id=20,
@@ -230,7 +247,11 @@ def test_score_override_stores_the_episode_row_through_sonarr_episode_id(score_a
 
     response = client.post(
         ROOT,
-        json={"sonarrEpisodeId": 20, "subtitlesPath": "/series/show/s01e01.en.srt", "score": 40},
+        json={
+            "sonarrEpisodeId": 20,
+            "subtitlesPath": "/series/show/s01e01.en.srt",
+            "score": 40,
+        },
         headers=HEADERS,
     )
 
@@ -268,7 +289,9 @@ def test_score_override_stores_the_movie_row_on_the_movie_scale(score_api):
             TableHistoryMovie.language,
             TableHistoryMovie.subtitles_path,
         ).where(TableHistoryMovie.action == MANUAL_SCORE_ACTION)
-    ).all() == [(MANUAL_SCORE_ACTION, round(180 * 40 / 100), 180, 1, "en", "/movies/a.en.srt")]
+    ).all() == [
+        (MANUAL_SCORE_ACTION, round(180 * 40 / 100), 180, 1, "en", "/movies/a.en.srt")
+    ]
 
 
 def test_score_override_refuses_a_request_with_neither_id(score_api):
@@ -308,11 +331,40 @@ def test_score_override_refuses_a_request_with_both_ids(score_api):
     assert _manual_history_rows(session) == []
 
 
+def test_score_override_refuses_a_request_without_an_api_key(score_api):
+    client, session = score_api
+    _add_movie(session)
+
+    response = client.post(
+        ROOT,
+        json={"radarrMovieId": 7, "subtitlesPath": "/movies/a.en.srt", "score": 40},
+    )
+
+    assert response.status_code == 401
+    assert _manual_rows(session) == []
+
+
+def test_score_override_refuses_an_unknown_radarr_movie_id(score_api):
+    client, session = score_api
+    _add_movie(session)
+
+    response = client.post(
+        ROOT,
+        json={"radarrMovieId": 8, "subtitlesPath": "/movies/a.en.srt", "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 404
+    assert _manual_rows(session) == []
+
+
 def test_score_override_emits_a_movie_history_event(score_api, monkeypatch):
     import subtitles.score_override as score_override
 
     events = []
-    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: events.append(kwargs))
+    monkeypatch.setattr(
+        score_override, "event_stream", lambda **kwargs: events.append(kwargs)
+    )
     client, session = score_api
     _add_movie(session)
 
@@ -330,13 +382,19 @@ def test_score_override_emits_an_episode_history_event(score_api, monkeypatch):
     import subtitles.score_override as score_override
 
     events = []
-    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: events.append(kwargs))
+    monkeypatch.setattr(
+        score_override, "event_stream", lambda **kwargs: events.append(kwargs)
+    )
     client, session = score_api
     _add_episode(session)
 
     response = client.post(
         ROOT,
-        json={"sonarrEpisodeId": 20, "subtitlesPath": "/series/show/s01e01.en.srt", "score": 40},
+        json={
+            "sonarrEpisodeId": 20,
+            "subtitlesPath": "/series/show/s01e01.en.srt",
+            "score": 40,
+        },
         headers=HEADERS,
     )
 

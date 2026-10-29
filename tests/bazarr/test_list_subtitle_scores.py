@@ -873,11 +873,13 @@ def test_local_subtitle_gets_configured_score_in_lowest_scores(schema_session, m
 
 
 def test_override_pins_subtitle_score_in_lowest_scores(schema_session, monkeypatch):
+    from subtitles import score_override
     from subtitles.score_override import set_score_override
 
     movies = _prepare_movies(monkeypatch, schema_session)
     _add_movie(schema_session, 100, "[['en', '/movies/movie100.en.srt', 100]]")
     _add_movie_history(schema_session, 1, 100, 1, "/movies/movie100.en.srt", "en", 90, 100)
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: None)
     # A manual score of 40 on the one subtitle replaces the stored 90 that the
     # score filter reads.
     set_score_override(schema_session, "movie", 100, "/movies/movie100.en.srt", 40)
@@ -902,12 +904,14 @@ def test_local_subtitle_gets_configured_score_for_an_episode(schema_session, mon
 
 
 def test_override_pins_subtitle_score_for_an_episode(schema_session, monkeypatch):
+    from subtitles import score_override
     from subtitles.score_override import set_score_override
 
     series = _prepare_series(monkeypatch, schema_session)
     _add_series(schema_session, 501)
     _add_episode(schema_session, 601, 501, 1, 1, "[['en', '/series/show501/s01e01.en.srt', 100]]")
     _add_episode_history(schema_session, 1, 501, 601, 1, "/series/show501/s01e01.en.srt", "en", 90, 100)
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: None)
     # A manual score of 40 on the one subtitle replaces the stored 90 that the
     # score filter reads. The episode scale is MAX_SCORES['episode'].
     set_score_override(schema_session, "episode", 601, "/series/show501/s01e01.en.srt", 40)

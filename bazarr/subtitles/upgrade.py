@@ -401,9 +401,7 @@ EXTRACTED_ACTION = 8
 # A hand upload replaces the file at its path, so it is final in the same way:
 # it is never a candidate, whatever upgrade_manual says. In both modes it also
 # ends the candidacy of any older row of the same video and language, and
-# retires an older translation of that language. With upgrade_manual off (the
-# default on a new install), a hand upload also retires an older download or
-# translation of the same item and language.
+# retires an older translation of that language.
 UPLOAD_ACTION = 4
 
 
