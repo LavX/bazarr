@@ -894,7 +894,7 @@ class SubtitleScoreOverride(Resource):
         # empty path would match an embedded track's listing, so refuse it here.
         if not subtitles_path:
             return "The subtitlesPath must be a listed subtitle file path.", 400
-        if not 0 <= score <= 100:
+        if score is None or not 0 <= score <= 100:
             return "The score must be a percentage from 0 to 100.", 400
         media, item_id = ("movie", movie_id) if movie_id is not None else ("episode", episode_id)
         try:
