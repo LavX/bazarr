@@ -2199,6 +2199,103 @@ class TestMassBatchOperationWithEmbeddedItems:
         assert mock_process.call_count == 2
         assert mock_extract.call_count == 2
 
+    @patch('subtitles.mass_operations.jobs_queue')
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    def test_a_gate_that_closes_mid_batch_stops_extracting_embedded_tracks(
+            self, mock_collect, mock_jobs_queue, monkeypatch):
+        from concurrent.futures import Future
+        from types import SimpleNamespace
+
+        from app.jobs_queue import JobFailed
+        from subtitles import mass_operations
+        from subtitles.tools.translate import availability, batch, main
+
+        gate_open = True
+        extracted_after_close = []
+
+        def gate():
+            return availability.TranslationAvailability(
+                gate_open, '' if gate_open else 'Translation was switched off')
+
+        def extract(video_path, language, media_type, **kwargs):
+            if not gate_open:
+                extracted_after_close.append(video_path)
+            return video_path.replace('/video/', '/extracted/').replace('.mkv', '.en.srt')
+
+        def translate(**kwargs):
+            nonlocal gate_open
+            gate_open = False
+            return True
+
+        def submit(function, item):
+            future = Future()
+            try:
+                future.set_result(function(item))
+            except Exception as error:
+                future.set_exception(error)
+            return future
+
+        # Finish each submission inline so a refill after the first translation
+        # always observes the closed gate, without relying on thread timing.
+        executor = MagicMock()
+        executor.submit.side_effect = submit
+        monkeypatch.setattr(mass_operations, 'ThreadPoolExecutor', lambda **kwargs: executor)
+        monkeypatch.setattr(mass_operations, 'settings', SimpleNamespace(
+            general=SimpleNamespace(mass_embedded_extract_workers=1)))
+        monkeypatch.setattr(availability, 'translation_available', gate)
+        mock_extract = MagicMock(side_effect=extract)
+        mock_translate = MagicMock(side_effect=translate)
+        monkeypatch.setattr(batch, 'extract_embedded_subtitle', mock_extract)
+        monkeypatch.setattr(main, 'translate_subtitles_file', mock_translate)
+        mock_collect.return_value = ([
+            {'video_path': f'/video/ep{number}.mkv', 'srt_path': None, 'srt_lang': 'en',
+             'embedded': True, 'forced': False, 'hi': False, 'sonarr_series_id': 10,
+             'sonarr_episode_id': number, 'radarr_id': None, 'metadata': None}
+            for number in range(1, 4)
+        ], 0)
+
+        with pytest.raises(JobFailed, match='Translation was switched off') as failure:
+            mass_operations.mass_batch_operation(
+                items=[{'type': 'series', 'sonarrSeriesId': 10}], action='translate',
+                options={'from_lang': 'en', 'to_lang': 'hu'}, job_id='test')
+
+        mock_translate.assert_called_once()
+        assert mock_translate.call_args.kwargs['sonarr_episode_id'] == 1
+        assert '2 of 3 items failed (1 done, 0 skipped)' in str(failure.value)
+        assert 'ep2.mkv (en track) (Translation was switched off)' in str(failure.value)
+        assert 'ep3.mkv (en track) (Translation was switched off)' in str(failure.value)
+        assert not extracted_after_close, extracted_after_close
+
+    @patch('subtitles.tools.translate.batch.extract_embedded_subtitle',
+           return_value='/extracted/ep1.en.srt')
+    @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)
+    @patch('subtitles.mass_operations.jobs_queue')
+    @patch('subtitles.mass_operations._collect_subtitle_items')
+    def test_a_gate_that_reopens_before_consuming_an_embedded_item_extracts_inline(
+            self, mock_collect, mock_jobs_queue, mock_translate, mock_extract, monkeypatch):
+        from subtitles.mass_operations import mass_batch_operation
+        from subtitles.tools.translate.availability import TranslationAvailability
+
+        open_gate = TranslationAvailability(True, '')
+        answers = iter([
+            open_gate,
+            TranslationAvailability(False, 'Translation was switched off'),
+            open_gate,
+            open_gate,
+        ])
+        monkeypatch.setattr('subtitles.tools.translate.availability.translation_available',
+                            MagicMock(side_effect=lambda *a, **k: next(answers, open_gate)))
+        mock_collect.return_value = ([TestMassTranslateFromEmbeddedTracks()._embedded_item()], 0)
+
+        result = mass_batch_operation(
+            items=[{'type': 'episode', 'sonarrEpisodeId': 1}], action='translate',
+            options={'from_lang': 'en', 'to_lang': 'hu'}, job_id='test')
+
+        assert result == {'queued': 1, 'skipped': 0, 'errors': []}
+        mock_extract.assert_called_once_with('/video/ep1.mkv', 'en', 'episode',
+                                             hi=False, forced=False, arr_instance_id=None)
+        assert mock_translate.call_args.kwargs['source_srt_file'] == '/extracted/ep1.en.srt'
+
     @patch('subtitles.mass_operations._extract_translate_source', return_value='/extracted/test.en.srt')
     @patch('subtitles.mass_operations.jobs_queue')
     @patch('subtitles.mass_operations._process_subtitle_item', return_value=True)

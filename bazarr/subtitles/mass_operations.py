@@ -1759,6 +1759,8 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     extraction_pool = None
     try:
         if action == 'translate':
+            from subtitles.tools.translate.availability import translation_available
+
             workers = settings.general.mass_embedded_extract_workers
             extraction_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='mass-extract')
             embedded_items = ((index, item) for index, item in enumerate(all_items, start=1)
@@ -1769,6 +1771,8 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                 while len(pending_extractions) < workers:
                     next_item = next(embedded_items, None)
                     if next_item is None:
+                        break
+                    if not translation_available().available:
                         break
                     index, embedded_item = next_item
                     # A cancel or failure can leave up to one extracted track per
@@ -1788,13 +1792,19 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
 
             try:
                 if action == 'translate' and item.get('embedded'):
-                    future = pending_extractions.pop(i)
-                    try:
-                        source_srt_file = future.result()
-                    finally:
-                        # Even a completed future occupies the window until
-                        # its result is consumed, including a failed result.
-                        refill_extractions()
+                    future = pending_extractions.pop(i, None)
+                    if not translation_available().available:
+                        if future is not None:
+                            future.cancel()
+                        source_srt_file = None
+                    else:
+                        try:
+                            source_srt_file = (future.result() if future is not None
+                                               else _SOURCE_SRT_FILE_UNSET)
+                        finally:
+                            # Even a completed future occupies the window until
+                            # its result is consumed, including a failed result.
+                            refill_extractions()
                     result = _process_subtitle_item(
                         item, action, options, job_id, source_srt_file=source_srt_file, **item_kwargs)
                 else:
