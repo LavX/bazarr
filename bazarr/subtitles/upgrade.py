@@ -523,6 +523,9 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
     what retires the translated row (see _retirement_evidence_actions for what
     those are: a hand upload always counts, whatever upgrade_manual says), so a
     translation is replaced by a real subtitle once rather than once per cycle.
+    A hand upload retires a translation only when it is not older than that
+    translation. A translation written after the upload is the current file, so
+    it stays a candidate.
     The language comparison ignores the :hi and :forced variant and runs here,
     in Python: no portable SQL expression for it reads the same on SQLite and
     PostgreSQL. The timestamp bound only keeps the read inside the upgrade
@@ -535,7 +538,9 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
     provider_rows = database.execute(
         select(table.video_path,
                table.arr_instance_id,
-               table.language)
+               table.language,
+               table.action,
+               table.timestamp)
         .where(and_(table.action.in_(provider_actions),
                     table.video_path.in_({row.video_path for row in translated_rows}),
                     table.timestamp > minimum_timestamp))) \
@@ -550,6 +555,10 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
             if provider_row.arr_instance_id != row.arr_instance_id:
                 continue
             if (provider_row.language or '').split(':')[0] != language:
+                continue
+            # A hand upload older than the translation was replaced by it, so
+            # it does not retire the translation.
+            if provider_row.action == UPLOAD_ACTION and provider_row.timestamp < row.timestamp:
                 continue
             retired.add(row.id)
             break
