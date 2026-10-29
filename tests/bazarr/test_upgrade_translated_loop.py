@@ -903,3 +903,37 @@ def test_override_does_not_reopen_upgrade_loop(upgrade_db, monkeypatch):
 
     assert provider.bars == [], "a pinned subtitle is never searched for"
     assert notifications == []
+
+
+def test_override_keeps_the_library_markers_off_a_pinned_movie_and_episode(upgrade_db, monkeypatch):
+    """The Movies and Series markers agree with the job: a subtitle whose score
+    the user pinned is neither marked for upgrade nor offered to the upgrade."""
+    from api.subtitles import batch
+    from api.subtitles.batch import get_upgradable_media_ids
+    from subtitles.score_override import set_score_override
+    from subtitles.upgrade import get_upgradable_episode_subtitles, get_upgradable_movies_subtitles
+
+    now = datetime.now()
+    _seed_movie(upgrade_db, '[["nl", "/movies/roofman/roofman.mkv.nl.srt", 4321]]')
+    _provider_replacement(upgrade_db, now)
+    _seed_episode(upgrade_db)
+    _episode_row(
+        upgrade_db, id=102, action=3, language="nl", provider="opensubtitlescom",
+        score=EPISODE_LISTING_SCORE, timestamp=now - timedelta(hours=28),
+        subtitles_path="/series/show/s01e01.mkv.nl.srt",
+        description="Dutch subtitles upgraded from opensubtitlescom with a score of 74.44%.",
+    )
+    monkeypatch.setattr(batch, "database", upgrade_db)
+    monkeypatch.setattr(batch, "settings", SimpleNamespace(general=SimpleNamespace(
+        upgrade_subs=True, use_sportarr=False)))
+
+    assert get_upgradable_media_ids()["movies"] == [30]
+    assert get_upgradable_media_ids()["series"] == [10]
+
+    set_score_override(upgrade_db, "movie", 30, "/movies/roofman/roofman.mkv.nl.srt", 40)
+    set_score_override(upgrade_db, "episode", 20, "/series/show/s01e01.mkv.nl.srt", 40)
+
+    candidates = get_upgradable_media_ids()
+    assert candidates["movies"] == [] and candidates["series"] == []
+    assert get_upgradable_movies_subtitles() == {}
+    assert get_upgradable_episode_subtitles() == {}
