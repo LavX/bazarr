@@ -17,7 +17,7 @@ export function useSystemProviders(history?: boolean) {
 // pressing Search again for the same item follows the search that is running.
 export function useMoviesProvider(radarrId?: number) {
   const client = useQueryClient();
-  return useQuery({
+  const result = useQuery({
     queryKey: [
       QueryKeys.System,
       QueryKeys.Providers,
@@ -27,21 +27,27 @@ export function useMoviesProvider(radarrId?: number) {
 
     queryFn: () => {
       if (radarrId) {
-        return searchAsJob<SearchResultType[]>(client, () =>
+        return searchAsJob<ManualSearchResponse>(client, () =>
           api.providers.searchMovie(radarrId),
         );
       }
 
-      return [];
+      return { data: [], providers: [] };
     },
 
     staleTime: 0,
   });
+
+  return {
+    ...result,
+    data: result.data?.data,
+    providers: result.data?.providers,
+  };
 }
 
 export function useEpisodesProvider(episodeId?: number) {
   const client = useQueryClient();
-  return useQuery({
+  const result = useQuery({
     queryKey: [
       QueryKeys.System,
       QueryKeys.Providers,
@@ -51,16 +57,22 @@ export function useEpisodesProvider(episodeId?: number) {
 
     queryFn: () => {
       if (episodeId) {
-        return searchAsJob<SearchResultType[]>(client, () =>
+        return searchAsJob<ManualSearchResponse>(client, () =>
           api.providers.searchEpisode(episodeId),
         );
       }
 
-      return [];
+      return { data: [], providers: [] };
     },
 
     staleTime: 0,
   });
+
+  return {
+    ...result,
+    data: result.data?.data,
+    providers: result.data?.providers,
+  };
 }
 
 export function useResetProvider() {

@@ -453,6 +453,11 @@ declare namespace Plex {
   }
 }
 
+interface ManualSearchResponse {
+  data: SearchResultType[];
+  providers: System.ProviderSearchOutcome[];
+}
+
 interface SearchResultType {
   matches: string[];
   dont_matches: string[];
