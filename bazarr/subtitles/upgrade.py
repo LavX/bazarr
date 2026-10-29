@@ -488,7 +488,7 @@ def _extracted_paths(table, media_column, media):
             if action == EXTRACTED_ACTION and (key[0], key[1]) in media}
 
 
-def _provider_sourced_actions(query_actions):
+def _retirement_evidence_actions(query_actions):
     """The actions whose rows retire a translated row: real subtitle files.
 
     That is every candidate action except the translation (6), plus a hand
@@ -518,12 +518,13 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
     break.
 
     One row of provider_actions for the same video, instance and language is
-    what retires the translated row (see _provider_sourced_actions for what
+    what retires the translated row (see _retirement_evidence_actions for what
     those are, hand uploads included), so a translation is replaced by a real
     subtitle once rather than once per cycle. The language comparison ignores
     the :hi and :forced variant and runs here, in Python: no portable SQL
-    expression for it reads the same on SQLite and PostgreSQL. The timestamp bound only keeps the
-    read inside the upgrade window the candidates themselves are drawn from.
+    expression for it reads the same on SQLite and PostgreSQL. The timestamp
+    bound only keeps the read inside the upgrade window the candidates
+    themselves are drawn from.
     """
     translated_rows = [row for row in rows if row.action == 6]
     if not translated_rows:
@@ -698,7 +699,7 @@ def get_upgradable_episode_subtitles(history_id_list=None):
                   f"each of them.")
 
     retired_translated_ids = _retired_translated_rows(
-        TableHistory, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
+        TableHistory, subtitles_to_upgrade, _retirement_evidence_actions(query_actions), minimum_timestamp)
     pinned_ids = _manually_pinned_rows(TableHistory, subtitles_to_upgrade)
 
     upgradable_episode_subtitles = {}
@@ -801,7 +802,7 @@ def get_upgradable_movies_subtitles(history_id_list=None):
                   f"each of them.")
 
     retired_translated_ids = _retired_translated_rows(
-        TableHistoryMovie, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
+        TableHistoryMovie, subtitles_to_upgrade, _retirement_evidence_actions(query_actions), minimum_timestamp)
     pinned_ids = _manually_pinned_rows(TableHistoryMovie, subtitles_to_upgrade)
 
     upgradable_movie_subtitles = {}
