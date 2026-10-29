@@ -38,11 +38,6 @@ updates:
     open-pull-requests-limit: 5
     target-branch: "development"
     ignore:
-      # subliminal 2.7.0 and later dropped subliminal.subtitle.LanguageType,
-      # which subliminal_patch imports, so the whole backend fails to import.
-      # Moving past 2.6.x needs a rebase of subliminal_patch, not a pin bump.
-      - dependency-name: "subliminal"
-        versions: [">=2.7.0"]
       # pytest 9.2.0 monkeypatch.setattr undo deletes attributes that live in
       # dict items (the settings sections), failing the compat and backend
       # fixtures. Lift together with the dev-requirements.txt pin.
