@@ -527,7 +527,7 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
 
     One row of provider_actions for the same video, instance and language is
     what retires the translated row (see _retirement_evidence_actions for what
-    those are, hand uploads included), so a translation is replaced by a real
+    those are, hand uploads included when upgrade_manual is on), so a translation is replaced by a real
     subtitle once rather than once per cycle. The language comparison ignores
     the :hi and :forced variant and runs here, in Python: no portable SQL
     expression for it reads the same on SQLite and PostgreSQL. The timestamp
