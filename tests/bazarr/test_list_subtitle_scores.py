@@ -113,6 +113,18 @@ def _configure_mappings(monkeypatch, schema_session, media, instance_mapping=Non
                         global_mapping or [])
 
 
+def _advance_id_sequence(schema_session, table):
+    """An explicit id bypasses the PostgreSQL sequence. Move the sequence past
+    the rows written so far, so a writer that lets the database assign the id
+    does not collide with them. SQLite assigns max + 1 by itself."""
+    import sqlalchemy as sa
+
+    if schema_session.get_bind().dialect.name != "postgresql":
+        return
+    schema_session.execute(sa.text(
+        f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), (SELECT MAX(id) FROM {table}))"))
+
+
 def _add_movie_history(schema_session, history_id, movie_id, action, subtitles_path,
                        language, score, score_out_of, video_path=_ITEM_PATH):
     from app.database import TableHistoryMovie, TableMovies
@@ -136,6 +148,7 @@ def _add_movie_history(schema_session, history_id, movie_id, action, subtitles_p
         timestamp=_history_timestamp(history_id),
     ))
     schema_session.flush()
+    _advance_id_sequence(schema_session, "table_history_movie")
 
 
 def _get_movies(movies, query):
@@ -448,6 +461,7 @@ def _add_episode_history(schema_session, history_id, series_id, episode_id, acti
         timestamp=_history_timestamp(history_id),
     ))
     schema_session.flush()
+    _advance_id_sequence(schema_session, "table_history")
 
 
 def _get_series(series, query):
