@@ -71,6 +71,22 @@ def test_score_override_refuses_a_path_only_the_other_instance_lists(score_api):
     assert _manual_rows(session) == []
 
 
+@pytest.mark.parametrize("score", [None, 150, -1])
+def test_score_override_refuses_a_score_that_is_null_or_out_of_range(score_api, score):
+    """A null score must be refused with 400 like an out-of-range one. A null
+    reached the range check and raised a TypeError, which returned 500."""
+    client, session = score_api
+    session.add(TableMovies(id=1, arr_instance_id=1, radarrId=7, title="A", path="/movies/a.mkv", tmdbId="1",
+                            subtitles=str([["en", "/movies/a.en.srt", 100]])))
+    session.commit()
+
+    response = client.post(ROOT, json={"radarrMovieId": 7, "subtitlesPath": "/movies/a.en.srt", "score": score},
+                           headers=HEADERS)
+
+    assert response.status_code == 400
+    assert _manual_rows(session) == []
+
+
 @pytest.mark.parametrize("path", [None, ""])
 def test_score_override_refuses_an_empty_subtitles_path(score_api, path):
     """An embedded track is listed as [lang, None, None, codec]. A null path
