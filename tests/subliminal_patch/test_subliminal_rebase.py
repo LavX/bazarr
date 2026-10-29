@@ -1,5 +1,7 @@
+import pytest
 import subliminal
 import subliminal_patch
+from subliminal.subtitle import SubtitleCategory
 from subzero.language import Language
 
 
@@ -83,8 +85,8 @@ EXPECTED_SUBLIMINAL_PROVIDER_NAMES = [
 ]
 
 
-def test_subliminal_version_is_rebased_to_260():
-    assert subliminal.__version__ == "2.6.0"
+def test_subliminal_version_is_rebased_to_271():
+    assert subliminal.__version__ == "2.7.1"
 
 
 def test_subliminal_patch_monkey_patches_core_surface():
@@ -150,7 +152,7 @@ def test_provider_registry_subtitle_classes_use_patch_subtitle_base():
         assert issubclass(subtitle_class, subliminal_patch.subtitle.Subtitle), provider_name
 
 
-def test_subliminal_provider_manager_stays_vanilla_upstream_26():
+def test_subliminal_provider_manager_stays_vanilla_upstream_27():
     assert sorted(subliminal.provider_manager.names()) == EXPECTED_SUBLIMINAL_PROVIDER_NAMES
 
 
@@ -354,6 +356,54 @@ def test_patched_subtitle_accepts_upstream_26_constructor_shape():
     assert subtitle.page_link == "https://example.test/subtitle"
     assert subtitle.subtitle_format == "ass"
     assert subtitle.fps == 23.976
+
+
+# hearing_impaired and foreign_only are True, False or None on compat subtitles.
+# None means the provider did not say, so it must stay distinct from False.
+@pytest.mark.parametrize("hearing_impaired, foreign_only, expected_hi, expected_fo", [
+    (None, None, None, None),
+    (False, False, False, False),
+    (False, None, False, False),
+    (True, None, True, False),
+    (None, True, False, True),
+])
+def test_compat_subtitle_keeps_hearing_impaired_and_foreign_only_tri_state(
+        hearing_impaired, foreign_only, expected_hi, expected_fo):
+    subtitle = subliminal_patch.subtitle.Subtitle(
+        Language("eng"), "provider-id", hearing_impaired=hearing_impaired, foreign_only=foreign_only)
+
+    assert subtitle.hearing_impaired is expected_hi
+    assert subtitle.foreign_only is expected_fo
+    # The 2.7 category that upstream reads is derived from the same flags.
+    assert subtitle.category == SubtitleCategory.from_flags(
+        hearing_impaired=expected_hi, foreign_only=expected_fo)
+
+
+def test_compat_download_never_passes_a_category_filter_upstream(monkeypatch):
+    # Upstream 2.7 filters results when subtitle_categories is non-empty. Bazarr
+    # sorts and filters on its own, so no upstream download entry point may be
+    # reached with a category filter from the compat download path.
+    seen = []
+
+    def record(*args, **kwargs):
+        seen.append(kwargs.get("subtitle_categories", ""))
+        return []
+
+    monkeypatch.setattr(subliminal.core.ProviderPool, "download_best_subtitles", record)
+    monkeypatch.setattr(subliminal.core, "download_best_subtitles", record)
+    monkeypatch.setattr(subliminal.core, "filter_and_sort_categories", record)
+
+    from subliminal_patch import core_persistent
+
+    video = subliminal.video.Episode("/m/Show.S01E01.mkv", "Show", 1, 1)
+    pool = subliminal_patch.core.SZProviderPool()
+    # core_persistent is the entry point Bazarr calls; with no providers it
+    # walks the whole prioritized path without any network request.
+    downloaded = core_persistent.download_best_subtitles(
+        {video}, {Language("eng")}, pool, min_score=1, hearing_impaired="force HI")
+
+    assert not any(downloaded.values())
+    assert seen == []
 
 
 def test_tvsubtitles_patch_uses_upstream_26_search_request_shape():

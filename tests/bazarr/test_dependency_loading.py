@@ -206,7 +206,7 @@ def test_subliminal_is_loaded_from_python_environment_not_custom_libs():
     custom_subliminal_dir = repo_root / "custom_libs" / "subliminal"
     subliminal_path = Path(subliminal.__file__).resolve()
 
-    assert subliminal.__version__ == "2.6.0"
+    assert subliminal.__version__ == "2.7.1"
     assert not subliminal_path.is_relative_to(custom_subliminal_dir)
 
 
@@ -351,7 +351,7 @@ def test_startup_requirements_probe_rejects_wrong_pinned_versions(monkeypatch):
     from app import requirements
 
     monkeypatch.setattr(requirements, "RUNTIME_IMPORTS", ("subliminal",))
-    monkeypatch.setattr(requirements, "RUNTIME_REQUIREMENTS", {"subliminal": ("subliminal", "==2.6.0")})
+    monkeypatch.setattr(requirements, "RUNTIME_REQUIREMENTS", {"subliminal": ("subliminal", "==2.7.1")})
     monkeypatch.setattr(requirements.importlib, "import_module", lambda module: object())
     monkeypatch.setattr(requirements, "_module_origin", lambda module: None)
     monkeypatch.setattr(requirements.metadata, "version", lambda distribution: "2.5.0")
@@ -521,14 +521,14 @@ def test_startup_requirements_probe_rejects_removed_vendor_origins(monkeypatch):
     repo_root = Path(__file__).resolve().parents[2]
 
     monkeypatch.setattr(requirements, "RUNTIME_IMPORTS", ("subliminal",))
-    monkeypatch.setattr(requirements, "RUNTIME_REQUIREMENTS", {"subliminal": ("subliminal", "==2.6.0")})
+    monkeypatch.setattr(requirements, "RUNTIME_REQUIREMENTS", {"subliminal": ("subliminal", "==2.7.1")})
     monkeypatch.setattr(requirements.importlib, "import_module", lambda module: object())
     monkeypatch.setattr(
         requirements,
         "_module_origin",
         lambda module: repo_root / "custom_libs" / "subliminal" / "__init__.py",
     )
-    monkeypatch.setattr(requirements.metadata, "version", lambda distribution: "2.6.0")
+    monkeypatch.setattr(requirements.metadata, "version", lambda distribution: "2.7.1")
 
     assert requirements.missing_runtime_requirements() == ["subliminal"]
 
