@@ -880,6 +880,7 @@ def test_override_does_not_reopen_upgrade_loop(upgrade_db, monkeypatch):
     translated rows around it must not reopen the loop either.
     """
     from subtitles import upgrade
+    from subtitles import score_override
     from subtitles.score_override import set_score_override
     from subtitles.upgrade import get_upgradable_movies_subtitles
 
@@ -888,6 +889,7 @@ def test_override_does_not_reopen_upgrade_loop(upgrade_db, monkeypatch):
     _first_translation(upgrade_db, now)
     _provider_replacement(upgrade_db, now)
     _second_translation(upgrade_db, now)
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: None)
     # The user pins the provider subtitle at 40 percent.
     set_score_override(upgrade_db, "movie", 30, "/movies/roofman/roofman.mkv.nl.srt", 40)
 
@@ -910,6 +912,7 @@ def test_override_keeps_the_library_markers_off_a_pinned_movie_and_episode(upgra
     the user pinned is neither marked for upgrade nor offered to the upgrade."""
     from api.subtitles import batch
     from api.subtitles.batch import get_upgradable_media_ids
+    from subtitles import score_override
     from subtitles.score_override import set_score_override
     from subtitles.upgrade import get_upgradable_episode_subtitles, get_upgradable_movies_subtitles
 
@@ -930,6 +933,7 @@ def test_override_keeps_the_library_markers_off_a_pinned_movie_and_episode(upgra
     assert get_upgradable_media_ids()["movies"] == [30]
     assert get_upgradable_media_ids()["series"] == [10]
 
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: None)
     set_score_override(upgrade_db, "movie", 30, "/movies/roofman/roofman.mkv.nl.srt", 40)
     set_score_override(upgrade_db, "episode", 20, "/series/show/s01e01.mkv.nl.srt", 40)
 
