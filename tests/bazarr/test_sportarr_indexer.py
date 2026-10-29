@@ -5,11 +5,15 @@ import json
 import pickle
 import shutil
 import subprocess
+import sys
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import sessionmaker
 from test_sportarr_kind_migration import migration_engine  # noqa: F401
+
+# Keep this import at module level: it binds the process-wide session before the fixture patches it.
+from sportarr import sse_client
 
 
 @pytest.fixture
@@ -17,13 +21,33 @@ def indexed_library(migration_engine, monkeypatch, tmp_path):  # noqa: F811
     from app import database as db
     from app.config import settings
     from languages import get_languages, custom_lang
-    from sportarr import identity
-    from sportarr.sync import events
+    from sportarr import identity, workflows
+    from sportarr.sync import events, leagues
+    from subtitles import mismatch
 
     db.Base.metadata.create_all(migration_engine)
     session = sessionmaker(bind=migration_engine, expire_on_commit=False)()
-    for module in (db, identity, events, get_languages, custom_lang):
+    # The imports above reach modules that bind the process-wide session at import:
+    # the workflow imports reach the subtitle pool, which binds the blacklist modules.
+    # Point every such binding at this fixture's session, then the named modules below.
+    process_session = db.database
+    for module in list(sys.modules.values()):
+        if getattr(module, "__dict__", {}).get("database") is process_session:
+            monkeypatch.setattr(module, "database", session)
+    for module in (
+        db,
+        identity,
+        events,
+        get_languages,
+        custom_lang,
+        sse_client,
+        leagues,
+        mismatch,
+        workflows,
+    ):
         monkeypatch.setattr(module, "database", session)
+    manager = sse_client.SportarrClientManager()
+    monkeypatch.setattr(sse_client, "_manager", manager)
     db.update_profile_id_list.invalidate()
     monkeypatch.setattr(events, "notify", lambda *a: None)
     # A Sports library in use: the manual file operations refuse to run while
@@ -124,6 +148,7 @@ def indexed_library(migration_engine, monkeypatch, tmp_path):  # noqa: F811
             )
         )
     yield session, tmp_path
+    manager.stop()
     db.update_profile_id_list.invalidate()
     session.close()
 
@@ -149,6 +174,37 @@ def row(session, event_id):
 
     session.expire_all()
     return session.get(TableSportsEvents, event_id)
+
+
+def test_repair_owner_lookup_reads_the_fixture_session(indexed_library):
+    from app.database import Base, TableArrInstances
+    from app.database import engine as process_engine
+    from sportarr.sync.leagues import require_sportarr
+
+    # The process-wide database has no rows. Create its tables so the lookup
+    # fails on the missing row, not on a missing table. create_all is idempotent.
+    Base.metadata.create_all(process_engine)
+
+    session, _ = indexed_library
+    connection = session.connection()
+    # The fixture engine uses AUTOCOMMIT, so begin a real transaction.
+    connection.exec_driver_sql("BEGIN")
+    try:
+        session.execute(
+            sa.insert(TableArrInstances).values(
+                id=3,
+                kind="sportarr",
+                name="Repair",
+                stable_key="repair-fixture",
+                enabled=1,
+                port=1867,
+            )
+        )
+        instance = require_sportarr(sse_client.database, 3)
+        assert instance.id == 3
+        assert instance.stable_key == "repair-fixture"
+    finally:
+        connection.exec_driver_sql("ROLLBACK")
 
 
 def test_real_embedded_external_and_colliding_owner_cache(indexed_library, monkeypatch):
