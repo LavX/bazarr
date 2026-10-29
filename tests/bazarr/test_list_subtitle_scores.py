@@ -887,6 +887,36 @@ def test_override_pins_subtitle_score_in_lowest_scores(schema_session, monkeypat
     assert result["data"][0]["lowest_subtitle_score"] == 40.0
 
 
+def test_local_subtitle_gets_configured_score_for_an_episode(schema_session, monkeypatch):
+    from app.config import settings as app_settings
+
+    series = _prepare_series(monkeypatch, schema_session)
+    monkeypatch.setitem(app_settings.general, "local_subtitle_score", 60)
+    # A sidecar the disk scan found for the episode: listed, no history row.
+    _add_series(schema_session, 501)
+    _add_episode(schema_session, 601, 501, 1, 1, "[['en', '/series/show501/s01e01.en.srt', 100]]")
+
+    result = _get_series(series, "/api/series?id[]=501&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 60.0
+
+
+def test_override_pins_subtitle_score_for_an_episode(schema_session, monkeypatch):
+    from subtitles.score_override import set_score_override
+
+    series = _prepare_series(monkeypatch, schema_session)
+    _add_series(schema_session, 501)
+    _add_episode(schema_session, 601, 501, 1, 1, "[['en', '/series/show501/s01e01.en.srt', 100]]")
+    _add_episode_history(schema_session, 1, 501, 601, 1, "/series/show501/s01e01.en.srt", "en", 90, 100)
+    # A manual score of 40 on the one subtitle replaces the stored 90 that the
+    # score filter reads. The episode scale is MAX_SCORES['episode'].
+    set_score_override(schema_session, "episode", 601, "/series/show501/s01e01.en.srt", 40)
+
+    result = _get_series(series, "/api/series?id[]=501&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 40.0
+
+
 # --------------------------------------------------------------------------- #
 # Hand uploads and the local score                                             #
 # --------------------------------------------------------------------------- #
