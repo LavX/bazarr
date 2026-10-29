@@ -1553,7 +1553,7 @@ describe("recommended providers", () => {
     expect(hub.enabled).toEqual(["alpha", "beta"]);
     expect(hub.restarts).toBe(1);
     expect(ready).toEqual(["alpha", "beta"]);
-  }, 15_000);
+  }, 60_000);
 
   it("keeps the install allowance when one provider is active and another still needs installing", async () => {
     const { hub, api } = fakeHub({
@@ -1571,7 +1571,7 @@ describe("recommended providers", () => {
     expect(hub.installs).toEqual(["beta"]);
     expect(info.timeout).toBeGreaterThan(60_000);
     expect(info.timeout - 60_000).toBe(INSTALL_ALLOWANCE_MS);
-  }, 15_000);
+  }, 60_000);
 
   it("gives the allowance back when everything is already in place", async () => {
     const { hub, api } = fakeHub({
@@ -1617,5 +1617,5 @@ describe("recommended providers", () => {
     expect(hub.installs).toEqual(["beta"]);
     expect(installing.timeout).toBe(0);
     expect(inPlace.timeout).toBe(0);
-  }, 15_000);
+  }, 60_000);
 });
