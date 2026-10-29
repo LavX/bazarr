@@ -9,7 +9,7 @@
  * no live window the prompt appears before the request rather than as a
  * refusal toast after it.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import userEvent from "@testing-library/user-event";

@@ -7,7 +7,7 @@
  * ordinary key saves straight away, and a cancelled prompt during Save and
  * leave keeps the draft and the navigation blocker in place.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import { StrictMode } from "react";

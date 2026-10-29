@@ -10,13 +10,18 @@ RUN apk add --no-cache wget
 # Use development node environment by default
 ENV NODE_ENV=development
 
+# pnpm ships with Node through Corepack. Its download goes to a shared folder,
+# so the node user at runtime finds the same pnpm the install used.
+ENV COREPACK_HOME=/usr/local/share/corepack
+RUN corepack enable
+
 WORKDIR /app
 
 # Copy package files first for better caching
-COPY frontend/package.json frontend/package-lock.json ./
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 
 # Install dependencies
-RUN npm ci
+RUN pnpm install --frozen-lockfile
 
 # Copy frontend source files (these will be overridden by volume mounts in dev)
 COPY frontend/ .

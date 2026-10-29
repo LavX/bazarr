@@ -78,10 +78,10 @@ All frontend code must pass ESLint before submitting a PR.
 cd frontend
 
 # Check for lint errors
-npm run check
+pnpm run check
 
 # Auto-fix import sorting and formatting
-npx eslint --fix --ext .ts,.tsx src/
+pnpm exec eslint --fix --ext .ts,.tsx src/
 ```
 
 Fix all errors before submitting. Warnings should be addressed when practical.
@@ -99,10 +99,10 @@ pytest tests/
 
 # Run frontend tests
 cd frontend
-npm test
+pnpm test
 
 # Run a specific test file
-npm test -- Translator
+pnpm test Translator
 ```
 
 Before you open a pull request, run the checks CI will run, in parallel:
@@ -169,8 +169,8 @@ python bazarr.py --no-update --config ./config
 
 # Frontend (separate terminal)
 cd frontend
-npm ci
-npm start
+pnpm install --frozen-lockfile
+pnpm start
 ```
 
 PostgreSQL backups and restores also need the PostgreSQL client tools (`pg_dump` and `pg_restore`,

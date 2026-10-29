@@ -2,11 +2,12 @@
   "name": "bazarr-release-hero",
   "version": "1.0.0",
   "private": true,
+  "packageManager": "pnpm@11.0.0",
   "description": "Animated release hero renderer for Bazarr+ (Remotion). Renders the MP4 source of truth plus the GIF and animated WebP derivatives.",
   "scripts": {
     "font": "mkdir -p public && cp -f ../../../site/fonts/Geist-Variable.woff2 public/",
-    "prestudio": "npm run font",
-    "prestill": "npm run font",
+    "prestudio": "pnpm run font",
+    "prestill": "pnpm run font",
     "studio": "remotion studio src/index.ts",
     "render": "./render.sh",
     "still": "remotion still src/index.ts Hero"

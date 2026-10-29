@@ -18,7 +18,7 @@
 #   --jobs N         processes at a time; default: the number of CPUs
 #   --hero           run Release hero even when nothing it builds from changed
 #
-# Needs python X.Y (found through uv when it is installed), node and npm, and
+# Needs python X.Y (found through uv when it is installed), node and pnpm, and
 # docker for a throwaway PostgreSQL 16 on a random local port, removed on exit.
 # The virtualenv is cached under ~/.cache/bazarr-ci and rebuilt when the
 # requirements change. Exits non-zero when anything fails.
@@ -82,11 +82,11 @@ if [[ -z "$PYTHON_VERSION" ]]; then
 fi
 
 # The UI is built in every mode, because the backend jobs run with it.
-command -v npm >/dev/null || { echo "npm is required (node from frontend/.nvmrc)" >&2; exit 1; }
-LOCK_STAMP="$(cat "$ROOT/frontend/package-lock.json" <(node --version) | sha256sum | cut -c1-16)"
+command -v pnpm >/dev/null || { echo "pnpm is required (node from frontend/.nvmrc; corepack enable provides it)" >&2; exit 1; }
+LOCK_STAMP="$(cat "$ROOT/frontend/pnpm-lock.yaml" "$ROOT/frontend/pnpm-workspace.yaml" <(node --version) | sha256sum | cut -c1-16)"
 if [[ "$(cat "$ROOT/frontend/node_modules/.bazarr-ci-stamp" 2>/dev/null)" != "$LOCK_STAMP" ]]; then
-  say "Installing frontend dependencies (npm ci)"
-  (cd "$ROOT/frontend" && npm ci --no-audit --no-fund --loglevel=error)
+  say "Installing frontend dependencies (pnpm install --frozen-lockfile)"
+  (cd "$ROOT/frontend" && pnpm install --frozen-lockfile --reporter=silent)
   echo "$LOCK_STAMP" > "$ROOT/frontend/node_modules/.bazarr-ci-stamp"
 fi
 

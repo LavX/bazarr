@@ -1,0 +1,17 @@
+allowBuilds:
+  "@parcel/watcher": true
+  fsevents: true
+  msw: true
+overrides:
+  "@babel/core": ^7.29.7
+  brace-expansion: ^5.0.12
+  esbuild: ^0.28.1
+  eslint-plugin-react-hooks>eslint: $eslint
+  fast-uri: ^3.1.8
+  follow-redirects: ^1.16.0
+  minimatch@<6>brace-expansion: ^2.1.7
+  postcss-selector-parser: ^7.1.6
+  serialize-javascript: ^7.0.4
+  sharp: ^0.35.5
+  source-map-js: ^1.2.2
+  undici: ^7.29.1

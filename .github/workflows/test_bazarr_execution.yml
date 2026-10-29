@@ -33,12 +33,16 @@ jobs:
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
 
+      - name: Enable pnpm
+        # Node ships Corepack, which provides the pnpm version pinned in frontend/package.json.
+        run: corepack enable
+
       - name: Install UI Dependencies
-        run: npm install
+        run: pnpm install --frozen-lockfile
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Build UI
-        run: npm run build
+        run: pnpm run build
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Set up Python ${{ matrix.python-version }}

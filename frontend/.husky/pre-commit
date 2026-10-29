@@ -1,4 +1,4 @@
 [ -n "$CI" ] && exit 0
 
 cd frontend || exit
-npx pretty-quick --staged --pattern "frontend/**/*.*"
+pnpm exec pretty-quick --staged --pattern "frontend/**/*.*"

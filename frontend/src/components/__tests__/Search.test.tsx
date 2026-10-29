@@ -9,7 +9,7 @@
  * What: Renders Search with a mocked useServerSearch hook that records its
  * arguments, then asserts the enabled flag and available options.
  *
- * Test: Run with `cd frontend && npx vitest run src/components/__tests__/Search.test.tsx`.
+ * Test: Run with `cd frontend && pnpm exec vitest run src/components/__tests__/Search.test.tsx`.
  */
 
 import userEvent from "@testing-library/user-event";

@@ -219,8 +219,8 @@ pip install -r postgres-requirements.txt
 # --no-deps (its only runtime dep is msgpack, pinned to 1.2.1 above)
 pip install --no-deps signalrcore==1.0.2
 
-# Build the frontend
-cd frontend && npm ci && npm run build && cd ..
+# Build the frontend (pnpm comes with Node through Corepack: run corepack enable once)
+cd frontend && pnpm install --frozen-lockfile && pnpm run build && cd ..
 
 # Run
 python3 docker/supervisor.py --config ./data

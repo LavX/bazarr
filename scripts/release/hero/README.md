@@ -3,7 +3,7 @@
 Renders the hero artwork for a feature release as a seamless five-second loop.
 
 ```bash
-npm install
+pnpm install
 ./render.sh 2.6.0 Clockwork 260      # version, codename, seed
 ```
 
@@ -34,7 +34,7 @@ generators in `site/hero/`; see that README for the conventions.
 
 The title is set in Geist, the site's own face. It is not committed here: the one
 copy lives in `site/fonts/` and is copied into `public/` by `render.sh` and by
-the `font` npm script, which `studio` and `still` both run first. A second
+the `font` script, which `studio` and `still` both run first. A second
 tracked copy would drift the day the site font changes.
 
 ## Writing a new motif
@@ -63,14 +63,14 @@ pixel-identical. Note that the motif is driven by the raw frame on purpose: fold
 it into the period and this test passes by construction while proving nothing.
 
 ```bash
-npm run font   # public/ is gitignored, so populate it before any direct remotion call
-npx remotion still src/index.ts LoopCheck out/a.png --frame=0   --overwrite
-npx remotion still src/index.ts LoopCheck out/b.png --frame=150 --overwrite
+pnpm run font   # public/ is gitignored, so populate it before any direct remotion call
+pnpm exec remotion still src/index.ts LoopCheck out/a.png --frame=0   --overwrite
+pnpm exec remotion still src/index.ts LoopCheck out/b.png --frame=150 --overwrite
 # compare a.png and b.png; any difference is a real seam
 ```
 
-`render.sh` and the `studio` and `still` npm scripts do that copy for you; a bare
-`npx remotion` call does not. Forgetting it fails the render with an explicit
+`render.sh` and the `studio` and `still` scripts do that copy for you; a bare
+`pnpm exec remotion` call does not. Forgetting it fails the render with an explicit
 message rather than quietly substituting a system font.
 
 **The encode.** A seamless source is not a seamless file. libwebp builds an

@@ -88,10 +88,10 @@ export const Hero: React.FC<HeroProps> = ({ version, codename, seed, loopFrames 
         // machine, which is the exact failure loading Geist explicitly exists to
         // prevent, and it would look like a successful render. The likeliest
         // cause is that `public/` has not been populated: it is gitignored, and
-        // the font is copied in from site/fonts/ by render.sh or `npm run font`.
+        // the font is copied in from site/fonts/ by render.sh or `pnpm run font`.
         cancelRender(
           new Error(
-            `Could not load the Geist brand font. Run "npm run font" to copy it ` +
+            `Could not load the Geist brand font. Run "pnpm run font" to copy it ` +
               `from site/fonts/ into public/, then render again. Cause: ${String(error)}`,
           ),
         );

@@ -124,7 +124,15 @@ def _unroll_loop(script: str) -> tuple:
 def _is_setup(script: str) -> bool:
     """Steps the virtualenv and the system packages already stand for."""
     first = _logical_lines(script)[0] if _logical_lines(script) else ""
-    return first.startswith(("sudo apt-get", "pip install -r", "npm install", "npm ci"))
+    return first.startswith(
+        ("sudo apt-get", "pip install -r", "corepack enable", "pnpm install")
+    )
+
+
+def _installs_node_modules(script: str) -> bool:
+    """The one setup step that fills a node_modules, which is what a stamp records."""
+    first = _logical_lines(script)[0] if _logical_lines(script) else ""
+    return first.startswith("pnpm install")
 
 
 def _ui_path(path: str, frontend_dir: Path) -> Path:
@@ -233,11 +241,11 @@ def hero_changed(base: str) -> bool:
 
 
 def _hero_stamp() -> str:
-    """What decides the hero's node_modules are current: the two files `npm ci`
-    reads and the Node that runs what it installs, as the job's cache key takes
-    the same three."""
+    """What decides the hero's node_modules are current: the three files a frozen
+    `pnpm install` reads and the Node that runs what it installs, as the job's
+    cache key takes the same inputs."""
     digest = hashlib.sha256()
-    for name in ("package.json", "package-lock.json"):
+    for name in ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"):
         digest.update((HERO_DIR / name).read_bytes())
     node = subprocess.run(["node", "--version"], capture_output=True)
     digest.update(node.stdout if node.returncode == 0 else b"")
@@ -245,9 +253,11 @@ def _hero_stamp() -> str:
 
 
 def hero_tasks(jobs: dict, work: Path) -> list:
-    """The Release hero job's steps, each after the one before. `npm ci` runs
-    only when the stamp of the last install no longer matches, and records a
-    fresh stamp once it has, so the mirror skips it as the job's cache does."""
+    """The Release hero job's steps, each after the one before. `pnpm install`
+    runs only when the stamp of the last install no longer matches, and records
+    a fresh stamp once it has, so the mirror skips it as the job's cache does.
+    Only the install records the stamp: a stamp written after `corepack enable`
+    would let a failed install be skipped on the next run."""
     job = jobs[HERO_JOB]
     group = _job_name(HERO_JOB, job, "")
     stamp = _hero_stamp()
@@ -260,14 +270,20 @@ def hero_tasks(jobs: dict, work: Path) -> list:
         if installed and _is_setup(script):
             continue
         name = step.get("name") or "step"
-        if _is_setup(script):
+        if _installs_node_modules(script):
             script += f'\nprintf %s "{stamp}" > {shlex.quote(str(HERO_STAMP))}\n'
-        tasks.append(Task(group, name, ["bash", "-e", "-c", script],
-                          cwd=ROOT / step.get("working-directory", "."),
-                          env={"RUNNER_TEMP": str(work)},
-                          weight=HERO_RENDER_WEIGHT if "npm run still" in script else 1,
-                          after=(tasks[-1].key,) if tasks else (),
-                          key=f"{group}: {name}"))
+        tasks.append(
+            Task(
+                group,
+                name,
+                ["bash", "-e", "-c", script],
+                cwd=ROOT / step.get("working-directory", "."),
+                env={"RUNNER_TEMP": str(work)},
+                weight=HERO_RENDER_WEIGHT if "pnpm run still" in script else 1,
+                after=(tasks[-1].key,) if tasks else (),
+                key=f"{group}: {name}",
+            )
+        )
     return tasks
 
 

@@ -58,7 +58,7 @@ mkdir -p public
 cp -f "$FONT_SRC" public/
 
 echo "==> 1/4 MP4 (source of truth, 1920x1080 30fps)"
-npx remotion render src/index.ts Hero "out/${STEM}.mp4" \
+pnpm exec remotion render src/index.ts Hero "out/${STEM}.mp4" \
   --codec h264 --crf 16 --props="$PROPS" "${BROWSER_ARG[@]}" --overwrite
 
 # The background is identical on every frame by design, so both encoders below
@@ -93,7 +93,7 @@ ffmpeg -v error -y -i "out/${STEM}.mp4" \
 # is a fraction of the size at the same visible quality and matches the format
 # the animated site asset already uses.
 echo "==> 4/4 Poster still (WebP)"
-npx remotion still src/index.ts Hero "out/${STEM}-poster.png" \
+pnpm exec remotion still src/index.ts Hero "out/${STEM}-poster.png" \
   --frame=0 --props="$PROPS" "${BROWSER_ARG[@]}" --overwrite
 ffmpeg -v error -y -i "out/${STEM}-poster.png" -vcodec libwebp -lossless 0 -q:v 88 \
   -compression_level 6 -preset picture "out/${STEM}-poster.webp"

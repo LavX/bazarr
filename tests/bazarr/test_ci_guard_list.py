@@ -311,7 +311,7 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # A leading VAR=value assignment on a command, as in `PYTHONPATH=. pytest ...`.
 _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 # Whether a script has anything to do with running tests at all. Scripts that do
-# not are left alone: `ruff check .` and `npm run build` are not this guard's
+# not are left alone: `ruff check .` and `pnpm run build` are not this guard's
 # business, and holding them to a shell grammar would be pointless friction.
 _MENTIONS_TESTS = re.compile(r"(?<![\w./-])pytest\b|(?<![\w./-])tests/")
 # Commands that print and do nothing else. `printf` is here for the same reason
@@ -532,19 +532,22 @@ _DOCUMENTS_TESTS_READ = frozenset({
     "site/guides/migration.html",
 })
 # Files that decide what the suites install and run, whatever they are called.
-_FILES_THAT_DECIDE_A_RUN = frozenset({
-    "requirements.txt",
-    "dev-requirements.txt",
-    "postgres-requirements.txt",
-    "Dockerfile",
-    ".github/workflows/ci.yml",
-    ".github/scripts/ci_plan.py",
-    ".github/scripts/build_test.sh",
-    "frontend/package.json",
-    "frontend/package-lock.json",
-    "frontend/vite.config.ts",
-    "frontend/.nvmrc",
-})
+_FILES_THAT_DECIDE_A_RUN = frozenset(
+    {
+        "requirements.txt",
+        "dev-requirements.txt",
+        "postgres-requirements.txt",
+        "Dockerfile",
+        ".github/workflows/ci.yml",
+        ".github/scripts/ci_plan.py",
+        ".github/scripts/build_test.sh",
+        "frontend/package.json",
+        "frontend/pnpm-lock.yaml",
+        "frontend/pnpm-workspace.yaml",
+        "frontend/vite.config.ts",
+        "frontend/.nvmrc",
+    }
+)
 # Trees whose every file is code or test input.
 _CODE_TREES = ("tests", "bazarr", "custom_libs", "migrations", "frontend/src")
 # `working-directory` values that leave every path in the script meaning what it
@@ -2194,7 +2197,7 @@ def test_the_dev_frontend_image_runs_the_node_ci_runs():
     """dev-setup builds the frontend on its own Node image, and CI on frontend/.nvmrc.
 
     The dev image stayed on Node 20 after the lockfile moved to a Vitest that
-    needs 22 or later, so `npm ci` in it no longer matched what CI tested.
+    needs 22 or later, so `pnpm install` in it no longer matched what CI tested.
     """
     dockerfile = (REPO_ROOT / "dev-setup" / "Dockerfile.frontend").read_text()
     pinned = re.search(r"^ARG NODE_VERSION=(\S+)$", dockerfile, flags=re.MULTILINE)
@@ -2964,14 +2967,18 @@ def test_job_reached_through_needs_is_checked_too(constructed_workflow, case, up
             "on": {"pull_request": None},
             "jobs": {
                 "Frontend": dict(
-                    upstream, **{"runs-on": "ubuntu-latest", "steps": [{"run": "npm run build\n"}]}
+                    upstream,
+                    **{
+                        "runs-on": "ubuntu-latest",
+                        "steps": [{"run": "pnpm run build\n"}],
+                    },
                 ),
                 "Backend": {
                     "runs-on": "ubuntu-latest",
                     "needs": "Frontend",
                     "steps": [{"run": f"pytest {_REAL}\n"}],
                 },
-            }
+            },
         }
     )
     covered, problems = _read_workflow()
@@ -2993,13 +3000,16 @@ def test_needs_a_healthy_job_is_still_coverage(constructed_workflow):
         {
             "on": {"pull_request": None},
             "jobs": {
-                "Frontend": {"runs-on": "ubuntu-latest", "steps": [{"run": "npm run build\n"}]},
+                "Frontend": {
+                    "runs-on": "ubuntu-latest",
+                    "steps": [{"run": "pnpm run build\n"}],
+                },
                 "Backend": {
                     "runs-on": "ubuntu-latest",
                     "needs": ["Frontend"],
                     "steps": [{"run": f"pytest {_REAL}\n"}],
                 },
-            }
+            },
         }
     )
     covered, problems = _read_workflow()
@@ -3952,12 +3962,15 @@ def test_a_file_named_the_other_way_round_is_enumerated(constructed_repo):
 def test_non_test_steps_are_left_alone(constructed_workflow):
     """Steps that run no tests are not this guard's business.
 
-    Holding `npm run build` or a conditional deploy step to a shell grammar
+    Holding `pnpm run build` or a conditional deploy step to a shell grammar
     would be friction with no safety behind it.
     """
     constructed_workflow(
         _one_job(
-            {"if": "github.ref == 'refs/heads/master'", "run": "npm run build && ./deploy.sh\n"},
+            {
+                "if": "github.ref == 'refs/heads/master'",
+                "run": "pnpm run build && ./deploy.sh\n",
+            },
             {"uses": "actions/checkout@v7"},
             {"run": f"pytest {_REAL}\n"},
         )

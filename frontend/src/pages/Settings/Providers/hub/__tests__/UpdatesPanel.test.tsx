@@ -9,7 +9,7 @@
  * prompt appears before the request rather than as a refusal toast after it,
  * and one confirmation covers the batch rather than prompting per provider.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import userEvent from "@testing-library/user-event";

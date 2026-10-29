@@ -13,7 +13,7 @@
  * we use fireEvent.submit to check aria-invalid state synchronously before
  * the StrictMode effect cycle clears it.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import userEvent from "@testing-library/user-event";

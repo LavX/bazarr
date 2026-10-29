@@ -15,7 +15,8 @@ it is safe to run beside a Bazarr+ that is already running.
 
 The frontend has to be built first (the backend serves frontend/build):
 
-    cd frontend && npm install && npm run build
+    corepack enable
+    cd frontend && pnpm install --frozen-lockfile && pnpm run build
 
 Playwright is not a dependency of this project. Point the walk at an install of
 it with --playwright-modules, or set PLAYWRIGHT_NODE_PATH:
@@ -87,7 +88,7 @@ def main() -> int:
 
     if not (ROOT / "frontend" / "build" / "index.html").is_file():
         raise SystemExit(
-            "frontend/build/index.html is missing: run `npm run build` in frontend/ first"
+            "frontend/build/index.html is missing: run `pnpm run build` in frontend/ first"
         )
 
     workspace = Path(tempfile.mkdtemp(prefix="bazarr-discover-e2e-"))

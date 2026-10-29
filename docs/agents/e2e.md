@@ -6,14 +6,15 @@ from this repository, through the same pages and API a user gets.
 
 ## Prerequisites
 
-- Node from `frontend/.nvmrc`, and `npm ci` in `frontend/`.
-- Chromium for Playwright, once per machine: `npx playwright install chromium`
+- Node from `frontend/.nvmrc`, `corepack enable` once per machine (it provides pnpm), and
+  `pnpm install --frozen-lockfile` in `frontend/`.
+- Chromium for Playwright, once per machine: `pnpm exec playwright install chromium`
   (add `--with-deps` on a fresh Linux box).
 - Docker, and a Bazarr+ image. The suite uses `bazarr-atlas:local` unless
   `BAZARR_E2E_IMAGE` names another. To build one from your checkout:
 
   ```sh
-  cd frontend && npm run build && cd ..
+  cd frontend && pnpm run build && cd ..
   docker build --tag bazarr-atlas:local .
   ```
 
@@ -25,21 +26,21 @@ they start no container.
 
 Run these from `frontend/`.
 
-| Command                                                           | Runs                                                       |
-| ----------------------------------------------------------------- | ---------------------------------------------------------- |
-| `npm run e2e`                                                     | Everything except `@live`                                  |
-| `npm run e2e -- --grep @wizard`                                   | One area                                                   |
-| `BAZARR_E2E_BASE_PATH=/bazarr npm run e2e -- --project stateless` | The stateless project, under a sub-path                    |
-| `npm run e2e:live`                                                | Everything, including specs that need the provider network |
-| `npm run e2e:ui`                                                  | Playwright's UI mode, for writing and debugging a spec     |
-| `npx playwright show-report e2e-report`                           | The HTML report of the last run                            |
+| Command                                                         | Runs                                                       |
+| --------------------------------------------------------------- | ---------------------------------------------------------- |
+| `pnpm run e2e`                                                  | Everything except `@live`                                  |
+| `pnpm run e2e --grep @wizard`                                   | One area                                                   |
+| `BAZARR_E2E_BASE_PATH=/bazarr pnpm run e2e --project stateless` | The stateless project, under a sub-path                    |
+| `pnpm run e2e:live`                                             | Everything, including specs that need the provider network |
+| `pnpm run e2e:ui`                                               | Playwright's UI mode, for writing and debugging a spec     |
+| `pnpm exec playwright show-report e2e-report`                   | The HTML report of the last run                            |
 
 Results go to `frontend/e2e-report/` (HTML report) and `frontend/e2e-results/`
 (a screenshot and a trace of every failed test, with its console and network).
 Both are ignored by git. Open a trace with
-`npx playwright show-trace e2e-results/<test>/trace.zip`.
+`pnpm exec playwright show-trace e2e-results/<test>/trace.zip`.
 
-The **End-to-end tests** workflow on GitHub runs `npm run e2e` against an
+The **End-to-end tests** workflow on GitHub runs `pnpm run e2e` against an
 image it builds from the dispatched commit, so it verifies that commit's
 build, not a shipped image. It is started by hand from the Actions tab, takes
 an optional grep, and uploads the report. Its release-pair input runs the
@@ -51,10 +52,10 @@ pass without exercising the image. To verify a shipped image, run the same
 pair locally against it:
 
 ```sh
-BAZARR_E2E_IMAGE=<candidate> npm run e2e -- --project stateless
+BAZARR_E2E_IMAGE=<candidate> pnpm run e2e --project stateless
 rm -rf e2e-report-root e2e-results-root
 mv e2e-report e2e-report-root && mv e2e-results e2e-results-root
-BAZARR_E2E_IMAGE=<candidate> BAZARR_E2E_BASE_PATH=/bazarr npm run e2e -- --project stateless
+BAZARR_E2E_IMAGE=<candidate> BAZARR_E2E_BASE_PATH=/bazarr pnpm run e2e --project stateless
 ```
 
 Move the first run's report aside between the two commands, as the workflow
@@ -90,7 +91,7 @@ least its area.
 | `@sports`       | The Sports pages and an enabled Sportarr                              |
 | `@auth`         | Form authentication, the session and the login lockout                |
 | `@postgres`     | The PostgreSQL variant, selected by `BAZARR_E2E_POSTGRES`             |
-| `@live`         | Needs the real provider network or catalog; left out of `npm run e2e` |
+| `@live`         | Needs the real provider network or catalog; left out of `pnpm run e2e` |
 | `@harness`      | Checks the harness itself on pages it writes; needs no container      |
 
 ## Isolation
@@ -202,7 +203,7 @@ grep is refused there, and each run counts only when its report shows the
 stateless tests passed, with none skipped.
 
 ```sh
-BAZARR_E2E_BASE_PATH=/bazarr npm run e2e -- --project stateless
+BAZARR_E2E_BASE_PATH=/bazarr pnpm run e2e --project stateless
 ```
 
 With `BAZARR_E2E_BASE_PATH` set, every container the suite starts is saved
@@ -347,7 +348,7 @@ network stood in for, so they need neither and run in the required frontend
 tests with everything else:
 
 ```sh
-npx vitest run --project e2e-harness
+pnpm exec vitest run --project e2e-harness
 ```
 
 A change to `container.ts`, `shared.ts`, `providers.ts`, `network.ts`,
@@ -360,7 +361,7 @@ lint rules, one per flagged form, live in `no-root-relative-url.test.ts`
 and `no-request-shortcut.test.ts`, which run them with ESLint's own
 RuleTester. `fit.ts` needs a real layout engine, so
 its checks are the `@harness` specs, run with
-`npm run e2e -- --grep @harness`; they start no container either.
+`pnpm run e2e --grep @harness`; they start no container either.
 
 ## Pointing at an existing instance
 
@@ -379,7 +380,7 @@ BAZARR_E2E_URL=https://bazarr.example.lan \
 BAZARR_E2E_API_KEY=... \
 BAZARR_E2E_USER=... \
 BAZARR_E2E_PASSWORD=... \
-npm run e2e -- --grep @status --grep-invert "@stateful|@live"
+pnpm run e2e --grep @status --grep-invert "@stateful|@live"
 ```
 
 Without `BAZARR_E2E_API_KEY` the key is read from the instance's page, which

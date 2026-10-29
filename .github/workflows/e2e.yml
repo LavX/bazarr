@@ -62,12 +62,16 @@ jobs:
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
 
+      - name: Enable pnpm
+        # Node ships Corepack, which provides the pnpm version pinned in frontend/package.json.
+        run: corepack enable
+
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Build frontend
-        run: npm run build
+        run: pnpm run build
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Build image
@@ -80,13 +84,13 @@ jobs:
             --tag "$BAZARR_E2E_IMAGE" .
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Run end-to-end tests (stateless at the root of its host)
         if: ${{ inputs.release_pair }}
         id: root
-        run: npm run e2e -- --project stateless
+        run: pnpm run e2e --project stateless
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Keep the root run's report
@@ -110,16 +114,16 @@ jobs:
         if: ${{ !cancelled() && inputs.release_pair && (steps.root.outcome == 'success' || steps.root.outcome == 'failure') }}
         run: |
           export BAZARR_E2E_BASE_PATH=/bazarr
-          npm run e2e -- --project stateless
+          pnpm run e2e --project stateless
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Run end-to-end tests
         if: ${{ !inputs.release_pair }}
         run: |
           if [ -n "$GREP" ]; then
-            npm run e2e -- --grep "$GREP"
+            pnpm run e2e --grep "$GREP"
           else
-            npm run e2e
+            pnpm run e2e
           fi
         working-directory: ${{ env.UI_DIRECTORY }}
         env:

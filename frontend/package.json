@@ -12,6 +12,7 @@
     "url": "https://github.com/LavX/bazarr/issues"
   },
   "private": true,
+  "packageManager": "pnpm@11.0.0",
   "engines": {
     "node": ">=24.20.0"
   },
@@ -43,6 +44,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@fortawesome/fontawesome-common-types": "^7.3.1",
     "@fortawesome/fontawesome-svg-core": "^7.3.1",
     "@fortawesome/free-brands-svg-icons": "^7.3.1",
     "@fortawesome/free-regular-svg-icons": "^7.3.1",
@@ -54,6 +56,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
+    "@types/estree": "^1.0.9",
     "@types/jest": "^30.0.0",
     "@types/lodash": "^4.17.24",
     "@types/node": "^26.0.0",
@@ -121,23 +124,5 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
-  },
-  "overrides": {
-    "serialize-javascript": "^7.0.4",
-    "follow-redirects": "^1.16.0",
-    "esbuild": "^0.28.1",
-    "@babel/core": "^7.29.7",
-    "eslint-plugin-react-hooks": {
-      "eslint": "$eslint"
-    },
-    "sharp": "^0.35.5",
-    "source-map-js": "^1.2.2",
-    "postcss-selector-parser": "^7.1.6",
-    "fast-uri": "^3.1.8",
-    "undici": "^7.29.1",
-    "brace-expansion": "^5.0.12",
-    "filelist": {
-      "brace-expansion": "^2.1.7"
-    }
   }
 }

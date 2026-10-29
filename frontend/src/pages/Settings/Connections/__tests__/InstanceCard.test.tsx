@@ -11,7 +11,7 @@
  * spy handlers. MSW handles the PATCH /api/system/arr-instances/:id (toggle)
  * and POST /api/system/arr-instances/:id/test (Test button) endpoints.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import userEvent from "@testing-library/user-event";
