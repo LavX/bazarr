@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from flask import Flask, redirect, request, Request
 from flask.sessions import SecureCookieSessionInterface
+from itsdangerous import BadData
 
 from flask_compress import Compress
 from flask_cors import CORS
@@ -17,7 +18,8 @@ from waitress.proxy_headers import proxy_headers_middleware
 from utilities.security_guards import api_key_matches
 
 from .auth import is_session_authenticated
-from .auth.generation import before_save_cleanup, open_session_cleanup
+from .auth.generation import (
+    LEGACY_UPGRADE_KEYS, before_save_cleanup, open_session_cleanup, session_cookie_must_expire)
 from .database import database
 from .get_args import args
 from .config import settings, base_url
@@ -106,12 +108,48 @@ class SchemeAwareSessionInterface(SecureCookieSessionInterface):
         carries it, which is how a read already in flight at logout handed the
         browser a fresh copy of the session it had just deleted. The gate
         refuses such a cookie anyway; this also keeps its contents away from
-        every handler and stops it being renewed. It is not deleted either:
-        see open_session_cleanup.
+        every handler and stops it being renewed. It is not deleted either,
+        except a cookie carrying a legacy upgrade key: see open_session_cleanup.
+
+        Flask refuses a cookie older than the session lifetime without reading
+        it, so a legacy key in such a cookie would never reach that cleanup. A
+        legacy-key cookie signed with the current secret is therefore expired
+        whatever its age. A cookie signed with another secret cannot be
+        verified and is left alone.
         """
-        return open_session_cleanup(super().open_session(app, request))
+        session = open_session_cleanup(super().open_session(app, request))
+        if not session and self._aged_legacy_cookie(app, request):
+            fresh = self.session_class()
+            fresh.expire_cookie_on_save = True
+            # save_session deletes only an empty session that is marked modified.
+            fresh.modified = True
+            return fresh
+        return session
+
+    def _aged_legacy_cookie(self, app, request):
+        """True when the request's cookie decodes, with its signature checked, to a legacy key.
+
+        The age is not checked here: the payload is read only to detect the
+        legacy keys, and is never restored into the session. Any failure to
+        decode keeps the cookie as it was.
+        """
+        value = request.cookies.get(self.get_cookie_name(app))
+        serializer = self.get_signing_serializer(app)
+        if not value or serializer is None:
+            return False
+        try:
+            data = serializer.loads(value)
+        except BadData:
+            return False
+        return isinstance(data, dict) and any(key in data for key in LEGACY_UPGRADE_KEYS)
 
     def save_session(self, app, session, response):
+        if not session and session_cookie_must_expire(session):
+            # Flask deletes an empty session that is marked modified, with the
+            # same name, path and attributes as the session cookie. A fresh
+            # session from open_session needs the mark too.
+            session.modified = True
+            return super().save_session(app, session, response)
         if not before_save_cleanup(session):
             # A stale session sends no cookie header, neither a renewal nor a
             # deletion (see before_save_cleanup). The Vary header that a

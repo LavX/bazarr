@@ -806,6 +806,124 @@ def test_a_legacy_request_in_flight_during_a_revocation_is_not_renewed(server):
     assert _renewed_cookie(answered["response"]) is None
 
 
+def _legacy_upgrade_cookie(app, **contents):
+    """A cookie carrying the keys older releases stored, signed with the server's own key."""
+    return app.session_interface.get_signing_serializer(app).dumps(contents)
+
+
+def _aged_cookie(app, **contents):
+    """A cookie signed with the server's key and stamped older than the session lifetime."""
+    from unittest import mock
+
+    from itsdangerous import TimestampSigner
+
+    lifetime = app.permanent_session_lifetime.total_seconds()
+    stamp = int(time.time() - lifetime - 86400)
+    with mock.patch.object(TimestampSigner, "get_timestamp", return_value=stamp):
+        return app.session_interface.get_signing_serializer(app).dumps(contents)
+
+
+def _expired_session_cookie(response):
+    """True when the response deletes the session cookie: an empty value whose Expires is the epoch."""
+    from email.utils import parsedate_to_datetime
+
+    headers = _session_cookie_headers(response)
+    if len(headers) != 1 or headers[0].split(";", 1)[0] != "session=" or "Max-Age=0" not in headers[0]:
+        return False
+    parts = [part.strip() for part in headers[0].split(";")]
+    expires = [part.split("=", 1)[1] for part in parts if part.lower().startswith("expires=")]
+    if len(expires) != 1:
+        return False
+    try:
+        return parsedate_to_datetime(expires[0]).timestamp() == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def test_a_legacy_upgrade_cookie_is_expired_not_reissued_by_a_normal_request(server):
+    """Older releases kept the plaintext password under _pw_for_upgrade; no request may re-sign it."""
+    cookie = _legacy_upgrade_cookie(server, logged_in=True, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).get("/_keys", headers=_with_cookie(cookie))
+
+    assert json.loads(response.get_data(as_text=True)) == []
+    assert _renewed_cookie(response) is None
+    assert _expired_session_cookie(response)
+
+
+def test_an_aged_legacy_upgrade_cookie_is_expired_by_a_normal_request(server):
+    """A legacy cookie older than the session lifetime must still be expired, not silently dropped."""
+    cookie = _aged_cookie(server, logged_in=True, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).get("/_keys", headers=_with_cookie(cookie))
+
+    assert json.loads(response.get_data(as_text=True)) == []
+    assert _renewed_cookie(response) is None
+    assert _expired_session_cookie(response)
+
+
+def test_an_aged_cookie_without_legacy_keys_gets_no_set_cookie(server):
+    """Guards the lifetime path: an expired cookie with no legacy key is left alone."""
+    cookie = _aged_cookie(server, logged_in=True, gen=0)
+
+    response = _bare_client(server).get("/_keys", headers=_with_cookie(cookie))
+
+    assert json.loads(response.get_data(as_text=True)) == []
+    assert _session_cookie_headers(response) == []
+
+
+def test_logout_with_a_legacy_upgrade_cookie_expires_it(server):
+    """A browser that declined the upgrade still holds the old key; logout must delete the cookie."""
+    cookie = _legacy_upgrade_cookie(server, logged_in=True, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).post(ACCOUNT_URL, data={"action": "logout"}, headers=_with_cookie(cookie))
+
+    assert response.status_code == 204
+    assert _expired_session_cookie(response)
+
+
+def test_a_refused_request_with_a_legacy_upgrade_cookie_leaks_neither_key_nor_password(server):
+    cookie = _legacy_upgrade_cookie(server, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).get("/_gate", headers=_with_cookie(cookie))
+
+    assert response.get_data(as_text=True) == "closed"
+    body_and_headers = response.get_data(as_text=True) + "".join(
+        f"{name}: {value}" for name, value in response.headers.items())
+    assert "hunter2" not in body_and_headers
+    assert "stale-token" not in body_and_headers
+    assert _renewed_cookie(response) is None
+
+
+def test_a_request_with_an_aged_legacy_cookie_that_logs_in_gets_a_clean_cookie(server):
+    """A login in the same request as an expired legacy cookie replaces it; the old keys are gone."""
+    cookie = _aged_cookie(server, logged_in=True, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).post(
+        ACCOUNT_URL, data={"action": "login", "username": USERNAME, "password": PASSWORD},
+        headers=_with_cookie(cookie))
+
+    assert response.status_code == 204
+    renewed = _renewed_cookie(response)
+    assert renewed is not None
+    payload = server.session_interface.get_signing_serializer(server).loads(renewed)
+    assert payload.get("logged_in") is True
+    assert "_pw_for_upgrade" not in payload
+    assert "_upgrade_token" not in payload
+
+
+def test_a_cookie_without_the_legacy_keys_is_not_expired_by_logout(server):
+    """Guards the deliberate choice: only a cookie that carries the old keys is ever expired."""
+    client = server.test_client()
+    assert _login(client).status_code == 204
+    copy = _cookie_value(client)
+
+    response = _bare_client(server).post(ACCOUNT_URL, data={"action": "logout"}, headers=_with_cookie(copy))
+
+    assert response.status_code == 204
+    assert _session_cookie_headers(response) == []
+
+
 # ---------------------------------------------------------------------------
 # Password change and auth-type change
 # ---------------------------------------------------------------------------
@@ -2191,6 +2309,12 @@ def test_the_socket_gate_follows_the_generation(server):
     assert _connect_gate(server, copy, {"apiKey": API_KEY}) is True
     assert _connect_gate(server, None, {"apiKey": "wrong"}) is False
     assert _connect_gate(server, None) is False
+
+
+def test_the_socket_gate_refuses_an_aged_legacy_upgrade_cookie(server):
+    legacy = _aged_cookie(server, logged_in=True, _pw_for_upgrade="hunter2")
+
+    assert _connect_gate(server, legacy) is False
 
 
 # ---------------------------------------------------------------------------
