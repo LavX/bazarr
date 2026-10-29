@@ -166,6 +166,11 @@ export default defineConfig(({ mode, command }) => {
             root: __dirname,
             environment: "node",
             include: ["e2e/lib/**/*.test.ts"],
+            // The harness tests stub docker and the network, but some of them
+            // wait on a real loopback socket, which can outlast vitest's 5 s
+            // default on a loaded machine. Only this project gets the longer
+            // limit.
+            testTimeout: 60000,
           },
         },
       ],
