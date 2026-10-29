@@ -2,7 +2,7 @@
 Bazarr code path can use it without reaching into a compat-specific
 module.
 
-Exists because subliminal (even latest 2.6.0 upstream) still uses TVDB
+Exists because subliminal (even latest 2.7.1 upstream) still uses TVDB
 v1 via a hardcoded public key, and v1's search_series endpoint only
 indexes series by imdb_id - it returns nothing for an episode's own
 imdb_id. OS.com-compat clients routinely send the episode's imdb_id,
