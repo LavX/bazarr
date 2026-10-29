@@ -1927,3 +1927,26 @@ def test_invalid_optional_command_keeps_saved_upload_finalization(upload_flow, m
     assert len(flow.history) == 1
     assert flow.events
     postprocess.assert_not_called()
+
+
+@pytest.mark.parametrize("media_type", ["movie", "series"])
+def test_a_manual_upload_records_the_configured_local_score(upload_flow, monkeypatch, media_type):
+    """A hand-uploaded subtitle is a local subtitle, so it takes the local score.
+
+    The upload history row otherwise records the full scale (100 percent). With
+    general.local_subtitle_score at 60 the recorded score is 60 percent of the
+    media's maximum.
+    """
+    from app.config import settings
+    from subliminal_patch.score import MAX_SCORES
+
+    flow = upload_flow
+    monkeypatch.setitem(settings.general, "local_subtitle_score", 60)
+    flow.submit(media_type)
+    job, thread = flow.start()
+    thread.join(2)
+
+    assert job.status == "completed"
+    [(_, kwargs)] = flow.history
+    key = "movie" if media_type == "movie" else "episode"
+    assert kwargs["fake_score"] == pytest.approx(MAX_SCORES[key] * 60 / 100)

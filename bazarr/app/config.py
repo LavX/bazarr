@@ -298,6 +298,9 @@ validators = [
     Validator('general.show_live_badge', must_exist=True, default=True, is_type_of=bool),
     Validator('general.minimum_score_movie', must_exist=True, default=70, is_type_of=int, gte=0, lte=100),
     Validator('general.minimum_score_sports', must_exist=True, default=70, is_type_of=int, gte=0, lte=100),
+    # Percentage given to a subtitle that has no score on record (a sidecar the
+    # disk scan found, or a hand upload). 0 keeps the behaviour unchanged.
+    Validator('general.local_subtitle_score', must_exist=True, default=0, is_type_of=int, gte=0, lte=100),
     Validator('general.use_embedded_subs', must_exist=True, default=True, is_type_of=bool),
     Validator('general.embedded_subs_show_desired', must_exist=True, default=True, is_type_of=bool),
     Validator('general.mass_embedded_extract_workers', must_exist=True, default=2, is_type_of=int, gte=1, lte=4),

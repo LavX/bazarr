@@ -113,6 +113,18 @@ def _configure_mappings(monkeypatch, schema_session, media, instance_mapping=Non
                         global_mapping or [])
 
 
+def _advance_id_sequence(schema_session, table):
+    """An explicit id bypasses the PostgreSQL sequence. Move the sequence past
+    the rows written so far, so a writer that lets the database assign the id
+    does not collide with them. SQLite assigns max + 1 by itself."""
+    import sqlalchemy as sa
+
+    if schema_session.get_bind().dialect.name != "postgresql":
+        return
+    schema_session.execute(sa.text(
+        f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), (SELECT MAX(id) FROM {table}))"))
+
+
 def _add_movie_history(schema_session, history_id, movie_id, action, subtitles_path,
                        language, score, score_out_of, video_path=_ITEM_PATH):
     from app.database import TableHistoryMovie, TableMovies
@@ -136,6 +148,7 @@ def _add_movie_history(schema_session, history_id, movie_id, action, subtitles_p
         timestamp=_history_timestamp(history_id),
     ))
     schema_session.flush()
+    _advance_id_sequence(schema_session, "table_history_movie")
 
 
 def _get_movies(movies, query):
@@ -448,6 +461,7 @@ def _add_episode_history(schema_session, history_id, series_id, episode_id, acti
         timestamp=_history_timestamp(history_id),
     ))
     schema_session.flush()
+    _advance_id_sequence(schema_session, "table_history")
 
 
 def _get_series(series, query):
@@ -851,3 +865,116 @@ def test_translation_shadows_a_download_despite_a_later_record_under_its_root(pl
     add(2, 6, 100, '/global/T.de.srt', '/global/T.mkv')
     add(3, 1, 90, '/global/T.de.srt', '/global/T.mkv')
     assert score() is None
+
+
+# --------------------------------------------------------------------------- #
+# Local score and manual override                                              #
+# --------------------------------------------------------------------------- #
+
+def test_local_subtitle_gets_configured_score_in_lowest_scores(schema_session, monkeypatch):
+    from app.config import settings as app_settings
+
+    movies = _prepare_movies(monkeypatch, schema_session)
+    # The percentage a subtitle found next to the video gets when no history
+    # row scores it.
+    monkeypatch.setitem(app_settings.general, "local_subtitle_score", 60)
+    # A sidecar the disk scan found: listed for the item, no history row.
+    _add_movie(schema_session, 100, "[['en', '/movies/movie100.en.srt', 100]]")
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 60.0
+
+
+def test_override_pins_subtitle_score_in_lowest_scores(schema_session, monkeypatch):
+    from subtitles import score_override
+    from subtitles.score_override import set_score_override
+
+    movies = _prepare_movies(monkeypatch, schema_session)
+    _add_movie(schema_session, 100, "[['en', '/movies/movie100.en.srt', 100]]")
+    _add_movie_history(schema_session, 1, 100, 1, "/movies/movie100.en.srt", "en", 90, 100)
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: None)
+    # A manual score of 40 on the one subtitle replaces the stored 90 that the
+    # score filter reads.
+    set_score_override(schema_session, "movie", 100, "/movies/movie100.en.srt", 40)
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 40.0
+
+
+def test_local_subtitle_gets_configured_score_for_an_episode(schema_session, monkeypatch):
+    from app.config import settings as app_settings
+
+    series = _prepare_series(monkeypatch, schema_session)
+    monkeypatch.setitem(app_settings.general, "local_subtitle_score", 60)
+    # A sidecar the disk scan found for the episode: listed, no history row.
+    _add_series(schema_session, 501)
+    _add_episode(schema_session, 601, 501, 1, 1, "[['en', '/series/show501/s01e01.en.srt', 100]]")
+
+    result = _get_series(series, "/api/series?id[]=501&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 60.0
+
+
+def test_override_pins_subtitle_score_for_an_episode(schema_session, monkeypatch):
+    from subtitles import score_override
+    from subtitles.score_override import set_score_override
+
+    series = _prepare_series(monkeypatch, schema_session)
+    _add_series(schema_session, 501)
+    _add_episode(schema_session, 601, 501, 1, 1, "[['en', '/series/show501/s01e01.en.srt', 100]]")
+    _add_episode_history(schema_session, 1, 501, 601, 1, "/series/show501/s01e01.en.srt", "en", 90, 100)
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: None)
+    # A manual score of 40 on the one subtitle replaces the stored 90 that the
+    # score filter reads. The episode scale is MAX_SCORES['episode'].
+    set_score_override(schema_session, "episode", 601, "/series/show501/s01e01.en.srt", 40)
+
+    result = _get_series(series, "/api/series?id[]=501&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 40.0
+
+
+# --------------------------------------------------------------------------- #
+# Hand uploads and the local score                                             #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def local_score(monkeypatch):
+    from app.config import settings as app_settings
+
+    def set_score(value):
+        monkeypatch.setitem(app_settings.general, "local_subtitle_score", value)
+
+    return set_score
+
+
+def test_upload_counts_at_the_local_score_when_it_is_set(scored_media, local_score):
+    add, score, _ = scored_media
+    local_score(40)
+    add(1, 4, 100, 100)
+    assert score() == 40.0
+
+
+def test_upload_is_unscored_when_the_local_score_is_zero(scored_media, local_score):
+    add, score, _ = scored_media
+    local_score(0)
+    add(1, 4, 100, 100)
+    assert score() is None
+
+
+def test_translation_is_unscored_even_with_the_local_score_set(scored_media, local_score):
+    add, score, _ = scored_media
+    local_score(40)
+    add(1, 6, 100, 100)
+    assert score() is None
+
+
+def test_upload_counts_at_the_local_score_and_shadows_an_older_download(scored_media, local_score):
+    # The download scores 20, below the local score of 40. Without shadowing the
+    # lowest score would be the download's 20; with it the upload's 40 wins.
+    add, score, _ = scored_media
+    local_score(40)
+    add(1, 1, 20, 100)
+    add(2, 4, 100, 100)
+    assert score() == 40.0

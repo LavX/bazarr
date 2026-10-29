@@ -7,6 +7,7 @@ import {
   Layout,
   Message,
   MultiSelector,
+  Number,
   Section,
   Selector,
   Slider,
@@ -300,6 +301,20 @@ const SettingsSubtitlesView: FunctionComponent = () => {
           given item once instead of on every scheduled pass. Nothing is
           blocklisted and nothing is re-downloaded automatically. Disabled by
           default.
+        </Message>
+      </Section>
+      <Section header="Local Subtitle Score">
+        <Number
+          label="Local subtitle score (%)"
+          settingKey="settings-general-local_subtitle_score"
+          min={0}
+          max={100}
+          step={1}
+        />
+        <Message>
+          Score from 0 to 100 for subtitles that have no provider score: files a
+          disk scan finds next to a video, and subtitles uploaded by hand. 0
+          keeps the current behaviour.
         </Message>
       </Section>
       <Section header="Upgrading Subtitles">

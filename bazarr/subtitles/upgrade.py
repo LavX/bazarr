@@ -20,6 +20,7 @@ from radarr.history import history_log_movie
 from sonarr.history import history_log
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.indexer.series import store_subtitles
+from subtitles.score_override import MANUAL_SCORE_ACTION
 from utilities.path_mappings import path_mappings
 from .download import generate_subtitles
 from app.event_handler import event_stream
@@ -376,16 +377,14 @@ def get_queries_condition_parameters():
     days_to_upgrade_subs = settings.general.days_to_upgrade_subs
     minimum_timestamp = (datetime.now() - timedelta(days=int(days_to_upgrade_subs)))
 
-    # action=7 (EmbeddedSource) and action=8 (Extracted) intentionally excluded:
-    # an embedded track and a file copied out of one are source quality and
-    # should not be upgraded. Manual downloads/uploads (2, 4) and translations
-    # (6) are separate opt-ins; both default off on a new install.
+    # action=4 (Upload), action=7 (EmbeddedSource) and action=8 (Extracted) are
+    # never candidates: an upload is the user's final file, and an embedded
+    # track and a file copied out of one are source quality. Manual downloads
+    # (2) and translations (6) are opt-ins; both default off on a new install.
     query_actions = [1]
     if getattr(settings.general, 'upgrade_manual', False):
         query_actions.append(2)
     query_actions.append(3)
-    if getattr(settings.general, 'upgrade_manual', False):
-        query_actions.append(4)
     if getattr(settings.general, 'upgrade_translated', False):
         query_actions.append(6)
 
@@ -399,10 +398,20 @@ def get_queries_condition_parameters():
 # fall back to the extracted file and replace it with a download.
 EXTRACTED_ACTION = 8
 
+# A hand upload replaces the file at its path, so it is final in the same way:
+# it is never a candidate, whatever upgrade_manual says. In both modes it also
+# ends the candidacy of any older row of the same video and language, and
+# retires an older translation of that language.
+UPLOAD_ACTION = 4
+
 
 def latest_row_actions(query_actions):
-    """The actions that decide which row is the latest for a video and language."""
-    return [*query_actions, EXTRACTED_ACTION]
+    """The actions that decide which row is the latest for a video and language.
+
+    Extractions and hand uploads always count here, though neither is ever a
+    candidate, so a newer one ends the candidacy of an older download.
+    """
+    return [*query_actions, UPLOAD_ACTION, EXTRACTED_ACTION]
 
 
 # An Embedded Source row records that the video carries a track of its
@@ -480,13 +489,14 @@ def _extracted_paths(table, media_column, media):
             if action == EXTRACTED_ACTION and (key[0], key[1]) in media}
 
 
-def _provider_sourced_actions(query_actions):
-    """The actions that mean a provider supplied the file.
+def _retirement_evidence_actions(query_actions):
+    """The actions whose rows retire a translated row: real subtitle files.
 
-    Action 6 is machine output, so it is never one of them, and the manual
+    That is every candidate action except the translation (6), plus a hand
+    upload (UPLOAD_ACTION) in both modes of upgrade_manual. The manual download
     actions only appear here when the user opted into upgrading them.
     """
-    return [action for action in query_actions if action != 6]
+    return [action for action in query_actions if action != 6] + [UPLOAD_ACTION]
 
 
 def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
@@ -507,12 +517,17 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
     same score, every upgrade run, which is the loop this returns the ids to
     break.
 
-    One provider sourced row for the same video, instance and language is what
-    retires the translated row, so a translation is replaced by a real subtitle
-    once rather than once per cycle. The language comparison ignores the :hi and
-    :forced variant and runs here, in Python: no portable SQL expression for it
-    reads the same on SQLite and PostgreSQL. The timestamp bound only keeps the
-    read inside the upgrade window the candidates themselves are drawn from.
+    One row of provider_actions for the same video, instance and language is
+    what retires the translated row (see _retirement_evidence_actions for what
+    those are: a hand upload always counts, whatever upgrade_manual says), so a
+    translation is replaced by a real subtitle once rather than once per cycle.
+    A hand upload retires a translation only when it is not older than that
+    translation. A translation written after the upload is the current file, so
+    it stays a candidate.
+    The language comparison ignores the :hi and :forced variant and runs here,
+    in Python: no portable SQL expression for it reads the same on SQLite and
+    PostgreSQL. The timestamp bound only keeps the read inside the upgrade
+    window the candidates themselves are drawn from.
     """
     translated_rows = [row for row in rows if row.action == 6]
     if not translated_rows:
@@ -521,7 +536,9 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
     provider_rows = database.execute(
         select(table.video_path,
                table.arr_instance_id,
-               table.language)
+               table.language,
+               table.action,
+               table.timestamp)
         .where(and_(table.action.in_(provider_actions),
                     table.video_path.in_({row.video_path for row in translated_rows}),
                     table.timestamp > minimum_timestamp))) \
@@ -537,9 +554,46 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
                 continue
             if (provider_row.language or '').split(':')[0] != language:
                 continue
+            # A hand upload older than the translation was replaced by it, so
+            # it does not retire the translation.
+            if provider_row.action == UPLOAD_ACTION and provider_row.timestamp < row.timestamp:
+                continue
             retired.add(row.id)
             break
     return retired
+
+
+def _manually_pinned_rows(table, rows):
+    """History ids of candidate rows whose subtitle has a manual score.
+
+    A manual score is a row of MANUAL_SCORE_ACTION for the same video, instance,
+    language and subtitle file, at least as new as the candidate. Such a
+    subtitle is not upgraded: the user has fixed its score. A download written
+    after the manual score is newer, so the candidate then comes back.
+    """
+    if not rows:
+        return set()
+
+    overrides = database.execute(
+        select(table.video_path,
+               table.arr_instance_id,
+               table.language,
+               table.subtitles_path,
+               table.timestamp)
+        .where(and_(table.action == MANUAL_SCORE_ACTION,
+                    table.video_path.in_({row.video_path for row in rows})))).all()
+
+    pinned = set()
+    for row in rows:
+        for override in overrides:
+            if (override.video_path == row.video_path
+                    and override.arr_instance_id == row.arr_instance_id
+                    and override.language == row.language
+                    and override.subtitles_path == row.subtitles_path
+                    and override.timestamp >= row.timestamp):
+                pinned.add(row.id)
+                break
+    return pinned
 
 
 def _find_current_subtitle_for_language(language_string, external_subtitles):
@@ -634,7 +688,9 @@ def get_upgradable_episode_subtitles(history_id_list=None):
                TableHistory.video_path,
                TableHistory.language,
                TableHistory.arr_instance_id,
-               TableHistory.upgradedFromId)
+               TableHistory.upgradedFromId,
+               TableHistory.subtitles_path,
+               TableHistory.timestamp)
         .select_from(TableHistory)
         .join(TableShows, onclause=and_(TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId,
                                   TableHistory.arr_instance_id == TableShows.arr_instance_id))
@@ -652,7 +708,8 @@ def get_upgradable_episode_subtitles(history_id_list=None):
                   f"each of them.")
 
     retired_translated_ids = _retired_translated_rows(
-        TableHistory, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
+        TableHistory, subtitles_to_upgrade, _retirement_evidence_actions(query_actions), minimum_timestamp)
+    pinned_ids = _manually_pinned_rows(TableHistory, subtitles_to_upgrade)
 
     upgradable_episode_subtitles = {}
     # The history page passes every id of one show. Membership against the
@@ -668,6 +725,11 @@ def get_upgradable_episode_subtitles(history_id_list=None):
         if subtitle_to_upgrade.id in retired_translated_ids:
             logging.debug(f"TableHistory ID {subtitle_to_upgrade.id} is a translation a real subtitle has already "  # noqa: G004
                           f"replaced for language {subtitle_to_upgrade.language} so we'll skip it.")
+            continue
+
+        # exclude a subtitle whose score the user set by hand
+        if subtitle_to_upgrade.id in pinned_ids:
+            logging.debug(f"TableHistory ID {subtitle_to_upgrade.id} has a manual score so we'll skip it.")  # noqa: G004
             continue
 
         # exclude subtitles with ID that as been "upgraded from" and shouldn't be considered
@@ -731,7 +793,9 @@ def get_upgradable_movies_subtitles(history_id_list=None):
                TableHistoryMovie.video_path,
                TableHistoryMovie.language,
                TableHistoryMovie.arr_instance_id,
-               TableHistoryMovie.upgradedFromId)
+               TableHistoryMovie.upgradedFromId,
+               TableHistoryMovie.subtitles_path,
+               TableHistoryMovie.timestamp)
         .select_from(TableHistoryMovie)
         .join(TableMovies, onclause=and_(TableHistoryMovie.radarrId == TableMovies.radarrId,
                                   TableHistoryMovie.arr_instance_id == TableMovies.arr_instance_id))
@@ -747,7 +811,8 @@ def get_upgradable_movies_subtitles(history_id_list=None):
                   f"each of them.")
 
     retired_translated_ids = _retired_translated_rows(
-        TableHistoryMovie, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
+        TableHistoryMovie, subtitles_to_upgrade, _retirement_evidence_actions(query_actions), minimum_timestamp)
+    pinned_ids = _manually_pinned_rows(TableHistoryMovie, subtitles_to_upgrade)
 
     upgradable_movie_subtitles = {}
     # The history page passes every id of one movie. Membership against the
@@ -763,6 +828,11 @@ def get_upgradable_movies_subtitles(history_id_list=None):
         if subtitle_to_upgrade.id in retired_translated_ids:
             logging.debug(f"TableHistoryMovie ID {subtitle_to_upgrade.id} is a translation a real subtitle has "  # noqa: G004
                           f"already replaced for language {subtitle_to_upgrade.language} so we'll skip it.")
+            continue
+
+        # exclude a subtitle whose score the user set by hand
+        if subtitle_to_upgrade.id in pinned_ids:
+            logging.debug(f"TableHistoryMovie ID {subtitle_to_upgrade.id} has a manual score so we'll skip it.")  # noqa: G004
             continue
 
         # exclude subtitles with ID that as been "upgraded from" and shouldn't be considered

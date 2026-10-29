@@ -97,6 +97,7 @@ declare namespace Settings {
     upgrade_frequency: number;
     upgrade_manual: boolean;
     upgrade_translated: boolean;
+    local_subtitle_score: number;
     use_embedded_subs: boolean;
     use_jellyfin?: boolean;
     use_emby?: boolean;

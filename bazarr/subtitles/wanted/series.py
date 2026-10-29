@@ -22,6 +22,7 @@ from app.jobs_queue import jobs_queue
 from app import activity
 from app.config import settings
 from subliminal_patch.score import MAX_SCORES
+from subtitles.utils import upload_fake_score
 
 from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
@@ -73,7 +74,7 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                 min_score = settings.translator.min_source_score
                 history = database.execute(
                     scoped(
-                        select(TableHistory.score)
+                        select(TableHistory.score, TableHistory.action)
                         .where(TableHistory.sonarrEpisodeId == episode.sonarrEpisodeId)
                         .where(TableHistory.language.like(f"{translate_cfg['from']}%"))
                         .where(TableHistory.score.is_not(None))
@@ -83,15 +84,25 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                         arr_instance_id,
                     )
                 ).first()
-                if history is not None:
+                # A stored score can predate a change to the local score, so a hand
+                # upload (action 4) is read at the local score the subtitle list shows
+                # for it, not at the score its row stores.
+                local_score = getattr(settings.general, 'local_subtitle_score', 0)
+                if history is not None and history.action == 4:
+                    source_score_pct = round(
+                        upload_fake_score('series', local_score) * 100 / MAX_SCORES['episode'], 1)
+                elif history is not None:
                     source_score_pct = round((history.score / MAX_SCORES['episode']) * 100, 1)
                 else:
-                    # No history record — subtitle may have been manually placed or
-                    # predates history tracking. Treat as exactly at threshold so
-                    # we proceed with translation instead of silently falling
-                    # back to provider search.
+                    # No history record: a sidecar the disk scan found, or a file placed by
+                    # hand. Treat it as exactly at threshold so we proceed with translation
+                    # instead of silently falling back to provider search, whatever
+                    # local_subtitle_score is.
                     source_score_pct = min_score
-                if source_score_pct < min_score:
+                # A hand upload is used below the threshold too, as a sidecar is, when
+                # a local score is set.
+                local_upload = history is not None and history.action == 4 and local_score > 0
+                if source_score_pct < min_score and not local_upload:
                     logging.debug(
                         "BAZARR auto-translate (wanted-scan) skipped for %s: "
                         "source score %s%% < threshold %s%% "

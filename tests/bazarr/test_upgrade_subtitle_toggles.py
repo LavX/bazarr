@@ -65,9 +65,9 @@ def test_already_split_config_is_left_alone():
     'manual, translated, expected',
     [
         (False, False, [1, 3]),
-        (True, False, [1, 2, 3, 4]),
+        (True, False, [1, 2, 3]),
         (False, True, [1, 3, 6]),
-        (True, True, [1, 2, 3, 4, 6]),
+        (True, True, [1, 2, 3, 6]),
     ],
 )
 def test_upgrade_query_actions_split_manual_and_translated(monkeypatch, manual, translated, expected):
