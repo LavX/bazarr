@@ -282,6 +282,44 @@ class _PendingExecutor(_ImmediateExecutor):
         return future
 
 
+@pytest.mark.parametrize('executor_class', [_ImmediateExecutor, _PendingExecutor])
+def test_gate_closure_stops_extraction_and_fails_remaining_items(mass, monkeypatch, executor_class):
+    from app.jobs_queue import JobFailed
+    from subtitles.tools.translate import availability
+
+    pools = _use_executor(monkeypatch, mass, executor_class)
+    gate = availability.TranslationAvailability(True, '')
+
+    def progress(**kwargs):
+        nonlocal gate
+        mass.progress.append(kwargs)
+        if kwargs.get('progress_value') == 1 and '(1/4)' in kwargs.get('progress_message', ''):
+            gate = availability.TranslationAvailability(False, 'Translation was switched off')
+            pools[0].events.append(('gate_closed', 1))
+
+    monkeypatch.setattr(availability, 'translation_available', lambda: gate)
+    monkeypatch.setattr(mass.module.jobs_queue, 'update_job_progress', progress)
+
+    with pytest.raises(JobFailed) as failure:
+        mass.run()
+
+    pool = pools[0]
+    closed_at = pool.events.index(('gate_closed', 1))
+    assert not any(event == 'submit' for event, _ in pool.events[closed_at + 1:])
+    assert [item['sonarr_episode_id'] for item in mass.translated] == [1]
+    assert str(failure.value) == (
+        'Mass translate: 3 of 4 items failed (1 done, 0 skipped). '
+        'ep2.mkv (en track) (Translation was switched off); '
+        'ep3.mkv (en track) (Translation was switched off); '
+        'ep4.mkv (en track) (Translation was switched off)'
+    )
+    assert [number for event, number in pool.events if event == 'consume'] == [1]
+    assert pool.shutdown_calls == [(False, True)]
+    if executor_class is _PendingExecutor:
+        assert [future.cancelled() for future in pool.futures] == [False, True, True]
+    assert mass.published == [(5, {'child_jobs': [101]})]
+
+
 def test_cancellation_from_an_extraction_result_propagates_and_cancels_pending_work(mass, monkeypatch):
     from app.jobs_queue import JobCancelled
 
