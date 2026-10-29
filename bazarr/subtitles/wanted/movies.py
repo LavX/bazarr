@@ -83,7 +83,14 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                         arr_instance_id,
                     )
                 ).first()
-                if history is not None:
+                # A stored score can predate a change to the local score, so a hand
+                # upload (action 4) is read at the local score the subtitle list shows
+                # for it, not at the score its row stores.
+                local_score = getattr(settings.general, 'local_subtitle_score', 0)
+                if history is not None and history.action == 4:
+                    source_score_pct = round(
+                        upload_fake_score('movie', local_score) * 100 / MAX_SCORES['movie'], 1)
+                elif history is not None:
                     source_score_pct = round((history.score / MAX_SCORES['movie']) * 100, 1)
                 else:
                     # No history record: a sidecar the disk scan found, or a file placed by
@@ -91,12 +98,9 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                     # instead of silently falling back to provider search, whatever
                     # local_subtitle_score is.
                     source_score_pct = min_score
-                # A hand upload (action 4) stored at the local score is used below the
-                # threshold too, as a sidecar is. Its stored score is the local score
-                # on the media scale.
-                local_score = getattr(settings.general, 'local_subtitle_score', 0)
-                local_upload = (history is not None and history.action == 4 and local_score > 0
-                                and history.score == upload_fake_score('movie', local_score))
+                # A hand upload is used below the threshold too, as a sidecar is, when
+                # a local score is set.
+                local_upload = history is not None and history.action == 4 and local_score > 0
                 if source_score_pct < min_score and not local_upload:
                     logging.debug(
                         "BAZARR auto-translate (wanted-scan) skipped for %s: "
