@@ -10,6 +10,7 @@ import {
   faLanguage,
   faMagnifyingGlass,
   faRecycle,
+  faStar,
   faTrash,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -24,6 +25,7 @@ enum HistoryAction {
   Translated = 6,
   EmbeddedSource = 7,
   Extracted = 8,
+  ManualScore = 9,
 }
 
 const HistoryIcon: FunctionComponent<{
@@ -68,6 +70,10 @@ const HistoryIcon: FunctionComponent<{
     case HistoryAction.Extracted:
       icon = faFileExport;
       label = "Extracted";
+      break;
+    case HistoryAction.ManualScore:
+      icon = faStar;
+      label = "Manual Score";
       break;
     default:
       icon = faClosedCaptioning;
