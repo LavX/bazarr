@@ -923,8 +923,10 @@ def test_translation_is_unscored_even_with_the_local_score_set(scored_media, loc
 
 
 def test_upload_counts_at_the_local_score_and_shadows_an_older_download(scored_media, local_score):
+    # The download scores 20, below the local score of 40. Without shadowing the
+    # lowest score would be the download's 20; with it the upload's 40 wins.
     add, score, _ = scored_media
     local_score(40)
-    add(1, 1, 80, 100)
+    add(1, 1, 20, 100)
     add(2, 4, 100, 100)
     assert score() == 40.0
