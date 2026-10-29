@@ -2,8 +2,9 @@
 """Hand uploads (history action 4) are final.
 
 An upload replaces the file at its path, so it is never an upgrade candidate,
-whatever upgrade_manual says, and it ends the candidacy of an older row of the
-same video and language, the way an extraction does.
+whatever upgrade_manual says. With upgrade_manual on it also ends the candidacy
+of an older row of the same video and language, the way an extraction does, and
+retires a translation. With upgrade_manual off it does neither.
 """
 # ruff: noqa: F811
 import pytest
@@ -47,10 +48,17 @@ def test_a_download_replaced_by_a_later_upload_is_not_a_candidate(upgrade_db, mo
     upgrade_db.execute(insert(TableHistory).values(**_episode_row(1, 60, 90, 101)))
     upgrade_db.execute(insert(TableHistory).values(**_episode_row(4, 1, 90, 102)))
 
-    assert get_upgradable_movies_subtitles() == {}
-    assert get_upgradable_episode_subtitles() == {}
     candidates = get_upgradable_media_ids()
-    assert candidates["movies"] == [] and candidates["series"] == []
+    if upgrade_manual:
+        assert get_upgradable_movies_subtitles() == {}
+        assert get_upgradable_episode_subtitles() == {}
+        assert candidates["movies"] == [] and candidates["series"] == []
+    else:
+        # With manual upgrades off an upload is not evidence, so the download
+        # stays the latest row of its language and remains a candidate.
+        assert get_upgradable_movies_subtitles() == {201: None}
+        assert get_upgradable_episode_subtitles() == {101: None}
+        assert candidates["movies"] == [30] and candidates["series"] == [10]
 
 
 @pytest.mark.parametrize("upgrade_manual", [True, False], ids=["manual-on", "manual-off"])
@@ -89,7 +97,8 @@ def test_an_upload_retires_an_older_translation_of_the_same_episode_language(upg
     upgrade_db.execute(insert(TableHistory).values(**_episode_row(4, 60, 90, 101)))
     upgrade_db.execute(insert(TableHistory).values(**_episode_row(6, 1, None, 102)))
 
-    assert 102 not in get_upgradable_episode_subtitles()
+    # With manual upgrades off the upload does not retire the translation.
+    assert (102 in get_upgradable_episode_subtitles()) is not upgrade_manual
 
 
 @pytest.mark.parametrize("upgrade_manual", [True, False], ids=["manual-on", "manual-off"])
@@ -103,7 +112,8 @@ def test_an_upload_retires_an_older_translation_of_the_same_movie_language(upgra
     upgrade_db.execute(insert(TableHistoryMovie).values(**_movie_row(4, 60, 90, 201)))
     upgrade_db.execute(insert(TableHistoryMovie).values(**_movie_row(6, 1, None, 202)))
 
-    assert 202 not in get_upgradable_movies_subtitles()
+    # With manual upgrades off the upload does not retire the translation.
+    assert (202 in get_upgradable_movies_subtitles()) is not upgrade_manual
 
 
 @pytest.mark.parametrize("upgrade_manual", [True, False], ids=["manual-on", "manual-off"])
