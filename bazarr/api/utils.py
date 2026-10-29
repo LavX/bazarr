@@ -723,6 +723,9 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         ).all())
 
     lowest = {}
+    # The configured local score is one global percent: it scores a sidecar the
+    # disk scan found and a hand upload alike, and 0 leaves both unscored.
+    local_score = getattr(settings.general, 'local_subtitle_score', 0)
     # (item_id, kind, key) already resolved: the newest record wins, so an older
     # record for the same subtitle is ignored even when the newest had no score.
     seen = set()
@@ -764,9 +767,16 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         # the downloaded file and must also shadow its old provider score. A
         # file extracted from an embedded track (8) replaces it too, and its
         # score is the track's, as on the detail pages.
-        if row.action not in (1, 2, 3, 7, 8, MANUAL_SCORE_ACTION) or row.score is None:
+        if row.action == 4:
+            # A hand upload (4) is scored at the configured local score, the
+            # same as a sidecar, and never at the score its row stores. Without
+            # that setting it only shadows.
+            if local_score <= 0:
+                continue
+            percent = float(local_score)
+        elif row.action not in (1, 2, 3, 7, 8, MANUAL_SCORE_ACTION) or row.score is None:
             continue
-        if row.score == 0:
+        elif row.score == 0:
             # Older history writers leave score_out_of unset for a real zero.
             percent = 0.0
         elif not row.score_out_of:
@@ -778,7 +788,6 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
             lowest[row.item_id] = percent
     # A current file subtitle with no history record at all (a sidecar the disk
     # scan found) takes the configured local score, when that is set above 0.
-    local_score = getattr(settings.general, 'local_subtitle_score', 0)
     if local_score > 0:
         for item_id, names in current_paths.items():
             for name in names:

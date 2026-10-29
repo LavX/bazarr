@@ -489,12 +489,14 @@ def _extracted_paths(table, media_column, media):
 
 
 def _provider_sourced_actions(query_actions):
-    """The actions that mean a provider supplied the file.
+    """The actions whose rows retire a translated row: real subtitle files.
 
-    Action 6 is machine output, so it is never one of them, and the manual
-    actions only appear here when the user opted into upgrading them.
+    That is every candidate action except the translation (6), plus a hand
+    upload (UPLOAD_ACTION). The manual download actions only appear here when
+    the user opted into upgrading them. An upload is never a candidate, but it
+    is a real subtitle, so it retires a translation whatever upgrade_manual says.
     """
-    return [action for action in query_actions if action != 6]
+    return [action for action in query_actions if action != 6] + [UPLOAD_ACTION]
 
 
 def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
@@ -515,11 +517,12 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
     same score, every upgrade run, which is the loop this returns the ids to
     break.
 
-    One provider sourced row for the same video, instance and language is what
-    retires the translated row, so a translation is replaced by a real subtitle
-    once rather than once per cycle. The language comparison ignores the :hi and
-    :forced variant and runs here, in Python: no portable SQL expression for it
-    reads the same on SQLite and PostgreSQL. The timestamp bound only keeps the
+    One row of provider_actions for the same video, instance and language is
+    what retires the translated row (see _provider_sourced_actions for what
+    those are, hand uploads included), so a translation is replaced by a real
+    subtitle once rather than once per cycle. The language comparison ignores
+    the :hi and :forced variant and runs here, in Python: no portable SQL
+    expression for it reads the same on SQLite and PostgreSQL. The timestamp bound only keeps the
     read inside the upgrade window the candidates themselves are drawn from.
     """
     translated_rows = [row for row in rows if row.action == 6]
