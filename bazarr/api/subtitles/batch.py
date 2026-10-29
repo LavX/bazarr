@@ -189,6 +189,7 @@ def get_upgradable_media_ids():
         latest_row_actions,
         newer_embedded_source,
         _ai_translated_subtitles_are_upgrade_candidates,
+        _manually_pinned_rows,
     )
     minimum_timestamp, query_actions = get_queries_condition_parameters()
     # With a valid AI translated penalty the upgrade jobs take an AI translated
@@ -212,9 +213,14 @@ def get_upgradable_media_ids():
     if allow_high_score_ai:
         movie_score_conditions.append(TableHistoryMovie.ai_translated.is_(True))
 
-    movie_results = database.execute(
-        select(TableHistoryMovie.radarrId, TableHistoryMovie.arr_instance_id)
-        .distinct()
+    movie_rows = database.execute(
+        select(TableHistoryMovie.id,
+               TableHistoryMovie.radarrId,
+               TableHistoryMovie.arr_instance_id,
+               TableHistoryMovie.video_path,
+               TableHistoryMovie.language,
+               TableHistoryMovie.subtitles_path,
+               TableHistoryMovie.timestamp)
         .join(TableMovies, onclause=and_(
             TableHistoryMovie.radarrId == TableMovies.radarrId,
             TableHistoryMovie.arr_instance_id == TableMovies.arr_instance_id,
@@ -231,6 +237,11 @@ def get_upgradable_media_ids():
             or_(*movie_score_conditions),
         ))
     ).all()
+    # A candidate the user pinned a score on is not offered to the upgrade job,
+    # so the marker leaves it out too.
+    pinned_movie_ids = _manually_pinned_rows(TableHistoryMovie, movie_rows)
+    movie_results = list({(r.radarrId, r.arr_instance_id): r
+                          for r in movie_rows if r.id not in pinned_movie_ids}.values())
     movie_ids = [r.radarrId for r in movie_results]
     movie_keys = [
         {'radarrId': r.radarrId, 'arr_instance_id': r.arr_instance_id}
@@ -254,9 +265,14 @@ def get_upgradable_media_ids():
     if allow_high_score_ai:
         episode_score_conditions.append(TableHistory.ai_translated.is_(True))
 
-    series_results = database.execute(
-        select(TableHistory.sonarrSeriesId, TableHistory.arr_instance_id)
-        .distinct()
+    episode_rows = database.execute(
+        select(TableHistory.id,
+               TableHistory.sonarrSeriesId,
+               TableHistory.arr_instance_id,
+               TableHistory.video_path,
+               TableHistory.language,
+               TableHistory.subtitles_path,
+               TableHistory.timestamp)
         .join(TableEpisodes, onclause=and_(
             TableHistory.sonarrEpisodeId == TableEpisodes.sonarrEpisodeId,
             TableHistory.arr_instance_id == TableEpisodes.arr_instance_id,
@@ -273,6 +289,10 @@ def get_upgradable_media_ids():
             or_(*episode_score_conditions),
         ))
     ).all()
+    # The same pin rule as the movies above.
+    pinned_episode_ids = _manually_pinned_rows(TableHistory, episode_rows)
+    series_results = list({(r.sonarrSeriesId, r.arr_instance_id): r
+                           for r in episode_rows if r.id not in pinned_episode_ids}.values())
     series_ids = [r.sonarrSeriesId for r in series_results]
     series_keys = [
         {'sonarrSeriesId': r.sonarrSeriesId, 'arr_instance_id': r.arr_instance_id}
