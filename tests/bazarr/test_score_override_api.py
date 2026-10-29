@@ -6,7 +6,7 @@ import pytest
 from flask import Flask
 from sqlalchemy import select
 
-from app.database import TableHistoryMovie, TableMovies
+from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows
 from subtitles.score_override import MANUAL_SCORE_ACTION
 
 HEADERS = {"X-API-KEY": "synthetic-bazarr-key"}
@@ -173,3 +173,172 @@ def test_score_override_refuses_an_empty_subtitles_path(score_api, path):
 
     assert response.status_code == 400
     assert _manual_rows(session) == []
+
+
+def _add_movie(session, subtitles=None):
+    session.add(
+        TableMovies(
+            id=1,
+            arr_instance_id=1,
+            radarrId=7,
+            title="A",
+            path="/movies/a.mkv",
+            tmdbId="1",
+            subtitles=str(subtitles or [["en", "/movies/a.en.srt", 100]]),
+        )
+    )
+    session.commit()
+
+
+def _add_episode(session):
+    session.add(TableShows(id=10, arr_instance_id=1, sonarrSeriesId=10, path="/series/show", title="Show"))
+    session.add(
+        TableEpisodes(
+            id=20,
+            series_id=10,
+            arr_instance_id=1,
+            episode=1,
+            monitored="True",
+            path="/series/show/s01e01.mkv",
+            season=1,
+            sonarrEpisodeId=20,
+            sonarrSeriesId=10,
+            title="Pilot",
+            subtitles=str([["en", "/series/show/s01e01.en.srt", 100]]),
+        )
+    )
+    session.commit()
+
+
+def _manual_history_rows(session):
+    return session.execute(
+        select(
+            TableHistory.action,
+            TableHistory.score,
+            TableHistory.score_out_of,
+            TableHistory.episode_id,
+            TableHistory.sonarrEpisodeId,
+            TableHistory.language,
+            TableHistory.subtitles_path,
+        ).where(TableHistory.action == MANUAL_SCORE_ACTION)
+    ).all()
+
+
+def test_score_override_stores_the_episode_row_through_sonarr_episode_id(score_api):
+    client, session = score_api
+    _add_episode(session)
+
+    response = client.post(
+        ROOT,
+        json={"sonarrEpisodeId": 20, "subtitlesPath": "/series/show/s01e01.en.srt", "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 204
+    assert _manual_history_rows(session) == [
+        (
+            MANUAL_SCORE_ACTION,
+            round(360 * 40 / 100),
+            360,
+            20,
+            20,
+            "en",
+            "/series/show/s01e01.en.srt",
+        )
+    ]
+
+
+def test_score_override_stores_the_movie_row_on_the_movie_scale(score_api):
+    client, session = score_api
+    _add_movie(session)
+
+    response = client.post(
+        ROOT,
+        json={"radarrMovieId": 7, "subtitlesPath": "/movies/a.en.srt", "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 204
+    assert session.execute(
+        select(
+            TableHistoryMovie.action,
+            TableHistoryMovie.score,
+            TableHistoryMovie.score_out_of,
+            TableHistoryMovie.movie_id,
+            TableHistoryMovie.language,
+            TableHistoryMovie.subtitles_path,
+        ).where(TableHistoryMovie.action == MANUAL_SCORE_ACTION)
+    ).all() == [(MANUAL_SCORE_ACTION, round(180 * 40 / 100), 180, 1, "en", "/movies/a.en.srt")]
+
+
+def test_score_override_refuses_a_request_with_neither_id(score_api):
+    client, session = score_api
+    _add_movie(session)
+    _add_episode(session)
+
+    response = client.post(
+        ROOT,
+        json={"subtitlesPath": "/movies/a.en.srt", "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 400
+    assert _manual_rows(session) == []
+    assert _manual_history_rows(session) == []
+
+
+def test_score_override_refuses_a_request_with_both_ids(score_api):
+    client, session = score_api
+    _add_movie(session)
+    _add_episode(session)
+
+    response = client.post(
+        ROOT,
+        json={
+            "radarrMovieId": 7,
+            "sonarrEpisodeId": 20,
+            "subtitlesPath": "/movies/a.en.srt",
+            "score": 40,
+        },
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 400
+    assert _manual_rows(session) == []
+    assert _manual_history_rows(session) == []
+
+
+def test_score_override_emits_a_movie_history_event(score_api, monkeypatch):
+    import subtitles.score_override as score_override
+
+    events = []
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: events.append(kwargs))
+    client, session = score_api
+    _add_movie(session)
+
+    response = client.post(
+        ROOT,
+        json={"radarrMovieId": 7, "subtitlesPath": "/movies/a.en.srt", "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 204
+    assert events == [{"type": "movie-history"}]
+
+
+def test_score_override_emits_an_episode_history_event(score_api, monkeypatch):
+    import subtitles.score_override as score_override
+
+    events = []
+    monkeypatch.setattr(score_override, "event_stream", lambda **kwargs: events.append(kwargs))
+    client, session = score_api
+    _add_episode(session)
+
+    response = client.post(
+        ROOT,
+        json={"sonarrEpisodeId": 20, "subtitlesPath": "/series/show/s01e01.en.srt", "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 204
+    assert events == [{"type": "episode-history"}]

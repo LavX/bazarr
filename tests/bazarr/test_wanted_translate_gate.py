@@ -503,3 +503,81 @@ def test_a_hand_upload_at_the_local_score_below_the_threshold_still_translates_a
 
     translations.assert_called_once()
     assert searches == [[]]
+
+
+def _insert_hand_upload(session, model, score, score_out_of, video_path, subtitles_path):
+    from datetime import datetime
+
+    from sqlalchemy import insert
+
+    if model == "movie":
+        from app.database import TableHistoryMovie as table
+        keys = dict(radarrId=30, video_path=video_path)
+    else:
+        from app.database import TableHistory as table
+        keys = dict(sonarrSeriesId=10, sonarrEpisodeId=20, video_path=video_path)
+    session.execute(insert(table).values(
+        action=4, description="Subtitle uploaded manually.", language="en", provider=None,
+        score=score, score_out_of=score_out_of, arr_instance_id=1, timestamp=datetime.now(),
+        subtitles_path=subtitles_path, **keys))
+    session.commit()
+
+
+def test_a_hand_upload_follows_the_local_score_when_the_local_score_changes_for_a_movie(
+        schema_session, monkeypatch):
+    """The upload was stored at local 60 (108 of 180). The local score is now
+    40, so the list scores the upload at 40% and the gate reads it the same way."""
+    from subliminal_patch.score import MAX_SCORES
+
+    _insert_hand_upload(schema_session, "movie", round(MAX_SCORES["movie"] * 60 / 100),
+                        MAX_SCORES["movie"], "/movies/fixture.mkv", "/movies/fixture.en.srt")
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_movies, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=40),
+        translator=SimpleNamespace(min_source_score=70),
+    ))
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_hand_upload_at_local_zero_is_read_at_full_scale_for_a_movie(schema_session, monkeypatch):
+    """With the local score at 0 a hand upload is scored at the full scale, so
+    it clears a threshold of 70 whatever the stored score."""
+    from subliminal_patch.score import MAX_SCORES
+
+    _insert_hand_upload(schema_session, "movie", MAX_SCORES["movie"], MAX_SCORES["movie"],
+                        "/movies/fixture.mkv", "/movies/fixture.en.srt")
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_movies, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=0),
+        translator=SimpleNamespace(min_source_score=70),
+    ))
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_hand_upload_follows_the_local_score_when_the_local_score_changes_for_an_episode(
+        schema_session, monkeypatch):
+    """The upload was stored at local 60 (216 of 360). The local score is now
+    40, so the list scores the upload at 40% and the gate reads it the same way."""
+    from subliminal_patch.score import MAX_SCORES
+
+    _insert_hand_upload(schema_session, "episode", round(MAX_SCORES["episode"] * 60 / 100),
+                        MAX_SCORES["episode"], "/series/fixture/s01e01.mkv",
+                        "/series/fixture/s01e01.en.srt")
+    searches, translations = [], Mock()
+    wanted_series = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_series, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=40),
+        translator=SimpleNamespace(min_source_score=70),
+    ))
+    wanted_series._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
