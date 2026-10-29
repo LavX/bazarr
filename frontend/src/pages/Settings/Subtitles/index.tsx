@@ -305,6 +305,7 @@ const SettingsSubtitlesView: FunctionComponent = () => {
       </Section>
       <Section header="Local Subtitle Score">
         <Number
+          label="Local subtitle score (%)"
           settingKey="settings-general-local_subtitle_score"
           min={0}
           max={100}
