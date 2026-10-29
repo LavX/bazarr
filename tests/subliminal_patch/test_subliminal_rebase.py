@@ -390,14 +390,23 @@ def test_subliminal_subtitle_module_exposes_the_compat_language_type():
     assert subliminal.subtitle.LanguageType is LanguageType
 
 
-def test_cache_pickle_written_under_subliminal_26_loads_as_the_compat_enum():
-    import pickle
-    from subliminal_patch.subtitle import LanguageType
-
+@pytest.mark.parametrize("payload", [
     # Protocol 2 pickle of subliminal 2.6's LanguageType.NORMAL, written by hand
     # so that 2.6 is not needed: GLOBAL subliminal.subtitle.LanguageType, the
-    # value 'normal', TUPLE1, REDUCE, STOP. This is what Enum.__reduce_ex__ emits.
-    payload = b"\x80\x02csubliminal.subtitle\nLanguageType\nX\x06\x00\x00\x00normal\x85R."
+    # value 'normal', TUPLE1, REDUCE, STOP. It has the opcodes of the protocol 2
+    # output of Enum.__reduce_ex__, without that output's memo entries.
+    pytest.param(b"\x80\x02csubliminal.subtitle\nLanguageType\nX\x06\x00\x00\x00normal\x85R.",
+                 id="protocol-2"),
+    # Protocol 5 pickle of the same member, as fcache writes it on Python 3.14
+    # (pickle.dumps with no protocol argument). Generated once from a stub
+    # LanguageType whose __module__ is 'subliminal.subtitle' and whose NORMAL
+    # value is 'normal', so it uses STACK_GLOBAL and memo frames.
+    pytest.param(b'\x80\x05\x955\x00\x00\x00\x00\x00\x00\x00\x8c\x13subliminal.subtitle\x94\x8c\x0cLanguageType\x94\x93\x94\x8c\x06normal\x94\x85\x94R\x94.',
+                 id="protocol-5"),
+])
+def test_cache_pickle_written_under_subliminal_26_loads_as_the_compat_enum(payload):
+    import pickle
+    from subliminal_patch.subtitle import LanguageType
 
     assert pickle.loads(payload) is LanguageType.NORMAL
 
@@ -417,7 +426,7 @@ def test_compat_download_applies_no_upstream_category_filter_to_a_scored_candida
         return []
 
     monkeypatch.setattr(subliminal.core.ProviderPool, "download_best_subtitles", record)
-    monkeypatch.setattr(subliminal.core, "filter_and_sort_categories", record, raising=False)
+    monkeypatch.setattr(subliminal.core, "filter_and_sort_categories", record)
 
     fake = _Waterfall(monkeypatch, {"a": [_Candidate("a", "a1")]})
     sink = []
