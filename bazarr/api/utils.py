@@ -583,7 +583,8 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
 
     Mirrors what the detail pages show. For every item, per current subtitle:
       * file subtitles -> the newest replacement/deletion record for a current
-        file; only downloads (action 1/2/3) supply a score. Sync (5) preserves it;
+        file; only downloads (action 1/2/3) and manual scores (action 9) supply
+        a score. Sync (5) preserves it;
       * embedded tracks -> the newest source record (action 7) whose language
         the item still has as an embedded track (a subtitles entry with an
         empty path). A forced and HI track is recorded under its forced code;

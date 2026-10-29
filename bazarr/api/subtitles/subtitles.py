@@ -866,11 +866,18 @@ class SubtitleScoreOverride(Resource):
     post_request_parser.add_argument(
         "score", type=int, required=True, help="Manual score, a percentage from 0 to 100"
     )
+    post_request_parser.add_argument(
+        "arr_instance_id",
+        type=int,
+        required=False,
+        help="Owning Sonarr/Radarr instance id",
+    )
 
     @authenticate
     @api_ns_subtitles.doc(parser=post_request_parser)
     @api_ns_subtitles.response(204, "Score set")
-    @api_ns_subtitles.response(400, "Give exactly one of radarrMovieId or sonarrEpisodeId, and a score from 0 to 100")
+    @api_ns_subtitles.response(400, "Give exactly one of radarrMovieId or sonarrEpisodeId, a non-empty "
+                                    "subtitlesPath, and a score from 0 to 100")
     @api_ns_subtitles.response(401, "Not Authenticated")
     @api_ns_subtitles.response(404, "Movie or episode not found, or the path is not listed for it")
     def post(self):
@@ -879,13 +886,20 @@ class SubtitleScoreOverride(Resource):
         movie_id = args.get("radarrMovieId")
         episode_id = args.get("sonarrEpisodeId")
         score = args.get("score")
+        subtitles_path = args.get("subtitlesPath")
+        arr_instance_id = args.get("arr_instance_id")
         if (movie_id is None) == (episode_id is None):
             return "Give exactly one of radarrMovieId or sonarrEpisodeId.", 400
+        # reqparse accepts null and empty values for a required argument, and an
+        # empty path would match an embedded track's listing, so refuse it here.
+        if not subtitles_path:
+            return "The subtitlesPath must be a listed subtitle file path.", 400
         if not 0 <= score <= 100:
             return "The score must be a percentage from 0 to 100.", 400
         media, item_id = ("movie", movie_id) if movie_id is not None else ("episode", episode_id)
         try:
-            set_score_override(database, media, item_id, args.get("subtitlesPath"), score)
+            set_score_override(database, media, item_id, subtitles_path, score,
+                               arr_instance_id=arr_instance_id)
         except (LookupError, ValueError) as error:
             return str(error), 404
         return '', 204

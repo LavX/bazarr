@@ -19,6 +19,7 @@ from datetime import datetime
 from sqlalchemy import insert, select
 
 from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies
+from arr_instances.resolution import scoped
 from subliminal_patch.score import MAX_SCORES
 
 # Not a provider action and not a translation: only the score filter and the
@@ -33,32 +34,39 @@ def _listed_language(listing, subtitles_path):
     except (ValueError, SyntaxError):
         entries = []
     for entry in entries:
-        if entry and len(entry) >= 2 and entry[1] == subtitles_path:
+        # An embedded track is listed with no path, so only a real path counts.
+        if entry and len(entry) >= 2 and entry[1] and entry[1] == subtitles_path:
             return entry[0]
     raise ValueError(f"{subtitles_path} is not a subtitle listed for this media")
 
 
-def set_score_override(database, media, item_id, subtitles_path, score_percent):
+def set_score_override(database, media, item_id, subtitles_path, score_percent, arr_instance_id=None):
     """Pin ``score_percent`` (0 to 100) on one listed subtitle.
 
     ``media`` is 'movie' (``item_id`` is the Radarr movie id) or 'episode'
-    (``item_id`` is the Sonarr episode id). ``subtitles_path`` must match a
-    path in the item's stored subtitles listing exactly.
+    (``item_id`` is the Sonarr episode id). ``arr_instance_id`` names the
+    owning instance, since upstream ids repeat across instances; None keeps
+    the unscoped lookup. ``subtitles_path`` must be a non-empty path matching
+    a path in the item's stored subtitles listing exactly.
     """
     if media not in ("movie", "episode"):
         raise ValueError(f"unknown media type: {media}")
     if not 0 <= score_percent <= 100:
         raise ValueError("score must be a percentage from 0 to 100")
+    if not subtitles_path:
+        raise ValueError("a subtitles path is required")
 
     if media == "movie":
-        item = database.execute(
+        item = database.execute(scoped(
             select(
                 TableMovies.id,
                 TableMovies.path,
                 TableMovies.arr_instance_id,
                 TableMovies.subtitles,
-            ).where(TableMovies.radarrId == item_id)
-        ).first()
+            ).where(TableMovies.radarrId == item_id),
+            TableMovies.arr_instance_id,
+            arr_instance_id,
+        )).first()
         if item is None:
             raise LookupError(f"no movie with radarr id {item_id}")
         language = _listed_language(item.subtitles, subtitles_path)
@@ -80,7 +88,7 @@ def set_score_override(database, media, item_id, subtitles_path, score_percent):
             )
         )
     else:
-        item = database.execute(
+        item = database.execute(scoped(
             select(
                 TableEpisodes.id,
                 TableEpisodes.series_id,
@@ -88,8 +96,10 @@ def set_score_override(database, media, item_id, subtitles_path, score_percent):
                 TableEpisodes.path,
                 TableEpisodes.arr_instance_id,
                 TableEpisodes.subtitles,
-            ).where(TableEpisodes.sonarrEpisodeId == item_id)
-        ).first()
+            ).where(TableEpisodes.sonarrEpisodeId == item_id),
+            TableEpisodes.arr_instance_id,
+            arr_instance_id,
+        )).first()
         if item is None:
             raise LookupError(f"no episode with sonarr episode id {item_id}")
         language = _listed_language(item.subtitles, subtitles_path)
