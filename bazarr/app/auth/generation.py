@@ -346,6 +346,20 @@ def keep_current_session_signed_in(was_in_force, advance):
         session[GENERATION_KEY] = advance.number
 
 
+# Session keys that older releases stored. _pw_for_upgrade held the admin's
+# plaintext password, and browsers that declined the upgrade still carry it.
+LEGACY_UPGRADE_KEYS = ('_pw_for_upgrade', '_upgrade_token')
+
+
+def session_cookie_must_expire(session_object):
+    """True when the cookie opened for this request carried a legacy upgrade key.
+
+    The response then deletes the session cookie instead of renewing it, unless
+    the request itself wrote a new session, which replaces the cookie as usual.
+    """
+    return bool(getattr(session_object, 'expire_cookie_on_save', False))
+
+
 def open_session_cleanup(session_object):
     """Called when a cookie is opened: normalise it or refuse it.
 
@@ -360,10 +374,20 @@ def open_session_cleanup(session_object):
     because the gate refuses it, so leaving it in the browser costs nothing; the
     next sign-in replaces it.
 
+    A cookie that carries a key from an older release (see LEGACY_UPGRADE_KEYS)
+    is the exception. Its contents are emptied here, so nothing in it, the
+    password included, reaches a handler or is written back, and it is marked so
+    that the response expires the cookie: a browser that declined the upgrade
+    must not keep that copy of the password.
+
     A session with no generation is pre-upgrade; it is given an explicit 0
     here so a later stamp in the same request cannot mistake it for a new one.
     """
     if not session_object:
+        return session_object
+    if any(key in session_object for key in LEGACY_UPGRADE_KEYS):
+        session_object.clear()
+        session_object.expire_cookie_on_save = True
         return session_object
     current = current_generation()
     if current is None or not _carries(session_object.get(GENERATION_KEY, 0), current):
