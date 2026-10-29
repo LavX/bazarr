@@ -8,6 +8,7 @@ describe("HistoryIcon", () => {
     [6, "Translated"],
     [7, "Embedded Source"],
     [8, "Extracted"],
+    [9, "Manual Score"],
     [99, "Unknown"],
   ])("names action %i %s", (action, label) => {
     customRender(<HistoryIcon action={action} />);
