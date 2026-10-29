@@ -377,16 +377,14 @@ def get_queries_condition_parameters():
     days_to_upgrade_subs = settings.general.days_to_upgrade_subs
     minimum_timestamp = (datetime.now() - timedelta(days=int(days_to_upgrade_subs)))
 
-    # action=7 (EmbeddedSource) and action=8 (Extracted) intentionally excluded:
-    # an embedded track and a file copied out of one are source quality and
-    # should not be upgraded. Manual downloads/uploads (2, 4) and translations
-    # (6) are separate opt-ins; both default off on a new install.
+    # action=4 (Upload), action=7 (EmbeddedSource) and action=8 (Extracted) are
+    # never candidates: an upload is the user's final file, and an embedded
+    # track and a file copied out of one are source quality. Manual downloads
+    # (2) and translations (6) are opt-ins; both default off on a new install.
     query_actions = [1]
     if getattr(settings.general, 'upgrade_manual', False):
         query_actions.append(2)
     query_actions.append(3)
-    if getattr(settings.general, 'upgrade_manual', False):
-        query_actions.append(4)
     if getattr(settings.general, 'upgrade_translated', False):
         query_actions.append(6)
 
@@ -400,10 +398,19 @@ def get_queries_condition_parameters():
 # fall back to the extracted file and replace it with a download.
 EXTRACTED_ACTION = 8
 
+# A hand upload replaces the file at its path, so it is final in the same way:
+# it is never a candidate (whatever upgrade_manual says), and it ends the
+# candidacy of any older row of the same video and language.
+UPLOAD_ACTION = 4
+
 
 def latest_row_actions(query_actions):
-    """The actions that decide which row is the latest for a video and language."""
-    return [*query_actions, EXTRACTED_ACTION]
+    """The actions that decide which row is the latest for a video and language.
+
+    Uploads and extractions always count here, though neither is ever a
+    candidate, so a newer one ends the candidacy of an older download.
+    """
+    return [*query_actions, UPLOAD_ACTION, EXTRACTED_ACTION]
 
 
 # An Embedded Source row records that the video carries a track of its
