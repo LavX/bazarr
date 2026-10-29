@@ -599,6 +599,7 @@ jobs:
             tests/bazarr/test_upgrade_subtitle_toggles.py \
             tests/subliminal_patch/test_animetosho.py \
             tests/subliminal_patch/test_core.py \
+            tests/test_save_hi_metadata.py \
             tests/subliminal_patch/test_prioritized_satisfaction.py \
             tests/subliminal_patch/test_core_persistent.py \
             tests/subliminal_patch/test_opensubtitles_scraper.py \
