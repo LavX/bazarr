@@ -19,6 +19,7 @@ from datetime import datetime
 from sqlalchemy import insert, select
 
 from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies
+from app.event_handler import event_stream
 from arr_instances.resolution import scoped
 from subliminal_patch.score import MAX_SCORES
 
@@ -129,3 +130,4 @@ def set_score_override(
             )
         )
     database.commit()
+    event_stream(type='movie-history' if media == 'movie' else 'episode-history')
