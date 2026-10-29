@@ -806,6 +806,67 @@ def test_a_legacy_request_in_flight_during_a_revocation_is_not_renewed(server):
     assert _renewed_cookie(answered["response"]) is None
 
 
+def _legacy_upgrade_cookie(app, **contents):
+    """A cookie carrying the keys older releases stored, signed with the server's own key."""
+    return app.session_interface.get_signing_serializer(app).dumps(contents)
+
+
+def _expired_session_cookie(response):
+    """True when the response deletes the session cookie: an empty value that expired in 1970."""
+    headers = _session_cookie_headers(response)
+    return (len(headers) == 1 and headers[0].split(";", 1)[0] == "session="
+            and "Max-Age=0" in headers[0] and "1970" in headers[0])
+
+
+def test_a_legacy_upgrade_cookie_is_expired_not_reissued_by_a_normal_request(server):
+    """Older releases kept the plaintext password under _pw_for_upgrade; no request may re-sign it."""
+    cookie = _legacy_upgrade_cookie(server, logged_in=True, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).get("/_keys", headers=_with_cookie(cookie))
+
+    assert json.loads(response.get_data(as_text=True)) == []
+    assert _renewed_cookie(response) is None
+    assert _expired_session_cookie(response)
+
+
+def test_logout_with_a_legacy_upgrade_cookie_expires_it(server):
+    """A browser that declined the upgrade still holds the old key; logout must delete the cookie."""
+    cookie = _legacy_upgrade_cookie(server, logged_in=True, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).post(ACCOUNT_URL, data={"action": "logout"}, headers=_with_cookie(cookie))
+
+    assert response.status_code == 204
+    assert _expired_session_cookie(response)
+
+
+def test_a_refused_request_with_a_legacy_upgrade_cookie_leaks_neither_key_nor_password(server):
+    cookie = _legacy_upgrade_cookie(server, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).get("/_gate", headers=_with_cookie(cookie))
+
+    assert response.get_data(as_text=True) == "closed"
+    body_and_headers = response.get_data(as_text=True) + "".join(
+        f"{name}: {value}" for name, value in response.headers.items())
+    assert "hunter2" not in body_and_headers
+    assert "stale-token" not in body_and_headers
+    renewed = _renewed_cookie(response)
+    payload = server.session_interface.get_signing_serializer(server).loads(renewed) if renewed else {}
+    assert "_pw_for_upgrade" not in payload
+    assert "_upgrade_token" not in payload
+
+
+def test_a_cookie_without_the_legacy_keys_is_not_expired_by_logout(server):
+    """Guards the deliberate choice: only a cookie that carries the old keys is ever expired."""
+    client = server.test_client()
+    assert _login(client).status_code == 204
+    copy = _cookie_value(client)
+
+    response = _bare_client(server).post(ACCOUNT_URL, data={"action": "logout"}, headers=_with_cookie(copy))
+
+    assert response.status_code == 204
+    assert _session_cookie_headers(response) == []
+
+
 # ---------------------------------------------------------------------------
 # Password change and auth-type change
 # ---------------------------------------------------------------------------
