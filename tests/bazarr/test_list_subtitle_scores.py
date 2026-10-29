@@ -885,3 +885,46 @@ def test_override_pins_subtitle_score_in_lowest_scores(schema_session, monkeypat
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
 
     assert result["data"][0]["lowest_subtitle_score"] == 40.0
+
+
+# --------------------------------------------------------------------------- #
+# Hand uploads and the local score                                             #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def local_score(monkeypatch):
+    from app.config import settings as app_settings
+
+    def set_score(value):
+        monkeypatch.setitem(app_settings.general, "local_subtitle_score", value)
+
+    return set_score
+
+
+def test_upload_counts_at_the_local_score_when_it_is_set(scored_media, local_score):
+    add, score, _ = scored_media
+    local_score(40)
+    add(1, 4, 100, 100)
+    assert score() == 40.0
+
+
+def test_upload_is_unscored_when_the_local_score_is_zero(scored_media, local_score):
+    add, score, _ = scored_media
+    local_score(0)
+    add(1, 4, 100, 100)
+    assert score() is None
+
+
+def test_translation_is_unscored_even_with_the_local_score_set(scored_media, local_score):
+    add, score, _ = scored_media
+    local_score(40)
+    add(1, 6, 100, 100)
+    assert score() is None
+
+
+def test_upload_counts_at_the_local_score_and_shadows_an_older_download(scored_media, local_score):
+    add, score, _ = scored_media
+    local_score(40)
+    add(1, 1, 80, 100)
+    add(2, 4, 100, 100)
+    assert score() == 40.0
