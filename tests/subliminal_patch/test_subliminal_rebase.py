@@ -1,7 +1,6 @@
 import pytest
 import subliminal
 import subliminal_patch
-from subliminal.subtitle import SubtitleCategory
 from subzero.language import Language
 
 
@@ -360,50 +359,74 @@ def test_patched_subtitle_accepts_upstream_26_constructor_shape():
 
 # hearing_impaired and foreign_only are True, False or None on compat subtitles.
 # None means the provider did not say, so it must stay distinct from False.
-@pytest.mark.parametrize("hearing_impaired, foreign_only, expected_hi, expected_fo", [
-    (None, None, None, None),
-    (False, False, False, False),
-    (False, None, False, False),
-    (True, None, True, False),
-    (None, True, False, True),
+@pytest.mark.parametrize("hearing_impaired, foreign_only, expected_hi, expected_fo, expected_category", [
+    (None, None, None, None, "NARRATIVE"),
+    (False, False, False, False, "NARRATIVE"),
+    (False, None, False, False, "NARRATIVE"),
+    (True, None, True, False, "HEARING_IMPAIRED"),
+    (None, True, False, True, "FOREIGN_ONLY"),
 ])
 def test_compat_subtitle_keeps_hearing_impaired_and_foreign_only_tri_state(
-        hearing_impaired, foreign_only, expected_hi, expected_fo):
+        hearing_impaired, foreign_only, expected_hi, expected_fo, expected_category):
     subtitle = subliminal_patch.subtitle.Subtitle(
         Language("eng"), "provider-id", hearing_impaired=hearing_impaired, foreign_only=foreign_only)
 
     assert subtitle.hearing_impaired is expected_hi
     assert subtitle.foreign_only is expected_fo
-    # The 2.7 category that upstream reads is derived from the same flags.
-    assert subtitle.category == SubtitleCategory.from_flags(
-        hearing_impaired=expected_hi, foreign_only=expected_fo)
+    # The 2.7 category that upstream reads. Unknown flags read as narrative.
+    assert subtitle.category.name == expected_category
 
 
-def test_compat_download_never_passes_a_category_filter_upstream(monkeypatch):
-    # Upstream 2.7 filters results when subtitle_categories is non-empty. Bazarr
-    # sorts and filters on its own, so no upstream download entry point may be
-    # reached with a category filter from the compat download path.
-    seen = []
+def test_default_subtitle_is_neither_hearing_impaired_nor_foreign_only():
+    subtitle = subliminal_patch.subtitle.Subtitle(Language("eng"), "id")
+
+    assert subtitle.hearing_impaired is False
+    assert subtitle.foreign_only is False
+
+
+def test_subliminal_subtitle_module_exposes_the_compat_language_type():
+    from subliminal_patch.subtitle import LanguageType
+
+    assert subliminal.subtitle.LanguageType is LanguageType
+
+
+def test_cache_pickle_written_under_subliminal_26_loads_as_the_compat_enum():
+    import pickle
+    from subliminal_patch.subtitle import LanguageType
+
+    # Protocol 2 pickle of subliminal 2.6's LanguageType.NORMAL, written by hand
+    # so that 2.6 is not needed: GLOBAL subliminal.subtitle.LanguageType, the
+    # value 'normal', TUPLE1, REDUCE, STOP. This is what Enum.__reduce_ex__ emits.
+    payload = b"\x80\x02csubliminal.subtitle\nLanguageType\nX\x06\x00\x00\x00normal\x85R."
+
+    assert pickle.loads(payload) is LanguageType.NORMAL
+
+
+def test_compat_download_applies_no_upstream_category_filter_to_a_scored_candidate(monkeypatch):
+    # Bazarr sorts and filters candidates itself. In subliminal 2.7 the category
+    # filter is applied in ProviderPool.download_best_subtitles through
+    # filter_and_sort_categories. The compat SZProviderPool.download_best_subtitles
+    # never calls super(), so that path must stay unreached while a real candidate
+    # is scored and downloaded through the pool.
+    from test_core_persistent import _Candidate, _Waterfall
+
+    calls = []
 
     def record(*args, **kwargs):
-        seen.append(kwargs.get("subtitle_categories", ""))
+        calls.append((args, kwargs))
         return []
 
     monkeypatch.setattr(subliminal.core.ProviderPool, "download_best_subtitles", record)
-    monkeypatch.setattr(subliminal.core, "download_best_subtitles", record)
-    monkeypatch.setattr(subliminal.core, "filter_and_sort_categories", record)
+    monkeypatch.setattr(subliminal.core, "filter_and_sort_categories", record, raising=False)
 
-    from subliminal_patch import core_persistent
+    fake = _Waterfall(monkeypatch, {"a": [_Candidate("a", "a1")]})
+    sink = []
 
-    video = subliminal.video.Episode("/m/Show.S01E01.mkv", "Show", 1, 1)
-    pool = subliminal_patch.core.SZProviderPool()
-    # core_persistent is the entry point Bazarr calls; with no providers it
-    # walks the whole prioritized path without any network request.
-    downloaded = core_persistent.download_best_subtitles(
-        {video}, {Language("eng")}, pool, min_score=1, hearing_impaired="force HI")
-
-    assert not any(downloaded.values())
-    assert seen == []
+    assert fake.search(candidate_sink=sink) == ["a1"]
+    assert len(sink) == 1
+    assert sink[0]["provider_name"] == "a"
+    assert sink[0]["downloaded"] is True
+    assert calls == []
 
 
 def test_tvsubtitles_patch_uses_upstream_26_search_request_shape():
