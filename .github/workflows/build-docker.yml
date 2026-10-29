@@ -34,7 +34,7 @@ env:
 
 jobs:
   # ==========================================================================
-  # Build Frontend (cached via GitHub Actions cache)
+  # Build Frontend
   # ==========================================================================
   build-frontend:
     runs-on: ubuntu-latest

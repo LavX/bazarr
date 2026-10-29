@@ -115,7 +115,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: "${{ env.UI_DIRECTORY }}/node_modules"
-          key: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-modules-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-modules-${{ hashFiles('frontend/pnpm-lock.yaml', 'frontend/pnpm-workspace.yaml') }}
           restore-keys: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-modules-
 
       - &setup-node

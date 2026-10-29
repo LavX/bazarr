@@ -169,6 +169,8 @@ python bazarr.py --no-update --config ./config
 
 # Frontend (separate terminal)
 cd frontend
+# pnpm comes with Node through Corepack: run corepack enable once
+corepack enable
 pnpm install --frozen-lockfile
 pnpm start
 ```
