@@ -22,6 +22,7 @@ from app.jobs_queue import jobs_queue
 from app import activity
 from app.config import settings
 from subliminal_patch.score import MAX_SCORES
+from subtitles.utils import upload_fake_score
 
 from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
@@ -73,7 +74,7 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                 min_score = settings.translator.min_source_score
                 history = database.execute(
                     scoped(
-                        select(TableHistory.score)
+                        select(TableHistory.score, TableHistory.action)
                         .where(TableHistory.sonarrEpisodeId == episode.sonarrEpisodeId)
                         .where(TableHistory.language.like(f"{translate_cfg['from']}%"))
                         .where(TableHistory.score.is_not(None))
@@ -91,7 +92,13 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                     # instead of silently falling back to provider search, whatever
                     # local_subtitle_score is.
                     source_score_pct = min_score
-                if source_score_pct < min_score:
+                # A hand upload (action 4) stored at the local score is used below the
+                # threshold too, as a sidecar is. Its stored score is the local score
+                # on the media scale.
+                local_score = getattr(settings.general, 'local_subtitle_score', 0)
+                local_upload = (history is not None and history.action == 4 and local_score > 0
+                                and history.score == upload_fake_score('series', local_score))
+                if source_score_pct < min_score and not local_upload:
                     logging.debug(
                         "BAZARR auto-translate (wanted-scan) skipped for %s: "
                         "source score %s%% < threshold %s%% "

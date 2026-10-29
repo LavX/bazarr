@@ -10,6 +10,7 @@ from functools import reduce
 
 from utilities.path_mappings import path_mappings
 from subtitles.indexer.movies import store_subtitles_movie, list_missing_subtitles_movies
+from subtitles.utils import upload_fake_score
 from arr_instances.resolution import scoped
 from radarr.history import history_log_movie
 from app.notifier import send_notifications_movie
@@ -72,7 +73,7 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                 min_score = settings.translator.min_source_score
                 history = database.execute(
                     scoped(
-                        select(TableHistoryMovie.score)
+                        select(TableHistoryMovie.score, TableHistoryMovie.action)
                         .where(TableHistoryMovie.radarrId == movie.radarrId)
                         .where(TableHistoryMovie.language.like(f"{translate_cfg['from']}%"))
                         .where(TableHistoryMovie.score.is_not(None))
@@ -90,7 +91,13 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                     # instead of silently falling back to provider search, whatever
                     # local_subtitle_score is.
                     source_score_pct = min_score
-                if source_score_pct < min_score:
+                # A hand upload (action 4) stored at the local score is used below the
+                # threshold too, as a sidecar is. Its stored score is the local score
+                # on the media scale.
+                local_score = getattr(settings.general, 'local_subtitle_score', 0)
+                local_upload = (history is not None and history.action == 4 and local_score > 0
+                                and history.score == upload_fake_score('movie', local_score))
+                if source_score_pct < min_score and not local_upload:
                     logging.debug(
                         "BAZARR auto-translate (wanted-scan) skipped for %s: "
                         "source score %s%% < threshold %s%% "
