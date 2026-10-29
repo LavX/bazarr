@@ -23,6 +23,17 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_ROOT.parent
 COMMAND = PACKAGE_ROOT / "release.py"
 WORKFLOW = REPO_ROOT / ".github/workflows/platform-packages.yml"
+# Fixture repositories must not start background maintenance. The environment form needs git 2.31 or newer.
+# Local pushes start git-receive-pack without it, so bare_remote also writes these settings into each remote.
+GIT_NO_AUTO_MAINTENANCE = {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "gc.auto",
+    "GIT_CONFIG_VALUE_0": "0",
+    "GIT_CONFIG_KEY_1": "maintenance.auto",
+    "GIT_CONFIG_VALUE_1": "false",
+    "GIT_CONFIG_KEY_2": "receive.autogc",
+    "GIT_CONFIG_VALUE_2": "false",
+}
 BASE_DIGEST = "sha256:90a5c184b0af41602ff78ea7286e0c5f2c4c284c9b18f71427d9ddbeb0b6531c"
 NEXT_DIGEST = "sha256:" + "a" * 64
 
@@ -68,6 +79,14 @@ def git(repository, *args):
     return subprocess.run(["git", "-c", "user.name=Package Test", "-c", "user.email=package-test@example.invalid",
                            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
                           cwd=repository, capture_output=True, text=True, check=True).stdout
+
+
+def bare_remote(path):
+    git(path.parent, "init", "-q", "--bare", str(path))
+    for index in range(int(GIT_NO_AUTO_MAINTENANCE["GIT_CONFIG_COUNT"])):
+        git(path, "config", GIT_NO_AUTO_MAINTENANCE[f"GIT_CONFIG_KEY_{index}"],
+            GIT_NO_AUTO_MAINTENANCE[f"GIT_CONFIG_VALUE_{index}"])
+    return path
 
 
 def package_repository(destination):
@@ -838,6 +857,9 @@ class WorkflowRunLaneTests(unittest.TestCase):
                 if (major, minor, patch) < following]
 
     def setUp(self):
+        environment = patch.dict(os.environ, GIT_NO_AUTO_MAINTENANCE)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -855,7 +877,7 @@ class WorkflowRunLaneTests(unittest.TestCase):
     def development_origin(self, name=None, data=None):
         """Point the fixture at a bare file:// origin whose development branch adds a reviewed lock."""
         remote = self.root / "remote.git"
-        git(self.repository, "init", "-q", "--bare", str(remote))
+        bare_remote(remote)
         git(self.repository, "remote", "add", "origin", f"file://{remote}")
         upstream = self.root / "upstream"
         git(self.root, "clone", "-q", str(self.repository), str(upstream))
@@ -891,7 +913,7 @@ class WorkflowRunLaneTests(unittest.TestCase):
         """Set up a bare origin, the downloaded lock and a gh stub for the proposal step."""
         remote = self.root / "remote.git"
         if not remote.exists():
-            git(self.repository, "init", "-q", "--bare", str(remote))
+            bare_remote(remote)
         if "origin" not in git(self.repository, "remote").split():
             git(self.repository, "remote", "add", "origin", str(remote))
         downloaded = self.repository / "resolved-lock" / f"{version}.json"
@@ -995,7 +1017,7 @@ class WorkflowRunLaneTests(unittest.TestCase):
 
     def test_the_proposal_commits_only_the_resolved_lock(self):
         remote = self.root / "remote.git"
-        git(self.repository, "init", "-q", "--bare", str(remote))
+        bare_remote(remote)
         git(self.repository, "remote", "add", "origin", str(remote))
         lock = self.repository / f"resolved-lock/{self.NEXT_RELEASE}.json"
         lock.parent.mkdir()
