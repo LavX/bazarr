@@ -443,3 +443,33 @@ def test_wanted_scan_uses_configured_score_for_sidecar_without_history(schema_se
 
     assert searches == [[("hu", "False", "False")], [("hu", "False", "False")]]
     translations.assert_not_called()
+
+
+def test_a_local_score_sidecar_below_the_threshold_still_translates_a_movie(schema_session, monkeypatch):
+    """A sidecar with the configured local score is translated even when that
+    score is below the translation threshold."""
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_movies, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=40),
+        translator=SimpleNamespace(min_source_score=90),
+    ))
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_local_score_sidecar_below_the_threshold_still_translates_an_episode(schema_session, monkeypatch):
+    """A sidecar with the configured local score is translated even when that
+    score is below the translation threshold."""
+    searches, translations = [], Mock()
+    wanted_series = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_series, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=40),
+        translator=SimpleNamespace(min_source_score=90),
+    ))
+    wanted_series._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
