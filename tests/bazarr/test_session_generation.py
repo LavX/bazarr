@@ -811,6 +811,18 @@ def _legacy_upgrade_cookie(app, **contents):
     return app.session_interface.get_signing_serializer(app).dumps(contents)
 
 
+def _aged_cookie(app, **contents):
+    """A cookie signed with the server's key and stamped older than the session lifetime."""
+    from unittest import mock
+
+    from itsdangerous import TimestampSigner
+
+    lifetime = app.permanent_session_lifetime.total_seconds()
+    stamp = int(time.time() - lifetime - 86400)
+    with mock.patch.object(TimestampSigner, "get_timestamp", return_value=stamp):
+        return app.session_interface.get_signing_serializer(app).dumps(contents)
+
+
 def _expired_session_cookie(response):
     """True when the response deletes the session cookie: an empty value that expired in 1970."""
     headers = _session_cookie_headers(response)
@@ -827,6 +839,27 @@ def test_a_legacy_upgrade_cookie_is_expired_not_reissued_by_a_normal_request(ser
     assert json.loads(response.get_data(as_text=True)) == []
     assert _renewed_cookie(response) is None
     assert _expired_session_cookie(response)
+
+
+def test_an_aged_legacy_upgrade_cookie_is_expired_by_a_normal_request(server):
+    """A legacy cookie older than the session lifetime must still be expired, not silently dropped."""
+    cookie = _aged_cookie(server, logged_in=True, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).get("/_keys", headers=_with_cookie(cookie))
+
+    assert json.loads(response.get_data(as_text=True)) == []
+    assert _renewed_cookie(response) is None
+    assert _expired_session_cookie(response)
+
+
+def test_an_aged_cookie_without_legacy_keys_gets_no_set_cookie(server):
+    """Guards the lifetime path: an expired cookie with no legacy key is left alone."""
+    cookie = _aged_cookie(server, logged_in=True, gen=0)
+
+    response = _bare_client(server).get("/_keys", headers=_with_cookie(cookie))
+
+    assert json.loads(response.get_data(as_text=True)) == []
+    assert _session_cookie_headers(response) == []
 
 
 def test_logout_with_a_legacy_upgrade_cookie_expires_it(server):
@@ -849,10 +882,7 @@ def test_a_refused_request_with_a_legacy_upgrade_cookie_leaks_neither_key_nor_pa
         f"{name}: {value}" for name, value in response.headers.items())
     assert "hunter2" not in body_and_headers
     assert "stale-token" not in body_and_headers
-    renewed = _renewed_cookie(response)
-    payload = server.session_interface.get_signing_serializer(server).loads(renewed) if renewed else {}
-    assert "_pw_for_upgrade" not in payload
-    assert "_upgrade_token" not in payload
+    assert _renewed_cookie(response) is None
 
 
 def test_a_cookie_without_the_legacy_keys_is_not_expired_by_logout(server):
