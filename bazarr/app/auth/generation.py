@@ -378,7 +378,10 @@ def open_session_cleanup(session_object):
     is the exception. Its contents are emptied here, so nothing in it, the
     password included, reaches a handler or is written back, and it is marked so
     that the response expires the cookie: a browser that declined the upgrade
-    must not keep that copy of the password.
+    must not keep that copy of the password. A legacy-key cookie signed with the
+    current secret is expired whatever its age, because the open step in app.py
+    reads an aged cookie for its keys too. A cookie signed with another secret
+    cannot be verified and is left alone.
 
     A session with no generation is pre-upgrade; it is given an explicit 0
     here so a later stamp in the same request cannot mistake it for a new one.

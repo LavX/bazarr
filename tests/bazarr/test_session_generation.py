@@ -824,10 +824,20 @@ def _aged_cookie(app, **contents):
 
 
 def _expired_session_cookie(response):
-    """True when the response deletes the session cookie: an empty value that expired in 1970."""
+    """True when the response deletes the session cookie: an empty value whose Expires is the epoch."""
+    from email.utils import parsedate_to_datetime
+
     headers = _session_cookie_headers(response)
-    return (len(headers) == 1 and headers[0].split(";", 1)[0] == "session="
-            and "Max-Age=0" in headers[0] and "1970" in headers[0])
+    if len(headers) != 1 or headers[0].split(";", 1)[0] != "session=" or "Max-Age=0" not in headers[0]:
+        return False
+    parts = [part.strip() for part in headers[0].split(";")]
+    expires = [part.split("=", 1)[1] for part in parts if part.lower().startswith("expires=")]
+    if len(expires) != 1:
+        return False
+    try:
+        return parsedate_to_datetime(expires[0]).timestamp() == 0
+    except (TypeError, ValueError):
+        return False
 
 
 def test_a_legacy_upgrade_cookie_is_expired_not_reissued_by_a_normal_request(server):
@@ -883,6 +893,23 @@ def test_a_refused_request_with_a_legacy_upgrade_cookie_leaks_neither_key_nor_pa
     assert "hunter2" not in body_and_headers
     assert "stale-token" not in body_and_headers
     assert _renewed_cookie(response) is None
+
+
+def test_a_request_with_an_aged_legacy_cookie_that_logs_in_gets_a_clean_cookie(server):
+    """A login in the same request as an expired legacy cookie replaces it; the old keys are gone."""
+    cookie = _aged_cookie(server, logged_in=True, _pw_for_upgrade="hunter2", _upgrade_token="stale-token")
+
+    response = _bare_client(server).post(
+        ACCOUNT_URL, data={"action": "login", "username": USERNAME, "password": PASSWORD},
+        headers=_with_cookie(cookie))
+
+    assert response.status_code == 204
+    renewed = _renewed_cookie(response)
+    assert renewed is not None
+    payload = server.session_interface.get_signing_serializer(server).loads(renewed)
+    assert payload.get("logged_in") is True
+    assert "_pw_for_upgrade" not in payload
+    assert "_upgrade_token" not in payload
 
 
 def test_a_cookie_without_the_legacy_keys_is_not_expired_by_logout(server):
@@ -2282,6 +2309,12 @@ def test_the_socket_gate_follows_the_generation(server):
     assert _connect_gate(server, copy, {"apiKey": API_KEY}) is True
     assert _connect_gate(server, None, {"apiKey": "wrong"}) is False
     assert _connect_gate(server, None) is False
+
+
+def test_the_socket_gate_refuses_an_aged_legacy_upgrade_cookie(server):
+    legacy = _aged_cookie(server, logged_in=True, _pw_for_upgrade="hunter2")
+
+    assert _connect_gate(server, legacy) is False
 
 
 # ---------------------------------------------------------------------------
