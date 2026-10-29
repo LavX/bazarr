@@ -20,6 +20,7 @@ from radarr.history import history_log_movie
 from sonarr.history import history_log
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.indexer.series import store_subtitles
+from subtitles.score_override import MANUAL_SCORE_ACTION
 from utilities.path_mappings import path_mappings
 from .download import generate_subtitles
 from app.event_handler import event_stream
@@ -542,6 +543,39 @@ def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
     return retired
 
 
+def _manually_pinned_rows(table, rows):
+    """History ids of candidate rows whose subtitle has a manual score.
+
+    A manual score is a row of MANUAL_SCORE_ACTION for the same video, instance,
+    language and subtitle file, at least as new as the candidate. Such a
+    subtitle is not upgraded: the user has fixed its score. A download written
+    after the manual score is newer, so the candidate then comes back.
+    """
+    if not rows:
+        return set()
+
+    overrides = database.execute(
+        select(table.video_path,
+               table.arr_instance_id,
+               table.language,
+               table.subtitles_path,
+               table.timestamp)
+        .where(and_(table.action == MANUAL_SCORE_ACTION,
+                    table.video_path.in_({row.video_path for row in rows})))).all()
+
+    pinned = set()
+    for row in rows:
+        for override in overrides:
+            if (override.video_path == row.video_path
+                    and override.arr_instance_id == row.arr_instance_id
+                    and override.language == row.language
+                    and override.subtitles_path == row.subtitles_path
+                    and override.timestamp >= row.timestamp):
+                pinned.add(row.id)
+                break
+    return pinned
+
+
 def _find_current_subtitle_for_language(language_string, external_subtitles):
     """Find a current subtitle file on disk that matches the language from history.
 
@@ -634,7 +668,9 @@ def get_upgradable_episode_subtitles(history_id_list=None):
                TableHistory.video_path,
                TableHistory.language,
                TableHistory.arr_instance_id,
-               TableHistory.upgradedFromId)
+               TableHistory.upgradedFromId,
+               TableHistory.subtitles_path,
+               TableHistory.timestamp)
         .select_from(TableHistory)
         .join(TableShows, onclause=and_(TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId,
                                   TableHistory.arr_instance_id == TableShows.arr_instance_id))
@@ -653,6 +689,7 @@ def get_upgradable_episode_subtitles(history_id_list=None):
 
     retired_translated_ids = _retired_translated_rows(
         TableHistory, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
+    pinned_ids = _manually_pinned_rows(TableHistory, subtitles_to_upgrade)
 
     upgradable_episode_subtitles = {}
     # The history page passes every id of one show. Membership against the
@@ -668,6 +705,11 @@ def get_upgradable_episode_subtitles(history_id_list=None):
         if subtitle_to_upgrade.id in retired_translated_ids:
             logging.debug(f"TableHistory ID {subtitle_to_upgrade.id} is a translation a real subtitle has already "  # noqa: G004
                           f"replaced for language {subtitle_to_upgrade.language} so we'll skip it.")
+            continue
+
+        # exclude a subtitle whose score the user set by hand
+        if subtitle_to_upgrade.id in pinned_ids:
+            logging.debug(f"TableHistory ID {subtitle_to_upgrade.id} has a manual score so we'll skip it.")  # noqa: G004
             continue
 
         # exclude subtitles with ID that as been "upgraded from" and shouldn't be considered
@@ -731,7 +773,9 @@ def get_upgradable_movies_subtitles(history_id_list=None):
                TableHistoryMovie.video_path,
                TableHistoryMovie.language,
                TableHistoryMovie.arr_instance_id,
-               TableHistoryMovie.upgradedFromId)
+               TableHistoryMovie.upgradedFromId,
+               TableHistoryMovie.subtitles_path,
+               TableHistoryMovie.timestamp)
         .select_from(TableHistoryMovie)
         .join(TableMovies, onclause=and_(TableHistoryMovie.radarrId == TableMovies.radarrId,
                                   TableHistoryMovie.arr_instance_id == TableMovies.arr_instance_id))
@@ -748,6 +792,7 @@ def get_upgradable_movies_subtitles(history_id_list=None):
 
     retired_translated_ids = _retired_translated_rows(
         TableHistoryMovie, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
+    pinned_ids = _manually_pinned_rows(TableHistoryMovie, subtitles_to_upgrade)
 
     upgradable_movie_subtitles = {}
     # The history page passes every id of one movie. Membership against the
@@ -763,6 +808,11 @@ def get_upgradable_movies_subtitles(history_id_list=None):
         if subtitle_to_upgrade.id in retired_translated_ids:
             logging.debug(f"TableHistoryMovie ID {subtitle_to_upgrade.id} is a translation a real subtitle has "  # noqa: G004
                           f"already replaced for language {subtitle_to_upgrade.language} so we'll skip it.")
+            continue
+
+        # exclude a subtitle whose score the user set by hand
+        if subtitle_to_upgrade.id in pinned_ids:
+            logging.debug(f"TableHistoryMovie ID {subtitle_to_upgrade.id} has a manual score so we'll skip it.")  # noqa: G004
             continue
 
         # exclude subtitles with ID that as been "upgraded from" and shouldn't be considered

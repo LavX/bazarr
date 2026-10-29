@@ -18,6 +18,7 @@ from app.database import get_audio_profile_languages, get_desired_languages, sel
 from sqlalchemy import case
 from utilities.path_mappings import path_mappings, _apply_mapping, _instance_path_mapping
 from subtitles.indexer.entries import entry_codec, entry_predates_codecs, entry_title
+from subtitles.score_override import MANUAL_SCORE_ACTION
 
 None_Keys = ['null', 'undefined', '', None]
 
@@ -706,7 +707,7 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
                        order_by=(history_table.timestamp.desc(), history_table.id.desc()),
                    ).label('position'))
             .where(id_column.in_(chunk))
-            .where(history_table.action.in_([0, 1, 2, 3, 4, 6, 7, 8]))
+            .where(history_table.action.in_([0, 1, 2, 3, 4, 6, 7, 8, MANUAL_SCORE_ACTION]))
             .subquery()
         )
         rows.extend(db.execute(
@@ -762,7 +763,7 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         # the downloaded file and must also shadow its old provider score. A
         # file extracted from an embedded track (8) replaces it too, and its
         # score is the track's, as on the detail pages.
-        if row.action not in (1, 2, 3, 7, 8) or row.score is None:
+        if row.action not in (1, 2, 3, 7, 8, MANUAL_SCORE_ACTION) or row.score is None:
             continue
         if row.score == 0:
             # Older history writers leave score_out_of unset for a real zero.
@@ -774,4 +775,15 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table, *, vid
         current = lowest.get(row.item_id)
         if current is None or percent < current:
             lowest[row.item_id] = percent
+    # A current file subtitle with no history record at all (a sidecar the disk
+    # scan found) takes the configured local score, when that is set above 0.
+    local_score = getattr(settings.general, 'local_subtitle_score', 0)
+    if local_score > 0:
+        for item_id, names in current_paths.items():
+            for name in names:
+                if (item_id, 'file', name) in seen:
+                    continue
+                current = lowest.get(item_id)
+                if current is None or local_score < current:
+                    lowest[item_id] = float(local_score)
     return lowest

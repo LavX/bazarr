@@ -23,6 +23,7 @@ from subtitles.tools.translate.batch import extract_embedded_subtitle
 from subtitles.tools.mods import apply_subtitle_mods
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
+from subtitles.score_override import set_score_override
 from subtitles.sync import sync_subtitles
 from app.config import settings, empty_values, get_array_from
 from app.event_handler import event_stream
@@ -848,6 +849,46 @@ def _embedded_ocr_action(args, language, hi, forced, media_type, media_id, arr_i
         job_id = ocr_embedded_track(media_type, media_id, track.arr_instance_id, language, hi, forced,
                                     codec=codec, label=label)
     return {**queued_job_response(job_id or None), "path": destinations[0]}, 202
+
+
+@api_ns_subtitles.route("subtitles/score-override")
+class SubtitleScoreOverride(Resource):
+    post_request_parser = reqparse.RequestParser()
+    post_request_parser.add_argument(
+        "subtitlesPath", type=str, required=True, help="Listed external subtitle file path"
+    )
+    post_request_parser.add_argument(
+        "radarrMovieId", type=int, required=False, help="Radarr Movie ID"
+    )
+    post_request_parser.add_argument(
+        "sonarrEpisodeId", type=int, required=False, help="Sonarr Episode ID"
+    )
+    post_request_parser.add_argument(
+        "score", type=int, required=True, help="Manual score, a percentage from 0 to 100"
+    )
+
+    @authenticate
+    @api_ns_subtitles.doc(parser=post_request_parser)
+    @api_ns_subtitles.response(204, "Score set")
+    @api_ns_subtitles.response(400, "Give exactly one of radarrMovieId or sonarrEpisodeId, and a score from 0 to 100")
+    @api_ns_subtitles.response(401, "Not Authenticated")
+    @api_ns_subtitles.response(404, "Movie or episode not found, or the path is not listed for it")
+    def post(self):
+        """Pin a manual score on one listed subtitle of a movie or episode"""
+        args = self.post_request_parser.parse_args()
+        movie_id = args.get("radarrMovieId")
+        episode_id = args.get("sonarrEpisodeId")
+        score = args.get("score")
+        if (movie_id is None) == (episode_id is None):
+            return "Give exactly one of radarrMovieId or sonarrEpisodeId.", 400
+        if not 0 <= score <= 100:
+            return "The score must be a percentage from 0 to 100.", 400
+        media, item_id = ("movie", movie_id) if movie_id is not None else ("episode", episode_id)
+        try:
+            set_score_override(database, media, item_id, args.get("subtitlesPath"), score)
+        except (LookupError, ValueError) as error:
+            return str(error), 404
+        return '', 204
 
 
 def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, arr_instance_id=None):

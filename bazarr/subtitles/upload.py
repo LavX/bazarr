@@ -40,6 +40,14 @@ from .post_processing import postprocessing
 from plex.operations import plex_set_movie_added_date_now, plex_set_episode_added_date_now
 
 
+def _upload_fake_score(media_type):
+    """Score recorded for a hand upload: the configured local score when it is
+    above 0, otherwise the full scale of the media type."""
+    full = MAX_SCORES['episode' if media_type == 'series' else 'movie']
+    local = getattr(settings.general, 'local_subtitle_score', 0)
+    return round(full * local / 100) if local > 0 else full
+
+
 def _refresh_uploaded_subtitles(video_path, subtitle_path, sonarr_series_id=None, sonarr_episode_id=None,
                                 radarr_id=None, arr_instance_id=None):
     _index_keep_all_outputs(video_path, sonarr_series_id=sonarr_series_id,
@@ -328,7 +336,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             provider = "manual"
             if media_type == 'series':
                 history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider,
-                            fake_score=MAX_SCORES['episode'], arr_instance_id=arr_instance_id)
+                            fake_score=_upload_fake_score('series'), arr_instance_id=arr_instance_id)
                 if not settings.general.dont_notify_manual_actions:
                     _notify_upload("user", send_notifications, sonarrSeriesId, sonarrEpisodeId, result.message,
                                        arr_instance_id=arr_instance_id)
@@ -336,7 +344,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                     if settings.plex.set_episode_added:
                         _notify_upload("Plex added date", plex_set_episode_added_date_now, episode_metadata)
             else:
-                history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'],
+                history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=_upload_fake_score('movie'),
                                   arr_instance_id=arr_instance_id)
                 if not settings.general.dont_notify_manual_actions:
                     _notify_upload("user", send_notifications_movie, radarrId, result.message, arr_instance_id=arr_instance_id)

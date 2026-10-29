@@ -84,6 +84,9 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                 ).first()
                 if history is not None:
                     source_score_pct = round((history.score / MAX_SCORES['movie']) * 100, 1)
+                elif getattr(settings.general, 'local_subtitle_score', 0) > 0:
+                    # A subtitle with no history record takes the configured local score.
+                    source_score_pct = settings.general.local_subtitle_score
                 else:
                     # No history record — subtitle may have been manually placed or
                     # predates history tracking. Treat as exactly at threshold so
