@@ -445,3 +445,61 @@ def test_a_local_score_sidecar_below_the_threshold_still_translates_an_episode(s
 
     translations.assert_called_once()
     assert searches == [[]]
+
+
+def test_a_hand_upload_at_the_local_score_below_the_threshold_still_translates_a_movie(schema_session,
+                                                                                     monkeypatch):
+    """A hand upload stored at the local score is a translation source even
+    when that score is below the threshold, the same as a sidecar."""
+    from datetime import datetime
+
+    from sqlalchemy import insert
+    from subliminal_patch.score import MAX_SCORES
+
+    from app.database import TableHistoryMovie
+
+    schema_session.execute(insert(TableHistoryMovie).values(
+        action=4, description="Subtitle uploaded manually.", language="en", provider=None,
+        score=round(MAX_SCORES["movie"] * 40 / 100), score_out_of=MAX_SCORES["movie"],
+        radarrId=30, arr_instance_id=1, timestamp=datetime.now(), video_path="/movies/fixture.mkv",
+        subtitles_path="/movies/fixture.en.srt"))
+    schema_session.commit()
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_movies, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=40),
+        translator=SimpleNamespace(min_source_score=90),
+    ))
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_hand_upload_at_the_local_score_below_the_threshold_still_translates_an_episode(schema_session,
+                                                                                         monkeypatch):
+    """A hand upload stored at the local score is a translation source even
+    when that score is below the threshold, the same as a sidecar."""
+    from datetime import datetime
+
+    from sqlalchemy import insert
+    from subliminal_patch.score import MAX_SCORES
+
+    from app.database import TableHistory
+
+    schema_session.execute(insert(TableHistory).values(
+        action=4, description="Subtitle uploaded manually.", language="en", provider=None,
+        score=round(MAX_SCORES["episode"] * 40 / 100), score_out_of=MAX_SCORES["episode"],
+        sonarrSeriesId=10, sonarrEpisodeId=20, arr_instance_id=1, timestamp=datetime.now(),
+        video_path="/series/fixture/s01e01.mkv", subtitles_path="/series/fixture/s01e01.en.srt"))
+    schema_session.commit()
+    searches, translations = [], Mock()
+    wanted_series = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_series, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=40),
+        translator=SimpleNamespace(min_source_score=90),
+    ))
+    wanted_series._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
