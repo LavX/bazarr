@@ -63,7 +63,7 @@ EXPECTED_PROVIDER_NAMES = [
     "zimuku",
 ]
 
-# Vanilla upstream 2.6 entry points. podnapisi stays on this list even though
+# Vanilla upstream 2.7.1 entry points. podnapisi stays on this list even though
 # Bazarr retired its own podnapisi wrapper: upstream still ships and registers
 # the provider, and this list exists to prove Bazarr does not mutate upstream's
 # registry. Bazarr's own registry is EXPECTED_PROVIDER_NAMES above, and

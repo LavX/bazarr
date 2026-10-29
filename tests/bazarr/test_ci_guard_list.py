@@ -260,8 +260,8 @@ EXCLUDED = {
         "only isinstance(subs, list) and one looping over a list that is empty."
     ),
     "tests/subliminal_patch/test_napiprojekt.py": (
-        "replays recorded HTTP and touches no network, but subliminal 2.6.0 "
-        "moved server_url to https while the cassettes were recorded against "
+        "replays recorded HTTP and touches no network, but subliminal 2.6.0 and "
+        "later use https for server_url while the cassettes were recorded against "
         "http, and vcrpy matches on scheme and port, so every request misses. "
         "Both cases also burn 30 seconds each of ProviderRetryMixin sleep."
     ),
