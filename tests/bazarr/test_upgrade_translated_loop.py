@@ -869,3 +869,37 @@ def test_the_same_listing_is_not_downloaded_twice_for_an_episode(upgrade_db, mon
     assert notifications == [], "the same listing must not be downloaded again"
     assert provider.bars[1:] == [EPISODE_LISTING_SCORE + 1], \
         "the provider row is the baseline now, and its bar is above the listing"
+
+
+def test_override_does_not_reopen_upgrade_loop(upgrade_db, monkeypatch):
+    """A manually scored subtitle is pinned for the upgrade.
+
+    The provider replacement is the baseline the upgrade reads. Once the user
+    pins its score, the upgrade must neither offer it as a candidate nor search
+    for it, so the same listing is not fetched and notified again. The
+    translated rows around it must not reopen the loop either.
+    """
+    from subtitles import upgrade
+    from subtitles.score_override import set_score_override
+    from subtitles.upgrade import get_upgradable_movies_subtitles
+
+    now = datetime.now()
+    _seed_movie(upgrade_db, '[["nl", "/movies/roofman/roofman.mkv.nl.srt", 4321]]')
+    _first_translation(upgrade_db, now)
+    _provider_replacement(upgrade_db, now)
+    _second_translation(upgrade_db, now)
+    # Placeholder call: the user pins the provider subtitle at 40 percent.
+    set_score_override(upgrade_db, "movie", 30, "/movies/roofman/roofman.mkv.nl.srt", 40)
+
+    provider = _FakeProvider(_listing_result("/movies/roofman/roofman.mkv"))
+    monkeypatch.setattr(upgrade, "generate_subtitles", provider)
+    notifications = []
+    monkeypatch.setattr(upgrade, "send_notifications_movie",
+                        lambda *a, **k: notifications.append(a))
+
+    assert get_upgradable_movies_subtitles() == {}
+
+    upgrade.upgrade_movies_subtitles(job_id="job-1")
+
+    assert provider.bars == [], "a pinned subtitle is never searched for"
+    assert notifications == []

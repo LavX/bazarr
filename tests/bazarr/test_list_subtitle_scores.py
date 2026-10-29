@@ -851,3 +851,37 @@ def test_translation_shadows_a_download_despite_a_later_record_under_its_root(pl
     add(2, 6, 100, '/global/T.de.srt', '/global/T.mkv')
     add(3, 1, 90, '/global/T.de.srt', '/global/T.mkv')
     assert score() is None
+
+
+# --------------------------------------------------------------------------- #
+# Local score and manual override                                              #
+# --------------------------------------------------------------------------- #
+
+def test_local_subtitle_gets_configured_score_in_lowest_scores(schema_session, monkeypatch):
+    from app.config import settings as app_settings
+
+    movies = _prepare_movies(monkeypatch, schema_session)
+    # Placeholder setting: the percentage a subtitle found next to the video
+    # gets when no history row scores it.
+    monkeypatch.setitem(app_settings.general, "local_subtitle_score", 60)
+    # A sidecar the disk scan found: listed for the item, no history row.
+    _add_movie(schema_session, 100, "[['en', '/movies/movie100.en.srt', 100]]")
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 60.0
+
+
+def test_override_pins_subtitle_score_in_lowest_scores(schema_session, monkeypatch):
+    from subtitles.score_override import set_score_override
+
+    movies = _prepare_movies(monkeypatch, schema_session)
+    _add_movie(schema_session, 100, "[['en', '/movies/movie100.en.srt', 100]]")
+    _add_movie_history(schema_session, 1, 100, 1, "/movies/movie100.en.srt", "en", 90, 100)
+    # Placeholder call: a manual score of 40 on the one subtitle replaces the
+    # stored 90 that the score filter reads.
+    set_score_override(schema_session, "movie", 100, "/movies/movie100.en.srt", 40)
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 40.0
