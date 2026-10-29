@@ -2,6 +2,7 @@
 from __future__ import absolute_import
 
 from collections import defaultdict
+import contextvars
 from concurrent.futures import (
     ThreadPoolExecutor,
     as_completed,
@@ -18,7 +19,7 @@ from subliminal.core import check_video
 logger = logging.getLogger(__name__)
 
 # list_all_subtitles, list_supported_languages, list_supported_video_types, download_subtitles, download_best_subtitles
-def list_all_subtitles(videos, languages, pool_instance, min_score=0, cancel=None):
+def list_all_subtitles(videos, languages, pool_instance, min_score=0, cancel=None, on_outcome=None):
     listed_subtitles = defaultdict(list)
 
     # return immediatly if no video passed the checks
@@ -29,14 +30,104 @@ def list_all_subtitles(videos, languages, pool_instance, min_score=0, cancel=Non
         logger.info("Listing subtitles for %r", video)
         # Only a caller that can be stopped passes a check, so a pool that has no use for one is not asked.
         stoppable = {'cancel': cancel} if cancel is not None else {}
-        subtitles = pool_instance.list_subtitles_prioritized(
-            video, languages - video.subtitle_languages, min_score=min_score,
-            exhaustive=True, **stoppable,
-        )
+        if on_outcome is None:
+            subtitles = pool_instance.list_subtitles_prioritized(
+                video, languages - video.subtitle_languages, min_score=min_score,
+                exhaustive=True, **stoppable,
+            )
+        else:
+            subtitles = _list_with_outcomes(pool_instance, video, languages - video.subtitle_languages,
+                                            cancel, on_outcome)
         listed_subtitles[video].extend(subtitles)
         logger.info("Found %d subtitle(s)", len(subtitles))
 
     return listed_subtitles
+
+
+def _list_with_outcomes(pool, video, languages, cancel, on_outcome):
+    from .core import ProviderSearchResult
+    from .score import compute_score
+
+    subtitles = []
+    for name in list(pool.providers):
+        if name in pool.discarded_providers:
+            on_outcome(ProviderSearchResult(name, status="skipped", reason="provider_excluded"))
+            continue
+        result = _list_provider_with_outcome(pool, name, video, languages, cancel)
+        on_outcome(result)
+        valid = [subtitle for subtitle in result.subtitles if hasattr(subtitle, 'get_matches')]
+        # Match methods can cache their set on the subtitle. Preserve the
+        # exhaustive listing's preliminary scoring before the manual rows
+        # read those matches, even though its early-exit score is unused.
+        for subtitle in valid:
+            try:
+                matches = subtitle.get_matches(video)
+            except AttributeError:
+                logger.exception("%r: Match computation failed", subtitle)
+                continue
+            compute_score(matches, subtitle, video, False)
+        subtitles.extend(valid)
+    return subtitles
+
+
+class _OutcomeListingPool:
+    """Keep failure discards ahead of the provider's outcome acknowledgement."""
+
+    def __init__(self, pool):
+        self.pool = pool
+
+    def __getattr__(self, name):
+        return getattr(self.pool, name)
+
+    def __getitem__(self, name):
+        return self.pool[name]
+
+    def _notify_throttle(self, name, error, **context):
+        recorded = self.pool._notify_throttle(name, error, **context)
+        # The detailed return in the core listing precedes its legacy discard.
+        # Record it here, before finally releases a waiting worker request,
+        # even when the caller has already cancelled its wait for this result.
+        self.pool.discarded_providers.add(name)
+        return recorded
+
+
+def _list_provider_with_outcome(pool, name, video, languages, cancel):
+    from .core import LISTING_STOP_POLL_SECONDS, ListingStopped, SZProviderPool
+
+    def ask():
+        return SZProviderPool.list_subtitles_provider(_OutcomeListingPool(pool), name, video, languages,
+                                                     detailed=True, discard_on_failure=True)
+
+    if cancel is None:
+        return ask()
+
+    def check():
+        try:
+            cancel()
+        except ListingStopped:
+            raise
+        except Exception:
+            logger.debug('The stop check of the listing failed; the listing goes on', exc_info=True)
+
+    check()
+    outcome = {}
+    done = threading.Event()
+
+    def run():
+        try:
+            outcome['value'] = ask()
+        except BaseException as error:
+            outcome['error'] = error
+        finally:
+            done.set()
+
+    threading.Thread(target=contextvars.copy_context().run, args=(run,), name=f'listing-{name}',
+                     daemon=True).start()
+    while not done.wait(LISTING_STOP_POLL_SECONDS):
+        check()
+    if 'error' in outcome:
+        raise outcome['error']
+    return outcome['value']
 
 
 def list_supported_languages(pool_instance):

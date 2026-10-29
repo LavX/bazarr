@@ -82,11 +82,13 @@ class ProviderMovies(Resource):
 
         providers_list = get_providers_sorted()
 
+        provider_outcomes = []
         data = manual_search(target['path'], target['profileId'], providers_list, target['sceneName'],
-                             target['title'], 'movie', arr_instance_id=target['arr_instance_id'])
+                             target['title'], 'movie', arr_instance_id=target['arr_instance_id'],
+                             provider_outcomes=provider_outcomes)
         if isinstance(data, str):
             return data, 500
-        return marshal(data, self.get_response_model, envelope='data')
+        return {'data': marshal(data, self.get_response_model), 'providers': provider_outcomes}
 
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('radarrid', type=int, required=True, help='Movie ID')

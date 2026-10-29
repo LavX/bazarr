@@ -40,7 +40,8 @@ from .search_result import marshal_search_results
 
 @update_pools
 def manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
-                  language_set=None, original_format=False, cancel=None, arr_instance_id=None, observed=True):
+                  language_set=None, original_format=False, cancel=None, arr_instance_id=None, observed=True,
+                  provider_outcomes=None):
     logging.debug(f'BAZARR Manually searching subtitles for this file: {path}')  # noqa: G004
 
     if not observed:
@@ -49,7 +50,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type, *, 
         return _manual_search(path, profile_id, providers, sceneName, title, media_type,
                               context=context, language_set=language_set,
                               original_format=original_format, cancel=cancel,
-                              arr_instance_id=arr_instance_id)
+                              arr_instance_id=arr_instance_id, provider_outcomes=provider_outcomes)
 
     # A manual search that answers a request runs on the request thread and
     # never enters the jobs queue, so without this observation it is invisible
@@ -61,7 +62,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type, *, 
         return _manual_search(path, profile_id, providers, sceneName, title, media_type,
                               context=context, language_set=language_set,
                               original_format=original_format, cancel=cancel,
-                              arr_instance_id=arr_instance_id)
+                              arr_instance_id=arr_instance_id, provider_outcomes=provider_outcomes)
 
 
 class _Stopped(Exception):
@@ -107,8 +108,32 @@ class _JobStop:
 
 
 def _manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
-                   language_set=None, original_format=False, cancel=None, arr_instance_id=None):
+                   language_set=None, original_format=False, cancel=None, arr_instance_id=None,
+                   provider_outcomes=None):
     final_subtitles = []
+
+    outcomes = {}
+    if provider_outcomes is not None:
+        from app.get_providers import get_providers_sorted, provider_is_throttled
+
+        # Selection normally removes backed-off providers. Keep them in the
+        # summary without adding them to the pool that will be searched.
+        for name in get_providers_sorted(include_throttled=True) or providers or []:
+            outcomes[name] = dict(name=name, status='throttled' if provider_is_throttled(name) else 'empty', results=0)
+
+        def record_outcome(result):
+            if result.status == 'success':
+                status = 'found'
+            elif result.status == 'empty':
+                status = 'empty'
+            elif result.status == 'cooldown':
+                status = 'throttled'
+            elif result.status == 'skipped':
+                status = ('busy' if result.reason == 'provider_busy' else
+                          'throttled' if provider_is_throttled(result.provider) else 'excluded')
+            else:
+                status = 'failed'
+            outcomes[result.provider] = dict(name=result.provider, status=status, results=0)
 
     pool = _get_pool(media_type, profile_id, context=context) if context is not None else _get_pool(media_type, profile_id)
 
@@ -139,7 +164,8 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
                 minimum_score_movie = settings.general.minimum_score_movie
                 min_score, _, _ = _get_scores(media_type, minimum_score_movie, minimum_score)
                 subtitles = list_all_subtitles([video], language_set, pool, min_score=int(min_score),
-                                               cancel=_stop_check(cancel))
+                                               cancel=_stop_check(cancel),
+                                               **({'on_outcome': record_outcome} if provider_outcomes is not None else {}))
             else:
                 logging.info("BAZARR All providers are throttled")
                 return 'All providers are throttled'
@@ -236,6 +262,15 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
 
     subliminal.region.backend.sync()
 
+    if provider_outcomes is not None:
+        for row in final_subtitles:
+            outcomes.setdefault(row['provider'],
+                                dict(name=row['provider'], status='found', results=0))['results'] += 1
+        for outcome in outcomes.values():
+            if outcome['status'] == 'found' and not outcome['results']:
+                outcome['status'] = 'empty'
+        provider_outcomes.extend(outcomes.values())
+
     return final_subtitles
 
 
@@ -271,15 +306,17 @@ def run_manual_search_job(path, profile_id, scene_name, title, media_type, arr_i
                                    progress_message="Searching the providers")
     # The job's own stop, read before and while each provider answers, so Stop ends the search at the
     # provider it is waiting on instead of after the last one.
+    provider_outcomes = []
     found = manual_search(path, profile_id, get_providers_sorted(), scene_name, title, media_type,
-                          arr_instance_id=arr_instance_id, observed=False, cancel=_JobStop(job_id))
+                          arr_instance_id=arr_instance_id, observed=False, cancel=_JobStop(job_id),
+                          provider_outcomes=provider_outcomes)
     if isinstance(found, str):
         # The search says why it could not run as its return value.
         logging.warning("Manual search failed: reason=providers_unavailable title=%s: %s", title, found)
         raise JobFailed(found, reason="providers_unavailable")
     jobs_queue.update_job_progress(job_id=job_id, progress_value=1,
                                    progress_message=f"Preparing {len(found)} result(s)")
-    jobs_queue.publish_job_result(job_id, marshal_search_results(found))
+    jobs_queue.publish_job_result(job_id, {'data': marshal_search_results(found), 'providers': provider_outcomes})
     jobs_queue.update_job_progress(job_id=job_id, progress_value="max", allow_cancelled=True,
                                    progress_message=f"{len(found)} subtitle(s) found")
 

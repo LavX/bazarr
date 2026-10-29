@@ -74,7 +74,10 @@ describe("manual search jobs", () => {
           session: "run-search",
           status: "completed",
           error: null,
-          result: ROWS,
+          result: {
+            data: ROWS,
+            providers: [{ name: "opensubtitles", status: "found", results: 1 }],
+          },
         }),
       ),
     );

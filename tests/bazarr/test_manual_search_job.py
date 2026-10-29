@@ -52,7 +52,7 @@ def test_the_job_publishes_the_rows_as_the_api_sends_them(real_queue, monkeypatc
 
     assert job.status == "completed"
     outcome = real_queue.queue.get_job_result(job.job_id)
-    row = outcome["result"][0]
+    row = outcome["result"]["data"][0]
     # Marshalled like the GET: strings and integers, not the raw bool and float.
     assert row["original_format"] == "False"
     assert row["score"] == 87
@@ -74,7 +74,7 @@ def test_an_empty_search_is_a_finished_job_with_an_empty_result(real_queue, monk
 
     assert job.status == "completed"
     # An empty list is an answer; only a job that published nothing has None.
-    assert real_queue.queue.get_job_result(job.job_id)["result"] == []
+    assert real_queue.queue.get_job_result(job.job_id)["result"]["data"] == []
 
 
 def test_a_search_that_cannot_run_fails_the_job_with_its_reason(real_queue, monkeypatch, caplog):
@@ -221,7 +221,7 @@ def _slow_providers(monkeypatch, real_queue, durations, asked):
     monkeypatch.setattr(manual, "_get_pool", lambda *args, **kwargs: pool)
     monkeypatch.setattr(manual, "get_video", lambda *args, **kwargs: SimpleNamespace(subtitle_languages=set()))
     monkeypatch.setattr(manual, "_get_language_obj", lambda profile_id: ({Language("eng")}, False))
-    monkeypatch.setattr("app.get_providers.get_providers_sorted", lambda: list(durations))
+    monkeypatch.setattr("app.get_providers.get_providers_sorted", lambda include_throttled=False: list(durations))
     monkeypatch.setattr(manual, "manual_search",
                         lambda *args, **kwargs: manual._manual_search(*args, **{k: v for k, v in kwargs.items()
                                                                                 if k != "observed"}))
