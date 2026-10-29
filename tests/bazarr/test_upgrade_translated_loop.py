@@ -888,7 +888,7 @@ def test_override_does_not_reopen_upgrade_loop(upgrade_db, monkeypatch):
     _first_translation(upgrade_db, now)
     _provider_replacement(upgrade_db, now)
     _second_translation(upgrade_db, now)
-    # Placeholder call: the user pins the provider subtitle at 40 percent.
+    # The user pins the provider subtitle at 40 percent.
     set_score_override(upgrade_db, "movie", 30, "/movies/roofman/roofman.mkv.nl.srt", 40)
 
     provider = _FakeProvider(_listing_result("/movies/roofman/roofman.mkv"))

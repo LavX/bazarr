@@ -427,7 +427,7 @@ def test_wanted_scan_uses_configured_score_for_sidecar_without_history(schema_se
     """
     searches, translations = [], Mock()
     wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
-    # Placeholder setting: general.local_subtitle_score, a percentage, 40 here.
+    # general.local_subtitle_score, a percentage, 40 here.
     monkeypatch.setattr(wanted_movies, "settings", SimpleNamespace(
         general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=40),
         translator=SimpleNamespace(min_source_score=90),

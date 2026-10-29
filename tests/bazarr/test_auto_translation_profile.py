@@ -494,6 +494,8 @@ def test_wanted_series_translation_uses_exact_profile_variant():
         }
         mock_path_mappings.path_replace.side_effect = lambda value: value
         mock_settings.translator.min_source_score = 0
+        # The wanted scan reads local_subtitle_score; a bare mock would not compare.
+        mock_settings.general.local_subtitle_score = 0
         # 3 queries inside _wanted_episode when auto-translate fires:
         # source-score lookup, already-translated guard, and the metadata
         # fetch for postprocess_subtitles.
@@ -562,6 +564,8 @@ def test_wanted_series_does_not_queue_over_a_subtitle_already_on_disk(tmp_path):
         ]}
         mock_path_mappings.path_replace.side_effect = lambda value: value
         mock_settings.translator.min_source_score = 0
+        # The wanted scan reads local_subtitle_score; a bare mock would not compare.
+        mock_settings.general.local_subtitle_score = 0
         mock_database.execute.return_value.first.side_effect = [
             None,
             None,
@@ -614,6 +618,8 @@ def test_wanted_series_skips_a_destination_the_sighting_captured_as_present():
         ]}
         mock_path_mappings.path_replace.side_effect = lambda value: value
         mock_settings.translator.min_source_score = 0
+        # The wanted scan reads local_subtitle_score; a bare mock would not compare.
+        mock_settings.general.local_subtitle_score = 0
         mock_database.execute.return_value.first.side_effect = [
             None,
             None,
@@ -668,6 +674,8 @@ def test_wanted_movie_does_not_queue_over_a_subtitle_already_on_disk(tmp_path):
         ]}
         mock_path_mappings.path_replace_movie.side_effect = lambda value: value
         mock_settings.translator.min_source_score = 0
+        # The wanted scan reads local_subtitle_score; a bare mock would not compare.
+        mock_settings.general.local_subtitle_score = 0
         mock_database.execute.return_value.first.side_effect = [
             None,
             None,

@@ -861,8 +861,8 @@ def test_local_subtitle_gets_configured_score_in_lowest_scores(schema_session, m
     from app.config import settings as app_settings
 
     movies = _prepare_movies(monkeypatch, schema_session)
-    # Placeholder setting: the percentage a subtitle found next to the video
-    # gets when no history row scores it.
+    # The percentage a subtitle found next to the video gets when no history
+    # row scores it.
     monkeypatch.setitem(app_settings.general, "local_subtitle_score", 60)
     # A sidecar the disk scan found: listed for the item, no history row.
     _add_movie(schema_session, 100, "[['en', '/movies/movie100.en.srt', 100]]")
@@ -878,8 +878,8 @@ def test_override_pins_subtitle_score_in_lowest_scores(schema_session, monkeypat
     movies = _prepare_movies(monkeypatch, schema_session)
     _add_movie(schema_session, 100, "[['en', '/movies/movie100.en.srt', 100]]")
     _add_movie_history(schema_session, 1, 100, 1, "/movies/movie100.en.srt", "en", 90, 100)
-    # Placeholder call: a manual score of 40 on the one subtitle replaces the
-    # stored 90 that the score filter reads.
+    # A manual score of 40 on the one subtitle replaces the stored 90 that the
+    # score filter reads.
     set_score_override(schema_session, "movie", 100, "/movies/movie100.en.srt", 40)
 
     result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")

@@ -1935,8 +1935,7 @@ def test_a_manual_upload_records_the_configured_local_score(upload_flow, monkeyp
 
     The upload history row otherwise records the full scale (100 percent). With
     general.local_subtitle_score at 60 the recorded score is 60 percent of the
-    media's maximum. The setting is a placeholder name until the implementation
-    lands.
+    media's maximum.
     """
     from app.config import settings
     from subliminal_patch.score import MAX_SCORES
