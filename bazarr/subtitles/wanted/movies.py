@@ -82,10 +82,14 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                         arr_instance_id,
                     )
                 ).first()
+                local_sidecar = False
                 if history is not None:
                     source_score_pct = round((history.score / MAX_SCORES['movie']) * 100, 1)
                 elif getattr(settings.general, 'local_subtitle_score', 0) > 0:
                     # A subtitle with no history record takes the configured local score.
+                    # It is used even below the threshold, so the local score is not
+                    # compared with min_score.
+                    local_sidecar = True
                     source_score_pct = settings.general.local_subtitle_score
                 else:
                     # No history record — subtitle may have been manually placed or
@@ -93,7 +97,7 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                     # we proceed with translation instead of silently falling
                     # back to provider search.
                     source_score_pct = min_score
-                if source_score_pct < min_score:
+                if source_score_pct < min_score and not local_sidecar:
                     logging.debug(
                         "BAZARR auto-translate (wanted-scan) skipped for %s: "
                         "source score %s%% < threshold %s%% "
