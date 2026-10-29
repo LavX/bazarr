@@ -10,7 +10,6 @@ from media_servers.events import publication_callback, observe_subtitle_change
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
 from subliminal_patch.subtitle import Subtitle
-from subliminal_patch.score import MAX_SCORES
 from pysubs2.formats import get_format_identifier
 
 from languages.get_languages import language_from_alpha3, alpha2_from_alpha3, alpha3_from_alpha2
@@ -37,15 +36,12 @@ from subtitles.tools.subsync_engines import (SubtitlePublication, write_subtitle
 
 from .sync import sync_subtitles, _index_keep_all_outputs
 from .post_processing import postprocessing
+from .utils import upload_fake_score
 from plex.operations import plex_set_movie_added_date_now, plex_set_episode_added_date_now
 
 
 def _upload_fake_score(media_type):
-    """Score recorded for a hand upload: the configured local score when it is
-    above 0, otherwise the full scale of the media type."""
-    full = MAX_SCORES['episode' if media_type == 'series' else 'movie']
-    local = getattr(settings.general, 'local_subtitle_score', 0)
-    return round(full * local / 100) if local > 0 else full
+    return upload_fake_score(media_type, getattr(settings.general, 'local_subtitle_score', 0))
 
 
 def _refresh_uploaded_subtitles(video_path, subtitle_path, sonarr_series_id=None, sonarr_episode_id=None,

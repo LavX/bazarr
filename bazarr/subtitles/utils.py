@@ -19,6 +19,13 @@ from app.database import get_profiles_list
 from .refiners import registered as registered_refiners
 
 
+def upload_fake_score(media_type, local_score):
+    """Score recorded for a hand upload: the local score when it is above 0,
+    otherwise the full scale of the media type."""
+    full = MAX_SCORES['episode' if media_type == 'series' else 'movie']
+    return round(full * local_score / 100) if local_score > 0 else full
+
+
 def get_video(path, title, sceneName, providers=None, media_type="movie", context=None, cancel=None):
     """
     Construct `Video` instance
