@@ -11,7 +11,7 @@
  * What: Renders ItemOverview directly with controlled props and asserts DOM
  * content via Testing Library queries.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import { faCalendarAlt, faHardDrive } from "@fortawesome/free-solid-svg-icons";

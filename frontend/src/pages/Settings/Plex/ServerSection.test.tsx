@@ -11,7 +11,7 @@
  * server so the automatic single-server selection runs, and a selection
  * mutation that rejects with each refusal code.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import { AxiosError } from "axios";

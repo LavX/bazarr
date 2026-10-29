@@ -115,7 +115,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: "${{ env.UI_DIRECTORY }}/node_modules"
-          key: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-modules-${{ hashFiles('frontend/package-lock.json') }}
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-modules-${{ hashFiles('frontend/pnpm-lock.yaml', 'frontend/pnpm-workspace.yaml') }}
           restore-keys: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-modules-
 
       - &setup-node
@@ -124,13 +124,18 @@ jobs:
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
 
-      - &npm-install
+      - &pnpm-enable
+        # Node ships Corepack, which provides the pnpm version pinned in frontend/package.json.
+        name: Enable pnpm
+        run: corepack enable
+
+      - &pnpm-install
         name: Install dependencies
-        run: npm install
+        run: pnpm install --frozen-lockfile
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Build
-        run: npm run build:ci
+        run: pnpm run build:ci
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - uses: actions/upload-artifact@v7
@@ -148,18 +153,19 @@ jobs:
       - *checkout
       - *node-modules-cache
       - *setup-node
-      - *npm-install
+      - *pnpm-enable
+      - *pnpm-install
 
       - name: Check Types
-        run: npm run check:ts
+        run: pnpm run check:ts
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Check Styles
-        run: npm run check
+        run: pnpm run check
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Check Format
-        run: npm run check:fmt
+        run: pnpm run check:fmt
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Check e2e harness tests are collected
@@ -167,7 +173,7 @@ jobs:
         # vitest project of their own. A glob or a move that left it with no
         # files would pass without a word, so it must find at least one.
         run: |
-          files=$(npx vitest list --project e2e-harness --filesOnly)
+          files=$(pnpm exec vitest list --project e2e-harness --filesOnly)
           if [ -z "$files" ]; then
             echo "The e2e-harness vitest project collected no test files"
             exit 1
@@ -189,7 +195,8 @@ jobs:
       - *checkout
       - *node-modules-cache
       - *setup-node
-      - *npm-install
+      - *pnpm-enable
+      - *pnpm-install
 
       - name: Unit Test (shard ${{ matrix.shard }} of 3)
         # Each shard records its results and its coverage in a blob report.
@@ -201,7 +208,7 @@ jobs:
         # folder moved to .vitest/blob in version 5, which left the upload
         # empty, so the path is spelled out rather than left to the default.
         run: >-
-          npx vitest run --shard=${{ matrix.shard }}/3
+          pnpm exec vitest run --shard=${{ matrix.shard }}/3
           --reporter=blob --reporter=default
           --outputFile.blob=.vitest-reports/blob-${{ matrix.shard }}.json
           --coverage --coverage.reporter=text-summary
@@ -227,7 +234,8 @@ jobs:
       - *checkout
       - *node-modules-cache
       - *setup-node
-      - *npm-install
+      - *pnpm-enable
+      - *pnpm-install
 
       - uses: actions/download-artifact@v8
         with:
@@ -244,7 +252,7 @@ jobs:
             echo "Expected 3 shard reports, found $count"
             exit 1
           fi
-          npx vitest run --merge-reports=.vitest-reports --coverage
+          pnpm exec vitest run --merge-reports=.vitest-reports --coverage
         working-directory: ${{ env.UI_DIRECTORY }}
 
   # The Remotion project that renders each release's hero artwork. Nothing else
@@ -260,29 +268,33 @@ jobs:
       - *checkout
 
       - name: Cache node_modules
-        # An exact key and no restore-keys, so a hit is the tree `npm ci` would
-        # build. It also holds the headless Chrome that Remotion downloads.
+        # An exact key and no restore-keys, so a hit is the tree a frozen
+        # `pnpm install` would build. It also holds the headless Chrome that
+        # Remotion downloads.
         id: hero-modules
         uses: actions/cache@v6
         with:
           path: scripts/release/hero/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-hero-${{ hashFiles('scripts/release/hero/package.json', 'scripts/release/hero/package-lock.json') }}
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-hero-${{ hashFiles('scripts/release/hero/package.json', 'scripts/release/hero/pnpm-lock.yaml', 'scripts/release/hero/pnpm-workspace.yaml') }}
 
       - *setup-node
 
+      - *pnpm-enable
+
       - name: Install dependencies
         if: ${{ steps.hero-modules.outputs.cache-hit != 'true' }}
-        run: npm ci
+        run: pnpm install --frozen-lockfile
         working-directory: scripts/release/hero
 
       - name: Check Types
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
         working-directory: scripts/release/hero
 
       - name: Render one still
         # Frame 0 of the Hero composition, to the runner's temp folder rather
-        # than out/, which is where release artwork is written.
-        run: npm run still -- "$RUNNER_TEMP/hero.png" --frame=0
+        # than out/, which is where release artwork is written. No `--` before
+        # the arguments: pnpm forwards a literal `--` to the script.
+        run: pnpm run still "$RUNNER_TEMP/hero.png" --frame=0
         working-directory: scripts/release/hero
 
   # The backend is split into seven jobs per Python version. They share their

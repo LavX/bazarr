@@ -12,7 +12,7 @@
  * download prop. Clicks Search to show the table, then exercises the download
  * button on individual rows.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import { UseQueryResult } from "@tanstack/react-query";

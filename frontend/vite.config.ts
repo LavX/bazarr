@@ -148,7 +148,7 @@ export default defineConfig(({ mode, command }) => {
       testTimeout: 20000,
       pool: "forks",
       // The Playwright suite runs against a real container with its own
-      // runner (npm run e2e), never under vitest.
+      // runner (pnpm run e2e), never under vitest.
       exclude: [...configDefaults.exclude, "e2e/**"],
       projects: [
         // The app's unit tests, with every option above.

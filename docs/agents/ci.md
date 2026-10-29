@@ -11,7 +11,7 @@ need it. That is the check to require in a branch rule.
 | --- | --- |
 | Plan | Reads the change and decides what the run needs (`.github/scripts/ci_plan.py`) |
 | Docs | Release-notes render check, and no em or en dash or broken relative link on an added line (`.github/scripts/docs_check.py`) |
-| Frontend build | `npm run build:ci`, uploaded for the backend jobs |
+| Frontend build | `pnpm run build:ci`, uploaded for the backend jobs |
 | Frontend checks | Types, ESLint and Prettier |
 | Frontend tests 1/3 to 3/3 | Vitest in three shards, each recording coverage |
 | Frontend coverage | Merges the three shards and enforces the coverage floor |
@@ -70,7 +70,7 @@ scripts/ci/run-local.sh --jobs 8         # fewer processes at a time
 ```
 
 It reads the suites out of `ci.yml`, so it cannot drift from CI. It needs the
-Python version (found through `uv` when installed), node and npm, and docker.
+Python version (found through `uv` when installed), node and pnpm, and docker.
 It starts a throwaway PostgreSQL 16 on a random local port, gives each parallel
 worker its own database, and removes the container on exit. It never touches
 another container, including `bazarr`, `bazarr-standalone` and `bazarr-atlas`.

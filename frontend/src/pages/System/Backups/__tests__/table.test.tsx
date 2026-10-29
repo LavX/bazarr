@@ -6,7 +6,7 @@
  * gated action: with login on and no live window the prompt appears after the
  * confirm dialog rather than as a refusal toast, and a cancel stages nothing.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import userEvent from "@testing-library/user-event";

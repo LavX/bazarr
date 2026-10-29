@@ -34,7 +34,7 @@ env:
 
 jobs:
   # ==========================================================================
-  # Build Frontend (cached via GitHub Actions cache)
+  # Build Frontend
   # ==========================================================================
   build-frontend:
     runs-on: ubuntu-latest
@@ -48,15 +48,17 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
-          cache: 'npm'
-          cache-dependency-path: "${{ env.UI_DIRECTORY }}/package-lock.json"
+
+      - name: Enable pnpm
+        # Node ships Corepack, which provides the pnpm version pinned in frontend/package.json.
+        run: corepack enable
 
       - name: Install Dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Build Frontend
-        run: npm run build
+        run: pnpm run build
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Upload Frontend Artifact

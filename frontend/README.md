@@ -3,7 +3,7 @@
 ## Dependencies
 
 - Either [Node.js](https://nodejs.org/) installed manually or using [Node Version Manager](https://github.com/nvm-sh/nvm)
-- npm (included in Node.js)
+- pnpm, which Node.js ships through [Corepack](https://nodejs.org/api/corepack.html): run `corepack enable` once and it provides the version pinned in `package.json`
 - (Optional) [Docker](https://www.docker.com/) for building and running the frontend using a Docker image
 
 > The recommended Node version to use and maintained is managed on the `.nvmrc` file. You can either install manually
@@ -21,7 +21,7 @@
 2. Install build dependencies in the project directory
 
    ```
-   $ npm install
+   $ pnpm install
    ```
 
 3. (Optional) Duplicate `.env.development` file and rename to `.env.development.local`
@@ -53,7 +53,7 @@
 7. Run the web development tool
 
    ```
-   $ npm start
+   $ pnpm start
    ```
 
 ## Building with Docker
@@ -83,7 +83,7 @@ For more details, see the [dev-setup README](../dev-setup/README.md).
 
 In the project directory, you can run:
 
-### `npm start`
+### `pnpm start`
 
 Runs the app in the development mode.
 Open `http://localhost:5173` to view it in the browser.
@@ -91,11 +91,11 @@ Open `http://localhost:5173` to view it in the browser.
 The page will reload if you make edits.
 You will also see any lint errors in the console.
 
-### `npm run build`
+### `pnpm run build`
 
 Builds the app in production mode and save to the `build` folder.
 
-### `npm run format`
+### `pnpm run format`
 
 Format code for all files in `frontend` folder
 

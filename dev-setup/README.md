@@ -82,11 +82,11 @@ This is the Bazarr web interface with live reloading. The frontend automatically
 2. **Frontend Development**:
    - Edit files in `../frontend/` directory
    - Vite automatically reloads the browser
-   - Install new npm packages by rebuilding: `docker compose up --build`
+   - Install new pnpm packages by rebuilding: `docker compose up --build`. The image installs from `frontend/pnpm-lock.yaml` with `--frozen-lockfile`, so add the package with `pnpm add` in `frontend/` first, which updates the lock file with it
 
 3. **Adding Dependencies**:
    - **Python**: Add to `../requirements.txt` and rebuild
-   - **Node.js**: Add to `../frontend/package.json` and rebuild
+   - **Node.js**: Add with `pnpm add` in `../frontend/` (this updates `package.json` and `pnpm-lock.yaml`), then rebuild
 
 ### Useful Commands
 
@@ -314,7 +314,7 @@ Frontend Container (/app/)
 ├── src/ (frontend source - mounted)
 ├── public/ (static assets - mounted)
 ├── config/ (configuration - mounted)
-└── node_modules/ (npm packages - container only)
+└── node_modules/ (pnpm packages - container only)
 
 Autopulse Container (/app/)
 ├── config.yaml (configuration - mounted)

@@ -12,7 +12,7 @@
  * asserts the Keep mode switches itself off with a reason, and that a server
  * refusal message is shown rather than generic retry text.
  *
- * Test: Run with `cd frontend && npx vitest run --reporter=verbose`.
+ * Test: Run with `cd frontend && pnpm exec vitest run --reporter=verbose`.
  */
 
 import userEvent from "@testing-library/user-event";

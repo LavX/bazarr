@@ -75,7 +75,8 @@ def test_documentation_is_recognised(path):
         "site/build.py",
         # Everything that is not documentation.
         "bazarr/main.py",
-        "frontend/package-lock.json",
+        "frontend/pnpm-lock.yaml",
+        "frontend/pnpm-workspace.yaml",
         "requirements.txt",
         "Dockerfile",
         ".github/workflows/ci.yml",
@@ -149,7 +150,8 @@ def test_an_empty_change_list_runs_everything():
     "path",
     [
         "scripts/release/hero/src/Root.tsx",
-        "scripts/release/hero/package-lock.json",
+        "scripts/release/hero/pnpm-lock.yaml",
+        "scripts/release/hero/pnpm-workspace.yaml",
         # The still loads the brand font from here.
         "site/fonts/Geist-Variable.woff2",
         # The job itself, the planner that starts it, and the Node it runs on.
@@ -174,7 +176,7 @@ def test_a_font_only_change_renders_the_hero_and_skips_the_suites():
     [
         "bazarr/main.py",
         "frontend/src/App.tsx",
-        "frontend/package-lock.json",
+        "frontend/pnpm-lock.yaml",
         "scripts/release/notes.py",
         "site/hero/index.html",
         "docs/agents/release-hero.md",
@@ -331,8 +333,9 @@ def _load_local_ci():
 
 
 def test_the_mirror_installs_the_hero_only_when_its_stamp_is_stale(tmp_path, monkeypatch):
-    """The hero's `npm ci` runs when no stamp stands for it, records one, and
-    is skipped once the stamp matches, as the job skips it on a cache hit. The
+    """The hero's `pnpm install` runs when no stamp stands for it, records one,
+    and is skipped once the stamp matches, as the job skips it on a cache hit.
+    Only the install records the stamp, so a failed install is retried. The
     still itself is the one hero step that loads a machine's cores, so the
     worker budget counts it at the weight the model gives it."""
     local_ci = _load_local_ci()
@@ -341,17 +344,22 @@ def test_the_mirror_installs_the_hero_only_when_its_stamp_is_stale(tmp_path, mon
     jobs = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
 
     fresh = local_ci.hero_tasks(jobs, tmp_path)
-    install = next(task for task in fresh if "npm ci" in task.argv[3])
+    corepack = next(task for task in fresh if "corepack enable" in task.argv[3])
+    install = next(task for task in fresh if "pnpm install" in task.argv[3])
     assert ".bazarr-ci-stamp" in install.argv[3], "a fresh install records no stamp"
-    render = next(task for task in fresh if "npm run still" in task.argv[3])
+    assert ".bazarr-ci-stamp" not in corepack.argv[3], (
+        "a stamp written before the install would outlive a failed install"
+    )
+    render = next(task for task in fresh if "pnpm run still" in task.argv[3])
     assert render.weight == local_ci.HERO_RENDER_WEIGHT == 1
 
     stamp.parent.mkdir(parents=True)
     stamp.write_text(local_ci._hero_stamp())
     stamped = local_ci.hero_tasks(jobs, tmp_path)
-    assert not any("npm ci" in task.argv[3] for task in stamped), (
-        "the mirror reinstalls a hero the stamp already stands for"
-    )
+    assert not any(
+        "pnpm install" in task.argv[3] or "corepack enable" in task.argv[3]
+        for task in stamped
+    ), "the mirror reinstalls a hero the stamp already stands for"
     assert [task.key for task in stamped] == [
-        task.key for task in fresh if task is not install
-    ], "skipping the install has to leave the chain of the other steps intact"
+        task.key for task in fresh if task is not install and task is not corepack
+    ], "skipping the setup steps has to leave the chain of the other steps intact"
