@@ -223,8 +223,8 @@ describe("the wizard's own URL", () => {
   });
 
   it("a save that lands after the step was left does not move the wizard", async () => {
-    // Only the provider stages report themselves busy, so browser Back can
-    // unmount any other step with its write still in the air. The callback the
+    // Browser Back is blocked only for a step that reports itself busy, so any
+    // other step is unmounted with its save in the air. The callback the
     // step handed to the write still ran when the write answered, and advanced
     // the wizard to the step it had been heading for over wherever the reader
     // had gone.
