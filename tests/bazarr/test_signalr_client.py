@@ -134,7 +134,12 @@ def _client(monkeypatch, client_cls, connection, arr_instance_id=None):
     client = client_cls(arr_instance_id)
     if client_cls is signalr_client.SonarrSignalrClient:
         monkeypatch.setattr(client, "_support_state", lambda: (True, "4.0.0"))
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
+
+    def configure():
+        client.connection = connection
+        return True
+
+    monkeypatch.setattr(client, "configure", configure)
     return client
 
 
@@ -152,7 +157,12 @@ def test_sonarr_signalr_start_retries_when_the_arr_refuses_the_connection(monkey
     monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: "4.0.0")
     monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: True)
     sleep_calls = _fake_sleep(monkeypatch)
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
+
+    def configure():
+        client.connection = connection
+        return True
+
+    monkeypatch.setattr(client, "configure", configure)
 
     client.start()
 
@@ -165,7 +175,12 @@ def test_radarr_signalr_start_retries_when_the_arr_refuses_the_connection(monkey
     client = signalr_client.RadarrSignalrClient()
 
     sleep_calls = _fake_sleep(monkeypatch)
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
+
+    def configure():
+        client.connection = connection
+        return True
+
+    monkeypatch.setattr(client, "configure", configure)
 
     client.start()
 
@@ -179,7 +194,12 @@ def test_sonarr_signalr_start_handles_missing_transport_before_first_start(monke
 
     monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: "4.0.0")
     monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: True)
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
+
+    def configure():
+        client.connection = connection
+        return True
+
+    monkeypatch.setattr(client, "configure", configure)
 
     client.start()
 
@@ -194,7 +214,12 @@ def test_sonarr_signalr_start_waits_when_version_is_temporarily_unknown(monkeypa
     monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: next(versions))
     monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: True)
     sleep_calls = _fake_sleep(monkeypatch)
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
+
+    def configure():
+        client.connection = connection
+        return True
+
+    monkeypatch.setattr(client, "configure", configure)
 
     client.start()
 
@@ -221,7 +246,11 @@ def test_radarr_signalr_start_handles_missing_transport_before_first_start(monke
     connection = _FakeConnection()
     client = signalr_client.RadarrSignalrClient()
 
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
+    def configure():
+        client.connection = connection
+        return True
+
+    monkeypatch.setattr(client, "configure", configure)
 
     client.start()
 
