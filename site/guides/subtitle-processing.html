@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Subtitle Processing: combine, sync and score - Bazarr+</title>
-  <meta name="description" content="Compose bilingual and trilingual subtitles, score and translate embedded tracks, and sync timing with ffsubsync, autosubsync or ALASS with a side-by-side compare.">
+  <meta name="description" content="Compose bilingual and trilingual subtitles, score and translate embedded tracks, extract or hide them, and sync timing with ffsubsync, autosubsync or ALASS.">
   <link rel="canonical" href="https://lavx.github.io/bazarr/guides/subtitle-processing.html">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:title" content="Subtitle Processing: combine, sync and score - Bazarr+">
-  <meta property="og:description" content="Compose bilingual and trilingual subtitles, score and translate embedded tracks, and sync timing with ffsubsync, autosubsync or ALASS with a side-by-side compare.">
+  <meta property="og:description" content="Compose bilingual and trilingual subtitles, score and translate embedded tracks, extract or hide them, and sync timing with ffsubsync, autosubsync or ALASS.">
   <meta property="og:url" content="https://lavx.github.io/bazarr/guides/subtitle-processing.html">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
@@ -22,7 +22,7 @@
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Subtitle Processing: combine, sync and score - Bazarr+">
-  <meta name="twitter:description" content="Compose bilingual and trilingual subtitles, score and translate embedded tracks, and sync timing with ffsubsync, autosubsync or ALASS with a side-by-side compare.">
+  <meta name="twitter:description" content="Compose bilingual and trilingual subtitles, score and translate embedded tracks, extract or hide them, and sync timing with ffsubsync, autosubsync or ALASS.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- Geist font: async preload -->
@@ -60,7 +60,7 @@
     "@context": "https://schema.org",
     "@type": "TechArticle",
     "headline": "Subtitle Processing",
-    "description": "Combine on-disk subtitles, score and translate embedded tracks, and sync with multiple engines in Bazarr+ v2.4.",
+    "description": "Combine on-disk subtitles, score and translate embedded tracks, extract and hide embedded tracks in Bazarr+ v2.8, and sync with multiple engines in Bazarr+ v2.4.",
     "url": "https://lavx.github.io/bazarr/guides/subtitle-processing.html",
     "author": {
       "@type": "Person",
@@ -195,9 +195,9 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
       <p>Before v2.8 an embedded row offered only Translate. The tools needed a file on disk, and the track was inside the container. Now the row can write that file itself.</p>
 
       <h3 id="embedded-extract">Extract to file</h3>
-      <p><strong>Extract to file</strong> pulls the track out of the container with ffmpeg and writes it next to the video as an ordinary subtitle, named with the video's name, the language, any HI or forced tag, and the extension. A hearing-impaired English track becomes <code>Film.en.sdh.srt</code> with the HI extension set to <code>sdh</code>, a forced one becomes <code>Film.en.forced.srt</code>, and a plain one becomes <code>Film.en.srt</code>. The file goes into the folder set under <strong>Settings &gt; Subtitles &gt; Subtitle Folder</strong>, or beside the video when that setting is <strong>Next to the video file</strong>. Text tracks always come out as SRT.</p>
+      <p><strong>Extract to file</strong> pulls the track out of the container with ffmpeg and writes it as an ordinary subtitle beside the video or in the subtitle folder, named with the video's name, the language, any HI or forced tag, and the extension. A hearing-impaired English track becomes <code>Film.en.sdh.srt</code> with the HI extension set to <code>sdh</code>, a forced one becomes <code>Film.en.forced.srt</code>, and a plain one becomes <code>Film.en.srt</code>. The file goes into the folder set under <strong>Settings &gt; Subtitles &gt; Subtitle Folder</strong>, or beside the video when that setting is <strong>Next to the video file</strong>. Text tracks always come out as SRT.</p>
       <p>Image-based tracks are copied out as they are: <code>.sup</code> for PGS, an <code>.idx</code> plus <code>.sub</code> pair for VobSub, and <code>.mks</code> for DVB. Those files are for players. Bazarr+ does not list them as text subtitles.</p>
-      <p>Nothing is overwritten. If a file with the name the extraction would take already exists, the action refuses and names the file in the way; for a text track in single-language mode, any language-less subtitle of the video (<code>&lt;video&gt;.srt</code>, <code>&lt;video&gt;.ass</code> and so on) counts too. Delete or rename it and run the action again. A finished extraction is recorded in History as <strong>Extracted</strong>, keeps the source track's score, and the item is indexed again, so the new file is an ordinary external subtitle from then on. Like an embedded track, an extracted file counts as source quality, so the upgrade job leaves it alone.</p>
+      <p>Nothing is overwritten. If a file with the name the extraction would take already exists, the action refuses and names the file in the way; for a text track in single-language mode, any language-less subtitle of the video (<code>&lt;video&gt;.srt</code>, <code>&lt;video&gt;.ass</code> and so on) counts too. Delete or rename it and run the action again. A finished extraction is recorded in History as <strong>Extracted</strong>, keeps the source track's score, and the item is indexed again, so an extracted text file is an ordinary external subtitle from then on. Like an embedded track, an extracted file counts as source quality, so the upgrade job leaves it alone.</p>
       <p>To extract in bulk, use <strong>Extract Embedded Tracks</strong> on the Movies, Series or Sports list. It extracts every indexed embedded track whose language has no subtitle file yet, whether or not your language profile wants that language, and leaves covered languages and hidden tracks alone. Coverage is checked by language plus the HI and forced flags, so an existing plain English file does not suppress an English HI or forced track.</p>
 
       <h3 id="embedded-tools">The same tools as an external file</h3>
@@ -211,10 +211,12 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
       </ul>
 
       <h3 id="embedded-bitmap">Image-based tracks</h3>
-      <p>A PGS or VobSub track is a series of pictures, so the tools, Translate, View, Edit and Download have no text to work on. The menu says so and leaves <strong>Extract to file</strong> and <strong>Hide track</strong> available. A DVB track is also image-based, but with the default ffprobe parser Bazarr+ does not learn its format at index time, so its row can look like a text track and its text actions fail when run. <strong>Extract to file</strong> still copies it out as <code>.mks</code>.</p>
+      <p>A PGS or VobSub track is a series of pictures, so the tools, Translate, View, Edit and Download have no text to work on. The menu says so and leaves <strong>OCR to text</strong>, <strong>Extract to file</strong> and <strong>Hide track</strong> available. <strong>OCR to text</strong> reads the pictures with Tesseract and writes an SRT where Extract to file writes its file, named like a downloaded subtitle. The tools, Translate, View, Edit and Download then work on that file. Italics are not preserved. OCR to text downloads the Tesseract language pack it needs into the <strong>OCR Language Packs Folder</strong>, which defaults to a <code>tessdata</code> folder in the config directory. <strong>Extract to file</strong> copies a PGS or VobSub track out as it is, for players.</p>
+      <p>A DVB track is also image-based, and OCR to text does not read it. With the default ffprobe parser Bazarr+ does not learn its format at index time, so its row names no codec and can look like a text track. When the same language has a text track with the same HI and forced flags, Extract to file and the tools on that row use that text track, not the DVB track: Extract to file writes it as an SRT, and the DVB track is not copied out. When the language has no such text track, Extract to file copies the DVB track out as <code>.mks</code>, and the tools on that row fail. Bazarr+ tells embedded tracks apart by language, HI and forced only, so a DVB track and a text track in the same language share one key, such as <code>en</code>. Once the SRT exists, extracting the text row is refused, and so is the DVB row. The message names the file already in the way.</p>
+      <p>Extracted rows of a forced and HI track are recorded under <code>en:hi</code> too, the code a plain HI track uses, because an extraction keeps the HI code when a track is both. Hiding the plain HI track does not remove those rows. They go when their Sonarr or Radarr instance is deleted along with its library.</p>
 
       <h3 id="embedded-hide">Hide track</h3>
-      <p>Delete is not offered on an embedded row, because Bazarr+ never rewrites a media file. The red action is <strong>Hide track...</strong>. It stops listing the track for that title and treats the language as wanted again, so a later search can download a text subtitle. The track stays inside the video and nothing is deleted.</p>
+      <p>Delete is not offered on an embedded row, because Bazarr+ never rewrites a media file. The red action is <strong>Hide track...</strong>. It stops listing the track for that title and treats the language as wanted again, so a later search can download a text subtitle. The track stays inside the video and no file is deleted.</p>
       <p>Bazarr+ tells embedded tracks apart by language, HI and forced only, so hiding an English SRT track also hides an English PGS track on the same title. The confirmation lists every track the hide covers. If another subtitle still covers the language, or your language profile does not want it, Bazarr+ says so and does not search.</p>
       <p>Hidden tracks are listed as <strong>Hidden tracks (n)</strong>, under the subtitle table on a movie and in the subtitle cell of the episode or event on series and sports pages. Open it and press <strong>Unhide</strong> to list the track again. Bazarr+ indexes the video again at once; if the file cannot be read at that moment, the next index lists the track.</p>
 
@@ -271,12 +273,12 @@ POST /api/series/&lt;id&gt;/subtitles/combine</code></pre>
       <p>You read the outcome in the notifications drawer. A sync you start on one subtitle from the episode or movie screen is a job of its own and the outcome becomes its name. The automatic sync after a download is not a separate job: it runs inside the download's job and the outcome appears there as a progress message, under the name of the download. An overwrite run that succeeds says only <em>Sync complete</em>, because it stopped at the first engine that worked and never asked the others. A keep-all run where some engines produced nothing says how many did, and then gives a line for each that did not. A run where nothing worked lists them all. Those lines name six different things:</p>
 
       <ul>
-        <li><strong>declined</strong> &mdash; the engine ran and rejected its own result. Nothing is wrong with your installation. autosubsync's line quotes the quality it measured and the threshold it was judged against, because it has a number to give; ffsubsync's says only that it reported the run unsuccessful.</li>
-        <li><strong>rejected</strong> &mdash; the engine claimed success but Bazarr+ refused the result, because the alignment was further out than your configured maximum offset.</li>
-        <li><strong>failed</strong> &mdash; the engine errored out. This one is worth reading: it carries whatever the engine said on its way down.</li>
-        <li><strong>not installed</strong> &mdash; something the engine needs could not be found. Usually the engine itself, and on a bare-metal install that usually means ALASS is not on <code>PATH</code>. It also covers <strong>ffmpeg and ffprobe</strong>: ffsubsync needs both, and a run without them reports ffsubsync as not installed even when ffsubsync is there. On Docker none of this should appear.</li>
-        <li><strong>skipped after repeated failures</strong> &mdash; the engine has come away from this subtitle empty-handed several times since it last produced a result, and is being left alone. Errors and rejected results both count towards that; an engine that declines its own result neither counts nor clears the tally, because that verdict can change when the reference or the settings do. Only a run that works clears it. Starting a sync yourself runs the engine anyway.</li>
-        <li><strong>output already existed</strong> &mdash; keep-all found a current result from this engine and kept it rather than doing the work again.</li>
+        <li><strong>declined</strong>: the engine ran and rejected its own result. Nothing is wrong with your installation. autosubsync's line quotes the quality it measured and the threshold it was judged against, because it has a number to give; ffsubsync's says only that it reported the run unsuccessful.</li>
+        <li><strong>rejected</strong>: the engine claimed success but Bazarr+ refused the result, because the alignment was further out than your configured maximum offset.</li>
+        <li><strong>failed</strong>: the engine errored out. This one is worth reading: it carries whatever the engine said on its way down.</li>
+        <li><strong>not installed</strong>: something the engine needs could not be found. Usually the engine itself, and on a bare-metal install that usually means ALASS is not on <code>PATH</code>. It also covers <strong>ffmpeg and ffprobe</strong>: ffsubsync needs both, and a run without them reports ffsubsync as not installed even when ffsubsync is there. On Docker none of this should appear.</li>
+        <li><strong>skipped after repeated failures</strong>: the engine has come away from this subtitle empty-handed several times since it last produced a result, and is being left alone. Errors and rejected results both count towards that; an engine that declines its own result neither counts nor clears the tally, because that verdict can change when the reference or the settings do. Only a run that works clears it. Starting a sync yourself runs the engine anyway.</li>
+        <li><strong>output already existed</strong>: keep-all found a current result from this engine and kept it rather than doing the work again.</li>
       </ul>
 
       <p>An engine that declines, is rejected, or fails leaves your original subtitle untouched, and the next engine in the chain runs.</p>

@@ -177,7 +177,7 @@
       </ul>
 
       <h2 id="more">Scan, search and upgrade</h2>
-      <p>The <strong>More</strong> menu holds three actions that work on the media rather than on
+      <p>The <strong>More</strong> menu holds several actions that work on the media rather than on
         an existing subtitle file:</p>
 
       <ul>
@@ -186,6 +186,10 @@
         <li><strong>Search Missing.</strong> Searches providers for every language your profile
           asks for that is not present yet.</li>
         <li><strong>Upgrade.</strong> Looks for a better match than the subtitle you already have.</li>
+        <li><strong>Extract Embedded Tracks.</strong> Writes out each embedded track that has no
+          subtitle file with the same language and HI and forced flags, whether or not your language
+          profile wants that language. Hidden tracks are left alone.</li>
+        <li><strong>OCR Image Subtitles.</strong> For each subtitle the title's language profile wants, reads its PGS or VobSub track into an SRT in the subtitle folder, or beside the video, unless that subtitle already has a file (a combined or synced output does not count) or an embedded track that Bazarr+ has identified as text. One track runs at a time.</li>
       </ul>
 
       <h2 id="limits">Limits and what happens next</h2>
