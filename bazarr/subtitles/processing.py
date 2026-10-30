@@ -89,6 +89,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         from subtitles.tools.translate.core.translator_utils import translated_destination_path
         from subtitles.tools.translate.main import translate_subtitles_file
         from subtitles.download import check_missing_languages
+        from subtitles.wanted.utils import source_wait_elapsed
         from app.database import (TableEpisodes, TableShows, TableMovies,
                                   database, select)
 
@@ -172,6 +173,14 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 'BAZARR auto-translate skipped: source score %.1f%% '
                 'below threshold %.1f%% for %s',
                 source_score_percent, min_score, video_path,
+            )
+            return
+
+        if not source_wait_elapsed(subtitle_path):
+            logging.info(
+                'BAZARR auto-translate skipped: source subtitle is younger than '
+                'translator.min_source_wait_minutes for %s',
+                video_path,
             )
             return
 

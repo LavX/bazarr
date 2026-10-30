@@ -4,6 +4,9 @@
 import ast
 import logging
 import os
+import time
+
+from app.config import settings
 
 
 def evaluate_translation_gate():
@@ -18,6 +21,26 @@ def evaluate_translation_gate():
     if not availability.available:
         logging.info("BAZARR is not translating missing subtitles: %s", availability.reason)
     return availability.available
+
+
+def source_wait_elapsed(source_path):
+    """Whether a source subtitle is old enough to translate automatically.
+
+    translator.min_source_wait_minutes is measured from the modification time
+    of the source file, and 0 turns the wait off. A source whose modification
+    time cannot be read is not held back by the wait. A source whose modification
+    time is in the future is not held back either, since its age cannot be measured.
+    """
+    wait_minutes = settings.translator.min_source_wait_minutes
+    if not wait_minutes:
+        return True
+    try:
+        modified_at = os.path.getmtime(source_path)
+    except OSError:
+        return True
+    if modified_at > time.time():
+        return True
+    return time.time() - modified_at >= wait_minutes * 60
 
 
 def _find_existing_subtitle_path(subtitles_field, source_lang, path_replace_fn=None):

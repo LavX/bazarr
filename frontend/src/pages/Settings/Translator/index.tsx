@@ -332,6 +332,35 @@ const SettingsTranslatorView: FunctionComponent = () => {
             </Tooltip>
           </Group>
           <Group gap="xs" align="center">
+            <MantineText size="sm" c="var(--bz-text-tertiary)">
+              Minimum wait before translating (minutes)
+            </MantineText>
+            <Number
+              settingKey="settings-translator-min_source_wait_minutes"
+              min={0}
+              max={10080}
+              step={1}
+              allowDecimal={false}
+              w={90}
+              size="xs"
+            />
+            <Tooltip
+              label="Waits until the source subtitle file is this old before translating it automatically. 0 translates as soon as a source exists. Wanted scans never hold a hand upload back, and sports processing ignores this setting."
+              multiline
+              w={280}
+              withArrow
+            >
+              <MantineText
+                size="xs"
+                c="var(--bz-text-tertiary)"
+                style={{ cursor: "help" }}
+                component="span"
+              >
+                <FontAwesomeIcon icon={faCircleInfo} />
+              </MantineText>
+            </Tooltip>
+          </Group>
+          <Group gap="xs" align="center">
             <Check
               label="Translation credit"
               settingKey="settings-translator-translator_info"

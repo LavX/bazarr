@@ -1,6 +1,8 @@
 # coding=utf-8
 
 import logging
+import os
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -496,9 +498,9 @@ def test_wanted_series_translation_uses_exact_profile_variant():
         mock_settings.translator.min_source_score = 0
         # The wanted scan reads local_subtitle_score; a bare mock would not compare.
         mock_settings.general.local_subtitle_score = 0
-        # 3 queries inside _wanted_episode when auto-translate fires:
-        # source-score lookup, already-translated guard, and the metadata
-        # fetch for postprocess_subtitles.
+        # At the default wait of 0 the wanted-scan auto-translate path runs three
+        # queries (source-score lookup, already-translated guard, metadata fetch).
+        # A non-zero wait with a younger source adds the source-row lookup.
         mock_database.execute.return_value.first.side_effect = [
             None,
             None,
@@ -687,3 +689,88 @@ def test_wanted_movie_does_not_queue_over_a_subtitle_already_on_disk(tmp_path):
 
     mock_translate.assert_not_called()
     assert destination.read_text() == 'already here'
+
+
+def test_a_download_waits_for_the_minimum_source_age_before_translating(tmp_path):
+    """A source younger than translator.min_source_wait_minutes is held back,
+    and the same source is translated once its modification time is old enough."""
+    from subtitles.processing import _trigger_auto_translation
+
+    mock_database = Mock()
+    mock_database.execute.return_value.first.return_value = SimpleNamespace(
+        sonarrSeriesId=10,
+        season=1,
+        episode=1,
+        imdbId='tt1',
+        tvdbId='1',
+        profileId=1,
+    )
+    source = tmp_path / 'episode.en.srt'
+    source.write_text('provider subtitle')
+    trigger = dict(
+        downloaded_lang='en',
+        subtitle_path=str(source),
+        video_path='/video/episode.mkv',
+        media_type='series',
+        series_id=10,
+        episode_id=20,
+        source_score_percent=100,
+    )
+
+    with (
+        patch('subtitles.processing.settings') as mock_settings,
+        patch('subtitles.wanted.utils.settings') as mock_wait_settings,
+        patch('app.database.get_profile_id', return_value=1),
+        patch('app.database.get_profiles_list') as mock_profiles,
+        patch('app.database.database', mock_database),
+        patch('subtitles.download.check_missing_languages') as mock_missing,
+        patch('subtitles.processing.alpha2_from_alpha3', return_value='hu'),
+        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
+    ):
+        mock_settings.translator.min_source_score = 90
+        mock_wait_settings.translator.min_source_wait_minutes = 60
+        mock_profiles.return_value = {
+            'items': [
+                {
+                    'language': 'hu',
+                    'translate_from': 'en',
+                    'forced': 'False',
+                    'hi': 'False',
+                }
+            ]
+        }
+        mock_missing.return_value = [_missing_language('hun')]
+
+        _trigger_auto_translation(**trigger)
+        mock_translate.assert_not_called()
+
+        aged = time.time() - 120 * 60
+        os.utime(source, (aged, aged))
+        _trigger_auto_translation(**trigger)
+
+    mock_translate.assert_called_once()
+
+
+def test_a_sports_download_is_queued_without_the_minimum_source_wait(tmp_path):
+    """Sports processing hands the download to its own queue and never reads the
+    minimum source wait, so a fresh source is queued as well."""
+    from subtitles.processing import _trigger_auto_translation
+
+    source = tmp_path / 'sports.en.srt'
+    source.write_text('provider subtitle')
+
+    with (
+        patch('subtitles.wanted.utils.settings') as mock_wait_settings,
+        patch('sportarr.profile_hooks.queue_translations') as mock_queue,
+    ):
+        mock_wait_settings.translator.min_source_wait_minutes = 60
+        _trigger_auto_translation(
+            downloaded_lang='en',
+            subtitle_path=str(source),
+            video_path='/video/sports.mkv',
+            media_type='sports',
+            source_score_percent=100,
+            sports_operation=Mock(),
+        )
+
+    mock_queue.assert_called_once()
