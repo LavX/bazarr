@@ -223,8 +223,7 @@ class _SignalrClientLifecycle:
         with self._lifecycle_lock:
             if not self._is_current(generation):
                 return None
-            self.configure()
-            return self.connection
+            return self.connection if self.configure() else None
 
     def _connect(self, generation, connection):
         logging.info('BAZARR trying to connect to %s SignalR feed...', self.arr_name)
@@ -369,7 +368,7 @@ class SonarrSignalrClient(_SignalrClientLifecycle):
             self._feed_lost = True
         self.connected = False
         event_stream(type='badges')
-        logging.error('BAZARR SignalR client for Sonarr connection as been lost. Trying to reconnect...')
+        logging.error('BAZARR SignalR client for Sonarr connection has been lost. Trying to reconnect...')
 
     def configure(self):
         # None -> scalar config (the default instance), byte-identical. Otherwise
@@ -386,7 +385,7 @@ class SonarrSignalrClient(_SignalrClientLifecycle):
                 logging.warning('BAZARR Sonarr instance %s is gone; not starting its '
                                 'SignalR feed.', self.arr_instance_id)
                 self.connected = False
-                return
+                return False
             base_url = client.base_url()
             self.apikey_sonarr = client.api_key
         # Tear down any prior connection before overwriting it so a stale
@@ -405,6 +404,7 @@ class SonarrSignalrClient(_SignalrClientLifecycle):
         self.connection.on_close(lambda: logging.debug('BAZARR SignalR client for Sonarr is disconnected.'))
         self.connection.on_error(self.exception_handler)
         self.connection.on("receiveMessage", lambda data: feed_queue(data, self.arr_instance_id))
+        return True
 
 
 class RadarrSignalrClient(_SignalrClientLifecycle):
@@ -464,7 +464,7 @@ class RadarrSignalrClient(_SignalrClientLifecycle):
             self._feed_lost = True
         self.connected = False
         event_stream(type='badges')
-        logging.error('BAZARR SignalR client for Radarr connection as been lost. Trying to reconnect...')
+        logging.error('BAZARR SignalR client for Radarr connection has been lost. Trying to reconnect...')
 
     def configure(self):
         if self.arr_instance_id is None:
@@ -476,7 +476,7 @@ class RadarrSignalrClient(_SignalrClientLifecycle):
                 logging.warning('BAZARR Radarr instance %s is gone; not starting its '
                                 'SignalR feed.', self.arr_instance_id)
                 self.connected = False
-                return
+                return False
             base_url = client.base_url()
             self.apikey_radarr = client.api_key
         if self.connection is not None:
@@ -492,6 +492,7 @@ class RadarrSignalrClient(_SignalrClientLifecycle):
         self.connection.on_close(lambda: logging.debug('BAZARR SignalR client for Radarr is disconnected.'))
         self.connection.on_error(self.exception_handler)
         self.connection.on("receiveMessage", lambda data: feed_queue(data, self.arr_instance_id))
+        return True
 
 
 def dispatcher(data):

@@ -134,7 +134,7 @@ def _client(monkeypatch, client_cls, connection, arr_instance_id=None):
     client = client_cls(arr_instance_id)
     if client_cls is signalr_client.SonarrSignalrClient:
         monkeypatch.setattr(client, "_support_state", lambda: (True, "4.0.0"))
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
+    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
     return client
 
 
@@ -152,7 +152,7 @@ def test_sonarr_signalr_start_retries_when_the_arr_refuses_the_connection(monkey
     monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: "4.0.0")
     monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: True)
     sleep_calls = _fake_sleep(monkeypatch)
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
+    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
 
     client.start()
 
@@ -165,7 +165,7 @@ def test_radarr_signalr_start_retries_when_the_arr_refuses_the_connection(monkey
     client = signalr_client.RadarrSignalrClient()
 
     sleep_calls = _fake_sleep(monkeypatch)
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
+    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
 
     client.start()
 
@@ -179,7 +179,7 @@ def test_sonarr_signalr_start_handles_missing_transport_before_first_start(monke
 
     monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: "4.0.0")
     monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: True)
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
+    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
 
     client.start()
 
@@ -194,7 +194,7 @@ def test_sonarr_signalr_start_waits_when_version_is_temporarily_unknown(monkeypa
     monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: next(versions))
     monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: True)
     sleep_calls = _fake_sleep(monkeypatch)
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
+    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
 
     client.start()
 
@@ -221,7 +221,7 @@ def test_radarr_signalr_start_handles_missing_transport_before_first_start(monke
     connection = _FakeConnection()
     client = signalr_client.RadarrSignalrClient()
 
-    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
+    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection) or True)
 
     client.start()
 
@@ -370,6 +370,22 @@ def test_signalr_start_gives_up_when_its_instance_is_deleted(monkeypatch, client
     assert sleep_calls == [5]
     assert connection.starts == 2
     assert client.connected is False
+
+
+@_CLIENT_CLASSES
+def test_configuring_a_deleted_instance_returns_no_connection_and_touches_nothing(monkeypatch, client_cls):
+    connection = _FakeConnection()
+    client = client_cls(7)
+    client.connection = connection
+    monkeypatch.setattr(signalr_client, "client_for_instance", lambda db, instance_id: None)
+    built = []
+    monkeypatch.setattr(signalr_client, "build_signalr_connection", lambda url, headers: built.append(url))
+
+    assert client._configure_if_current(client._begin_generation()) is None
+
+    assert built == []
+    assert client.connection is connection
+    assert connection.events == []
 
 
 @_CLIENT_CLASSES
@@ -597,6 +613,39 @@ def test_signalr_first_connect_after_a_restart_still_syncs(monkeypatch, client_c
     assert len(sync_jobs) == 2
 
 
+@pytest.mark.parametrize(
+    ("client_cls", "kind", "taskid"),
+    [
+        (signalr_client.SonarrSignalrClient, "sonarr", "update_series_7"),
+        (signalr_client.RadarrSignalrClient, "radarr", "update_movies_7"),
+    ],
+    ids=["sonarr", "radarr"],
+)
+def test_an_automatic_reconnect_skips_the_full_sync_and_a_restart_runs_it_again(
+        monkeypatch, client_cls, kind, taskid):
+    """The on_reconnect and on_open callbacks of an automatic reconnect restore
+    the connected state without a full sync. A restart builds a new feed, and
+    its first connect runs the full sync again."""
+    first = _CallbackConnection()
+    second = _CallbackConnection()
+    client, sync_jobs = _configured_client(monkeypatch, client_cls, first, second)
+    monkeypatch.setattr(signalr_client.settings.general, f"use_{kind}", True)
+
+    client.start()
+    assert sync_jobs == [taskid]
+
+    first.callbacks["reconnect"]()
+    first.callbacks["open"]()
+
+    assert client.connected is True
+    assert sync_jobs == [taskid]
+
+    client.restart()
+
+    assert client.connected is True
+    assert sync_jobs == [taskid, taskid]
+
+
 @_CLIENT_CLASSES
 def test_signalr_reconnect_that_fails_keeps_the_client_disconnected(monkeypatch, client_cls):
     """A reconnect that never reaches the open callback leaves the client
@@ -677,6 +726,7 @@ def test_refanout_retires_the_retry_loops_it_replaces(monkeypatch, kind, client_
         def configure(self):
             self.connection = _AlwaysRefusedConnection()
             connections.append(self.connection)
+            return True
 
     monkeypatch.setattr(signalr_client, "_enabled_instances",
                         lambda _kind: [types.SimpleNamespace(id=1), types.SimpleNamespace(id=2)])
