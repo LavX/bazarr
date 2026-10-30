@@ -226,8 +226,8 @@ describe("the wizard's own URL", () => {
     // Browser Back is blocked only for a step that reports itself busy, so any
     // other step is unmounted with its save in the air. The mocked save never
     // sets isPending, so Back is not blocked here. The callback the step handed
-    // to the write still ran when the write answered, and advanced the wizard
-    // one step on from wherever the reader had gone.
+    // to the write still runs when the write answers, and must not move the
+    // wizard one step on from wherever the reader had gone.
     let landed: (() => void) | undefined;
     mockedSettingsMutation.mockReturnValue({
       mutate: vi.fn(
