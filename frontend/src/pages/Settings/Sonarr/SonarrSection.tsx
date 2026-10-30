@@ -41,7 +41,9 @@ const SonarrSection: FunctionComponent<Props> = ({ children }) => {
           <Message>
             When Bazarr establishes its live connection to Sonarr, run a series
             and episodes synchronization to make sure that we're up-to-date.
-            Automatic reconnects after a dropped connection do not run it again.
+            After an automatic reconnect, the library sync does not run again.
+            The scheduled sync covers the gap within one sync interval, unless
+            the interval is set to Manually.
           </Message>
           <Slider
             label="Minimum Score For Episodes"
