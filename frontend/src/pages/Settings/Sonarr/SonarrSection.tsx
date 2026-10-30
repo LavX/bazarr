@@ -39,8 +39,9 @@ const SonarrSection: FunctionComponent<Props> = ({ children }) => {
             settingKey="settings-sonarr-series_sync_on_live"
           ></Check>
           <Message>
-            When Bazarr connects or reconnects to Sonarr, run a series and
-            episodes synchronization to make sure that we're up-to-date.
+            When Bazarr establishes its live connection to Sonarr, run a series
+            and episodes synchronization to make sure that we're up-to-date.
+            Automatic reconnects after a dropped connection do not run it again.
           </Message>
           <Slider
             label="Minimum Score For Episodes"

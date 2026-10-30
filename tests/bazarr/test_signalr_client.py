@@ -3,10 +3,13 @@ import logging
 import threading
 import time
 import types
+from unittest.mock import patch as _patch
 from urllib.error import URLError
 
 import pytest
+from signalrcore.transport.base_transport import TransportState
 from signalrcore.transport.sockets.errors import SocketHandshakeError
+from signalrcore.transport.websockets.websocket_transport import WebsocketTransport
 
 from app import signalr_client
 
@@ -434,6 +437,50 @@ def _configured_client(monkeypatch, client_cls, *connections):
     return client, sync_jobs
 
 
+class _ReconnectingTransportConnection(_FakeConnection):
+    def __init__(self):
+        super().__init__()
+        with _patch_websocket_init():
+            self.transport = WebsocketTransport()
+        self.transport.state = TransportState.disconnected
+        self.transport.logger = logging.getLogger("SignalRCoreClient")
+        self.transport._on_open = lambda: None
+        self.transport._on_reconnect = lambda: None
+        self.transport._on_close = lambda: None
+
+    def on_open(self, callback):
+        self.transport._on_open = callback
+
+    def on_reconnect(self, callback):
+        self.transport._on_reconnect = callback
+
+    def on_close(self, callback):
+        self.transport._on_close = callback
+
+    def on_error(self, callback):
+        pass
+
+    def on(self, event, callback):
+        pass
+
+    def start(self):
+        self.starts += 1
+        self.transport._set_state(TransportState.connecting)
+        self.transport._set_state(TransportState.connected)
+        return True
+
+
+def _patch_websocket_init():
+    return _patch.object(WebsocketTransport, "__init__", lambda self, **kwargs: None)
+
+
+class _ConnectingOnlyTransportConnection(_ReconnectingTransportConnection):
+    def start(self):
+        self.starts += 1
+        self.transport._set_state(TransportState.connecting)
+        return True
+
+
 @_CLIENT_CLASSES
 def test_signalr_connection_opening_marks_the_client_connected(monkeypatch, client_cls):
     connection = _CallbackConnection()
@@ -489,47 +536,8 @@ def test_signalr_callbacks_from_a_replaced_connection_are_ignored(monkeypatch, c
 def test_signalr_automatic_reconnect_restores_connected_state(monkeypatch, client_cls):
     """When signalrcore automatically reconnects an established feed, entering
     TransportState.reconnecting marks the client disconnected and completing
-    the new handshake (TransportState.connected) marks it connected again."""
-    from signalrcore.transport.base_transport import TransportState
-    from signalrcore.transport.websockets.websocket_transport import WebsocketTransport
-
-    class _ReconnectingTransportConnection(_FakeConnection):
-        def __init__(self):
-            super().__init__()
-            with unittest_patch_init():
-                self.transport = WebsocketTransport()
-            self.transport.state = TransportState.disconnected
-            self.transport.logger = logging.getLogger("SignalRCoreClient")
-            self.transport._on_open = lambda: None
-            self.transport._on_reconnect = lambda: None
-            self.transport._on_close = lambda: None
-
-        def on_open(self, callback):
-            self.transport._on_open = callback
-
-        def on_reconnect(self, callback):
-            self.transport._on_reconnect = callback
-
-        def on_close(self, callback):
-            self.transport._on_close = callback
-
-        def on_error(self, callback):
-            pass
-
-        def on(self, event, callback):
-            pass
-
-        def start(self):
-            self.starts += 1
-            self.transport._set_state(TransportState.connecting)
-            self.transport._set_state(TransportState.connected)
-            return True
-
-    from unittest.mock import patch as _patch
-
-    def unittest_patch_init():
-        return _patch.object(WebsocketTransport, "__init__", lambda self, **kwargs: None)
-
+    the new handshake (TransportState.connected) marks it connected again.
+    A restored feed runs exactly one full sync, from the first connect."""
     connection = _ReconnectingTransportConnection()
     client, sync_jobs = _configured_client(monkeypatch, client_cls, connection)
 
@@ -542,7 +550,92 @@ def test_signalr_automatic_reconnect_restores_connected_state(monkeypatch, clien
 
     connection.transport._set_state(TransportState.connected)
     assert client.connected is True
+    assert len(sync_jobs) == 1
+
+
+@pytest.mark.parametrize(
+    ("client_cls", "taskid"),
+    [
+        (signalr_client.SonarrSignalrClient, "update_series_7"),
+        (signalr_client.RadarrSignalrClient, "update_movies_7"),
+    ],
+    ids=["sonarr", "radarr"],
+)
+def test_signalr_automatic_reconnect_skips_the_full_sync(monkeypatch, client_cls, taskid):
+    """A reconnect restores the connected state without queuing another full
+    sync. An enabled instance's scheduled sync reconciles the changes it
+    covers, unless its interval is set to Manually."""
+    connection = _ReconnectingTransportConnection()
+    client, sync_jobs = _configured_client(monkeypatch, client_cls, connection)
+
+    client.start()
+    assert sync_jobs == [taskid]
+
+    connection.transport._set_state(TransportState.reconnecting)
+    connection.transport._set_state(TransportState.connected)
+
+    assert client.connected is True
+    assert sync_jobs == [taskid]
+
+
+@_CLIENT_CLASSES
+def test_signalr_first_connect_after_a_restart_still_syncs(monkeypatch, client_cls):
+    """A restart builds a new feed, so its first connect runs the full sync,
+    even when the feed was lost before the restart."""
+    first = _ReconnectingTransportConnection()
+    second = _ReconnectingTransportConnection()
+    client, sync_jobs = _configured_client(monkeypatch, client_cls, first, second)
+
+    client.start()
+    assert len(sync_jobs) == 1
+
+    first.transport._set_state(TransportState.reconnecting)
+    client.stop()
+    client.start()
+
+    assert client.connected is True
     assert len(sync_jobs) == 2
+
+
+@_CLIENT_CLASSES
+def test_signalr_reconnect_that_fails_keeps_the_client_disconnected(monkeypatch, client_cls):
+    """A reconnect that never reaches the open callback leaves the client
+    disconnected and triggers no sync."""
+    connection = _ReconnectingTransportConnection()
+    client, sync_jobs = _configured_client(monkeypatch, client_cls, connection)
+
+    client.start()
+    assert len(sync_jobs) == 1
+
+    connection.transport._set_state(TransportState.reconnecting)
+
+    assert client.connected is False
+    assert len(sync_jobs) == 1
+
+
+@pytest.mark.parametrize(
+    ("client_cls", "taskid"),
+    [
+        (signalr_client.SonarrSignalrClient, "update_series_7"),
+        (signalr_client.RadarrSignalrClient, "update_movies_7"),
+    ],
+    ids=["sonarr", "radarr"],
+)
+def test_signalr_reconnect_before_the_first_connect_still_syncs(monkeypatch, client_cls, taskid):
+    """A socket that drops before the SignalR handshake completes reconnects
+    with no live feed to lose, so the first live connect still runs the sync."""
+    connection = _ConnectingOnlyTransportConnection()
+    client, sync_jobs = _configured_client(monkeypatch, client_cls, connection)
+
+    client.start()
+    assert client.connected is False
+    assert sync_jobs == []
+
+    connection.transport._set_state(TransportState.reconnecting)
+    connection.transport._set_state(TransportState.connected)
+
+    assert client.connected is True
+    assert sync_jobs == [taskid]
 
 
 @_CLIENT_CLASSES

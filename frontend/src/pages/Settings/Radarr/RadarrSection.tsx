@@ -34,8 +34,9 @@ const RadarrSection: FunctionComponent<Props> = ({ children }) => {
             settingKey="settings-radarr-movies_sync_on_live"
           ></Check>
           <Message>
-            When Bazarr connects or reconnects to Radarr, run a movies
-            synchronization to make sure that we're up-to-date.
+            When Bazarr establishes its live connection to Radarr, run a movies
+            synchronization to make sure that we're up-to-date. Automatic
+            reconnects after a dropped connection do not run it again.
           </Message>
           <Slider
             label="Minimum Score For Movies"

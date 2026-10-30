@@ -287,6 +287,7 @@ class SonarrSignalrClient(_SignalrClientLifecycle):
         self.apikey_sonarr = None
         self.connection = None
         self.connected = False
+        self._feed_lost = False
 
     def _support_state(self):
         # The scalar/default client keeps probing the shared get_sonarr_info
@@ -343,6 +344,13 @@ class SonarrSignalrClient(_SignalrClientLifecycle):
         self.connected = True
         event_stream(type='badges')
         logging.info('BAZARR SignalR client for Sonarr is connected and waiting for events.')
+        if self._feed_lost:
+            # A reconnect restores the live feed. An enabled instance's
+            # scheduled sync reconciles the changes it covers, unless its
+            # interval is set to Manually.
+            self._feed_lost = False
+            logging.info('BAZARR SignalR live feed for Sonarr resumed; skipping the full sync.')
+            return
         if settings.sonarr.series_sync_on_live:
             # Match the scheduler fan-out: unsuffixed job for the single default
             # instance, per-instance job id when fanned out.
@@ -357,6 +365,8 @@ class SonarrSignalrClient(_SignalrClientLifecycle):
                                 '(not registered).', taskid)
 
     def on_reconnect_handler(self):
+        if self.connected:
+            self._feed_lost = True
         self.connected = False
         event_stream(type='badges')
         logging.error('BAZARR SignalR client for Sonarr connection as been lost. Trying to reconnect...')
@@ -384,6 +394,8 @@ class SonarrSignalrClient(_SignalrClientLifecycle):
         # connection directly: stop() would retire the start() calling us.
         if self.connection is not None:
             _stop_connection_quietly(self.connection)
+        # A new connection is a new feed, so its first connect runs the full sync.
+        self._feed_lost = False
         self.connection = build_signalr_connection(
             f"{base_url}/signalr/messages?access_token={self.apikey_sonarr}",
             HEADERS,
@@ -405,6 +417,7 @@ class RadarrSignalrClient(_SignalrClientLifecycle):
         self.apikey_radarr = None
         self.connection = None
         self.connected = False
+        self._feed_lost = False
 
     def start(self):
         generation = self._begin_generation()
@@ -431,6 +444,13 @@ class RadarrSignalrClient(_SignalrClientLifecycle):
         self.connected = True
         event_stream(type='badges')
         logging.info('BAZARR SignalR client for Radarr is connected and waiting for events.')
+        if self._feed_lost:
+            # A reconnect restores the live feed. An enabled instance's
+            # scheduled sync reconciles the changes it covers, unless its
+            # interval is set to Manually.
+            self._feed_lost = False
+            logging.info('BAZARR SignalR live feed for Radarr resumed; skipping the full sync.')
+            return
         if settings.radarr.movies_sync_on_live:
             taskid = "update_movies" if self.arr_instance_id is None else f"update_movies_{self.arr_instance_id}"
             try:
@@ -440,6 +460,8 @@ class RadarrSignalrClient(_SignalrClientLifecycle):
                                 '(not registered).', taskid)
 
     def on_reconnect_handler(self):
+        if self.connected:
+            self._feed_lost = True
         self.connected = False
         event_stream(type='badges')
         logging.error('BAZARR SignalR client for Radarr connection as been lost. Trying to reconnect...')
@@ -459,6 +481,8 @@ class RadarrSignalrClient(_SignalrClientLifecycle):
             self.apikey_radarr = client.api_key
         if self.connection is not None:
             _stop_connection_quietly(self.connection)
+        # A new connection is a new feed, so its first connect runs the full sync.
+        self._feed_lost = False
         self.connection = build_signalr_connection(
             f"{base_url}/signalr/messages?access_token={self.apikey_radarr}",
             HEADERS,
