@@ -84,7 +84,7 @@ def codec_label(codec):
 
 def _bitmap_message(codec):
     return (f'This embedded track is image-based ({codec_label(codec)}). '
-            'Extract it to a file, or OCR it to text, first.')
+            'Extract it to a file first.')
 
 
 def _embedded_entries(raw_subtitles, key):

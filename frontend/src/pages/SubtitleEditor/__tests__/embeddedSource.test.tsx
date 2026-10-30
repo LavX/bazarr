@@ -458,7 +458,7 @@ describe("the editor on an embedded track", () => {
     server.use(
       http.get("/api/movies/30/subtitles/:language/content", () =>
         HttpResponse.json(
-          "This embedded track is image-based (PGS). Extract it to a file, or OCR it to text, first.",
+          "This embedded track is image-based (PGS). Extract it to a file first.",
           { status: 415 },
         ),
       ),
