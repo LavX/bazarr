@@ -468,7 +468,9 @@ describe("the editor on an embedded track", () => {
     openAt(EDIT_EMBEDDED);
 
     expect(
-      await screen.findByText(/This embedded track is image-based \(PGS\)/),
+      await screen.findByText(
+        "This embedded track is image-based (PGS). Extract it to a file first.",
+      ),
     ).toBeInTheDocument();
   });
 });
