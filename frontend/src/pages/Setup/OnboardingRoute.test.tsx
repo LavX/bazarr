@@ -223,11 +223,11 @@ describe("the wizard's own URL", () => {
   });
 
   it("a save that lands after the step was left does not move the wizard", async () => {
-    // Only the provider stages report themselves busy, so browser Back can
-    // unmount any other step with its write still in the air. The callback the
-    // step handed to the write still ran when the write answered, and advanced
-    // the wizard to the step it had been heading for over wherever the reader
-    // had gone.
+    // Browser Back is blocked only for a step that reports itself busy, so any
+    // other step is unmounted with its save in the air. The mocked save never
+    // sets isPending, so Back is not blocked here. The callback the step handed
+    // to the write still runs when the write answers, and must not move the
+    // wizard one step on from wherever the reader had gone.
     let landed: (() => void) | undefined;
     mockedSettingsMutation.mockReturnValue({
       mutate: vi.fn(
@@ -258,7 +258,7 @@ describe("the wizard's own URL", () => {
 
     act(() => landed?.());
 
-    // Still where the reader went, not carried on to the step after Translation.
+    // Still where the reader went, not carried one step on from Welcome.
     expect(router.state.location.pathname).toBe("/setup/welcome");
     expect(
       screen.getByRole("heading", { name: /welcome to bazarr/i }),
