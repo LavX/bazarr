@@ -197,10 +197,10 @@ const OnboardingWizardBody: FunctionComponent = () => {
   }, [goTo, navigate, steps, index]);
 
   // What a step is handed to move the wizard with. A step's write can answer
-  // after the reader has already left it (only the provider stages report
-  // themselves busy, so browser Back unmounts any other step with its save in
-  // the air), and the callback it holds then advanced the wizard to the step
-  // it had been heading for, over wherever the reader went. The callbacks are
+  // after the reader has already left it (a step that does not report itself
+  // busy can be unmounted by browser Back with its save in the air), and the
+  // callback it holds then advanced the wizard to the step it had been heading
+  // for, over wherever the reader went. The callbacks are
   // tied to the mount they were handed to and do nothing once it is no longer
   // the one on screen. A step key would not do for that: Back and then Forward
   // before the old save lands puts the same key on screen again, as a fresh

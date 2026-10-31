@@ -7,7 +7,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readConnectionTests } from "@/pages/Setup/connectionTests";
 import { OnboardingSelectionProvider } from "@/pages/Setup/useOnboardingSelection";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
-import { customRender, screen, waitFor } from "@/tests";
+import { StepBusyProvider, useStepBusy } from "@/pages/Setup/useStepBusy";
+import { act, customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import InstanceServerForm from "./InstanceServerForm";
 
@@ -16,22 +17,30 @@ const onNext = vi.fn();
 // The form is handed its draft, and what this covers is what the draft is
 // carrying by the time it is written, so the draft comes from the real
 // provider rather than a literal.
-const Harness: FC = () => {
-  const { drafts, addDraft } = useOnboardingSelection();
+const Harness: FC<{ saving?: boolean }> = ({ saving = false }) => {
+  const { drafts, addDraft, updateDraft } = useOnboardingSelection();
   const created = useRef(false);
   useEffect(() => {
     if (created.current) {
       return;
     }
     created.current = true;
-    addDraft("jellyfin");
-  }, [addDraft]);
+    const draft = addDraft("jellyfin");
+    // What a form remounted mid-save finds: a create still in the air.
+    if (saving) {
+      updateDraft(draft.draftId, { submitting: true });
+    }
+  }, [addDraft, saving, updateDraft]);
   const draft = drafts[0];
   if (!draft) {
     return null;
   }
   return <InstanceServerForm draft={draft} onNext={onNext} onBack={vi.fn()} />;
 };
+
+function ShellBusy() {
+  return <span>{useStepBusy() ? "step busy" : "step free"}</span>;
+}
 
 function stageBackend(probeSucceeds = true) {
   const asked: string[] = [];
@@ -193,5 +202,71 @@ describe("InstanceServerForm", () => {
     await connect(true);
     expect(created).toHaveLength(1);
     expect(readConnectionTests()).toEqual({ "media-server:row-1": "failed" });
+  });
+
+  it("a generated media server step reports busy while its save is pending", async () => {
+    // Browser Back is refused only while the step reports busy, so the flag
+    // has to stay up until the save request settles.
+    stageBackend();
+    let settleSave!: () => void;
+    const held = new Promise<void>((resolve) => {
+      settleSave = resolve;
+    });
+    server.use(
+      http.post("/api/system/media-server-instances", async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        await held;
+        return HttpResponse.json({
+          id: "row-1",
+          kind: "jellyfin",
+          name: String(body.name),
+          enabled: true,
+          url: String(body.url),
+          verify_ssl: true,
+          api_key_set: true,
+          path_mappings: [],
+          refresh_movies: true,
+          refresh_episodes: true,
+          options: {},
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <StepBusyProvider>
+        <OnboardingSelectionProvider>
+          <Harness />
+        </OnboardingSelectionProvider>
+        <ShellBusy />
+      </StepBusyProvider>,
+    );
+
+    await user.type(
+      await screen.findByLabelText("Server URL"),
+      "http://a.example",
+    );
+    await user.type(screen.getByLabelText("API key"), "key-a");
+    expect(screen.getByText("step free")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
+    expect(await screen.findByText("step busy")).toBeInTheDocument();
+
+    await act(async () => settleSave());
+    expect(await screen.findByText("step free")).toBeInTheDocument();
+  });
+
+  it("a form remounted while its save is still in the air reports busy", async () => {
+    // A remounted form has no request of its own in flight. The draft still
+    // carries the create the earlier mount sent, and that keeps the step busy.
+    customRender(
+      <StepBusyProvider>
+        <OnboardingSelectionProvider>
+          <Harness saving />
+        </OnboardingSelectionProvider>
+        <ShellBusy />
+      </StepBusyProvider>,
+    );
+
+    expect(await screen.findByText("step busy")).toBeInTheDocument();
   });
 });

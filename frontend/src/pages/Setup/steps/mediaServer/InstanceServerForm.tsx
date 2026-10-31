@@ -35,6 +35,7 @@ import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "@/pages/Setup/steps/types";
 import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import StepActions from "./StepActions";
 import {
   DraftFieldErrors,
@@ -185,6 +186,8 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   const libraries = useMediaServerLibraries(kind, connection, undefined, {
     inlineErrors: true,
   });
+  // A create sent from an earlier mount keeps the step busy until it settles.
+  useReportStepBusy(isPending || draft.submitting === true);
 
   const handleContinue = () => {
     if (!touched) {
@@ -248,33 +251,39 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           tested,
         );
       }
-    }).then((result) => {
-      updateDraft(draft.draftId, { submitting: false });
-      const found = result.errors[draft.draftId];
-      if (found) {
-        setErrors(found);
-        return;
-      }
-      setErrors({});
-      const outcome = result.outcomes[0];
-      if (!outcome?.ok) {
-        setFailure(outcome?.error ?? "The save failed.");
-        return;
-      }
-      if (result.switchesFailed) {
-        // Marking the draft saved is what removes this step from the wizard,
-        // so doing it here would unmount the warning in the same commit that
-        // renders it: the reader would reach Finish with the server reported
-        // as connected and nothing refreshing. The step stays until they have
-        // read it and pressed Continue again.
-        updateDraft(draft.draftId, { switchFailed: true });
-        return;
-      }
-      markSaved(draft.draftId, outcome.instanceId ?? "");
-      if (onScreen.current) {
-        onNext();
-      }
-    });
+    })
+      .then((result) => {
+        updateDraft(draft.draftId, { submitting: false });
+        const found = result.errors[draft.draftId];
+        if (found) {
+          setErrors(found);
+          return;
+        }
+        setErrors({});
+        const outcome = result.outcomes[0];
+        if (!outcome?.ok) {
+          setFailure(outcome?.error ?? "The save failed.");
+          return;
+        }
+        if (result.switchesFailed) {
+          // Marking the draft saved is what removes this step from the wizard,
+          // so doing it here would unmount the warning in the same commit that
+          // renders it: the reader would reach Finish with the server reported
+          // as connected and nothing refreshing. The step stays until they have
+          // read it and pressed Continue again.
+          updateDraft(draft.draftId, { switchFailed: true });
+          return;
+        }
+        markSaved(draft.draftId, outcome.instanceId ?? "");
+        if (onScreen.current) {
+          onNext();
+        }
+      })
+      .catch(() => {
+        // A rejected save skips the block above, so the flag is cleared here.
+        updateDraft(draft.draftId, { submitting: false });
+        setFailure("The save failed.");
+      });
   };
 
   // Everything the reader reads rather than types into: what the connection

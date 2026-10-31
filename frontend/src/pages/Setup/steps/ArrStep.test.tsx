@@ -179,6 +179,14 @@ describe("ArrStep", () => {
           isPending,
         } as unknown as ReturnType<typeof useUpdateArrInstance>),
     },
+    {
+      name: "remove",
+      setPending: (isPending: boolean) =>
+        mockedUseDeleteArrInstance.mockReturnValue({
+          mutate: deleteMutate,
+          isPending,
+        } as unknown as ReturnType<typeof useDeleteArrInstance>),
+    },
   ])("reports busy while the $name write is pending", ({ setPending }) => {
     const { rerender } = customRender(stepWithBusyProbe());
     expect(screen.getByText("step free")).toBeInTheDocument();

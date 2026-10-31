@@ -349,12 +349,9 @@ describe("media server selection", () => {
     await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
   }
 
-  it("finishes the save after the step it was started on is gone", async () => {
-    // Back and Skip unmount the configure step mid-save, and TanStack drops a
-    // mutate call's own onSuccess and onError once that happens. The settings
-    // write then never settled, so the draft was never marked saved: its step
-    // stayed in the wizard with the values still in it, and continuing from it
-    // wrote a second row for a server that was already there.
+  it("offers no Back while the master switch write is in the air", async () => {
+    // The configure step reports its save as busy, so the Back button is not
+    // offered and browser Back is refused until the save has settled.
     let release: (() => void) | undefined;
     heldSwitch = new Promise<void>((resolve) => {
       release = resolve;
@@ -365,35 +362,23 @@ describe("media server selection", () => {
     await connectJellyfin(user);
     await waitFor(() => expect(creates).toHaveLength(1));
 
-    // Out of the step while its master switch is still in the air.
-    await user.click(screen.getByRole("button", { name: /^back$/i }));
-    await screen.findByRole("heading", { name: /^media servers$/i });
+    expect(
+      screen.queryByRole("button", { name: /^back$/i }),
+    ).not.toBeInTheDocument();
 
     release?.();
     await waitFor(() => expect(settingsWrites).toHaveLength(1));
 
-    // The draft is saved, so nothing is pending and no second configure step
-    // is generated for it.
-    expect(
-      await screen.findByRole("button", { name: /continue without a server/i }),
-    ).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: /continue without a server/i }),
-    );
-
+    // The save settled on the step it was started on, so the wizard moves on.
     expect(
       await screen.findByRole("heading", { name: /^requests$/i }),
     ).toBeInTheDocument();
     expect(creates).toHaveLength(1);
   });
 
-  it("does not walk the reader on when a save finishes behind their back", async () => {
-    // Skip during a save unmounts the step, and the save now settles anyway,
-    // which is the point. It must not also advance: useWizardStep.next reads
-    // the cursor from a ref, so an onNext fired by the step they already left
-    // moves them on from whatever screen they are now looking at. Here that is
-    // the Emby form they were sent to by the skip, and the extra step would
-    // carry them past it to Seerr without them touching anything.
+  it("offers no Skip while the master switch write is in the air", async () => {
+    // The shell hides Do this later while the configure step is busy, so the
+    // reader cannot leave a save that is still being written.
     let release: (() => void) | undefined;
     heldSwitch = new Promise<void>((resolve) => {
       release = resolve;
@@ -415,15 +400,14 @@ describe("media server selection", () => {
     await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
     await waitFor(() => expect(creates).toHaveLength(1));
 
-    // The shell's own skip, while the master switch write is still in the air.
-    await user.click(screen.getByRole("button", { name: /do this later/i }));
-    await screen.findByRole("heading", { name: /^emby$/i });
+    expect(
+      screen.queryByRole("button", { name: /do this later/i }),
+    ).not.toBeInTheDocument();
 
     release?.();
     await waitFor(() => expect(settingsWrites).toHaveLength(1));
-    // Waiting on the segment counter rather than a timer: it drops to 2 of 2
-    // only once the saved draft has been committed and the step list rebuilt,
-    // which is the moment any stray advance would have happened.
+    // Waiting on the segment counter rather than a timer: it reads 2 of 2 only
+    // once the saved draft has been committed and the step list rebuilt.
     expect(
       await screen.findByText(/connect \u00b7 media servers 2 of 2/i),
     ).toBeVisible();
@@ -434,12 +418,10 @@ describe("media server selection", () => {
     expect(screen.queryByRole("heading", { name: /^requests$/i })).toBeNull();
   });
 
-  it("does not write the server twice when the reader comes back mid-save", async () => {
-    // Back and forward again remounts the form with no memory of the request
-    // still in flight, so Connect was pressable a second time and wrote the
-    // same server twice. The row is recorded on the draft as soon as the
-    // create lands, before the master switch, so the second press accepts what
-    // is already there.
+  it("does not write the server twice when Connect is pressed again mid-save", async () => {
+    // The row is recorded on the draft as soon as the create lands, before the
+    // master switch is written, so a second press accepts the row that is
+    // already there instead of writing it again.
     let release: (() => void) | undefined;
     heldSwitch = new Promise<void>((resolve) => {
       release = resolve;
@@ -450,13 +432,12 @@ describe("media server selection", () => {
     await connectJellyfin(user);
     await waitFor(() => expect(creates).toHaveLength(1));
 
-    await user.click(screen.getByRole("button", { name: /^back$/i }));
-    await screen.findByRole("heading", { name: /^media servers$/i });
-    await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
-    await screen.findByRole("heading", { name: /^jellyfin$/i });
+    expect(
+      screen.queryByRole("button", { name: /^back$/i }),
+    ).not.toBeInTheDocument();
 
-    // The switch write is still held, so nothing has told this form the run
-    // finished. Pressing the primary button must not create a second row.
+    // The switch write is still held. Pressing the primary button again must
+    // not create a second row.
     await user.click(screen.getByRole("button", { name: /continue|connect/i }));
     expect(creates).toHaveLength(1);
 
