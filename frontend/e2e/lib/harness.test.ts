@@ -385,6 +385,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // A test that times out on a fake clock skips the vi.useRealTimers() in its
+  // finally, so the next test would start with its timers still faked.
+  vi.useRealTimers();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   delete process.env.BAZARR_E2E_URL;
@@ -1326,11 +1329,19 @@ describe("the shared instance", () => {
       );
       for (
         let step = 0;
-        outcomes.some((outcome) => outcome === null) && step < 400;
+        outcomes.some((outcome) => outcome === null) && step < 2_000;
         step += 1
       ) {
         await vi.advanceTimersByTimeAsync(5_000);
         await new Promise((resolve) => realTimeout(resolve, 0));
+      }
+      const pending = outcomes.filter((outcome) => outcome === null).length;
+      // Past the cap, a caller still pending would leave the await below
+      // waiting on a clock nothing advances. Fail with the count instead.
+      if (pending > 0) {
+        throw new Error(
+          `lets a waiter for the shared instance outlast such a start: ${pending} caller(s) still pending at the step cap`,
+        );
       }
       await Promise.allSettled(callers);
       // The waiter got the starter's record, not the timeout message.
