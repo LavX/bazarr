@@ -167,6 +167,7 @@ def test_a_bitmap_only_key_answers_415_naming_the_codec(library):
 
     assert status == 415
     assert "PGS" in message
+    assert message == "This embedded track is image-based (PGS). Extract it to a file first."
     assert calls == []
 
 

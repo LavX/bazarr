@@ -5,7 +5,8 @@ View, Edit and Download on an embedded track row ask the usual content and
 download routes with ``?source=embedded``. The track is pulled out of the
 container into the extraction cache under the config directory, the cache
 translate already uses, and nothing is written next to the video. The editor's
-Save is what creates a file there, through the create route.
+Save is what creates the file, through the create route, in the subtitle
+folder when one is set and beside the video otherwise.
 
 The stored subtitles list decides which tracks exist. A language key with no
 embedded entry is refused before ffmpeg runs, so a hidden track, a track an
@@ -83,7 +84,7 @@ def codec_label(codec):
 
 def _bitmap_message(codec):
     return (f'This embedded track is image-based ({codec_label(codec)}). '
-            'Extract it to a file, or OCR it to text, first.')
+            'Extract it to a file first.')
 
 
 def _embedded_entries(raw_subtitles, key):

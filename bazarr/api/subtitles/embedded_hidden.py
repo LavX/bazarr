@@ -278,11 +278,15 @@ class EmbeddedHiddenTracks(Resource):
             # could not be read, and the sports indexer then keeps the listing
             # it had, so the listing proves nothing there.
             if isinstance(failure, _Refused) or _still_listed(media_type, media_id, key):
-                # Not applied: the re-index could not read the file, failed
-                # before it wrote the listing, or returned without applying the
-                # hide (the file went away after the check above, or the hidden
-                # lookup failed). Take the hide back rather than surprise the
-                # user at the next index.
+                # Not applied. The sports re-read refused the file, or the stored
+                # listing still carries the track: the re-index failed before it
+                # stored a listing, returned without applying the hide (a failed
+                # history delete does that, since the indexers then keep the
+                # stored listing and write no new one), or left the old listing
+                # because the file went away after the check above. A failed
+                # database read of the stored listing counts as still carrying the
+                # track. Take the hide back rather than surprise the user at the
+                # next index.
                 if recorded:
                     try:
                         unhide_track(database, media_type, [media_id], owner, key)

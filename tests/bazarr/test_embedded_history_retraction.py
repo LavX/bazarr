@@ -1,7 +1,8 @@
 # coding=utf-8
 """An Embedded Source row stands for a track the indexer counts.
 
-The row ends the upgrades of its language, so it has to go when the track stops
+The row ends the upgrades of its language while it is newer than the download
+and embedded subtitles are switched on, so it has to go when the track stops
 counting: hidden by the user, or skipped by an ignore switch. A track that is
 only gone from the container keeps its row, because another tool may have
 copied it out next to the video and the row is the only trace of that. The
@@ -413,11 +414,11 @@ def test_a_failed_sports_retraction_rolls_the_index_back_and_the_next_pass_retra
     hide_track(session, "sports", 61, 1, "fr", "subrip")
 
     real = module.retract_embedded_history
-    failures = []
+    calls = []
 
     def flaky(*args, **kwargs):
-        if not failures:
-            failures.append(1)
+        calls.append(kwargs)
+        if len(calls) == 1:
             raise sa.exc.OperationalError("DELETE", {}, Exception("connection lost"))
         return real(*args, **kwargs)
 
@@ -425,6 +426,7 @@ def test_a_failed_sports_retraction_rolls_the_index_back_and_the_next_pass_retra
     with pytest.raises(sa.exc.OperationalError):
         module.store_subtitles_sports(61, 1)
 
+    assert calls[0].get("guard") is False
     assert row(session, 61).subtitles == listed
     assert (61, "fr") in recorded()
 
@@ -433,7 +435,7 @@ def test_a_failed_sports_retraction_rolls_the_index_back_and_the_next_pass_retra
     assert (61, "fr") not in recorded()
 
 
-def test_a_guarded_retraction_returns_none_on_failure_and_an_unguarded_one_raises(hidden_db):
+def test_a_guarded_retraction_returns_none_on_failure_and_an_unguarded_one_raises():
     from subtitles.indexer.utils import retract_embedded_history
 
     class Broken:
