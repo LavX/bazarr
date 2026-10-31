@@ -355,7 +355,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
         </Group>
       </Group>
 
-      {/* Gemini config — unchanged */}
+      {/* Gemini config, unchanged */}
       <CollapseBox
         settingKey="settings-translator-translator_type"
         on={(val) => val === "gemini"}
@@ -394,7 +394,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
         </Section>
       </CollapseBox>
 
-      {/* Lingarr config — unchanged */}
+      {/* Lingarr config, unchanged */}
       <CollapseBox
         settingKey="settings-translator-translator_type"
         on={(val) => val === "lingarr"}
@@ -416,7 +416,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
         </Section>
       </CollapseBox>
 
-      {/* AI Subtitle Translator — Zones 2-4 */}
+      {/* AI Subtitle Translator: Zones 2-4 */}
       <CollapseBox
         settingKey="settings-translator-translator_type"
         on={(val) => val === "openrouter"}
