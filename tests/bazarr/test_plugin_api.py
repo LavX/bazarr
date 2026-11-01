@@ -1,6 +1,8 @@
 # coding=utf-8
 """The kind-neutral plugin routes, and the provider-hub routes as the
 Subtitle Hub's view of the subtitle provider kind."""
+import time
+
 import pytest
 from flask import Flask
 
@@ -49,6 +51,7 @@ def client(monkeypatch, tmp_path, service_kind):
                                "manifest": {"id": "exampleservice"}},
         })))
     app = Flask(__name__)
+    app.config["SECRET_KEY"] = "plugin-api-test-secret"  # pragma: allowlist secret
     app.register_blueprint(api_bp)
     return app.test_client()
 
@@ -131,6 +134,46 @@ def test_routes_that_start_code_carry_the_gate_of_their_provider_hub_counterpart
     # Without the API key both families refuse the same way.
     assert plain.status_code == twin.status_code
     assert plain.status_code in (401, 403)
+
+    # With the API key and no password confirmation both families answer the
+    # confirmation refusal: 403 and the reason `confirm_password`.
+    keyed = {"X-API-KEY": API_KEY}
+    plain = getattr(client, method)(path, json=body, headers=keyed)
+    twin = getattr(client, method)(counterpart, json=dict(body, provider_id=body.get("id")), headers=keyed)
+    assert plain.status_code == twin.status_code == 403
+    assert plain.get_json()["code"] == twin.get_json()["code"] == "confirm_password"
+
+
+def _prime(client):
+    """Give the client a signed-in session that holds a live password confirmation."""
+    with client.session_transaction() as sess:
+        sess["logged_in"] = True
+        sess["password_confirmed_until"] = time.time() + 600
+
+
+@pytest.mark.parametrize("method,path,counterpart,body", GATED)
+def test_a_confirmed_session_passes_the_gate_of_both_families(
+        client, monkeypatch, method, path, counterpart, body):
+    from app.config import settings
+    from provider_hub import jobs as hub_jobs
+    from provider_hub import service
+
+    monkeypatch.setattr(settings.auth, "type", "form")
+    monkeypatch.setattr(hub_jobs, "_enqueue", lambda label, func, kwargs: "job-1")
+    monkeypatch.setattr(service, "add_catalog_source", lambda name, url: {"name": name})
+    monkeypatch.setattr(service, "update_catalog_source", lambda name, **kwargs: {"id": name})
+    monkeypatch.setattr(service, "get_catalog_source", lambda name: {"id": name})
+    monkeypatch.setattr(service, "refresh_catalog", lambda: None)
+    _prime(client)
+
+    keyed = {"X-API-KEY": API_KEY}
+    plain = getattr(client, method)(path, json=body, headers=keyed)
+    twin = getattr(client, method)(counterpart, json=dict(body, provider_id=body.get("id")), headers=keyed)
+
+    # A refusal from authentication or from the gate is 401 or 403. Past both,
+    # each handler answers for itself.
+    assert plain.status_code not in (401, 403)
+    assert twin.status_code not in (401, 403)
 
 
 def _decorator_layers(view):
