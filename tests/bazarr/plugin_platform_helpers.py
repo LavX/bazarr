@@ -2,8 +2,8 @@
 """Shared helpers for the plugin platform tests.
 
 Imported by the test_plugin_*.py files. Not a test file itself, so the CI
-guard does not ask for it to be enumerated. The fixtures these helpers go
-with, service_kind and signing_key, live in conftest.py.
+guard does not ask for it to be enumerated. The fixture these helpers go
+with, service_kind, lives in conftest.py.
 """
 import hashlib
 import json

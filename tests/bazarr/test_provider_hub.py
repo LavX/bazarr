@@ -1533,17 +1533,18 @@ def test_provider_hub_update_task_refreshes_catalog_before_checking_updates(monk
 def test_provider_hub_updates_check_endpoint_refreshes_catalog_before_check(monkeypatch):
     from api.provider_hub.provider_hub import ProviderHubUpdatesCheck
     from api.provider_hub import provider_hub
+    from provider_hub.kinds import SUBTITLE_PROVIDER
 
     calls = []
     monkeypatch.setattr(provider_hub.service, "refresh_catalog", lambda: calls.append("refresh"))
     monkeypatch.setattr(
         provider_hub.service,
         "check_updates",
-        lambda: calls.append("check") or {"state": "completed"},
+        lambda *, kind=None: calls.append(("check", kind)) or {"state": "completed"},
     )
 
     assert ProviderHubUpdatesCheck.post.__wrapped__(ProviderHubUpdatesCheck()) == {"state": "completed"}
-    assert calls == ["refresh", "check"]
+    assert calls == ["refresh", ("check", SUBTITLE_PROVIDER)]
 
 
 def test_apply_update_without_available_manifest_does_not_stage(tmp_path, monkeypatch):
@@ -8540,3 +8541,25 @@ def test_a_malformed_state_document_refuses_a_hub_config_move(tmp_path, monkeypa
                         "could not be read, so the address was not changed")
     finally:
         remove_settings_section("examplehub")
+
+
+def test_an_unparseable_state_document_refuses_a_hub_enable_change(tmp_path, monkeypatch):
+    """A state document that does not parse is the state being unreadable: the
+    Hub's PATCH answers 400 for it and leaves the document as it was."""
+    from flask import Flask
+    import api.provider_hub.provider_hub as hub_api
+
+    state_path = tmp_path / "provider_hub" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text("{")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    before = state_path.read_bytes()
+
+    app = Flask(__name__)
+    with app.test_request_context("/api/provider-hub/providers/examplehub", method="PATCH",
+                                  json={"enabled": False}):
+        body, status = hub_api.ProviderHubProvider.patch.__wrapped__(
+            hub_api.ProviderHubProvider(), "examplehub")
+
+    assert status == 400, body
+    assert state_path.read_bytes() == before

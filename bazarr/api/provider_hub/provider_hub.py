@@ -126,11 +126,11 @@ class ProviderHubProvider(Resource):
     @api_ns_provider_hub.response(404, 'Provider not found')
     @api_ns_provider_hub.response(500, 'The change could not be saved')
     def patch(self, provider_id):
-        installation = service.get_provider(provider_id)
-        if installation is not None and kind_of(installation) != SUBTITLE_PROVIDER:
-            return 'Provider not found', 404
-        payload = request.json or {}
         try:
+            installation = service.get_provider(provider_id, redact=False)
+            if installation is not None and kind_of(installation) != SUBTITLE_PROVIDER:
+                return 'Provider not found', 404
+            payload = request.json or {}
             provider = service.update_provider(
                 provider_id,
                 enabled=payload.get("enabled") if "enabled" in payload else None,
