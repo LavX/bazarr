@@ -20,7 +20,7 @@ from api.utils import (UploadTooLarge, authenticate, copy_bounded_upload, upload
                        upload_too_large_message)
 from provider_hub import jobs as hub_jobs
 from provider_hub import service
-from provider_hub.kinds import UnknownKindError, get_kind, kind_of
+from provider_hub.kinds import UnknownKindError, get_kind, kind_of, known_kinds
 from provider_hub.service import CatalogSourceError, ProviderHubSettingsError
 
 
@@ -37,6 +37,14 @@ def _kind_filter():
     if kind is not None:
         get_kind(kind)
     return kind
+
+
+def _installation(plugin_id):
+    """The installation to serve; None when it is absent or of a kind this host does not define."""
+    row = service.get_provider(plugin_id, redact=False)
+    if row is None or kind_of(row) not in known_kinds():
+        return None
+    return service.get_provider(plugin_id)
 
 
 @api_ns_plugins.route('plugins/catalog')
@@ -142,7 +150,7 @@ class PluginsInstallation(Resource):
     @api_ns_plugins.response(401, 'Not Authenticated')
     @api_ns_plugins.response(404, 'Plugin not found')
     def get(self, plugin_id):
-        installation = service.get_provider(plugin_id)
+        installation = _installation(plugin_id)
         if not installation:
             return 'Plugin not found', 404
         return installation
@@ -155,6 +163,9 @@ class PluginsInstallation(Resource):
     @api_ns_plugins.response(500, 'The change could not be saved')
     def patch(self, plugin_id):
         payload = request.json or {}
+        row = service.get_provider(plugin_id, redact=False)
+        if row is not None and kind_of(row) not in known_kinds():
+            return 'Plugin not found', 404
         try:
             installation = service.update_provider(
                 plugin_id,
@@ -174,7 +185,7 @@ class PluginsInstallation(Resource):
     @api_ns_plugins.response(401, 'Not Authenticated')
     @api_ns_plugins.response(404, 'Plugin not found')
     def delete(self, plugin_id):
-        installation = service.get_provider(plugin_id)
+        installation = _installation(plugin_id)
         if not installation:
             return 'Plugin not found', 404
         return {"job_id": hub_jobs.queue_uninstall(plugin_id, installation.get("name"))}, 202
@@ -203,7 +214,7 @@ class PluginsUpdatesApply(Resource):
         plugin_id = (request.json or {}).get("id")
         if not isinstance(plugin_id, str) or not plugin_id:
             return 'id is required', 400
-        installation = service.get_provider(plugin_id)
+        installation = _installation(plugin_id)
         if not installation:
             return 'Plugin not found', 404
         return {"job_id": hub_jobs.queue_update(plugin_id, installation.get("name"))}, 202

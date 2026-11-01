@@ -216,3 +216,54 @@ def test_gated_routes_carry_the_same_decorators_as_their_provider_hub_counterpar
 
     assert _decorator_names(plugin_view) == _decorator_names(hub_view), family
     assert "password_confirmation" in _decorator_names(hub_view), family
+
+
+def _undefined_kind_installation():
+    """A row of a kind this build does not define."""
+    return {"provider_id": "ghost_plugin", "kind": "unregistered_kind", "name": "Ghost",
+            "active_version": "1.0.0", "state": "active", "pending_restart": False,
+            "manifest": {"id": "ghost_plugin"}}
+
+
+def test_installation_of_an_undefined_kind_answers_not_found(client, monkeypatch, tmp_path):
+    from app.config import settings
+
+    monkeypatch.setattr(settings.auth, "type", "form")
+    _prime(client)
+    state_path = write_state(tmp_path / "state.json",
+                             installations={"ghost_plugin": _undefined_kind_installation()})
+    keyed = {"X-API-KEY": API_KEY}
+
+    assert _get(client, "/api/provider-hub/providers/ghost_plugin").status_code == 404
+    assert client.post("/api/provider-hub/providers/ghost_plugin/test", headers=keyed).status_code == 404
+    assert client.delete("/api/provider-hub/installations/ghost_plugin", headers=keyed).status_code == 404
+    before = state_path.read_bytes()
+    assert client.patch("/api/provider-hub/providers/ghost_plugin", json={"enabled": False},
+                        headers=keyed).status_code == 404
+    assert state_path.read_bytes() == before
+
+    assert _get(client, "/api/plugins/installations/ghost_plugin").status_code == 404
+    assert client.delete("/api/plugins/installations/ghost_plugin", headers=keyed).status_code == 404
+    before = state_path.read_bytes()
+    assert client.patch("/api/plugins/installations/ghost_plugin", json={"enabled": False},
+                        headers=keyed).status_code == 404
+    assert state_path.read_bytes() == before
+
+    assert client.post("/api/plugins/updates/apply", json={"id": "ghost_plugin"},
+                       headers=keyed).status_code == 404
+
+
+def test_listing_skips_installation_of_an_undefined_kind(client, tmp_path):
+    write_state(tmp_path / "state.json", installations={
+        "providerhub": {"provider_id": "providerhub", "kind": "subtitle_provider", "name": "Provider",
+                        "active_version": "1.0.0", "state": "active", "pending_restart": False,
+                        "manifest": provider_manifest_v1("providerhub")},
+        "ghost_plugin": _undefined_kind_installation(),
+    })
+
+    response = _get(client, "/api/plugins/installations")
+
+    assert response.status_code == 200
+    listed = {item["provider_id"] for item in response.json["data"]}
+    assert "ghost_plugin" not in listed
+    assert "providerhub" in listed

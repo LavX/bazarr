@@ -26,7 +26,7 @@ from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KE
 from secret_store.scrub import scrub_job_secrets, scrub_text
 
 from .manifest import validate_manifest
-from .kinds import SUBTITLE_PROVIDER, get_kind, kind_of
+from .kinds import SUBTITLE_PROVIDER, get_kind, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
 from .bundle import verify_bundle_tree
 from .migration import (
@@ -1929,6 +1929,11 @@ def list_installations(redact: bool = True, *, kind: str | None = None) -> list[
             installations.append(provider)
             continue
         if kind is not None and kind_of(provider) != kind:
+            continue
+        if kind_of(provider) not in known_kinds():
+            logging.getLogger(__name__).warning(
+                "Skipping installation %s: kind %s is not defined by this build",
+                provider.get("provider_id"), kind_of(provider))
             continue
         item = dict(_with_origin(provider, state))
         status = runtime_status.get(item.get("provider_id"))

@@ -20,9 +20,9 @@ api_ns_provider_hub = Namespace('Provider Hub', description='Provider Hub catalo
 def _provider(provider_id, redact=True):
     """The installation, when it is a subtitle provider. These routes are the
     Subtitle Hub's; every other kind is addressed through the plugins routes."""
-    installation = service.get_provider(provider_id, redact=redact)
+    installation = service.get_provider(provider_id, redact=False)
     if installation and kind_of(installation) == SUBTITLE_PROVIDER:
-        return installation
+        return service.get_provider(provider_id, redact=redact)
     return None
 
 
