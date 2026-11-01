@@ -47,6 +47,7 @@ from .state import (
 )
 from .venv import PluginEnvironment, python_executable
 from .worker import ProviderWorkerClient, worker_command
+from .versions import version_key as _version_key
 
 
 class CatalogSourceError(ValueError):
@@ -69,10 +70,6 @@ ENABLED_PROVIDERS_NOT_SAVED = "the enabled providers list could not be saved to 
 
 
 SECRET_PLACEHOLDER = "********"
-_VERSION_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+")
-_SEMVER_RE = re.compile(
-    r"^\s*v?(?P<core>\d+(?:\.\d+)*)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?\s*$"
-)
 _JOB_LOG_LIMIT = 200
 
 
@@ -2981,38 +2978,6 @@ def check_updates() -> dict[str, Any]:
         )
     persisted = get_job(job_id) if job_id else None
     return persisted or {}
-
-
-def _version_key(version: Any) -> tuple[Any, ...] | None:
-    raw_version = str(version or "").strip()
-    if not raw_version:
-        return None
-    comparable_version = raw_version.split("+", 1)[0]
-    match = _SEMVER_RE.match(comparable_version)
-    if match:
-        core_parts = [int(part) for part in match.group("core").split(".")]
-        while len(core_parts) < 3:
-            core_parts.append(0)
-        prerelease = match.group("prerelease")
-        if prerelease is None:
-            prerelease_key = (1,)
-        else:
-            prerelease_tokens: list[tuple[int, int | str]] = []
-            for token in prerelease.split("."):
-                if token.isdigit():
-                    prerelease_tokens.append((0, int(token)))
-                else:
-                    prerelease_tokens.append((1, token.lower()))
-            prerelease_key = (0, tuple(prerelease_tokens))
-        return (1, tuple(core_parts), prerelease_key)
-
-    tokens: list[tuple[int, int | str]] = []
-    for token in _VERSION_TOKEN_RE.findall(comparable_version):
-        if token.isdigit():
-            tokens.append((0, int(token)))
-        else:
-            tokens.append((1, token.lower()))
-    return (0, tuple(tokens))
 
 
 def _bound_source_id(installation: dict[str, Any]) -> str | None:
