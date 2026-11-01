@@ -93,7 +93,8 @@ def test_a_schema_2_provider_validates_and_reads_as_a_provider():
 
 
 @pytest.mark.parametrize("overrides,reason", [
-    ({"kind": "test_service", "kind_api": "bazarr.test_service.v1"}, "is a test_service plugin, not a subtitle provider"),
+    ({"kind": "test_service", "kind_api": "bazarr.test_service.v1"},
+     "is a test_service plugin, not a subtitle provider"),
     ({"kind_api": "bazarr.subtitle_provider.v9"}, "unsupported subtitle provider contract"),
     ({"settings": {"fields": []}, "settings_version": 1}, "declares config_schema, not settings"),
 ])

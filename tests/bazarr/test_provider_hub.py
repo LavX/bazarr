@@ -127,7 +127,8 @@ def _patch_local_install_env(monkeypatch, tmp_path):
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
     monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
     monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
-    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
 
 
 class _FakeResponse:
@@ -2275,7 +2276,8 @@ def test_removed_plugin_keeps_registered_secret_paths(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
-    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
 
     # Configuring the plugin persists its manifest's secret path.
     update_provider("examplehub", config={"api_key": "unit-secret"})  # pragma: allowlist secret
@@ -4235,7 +4237,8 @@ def test_stage_install_accepts_trusted_migrated_built_in_shadow(tmp_path, monkey
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
     monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
     monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
-    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
 
     installation = stage_install(install_manifest)
 
@@ -5650,7 +5653,8 @@ def test_autoinstall_stages_enabled_official_providers_not_yet_installed(tmp_pat
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl", "opensubtitlescom"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers",
+                        lambda: ["subdl", "opensubtitlescom"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -6352,9 +6356,9 @@ def test_failed_initial_catalog_refresh_waits_for_explicit_retry(tmp_path, monke
 # installing only the first". Two very different faults produce that symptom: an
 # install that fails and stops the run, or an install that succeeds and then
 # vanishes because the next one read a stale enabled_providers and wrote it back
-# without the previous entry. _set_bazarr_provider_enabled read-modify-writes
-# that list, so this pins the second possibility shut: three sequential installs
-# leave all three ids in the list, in memory and on disk.
+# without the previous entry. set_bazarr_provider_enabled reads, edits and writes
+# that list under CONFIG_LOCK, so this pins the second possibility shut: three
+# sequential installs leave all three ids in the list, in memory and on disk.
 #
 # It runs in a child process with its own config dir because it exercises the
 # real settings singleton and a real write_config(); doing that in the test
@@ -6389,10 +6393,11 @@ returned = [_set_bazarr_provider_enabled(provider_id, True) for provider_id in i
 
 sequential_in_memory = list(_bazarr_enabled_providers())
 
-# Concurrent half. A parallel install run reaches _set_bazarr_provider_enabled
-# from several threads at once; widening the gap between its read and its write
-# turns the lost update from a rare interleaving into a certainty, so the lock
-# is what the assertion is really measuring.
+# Concurrent half. A parallel install run reaches set_bazarr_provider_enabled
+# from several threads at once. The slow read widens the window between that
+# read and the write, so a missing CONFIG_LOCK would show up here as a lost
+# update. The assertion measures that the lock covers the read, the edit and
+# the write together.
 _real_read = provider_kind.bazarr_enabled_providers
 
 
@@ -6613,7 +6618,8 @@ def test_an_update_whose_enabled_state_cannot_be_saved_changes_nothing(tmp_path,
     from provider_hub.state import load_state
 
     _installed_examplehub(tmp_path, monkeypatch)
-    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: False)
     monkeypatch.setattr("provider_hub.kinds.subtitle_provider.forget_credential_throttle", lambda provider_id: None)
 
     with pytest.raises(service.ProviderHubSettingsError):
@@ -6640,7 +6646,8 @@ def test_a_removal_whose_disable_cannot_be_saved_leaves_the_provider_installed(t
     from provider_hub.state import load_state
 
     _installed_examplehub(tmp_path, monkeypatch)
-    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: False)
 
     with pytest.raises(JobFailed, match="could not be saved"):
         hub_jobs.uninstall_provider("examplehub", "Example")
@@ -6713,7 +6720,8 @@ def test_a_first_install_that_cannot_be_enabled_is_reported_as_failed(tmp_path, 
     state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     _patch_local_install_env(monkeypatch, tmp_path)
-    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: False)
 
     with pytest.raises(service.ProviderHubSettingsError, match="could not be enabled"):
         stage_install_local(package)
