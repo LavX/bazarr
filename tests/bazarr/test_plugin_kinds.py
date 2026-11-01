@@ -7,6 +7,12 @@ only through the subtitle provider kind.
 """
 import pytest
 
+from plugin_platform_helpers import (
+    SERVICE_KIND,
+    provider_manifest_v1,
+    write_state,
+)
+
 
 def test_kind_registry_refuses_conflicts():
     from provider_hub.kinds import (
@@ -32,3 +38,83 @@ def test_the_subtitle_provider_kind_attaches_on_restart():
     assert kind.attach_policy == ATTACH_ON_RESTART
     assert kind_for_api("bazarr.subtitle_provider.v1") is kind
     assert kind_of({"provider_id": "legacyhub"}) == SUBTITLE_PROVIDER
+
+
+def _active_row(provider_id, kind=None, manifest=None):
+    row = {
+        "provider_id": provider_id,
+        "name": provider_id,
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "manifest": manifest or provider_manifest_v1(provider_id),
+        "config": {"api_key": "plain"},
+    }
+    if kind:
+        row["kind"] = kind
+    return row
+
+
+def test_rows_written_before_kinds_load_as_subtitle_providers(tmp_path, monkeypatch):
+    from provider_hub.state import load_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(
+        tmp_path / "state.json", installations={"legacyhub": _active_row("legacyhub")})))
+
+    assert load_state()["installations"]["legacyhub"]["kind"] == "subtitle_provider"
+
+
+def test_iterations_see_only_their_own_kind(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider
+    from provider_hub.state import active_installations
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "providerhub": _active_row("providerhub"),
+        "exampleservice": _active_row("exampleservice", kind=SERVICE_KIND),
+    })))
+    monkeypatch.setattr(subtitle_provider, "bazarr_enabled_providers", lambda: ["providerhub"])
+
+    assert [item.provider_id for item in active_installations()] == ["providerhub"]
+    assert [item.provider_id for item in active_installations(kind=SERVICE_KIND)] == ["exampleservice"]
+    assert {item.provider_id for item in active_installations(kind=None)} == {"providerhub", "exampleservice"}
+    assert set(service.runtime_provider_configs()) == {"providerhub"}
+    assert [item["provider_id"] for item in service.list_providers()] == ["providerhub"]
+    assert {item["provider_id"] for item in service.list_installations()} == {"providerhub", "exampleservice"}
+    assert subtitle_provider.settings_section_plugin_ids() == {"providerhub"}
+
+
+def test_a_service_plugin_never_joins_the_provider_pool(tmp_path, monkeypatch, service_kind):
+    from provider_hub import registry
+    from subliminal_patch.extensions import provider_registry
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "exampleservice": _active_row("exampleservice", kind=SERVICE_KIND),
+    })))
+
+    assert registry.register_active_provider_classes() == []
+    assert "exampleservice" not in provider_registry.names()
+
+
+def test_a_service_plugin_never_reads_a_settings_section(tmp_path, monkeypatch, service_kind):
+    from app import get_providers
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "exampleservice": _active_row("exampleservice", kind=SERVICE_KIND),
+    })))
+
+    assert "exampleservice" not in get_providers.get_providers_auth()
+
+
+def test_an_installation_never_changes_kind(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "examplehub": _active_row("examplehub", kind=SERVICE_KIND),
+    })))
+    staged = []
+    monkeypatch.setattr(service, "_fetch_bundle", lambda *args, **kwargs: staged.append("bundle"))
+
+    with pytest.raises(service.ProviderHubInstallError, match="installed as a test_service plugin"):
+        service.stage_install(provider_manifest_v1("examplehub", "2.0.0"))
+    assert staged == []

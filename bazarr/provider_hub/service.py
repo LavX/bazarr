@@ -26,6 +26,7 @@ from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KE
 from secret_store.scrub import scrub_job_secrets, scrub_text
 
 from .manifest import validate_manifest
+from .kinds import SUBTITLE_PROVIDER, kind_of
 from .bundle import verify_bundle_tree
 from .migration import (
     MIGRATED_BUILT_IN_PROVIDER_IDS,
@@ -1865,7 +1866,7 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
     state = load_state()
     configs = {}
     for provider_id, installation in (state.get("installations") or {}).items():
-        if not isinstance(installation, dict):
+        if not isinstance(installation, dict) or kind_of(installation) != SUBTITLE_PROVIDER:
             continue
         # The active provider class is keyed off ``active_version`` and stays
         # registered until restart, even while an update or removal is staged.
@@ -2028,15 +2029,18 @@ def decrypt_blocked_provider_ids() -> set[str]:
     return blocked
 
 
-def list_providers(redact: bool = True) -> list[dict[str, Any]]:
+def list_installations(redact: bool = True, *, kind: str | None = None) -> list[dict[str, Any]]:
+    """Installations of one kind, or of every kind when ``kind`` is None."""
     from . import runtime_status
 
     state = load_state()
     enabled_provider_ids = set(_bazarr_enabled_providers())
-    providers = []
+    installations = []
     for provider in (state.get("installations") or {}).values():
         if not isinstance(provider, dict):
-            providers.append(provider)
+            installations.append(provider)
+            continue
+        if kind is not None and kind_of(provider) != kind:
             continue
         item = dict(_with_origin(provider, state))
         status = runtime_status.get(item.get("provider_id"))
@@ -2046,8 +2050,13 @@ def list_providers(redact: bool = True) -> list[dict[str, Any]]:
         )
         if status is not None and status_is_current:
             item["runtime_status"] = status
-        providers.append(_redact_installation(item) if redact else item)
-    return providers
+        installations.append(_redact_installation(item) if redact else item)
+    return installations
+
+
+def list_providers(redact: bool = True) -> list[dict[str, Any]]:
+    """The Subtitle Hub's listing: subtitle providers only."""
+    return list_installations(redact, kind=SUBTITLE_PROVIDER)
 
 
 def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None:
@@ -2505,6 +2514,7 @@ def _staged_installation(
     existing = existing if isinstance(existing, dict) else {}
     return {
         "provider_id": validated.provider_id,
+        "kind": validated.kind,
         "name": validated.name,
         "active_version": existing.get("active_version"),
         "staged_version": validated.version,
@@ -2550,6 +2560,7 @@ def _failed_installation(
 
     return {
         "provider_id": validated.provider_id,
+        "kind": validated.kind,
         "name": validated.name,
         "active_version": None,
         "staged_version": None,
@@ -2600,6 +2611,14 @@ def _stage_validated(
     staged = []
     state = load_state()
     existing = (state.get("installations") or {}).get(validated.provider_id)
+    if isinstance(existing, dict) and kind_of(existing) != validated.kind:
+        # An installation's kind never changes: the id already belongs to a
+        # plugin of another kind, and replacing it would hand that plugin's
+        # settings, bindings and dependents to something else.
+        raise ProviderHubInstallError(
+            f"{validated.provider_id} is installed as a {kind_of(existing)} plugin and cannot "
+            f"become a {validated.kind} plugin"
+        )
     existing_version = (
         existing.get("active_version") if isinstance(existing, dict) else None
     )

@@ -58,6 +58,8 @@ class ValidatedManifest:
     source_path: str
     trusted: bool
     dependency_requirements: tuple[DependencyRequirement, ...]
+    # Every manifest this validator accepts is a subtitle provider's.
+    kind: str = "subtitle_provider"
 
 
 def _require_mapping(value: Any, field: str) -> dict[str, Any]:
