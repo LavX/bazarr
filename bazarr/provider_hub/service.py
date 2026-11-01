@@ -2937,7 +2937,7 @@ def remove_installation(provider_id: str) -> bool:
         return True
 
 
-def check_updates() -> dict[str, Any]:
+def check_updates(*, kind: str | None = None) -> dict[str, Any]:
     job_id: str | None = None
     with record_job("check_updates", target_kind="system") as job:
         job_id = job.data["id"]
@@ -2946,6 +2946,8 @@ def check_updates() -> dict[str, Any]:
         provider_summaries: list[str] = []
         for provider_id, installation in (state.get("installations") or {}).items():
             if not isinstance(installation, dict):
+                continue
+            if kind is not None and kind_of(installation) != kind:
                 continue
             if installation.get("origin") == "local":
                 # Local packages are owned by their uploaded file, not the catalog.

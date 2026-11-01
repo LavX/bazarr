@@ -143,3 +143,34 @@ def test_provider_side_effects_run_only_for_providers(tmp_path, monkeypatch, ser
         ("configured", "exampleservice"),
         ("removed", "exampleservice"),
     ]
+
+
+def test_an_update_check_covers_only_the_kind_it_is_asked_for(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.kinds import SUBTITLE_PROVIDER
+
+    def bound(row):
+        return dict(row, source_bound=True, source_id="official")
+
+    # Catalog validation accepts only subtitle provider manifests, so the newer
+    # version of the other installation is carried as one. The kind filter is
+    # what keeps that installation out of the subtitle check.
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", catalog_entries={
+        "official:providerhub:1.1.0": {"source": "official", "provider_id": "providerhub", "version": "1.1.0",
+                                       "manifest": provider_manifest_v1("providerhub", "1.1.0")},
+        "official:exampleservice:1.1.0": {"source": "official", "provider_id": "exampleservice",
+                                          "version": "1.1.0",
+                                          "manifest": provider_manifest_v1("exampleservice", "1.1.0")},
+    }, installations={
+        "providerhub": bound(_active_row("providerhub")),
+        "exampleservice": bound(_active_row("exampleservice", kind=SERVICE_KIND)),
+    })))
+
+    everything = service.check_updates()
+    subtitle = service.check_updates(kind=SUBTITLE_PROVIDER)
+
+    assert sorted(everything["details"]["providers"]) == [
+        "exampleservice: 1.0.0 -> 1.1.0",
+        "providerhub: 1.0.0 -> 1.1.0",
+    ]
+    assert subtitle["details"]["providers"] == ["providerhub: 1.0.0 -> 1.1.0"]

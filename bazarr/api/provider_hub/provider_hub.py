@@ -248,7 +248,7 @@ class ProviderHubUpdatesCheck(Resource):
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def post(self):
         service.refresh_catalog()
-        return service.check_updates()
+        return service.check_updates(kind=SUBTITLE_PROVIDER)
 
 
 @api_ns_provider_hub.route('provider-hub/updates/apply')
