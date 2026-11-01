@@ -200,14 +200,13 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // after the reader has already left it (a step that does not report itself
   // busy can be unmounted by browser Back with its save in the air), and the
   // callback it holds then advanced the wizard to the step it had been heading
-  // for, over wherever the reader went. The callbacks are
-  // tied to the mount they were handed to and do nothing once it is no longer
-  // the one on screen. A step key would not do for that: Back and then Forward
-  // before the old save lands puts the same key on screen again, as a fresh
-  // mount, and the old save would advance it. Each visit gets the next number
-  // instead. The callbacks also call the latest move rather than the one in
-  // force when they were made, so a list that changed in between is not
-  // walked from a stale index.
+  // for, over wherever the reader went. The callbacks are tied to the mount
+  // they were handed to and do nothing once it is no longer the one on screen.
+  // A step key would not do for that: Back and then Forward before the old save
+  // lands puts the same key on screen again, as a fresh mount, and the old save
+  // would advance it. Each visit gets the next number instead. The callbacks
+  // also call the latest move rather than the one in force when they were made,
+  // so a list that changed in between is not walked from a stale index.
   const visit = useRef({ key: current.key, id: 0 });
   if (visit.current.key !== current.key) {
     visit.current = { key: current.key, id: visit.current.id + 1 };
