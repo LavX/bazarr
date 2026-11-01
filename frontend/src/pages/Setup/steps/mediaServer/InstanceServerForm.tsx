@@ -93,10 +93,10 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
 
   const [errors, setErrors] = useState<DraftFieldErrors>({});
   const [failure, setFailure] = useState<string | null>(null);
-  // Whether this step is still the one on screen. A save now settles even when
-  // the reader has left mid-write, which is the point, but the wizard cursor
-  // has moved on by then: advancing from here would step past whatever screen
-  // they are actually looking at, without them touching anything. Marking the
+  // Whether this step is still the one on screen. The busy hold refuses Back
+  // or Skip while a save is in flight, so it normally is when the save settles.
+  // The onScreen guard is defence in depth: if the form has unmounted by then,
+  // advancing from here would step past whatever screen is showing. Marking the
   // draft saved still has to happen, so the two are separated.
   const onScreen = useRef(true);
   useEffect(() => {
@@ -200,9 +200,10 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
     // write it a second time: a repeat create would leave two rows for one
     // server.
     if (savedInstanceId !== undefined) {
-      // The master switch write from that press has not been refused, so it
-      // is still in the air: this press accepts the row that is already
-      // there and moves on.
+      // The master switch write from that press has not been refused. A press
+      // never reaches handleContinue while that write is in flight, because the
+      // Connect button is disabled while loading. Once that write has settled,
+      // this branch accepts the row that is already there and moves on.
       if (!savedButNotSwitchedOn) {
         markSaved(draft.draftId, savedInstanceId);
         onNext();

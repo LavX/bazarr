@@ -201,15 +201,17 @@ export function useMediaServerSubmit() {
         if (kinds.size > 0) {
           // mutateAsync, not mutate with callbacks. TanStack drops a mutate
           // call's own onSuccess and onError once the component that made the
-          // call has unmounted, which pressing Back or Skip during the save
-          // does. The promise then never settled: the caller's then never ran,
-          // the draft was never marked saved, its step stayed in the wizard,
-          // and submitting it again wrote a second row for a server that was
-          // already there. mutateAsync settles either way. Not every rejection
-          // means the switches are off: a 503 whose code is
-          // settings_refresh_failed says the configuration reached the disk
-          // and only applying it failed, so the switches count as on and the
-          // step advances without the warning.
+          // call has unmounted. The busy hold refuses Back or Skip while a save
+          // is in flight, and the onScreen guard in InstanceServerForm is
+          // defence in depth. Without mutateAsync, a save whose component has
+          // unmounted would leave its promise unsettled: the caller's then
+          // would never run, the draft would never be marked saved, its step
+          // would stay in the wizard, and submitting it again would write a
+          // second row for a server that was already there. mutateAsync
+          // settles either way. Not every rejection means the switches are off:
+          // a 503 whose code is settings_refresh_failed says the configuration
+          // reached the disk and only applying it failed, so the switches count
+          // as on and the step advances without the warning.
           switchesFailed = await settings
             .mutateAsync(
               Object.fromEntries(

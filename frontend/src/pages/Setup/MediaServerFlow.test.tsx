@@ -34,7 +34,8 @@ let switchFollowupFails = false;
 // Every master-switch write this backend has seen, landed or not, so a test
 // can count the attempts.
 let switchWriteAttempts = 0;
-// Holds the master-switch write open, so a step can be left mid-save.
+// Holds the master-switch write open. The busy hold refuses Back or Skip while
+// a save is in flight, and the onScreen guard is defence in depth.
 let heldSwitch: Promise<void> | null = null;
 // The same for the create itself.
 let heldCreate: Promise<void> | null = null;
@@ -420,8 +421,8 @@ describe("media server selection", () => {
 
   it("does not write the server twice when Connect is pressed again mid-save", async () => {
     // The row is recorded on the draft as soon as the create lands, before the
-    // master switch is written, so a second press accepts the row that is
-    // already there instead of writing it again.
+    // master switch is written. A second press never reaches handleContinue,
+    // because the Connect button is disabled while loading.
     let release: (() => void) | undefined;
     heldSwitch = new Promise<void>((resolve) => {
       release = resolve;
@@ -439,6 +440,9 @@ describe("media server selection", () => {
     // The switch write is still held. Pressing the primary button again must
     // not create a second row, and the wizard must stay on this step until the
     // switch write settles.
+    expect(
+      screen.getByRole("button", { name: /continue|connect/i }),
+    ).toBeDisabled();
     await user.click(screen.getByRole("button", { name: /continue|connect/i }));
     expect(creates).toHaveLength(1);
     expect(
