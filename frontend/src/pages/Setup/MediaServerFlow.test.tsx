@@ -437,9 +437,14 @@ describe("media server selection", () => {
     ).not.toBeInTheDocument();
 
     // The switch write is still held. Pressing the primary button again must
-    // not create a second row.
+    // not create a second row, and the wizard must stay on this step until the
+    // switch write settles.
     await user.click(screen.getByRole("button", { name: /continue|connect/i }));
     expect(creates).toHaveLength(1);
+    expect(
+      screen.getByRole("heading", { name: /^jellyfin$/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^requests$/i })).toBeNull();
 
     release?.();
     await waitFor(() => expect(settingsWrites).toHaveLength(1));

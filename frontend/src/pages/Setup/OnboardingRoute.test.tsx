@@ -223,11 +223,11 @@ describe("the wizard's own URL", () => {
   });
 
   it("a save that lands after the step was left does not move the wizard", async () => {
-    // Only the provider stages report themselves busy, so browser Back can
-    // unmount any other step with its write still in the air. The callback the
-    // step handed to the write still ran when the write answered, and advanced
-    // the wizard to the step it had been heading for over wherever the reader
-    // had gone.
+    // The translator step reports itself busy from settings.isPending, which
+    // this test's mock does not supply. Here the step reads as free, so browser
+    // Back can unmount it with its write still in the air. The callback the
+    // step handed to that write still runs when the write answers, and the
+    // wizard ignores it because the step is no longer on screen.
     let landed: (() => void) | undefined;
     mockedSettingsMutation.mockReturnValue({
       mutate: vi.fn(
