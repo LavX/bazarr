@@ -24,7 +24,7 @@ from .versions import host_version_key, version_key
 
 logger = logging.getLogger(__name__)
 
-# The runtimes this host can start. Slices that add a runtime add it here.
+# The runtimes this host can start. New runtimes are added here once the host can start them.
 AVAILABLE_RUNTIMES = frozenset({(PYTHON_BUNDLE, STDIO_WORKER)})
 
 
