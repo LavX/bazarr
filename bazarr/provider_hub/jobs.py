@@ -16,6 +16,7 @@ from app.job_errors import reason_of
 from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 
 from . import service
+from .kinds import SUBTITLE_PROVIDER, UnknownKindError, get_kind, kind_of
 
 JOB_MODULE = "provider_hub.jobs"
 
@@ -51,13 +52,24 @@ def _enqueue(label, func, kwargs):
         return_existing=True)
 
 
+def _noun(source_id, provider_id, version):
+    """What the job list calls the plugin: "provider" for a subtitle provider, else "plugin"."""
+    entry = service._held_catalog_entry(service.load_state(), source_id, provider_id, version)
+    kind = kind_of(entry) if entry else SUBTITLE_PROVIDER
+    try:
+        return get_kind(kind).noun
+    except UnknownKindError:
+        return "plugin"
+
+
 def queue_install(source_id, provider_id, version, name=None):
     """Queue the install of the entry ``source_id`` lists for ``provider_id``.
 
     The job carries the reference, not a manifest: it installs what the source
     holds when it runs, bound to that source.
     """
-    return _enqueue(f"Installing provider {name or provider_id}", "install_provider",
+    return _enqueue(f"Installing {_noun(source_id, provider_id, version)} {name or provider_id}",
+                    "install_provider",
                     {"source_id": source_id, "provider_id": provider_id, "version": version,
                      "name": name})
 

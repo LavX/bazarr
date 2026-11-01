@@ -400,6 +400,7 @@ jobs:
             tests/bazarr/test_media_server_links_api.py \
             tests/bazarr/test_provider_hub.py \
             tests/bazarr/test_plugin_kinds.py \
+            tests/bazarr/test_plugin_api.py \
             tests/bazarr/test_provider_registry_pruning.py \
             tests/bazarr/test_builtin_provider_id_guard.py \
             tests/bazarr/test_provider_pool_config_reload.py \
