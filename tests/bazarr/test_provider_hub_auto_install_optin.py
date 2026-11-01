@@ -43,7 +43,7 @@ def test_autoinstall_proceeds_when_optin_on(monkeypatch):
     # Return no installations + no enabled providers so the function exits quickly after
     # the gate without hitting the network; we only care that the gate let it through.
     monkeypatch.setattr(svc, "load_state", lambda *a, **k: reached.append("load_state") or {"installations": {}})
-    monkeypatch.setattr(svc, "_bazarr_enabled_providers", lambda *a, **k: [])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda *a, **k: [])
 
     svc.autoinstall_enabled_builtins()
 

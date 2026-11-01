@@ -118,3 +118,28 @@ def test_an_installation_never_changes_kind(tmp_path, monkeypatch, service_kind)
     with pytest.raises(service.ProviderHubInstallError, match="installed as a test_service plugin"):
         service.stage_install(provider_manifest_v1("examplehub", "2.0.0"))
     assert staged == []
+
+
+def test_provider_side_effects_run_only_for_providers(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "exampleservice": _active_row("exampleservice", kind=SERVICE_KIND),
+    })))
+    enabled_calls = []
+    monkeypatch.setattr(subtitle_provider, "set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: enabled_calls.append((provider_id, enabled)))
+    monkeypatch.setattr(subtitle_provider, "forget_credential_throttle",
+                        lambda provider_id: enabled_calls.append(("throttle", provider_id)))
+
+    service.update_provider("exampleservice", enabled=False)
+    service.update_provider("exampleservice", config={"api_key": "new"})
+    service.remove_installation("exampleservice")
+
+    assert enabled_calls == []
+    assert service_kind.calls == [
+        ("enabled", "exampleservice", False),
+        ("configured", "exampleservice"),
+        ("removed", "exampleservice"),
+    ]

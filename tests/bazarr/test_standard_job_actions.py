@@ -714,7 +714,7 @@ def hub_install(tmp_path, monkeypatch, queue):
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
     monkeypatch.setattr("provider_hub.service._smoke_validate_worker",
                         lambda manifest, bundle_path, python_path: step("smoke"))
-    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda *args: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda *args: True)
     return control
 
 

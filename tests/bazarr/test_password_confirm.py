@@ -741,11 +741,12 @@ def test_startup_auto_install_and_boot_activation_run_ungated(monkeypatch, auth_
     _auth(monkeypatch, auth_type=auth_type)
     from flask import has_request_context
     from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.delenv('BAZARR_DISABLE_PROVIDER_AUTOINSTALL', raising=False)
     monkeypatch.setitem(settings.general, 'provider_hub_auto_install', True)
     monkeypatch.setattr(service, 'load_state', lambda: {'installations': {}})
-    monkeypatch.setattr(service, '_bazarr_enabled_providers', lambda: ['stubbed-provider'])
+    monkeypatch.setattr(provider_kind, 'bazarr_enabled_providers', lambda: ['stubbed-provider'])
     monkeypatch.setattr(service, 'refresh_catalog', lambda **kwargs: None)
     monkeypatch.setattr(service, '_latest_official_catalog_manifest',
                         lambda state, provider_id: {'id': provider_id, 'name': 'Stubbed'})

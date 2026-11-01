@@ -127,7 +127,7 @@ def _patch_local_install_env(monkeypatch, tmp_path):
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
     monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
     monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
-    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: True)
 
 
 class _FakeResponse:
@@ -2046,7 +2046,7 @@ def test_update_provider_with_failing_encrypter_stores_nothing(tmp_path, monkeyp
 
     enabled_calls = []
     monkeypatch.setattr(
-        "provider_hub.service._set_bazarr_provider_enabled",
+        "provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
         lambda provider_id, enabled: enabled_calls.append((provider_id, enabled)) or True,
     )
 
@@ -2275,7 +2275,7 @@ def test_removed_plugin_keeps_registered_secret_paths(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
-    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: True)
 
     # Configuring the plugin persists its manifest's secret path.
     update_provider("examplehub", config={"api_key": "unit-secret"})  # pragma: allowlist secret
@@ -4235,7 +4235,7 @@ def test_stage_install_accepts_trusted_migrated_built_in_shadow(tmp_path, monkey
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
     monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
     monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
-    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: True)
 
     installation = stage_install(install_manifest)
 
@@ -5242,8 +5242,7 @@ def test_list_providers_overlays_enabled_from_bazarr_enabled_providers(
     }
     save_state(state)
 
-    monkeypatch.setattr(
-        service, "_bazarr_enabled_providers", lambda: ["examplehub", "other"]
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["examplehub", "other"]
     )
 
     providers = service.list_providers()
@@ -5251,7 +5250,7 @@ def test_list_providers_overlays_enabled_from_bazarr_enabled_providers(
         p["provider_id"] == "examplehub" and p["enabled"] is True for p in providers
     )
 
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["other"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["other"])
     providers = service.list_providers()
     assert any(
         p["provider_id"] == "examplehub" and p["enabled"] is False for p in providers
@@ -5276,9 +5275,7 @@ def test_update_provider_syncs_enabled_providers(tmp_path, monkeypatch):
     save_state(state)
 
     calls = []
-    monkeypatch.setattr(
-        service,
-        "_set_bazarr_provider_enabled",
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
         lambda pid, enabled: calls.append((pid, enabled)) or True,
     )
 
@@ -5305,9 +5302,7 @@ def test_remove_installation_clears_enabled_providers(tmp_path, monkeypatch):
     save_state(state)
 
     calls = []
-    monkeypatch.setattr(
-        service,
-        "_set_bazarr_provider_enabled",
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
         lambda pid, enabled: calls.append((pid, enabled)) or True,
     )
 
@@ -5655,7 +5650,7 @@ def test_autoinstall_stages_enabled_official_providers_not_yet_installed(tmp_pat
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl", "opensubtitlescom"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl", "opensubtitlescom"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5679,7 +5674,7 @@ def test_autoinstall_is_idempotent_skips_existing_installs(tmp_path, monkeypatch
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5696,7 +5691,7 @@ def test_autoinstall_ignores_non_official_catalog_entries(tmp_path, monkeypatch)
     state_file = _catalog_state(tmp_path, entries={"thirdparty:subdl:1.0.0": third_party})
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5713,7 +5708,7 @@ def test_autoinstall_swallows_stage_failures(tmp_path, monkeypatch):
     })
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl", "gestdown"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl", "gestdown"])
 
     calls = []
 
@@ -5732,7 +5727,7 @@ def test_autoinstall_swallows_stage_failures(tmp_path, monkeypatch):
 def test_autoinstall_kill_switch_returns_empty(monkeypatch):
     from provider_hub import service
     monkeypatch.setenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", "1")
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     assert service.autoinstall_enabled_builtins() == []
 
 
@@ -5756,7 +5751,7 @@ def test_autoinstall_proceeds_when_catalog_refresh_fails(tmp_path, monkeypatch):
         raise RuntimeError("github unreachable")
 
     monkeypatch.setattr(service, "refresh_catalog", boom)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5777,7 +5772,7 @@ def test_autoinstall_retries_failed_install_rows(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5799,7 +5794,7 @@ def test_autoinstall_skips_refresh_when_nothing_to_install(tmp_path, monkeypatch
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     refresh_calls = []
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: refresh_calls.append(source_ids))
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: (_ for _ in ()).throw(AssertionError("should not install")))
 
     assert service.autoinstall_enabled_builtins() == []
@@ -5814,7 +5809,7 @@ def test_autoinstall_refreshes_only_the_official_source(tmp_path, monkeypatch):
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     refresh_calls = []
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: refresh_calls.append(source_ids))
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: None)
 
     service.autoinstall_enabled_builtins()
@@ -5827,7 +5822,7 @@ def test_autoinstall_bounds_each_install_with_remaining_budget(tmp_path, monkeyp
     state_file = _catalog_state(tmp_path, entries={"official:subdl:1.0.0": _official_entry("subdl")})
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     captured = {}
 
     def capture(manifest, install_timeout=None):
@@ -6383,8 +6378,11 @@ assert os.path.realpath(args.config_dir) == os.path.realpath(
 ), "child resolved config_dir to %r" % (args.config_dir,)
 
 from app.config import config_yaml_file
-from provider_hub import service
-from provider_hub.service import _bazarr_enabled_providers, _set_bazarr_provider_enabled
+from provider_hub.kinds import subtitle_provider as provider_kind
+from provider_hub.kinds.subtitle_provider import (
+    bazarr_enabled_providers as _bazarr_enabled_providers,
+    set_bazarr_provider_enabled as _set_bazarr_provider_enabled,
+)
 
 ids = json.loads(os.environ["PROVIDER_IDS"])
 returned = [_set_bazarr_provider_enabled(provider_id, True) for provider_id in ids]
@@ -6395,7 +6393,7 @@ sequential_in_memory = list(_bazarr_enabled_providers())
 # from several threads at once; widening the gap between its read and its write
 # turns the lost update from a rare interleaving into a certainty, so the lock
 # is what the assertion is really measuring.
-_real_read = service._bazarr_enabled_providers
+_real_read = provider_kind.bazarr_enabled_providers
 
 
 def _slow_read():
@@ -6404,7 +6402,7 @@ def _slow_read():
     return value
 
 
-service._bazarr_enabled_providers = _slow_read
+provider_kind.bazarr_enabled_providers = _slow_read
 
 threaded_ids = json.loads(os.environ["THREADED_PROVIDER_IDS"])
 errors = []
@@ -6412,7 +6410,7 @@ errors = []
 
 def _enable(provider_id):
     try:
-        service._set_bazarr_provider_enabled(provider_id, True)
+        _set_bazarr_provider_enabled(provider_id, True)
     except Exception as error:  # noqa: BLE001
         errors.append(repr(error))
 
@@ -6423,7 +6421,7 @@ for thread in threads:
 for thread in threads:
     thread.join()
 
-service._bazarr_enabled_providers = _real_read
+provider_kind.bazarr_enabled_providers = _real_read
 
 from dynaconf import Dynaconf
 
@@ -6497,22 +6495,22 @@ def test_installs_keep_every_enabled_provider_sequentially_and_in_parallel(tmp_p
 
 def test_enabled_providers_that_cannot_be_saved_are_put_back(monkeypatch):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
     monkeypatch.setattr(config, "write_config", lambda: False)
 
-    assert service._set_bazarr_provider_enabled("beta", True) is False
+    assert provider_kind.set_bazarr_provider_enabled("beta", True) is False
     assert list(config.settings.general.enabled_providers) == ["alpha"]
-    assert service._set_bazarr_provider_enabled("alpha", False) is False
+    assert provider_kind.set_bazarr_provider_enabled("alpha", False) is False
     assert list(config.settings.general.enabled_providers) == ["alpha"]
     # A list that already holds the requested state needs no write, and is not a failure.
-    assert service._set_bazarr_provider_enabled("alpha", True) is True
+    assert provider_kind.set_bazarr_provider_enabled("alpha", True) is True
 
 
 def test_enabling_a_provider_clears_its_disabled_entry_in_the_same_save(monkeypatch):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
     monkeypatch.setattr(
@@ -6527,14 +6525,14 @@ def test_enabling_a_provider_clears_its_disabled_entry_in_the_same_save(monkeypa
 
     monkeypatch.setattr(config, "write_config", write_config)
 
-    assert service._set_bazarr_provider_enabled("beta", True) is True
+    assert provider_kind.set_bazarr_provider_enabled("beta", True) is True
     assert saved == [(["alpha", "beta"], ["other"])]
     assert list(config.settings.general.disabled_providers) == ["other"]
 
 
 def test_enabling_an_enabled_provider_clears_its_stale_disabled_entry(monkeypatch):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha", "beta"])
     monkeypatch.setattr(
@@ -6549,7 +6547,7 @@ def test_enabling_an_enabled_provider_clears_its_stale_disabled_entry(monkeypatc
 
     monkeypatch.setattr(config, "write_config", write_config)
 
-    assert service._set_bazarr_provider_enabled("beta", True) is True
+    assert provider_kind.set_bazarr_provider_enabled("beta", True) is True
     assert saved == [(["alpha", "beta"], ["other"])]
     assert list(config.settings.general.disabled_providers) == ["other"]
 
@@ -6557,7 +6555,7 @@ def test_enabling_an_enabled_provider_clears_its_stale_disabled_entry(monkeypatc
 @pytest.mark.parametrize("failure", ["false", "exception"])
 def test_failed_provider_activation_restores_both_provider_lists(monkeypatch, failure):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
     monkeypatch.setattr(config.settings.general, "disabled_providers", ["beta", "other"], raising=False)
@@ -6572,7 +6570,7 @@ def test_failed_provider_activation_restores_both_provider_lists(monkeypatch, fa
 
     monkeypatch.setattr(config, "write_config", write_config)
 
-    assert service._set_bazarr_provider_enabled("beta", True) is False
+    assert provider_kind.set_bazarr_provider_enabled("beta", True) is False
     assert attempted == [(["alpha", "beta"], ["other"])]
     assert list(config.settings.general.enabled_providers) == ["alpha"]
     assert list(config.settings.general.disabled_providers) == ["beta", "other"]
@@ -6580,13 +6578,13 @@ def test_failed_provider_activation_restores_both_provider_lists(monkeypatch, fa
 
 def test_disabling_a_hub_provider_preserves_the_disabled_list(monkeypatch):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha", "beta"])
     monkeypatch.setattr(config.settings.general, "disabled_providers", ["other"], raising=False)
     monkeypatch.setattr(config, "write_config", lambda: True)
 
-    assert service._set_bazarr_provider_enabled("beta", False) is True
+    assert provider_kind.set_bazarr_provider_enabled("beta", False) is True
     assert list(config.settings.general.enabled_providers) == ["alpha"]
     assert list(config.settings.general.disabled_providers) == ["other"]
 
@@ -6615,8 +6613,8 @@ def test_an_update_whose_enabled_state_cannot_be_saved_changes_nothing(tmp_path,
     from provider_hub.state import load_state
 
     _installed_examplehub(tmp_path, monkeypatch)
-    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
-    monkeypatch.setattr(service, "_forget_credential_throttle", lambda provider_id: None)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.forget_credential_throttle", lambda provider_id: None)
 
     with pytest.raises(service.ProviderHubSettingsError):
         service.update_provider("examplehub", enabled=False, config={"api_key": "new"})
@@ -6642,7 +6640,7 @@ def test_a_removal_whose_disable_cannot_be_saved_leaves_the_provider_installed(t
     from provider_hub.state import load_state
 
     _installed_examplehub(tmp_path, monkeypatch)
-    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: False)
 
     with pytest.raises(JobFailed, match="could not be saved"):
         hub_jobs.uninstall_provider("examplehub", "Example")
@@ -6715,7 +6713,7 @@ def test_a_first_install_that_cannot_be_enabled_is_reported_as_failed(tmp_path, 
     state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     _patch_local_install_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled", lambda provider_id, enabled: False)
 
     with pytest.raises(service.ProviderHubSettingsError, match="could not be enabled"):
         stage_install_local(package)

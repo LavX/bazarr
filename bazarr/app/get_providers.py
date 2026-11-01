@@ -580,62 +580,16 @@ def get_providers_auth():
             'api_key': settings.subsro.api_key,
         }
     }
+    # Provider plugins read their credentials from their own stored config
+    # and from the settings section named after them; the subtitle provider
+    # kind owns that overlay.
     try:
-        from provider_hub.service import runtime_provider_configs
-        provider_configs.update(runtime_provider_configs())
-    except Exception:
-        logging.exception("Unable to load Provider Hub provider config")
-    try:
-        from provider_hub.manifest import reserved_settings_sections
-        from provider_hub.state import running_installations
-        reserved_sections = reserved_settings_sections()
+        from provider_hub.kinds.subtitle_provider import apply_settings_overlay
         blocked = _decrypt_blocked_provider_ids()
-        # The same active-version population the runtime configs admit, with
-        # the active manifest: the class stays keyed off active_version until
-        # a restart, so a pending update must not strip the section overlay,
-        # or a provider admitted on its settings-section credential runs
-        # without it. A staged schema's fields are not overlaid; the code
-        # that is running is the active version's.
-        for installation in running_installations():
-            if installation.provider_id in blocked:
-                # Configuration: a provider whose stored credential will not
-                # decrypt is not rebuilt here from its installation row, or
-                # the pool would query it anyway with the settings section's
-                # values for config. No config, no worker request.
-                continue
-            manifest = installation.manifest
-            schema = manifest.get("config_schema") if isinstance(manifest, dict) else {}
-            properties = schema.get("properties") if isinstance(schema, dict) else {}
-            if not isinstance(properties, dict):
-                continue
-            if installation.provider_id in reserved_sections:
-                # The section named after this plugin is one of Bazarr's own, not
-                # the plugin's. validate_manifest refuses such an id at install and
-                # at every boot, so getting here means a manifest slipped past it,
-                # and copying the section's keys into the worker config would hand
-                # the plugin that section's credentials (sonarr.apikey, plex.token,
-                # auth.password) on every search. Its own stored config and the
-                # schema defaults still apply.
-                if installation.provider_id not in _REPORTED_RESERVED_SECTION_PLUGINS:
-                    _REPORTED_RESERVED_SECTION_PLUGINS.add(installation.provider_id)
-                    logging.error("Refusing to read the %s settings section for Provider Hub plugin %s: "
-                                  "that section belongs to Bazarr, not to the plugin",
-                                  installation.provider_id, installation.provider_id)
-                section = {}
-            else:
-                section = settings.get(installation.provider_id, {}) if hasattr(settings, "get") else {}
-            config = dict(provider_configs.get(installation.provider_id, {}))
-            for key, field in properties.items():
-                if not isinstance(field, dict):
-                    continue
-                if "default" in field and key not in config:
-                    config[key] = field["default"]
-                value = section.get(key) if hasattr(section, "get") else getattr(section, key, None)
-                if value not in (None, "", [], {}):
-                    config[key] = value
-            provider_configs[installation.provider_id] = config
     except Exception:
         logging.exception("Unable to load Provider Hub settings config")
+    else:
+        apply_settings_overlay(provider_configs, settings, _REPORTED_RESERVED_SECTION_PLUGINS, blocked)
     return provider_configs
 
 

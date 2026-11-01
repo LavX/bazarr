@@ -26,7 +26,8 @@ from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KE
 from secret_store.scrub import scrub_job_secrets, scrub_text
 
 from .manifest import validate_manifest
-from .kinds import SUBTITLE_PROVIDER, kind_of
+from .kinds import SUBTITLE_PROVIDER, get_kind, kind_of
+from .kinds import subtitle_provider as provider_kind
 from .bundle import verify_bundle_tree
 from .migration import (
     MIGRATED_BUILT_IN_PROVIDER_IDS,
@@ -73,86 +74,6 @@ _SEMVER_RE = re.compile(
     r"^\s*v?(?P<core>\d+(?:\.\d+)*)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?\s*$"
 )
 _JOB_LOG_LIMIT = 200
-
-
-def _bazarr_enabled_providers() -> list[str]:
-    """Return Bazarr's current enabled-providers list, or [] if unavailable.
-
-    ``settings.general.enabled_providers`` is the actual gate that decides
-    which providers run during a search. The hub installation row's stored
-    ``enabled`` flag is a local copy that historically drifted out of sync
-    with this list. Reading the canonical value lazily avoids a circular
-    import (service.py is imported during init before settings finishes
-    loading on some code paths) and keeps the hub view honest.
-    """
-    try:
-        from app.config import settings
-    except Exception:
-        return []
-    raw = getattr(getattr(settings, "general", None), "enabled_providers", None)
-    if isinstance(raw, list):
-        return [str(item) for item in raw]
-    if isinstance(raw, str):
-        trimmed = raw.strip().strip("[]")
-        return [item.strip().strip("'\"") for item in trimmed.split(",") if item.strip()]
-    return []
-
-
-def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
-    """Add ``provider_id`` to (or remove it from) Bazarr's enabled_providers.
-
-    Returns True when the list holds the requested state on disk, whether
-    this call changed it or it already did. Returns False when the change
-    could not be saved, with the live list put back as it was: a change that
-    reached no file would make the provider look enabled, or removed, until
-    the next restart quietly undid it. Callers report that as a failure.
-
-    The read, the edit and the write are one critical section. Installing
-    several providers at once reaches this from several threads: the venv
-    lock in venv.py serializes only the pip work and is released before the
-    caller gets here, and write_config takes CONFIG_LOCK around the file
-    write alone, not around the read. Two installs finishing in the same
-    window would each read the list before the other wrote it, and the
-    second write would drop the first provider: a successful install that
-    vanishes. CONFIG_LOCK is reentrant, so the write_config below still
-    takes it on the same thread.
-    """
-    import logging
-
-    try:
-        from app.config import settings, write_config
-        from discover.metadata import CONFIG_LOCK
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Failed to sync enabled_providers for %s", provider_id
-        )
-        return False
-    with CONFIG_LOCK:
-        current = list(_bazarr_enabled_providers())
-        if enabled and provider_id not in current:
-            current.append(provider_id)
-        elif not enabled and provider_id in current:
-            current = [item for item in current if item != provider_id]
-        elif not enabled or provider_id not in getattr(settings.general, "disabled_providers", []):
-            return True
-        previous = settings.general.enabled_providers
-        previous_disabled = getattr(settings.general, "disabled_providers", [])
-        try:
-            settings.general.enabled_providers = current
-            if enabled:
-                settings.general.disabled_providers = [item for item in previous_disabled if item != provider_id]
-            saved = write_config()
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "Failed to sync enabled_providers for %s", provider_id
-            )
-            saved = False
-        if saved is not True:
-            settings.general.enabled_providers = previous
-            if enabled:
-                settings.general.disabled_providers = previous_disabled
-            return False
-        return True
 
 
 def utcnow_iso() -> str:
@@ -1026,7 +947,7 @@ def autoinstall_enabled_builtins() -> list[str]:
             for provider_id, row in (state.get("installations") or {}).items()
             if isinstance(row, dict) and row.get("state") != "failed"
         }
-        enabled = _bazarr_enabled_providers()
+        enabled = provider_kind.bazarr_enabled_providers()
     except Exception:
         logger.exception("Provider Hub startup auto-install: could not load state; skipping")
         return []
@@ -1568,7 +1489,7 @@ def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     if provider_id:
         # enabled_providers in config.yaml is the source of truth; the stored
         # field on the hub row is a stale shadow we don't trust on read.
-        redacted["enabled"] = str(provider_id) in _bazarr_enabled_providers()
+        redacted["enabled"] = get_kind(kind_of(redacted)).is_enabled(redacted)
     config = redacted.get("config")
     if not isinstance(config, dict):
         return redacted
@@ -1639,36 +1560,6 @@ def _effective_installation_config(installation: dict[str, Any],
                 effective.pop(field, None)
                 undecryptable.discard(field)
     return effective, undecryptable
-
-
-def _forget_credential_throttle(provider_id: str) -> None:
-    """Hand a re-configured provider its next attempt back.
-
-    An AuthenticationError parks a provider in throttled_providers.dat for
-    twelve hours, and the only thing that fixes it is the user correcting what
-    they typed. The settings page already clears those entries on save, but a
-    Provider Hub plugin is configured through this module instead, so the
-    corrected provider stayed skipped by every search, and reported as cooling
-    down on Discover, until the backoff ran out on its own.
-
-    The compat pool holds provider instances built with the old credentials, so
-    it is dropped here too, exactly as the settings path does. Both steps are
-    best-effort: saving a plugin's configuration must not fail because the
-    throttle table or the pool is unavailable.
-    """
-    import logging
-
-    logger = logging.getLogger(__name__)
-    try:
-        from app.get_providers import reset_throttled_provider
-        reset_throttled_provider(provider_id)
-    except Exception:
-        logger.exception("Failed to clear the throttle for %s after a configuration change", provider_id)
-    try:
-        from compat.service import reset_compat_pool
-        reset_compat_pool()
-    except Exception:
-        logger.exception("Failed to reset the compat pool after configuring %s", provider_id)
 
 
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -1804,7 +1695,7 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
 
         if enabled is not None:
             provider["enabled"] = bool(enabled)
-            if not _set_bazarr_provider_enabled(provider_id, bool(enabled)):
+            if not get_kind(kind_of(provider)).set_enabled(provider, bool(enabled)):
                 # Raised inside the mutation, so the Hub state is not saved
                 # either and the whole update is refused, configuration included.
                 raise ProviderHubSettingsError(
@@ -1849,7 +1740,7 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
     if provider is None:
         return None
     if config is not None:
-        _forget_credential_throttle(provider_id)
+        get_kind(kind_of(provider)).on_config_saved(provider_id)
     if config is not None or enabled is not None:
         from . import runtime_status
         runtime_status.clear(provider_id)
@@ -2034,7 +1925,7 @@ def list_installations(redact: bool = True, *, kind: str | None = None) -> list[
     from . import runtime_status
 
     state = load_state()
-    enabled_provider_ids = set(_bazarr_enabled_providers())
+    enabled_provider_ids = set(provider_kind.bazarr_enabled_providers())
     installations = []
     for provider in (state.get("installations") or {}).values():
         if not isinstance(provider, dict):
@@ -2685,7 +2576,7 @@ def _stage_validated(
             return dict(installation)
 
         installation = mutate_state(record_staged_install)
-        if not is_update and not _set_bazarr_provider_enabled(validated.provider_id, True):
+        if not is_update and not get_kind(validated.kind).on_installed(validated.provider_id):
             # First install: opt the provider into Bazarr's enabled_providers so
             # the new plugin is search-eligible without a separate UI toggle.
             # When that cannot be saved the install is staged but disabled,
@@ -3003,8 +2894,13 @@ def remove_installation(provider_id: str) -> bool:
         # Disabled first: once the removal is staged, a list that still names
         # the provider after the restart would bring it back, and a failure
         # here leaves nothing changed.
-        was_enabled = provider_id in _bazarr_enabled_providers()
-        if not _set_bazarr_provider_enabled(provider_id, False):
+        kind_hooks = get_kind(kind_of(item))
+        # The hooks read the row keyed by the id the caller passed, so a row
+        # that is not an object still answers for its own id.
+        row = dict(item) if isinstance(item, dict) else {}
+        row["provider_id"] = provider_id
+        was_enabled = kind_hooks.is_enabled(row)
+        if not kind_hooks.on_removed(provider_id):
             raise ProviderHubSettingsError(ENABLED_PROVIDERS_NOT_SAVED)
 
         def remove_or_stage(state: dict[str, Any]) -> str:
@@ -3030,7 +2926,7 @@ def remove_installation(provider_id: str) -> bool:
             # Nothing was staged, so the provider is still installed and has to
             # stay enabled as it was rather than silently switched off.
             if was_enabled:
-                _set_bazarr_provider_enabled(provider_id, True)
+                kind_hooks.set_enabled(row, True)
             raise
         if result == "missing":
             job.update(message=f"Plugin '{target_name}' not found")

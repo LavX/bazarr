@@ -1461,30 +1461,11 @@ def _settings_value(parent, keys):
 
 
 def _active_provider_hub_provider_ids():
+    # Which settings sections belong to an active provider plugin is the
+    # subtitle provider kind's knowledge, not the settings module's.
     try:
-        state_module = sys.modules.get("provider_hub.state")
-        if state_module is None:
-            from provider_hub import state as state_module
-        load_state = getattr(state_module, "load_state", None)
-        if callable(load_state):
-            state = load_state()
-            return {
-                str(item.get("provider_id") or provider_id)
-                for provider_id, item in (state.get("installations") or {}).items()
-                if isinstance(item, dict)
-                and item.get("active_version")
-                and item.get("state") != "removed"
-            }
-
-        active_installations = getattr(state_module, "active_installations")
-        return {
-            str(provider_id)
-            for provider_id in (
-                getattr(installation, "provider_id", None)
-                for installation in active_installations()
-            )
-            if provider_id
-        }
+        from provider_hub.kinds.subtitle_provider import settings_section_plugin_ids
+        return settings_section_plugin_ids()
     except Exception:
         logging.exception("Unable to inspect active Provider Hub providers")
         return set()
