@@ -256,45 +256,44 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           tested,
         );
       }
-    })
-      .then(
-        (result) => {
-          updateDraft(draft.draftId, { submitting: false });
-          const found = result.errors[draft.draftId];
-          if (found) {
-            setErrors(found);
-            return;
-          }
-          setErrors({});
-          const outcome = result.outcomes[0];
-          if (!outcome?.ok) {
-            setFailure(outcome?.error ?? "The save failed.");
-            return;
-          }
-          if (result.switchesFailed) {
-            // Marking the draft saved is what removes this step from the
-            // wizard, so doing it here would unmount the warning in the same
-            // commit that renders it: the reader would reach Finish with the
-            // server reported as connected and nothing refreshing. The step
-            // stays until they have read it and pressed Continue again.
-            updateDraft(draft.draftId, { switchFailed: true });
-            return;
-          }
-          markSaved(draft.draftId, outcome.instanceId ?? "");
-          if (onScreen.current) {
-            onNext();
-          }
-        },
-        (reason) => {
-          updateDraft(draft.draftId, { submitting: false });
-          setFailure(describeSaveError(reason));
-          if (rowRecorded) {
-            // The row is written but its master switch never was, so Continue
-            // has to retry the switch rather than accept the row as it stands.
-            updateDraft(draft.draftId, { switchFailed: true });
-          }
-        },
-      );
+    }).then(
+      (result) => {
+        updateDraft(draft.draftId, { submitting: false });
+        const found = result.errors[draft.draftId];
+        if (found) {
+          setErrors(found);
+          return;
+        }
+        setErrors({});
+        const outcome = result.outcomes[0];
+        if (!outcome?.ok) {
+          setFailure(outcome?.error ?? "The save failed.");
+          return;
+        }
+        if (result.switchesFailed) {
+          // Marking the draft saved is what removes this step from the
+          // wizard, so doing it here would unmount the warning in the same
+          // commit that renders it: the reader would reach Finish with the
+          // server reported as connected and nothing refreshing. The step
+          // stays until they have read it and pressed Continue again.
+          updateDraft(draft.draftId, { switchFailed: true });
+          return;
+        }
+        markSaved(draft.draftId, outcome.instanceId ?? "");
+        if (onScreen.current) {
+          onNext();
+        }
+      },
+      (reason) => {
+        updateDraft(draft.draftId, { submitting: false });
+        setFailure(describeSaveError(reason));
+        if (rowRecorded) {
+          // The row is written but its master switch never was, so Continue
+          // has to retry the switch rather than accept the row as it stands.
+          updateDraft(draft.draftId, { switchFailed: true });
+        }
+      },
+    );
   };
 
   // Everything the reader reads rather than types into: what the connection
