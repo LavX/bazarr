@@ -19,6 +19,7 @@ _CONFIG_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ENTRY_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SUPPORTED_CONFIG_TYPES = {"string", "boolean", "number", "integer"}
 _DISALLOWED_SCHEMA_KEYS = {"$ref", "oneOf", "anyOf", "allOf", "not", "items"}
+BUNDLE_MANIFEST_FILE = "provider.json"
 
 
 class ManifestValidationError(ValueError):
@@ -60,6 +61,8 @@ class ValidatedManifest:
     dependency_requirements: tuple[DependencyRequirement, ...]
     # Every manifest this validator accepts is a subtitle provider's.
     kind: str = "subtitle_provider"
+    # Schema 2 bundles may carry files other than Python modules.
+    schema_version: int = 1
 
 
 def _require_mapping(value: Any, field: str) -> dict[str, Any]:
@@ -167,7 +170,7 @@ def _validate_provider_id(value: str, built_in_provider_ids: set[str]) -> str:
     return value
 
 
-def _validate_file_path(path: str) -> str:
+def _validate_file_path(path: str, python_only: bool = True) -> str:
     if not isinstance(path, str) or not path:
         raise ManifestValidationError("manifest files must use non-empty relative paths")
     if path.startswith("/") or "\\" in path:
@@ -176,8 +179,11 @@ def _validate_file_path(path: str) -> str:
     parsed = PurePosixPath(path)
     if any(part in ("", ".", "..") for part in parsed.parts):
         raise ManifestValidationError(f"unsafe file path: {path}")
-    if parsed.suffix != ".py":
+    if python_only and parsed.suffix != ".py":
         raise ManifestValidationError(f"only .py files are allowed: {path}")
+    if parsed.as_posix() == BUNDLE_MANIFEST_FILE:
+        # The host writes this file into every bundle it stages.
+        raise ManifestValidationError(f"{BUNDLE_MANIFEST_FILE} is reserved for the host")
     return parsed.as_posix()
 
 
@@ -280,13 +286,98 @@ def _validate_dependencies(dependencies: dict[str, Any]) -> tuple[DependencyRequ
     return tuple(validated)
 
 
+def _provider_fields_of_schema_2(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Check a schema-2 subtitle provider's envelope and fill ``provider_id``.
+
+    A schema-2 provider keeps every field a schema-1 provider has, except
+    that ``id`` and ``kind_api`` replace ``provider_id`` and ``api_version``.
+    Everything downstream reads ``provider_id``, so it is filled from ``id``.
+    """
+    from .kinds import SUBTITLE_PROVIDER
+    from .kinds.subtitle_provider import SUBTITLE_PROVIDER_KIND_API
+    from .plugin_manifest import parse_plugin_manifest
+
+    plugin = parse_plugin_manifest(manifest)
+    if plugin.kind != SUBTITLE_PROVIDER:
+        raise ManifestValidationError(f"{plugin.plugin_id} is a {plugin.kind} plugin, not a subtitle provider")
+    if plugin.kind_api != SUBTITLE_PROVIDER_KIND_API:
+        raise ManifestValidationError(f"unsupported subtitle provider contract: {plugin.kind_api}")
+    if manifest.get("settings") is not None:
+        raise ManifestValidationError("a subtitle provider declares config_schema, not settings")
+    normalized = dict(manifest)
+    normalized["provider_id"] = plugin.plugin_id
+    return normalized
+
+
+def validate_plugin_bundle(manifest: dict[str, Any]) -> ValidatedManifest:
+    """Validate the bundle fields a schema-2 plugin of any kind carries.
+
+    A subtitle provider has more to check (entry module, config schema, media)
+    and goes through ``validate_manifest``. A plugin of another kind has fields
+    its kind validates itself; the files, their hashes, the pinned source and
+    the dependencies are common, so the installer stages every kind the same way.
+    """
+    from .plugin_manifest import parse_plugin_manifest
+
+    plugin = parse_plugin_manifest(manifest)
+    if plugin.schema_version != 2:
+        raise ManifestValidationError("a plugin that is not a subtitle provider is a schema 2 manifest")
+    version = plugin.version
+    if (not _EXACT_VERSION_RE.match(version) or version in (".", "..")
+            or any(sep in version for sep in ("/", "\\"))):
+        raise ManifestValidationError(
+            "version must be a safe identifier (letters, digits, '.', '_', '-', '+', '!', '~')")
+    files = {}
+    for path, digest in _require_mapping(manifest.get("files"), "files").items():
+        safe_path = _validate_file_path(path, python_only=False)
+        files[safe_path] = _validate_sha256(_require_text(digest, f"files.{path}"), f"files.{path}")
+    if not files:
+        raise ManifestValidationError("files must not be empty")
+    bundle_sha256 = _validate_sha256(_require_text(manifest.get("bundle_sha256"), "bundle_sha256"), "bundle_sha256")
+    source = _require_mapping(manifest.get("source"), "source")
+    if source.get("type") != "github":
+        raise ManifestValidationError("source.type must be github")
+    source_repo = _require_text(source.get("repo"), "source.repo")
+    if source_repo.count("/") != 1:
+        raise ManifestValidationError("source.repo must be owner/repo")
+    source_commit = _require_text(source.get("commit"), "source.commit")
+    if not _HEX_COMMIT_RE.match(source_commit):
+        raise ManifestValidationError("source.commit must be an immutable commit SHA")
+    dependencies = _require_mapping(manifest.get("dependencies", {}), "dependencies")
+    return ValidatedManifest(
+        raw=dict(manifest),
+        provider_id=plugin.plugin_id,
+        name=plugin.name,
+        version=version,
+        api_version=plugin.kind_api,
+        entry_module=str(manifest.get("entry_module") or ""),
+        entry_class=str(manifest.get("entry_class") or ""),
+        config_schema={},
+        secret_fields=(),
+        supported_media=(),
+        languages=(),
+        files=files,
+        bundle_sha256=bundle_sha256,
+        source_repo=source_repo,
+        source_ref=_require_text(source.get("ref"), "source.ref"),
+        source_commit=source_commit.lower(),
+        source_path=_validate_source_path(source.get("path") or source.get("bundle_path") or ""),
+        trusted=bool(source.get("trusted", False)),
+        dependency_requirements=_validate_dependencies(dependencies),
+        schema_version=2,
+        kind=plugin.kind,
+    )
+
+
 def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] | None = None) -> ValidatedManifest:
     built_in_provider_ids = built_in_provider_ids or set()
     manifest = _require_mapping(manifest, "manifest")
 
     schema_version = manifest.get("schema_version")
-    if schema_version != 1:
-        raise ManifestValidationError("schema_version must be 1")
+    if schema_version == 2:
+        manifest = _provider_fields_of_schema_2(manifest)
+    elif schema_version != 1:
+        raise ManifestValidationError("schema_version must be 1 or 2")
 
     provider_id = _validate_provider_id(
         _require_text(manifest.get("provider_id"), "provider_id"),
@@ -305,9 +396,12 @@ def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] 
         raise ManifestValidationError(
             "version must be a safe identifier (letters, digits, '.', '_', '-', '+', '!', '~')"
         )
-    api_version = _require_text(manifest.get("api_version"), "api_version")
-    if api_version != PROVIDER_HUB_API_VERSION:
-        raise ManifestValidationError(f"unsupported Provider Hub API version: {api_version}")
+    if schema_version == 1:
+        api_version = _require_text(manifest.get("api_version"), "api_version")
+        if api_version != PROVIDER_HUB_API_VERSION:
+            raise ManifestValidationError(f"unsupported Provider Hub API version: {api_version}")
+    else:
+        api_version = manifest["kind_api"]
 
     entry_module = _require_text(manifest.get("entry_module"), "entry_module")
     if not _ENTRY_MODULE_RE.match(entry_module):
@@ -333,7 +427,7 @@ def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] 
     raw_files = _require_mapping(manifest.get("files"), "files")
     files = {}
     for path, digest in raw_files.items():
-        safe_path = _validate_file_path(path)
+        safe_path = _validate_file_path(path, python_only=schema_version == 1)
         files[safe_path] = _validate_sha256(_require_text(digest, f"files.{path}"), f"files.{path}")
     if not files:
         raise ManifestValidationError("files must not be empty")
@@ -383,4 +477,5 @@ def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] 
         source_path=source_path,
         trusted=trusted,
         dependency_requirements=dependency_requirements,
+        schema_version=schema_version,
     )
