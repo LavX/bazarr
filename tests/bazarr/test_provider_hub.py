@@ -6636,7 +6636,7 @@ def test_an_update_whose_enabled_state_cannot_be_saved_changes_nothing(tmp_path,
 
 def test_a_removal_whose_disable_cannot_be_saved_leaves_the_provider_installed(tmp_path, monkeypatch):
     from app.jobs_queue import JobFailed
-    from provider_hub import jobs as hub_jobs, service
+    from provider_hub import jobs as hub_jobs
     from provider_hub.state import load_state
 
     _installed_examplehub(tmp_path, monkeypatch)

@@ -234,7 +234,8 @@ def hub_calls(monkeypatch, tmp_path):
                         lambda package_path, filename=None:
                         calls.append((HUB_UPLOAD, filename)) or 'job-local')
     monkeypatch.setattr(service, 'get_provider',
-                        lambda provider_id: {'provider_id': provider_id, 'name': 'Some Provider'})
+                        lambda provider_id, redact=True:
+                        {'provider_id': provider_id, 'name': 'Some Provider'})
     monkeypatch.setattr(hub_jobs, 'queue_update',
                         lambda provider_id, name:
                         calls.append((HUB_UPDATE, provider_id)) or 'job-update')
