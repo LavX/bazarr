@@ -38,6 +38,7 @@ import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import StepActions from "./StepActions";
 import {
+  describeSaveError,
   DraftFieldErrors,
   isDraftTouched,
   useMediaServerSubmit,
@@ -240,11 +241,15 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           ? "failed"
           : "untested";
     updateDraft(draft.draftId, { submitting: true });
+    // Set by onCreated once the row is recorded. The draft captured here is
+    // from the render that pressed Continue, so it still shows no saved row.
+    let rowRecorded = false;
     void submit([draft], (outcome) => {
       // The row exists from here on, whatever the master switch write does
       // next, so a remount mid-save finds a draft that knows not to write it
       // again.
       updateDraft(draft.draftId, { savedInstanceId: outcome.instanceId ?? "" });
+      rowRecorded = true;
       if (outcome.instanceId) {
         recordConnectionTest(
           connectionTestKey("media-server", outcome.instanceId),
@@ -252,38 +257,44 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
         );
       }
     })
-      .then((result) => {
-        updateDraft(draft.draftId, { submitting: false });
-        const found = result.errors[draft.draftId];
-        if (found) {
-          setErrors(found);
-          return;
-        }
-        setErrors({});
-        const outcome = result.outcomes[0];
-        if (!outcome?.ok) {
-          setFailure(outcome?.error ?? "The save failed.");
-          return;
-        }
-        if (result.switchesFailed) {
-          // Marking the draft saved is what removes this step from the wizard,
-          // so doing it here would unmount the warning in the same commit that
-          // renders it: the reader would reach Finish with the server reported
-          // as connected and nothing refreshing. The step stays until they have
-          // read it and pressed Continue again.
-          updateDraft(draft.draftId, { switchFailed: true });
-          return;
-        }
-        markSaved(draft.draftId, outcome.instanceId ?? "");
-        if (onScreen.current) {
-          onNext();
-        }
-      })
-      .catch(() => {
-        // A rejected save skips the block above, so the flag is cleared here.
-        updateDraft(draft.draftId, { submitting: false });
-        setFailure("The save failed.");
-      });
+      .then(
+        (result) => {
+          updateDraft(draft.draftId, { submitting: false });
+          const found = result.errors[draft.draftId];
+          if (found) {
+            setErrors(found);
+            return;
+          }
+          setErrors({});
+          const outcome = result.outcomes[0];
+          if (!outcome?.ok) {
+            setFailure(outcome?.error ?? "The save failed.");
+            return;
+          }
+          if (result.switchesFailed) {
+            // Marking the draft saved is what removes this step from the
+            // wizard, so doing it here would unmount the warning in the same
+            // commit that renders it: the reader would reach Finish with the
+            // server reported as connected and nothing refreshing. The step
+            // stays until they have read it and pressed Continue again.
+            updateDraft(draft.draftId, { switchFailed: true });
+            return;
+          }
+          markSaved(draft.draftId, outcome.instanceId ?? "");
+          if (onScreen.current) {
+            onNext();
+          }
+        },
+        (reason) => {
+          updateDraft(draft.draftId, { submitting: false });
+          setFailure(describeSaveError(reason));
+          if (rowRecorded) {
+            // The row is written but its master switch never was, so Continue
+            // has to retry the switch rather than accept the row as it stands.
+            updateDraft(draft.draftId, { switchFailed: true });
+          }
+        },
+      );
   };
 
   // Everything the reader reads rather than types into: what the connection
