@@ -13,7 +13,7 @@ import logging
 
 from typing import Any
 
-from . import ATTACH_ON_RESTART, SUBTITLE_PROVIDER, Kind, register_kind
+from . import ATTACH_ON_RESTART, SUBTITLE_PROVIDER, Kind, kind_of, register_kind
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ def settings_section_plugin_ids() -> set[str]:
                 str(item.get("provider_id") or provider_id)
                 for provider_id, item in (state.get("installations") or {}).items()
                 if isinstance(item, dict)
-                and item.get("kind", SUBTITLE_PROVIDER) == SUBTITLE_PROVIDER
+                and kind_of(item) == SUBTITLE_PROVIDER
                 and item.get("active_version")
                 and item.get("state") != "removed"
             }

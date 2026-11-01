@@ -11,7 +11,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from .kinds import SUBTITLE_PROVIDER
+from .kinds import SUBTITLE_PROVIDER, kind_of
 
 
 OFFICIAL_CATALOG_SOURCE_ID = "official"
@@ -259,7 +259,7 @@ def _installation_from_row(provider_id: str, item: dict[str, Any],
         trusted=bool(item.get("trusted", False)),
         origin=str(item.get("origin") or "catalog"),
         source_id=item.get("source_id"),
-        kind=str(item.get("kind") or SUBTITLE_PROVIDER),
+        kind=kind_of(item),
     )
 
 
@@ -278,7 +278,7 @@ def active_installations(
     for provider_id, item in (data.get("installations") or {}).items():
         if not isinstance(item, dict):
             continue
-        if kind is not None and item.get("kind", SUBTITLE_PROVIDER) != kind:
+        if kind is not None and kind_of(item) != kind:
             continue
         if item.get("state") != "active" or item.get("pending_restart"):
             continue
@@ -308,7 +308,7 @@ def running_installations(
     for provider_id, item in (data.get("installations") or {}).items():
         if not isinstance(item, dict):
             continue
-        if kind is not None and item.get("kind", SUBTITLE_PROVIDER) != kind:
+        if kind is not None and kind_of(item) != kind:
             continue
         if not item.get("active_version"):
             continue
