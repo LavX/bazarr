@@ -93,9 +93,9 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
 
   const [errors, setErrors] = useState<DraftFieldErrors>({});
   const [failure, setFailure] = useState<string | null>(null);
-  // Whether this step is still the one on screen. The busy hold refuses Back
+  // Whether this step is still the one on screen. The busy hold hides Back
   // or Skip while a save is in flight, so it normally is when the save settles.
-  // The onScreen guard is defence in depth: if the form has unmounted by then,
+  // The onScreen guard is defense in depth: if the form has unmounted by then,
   // advancing from here would step past whatever screen is showing. Marking the
   // draft saved still has to happen, so the two are separated.
   const onScreen = useRef(true);
@@ -200,10 +200,10 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
     // write it a second time: a repeat create would leave two rows for one
     // server.
     if (savedInstanceId !== undefined) {
-      // The master switch write from that press has not been refused. A press
-      // never reaches handleContinue while that write is in flight, because the
-      // Connect button is disabled while loading. Once that write has settled,
-      // this branch accepts the row that is already there and moves on.
+      // While that switch write is in flight a press cannot reach this
+      // handler, because the Connect button is disabled while loading. The
+      // check below accepts the row when the switch has not been refused, and
+      // retries it when it has.
       if (!savedButNotSwitchedOn) {
         markSaved(draft.draftId, savedInstanceId);
         onNext();

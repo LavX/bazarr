@@ -34,8 +34,8 @@ let switchFollowupFails = false;
 // Every master-switch write this backend has seen, landed or not, so a test
 // can count the attempts.
 let switchWriteAttempts = 0;
-// Holds the master-switch write open. The busy hold refuses Back or Skip while
-// a save is in flight, and the onScreen guard is defence in depth.
+// Holds the master-switch write open. The busy hold hides Back or Skip while
+// a save is in flight.
 let heldSwitch: Promise<void> | null = null;
 // The same for the create itself.
 let heldCreate: Promise<void> | null = null;
