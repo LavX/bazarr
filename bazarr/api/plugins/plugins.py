@@ -163,10 +163,10 @@ class PluginsInstallation(Resource):
     @api_ns_plugins.response(500, 'The change could not be saved')
     def patch(self, plugin_id):
         payload = request.json or {}
-        row = service.get_provider(plugin_id, redact=False)
-        if row is not None and kind_of(row) not in known_kinds():
-            return 'Plugin not found', 404
         try:
+            row = service.get_provider(plugin_id, redact=False)
+            if row is not None and kind_of(row) not in known_kinds():
+                return 'Plugin not found', 404
             installation = service.update_provider(
                 plugin_id,
                 enabled=payload.get("enabled") if "enabled" in payload else None,

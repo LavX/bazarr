@@ -89,6 +89,20 @@ def test_plugins_patch_runs_the_plugins_own_kind(client, service_kind):
     assert service_kind.calls == [("enabled", "exampleservice", False)]
 
 
+def test_an_unparseable_state_document_refuses_a_plugin_enable_change(client):
+    from provider_hub.state import state_file
+
+    state_path = state_file()
+    state_path.write_text("{")
+    before = state_path.read_bytes()
+
+    response = client.patch("/api/plugins/installations/exampleservice", json={"enabled": False},
+                            headers={"X-API-KEY": API_KEY})
+
+    assert response.status_code == 400
+    assert state_path.read_bytes() == before
+
+
 def test_plugins_install_takes_a_catalog_reference_only(client, monkeypatch):
     from provider_hub import jobs as hub_jobs
 
@@ -230,30 +244,44 @@ def test_installation_of_an_undefined_kind_answers_not_found(client, monkeypatch
 
     monkeypatch.setattr(settings.auth, "type", "form")
     _prime(client)
-    state_path = write_state(tmp_path / "state.json",
-                             installations={"ghost_plugin": _undefined_kind_installation()})
+    write_state(tmp_path / "state.json",
+                installations={"ghost_plugin": _undefined_kind_installation()})
     keyed = {"X-API-KEY": API_KEY}
 
     assert _get(client, "/api/provider-hub/providers/ghost_plugin").status_code == 404
     assert client.post("/api/provider-hub/providers/ghost_plugin/test", headers=keyed).status_code == 404
     assert client.delete("/api/provider-hub/installations/ghost_plugin", headers=keyed).status_code == 404
-    before = state_path.read_bytes()
-    assert client.patch("/api/provider-hub/providers/ghost_plugin", json={"enabled": False},
-                        headers=keyed).status_code == 404
-    assert state_path.read_bytes() == before
+    assert client.post("/api/provider-hub/updates/apply", data={"provider_id": "ghost_plugin"},
+                       headers=keyed).status_code == 404
 
     assert _get(client, "/api/plugins/installations/ghost_plugin").status_code == 404
     assert client.delete("/api/plugins/installations/ghost_plugin", headers=keyed).status_code == 404
-    before = state_path.read_bytes()
-    assert client.patch("/api/plugins/installations/ghost_plugin", json={"enabled": False},
-                        headers=keyed).status_code == 404
-    assert state_path.read_bytes() == before
 
     assert client.post("/api/plugins/updates/apply", json={"id": "ghost_plugin"},
                        headers=keyed).status_code == 404
 
 
-def test_listing_skips_installation_of_an_undefined_kind(client, tmp_path):
+def test_patch_of_an_undefined_kind_installation_answers_not_found(client, monkeypatch, tmp_path):
+    from app.config import settings
+
+    monkeypatch.setattr(settings.auth, "type", "form")
+    _prime(client)
+    state_path = write_state(tmp_path / "state.json",
+                             installations={"ghost_plugin": _undefined_kind_installation()})
+    keyed = {"X-API-KEY": API_KEY}
+
+    before = state_path.read_bytes()
+    assert client.patch("/api/provider-hub/providers/ghost_plugin", json={"enabled": False},
+                        headers=keyed).status_code == 404
+    assert state_path.read_bytes() == before
+
+    before = state_path.read_bytes()
+    assert client.patch("/api/plugins/installations/ghost_plugin", json={"enabled": False},
+                        headers=keyed).status_code == 404
+    assert state_path.read_bytes() == before
+
+
+def test_listing_skips_installation_of_an_undefined_kind(client, tmp_path, caplog):
     write_state(tmp_path / "state.json", installations={
         "providerhub": {"provider_id": "providerhub", "kind": "subtitle_provider", "name": "Provider",
                         "active_version": "1.0.0", "state": "active", "pending_restart": False,
@@ -267,3 +295,6 @@ def test_listing_skips_installation_of_an_undefined_kind(client, tmp_path):
     listed = {item["provider_id"] for item in response.json["data"]}
     assert "ghost_plugin" not in listed
     assert "providerhub" in listed
+    messages = [record.getMessage() for record in caplog.records
+                if record.name == "provider_hub.service" and record.levelname == "WARNING"]
+    assert any("is not defined by this build" in message for message in messages)
