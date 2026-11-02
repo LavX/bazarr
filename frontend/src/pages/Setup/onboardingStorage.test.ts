@@ -100,6 +100,22 @@ describe("onboarding storage", () => {
   );
 
   it.each(NAMES)(
+    "does not adopt the legacy %s when this install clears it before reading",
+    (name) => {
+      // Nothing of this install's own was ever stored, so only the value the
+      // clear left behind keeps the legacy value from being adopted.
+      localStorage.setItem(`bazarr.onboarding.${name}`, "kept");
+      underBaseUrl("/bazarr");
+
+      removeOnboardingValue(name);
+
+      expect(readOnboardingValue(name)).toBeNull();
+      expect(readOnboardingValue(name)).toBeNull();
+      expect(localStorage.getItem(`bazarr.onboarding.${name}`)).toBe("kept");
+    },
+  );
+
+  it.each(NAMES)(
     "does not adopt a legacy %s that turns up after this install cleared its own",
     (name) => {
       // An install served from the root on the same origin keeps writing the
@@ -121,6 +137,19 @@ describe("onboarding storage", () => {
 
     expect(readOnboardingValue("step")).toBe("seerr");
   });
+
+  it.each(NAMES)(
+    "reads a new %s written after this install cleared the legacy value",
+    (name) => {
+      localStorage.setItem(`bazarr.onboarding.${name}`, "kept");
+      underBaseUrl("/bazarr");
+      removeOnboardingValue(name);
+
+      writeOnboardingValue(name, "after the clear");
+
+      expect(readOnboardingValue(name)).toBe("after the clear");
+    },
+  );
 
   it("removes the key outright for an install without a base URL", () => {
     // The root install reads the un-namespaced key as its own, so there is no
