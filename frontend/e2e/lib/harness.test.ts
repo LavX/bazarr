@@ -1340,7 +1340,7 @@ describe("the shared instance", () => {
       // waiting on a clock nothing advances. Fail with the count instead.
       if (pending > 0) {
         throw new Error(
-          `lets a waiter for the shared instance outlast such a start: ${pending} caller(s) still pending at the step cap`,
+          `shared instance waiter test: ${pending} caller(s) still pending at the step cap`,
         );
       }
       await Promise.allSettled(callers);
