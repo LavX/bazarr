@@ -60,9 +60,6 @@ STDIO_WORKER = "worker"
 RUNTIME_COMBINATIONS = frozenset({
     (PYTHON_BUNDLE, STDIO_WORKER),
     (PYTHON_BUNDLE, "daemon"),
-    ("archive", STDIO_WORKER),
-    ("archive", "daemon"),
-    ("oci", "daemon"),
     ("none", "external"),
 })
 PERMISSIONS = frozenset({"network", "media_read", "data_dir", "binaries", "docker", "interactive_login"})

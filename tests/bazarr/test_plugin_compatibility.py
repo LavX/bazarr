@@ -42,9 +42,9 @@ def _host(**overrides):
     ({"min_host_version": "2.8.1"}, {}, "needs Bazarr+ 2.8.1 or later"),
     ({"min_host_version": "2.8.0"}, {"version": "2.8.0-rc.2"}, "needs Bazarr+ 2.8.0 or later"),
     ({"platforms": ["linux-aarch64"]}, {}, "not available for linux-x86_64"),
+    ({"runtime": {"artifact": "python", "process": "daemon"}}, {},
+     "needs the python daemon runtime, which this Bazarr+ does not provide"),
     ({"python_tags": ["cp312", "cp313"]}, {}, "not available for Python cp314"),
-    ({"runtime": {"artifact": "archive", "process": "daemon"}}, {},
-     "needs the archive daemon runtime, which this Bazarr+ does not provide"),
 ])
 def test_an_entry_that_cannot_run_here_says_why(overrides, host, reason):
     from provider_hub.compatibility import evaluate

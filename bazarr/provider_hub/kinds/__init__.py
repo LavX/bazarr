@@ -11,7 +11,7 @@ to the core.
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 if TYPE_CHECKING:
     from ..manifest import ValidatedManifest
@@ -130,6 +130,13 @@ def kind_of(item: Any) -> str:
     else:
         value = getattr(item, "kind", None)
     return str(value) if value else SUBTITLE_PROVIDER
+
+
+def of_kind(items: Iterable[Any], kind: str | None) -> list[Any]:
+    """Filter rows or objects by kind. ``kind=None`` keeps every kind."""
+    if kind is None:
+        return list(items)
+    return [item for item in items if kind_of(item) == kind]
 
 
 # Registers the built-in kind. Imported last because the module subclasses Kind.

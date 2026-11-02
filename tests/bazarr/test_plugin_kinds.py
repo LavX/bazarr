@@ -5,6 +5,8 @@ Every installation row carries a kind that never changes, every iteration
 filters by it, and the side effects that belong to subtitle providers run
 only through the subtitle provider kind.
 """
+from types import SimpleNamespace
+
 import pytest
 
 from plugin_platform_helpers import (
@@ -174,3 +176,40 @@ def test_an_update_check_covers_only_the_kind_it_is_asked_for(tmp_path, monkeypa
         "providerhub: 1.0.0 -> 1.1.0",
     ]
     assert subtitle["details"]["providers"] == ["providerhub: 1.0.0 -> 1.1.0"]
+
+
+def test_no_kind_keeps_every_item():
+    from provider_hub.kinds import SUBTITLE_PROVIDER, of_kind
+
+    items = [{"provider_id": "providerhub", "kind": SUBTITLE_PROVIDER},
+             SimpleNamespace(provider_id="exampleservice", kind=SERVICE_KIND)]
+
+    assert of_kind(items, None) == items
+
+
+def test_a_kind_keeps_only_the_items_whose_kind_matches():
+    from provider_hub.kinds import SUBTITLE_PROVIDER, of_kind
+
+    provider = {"provider_id": "providerhub", "kind": SUBTITLE_PROVIDER}
+    service_row = {"provider_id": "examplehub", "kind": SERVICE_KIND}
+    service = SimpleNamespace(provider_id="exampleservice", kind=SERVICE_KIND)
+
+    assert of_kind([provider, service_row, service], SERVICE_KIND) == [service_row, service]
+
+
+def test_an_item_with_no_kind_is_a_subtitle_provider():
+    from provider_hub.kinds import SUBTITLE_PROVIDER, of_kind
+
+    legacy = {"provider_id": "legacyhub"}
+    service = SimpleNamespace(provider_id="exampleservice", kind=SERVICE_KIND)
+
+    assert legacy in of_kind([legacy, service], SUBTITLE_PROVIDER)
+
+
+def test_an_item_of_another_kind_is_left_out_of_the_subtitle_filter():
+    from provider_hub.kinds import SUBTITLE_PROVIDER, of_kind
+
+    legacy = {"provider_id": "legacyhub"}
+    service = SimpleNamespace(provider_id="exampleservice", kind=SERVICE_KIND)
+
+    assert service not in of_kind([legacy, service], SUBTITLE_PROVIDER)
