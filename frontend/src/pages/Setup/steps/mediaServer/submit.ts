@@ -146,8 +146,7 @@ export function useMediaServerSubmit() {
       // Called for every server that landed, before the master switches are
       // written. The caller records the row on its draft there rather than
       // waiting for the whole run, because the switch write is a second round
-      // trip and the reader can be back on this step pressing Connect again
-      // long before it answers.
+      // trip, and a remount during it must find the row already recorded.
       onCreated?: (outcome: SaveOutcome) => void,
     ): Promise<SubmitResult> => {
       const errors: DraftErrors = {};

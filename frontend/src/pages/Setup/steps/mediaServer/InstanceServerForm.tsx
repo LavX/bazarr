@@ -93,8 +93,8 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
 
   const [errors, setErrors] = useState<DraftFieldErrors>({});
   const [failure, setFailure] = useState<string | null>(null);
-  // Whether this step is still the one on screen. The busy hold hides Back
-  // or Skip while a save is in flight, so it normally is when the save settles.
+  // Whether this step is still the one on screen. The busy hold hides Back and
+  // Skip while a save is in flight, so it normally is when the save settles.
   // The onScreen guard is defense in depth: if the form has unmounted by then,
   // advancing from here would step past whatever screen is showing. Marking the
   // draft saved still has to happen, so the two are separated.
