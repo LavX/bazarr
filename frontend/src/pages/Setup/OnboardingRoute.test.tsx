@@ -225,11 +225,11 @@ describe("the wizard's own URL", () => {
   });
 
   it("a save that lands after the step was left does not move the wizard", async () => {
-    // The translator step reports itself busy from settings.isPending, which
-    // this test's mock does not supply. Here the step reads as free, so browser
-    // Back can unmount it with its write still in the air. The callback the
-    // step handed to that write still runs when the write answers, and the
-    // wizard ignores it because the step is no longer on screen.
+    // Browser Back is blocked only for a step that reports itself busy, so any
+    // other step is unmounted with its save in the air. The mocked save never
+    // sets isPending, so Back is not blocked here. The callback the step handed
+    // to the write still runs when the write answers, and must not move the
+    // wizard one step on from wherever the reader had gone.
     let landed: (() => void) | undefined;
     mockedSettingsMutation.mockReturnValue({
       mutate: vi.fn(
@@ -260,7 +260,7 @@ describe("the wizard's own URL", () => {
 
     act(() => landed?.());
 
-    // Still where the reader went, not carried on to the step after Translation.
+    // Still where the reader went, not carried one step on from Welcome.
     expect(router.state.location.pathname).toBe("/setup/welcome");
     expect(
       screen.getByRole("heading", { name: /welcome to bazarr/i }),
