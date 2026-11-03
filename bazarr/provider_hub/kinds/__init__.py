@@ -67,16 +67,20 @@ class Kind:
     def validate_manifest(self, manifest: dict[str, Any], trusted: bool) -> "ValidatedManifest":
         """Validate this kind's manifest and return what the installer stages.
 
-        Raises ManifestValidationError. The envelope itself was checked before
-        this is called. A kind with no installer yet refuses, so a catalog
-        entry of that kind is listed with the reason and never installs.
+        Raises ManifestValidationError. The core does not call this hook yet.
+        The subtitle provider kind overrides it for when the core does. A kind
+        with no installer keeps this version, which refuses.
         """
         from ..manifest import ManifestValidationError
 
         raise ManifestValidationError(f"this Bazarr+ cannot install {self.name} plugins yet")
 
     def smoke_test(self, validated: "ValidatedManifest", bundle_path, python_path) -> None:
-        """Start the staged plugin once to prove it loads. The default has nothing to start."""
+        """Start the staged plugin once to prove it loads. The default has nothing to start.
+
+        The core does not call this hook yet. The subtitle provider kind
+        overrides it for when the core does.
+        """
 
 
 _KINDS: dict[str, Kind] = {}

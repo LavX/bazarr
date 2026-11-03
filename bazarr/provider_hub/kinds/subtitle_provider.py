@@ -1,7 +1,7 @@
 # coding=utf-8
 """The subtitle provider kind: catalog providers that join Bazarr's search pool.
 
-Everything here is specific to providers and used to live in the shared core:
+Everything here is specific to providers:
 the ``enabled_providers`` list, registration as a subliminal provider (see
 ``provider_hub.registry``), the provider pool and credential-throttle resets
 when a provider's configuration changes, and the settings-section overlay the
