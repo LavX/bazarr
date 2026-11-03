@@ -213,7 +213,11 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       // and advances once the switch is on. A retry that fails too keeps the
       // step and the warning where they are; leaving the switch off is what
       // Skip and Back are for.
+      // Held on the draft the way the first save holds it, so a remount during
+      // the retry still reports the step busy.
+      updateDraft(draft.draftId, { submitting: true });
       void retrySwitch(kind).then((written) => {
+        updateDraft(draft.draftId, { submitting: false });
         if (!written) {
           return;
         }
@@ -287,7 +291,11 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       },
       (reason) => {
         updateDraft(draft.draftId, { submitting: false });
-        setFailure(describeSaveError(reason));
+        // A recorded row is reported by the switched-off warning instead, so
+        // the save failure copy would contradict it.
+        if (!rowRecorded) {
+          setFailure(describeSaveError(reason));
+        }
         if (rowRecorded) {
           // The row is written but its master switch never was, so Continue
           // has to retry the switch rather than accept the row as it stands.

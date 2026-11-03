@@ -301,7 +301,7 @@ describe("InstanceServerForm", () => {
     expect(await screen.findByText("step busy")).toBeInTheDocument();
   });
 
-  it("a save whose connection-test record throws after its row landed names the failure and frees the step", async () => {
+  it("a save whose connection-test record throws after its row landed reports the switch as off and frees the step", async () => {
     // The row lands before its Test is recorded, so this failure leaves a row
     // on the server whose master switch was never written.
     stageBackend();
@@ -326,10 +326,11 @@ describe("InstanceServerForm", () => {
     await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
 
     expect(
-      await screen.findByText(/connection test record failed/i),
-    ).toBeInTheDocument();
-    expect(
       await screen.findByText(/is saved but switched off/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/could not save/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
     ).toBeInTheDocument();
     expect(await screen.findByText("step free")).toBeInTheDocument();
     expect(onNext).not.toHaveBeenCalled();
