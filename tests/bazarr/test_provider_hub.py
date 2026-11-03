@@ -3887,7 +3887,7 @@ def test_subtitle_hub_catalog_lists_only_subtitle_entries(tmp_path, monkeypatch)
     state["catalog_sources"][OFFICIAL_CATALOG_SOURCE_ID]["last_checked_at"] = _OLD_CHECK
     state["catalog_entries"].update(_entry(OFFICIAL_CATALOG_SOURCE_ID, _manifest(provider_id="subtitlehub")))
     state["catalog_entries"].update(
-        _entry(OFFICIAL_CATALOG_SOURCE_ID, _manifest(provider_id="otherhub", kind="other_kind")))
+        _entry(OFFICIAL_CATALOG_SOURCE_ID, _manifest(provider_id="otherhub", kind="other_kind", schema_version=2)))
     save_state(state)
 
     import api.provider_hub.provider_hub as hub_api
@@ -3988,6 +3988,33 @@ def test_catalog_refresh_skips_an_entry_whose_manifest_declares_no_id(tmp_path, 
         if "LavX/bazarr-provider-catalog" in url:
             return _FakeResponse({"providers": []})
         return _FakeResponse({"providers": [item]})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+
+
+def test_a_schema_1_catalog_entry_without_a_provider_id_is_not_listed(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, refresh_catalog
+    from provider_hub.state import load_state
+
+    # The wrapper names an id that its manifest does not declare, so nothing is stored.
+    manifest = _manifest(provider_id="wrapperhub")
+    manifest.pop("provider_id")
+    entry = {"provider_id": "wrapperhub", "version": "1.0.0", "manifest": manifest}
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if "LavX/bazarr-provider-catalog" in url:
+            return _FakeResponse({"providers": []})
+        return _FakeResponse({"providers": [entry]})
 
     monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
     state_file = tmp_path / "state.json"

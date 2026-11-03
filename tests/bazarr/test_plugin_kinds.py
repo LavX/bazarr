@@ -224,5 +224,13 @@ def test_a_row_without_a_kind_is_a_subtitle_provider_even_when_its_manifest_name
 def test_a_catalog_entry_takes_its_kind_from_its_manifest():
     from provider_hub.kinds import SUBTITLE_PROVIDER, catalog_kind_of
 
-    assert catalog_kind_of({"provider_id": "x", "manifest": {"kind": "other_kind"}}) == "other_kind"
+    assert catalog_kind_of({"provider_id": "x", "manifest": {"schema_version": 2, "kind": "other_kind"}}) == "other_kind"
     assert catalog_kind_of({"provider_id": "x", "manifest": {}}) == SUBTITLE_PROVIDER
+
+
+def test_a_catalog_entry_counts_a_kind_only_from_a_schema_2_manifest():
+    from provider_hub.kinds import SUBTITLE_PROVIDER, catalog_kind_of
+
+    assert catalog_kind_of({"kind": "other_kind", "manifest": {}}) == SUBTITLE_PROVIDER
+    assert catalog_kind_of({"manifest": {"schema_version": 1, "kind": "other_kind"}}) == SUBTITLE_PROVIDER
+    assert catalog_kind_of({"manifest": {"schema_version": 2, "kind": "other_kind"}}) == "other_kind"

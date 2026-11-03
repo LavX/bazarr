@@ -132,9 +132,11 @@ def kind_of(item: Any) -> str:
 
 
 def catalog_kind_of(entry: Any) -> str:
-    """The kind of a catalog entry, which keeps its kind in its manifest."""
+    """A catalog entry takes its kind from a schema 2 manifest, else it is a subtitle provider."""
     manifest = entry.get("manifest") if isinstance(entry, dict) else None
-    value = manifest.get("kind") if isinstance(manifest, dict) else None
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 2:
+        return SUBTITLE_PROVIDER
+    value = manifest.get("kind")
     return str(value) if value else SUBTITLE_PROVIDER
 
 
