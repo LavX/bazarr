@@ -4,9 +4,10 @@
 A kind names the manifests it accepts (its kind_api majors), says when a new
 release attaches (at the next restart, or live), and owns every side effect
 that installing, enabling, configuring or removing one of its plugins has on
-the rest of Bazarr+. The shared Provider Hub core calls these hooks and never
-does a kind's work itself, so a new kind is a new module here, never a change
-to the core.
+the rest of Bazarr+. The shared Provider Hub core calls is_enabled,
+set_enabled, on_config_saved, on_installed and on_removed. The
+validate_manifest and smoke_test hooks are not called by the core yet; the core
+runs the same checks directly.
 """
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ class Kind:
         True when the host's state holds what this kind needs, False when it
         could not be saved, which the core reports as a failed action. The
         subtitle provider kind returns what ``set_bazarr_provider_enabled``
-        says, as the core's own helper did before kinds existed.
+        says.
         """
         return True
 
