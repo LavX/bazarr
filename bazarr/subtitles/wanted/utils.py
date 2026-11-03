@@ -37,8 +37,8 @@ def _find_existing_subtitle_path(subtitles_field, source_lang, path_replace_fn=N
     returned, so Docker / remote setups with path mappings see the correct
     on-disk location.
     Test: Pass a literal list like "[['en','/tmp/x.srt',null]]" with an
-    existing file and source_lang='en' — assert it returns '/tmp/x.srt';
-    pass with a missing file or wrong code — assert None; pass a
+    existing file and source_lang='en'; assert it returns '/tmp/x.srt';
+    pass with a missing file or wrong code; assert None; pass a
     path_replace_fn that rewrites '/remote/x.srt' to a real local path and
     assert the mapped path is returned.
     """

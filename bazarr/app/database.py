@@ -282,7 +282,7 @@ class TableArrInstances(Base):
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
     def to_dict(self):
-        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+        return {column.name: getattr(self, column.name) for column in self.__table__.columns if column.name != 'api_key'}
 
 
 class TableArrInstanceRetiredIds(Base):

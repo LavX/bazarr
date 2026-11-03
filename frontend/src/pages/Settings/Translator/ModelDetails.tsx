@@ -164,7 +164,7 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
       >
         {model.name}
       </Text>
-      {/* Per-million pricing — always show all available prices */}
+      {/* Per-million pricing: always show all available prices */}
       <SimpleGrid cols={{ base: 2, sm: hasCache ? 4 : 2 }} spacing="xs">
         <Box>
           <Text size="xs" c="var(--bz-text-tertiary)">
@@ -203,7 +203,7 @@ const ModelDetailsCard: FunctionComponent<ModelDetailsProps> = ({
           </Box>
         )}
       </SimpleGrid>
-      {/* Estimations — single best estimate per type */}
+      {/* Estimations: single best estimate per type */}
       <SimpleGrid cols={{ base: 2, sm: 2 }} spacing="xs" mt="xs">
         <Box>
           <Text size="xs" c="var(--bz-text-tertiary)">

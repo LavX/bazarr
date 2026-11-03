@@ -103,3 +103,15 @@ def test_default_instance_must_be_enabled(schema_session):
     with pytest.raises(IntegrityError):
         _insert_instance(schema_session, stable_key="sonarr-main", is_default=1, enabled=0)
     schema_session.rollback()
+
+
+def test_arr_instance_to_dict_omits_api_key(schema_session):
+    from app.database import TableArrInstances
+
+    _insert_instance(schema_session, api_key="enc:v1:test-ciphertext")
+    row = schema_session.execute(select(TableArrInstances)).scalar_one()
+
+    data = row.to_dict()
+
+    assert "api_key" not in data
+    assert data["name"] == "Sonarr Main"
