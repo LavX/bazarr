@@ -209,13 +209,13 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
         onNext();
         return;
       }
+      setFailure(null);
       // Only the master switch failed, so Continue retries that one write
       // and advances once the switch is on. A retry that fails too keeps the
       // step and the warning where they are; leaving the switch off is what
       // Skip and Back are for.
       // Held on the draft the way the first save holds it, so a remount during
       // the retry still reports the step busy.
-      setFailure(null);
       updateDraft(draft.draftId, { submitting: true });
       void retrySwitch(kind).then((reason) => {
         updateDraft(draft.draftId, { submitting: false });

@@ -421,14 +421,74 @@ describe("InstanceServerForm", () => {
     );
 
     expect(
-      screen.queryByText(/Settings are read-only on this server/),
-    ).not.toBeInTheDocument();
-    expect(
       await screen.findByText(/Settings are read-only on this server/),
     ).toBeInTheDocument();
     expect(screen.getByText(/is saved but switched off/i)).toBeInTheDocument();
     expect(screen.getByText(/could not turn on jellyfin/i)).toBeInTheDocument();
     expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("a second switch retry clears the reason from the first refusal while it is pending", async () => {
+    // Each retry clears the reason the last one left, so the reason from the
+    // first refusal has to be gone while the second retry is held open. The
+    // refusal released afterwards carries the reason again.
+    stageBackend();
+    let settleRetry!: () => void;
+    const held = new Promise<void>((resolve) => {
+      settleRetry = resolve;
+    });
+    let switchWrites = 0;
+    server.use(
+      http.post("/api/system/settings", async () => {
+        switchWrites += 1;
+        // The save's switch write and the first retry are refused at once. The
+        // second retry waits until the test releases it.
+        if (switchWrites > 2) {
+          await held;
+        }
+        return HttpResponse.json(
+          { message: "Settings are read-only on this server." },
+          { status: 500 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <OnboardingSelectionProvider>
+        <Harness />
+      </OnboardingSelectionProvider>,
+    );
+
+    await user.type(
+      await screen.findByLabelText("Server URL"),
+      "http://a.example",
+    );
+    await user.type(screen.getByLabelText("API key"), "key-a");
+    await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
+    expect(
+      await screen.findByText(/is saved but switched off/i),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
+    );
+    expect(
+      await screen.findByText(/Settings are read-only on this server/),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
+    );
+    expect(
+      screen.queryByText(/Settings are read-only on this server/),
+    ).not.toBeInTheDocument();
+
+    await act(async () => settleRetry());
+    expect(
+      await screen.findByText(/Settings are read-only on this server/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/is saved but switched off/i)).toBeInTheDocument();
+    expect(screen.getByText(/could not turn on jellyfin/i)).toBeInTheDocument();
   });
 
   it("a save whose connection-test record throws after its row landed reports the switch as off and frees the step", async () => {
