@@ -421,9 +421,13 @@ describe("InstanceServerForm", () => {
     );
 
     expect(
+      screen.queryByText(/Settings are read-only on this server/),
+    ).not.toBeInTheDocument();
+    expect(
       await screen.findByText(/Settings are read-only on this server/),
     ).toBeInTheDocument();
-    expect(screen.getByText(/could not save/i)).toBeInTheDocument();
+    expect(screen.getByText(/is saved but switched off/i)).toBeInTheDocument();
+    expect(screen.getByText(/could not turn on jellyfin/i)).toBeInTheDocument();
     expect(onNext).not.toHaveBeenCalled();
   });
 

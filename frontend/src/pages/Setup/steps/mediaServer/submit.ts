@@ -229,10 +229,11 @@ export function useMediaServerSubmit() {
 
   // Retries the master switch of a row a save already wrote. One settings
   // write and no create: the row exists, and writing it again would leave two
-  // of the same server. The answer is the whole verdict, and a 503 whose code
-  // is settings_refresh_failed counts as on: the configuration reached the
-  // disk, and only what the backend does after the write failed. Anything else
-  // leaves the switch off and the step where it was.
+  // of the same server. The result is null when the switch is on, and the
+  // reason to show when it is not. A 503 whose code is settings_refresh_failed
+  // counts as on: the configuration reached the disk, and only what the backend
+  // does after the write failed. Anything else leaves the switch off and the
+  // step where it was.
   const retrySwitch = useCallback(
     async (kind: MediaServerKind): Promise<string | null> => {
       setPending(true);

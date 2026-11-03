@@ -215,6 +215,7 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       // Skip and Back are for.
       // Held on the draft the way the first save holds it, so a remount during
       // the retry still reports the step busy.
+      setFailure(null);
       updateDraft(draft.draftId, { submitting: true });
       void retrySwitch(kind).then((reason) => {
         updateDraft(draft.draftId, { submitting: false });
@@ -332,9 +333,16 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       {failure && (
         <Alert
           color="red"
-          title={`Could not save ${draft.name.trim() || name}`}
+          title={
+            savedButNotSwitchedOn
+              ? `Could not turn on ${name}`
+              : `Could not save ${draft.name.trim() || name}`
+          }
         >
-          {failure} Try again, or connect it later from Settings, Connections.
+          {failure}{" "}
+          {savedButNotSwitchedOn
+            ? "Try again, or turn it on later from Settings, Connections."
+            : "Try again, or connect it later from Settings, Connections."}
         </Alert>
       )}
       {savedButNotSwitchedOn && (
