@@ -15,6 +15,7 @@ import zipfile
 
 import requests
 
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -26,7 +27,7 @@ from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KE
 from secret_store.scrub import scrub_job_secrets, scrub_text
 
 from .manifest import manifest_provider_id, validate_manifest
-from .kinds import SUBTITLE_PROVIDER, get_kind, kind_of, known_kinds
+from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
 from .bundle import verify_bundle_tree
 from .migration import (
@@ -35,6 +36,7 @@ from .migration import (
     RETIRED_BUILT_IN_PROVIDER_IDS,
     validation_built_in_provider_ids,
 )
+from .plugin_manifest import parse_plugin_manifest
 from .state import (
     OFFICIAL_CATALOG_REPO,
     OFFICIAL_CATALOG_SOURCE_ID,
@@ -71,6 +73,16 @@ ENABLED_PROVIDERS_NOT_SAVED = "the enabled providers list could not be saved to 
 
 SECRET_PLACEHOLDER = "********"
 _JOB_LOG_LIMIT = 200
+# The two lists a catalog holds: "providers" for subtitle providers, "plugins" for schema 2 plugin manifests.
+CATALOG_LIST_PROVIDERS = "providers"
+CATALOG_LIST_PLUGINS = "plugins"
+PLUGIN_MANIFEST_UNREADABLE_REASON = "This plugin manifest could not be read, so it was not stored."
+PLUGIN_KIND_CONFLICT_REASON = (
+    "Another plugin in this catalog claims this id with a different kind, so this claim was not stored."
+)
+PLUGIN_VERSION_REPEATED_REASON = (
+    "This version is listed more than once in this catalog, so none of its copies was stored."
+)
 
 
 def utcnow_iso() -> str:
@@ -893,6 +905,9 @@ def _latest_official_catalog_manifest(state: dict[str, Any], provider_id: str) -
     for entry in (state.get("catalog_entries") or {}).values():
         if not isinstance(entry, dict) or entry.get("provider_id") != provider_id:
             continue
+        # Entries stored before the plugins list existed carry no catalog_list and came from providers.
+        if entry.get("catalog_list", CATALOG_LIST_PROVIDERS) != CATALOG_LIST_PROVIDERS:
+            continue
         if entry.get("source") != OFFICIAL_CATALOG_SOURCE_ID or not entry.get("trusted", False):
             continue
         manifest = entry.get("manifest")
@@ -1154,6 +1169,18 @@ def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any]
     return normalized
 
 
+def _rejected_plugin(source: dict[str, Any], manifest: dict[str, Any], reason: str) -> dict[str, Any]:
+    """The job-details record of a plugin manifest the refresh did not store."""
+    provider_id = manifest.get("id")
+    version = manifest.get("version")
+    return {
+        "source": source["name"],
+        "provider_id": provider_id if isinstance(provider_id, str) else None,
+        "version": version if isinstance(version, str) else None,
+        "reason": reason,
+    }
+
+
 def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict[str, Any]:
     """Refresh catalog sources. When ``source_ids`` is given, only those source ids
     are fetched (e.g. the startup migration refreshes only the official source so an
@@ -1172,6 +1199,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
             entries_count = 0
             sources_count = 0
             failed_sources: list[str] = []
+            rejected_plugins: list[dict[str, Any]] = []
             ancestry = _OfficialAncestry(state)
             for source_key, source in (state.get("catalog_sources") or {}).items():
                 if not isinstance(source, dict):
@@ -1250,6 +1278,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 if is_official:
                     _set_official_trust(source, commit, previous_commit, ancestry)
                     published_ids = set()
+                claimed_kinds: dict[str, set[str]] = {}
                 for item in catalog.get("providers", []):
                     if not isinstance(item, dict):
                         continue
@@ -1261,7 +1290,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     version = manifest.get("version") or item.get("version")
                     if not provider_id or not version:
                         continue
-                    key = f"{source['name']}:{provider_id}:{version}"
+                    key = f"{source['name']}:{CATALOG_LIST_PROVIDERS}:{provider_id}:{version}"
                     source_id = source.get("id") or source["name"]
                     entries[key] = {
                         "source": source_id,
@@ -1272,11 +1301,69 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         "trusted": bool(source.get("trusted", False)),
                         "manifest": manifest,
                         "resolved_commit": commit,
+                        "catalog_list": CATALOG_LIST_PROVIDERS,
                     }
                     refreshed_entry_keys.add(key)
                     entries_count += 1
+                    claimed_kinds.setdefault(provider_id, set()).add(catalog_kind_of(entries[key]))
                     if is_official:
                         published_ids.add(str(provider_id))
+                plugins = catalog.get("plugins")
+                plugin_claims: list[dict[str, Any]] = []
+                for item in plugins if isinstance(plugins, list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    manifest = item.get("manifest") if isinstance(item.get("manifest"), dict) else item
+                    if not isinstance(manifest, dict):
+                        continue
+                    try:
+                        manifest = _normalize_catalog_manifest(manifest, source, commit)
+                        parsed = parse_plugin_manifest(manifest)
+                    except Exception:
+                        rejected_plugins.append(_rejected_plugin(
+                            source, manifest, PLUGIN_MANIFEST_UNREADABLE_REASON))
+                        continue
+                    if parsed.schema_version != 2:
+                        continue
+                    provider_id = manifest_provider_id(manifest)
+                    if is_official:
+                        published_ids.add(provider_id)
+                    claimed_kinds.setdefault(provider_id, set()).add(parsed.kind)
+                    plugin_claims.append({
+                        "manifest": manifest,
+                        "provider_id": provider_id,
+                        "version": manifest.get("version"),
+                    })
+                # One id names one plugin of one kind. When the two lists claim an id with
+                # different kinds, every plugin claim for that id is rejected.
+                accepted = []
+                for claim in plugin_claims:
+                    if len(claimed_kinds[claim["provider_id"]]) > 1:
+                        rejected_plugins.append(_rejected_plugin(
+                            source, claim["manifest"], PLUGIN_KIND_CONFLICT_REASON))
+                    else:
+                        accepted.append(claim)
+                listed = Counter((claim["provider_id"], claim["version"]) for claim in accepted)
+                for claim in accepted:
+                    provider_id, version = claim["provider_id"], claim["version"]
+                    if listed[(provider_id, version)] > 1:
+                        rejected_plugins.append(_rejected_plugin(
+                            source, claim["manifest"], PLUGIN_VERSION_REPEATED_REASON))
+                        continue
+                    key = f"{source['name']}:{CATALOG_LIST_PLUGINS}:{provider_id}:{version}"
+                    entries[key] = {
+                        "source": source_id,
+                        "source_name": source["name"],
+                        "provider_id": provider_id,
+                        "name": claim["manifest"].get("name") or provider_id,
+                        "version": version,
+                        "trusted": bool(source.get("trusted", False)),
+                        "manifest": claim["manifest"],
+                        "resolved_commit": commit,
+                        "catalog_list": CATALOG_LIST_PLUGINS,
+                    }
+                    refreshed_entry_keys.add(key)
+                    entries_count += 1
                 if is_official and source["trusted"]:
                     source["provider_ids"] = sorted(published_ids)
             for key, entry in list(entries.items()):
@@ -1294,6 +1381,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 "entries": entries_count,
                 "sources_ok": ok_sources,
                 "failed_sources": failed_sources,
+                "rejected_plugins": rejected_plugins,
             }
 
         result = mutate_state(refresh)
@@ -1315,6 +1403,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 "sources_ok": ok_sources,
                 "sources_failed": failed_sources,
                 "entries": entries_count,
+                "rejected_plugins": result["rejected_plugins"],
             },
         )
         return {

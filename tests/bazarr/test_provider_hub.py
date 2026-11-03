@@ -23,7 +23,7 @@ from retired_providers import (
     LEGACY_RETIRED_PROVIDER_IDS,
     RETIRED_PROVIDER_IDS_UNDER_TEST,
 )
-from plugin_platform_helpers import provider_manifest_v2
+from plugin_platform_helpers import provider_manifest_v2, service_manifest
 
 
 @pytest.fixture(autouse=True)
@@ -4076,6 +4076,167 @@ def test_catalog_refresh_prunes_stale_entries_for_successful_source(tmp_path, mo
     assert "stalehub" not in provider_ids
 
 
+def _serve_community_catalog(monkeypatch, catalog):
+    """Serve ``catalog`` from the community source. The official source lists nothing."""
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if "LavX/bazarr-provider-catalog" in url:
+            return _FakeResponse({"providers": []})
+        return _FakeResponse(catalog)
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+
+
+def test_catalog_refresh_reads_the_plugins_list(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, list_catalog, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("pluginhub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:pluginhub:1.0.0"]
+    [entry] = list_catalog()["entries"]
+    assert (entry["provider_id"], entry["catalog_list"], entry["manifest"]["kind"]) == (
+        "pluginhub", "plugins", "test_service")
+
+
+def test_catalog_refresh_skips_a_non_schema_2_plugins_entry(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": _manifest(provider_id="oldhub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    assert list_jobs()[-1]["details"]["rejected_plugins"] == []
+
+
+def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_across_lists(tmp_path, monkeypatch):
+    from provider_hub.service import PLUGIN_KIND_CONFLICT_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [{"manifest": _manifest(provider_id="crosshub")}],
+        "plugins": [{"manifest": service_manifest("crosshub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    # The providers copy stays, because released hosts read only that list.
+    assert list(load_state()["catalog_entries"]) == ["community:providers:crosshub:1.0.0"]
+    assert list_jobs()[-1]["details"]["rejected_plugins"] == [{
+        "source": "community",
+        "provider_id": "crosshub",
+        "version": "1.0.0",
+        "reason": PLUGIN_KIND_CONFLICT_REASON,
+    }]
+
+
+def test_catalog_refresh_keeps_the_same_id_and_kind_in_both_lists(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, list_catalog, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [{"manifest": _manifest(provider_id="movedhub")}],
+        "plugins": [{"manifest": provider_manifest_v2("movedhub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert set(load_state()["catalog_entries"]) == {
+        "community:providers:movedhub:1.0.0",
+        "community:plugins:movedhub:1.0.0",
+    }
+    assert sorted(entry["catalog_list"] for entry in list_catalog()["entries"]) == ["plugins", "providers"]
+
+
+def test_catalog_refresh_rejects_a_repeated_version_within_a_list(tmp_path, monkeypatch):
+    from provider_hub.service import (
+        PLUGIN_VERSION_REPEATED_REASON, add_catalog_source, list_jobs, refresh_catalog)
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [
+            {"manifest": service_manifest("repeathub")},
+            {"manifest": service_manifest("repeathub")},
+            {"manifest": service_manifest("repeathub", "2.0.0")},
+        ],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:repeathub:2.0.0"]
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_VERSION_REPEATED_REASON] * 2
+
+
+def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_within_the_plugins_list(tmp_path, monkeypatch):
+    from provider_hub.service import PLUGIN_KIND_CONFLICT_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [
+            {"manifest": service_manifest("splithub")},
+            {"manifest": provider_manifest_v2("splithub")},
+        ],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_KIND_CONFLICT_REASON] * 2
+
+
+def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_sources(tmp_path, monkeypatch):
+    from provider_hub.service import RESERVED_ID_REASON, add_catalog_source, list_catalog, refresh_catalog
+    from provider_hub.state import load_state
+
+    official_plugin = service_manifest("reservedsvc")
+    community_provider = _manifest(provider_id="reservedsvc")
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _FakeResponse({"providers": [], "plugins": [{"manifest": official_plugin}]})
+        return _FakeResponse({"providers": [{"manifest": community_provider}]})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_sources"]["official"]["provider_ids"] == ["reservedsvc"]
+    blocked = {entry["source"]: entry.get("blocked_reason") for entry in list_catalog()["entries"]}
+    assert blocked == {"official": None, "community": RESERVED_ID_REASON}
+
+
 def test_stage_install_fetches_bundle_builds_env_and_records_staged_paths(tmp_path, monkeypatch):
     from provider_hub.service import stage_install
     from provider_hub.state import load_state
@@ -7336,7 +7497,7 @@ def test_one_source_failing_does_not_block_other_sources(tmp_path, monkeypatch):
     assert broken["resolved_commit"] == "c" * 40
     live = state["catalog_sources"]["live"]
     assert (live["last_error"], live["resolved_commit"]) == (None, live_commit)
-    assert set(state["catalog_entries"]) == {"broken:brokenhub:1.0.0", "live:livehub:2.0.0"}
+    assert set(state["catalog_entries"]) == {"broken:brokenhub:1.0.0", "live:providers:livehub:2.0.0"}
 
 
 # Catalog ref resolution over the git smart-HTTP protocol: the ref
@@ -8170,7 +8331,7 @@ def test_a_source_pinned_to_a_full_sha_still_fetches_raw(tmp_path, monkeypatch):
     source = load_state()["catalog_sources"]["community"]
     assert source["last_error"] is None
     assert source["resolved_commit"] == "c" * 40
-    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+    assert list(load_state()["catalog_entries"]) == ["community:providers:examplehub:1.0.0"]
 
 
 def test_a_short_sha_failure_keeps_the_cached_catalog(tmp_path, monkeypatch):
