@@ -178,7 +178,7 @@ def test_an_update_check_covers_only_the_kind_it_is_asked_for(tmp_path, monkeypa
     assert subtitle["details"]["providers"] == ["providerhub: 1.0.0 -> 1.1.0"]
 
 
-def test_no_kind_keeps_every_item():
+def test_no_kind_keeps_every_entry():
     from provider_hub.kinds import SUBTITLE_PROVIDER, of_kind
 
     items = [{"provider_id": "providerhub", "kind": SUBTITLE_PROVIDER},
@@ -187,7 +187,7 @@ def test_no_kind_keeps_every_item():
     assert of_kind(items, None) == items
 
 
-def test_a_kind_keeps_only_the_items_whose_kind_matches():
+def test_a_kind_keeps_only_the_entries_whose_kind_matches():
     from provider_hub.kinds import SUBTITLE_PROVIDER, of_kind
 
     provider = {"provider_id": "providerhub", "kind": SUBTITLE_PROVIDER}
@@ -197,7 +197,7 @@ def test_a_kind_keeps_only_the_items_whose_kind_matches():
     assert of_kind([provider, service_row, service], SERVICE_KIND) == [service_row, service]
 
 
-def test_an_item_with_no_kind_is_a_subtitle_provider():
+def test_an_entry_with_no_kind_is_a_subtitle_provider():
     from provider_hub.kinds import SUBTITLE_PROVIDER, of_kind
 
     legacy = {"provider_id": "legacyhub"}
@@ -206,7 +206,7 @@ def test_an_item_with_no_kind_is_a_subtitle_provider():
     assert legacy in of_kind([legacy, service], SUBTITLE_PROVIDER)
 
 
-def test_an_item_of_another_kind_is_left_out_of_the_subtitle_filter():
+def test_an_entry_of_another_kind_is_left_out_of_the_subtitle_filter():
     from provider_hub.kinds import SUBTITLE_PROVIDER, of_kind
 
     legacy = {"provider_id": "legacyhub"}

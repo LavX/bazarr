@@ -3952,7 +3952,7 @@ def test_catalog_refresh_keeps_a_schema_2_entry_under_its_id(tmp_path, monkeypat
     }
 
 
-def test_catalog_refresh_skips_an_item_whose_manifest_declares_no_id(tmp_path, monkeypatch):
+def test_catalog_refresh_skips_an_entry_whose_manifest_declares_no_id(tmp_path, monkeypatch):
     from provider_hub.service import add_catalog_source, refresh_catalog
     from provider_hub.state import load_state
 

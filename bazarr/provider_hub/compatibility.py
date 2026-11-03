@@ -6,6 +6,9 @@ An entry is compatible when this host defines its ``kind_api``, meets its
 2.8.0), runs on one of its ``platforms`` and offers its runtime. Selection
 picks the highest compatible version among the entries a caller is allowed
 to use.
+
+Nothing in the running application calls this module yet, so these rules do
+not refuse an entry today.
 """
 from __future__ import annotations
 

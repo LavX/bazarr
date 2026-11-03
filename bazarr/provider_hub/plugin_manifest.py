@@ -9,9 +9,12 @@ stdio worker on any platform.
 
 Only the envelope is checked here. The fields a kind adds (a provider's
 entry module and config schema, for example) are the kind's to validate.
-Keys this host does not know are kept in the manifest and ignored: a plugin
-that depends on a newer host feature says so with ``kind_api`` or
-``min_host_version``, which is what keeps it off hosts that lack it.
+Keys this host does not know are kept in the manifest and ignored.
+
+The compatibility fields (``kind_api``, ``min_host_version``, ``platforms``,
+``python_tags`` and ``runtime``) are checked when the manifest is read. Install
+and selection do not yet check them against the running host, so declaring
+one does not keep a plugin off a host that lacks it.
 """
 from __future__ import annotations
 
@@ -130,7 +133,7 @@ def _string_list(value: Any, field: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ManifestValidationError(f"{field} must be a list of strings")
     if len(set(value)) != len(value):
-        raise ManifestValidationError(f"{field} must not repeat an item")
+        raise ManifestValidationError(f"{field} must not repeat a value")
     return list(value)
 
 
