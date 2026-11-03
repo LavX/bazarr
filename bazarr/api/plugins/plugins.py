@@ -163,6 +163,8 @@ class PluginsInstallation(Resource):
     @api_ns_plugins.response(500, 'The change could not be saved')
     def patch(self, plugin_id):
         payload = request.json or {}
+        if not isinstance(payload, dict):
+            return 'a JSON object is required', 400
         try:
             row = service.get_provider(plugin_id, redact=False)
             if row is not None and kind_of(row) not in known_kinds():
@@ -211,7 +213,10 @@ class PluginsUpdatesApply(Resource):
     @api_ns_plugins.response(403, 'Password confirmation required')
     @api_ns_plugins.response(404, 'Plugin not found')
     def post(self):
-        plugin_id = (request.json or {}).get("id")
+        payload = request.json or {}
+        if not isinstance(payload, dict):
+            return 'a JSON object is required', 400
+        plugin_id = payload.get("id")
         if not isinstance(plugin_id, str) or not plugin_id:
             return 'id is required', 400
         installation = _installation(plugin_id)
@@ -230,6 +235,8 @@ class PluginsCatalogSources(Resource):
     @api_ns_plugins.response(403, 'Password confirmation required')
     def post(self):
         payload = request.json or {}
+        if not isinstance(payload, dict):
+            return 'a JSON object is required', 400
         try:
             return service.add_catalog_source(name=payload.get("name"), url=payload.get("url"))
         except CatalogSourceError as error:
@@ -265,6 +272,8 @@ class PluginsCatalogSource(Resource):
     @api_ns_plugins.response(404, 'Catalog source not found')
     def patch(self, name):
         payload = request.json or {}
+        if not isinstance(payload, dict):
+            return 'a JSON object is required', 400
         kwargs = {"dev_ref": payload["dev_ref"]} if "dev_ref" in payload else {}
         try:
             source = service.update_catalog_source(name, **kwargs)

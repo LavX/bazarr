@@ -23,6 +23,7 @@ from retired_providers import (
     LEGACY_RETIRED_PROVIDER_IDS,
     RETIRED_PROVIDER_IDS_UNDER_TEST,
 )
+from plugin_platform_helpers import provider_manifest_v2
 
 
 @pytest.fixture(autouse=True)
@@ -3921,6 +3922,36 @@ def test_catalog_refresh_fetches_github_catalog_entries(tmp_path, monkeypatch):
     assert catalog["entries"][0]["manifest"]["source"]["commit"] == "d" * 40
 
 
+def test_catalog_refresh_keeps_a_schema_2_entry_under_its_id(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, list_catalog, refresh_catalog, resolve_catalog_install
+
+    manifest = provider_manifest_v2("modernhub")
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if "LavX/bazarr-provider-catalog" in url:
+            return _FakeResponse({"providers": []})
+        return _FakeResponse({"providers": [{"manifest": manifest}]})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    result = refresh_catalog()
+
+    assert result["entries"] == 1
+    assert [entry["provider_id"] for entry in list_catalog()["entries"]] == ["modernhub"]
+    assert resolve_catalog_install("community", "modernhub", "1.0.0") == {
+        "source": "community",
+        "provider_id": "modernhub",
+        "version": "1.0.0",
+        "name": "Modernhub",
+    }
+
+
 def test_catalog_refresh_prunes_stale_entries_for_successful_source(tmp_path, monkeypatch):
     from provider_hub.service import list_catalog, refresh_catalog
 
@@ -4164,6 +4195,39 @@ def test_stage_install_trust_comes_from_catalog_entry_only(tmp_path, monkeypatch
     assert installation["trusted"] is False
 
 
+def test_catalog_binding_reads_a_schema_2_provider_id():
+    from provider_hub.service import _catalog_binding
+    from provider_hub.state import official_catalog_source
+
+    catalog_manifest = provider_manifest_v2(
+        "modernhub",
+        source={
+            "type": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "commit": "e" * 40,
+            "catalog_url": "https://github.com/owner/repo/blob/main/catalog.json",
+            "trusted": True,
+        },
+    )
+    install_manifest = json.loads(json.dumps(catalog_manifest))
+    install_manifest["source"].pop("trusted")
+    state = {
+        "catalog_sources": {"official": official_catalog_source()},
+        "catalog_entries": {
+            "official:modernhub:1.0.0": {
+                "source": "official",
+                "provider_id": "modernhub",
+                "version": "1.0.0",
+                "trusted": True,
+                "manifest": catalog_manifest,
+            }
+        },
+    }
+
+    assert _catalog_binding(install_manifest, state) == ("official", True)
+
+
 def test_stage_install_rejects_untrusted_built_in_shadow(tmp_path, monkeypatch):
     from provider_hub.manifest import ManifestValidationError
     from provider_hub.service import stage_install
@@ -4251,6 +4315,79 @@ def test_stage_install_accepts_trusted_migrated_built_in_shadow(tmp_path, monkey
     stored = load_state()["installations"]["gestdown"]
     assert stored["trusted"] is True
     assert stored["staged_manifest"] == install_manifest
+
+
+def test_stage_install_accepts_trusted_schema_2_built_in_shadow(tmp_path, monkeypatch):
+    from provider_hub.service import stage_install
+    from provider_hub.state import load_state, official_catalog_source
+
+    provider_content = b"class GestdownProvider: pass\n"
+    catalog_manifest = provider_manifest_v2(
+        "gestdown",
+        name="Gestdown",
+        file_payloads={"provider.py": provider_content},
+        dependencies={"requirements": []},
+        source={
+            "type": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "commit": "e" * 40,
+            "catalog_url": "https://github.com/owner/repo/blob/main/catalog.json",
+            "trusted": True,
+        },
+    )
+    install_manifest = json.loads(json.dumps(catalog_manifest))
+    install_manifest["source"].pop("trusted")
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps(
+            {
+                "catalog_sources": {"official": official_catalog_source()},
+                "catalog_entries": {
+                    "official:gestdown:1.0.0": {
+                        "source": "official",
+                        "provider_id": "gestdown",
+                        "version": "1.0.0",
+                        "trusted": True,
+                        "manifest": catalog_manifest,
+                    }
+                },
+                "installations": {},
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr("provider_hub.service._built_in_provider_ids", lambda: {"gestdown"})
+    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated, timeout=None):
+            return self.root / "envs" / validated.provider_id / validated.version / "test"
+
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
+
+    installation = stage_install(install_manifest)
+
+    assert installation["provider_id"] == "gestdown"
+    assert installation["trusted"] is True
+    assert installation["state"] == "staged"
+    assert installation["pending_restart"] is True
+    assert installation["staged_version"] == "1.0.0"
+    stored = load_state()["installations"]["gestdown"]
+    assert stored["trusted"] is True
+    # validate_manifest fills provider_id into a schema 2 manifest, so the staged copy carries it.
+    assert stored["staged_manifest"] == {**install_manifest, "provider_id": "gestdown"}
 
 
 def test_stage_install_smoke_failure_records_failed_install(tmp_path, monkeypatch):

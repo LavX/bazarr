@@ -25,7 +25,7 @@ from subliminal_patch.extensions import provider_registry
 from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KEY
 from secret_store.scrub import scrub_job_secrets, scrub_text
 
-from .manifest import validate_manifest
+from .manifest import manifest_provider_id, validate_manifest
 from .kinds import SUBTITLE_PROVIDER, get_kind, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
 from .bundle import verify_bundle_tree
@@ -1063,7 +1063,7 @@ def _bind_by_evidence(row: dict[str, Any], manifest: Any, origin: dict[str, Any]
             continue
         if entry.get("source") not in sources or not isinstance(entry.get("manifest"), dict):
             continue
-        if (entry.get("provider_id") == manifest.get("provider_id")
+        if (entry.get("provider_id") == manifest_provider_id(manifest)
                 and entry.get("version") == manifest.get("version")
                 and _trust_manifest(entry["manifest"]) == _trust_manifest(manifest)):
             bound = entry["source"]
@@ -1257,7 +1257,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if not isinstance(manifest, dict):
                         continue
                     manifest = _normalize_catalog_manifest(manifest, source, commit)
-                    provider_id = manifest.get("provider_id") or item.get("provider_id")
+                    provider_id = manifest_provider_id(manifest) or item.get("provider_id")
                     version = manifest.get("version") or item.get("version")
                     if not provider_id or not version:
                         continue
@@ -2090,9 +2090,7 @@ def _built_in_provider_ids() -> set[str]:
 
 
 def _manifest_provider_id(manifest: dict[str, Any]) -> str:
-    if not isinstance(manifest, dict):
-        return ""
-    return str(manifest.get("provider_id") or "")
+    return manifest_provider_id(manifest)
 
 
 def _validation_built_in_provider_ids(manifest: dict[str, Any], trusted: bool) -> set[str]:
@@ -2314,7 +2312,7 @@ def _catalog_binding(
     trusted source first. A forged manifest matches no trusted entry and installs
     untrusted. The manifest's own source fields are data, never its identity.
     """
-    provider_id = manifest.get("provider_id")
+    provider_id = manifest_provider_id(manifest)
     version = manifest.get("version")
     sources = state.get("catalog_sources") or {}
     binding: tuple[str | None, bool] | None = None
@@ -2676,7 +2674,7 @@ def _requested_entry(
             raise ProviderHubInstallError(
                 "the manifest matches no catalog entry; install it by source, provider_id and version"
             )
-        provider_id, version = manifest.get("provider_id"), manifest.get("version")
+        provider_id, version = manifest_provider_id(manifest), manifest.get("version")
     elif not all(isinstance(value, str) and value for value in (source_id, provider_id, version)):
         raise ProviderHubInstallError("source, provider_id and version are required")
     entry = _held_catalog_entry(state, source_id, provider_id, version)

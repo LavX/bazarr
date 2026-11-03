@@ -369,6 +369,14 @@ def validate_plugin_bundle(manifest: dict[str, Any]) -> ValidatedManifest:
     )
 
 
+def manifest_provider_id(manifest: Any) -> str:
+    """The provider id a schema 1 or 2 manifest declares, or "" when it has none."""
+    if not isinstance(manifest, dict):
+        return ""
+    key = "id" if manifest.get("schema_version") == 2 else "provider_id"
+    return str(manifest.get(key) or "")
+
+
 def validate_manifest(manifest: dict[str, Any], built_in_provider_ids: set[str] | None = None) -> ValidatedManifest:
     built_in_provider_ids = built_in_provider_ids or set()
     manifest = _require_mapping(manifest, "manifest")
