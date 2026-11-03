@@ -162,12 +162,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
   const remove = useDeleteArrInstance({ inlineErrors: true });
   const update = useUpdateArrInstance({ inlineErrors: true });
   const settings = useSettingsMutation(false, { inlineErrors: true });
-  useReportStepBusy(
-    settings.isPending ||
-      create.isPending ||
-      update.isPending ||
-      remove.isPending,
-  );
+  useReportStepBusy(settings.isPending || create.isPending || update.isPending);
   const { data: systemSettings } = useSystemSettings();
 
   // An enabled row first: with one of the kind on and another off, the one
