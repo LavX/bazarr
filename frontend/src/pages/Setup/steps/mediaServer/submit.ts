@@ -234,15 +234,18 @@ export function useMediaServerSubmit() {
   // disk, and only what the backend does after the write failed. Anything else
   // leaves the switch off and the step where it was.
   const retrySwitch = useCallback(
-    async (kind: MediaServerKind): Promise<boolean> => {
+    async (kind: MediaServerKind): Promise<string | null> => {
       setPending(true);
       try {
         await settings.mutateAsync({
           [`settings-general-use_${kind}`]: true,
         });
-        return true;
+        return null;
       } catch (error) {
-        return isSettingsFollowupError(error);
+        if (isSettingsFollowupError(error)) {
+          return null;
+        }
+        return describeSaveError(error);
       } finally {
         setPending(false);
       }

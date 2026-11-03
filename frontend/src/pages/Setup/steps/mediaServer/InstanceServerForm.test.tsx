@@ -387,6 +387,46 @@ describe("InstanceServerForm", () => {
     expect(onNext).not.toHaveBeenCalled();
   });
 
+  it("a failed switch retry shows the backend reason", async () => {
+    // The switch write is refused with a reason of its own. The retry shows
+    // that reason in the failure alert, and the step stays where it is.
+    stageBackend();
+    server.use(
+      http.post("/api/system/settings", () =>
+        HttpResponse.json(
+          { message: "Settings are read-only on this server." },
+          { status: 500 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <OnboardingSelectionProvider>
+        <Harness />
+      </OnboardingSelectionProvider>,
+    );
+
+    await user.type(
+      await screen.findByLabelText("Server URL"),
+      "http://a.example",
+    );
+    await user.type(screen.getByLabelText("API key"), "key-a");
+    await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
+    expect(
+      await screen.findByText(/is saved but switched off/i),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
+    );
+
+    expect(
+      await screen.findByText(/Settings are read-only on this server/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/could not save/i)).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
   it("a save whose connection-test record throws after its row landed reports the switch as off and frees the step", async () => {
     // The row lands before its Test is recorded, so this failure leaves a row
     // on the server whose master switch was never written.
