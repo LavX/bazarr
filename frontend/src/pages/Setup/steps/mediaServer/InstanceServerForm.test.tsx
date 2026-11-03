@@ -69,6 +69,33 @@ const LeavingHarness: FC = () => {
   );
 };
 
+// The form on a toggle, over the one draft the provider holds. The draft is
+// created once, so turning the form off and back on remounts it under the same
+// provider without adding a second draft.
+const ToggleHarness: FC = () => {
+  const [shown, setShown] = useState(true);
+  const { drafts, addDraft } = useOnboardingSelection();
+  const created = useRef(false);
+  useEffect(() => {
+    if (created.current) {
+      return;
+    }
+    created.current = true;
+    addDraft("jellyfin");
+  }, [addDraft]);
+  const draft = drafts[0];
+  return (
+    <>
+      <button type="button" onClick={() => setShown((on) => !on)}>
+        Toggle form
+      </button>
+      {shown && draft && (
+        <InstanceServerForm draft={draft} onNext={onNext} onBack={vi.fn()} />
+      )}
+    </>
+  );
+};
+
 function ShellBusy() {
   return <span>{useStepBusy() ? "step busy" : "step free"}</span>;
 }
@@ -299,6 +326,65 @@ describe("InstanceServerForm", () => {
     );
 
     expect(await screen.findByText("step busy")).toBeInTheDocument();
+  });
+
+  it("a remount during a pending switch retry still reports the step busy", async () => {
+    // The retry holds the step busy on the draft, not in the form, so a form
+    // put back on screen while the retry is in the air still reports busy.
+    // The first switch write is refused. The retry is held open, then refused
+    // as well on release, so the warning stays and nothing advances.
+    stageBackend();
+    let settleRetry!: () => void;
+    const held = new Promise<void>((resolve) => {
+      settleRetry = resolve;
+    });
+    let switchWrites = 0;
+    server.use(
+      http.post("/api/system/settings", async () => {
+        switchWrites += 1;
+        if (switchWrites === 1) {
+          return new HttpResponse(null, { status: 500 });
+        }
+        await held;
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <StepBusyProvider>
+        <OnboardingSelectionProvider>
+          <ToggleHarness />
+        </OnboardingSelectionProvider>
+        <ShellBusy />
+      </StepBusyProvider>,
+    );
+
+    await user.type(
+      await screen.findByLabelText("Server URL"),
+      "http://a.example",
+    );
+    await user.type(screen.getByLabelText("API key"), "key-a");
+    await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
+    expect(
+      await screen.findByText(/is saved but switched off/i),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("step free")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
+    );
+    expect(await screen.findByText("step busy")).toBeInTheDocument();
+
+    // Off and back on: the form remounts under the same provider.
+    await user.click(screen.getByRole("button", { name: "Toggle form" }));
+    expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Toggle form" }));
+    expect(await screen.findByText("step busy")).toBeInTheDocument();
+
+    await act(async () => settleRetry());
+    expect(await screen.findByText("step free")).toBeInTheDocument();
+    expect(screen.getByText(/is saved but switched off/i)).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
   });
 
   it("a save whose connection-test record throws after its row landed reports the switch as off and frees the step", async () => {
