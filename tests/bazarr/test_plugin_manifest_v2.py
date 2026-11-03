@@ -71,6 +71,16 @@ def test_extends_names_the_parent_and_its_extension_point():
     ({"settings": {"fields": [{"key": "a", "type": "text"}, {"key": "a", "type": "text"}]},
       "settings_version": 1}, "declared twice"),
     ({"endpoints": "https://openrouter.ai:443"}, "must be a list of strings"),
+    ({"login": {"argv": ["vendor"], "flow": "device_code", "paths": ["token.json"]}},
+     "login needs the interactive_login permission"),
+    ({"login": {"argv": "vendor", "flow": "device_code", "paths": ["token.json"]},
+      "permissions": ["interactive_login"]}, "login.argv must be a list"),
+    ({"login": {"argv": ["vendor"], "flow": "browser", "paths": ["token.json"]},
+      "permissions": ["interactive_login"]}, "login.flow must be one of device_code or paste_code"),
+    ({"login": {"argv": ["vendor"], "flow": "device_code", "paths": ["../token.json"]},
+      "permissions": ["interactive_login"]}, "login.paths entry"),
+    ({"login": {"argv": ["vendor"], "flow": "device_code", "paths": ["token.json"], "timeout": 30},
+      "permissions": ["interactive_login"]}, "login names an unknown key: timeout"),
 ])
 def test_the_envelope_refuses_what_it_cannot_honour(overrides, reason):
     from provider_hub.manifest import ManifestValidationError
@@ -80,9 +90,16 @@ def test_the_envelope_refuses_what_it_cannot_honour(overrides, reason):
 
 
 def test_unknown_top_level_keys_are_kept_and_ignored():
-    plugin = _parse(service_manifest(login={"argv": ["vendor", "login"]}))
+    plugin = _parse(service_manifest(future_field=["vendor", "login"]))
 
-    assert plugin.raw["login"] == {"argv": ["vendor", "login"]}
+    assert plugin.raw["future_field"] == ["vendor", "login"]
+
+
+def test_a_schema_2_login_reads_its_argv_flow_and_paths():
+    login = {"argv": ["vendor", "login"], "flow": "device_code", "paths": ["auth/token.json"]}
+    plugin = _parse(service_manifest(login=login, permissions=["interactive_login"]))
+
+    assert plugin.login == login
 
 
 def test_a_schema_2_provider_validates_and_reads_as_a_provider():

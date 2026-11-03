@@ -3943,8 +3943,9 @@ def test_catalog_refresh_fetches_github_catalog_entries(tmp_path, monkeypatch):
     assert catalog["entries"][0]["manifest"]["source"]["commit"] == "d" * 40
 
 
-def test_catalog_refresh_keeps_a_schema_2_entry_under_its_id(tmp_path, monkeypatch):
-    from provider_hub.service import add_catalog_source, list_catalog, refresh_catalog, resolve_catalog_install
+def test_catalog_refresh_refuses_a_schema_2_entry_in_the_providers_list(tmp_path, monkeypatch):
+    from provider_hub.service import (
+        PLUGIN_IN_PROVIDERS_LIST_REASON, add_catalog_source, list_catalog, list_jobs, refresh_catalog)
 
     manifest = provider_manifest_v2("modernhub")
 
@@ -3963,14 +3964,10 @@ def test_catalog_refresh_keeps_a_schema_2_entry_under_its_id(tmp_path, monkeypat
     add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
     result = refresh_catalog()
 
-    assert result["entries"] == 1
-    assert [entry["provider_id"] for entry in list_catalog()["entries"]] == ["modernhub"]
-    assert resolve_catalog_install("community", "modernhub", "1.0.0") == {
-        "source": "community",
-        "provider_id": "modernhub",
-        "version": "1.0.0",
-        "name": "Modernhub",
-    }
+    assert result["entries"] == 0
+    assert list_catalog()["entries"] == []
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_IN_PROVIDERS_LIST_REASON]
 
 
 def test_catalog_refresh_skips_an_entry_whose_manifest_declares_no_id(tmp_path, monkeypatch):
@@ -4089,7 +4086,7 @@ def _serve_community_catalog(monkeypatch, catalog):
     monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
 
 
-def test_catalog_refresh_reads_the_plugins_list(tmp_path, monkeypatch):
+def test_catalog_refresh_reads_the_plugins_list(tmp_path, monkeypatch, service_kind):
     from provider_hub.service import add_catalog_source, list_catalog, refresh_catalog
     from provider_hub.state import load_state
 
@@ -4106,6 +4103,43 @@ def test_catalog_refresh_reads_the_plugins_list(tmp_path, monkeypatch):
     [entry] = list_catalog()["entries"]
     assert (entry["provider_id"], entry["catalog_list"], entry["manifest"]["kind"]) == (
         "pluginhub", "plugins", "test_service")
+
+
+def test_catalog_refresh_rejects_a_plugin_whose_kind_is_not_defined(tmp_path, monkeypatch):
+    from provider_hub.service import PLUGIN_KIND_UNKNOWN_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest(
+            "unknownhub", kind="unknown_kind", kind_api="bazarr.unknown_kind.v1")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_KIND_UNKNOWN_REASON]
+
+
+def test_catalog_refresh_rejects_a_plugin_its_kind_refuses(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import PLUGIN_KIND_REFUSED_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("emptyhub", files={})}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_KIND_REFUSED_REASON]
 
 
 def test_catalog_refresh_skips_a_non_schema_2_plugins_entry(tmp_path, monkeypatch):
@@ -4125,7 +4159,7 @@ def test_catalog_refresh_skips_a_non_schema_2_plugins_entry(tmp_path, monkeypatc
     assert list_jobs()[-1]["details"]["rejected_plugins"] == []
 
 
-def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_across_lists(tmp_path, monkeypatch):
+def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_across_lists(tmp_path, monkeypatch, service_kind):
     from provider_hub.service import PLUGIN_KIND_CONFLICT_REASON, add_catalog_source, list_jobs, refresh_catalog
     from provider_hub.state import load_state
 
@@ -4168,7 +4202,7 @@ def test_catalog_refresh_keeps_the_same_id_and_kind_in_both_lists(tmp_path, monk
     assert sorted(entry["catalog_list"] for entry in list_catalog()["entries"]) == ["plugins", "providers"]
 
 
-def test_catalog_refresh_rejects_a_repeated_version_within_a_list(tmp_path, monkeypatch):
+def test_catalog_refresh_rejects_a_repeated_version_within_a_list(tmp_path, monkeypatch, service_kind):
     from provider_hub.service import (
         PLUGIN_VERSION_REPEATED_REASON, add_catalog_source, list_jobs, refresh_catalog)
     from provider_hub.state import load_state
@@ -4191,7 +4225,8 @@ def test_catalog_refresh_rejects_a_repeated_version_within_a_list(tmp_path, monk
     assert [record["reason"] for record in rejected] == [PLUGIN_VERSION_REPEATED_REASON] * 2
 
 
-def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_within_the_plugins_list(tmp_path, monkeypatch):
+def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_within_the_plugins_list(
+        tmp_path, monkeypatch, service_kind):
     from provider_hub.service import PLUGIN_KIND_CONFLICT_REASON, add_catalog_source, list_jobs, refresh_catalog
     from provider_hub.state import load_state
 
@@ -4212,7 +4247,7 @@ def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_within_the_plugins_l
     assert [record["reason"] for record in rejected] == [PLUGIN_KIND_CONFLICT_REASON] * 2
 
 
-def test_catalog_refresh_reads_plugins_when_stored_entries_predate_catalog_list(tmp_path, monkeypatch):
+def test_catalog_refresh_reads_plugins_when_stored_entries_predate_catalog_list(tmp_path, monkeypatch, service_kind):
     from provider_hub.service import refresh_catalog
     from provider_hub.state import load_state
 
@@ -4232,7 +4267,7 @@ def test_catalog_refresh_reads_plugins_when_stored_entries_predate_catalog_list(
     assert list(load_state()["catalog_entries"]) == ["community:plugins:pluginhub:1.0.0"]
 
 
-def test_catalog_refresh_records_an_unreadable_plugin_and_keeps_its_sibling(tmp_path, monkeypatch):
+def test_catalog_refresh_records_an_unreadable_plugin_and_keeps_its_sibling(tmp_path, monkeypatch, service_kind):
     from provider_hub.service import (
         PLUGIN_MANIFEST_UNREADABLE_REASON, add_catalog_source, list_jobs, refresh_catalog)
     from provider_hub.state import load_state
@@ -4254,7 +4289,8 @@ def test_catalog_refresh_records_an_unreadable_plugin_and_keeps_its_sibling(tmp_
     assert [record["reason"] for record in rejected] == [PLUGIN_MANIFEST_UNREADABLE_REASON]
 
 
-def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_sources(tmp_path, monkeypatch):
+def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_sources(
+        tmp_path, monkeypatch, service_kind):
     from provider_hub.service import RESERVED_ID_REASON, add_catalog_source, list_catalog, refresh_catalog
     from provider_hub.state import load_state
 

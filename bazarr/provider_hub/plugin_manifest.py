@@ -66,6 +66,10 @@ RUNTIME_COMBINATIONS = frozenset({
     ("none", "external"),
 })
 PERMISSIONS = frozenset({"network", "media_read", "data_dir", "binaries", "docker", "interactive_login"})
+# The keys a login declares, and the sign-in flows it may name: a device code the user enters on
+# another device, or a paste code the user copies back.
+LOGIN_KEYS = frozenset({"argv", "flow", "paths"})
+LOGIN_FLOWS = frozenset({"device_code", "paste_code"})
 SETTING_TYPES = frozenset({
     "text", "secret", "number", "integer", "toggle", "choice",
     "list", "key_list", "orderable_list", "options",
@@ -107,6 +111,8 @@ class PluginManifest:
     # (type id, origins) and (type id, fields), sorted by type id.
     backend_endpoints: tuple[tuple[str, tuple[str, ...]], ...] = ()
     backend_fields: tuple[tuple[str, tuple[dict[str, Any], ...]], ...] = ()
+    # The validated login a back end declares (argv, flow and paths), or None when it declares none.
+    login: dict[str, Any] | None = None
 
     @property
     def kind_api_major(self) -> int:
@@ -221,6 +227,46 @@ def _extends(value: Any) -> Extends | None:
     return Extends(plugin_id=plugin_id, capability=capability)
 
 
+def _login_argv(value: Any) -> list[str]:
+    if (not isinstance(value, list) or not 1 <= len(value) <= 64
+            or not all(isinstance(arg, str) and arg and "\x00" not in arg for arg in value)):
+        raise ManifestValidationError("login.argv must be a list of 1 to 64 non-empty strings without NUL bytes")
+    return list(value)
+
+
+def _login_paths(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ManifestValidationError("login.paths must be a non-empty list of relative paths")
+    for path in value:
+        if (not isinstance(path, str) or path.startswith("/") or "\\" in path
+                or any(part in ("", "..") for part in path.split("/"))):
+            raise ManifestValidationError(
+                f"login.paths entry {path!r} must be a relative POSIX path with no empty or '..' segment")
+    return list(value)
+
+
+def _login(manifest: dict[str, Any], permissions: tuple[str, ...]) -> dict[str, Any] | None:
+    """The login a manifest declares, validated, or None when it declares none."""
+    if "login" not in manifest:
+        return None
+    login = manifest["login"]
+    if not isinstance(login, dict):
+        raise ManifestValidationError("login must be an object with argv, flow and paths")
+    unknown = sorted(str(key) for key in login if key not in LOGIN_KEYS)
+    if unknown:
+        raise ManifestValidationError(f"login names an unknown key: {', '.join(unknown)}")
+    if not LOGIN_KEYS <= set(login):
+        raise ManifestValidationError("login must name argv, flow and paths")
+    flow = login["flow"]
+    if not isinstance(flow, str) or flow not in LOGIN_FLOWS:
+        raise ManifestValidationError("login.flow must be one of device_code or paste_code")
+    argv = _login_argv(login["argv"])
+    paths = _login_paths(login["paths"])
+    if "interactive_login" not in permissions:
+        raise ManifestValidationError("login needs the interactive_login permission")
+    return {"argv": argv, "flow": flow, "paths": paths}
+
+
 def _field_list(fields: Any, where: str) -> tuple[dict[str, Any], ...]:
     if not isinstance(fields, list):
         raise ManifestValidationError(f"{where} must be a list")
@@ -330,6 +376,8 @@ def parse_plugin_manifest(manifest: Any) -> PluginManifest:
     extends = _extends(manifest.get("extends"))
     if extends is not None and extends.plugin_id == plugin_id:
         raise ManifestValidationError("a plugin cannot extend itself")
+    permissions = _permissions(manifest.get("permissions"))
+    login = _login(manifest, permissions)
     return PluginManifest(
         raw=dict(manifest),
         schema_version=2,
@@ -342,7 +390,7 @@ def parse_plugin_manifest(manifest: Any) -> PluginManifest:
         platforms=_platforms(manifest.get("platforms")),
         artifact=artifact,
         process=process,
-        permissions=_permissions(manifest.get("permissions")),
+        permissions=permissions,
         requires=_capabilities(manifest.get("requires"), "requires"),
         provides=provides,
         extends=extends,
@@ -352,4 +400,5 @@ def parse_plugin_manifest(manifest: Any) -> PluginManifest:
         python_tags=_python_tags(manifest.get("python_tags")),
         backend_endpoints=backend_endpoints,
         backend_fields=backend_fields,
+        login=login,
     )

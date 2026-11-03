@@ -5,9 +5,9 @@ A kind names the manifests it accepts (its kind_api majors), says when a new
 release attaches (at the next restart, or live), and owns every side effect
 that installing, enabling, configuring or removing one of its plugins has on
 the rest of Bazarr+. The shared Provider Hub core calls is_enabled,
-set_enabled, on_config_saved, on_installed and on_removed. The
-validate_manifest and smoke_test hooks are not called by the core yet; the core
-runs the same checks directly.
+set_enabled, on_config_saved, on_installed and on_removed, and validate_manifest
+when a catalog refresh reads a plugin. The smoke_test hook is not called by the
+core yet; the core runs the same check directly.
 """
 from __future__ import annotations
 
@@ -68,9 +68,9 @@ class Kind:
     def validate_manifest(self, manifest: dict[str, Any], trusted: bool) -> "ValidatedManifest":
         """Validate this kind's manifest and return what the installer stages.
 
-        Raises ManifestValidationError. The core does not call this hook yet.
-        The subtitle provider kind overrides it for when the core does. A kind
-        with no installer keeps this version, which refuses.
+        Raises ManifestValidationError. A catalog refresh calls this hook for each
+        schema 2 plugin it reads and stores nothing the hook refuses. A kind with
+        no installer keeps this version, which refuses.
         """
         from ..manifest import ManifestValidationError
 

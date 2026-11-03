@@ -26,8 +26,8 @@ from subliminal_patch.extensions import provider_registry
 from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KEY
 from secret_store.scrub import scrub_job_secrets, scrub_text
 
-from .manifest import manifest_provider_id, validate_manifest
-from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_of, known_kinds
+from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
+from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
 from .bundle import verify_bundle_tree
 from .migration import (
@@ -82,6 +82,11 @@ PLUGIN_KIND_CONFLICT_REASON = (
 )
 PLUGIN_VERSION_REPEATED_REASON = (
     "This version is listed more than once in this catalog, so none of its copies was stored."
+)
+PLUGIN_KIND_UNKNOWN_REASON = "The kind of this plugin is not defined by Bazarr+, so it was not stored."
+PLUGIN_KIND_REFUSED_REASON = "The kind of this plugin refused its manifest, so it was not stored."
+PLUGIN_IN_PROVIDERS_LIST_REASON = (
+    "A schema 2 manifest belongs in the plugins list, so it was not stored from the providers list."
 )
 
 
@@ -1296,6 +1301,11 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     version = manifest.get("version") or item.get("version")
                     if not provider_id or not version:
                         continue
+                    # A schema 2 manifest is a plugin, so it is listed in the plugins list only.
+                    if manifest.get("schema_version") == 2:
+                        rejected_plugins.append(_rejected_plugin(
+                            source, manifest, PLUGIN_IN_PROVIDERS_LIST_REASON))
+                        continue
                     key = f"{source['name']}:{CATALOG_LIST_PROVIDERS}:{provider_id}:{version}"
                     source_id = source.get("id") or source["name"]
                     entries[key] = {
@@ -1335,6 +1345,19 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if is_official:
                         published_ids.add(provider_id)
                     claimed_kinds.setdefault(provider_id, set()).add(parsed.kind)
+                    # The kind checks run after the id and kind are recorded, so a refused
+                    # plugin still reserves its id and counts toward the kind conflict rule.
+                    kind = kind_for_api(parsed.kind_api)
+                    if kind is None or kind.name != parsed.kind:
+                        rejected_plugins.append(_rejected_plugin(
+                            source, manifest, PLUGIN_KIND_UNKNOWN_REASON))
+                        continue
+                    try:
+                        kind.validate_manifest(manifest, trusted=bool(source.get("trusted", False)))
+                    except ManifestValidationError:
+                        rejected_plugins.append(_rejected_plugin(
+                            source, manifest, PLUGIN_KIND_REFUSED_REASON))
+                        continue
                     plugin_claims.append({
                         "manifest": manifest,
                         "provider_id": provider_id,
