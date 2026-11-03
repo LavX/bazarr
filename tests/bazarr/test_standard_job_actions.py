@@ -807,7 +807,7 @@ def test_stopping_a_catalog_refresh_during_a_skipped_source_leaves_the_catalog_a
         "url": "https://github.com/owner/zextra/blob/main/catalog.json"}
     state["catalog_entries"]["official:examplehub:1.0.0"] = {
         "source": "official", "source_name": "official", "provider_id": "examplehub",
-        "name": "examplehub", "version": "1.0.0", "trusted": True}
+        "name": "examplehub", "version": "1.0.0", "trusted": True, "catalog_list": "providers"}
     save_state(state)
     before = load_state()
 

@@ -4212,6 +4212,48 @@ def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_within_the_plugins_l
     assert [record["reason"] for record in rejected] == [PLUGIN_KIND_CONFLICT_REASON] * 2
 
 
+def test_catalog_refresh_reads_plugins_when_stored_entries_predate_catalog_list(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    stored = {"community:examplehub:1.0.0": {
+        "source": "community", "source_name": "community", "provider_id": "examplehub",
+        "name": "Example Hub Provider", "version": "1.0.0", "trusted": False, "manifest": _manifest(),
+    }}
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community", resolved_commit="d" * 40),
+               entries=stored)
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("pluginhub")}],
+    })
+
+    refresh_catalog(source_ids={"community"})
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:pluginhub:1.0.0"]
+
+
+def test_catalog_refresh_records_an_unreadable_plugin_and_keeps_its_sibling(tmp_path, monkeypatch):
+    from provider_hub.service import (
+        PLUGIN_MANIFEST_UNREADABLE_REASON, add_catalog_source, list_jobs, refresh_catalog)
+    from provider_hub.state import load_state
+
+    unreadable = service_manifest("unreadhub", settings_version=1, settings={
+        "fields": [{"key": "token", "type": "not_a_setting_type"}],
+    })
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": unreadable}, {"manifest": service_manifest("siblinghub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:siblinghub:1.0.0"]
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_MANIFEST_UNREADABLE_REASON]
+
+
 def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_sources(tmp_path, monkeypatch):
     from provider_hub.service import RESERVED_ID_REASON, add_catalog_source, list_catalog, refresh_catalog
     from provider_hub.state import load_state
@@ -7190,7 +7232,7 @@ def _entry(source, manifest):
     key = f"{source}:{manifest['provider_id']}:{manifest['version']}"
     return {key: {"source": source, "source_name": source, "provider_id": manifest["provider_id"],
                   "name": manifest["name"], "version": manifest["version"], "trusted": source == "official",
-                  "manifest": manifest}}
+                  "manifest": manifest, "catalog_list": "providers"}}
 
 
 def _installed(manifest, *, trusted, **fields):

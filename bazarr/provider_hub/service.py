@@ -1225,10 +1225,16 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 # or beta with no dev_ref always assigns trusted, so a stored
                 # false means that last fetch was untrusted and the list may
                 # be stale.
+                # Entries stored without a catalog_list predate the plugins
+                # list, so a source holding any of them is fetched once and
+                # its entries are rewritten in the current key format.
                 skip_commit = None
-                if isinstance(previous_commit, str) and any(
-                    isinstance(entry, dict) and entry.get("source") == source_id
-                    for entry in entries.values()
+                stored_entries = [
+                    entry for entry in entries.values()
+                    if isinstance(entry, dict) and entry.get("source") == source_id
+                ]
+                if isinstance(previous_commit, str) and stored_entries and all(
+                    "catalog_list" in entry for entry in stored_entries
                 ):
                     if not is_official:
                         skip_commit = previous_commit
