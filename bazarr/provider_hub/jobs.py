@@ -16,7 +16,7 @@ from app.job_errors import reason_of
 from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 
 from . import service
-from .kinds import SUBTITLE_PROVIDER, UnknownKindError, get_kind, kind_of
+from .kinds import SUBTITLE_PROVIDER, UnknownKindError, catalog_kind_of, get_kind
 
 JOB_MODULE = "provider_hub.jobs"
 
@@ -55,7 +55,7 @@ def _enqueue(label, func, kwargs):
 def _noun(source_id, provider_id, version):
     """What the job list calls the plugin: "provider" for a subtitle provider, else "plugin"."""
     entry = service._held_catalog_entry(service.load_state(), source_id, provider_id, version)
-    kind = kind_of(entry) if entry else SUBTITLE_PROVIDER
+    kind = catalog_kind_of(entry) if entry else SUBTITLE_PROVIDER
     try:
         return get_kind(kind).noun
     except UnknownKindError:

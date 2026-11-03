@@ -213,3 +213,16 @@ def test_an_entry_of_another_kind_is_left_out_of_the_subtitle_filter():
     service = SimpleNamespace(provider_id="exampleservice", kind=SERVICE_KIND)
 
     assert service not in of_kind([legacy, service], SUBTITLE_PROVIDER)
+
+
+def test_a_row_without_a_kind_is_a_subtitle_provider_even_when_its_manifest_names_another_kind():
+    from provider_hub.kinds import SUBTITLE_PROVIDER, kind_of
+
+    assert kind_of({"provider_id": "legacyhub", "manifest": {"kind": "other_kind"}}) == SUBTITLE_PROVIDER
+
+
+def test_a_catalog_entry_takes_its_kind_from_its_manifest():
+    from provider_hub.kinds import SUBTITLE_PROVIDER, catalog_kind_of
+
+    assert catalog_kind_of({"provider_id": "x", "manifest": {"kind": "other_kind"}}) == "other_kind"
+    assert catalog_kind_of({"provider_id": "x", "manifest": {}}) == SUBTITLE_PROVIDER

@@ -20,7 +20,7 @@ from api.utils import (UploadTooLarge, authenticate, copy_bounded_upload, upload
                        upload_too_large_message)
 from provider_hub import jobs as hub_jobs
 from provider_hub import service
-from provider_hub.kinds import UnknownKindError, get_kind, kind_of, known_kinds
+from provider_hub.kinds import UnknownKindError, catalog_kind_of, get_kind, kind_of, known_kinds
 from provider_hub.service import CatalogSourceError, ProviderHubSettingsError
 
 
@@ -60,7 +60,7 @@ class PluginsCatalog(Resource):
             return str(error), 400
         catalog = service.list_catalog(auto_refresh=True)
         if kind is not None:
-            catalog["entries"] = [entry for entry in catalog["entries"] if kind_of(entry) == kind]
+            catalog["entries"] = [entry for entry in catalog["entries"] if catalog_kind_of(entry) == kind]
         return catalog
 
 

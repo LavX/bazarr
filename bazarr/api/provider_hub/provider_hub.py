@@ -10,7 +10,7 @@ from api.utils import (UploadTooLarge, authenticate, copy_bounded_upload, upload
                        upload_too_large_message)
 from provider_hub import jobs as hub_jobs
 from provider_hub import service
-from provider_hub.kinds import SUBTITLE_PROVIDER, kind_of
+from provider_hub.kinds import SUBTITLE_PROVIDER, catalog_kind_of, kind_of
 from provider_hub.service import CatalogSourceError, ProviderHubSettingsError
 
 
@@ -33,7 +33,7 @@ class ProviderHubCatalog(Resource):
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def get(self):
         catalog = service.list_catalog(auto_refresh=True)
-        catalog["entries"] = [entry for entry in catalog["entries"] if kind_of(entry) == SUBTITLE_PROVIDER]
+        catalog["entries"] = [entry for entry in catalog["entries"] if catalog_kind_of(entry) == SUBTITLE_PROVIDER]
         return catalog
 
 

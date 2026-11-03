@@ -120,19 +120,21 @@ def kind_for_api(kind_api: str) -> Kind | None:
 
 
 def kind_of(item: Any) -> str:
-    """The kind of an installation row, a catalog entry or an installation object.
+    """The kind of an installation row or installation object.
 
-    Rows written before kinds existed carry none, and every one of them is a
-    subtitle provider, so that is what a missing kind means. A catalog entry
-    keeps its kind in its manifest.
+    Rows written before kinds existed carry no kind and are subtitle providers.
     """
     if isinstance(item, dict):
         value = item.get("kind")
-        manifest = item.get("manifest")
-        if not value and isinstance(manifest, dict):
-            value = manifest.get("kind")
     else:
         value = getattr(item, "kind", None)
+    return str(value) if value else SUBTITLE_PROVIDER
+
+
+def catalog_kind_of(entry: Any) -> str:
+    """The kind of a catalog entry, which keeps its kind in its manifest."""
+    manifest = entry.get("manifest") if isinstance(entry, dict) else None
+    value = manifest.get("kind") if isinstance(manifest, dict) else None
     return str(value) if value else SUBTITLE_PROVIDER
 
 

@@ -3877,6 +3877,27 @@ def test_list_catalog_auto_refreshes_unchecked_sources(tmp_path, monkeypatch):
     assert catalog["entries"][0]["trusted"] is True
 
 
+def test_subtitle_hub_catalog_lists_only_subtitle_entries(tmp_path, monkeypatch):
+    from flask import Flask
+    from provider_hub.state import OFFICIAL_CATALOG_SOURCE_ID, load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    # A checked official source is not refreshed over the network by the listing.
+    state["catalog_sources"][OFFICIAL_CATALOG_SOURCE_ID]["last_checked_at"] = _OLD_CHECK
+    state["catalog_entries"].update(_entry(OFFICIAL_CATALOG_SOURCE_ID, _manifest(provider_id="subtitlehub")))
+    state["catalog_entries"].update(
+        _entry(OFFICIAL_CATALOG_SOURCE_ID, _manifest(provider_id="otherhub", kind="other_kind")))
+    save_state(state)
+
+    import api.provider_hub.provider_hub as hub_api
+    app = Flask(__name__)
+    with app.test_request_context("/api/provider-hub/catalog"):
+        catalog = hub_api.ProviderHubCatalog.get.__wrapped__(hub_api.ProviderHubCatalog())
+
+    assert [entry["provider_id"] for entry in catalog["entries"]] == ["subtitlehub"]
+
+
 def test_custom_catalog_source_rejects_non_github_url(tmp_path, monkeypatch):
     from provider_hub.service import CatalogSourceError, add_catalog_source
 
