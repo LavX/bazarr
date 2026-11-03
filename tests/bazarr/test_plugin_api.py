@@ -300,19 +300,20 @@ def test_listing_skips_installation_of_an_undefined_kind(client, tmp_path, caplo
     assert any("is not defined by this build" in message for message in messages)
 
 
+@pytest.mark.parametrize("body", [[1], []])
 @pytest.mark.parametrize("method,path", [
     ("post", "/api/plugins/updates/apply"),
     ("post", "/api/plugins/catalog/sources"),
     ("patch", "/api/plugins/catalog/sources/official"),
     ("patch", "/api/plugins/installations/exampleservice"),
 ])
-def test_a_json_array_body_is_refused_before_any_field_is_read(client, monkeypatch, method, path):
+def test_a_json_array_body_is_refused_before_any_field_is_read(client, monkeypatch, method, path, body):
     from app.config import settings
 
     monkeypatch.setattr(settings.auth, "type", "form")
     _prime(client)
 
-    response = getattr(client, method)(path, json=[1], headers={"X-API-KEY": API_KEY})
+    response = getattr(client, method)(path, json=body, headers={"X-API-KEY": API_KEY})
 
     assert response.status_code == 400
     assert response.get_json() == "a JSON object is required"

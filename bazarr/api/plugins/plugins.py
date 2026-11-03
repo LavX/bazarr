@@ -162,7 +162,9 @@ class PluginsInstallation(Resource):
     @api_ns_plugins.response(404, 'Plugin not found')
     @api_ns_plugins.response(500, 'The change could not be saved')
     def patch(self, plugin_id):
-        payload = request.json or {}
+        payload = request.json
+        if payload is None:
+            payload = {}
         if not isinstance(payload, dict):
             return 'a JSON object is required', 400
         try:
@@ -213,7 +215,9 @@ class PluginsUpdatesApply(Resource):
     @api_ns_plugins.response(403, 'Password confirmation required')
     @api_ns_plugins.response(404, 'Plugin not found')
     def post(self):
-        payload = request.json or {}
+        payload = request.json
+        if payload is None:
+            payload = {}
         if not isinstance(payload, dict):
             return 'a JSON object is required', 400
         plugin_id = payload.get("id")
@@ -234,7 +238,9 @@ class PluginsCatalogSources(Resource):
     @api_ns_plugins.response(401, 'Not Authenticated')
     @api_ns_plugins.response(403, 'Password confirmation required')
     def post(self):
-        payload = request.json or {}
+        payload = request.json
+        if payload is None:
+            payload = {}
         if not isinstance(payload, dict):
             return 'a JSON object is required', 400
         try:
@@ -271,7 +277,9 @@ class PluginsCatalogSource(Resource):
     @api_ns_plugins.response(403, 'Password confirmation required')
     @api_ns_plugins.response(404, 'Catalog source not found')
     def patch(self, name):
-        payload = request.json or {}
+        payload = request.json
+        if payload is None:
+            payload = {}
         if not isinstance(payload, dict):
             return 'a JSON object is required', 400
         kwargs = {"dev_ref": payload["dev_ref"]} if "dev_ref" in payload else {}
