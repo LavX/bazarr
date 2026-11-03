@@ -123,10 +123,14 @@ def kind_of(item: Any) -> str:
     """The kind of an installation row, a catalog entry or an installation object.
 
     Rows written before kinds existed carry none, and every one of them is a
-    subtitle provider, so that is what a missing kind means.
+    subtitle provider, so that is what a missing kind means. A catalog entry
+    keeps its kind in its manifest.
     """
     if isinstance(item, dict):
         value = item.get("kind")
+        manifest = item.get("manifest")
+        if not value and isinstance(manifest, dict):
+            value = manifest.get("kind")
     else:
         value = getattr(item, "kind", None)
     return str(value) if value else SUBTITLE_PROVIDER

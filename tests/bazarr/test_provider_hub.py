@@ -3952,6 +3952,33 @@ def test_catalog_refresh_keeps_a_schema_2_entry_under_its_id(tmp_path, monkeypat
     }
 
 
+def test_catalog_refresh_skips_an_item_whose_manifest_declares_no_id(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, refresh_catalog
+    from provider_hub.state import load_state
+
+    # The wrapper names an id that its manifest does not declare, so nothing is stored.
+    manifest = provider_manifest_v2("wrapperhub")
+    manifest.pop("id")
+    item = {"provider_id": "wrapperhub", "version": "1.0.0", "manifest": manifest}
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if "LavX/bazarr-provider-catalog" in url:
+            return _FakeResponse({"providers": []})
+        return _FakeResponse({"providers": [item]})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+
+
 def test_catalog_refresh_prunes_stale_entries_for_successful_source(tmp_path, monkeypatch):
     from provider_hub.service import list_catalog, refresh_catalog
 

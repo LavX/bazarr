@@ -1257,7 +1257,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if not isinstance(manifest, dict):
                         continue
                     manifest = _normalize_catalog_manifest(manifest, source, commit)
-                    provider_id = manifest_provider_id(manifest) or item.get("provider_id")
+                    provider_id = manifest_provider_id(manifest)
                     version = manifest.get("version") or item.get("version")
                     if not provider_id or not version:
                         continue

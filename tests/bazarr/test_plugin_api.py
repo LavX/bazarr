@@ -69,6 +69,23 @@ def test_plugins_listing_covers_every_kind_and_filters_by_kind(client):
     assert _get(client, "/api/plugins/installations?kind=nonsense").status_code == 400
 
 
+def test_catalog_kind_filter_reads_the_kind_in_a_stored_entry_manifest(client, tmp_path):
+    # The source counts as checked, so the listing does not try to refresh it.
+    write_state(tmp_path / "state.json",
+                catalog_sources={"official": verified_official_source(last_checked_at="2026-01-01T00:00:00Z")},
+                catalog_entries={"official:exampleservice:1.0.0": {
+                    "source": "official", "source_name": "Official Bazarr Provider Catalog",
+                    "provider_id": "exampleservice", "name": "Exampleservice", "version": "1.0.0",
+                    "trusted": True, "manifest": service_manifest("exampleservice"),
+                    "resolved_commit": "b" * 40}})
+
+    services = _get(client, f"/api/plugins/catalog?kind={SERVICE_KIND}").json["entries"]
+    subtitles = _get(client, "/api/plugins/catalog?kind=subtitle_provider").json["entries"]
+
+    assert [entry["provider_id"] for entry in services] == ["exampleservice"]
+    assert subtitles == []
+
+
 def test_subtitle_hub_routes_see_providers_only(client):
     listed = _get(client, "/api/provider-hub/providers").json["data"]
 
@@ -300,7 +317,7 @@ def test_listing_skips_installation_of_an_undefined_kind(client, tmp_path, caplo
     assert any("is not defined by this build" in message for message in messages)
 
 
-@pytest.mark.parametrize("body", [[1], []])
+@pytest.mark.parametrize("body", [[1], [], 0, False, ""])
 @pytest.mark.parametrize("method,path", [
     ("post", "/api/plugins/updates/apply"),
     ("post", "/api/plugins/catalog/sources"),
