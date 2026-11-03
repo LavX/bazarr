@@ -146,8 +146,7 @@ export function useMediaServerSubmit() {
       // Called for every server that landed, before the master switches are
       // written. The caller records the row on its draft there rather than
       // waiting for the whole run, because the switch write is a second round
-      // trip and the reader can be back on this step pressing Connect again
-      // long before it answers.
+      // trip, and a remount during it must find the row already recorded.
       onCreated?: (outcome: SaveOutcome) => void,
     ): Promise<SubmitResult> => {
       const errors: DraftErrors = {};
@@ -201,15 +200,13 @@ export function useMediaServerSubmit() {
         if (kinds.size > 0) {
           // mutateAsync, not mutate with callbacks. TanStack drops a mutate
           // call's own onSuccess and onError once the component that made the
-          // call has unmounted, which pressing Back or Skip during the save
-          // does. The promise then never settled: the caller's then never ran,
-          // the draft was never marked saved, its step stayed in the wizard,
-          // and submitting it again wrote a second row for a server that was
-          // already there. mutateAsync settles either way. Not every rejection
-          // means the switches are off: a 503 whose code is
-          // settings_refresh_failed says the configuration reached the disk
-          // and only applying it failed, so the switches count as on and the
-          // step advances without the warning.
+          // call has unmounted. The busy hold hides Back and Skip while a save
+          // is in flight, and the onScreen guard in InstanceServerForm is
+          // defense in depth. mutateAsync settles either way, so the caller's
+          // then still runs. Not every rejection means the switches are off:
+          // a 503 whose code is settings_refresh_failed says the configuration
+          // reached the disk and only applying it failed, so the switches count
+          // as on and the step advances without the warning.
           switchesFailed = await settings
             .mutateAsync(
               Object.fromEntries(
@@ -232,20 +229,24 @@ export function useMediaServerSubmit() {
 
   // Retries the master switch of a row a save already wrote. One settings
   // write and no create: the row exists, and writing it again would leave two
-  // of the same server. The answer is the whole verdict, and a 503 whose code
-  // is settings_refresh_failed counts as on: the configuration reached the
-  // disk, and only what the backend does after the write failed. Anything else
-  // leaves the switch off and the step where it was.
+  // of the same server. The result is null when the switch is on, and the
+  // reason to show when it is not. A 503 whose code is settings_refresh_failed
+  // counts as on: the configuration reached the disk, and only what the backend
+  // does after the write failed. Anything else leaves the switch off and the
+  // step where it was.
   const retrySwitch = useCallback(
-    async (kind: MediaServerKind): Promise<boolean> => {
+    async (kind: MediaServerKind): Promise<string | null> => {
       setPending(true);
       try {
         await settings.mutateAsync({
           [`settings-general-use_${kind}`]: true,
         });
-        return true;
+        return null;
       } catch (error) {
-        return isSettingsFollowupError(error);
+        if (isSettingsFollowupError(error)) {
+          return null;
+        }
+        return describeSaveError(error);
       } finally {
         setPending(false);
       }
