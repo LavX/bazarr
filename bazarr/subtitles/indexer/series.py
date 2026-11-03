@@ -257,7 +257,7 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
 
         for episode in matching_episodes:
             if episode:
-                logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
+                logging.debug(f"BAZARR subtitles found for this episode: {actual_subtitles}")  # noqa: G004
                 # Scope the missing-subtitle recompute to the owning instance so
                 # an upstream id shared across instances can't recompute the
                 # wrong row (no-op for the default/single-instance path).

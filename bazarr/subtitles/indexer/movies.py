@@ -254,7 +254,7 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
 
         for movie in matching_movies:
             if movie:
-                logging.debug(f"BAZARR storing those languages to DB: {actual_subtitles}")  # noqa: G004
+                logging.debug(f"BAZARR subtitles found for this movie: {actual_subtitles}")  # noqa: G004
                 # Scope the missing-subtitle recompute to the owning instance
                 # (no-op for the default/single-instance path).
                 list_missing_subtitles_movies(no=movie.radarrId,
