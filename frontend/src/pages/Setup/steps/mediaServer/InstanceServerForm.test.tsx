@@ -301,12 +301,12 @@ describe("InstanceServerForm", () => {
     expect(await screen.findByText("step busy")).toBeInTheDocument();
   });
 
-  it("a save that fails after its row landed names the failure and frees the step", async () => {
+  it("a save whose connection-test record throws after its row landed names the failure and frees the step", async () => {
     // The row lands before its Test is recorded, so this failure leaves a row
     // on the server whose master switch was never written.
     stageBackend();
     vi.mocked(recordConnectionTest).mockImplementationOnce(() => {
-      throw new Error("Browser storage is full.");
+      throw new Error("Connection test record failed.");
     });
     const user = userEvent.setup();
     customRender(
@@ -326,7 +326,7 @@ describe("InstanceServerForm", () => {
     await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
 
     expect(
-      await screen.findByText(/browser storage is full/i),
+      await screen.findByText(/connection test record failed/i),
     ).toBeInTheDocument();
     expect(
       await screen.findByText(/is saved but switched off/i),
