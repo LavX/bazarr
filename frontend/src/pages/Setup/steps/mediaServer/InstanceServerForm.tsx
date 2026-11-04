@@ -35,8 +35,10 @@ import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "@/pages/Setup/steps/types";
 import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import StepActions from "./StepActions";
 import {
+  describeSaveError,
   DraftFieldErrors,
   isDraftTouched,
   useMediaServerSubmit,
@@ -91,10 +93,10 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
 
   const [errors, setErrors] = useState<DraftFieldErrors>({});
   const [failure, setFailure] = useState<string | null>(null);
-  // Whether this step is still the one on screen. A save now settles even when
-  // the reader has left mid-write, which is the point, but the wizard cursor
-  // has moved on by then: advancing from here would step past whatever screen
-  // they are actually looking at, without them touching anything. Marking the
+  // Whether this step is still the one on screen. The busy hold hides Back and
+  // Skip while a save is in flight, so it normally is when the save settles.
+  // The onScreen guard is defense in depth: if the form has unmounted by then,
+  // advancing from here would step past whatever screen is showing. Marking the
   // draft saved still has to happen, so the two are separated.
   const onScreen = useRef(true);
   useEffect(() => {
@@ -185,6 +187,8 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   const libraries = useMediaServerLibraries(kind, connection, undefined, {
     inlineErrors: true,
   });
+  // A create sent from an earlier mount keeps the step busy until it settles.
+  useReportStepBusy(isPending || draft.submitting === true);
 
   const handleContinue = () => {
     if (!touched) {
@@ -196,20 +200,27 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
     // write it a second time: a repeat create would leave two rows for one
     // server.
     if (savedInstanceId !== undefined) {
-      // The master switch write from that press has not been refused, so it
-      // is still in the air: this press accepts the row that is already
-      // there and moves on.
+      // While that switch write is in flight a press cannot reach this
+      // handler, because the Connect button is disabled while loading. The
+      // check below accepts the row when the switch has not been refused, and
+      // retries it when it has.
       if (!savedButNotSwitchedOn) {
         markSaved(draft.draftId, savedInstanceId);
         onNext();
         return;
       }
+      setFailure(null);
       // Only the master switch failed, so Continue retries that one write
       // and advances once the switch is on. A retry that fails too keeps the
       // step and the warning where they are; leaving the switch off is what
       // Skip and Back are for.
-      void retrySwitch(kind).then((written) => {
-        if (!written) {
+      // Held on the draft the way the first save holds it, so a remount during
+      // the retry still reports the step busy.
+      updateDraft(draft.draftId, { submitting: true });
+      void retrySwitch(kind).then((reason) => {
+        updateDraft(draft.draftId, { submitting: false });
+        if (reason !== null) {
+          setFailure(reason);
           return;
         }
         updateDraft(draft.draftId, { switchFailed: false });
@@ -237,44 +248,63 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           ? "failed"
           : "untested";
     updateDraft(draft.draftId, { submitting: true });
+    // Set by onCreated once the row is recorded. The draft captured here is
+    // from the render that pressed Continue, so it still shows no saved row.
+    let rowRecorded = false;
     void submit([draft], (outcome) => {
       // The row exists from here on, whatever the master switch write does
       // next, so a remount mid-save finds a draft that knows not to write it
       // again.
       updateDraft(draft.draftId, { savedInstanceId: outcome.instanceId ?? "" });
+      rowRecorded = true;
       if (outcome.instanceId) {
         recordConnectionTest(
           connectionTestKey("media-server", outcome.instanceId),
           tested,
         );
       }
-    }).then((result) => {
-      updateDraft(draft.draftId, { submitting: false });
-      const found = result.errors[draft.draftId];
-      if (found) {
-        setErrors(found);
-        return;
-      }
-      setErrors({});
-      const outcome = result.outcomes[0];
-      if (!outcome?.ok) {
-        setFailure(outcome?.error ?? "The save failed.");
-        return;
-      }
-      if (result.switchesFailed) {
-        // Marking the draft saved is what removes this step from the wizard,
-        // so doing it here would unmount the warning in the same commit that
-        // renders it: the reader would reach Finish with the server reported
-        // as connected and nothing refreshing. The step stays until they have
-        // read it and pressed Continue again.
-        updateDraft(draft.draftId, { switchFailed: true });
-        return;
-      }
-      markSaved(draft.draftId, outcome.instanceId ?? "");
-      if (onScreen.current) {
-        onNext();
-      }
-    });
+    }).then(
+      (result) => {
+        updateDraft(draft.draftId, { submitting: false });
+        const found = result.errors[draft.draftId];
+        if (found) {
+          setErrors(found);
+          return;
+        }
+        setErrors({});
+        const outcome = result.outcomes[0];
+        if (!outcome?.ok) {
+          setFailure(outcome?.error ?? "The save failed.");
+          return;
+        }
+        if (result.switchesFailed) {
+          // Marking the draft saved is what removes this step from the
+          // wizard, so doing it here would unmount the warning in the same
+          // commit that renders it: the reader would reach Finish with the
+          // server reported as connected and nothing refreshing. The step
+          // stays until they have read it and pressed Continue again.
+          updateDraft(draft.draftId, { switchFailed: true });
+          return;
+        }
+        markSaved(draft.draftId, outcome.instanceId ?? "");
+        if (onScreen.current) {
+          onNext();
+        }
+      },
+      (reason) => {
+        updateDraft(draft.draftId, { submitting: false });
+        // A recorded row is reported by the switched-off warning instead, so
+        // the save failure copy would contradict it.
+        if (!rowRecorded) {
+          setFailure(describeSaveError(reason));
+        }
+        if (rowRecorded) {
+          // The row is written but its master switch never was, so Continue
+          // has to retry the switch rather than accept the row as it stands.
+          updateDraft(draft.draftId, { switchFailed: true });
+        }
+      },
+    );
   };
 
   // Everything the reader reads rather than types into: what the connection
@@ -303,9 +333,16 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       {failure && (
         <Alert
           color="red"
-          title={`Could not save ${draft.name.trim() || name}`}
+          title={
+            savedButNotSwitchedOn
+              ? `Could not turn on ${name}`
+              : `Could not save ${draft.name.trim() || name}`
+          }
         >
-          {failure} Try again, or connect it later from Settings, Connections.
+          {failure}{" "}
+          {savedButNotSwitchedOn
+            ? "Try again, or turn it on later from Settings, Connections."
+            : "Try again, or connect it later from Settings, Connections."}
         </Alert>
       )}
       {savedButNotSwitchedOn && (

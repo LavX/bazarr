@@ -1,10 +1,12 @@
 import { StrictMode } from "react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor } from "@/tests";
+import server from "@/tests/mocks/node";
 import OnboardingWizardView from "./OnboardingWizard";
 
 // The real router here, deliberately: what is being tested is that the wizard
@@ -334,5 +336,100 @@ describe("the wizard's own URL", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/setup/general"),
     );
+  });
+
+  it("browser Back stays on a media server step while it saves", async () => {
+    // The Jellyfin configure step is where a media server gets saved. Its
+    // create request is held open, so the step is busy because a real save is
+    // still running, not because a mocked value says so.
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const requested = vi.fn();
+    server.use(
+      http.post("/api/system/media-server-instances", async () => {
+        requested();
+        await held;
+        return new HttpResponse(null, { status: 400 });
+      }),
+    );
+    const draft = {
+      draftId: "jellyfin-draft",
+      kind: "jellyfin",
+      name: "Jellyfin",
+      url: "",
+      verifySsl: true,
+      pathMappings: [],
+      options: {},
+    };
+    localStorage.setItem(
+      "bazarr.onboarding.media-servers",
+      JSON.stringify([draft]),
+    );
+    const stepPath = "/setup/media-server-jellyfin-draft";
+    const user = userEvent.setup();
+    const router = openWizardAt(stepPath, ["/setup/welcome", stepPath]);
+
+    await user.type(
+      await screen.findByLabelText(/server url/i),
+      "http://10.0.0.9:8096",
+    );
+    await user.type(screen.getByLabelText(/api key/i), "jelly-key");
+    await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
+    await waitFor(() => expect(requested).toHaveBeenCalledTimes(1));
+    // The skip is only offered while the step is idle, so it going away shows
+    // the wizard has taken the busy state in.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /do this later/i }),
+      ).not.toBeInTheDocument(),
+    );
+
+    // Browser Back is refused while the save runs, so the wizard stays put.
+    await act(async () => {
+      await router.navigate(-1);
+    });
+
+    expect(router.state.location.pathname).toBe(stepPath);
+    expect(
+      screen.getByRole("heading", { name: /^jellyfin$/i }),
+    ).toBeInTheDocument();
+
+    // Refusing the create settles the save, so nothing is left in the air.
+    release?.();
+    await screen.findByText(/could not save jellyfin/i);
+  });
+
+  it("browser Back leaves a media server step once it is idle", async () => {
+    // Nothing is being saved, so the same browser Back moves the wizard off
+    // the configure step.
+    const draft = {
+      draftId: "jellyfin-draft",
+      kind: "jellyfin",
+      name: "Jellyfin",
+      url: "",
+      verifySsl: true,
+      pathMappings: [],
+      options: {},
+    };
+    localStorage.setItem(
+      "bazarr.onboarding.media-servers",
+      JSON.stringify([draft]),
+    );
+    const stepPath = "/setup/media-server-jellyfin-draft";
+    const router = openWizardAt(stepPath, ["/setup/welcome", stepPath]);
+
+    await screen.findByRole("heading", { name: /^jellyfin$/i });
+    await act(async () => {
+      await router.navigate(-1);
+    });
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+    expect(
+      await screen.findByRole("heading", { name: /welcome to bazarr/i }),
+    ).toBeInTheDocument();
   });
 });
