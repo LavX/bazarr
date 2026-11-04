@@ -983,12 +983,10 @@ def autoinstall_enabled_builtins() -> list[str]:
 
     # There is potential work, so force a fresh OFFICIAL catalog (only) to pick up a
     # newly-merged provider id. The refresh runs during startup, before the web
-    # server starts, so startup waits for it. Its network calls carry timeouts (20
-    # seconds for the git ref advertisement and each GitHub comparison, 30 seconds
-    # for the raw catalog fetch), and one refresh can make several of them. Failures
-    # are isolated per source and the call is guarded, so startup falls back to the
-    # cached catalog. The 180 second budget below bounds only the staging loop.
-    # Unrelated third-party sources are not fetched on the boot path.
+    # server starts. Its network calls time out after 20 seconds (git ref
+    # advertisement and each GitHub comparison) or 30 seconds (raw catalog fetch). A
+    # failure falls back to the cached catalog. The 180 second budget below bounds
+    # only the staging loop. Third-party sources are not fetched on the boot path.
     try:
         refresh_catalog(source_ids={OFFICIAL_CATALOG_SOURCE_ID})
         state = load_state()
@@ -3089,6 +3087,7 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
         state = load_state()
         available = 0
         provider_summaries: list[str] = []
+        refusals: list[str] = []
         for provider_id, installation in (state.get("installations") or {}).items():
             if not isinstance(installation, dict):
                 continue
@@ -3104,6 +3103,10 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
                 state, provider_id, active_version, _bound_source_id(installation)
             )
             if not isinstance(latest, dict):
+                refusal = _refused_update_reason(
+                    state, provider_id, active_version, _bound_source_id(installation))
+                if refusal:
+                    refusals.append(f"{installation.get('name') or provider_id}: {refusal}")
                 continue
             latest_version = latest.get("version")
             if not latest_version:
@@ -3119,6 +3122,8 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
             )
         else:
             message = "Catalog metadata checked. No new updates available."
+        if refusals:
+            message = f"{message} (update not offered for {'; '.join(refusals)})"
         job.update(
             message=message,
             details={"updates_available": available, "providers": provider_summaries},
@@ -3160,6 +3165,24 @@ def _latest_catalog_manifest(
     return entry["manifest"] if entry else None
 
 
+def _refused_update_reason(
+    state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
+) -> str | None:
+    """The host refusal of the newest version ``source_id`` lists above ``active_version``
+    for ``provider_id``, or None when no newer version is refused by this host."""
+    if source_id is None or _install_refusal(state, source_id, provider_id):
+        return None
+    host = current_host()
+
+    def refused(entry: dict[str, Any]) -> bool:
+        return _host_refusal(entry, host) is not None
+
+    entry = select_entry(
+        _stored_manifest_entries(state), provider_id,
+        usable=refused, source_id=source_id, above_version=active_version)
+    return _host_refusal(entry, host) if entry else None
+
+
 def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
     provider = get_provider(provider_id, redact=False)
     if not provider:
@@ -3177,6 +3200,12 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
     )
     if not isinstance(manifest, dict):
         target_name = provider.get("name") or provider_id
+        message = _refused_update_reason(
+            state,
+            provider_id,
+            provider.get("active_version") or provider.get("staged_version"),
+            source_id,
+        ) or "No update manifest is available"
         with record_job(
             "stage_update",
             target_kind="provider",
@@ -3184,7 +3213,7 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
             target_name=target_name,
             from_version=provider.get("active_version") or provider.get("staged_version"),
         ) as job:
-            provider["last_error"] = "No update manifest is available"
+            provider["last_error"] = message
 
             def record_missing_manifest(state: dict[str, Any]) -> None:
                 state.setdefault("installations", {})[provider_id] = provider
@@ -3192,8 +3221,8 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
             mutate_state(record_missing_manifest)
             job.data["state"] = "failed"
             job.update(
-                error="No update manifest is available",
-                message="No update manifest is available",
+                error=message,
+                message=message,
             )
         return _redact_installation(provider)
     try:

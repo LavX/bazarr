@@ -137,10 +137,6 @@ def entry_compatibility(entry: dict[str, Any], host: HostFacts) -> tuple[bool, s
     upgraded since then, or that installs from the cached catalog during an
     upgrade, evaluates again rather than trusting them.
     """
-    if not entry.get("valid", True):
-        return False, entry.get("invalid_reason") or "the catalog entry is invalid"
-    if entry.get("revoked"):
-        return False, entry.get("revoked_reason") or "revoked by the catalog"
     try:
         plugin = parse_plugin_manifest(entry.get("manifest"))
     except ManifestValidationError as error:
@@ -149,7 +145,7 @@ def entry_compatibility(entry: dict[str, Any], host: HostFacts) -> tuple[bool, s
 
 
 def entry_plugin_id(entry: dict[str, Any]) -> str:
-    return str(entry.get("plugin_id") or entry.get("provider_id") or "")
+    return str(entry.get("provider_id") or "")
 
 
 def select_entry(

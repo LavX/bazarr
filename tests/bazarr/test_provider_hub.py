@@ -4376,18 +4376,26 @@ def test_a_local_package_for_a_runtime_the_host_lacks_is_refused(tmp_path, monke
         service.stage_install_local(package)
 
 
-def test_an_update_skips_a_newer_version_this_host_cannot_run(tmp_path, monkeypatch):
-    from provider_hub.service import check_updates
+@pytest.mark.parametrize("newer_fields,reason", [
+    ({"min_host_version": "2.8.0"}, "needs Bazarr+ 2.8.0 or later"),
+    ({"runtime": {"artifact": "archive", "process": "worker"}}, ARCHIVE_WORKER_REASON),
+])
+def test_a_newer_version_this_host_cannot_run_is_not_offered_and_says_why(
+        tmp_path, monkeypatch, newer_fields, reason):
+    from provider_hub.service import apply_update, check_updates
 
     monkeypatch.setenv("BAZARR_VERSION", "2.7.0")
-    newer = provider_manifest_v2("examplehub", version="1.1.0", min_host_version="2.8.0")
+    newer = provider_manifest_v2("examplehub", version="1.1.0", **newer_fields)
     installation = {"provider_id": "examplehub", "name": "Examplehub", "state": "active",
                     "pending_restart": False, "active_version": "1.0.0", "source_bound": True,
                     "source_id": "community", "manifest": provider_manifest_v2("examplehub")}
     _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
                entries=_plugin_entry("community", newer), installations={"examplehub": installation})
 
-    assert check_updates()["details"]["updates_available"] == 0
+    job = check_updates()
+    assert job["details"]["updates_available"] == 0
+    assert reason in job["message"]
+    assert apply_update("examplehub")["last_error"] == reason
 
 
 def test_stage_install_fetches_bundle_builds_env_and_records_staged_paths(tmp_path, monkeypatch):
@@ -6920,7 +6928,7 @@ returned = [_set_bazarr_provider_enabled(provider_id, True) for provider_id in i
 
 sequential_in_memory = list(_bazarr_enabled_providers())
 
-# Concurrent half. A parallel install run reaches set_bazarr_provider_enabled
+# Concurrent install run. Parallel installs reach set_bazarr_provider_enabled
 # from several threads at once. The slow read widens the window between that
 # read and the write, so a missing CONFIG_LOCK would show up here as a lost
 # update. The assertion measures that the lock covers the read, the edit and
