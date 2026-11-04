@@ -4422,6 +4422,25 @@ def test_a_compatible_update_is_offered_beside_a_newer_version_this_host_cannot_
     assert f"newer version not offered for Examplehub: {reason}" in job["message"]
 
 
+def test_a_refused_version_below_the_offered_update_is_not_named(tmp_path, monkeypatch):
+    from provider_hub.service import check_updates
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.7.0")
+    refused = provider_manifest_v2("examplehub", version="1.0.1", min_host_version="2.8.0")
+    compatible = provider_manifest_v2("examplehub", version="1.1.0")
+    installation = {"provider_id": "examplehub", "name": "Examplehub", "state": "active",
+                    "pending_restart": False, "active_version": "1.0.0", "source_bound": True,
+                    "source_id": "community", "manifest": provider_manifest_v2("examplehub")}
+    entries = {**_plugin_entry("community", refused), **_plugin_entry("community", compatible)}
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=entries, installations={"examplehub": installation})
+
+    job = check_updates()
+    assert job["details"]["updates_available"] == 1
+    assert job["details"]["providers"] == ["Examplehub: 1.0.0 -> 1.1.0"]
+    assert "not offered" not in job["message"]
+
+
 def test_stage_install_fetches_bundle_builds_env_and_records_staged_paths(tmp_path, monkeypatch):
     from provider_hub.service import stage_install
     from provider_hub.state import load_state

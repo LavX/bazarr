@@ -3099,13 +3099,16 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
             active_version = installation.get("active_version")
             if not active_version:
                 continue
-            refusal = _refused_update_reason(
-                state, provider_id, active_version, _bound_source_id(installation))
-            if refusal:
-                refusals.append(f"{installation.get('name') or provider_id}: {refusal}")
             latest = _latest_catalog_manifest(
                 state, provider_id, active_version, _bound_source_id(installation)
             )
+            refusal_floor = active_version
+            if isinstance(latest, dict) and latest.get("version"):
+                refusal_floor = latest["version"]
+            refusal = _refused_update_reason(
+                state, provider_id, refusal_floor, _bound_source_id(installation))
+            if refusal:
+                refusals.append(f"{installation.get('name') or provider_id}: {refusal}")
             if not isinstance(latest, dict):
                 continue
             latest_version = latest.get("version")
@@ -3168,8 +3171,9 @@ def _latest_catalog_manifest(
 def _refused_update_reason(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
 ) -> str | None:
-    """The host refusal of the newest version ``source_id`` lists above ``active_version``
-    for ``provider_id``, or None when no newer version is refused by this host."""
+    """The host refusal of the newest refused version ``source_id`` lists for ``provider_id``
+    above ``active_version``, or None when no refused version is above it. Callers pass the
+    offered version, or the installed version when none is offered."""
     if source_id is None or _install_refusal(state, source_id, provider_id):
         return None
     host = current_host()
