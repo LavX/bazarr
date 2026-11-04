@@ -4142,6 +4142,24 @@ def test_catalog_refresh_rejects_a_plugin_its_kind_refuses(tmp_path, monkeypatch
     assert [record["reason"] for record in rejected] == [PLUGIN_KIND_REFUSED_REASON]
 
 
+def test_catalog_refresh_rejects_a_plugin_whose_kind_mismatches_its_kind_api(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import PLUGIN_KIND_MISMATCH_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("mismatchhub", kind_api="bazarr.subtitle_provider.v1")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_KIND_MISMATCH_REASON]
+
+
 def test_catalog_refresh_skips_a_non_schema_2_plugins_entry(tmp_path, monkeypatch):
     from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
     from provider_hub.state import load_state
@@ -4313,6 +4331,63 @@ def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_so
     assert load_state()["catalog_sources"]["official"]["provider_ids"] == ["reservedsvc"]
     blocked = {entry["source"]: entry.get("blocked_reason") for entry in list_catalog()["entries"]}
     assert blocked == {"official": None, "community": RESERVED_ID_REASON}
+
+
+def _plugin_entry(source, manifest):
+    key = f"{source}:plugins:{manifest['id']}:{manifest['version']}"
+    return {key: {"source": source, "source_name": source, "provider_id": manifest["id"],
+                  "name": manifest["name"], "version": manifest["version"], "trusted": False,
+                  "manifest": manifest, "catalog_list": "plugins"}}
+
+
+ARCHIVE_WORKER_REASON = "needs the archive worker runtime, which this Bazarr+ does not provide"
+
+
+def test_the_catalog_lists_a_plugin_this_host_cannot_run_with_the_reason(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    archive = provider_manifest_v2("archivehub", runtime={"artifact": "archive", "process": "worker"})
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_plugin_entry("community", archive))
+
+    [entry] = [entry for entry in service.list_catalog()["entries"] if entry["source"] == "community"]
+    assert entry["blocked_reason"] == ARCHIVE_WORKER_REASON
+
+
+def test_an_install_refuses_a_catalog_plugin_this_host_cannot_run(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    archive = provider_manifest_v2("archivehub", runtime={"artifact": "archive", "process": "worker"})
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_plugin_entry("community", archive))
+
+    with pytest.raises(service.ProviderHubInstallError, match="needs the archive worker runtime"):
+        service.install_catalog_entry("community", "archivehub", "1.0.0")
+
+
+def test_a_local_package_for_a_runtime_the_host_lacks_is_refused(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    _hub_state(tmp_path, monkeypatch)
+    archive = provider_manifest_v2("localarchive", runtime={"artifact": "archive", "process": "worker"})
+    package = _provider_zip(archive, {"provider.py": b"class ExampleProvider: pass\n"}, prefix="localarchive/")
+
+    with pytest.raises(service.ProviderHubInstallError, match="needs the archive worker runtime"):
+        service.stage_install_local(package)
+
+
+def test_an_update_skips_a_newer_version_this_host_cannot_run(tmp_path, monkeypatch):
+    from provider_hub.service import check_updates
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.7.0")
+    newer = provider_manifest_v2("examplehub", version="1.1.0", min_host_version="2.8.0")
+    installation = {"provider_id": "examplehub", "name": "Examplehub", "state": "active",
+                    "pending_restart": False, "active_version": "1.0.0", "source_bound": True,
+                    "source_id": "community", "manifest": provider_manifest_v2("examplehub")}
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_plugin_entry("community", newer), installations={"examplehub": installation})
+
+    assert check_updates()["details"]["updates_available"] == 0
 
 
 def test_stage_install_fetches_bundle_builds_env_and_records_staged_paths(tmp_path, monkeypatch):

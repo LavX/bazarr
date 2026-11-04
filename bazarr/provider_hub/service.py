@@ -30,6 +30,7 @@ from .manifest import ManifestValidationError, manifest_provider_id, validate_ma
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
 from .bundle import verify_bundle_tree
+from .compatibility import HostFacts, current_host, entry_compatibility, select_entry
 from .migration import (
     MIGRATED_BUILT_IN_PROVIDER_IDS,
     OFFICIAL_CATALOG_PROVIDER_IDS,
@@ -49,7 +50,6 @@ from .state import (
 )
 from .venv import PluginEnvironment, python_executable
 from .worker import ProviderWorkerClient, worker_command
-from .versions import version_key as _version_key
 
 
 class CatalogSourceError(ValueError):
@@ -85,6 +85,9 @@ PLUGIN_VERSION_REPEATED_REASON = (
 )
 PLUGIN_KIND_UNKNOWN_REASON = "The kind of this plugin is not defined by Bazarr+, so it was not stored."
 PLUGIN_KIND_REFUSED_REASON = "The kind of this plugin refused its manifest, so it was not stored."
+PLUGIN_KIND_MISMATCH_REASON = (
+    "The kind this plugin declares does not match the kind its kind_api belongs to, so it was not stored."
+)
 PLUGIN_IN_PROVIDERS_LIST_REASON = (
     "A schema 2 manifest belongs in the plugins list, so it was not stored from the providers list."
 )
@@ -887,14 +890,16 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
         refresh_catalog()
         state = load_state()
     sources = state.get("catalog_sources") or {}
+    host = current_host()
     entries = []
     for entry in (state.get("catalog_entries") or {}).values():
         if isinstance(entry, dict):
-            # Named from the source record as it is now, and marked when its
-            # source may not install it.
+            # Named from the source record as it is now. Marked when its source
+            # may not install it, or when this Bazarr+ cannot run it.
             source = catalog_source_for_entry(sources, entry)
             entry = {**entry, "source_name": source.get("name") or entry.get("source")}
-            refusal = _install_refusal(state, entry.get("source"), entry.get("provider_id"))
+            refusal = (_install_refusal(state, entry.get("source"), entry.get("provider_id"))
+                       or _host_refusal(entry, host))
             if refusal:
                 entry["blocked_reason"] = refusal
         entries.append(entry)
@@ -904,27 +909,27 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
     }
 
 
+def _stored_manifest_entries(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """The stored catalog entries whose manifest is an object."""
+    return [
+        entry for entry in (state.get("catalog_entries") or {}).values()
+        if isinstance(entry, dict) and isinstance(entry.get("manifest"), dict)
+    ]
+
+
 def _latest_official_catalog_manifest(state: dict[str, Any], provider_id: str) -> dict[str, Any] | None:
     """Latest manifest for ``provider_id`` from the OFFICIAL (trusted) catalog source."""
-    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    for entry in (state.get("catalog_entries") or {}).values():
-        if not isinstance(entry, dict) or entry.get("provider_id") != provider_id:
-            continue
+    host = current_host()
+
+    def usable(entry: dict[str, Any]) -> bool:
         # Entries stored before the plugins list existed carry no catalog_list and came from providers.
         if entry.get("catalog_list", CATALOG_LIST_PROVIDERS) != CATALOG_LIST_PROVIDERS:
-            continue
-        if entry.get("source") != OFFICIAL_CATALOG_SOURCE_ID or not entry.get("trusted", False):
-            continue
-        manifest = entry.get("manifest")
-        if not isinstance(manifest, dict):
-            continue
-        version_key = _version_key(manifest.get("version") or entry.get("version"))
-        if version_key is None:
-            continue
-        candidates.append((version_key, manifest))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[0])[1]
+            return False
+        return bool(entry.get("trusted", False)) and _host_refusal(entry, host) is None
+
+    entry = select_entry(
+        _stored_manifest_entries(state), provider_id, usable=usable, source_id=OFFICIAL_CATALOG_SOURCE_ID)
+    return entry["manifest"] if entry else None
 
 
 def autoinstall_enabled_builtins() -> list[str]:
@@ -977,9 +982,13 @@ def autoinstall_enabled_builtins() -> list[str]:
         return []
 
     # There is potential work, so force a fresh OFFICIAL catalog (only) to pick up a
-    # newly-merged provider id. Best-effort: refresh_catalog isolates per-source
-    # failures and the call is guarded, so a slow/broken catalog can never block or
-    # crash boot, and unrelated third-party sources are not fetched on the boot path.
+    # newly-merged provider id. The refresh runs during startup, before the web
+    # server starts, so startup waits for it. Its network calls carry timeouts (20
+    # seconds for the git ref advertisement and each GitHub comparison, 30 seconds
+    # for the raw catalog fetch), and one refresh can make several of them. Failures
+    # are isolated per source and the call is guarded, so startup falls back to the
+    # cached catalog. The 180 second budget below bounds only the staging loop.
+    # Unrelated third-party sources are not fetched on the boot path.
     try:
         refresh_catalog(source_ids={OFFICIAL_CATALOG_SOURCE_ID})
         state = load_state()
@@ -1219,20 +1228,20 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 source_id = source.get("id") or source["name"]
                 is_official = source_key == OFFICIAL_CATALOG_SOURCE_ID
                 # An unchanged commit means an unchanged catalog: the refresh
-                # can end after the advertisement. A skip needs the source's
-                # entries to exist, else there is nothing to keep. The
-                # official source skips only when its effective ref is one of
-                # the trusted branches, and never on a dev_ref, whose trust
-                # verdict depends on where the commit sits in the graph and is
-                # re-derived on every refresh. It also needs the stored
-                # trusted flag already true: the skip keeps the reserved
-                # provider-id list of the last fetch, and a refresh on main
-                # or beta with no dev_ref always assigns trusted, so a stored
-                # false means that last fetch was untrusted and the list may
-                # be stale.
-                # Entries stored without a catalog_list predate the plugins
-                # list, so a source holding any of them is fetched once and
+                # can end after the advertisement. A skip needs a stored commit
+                # and stored entries for the source, and every one of those
+                # entries must carry a catalog_list. Entries stored without one
+                # predate the plugins list, so that source is fetched once and
                 # its entries are rewritten in the current key format.
+                # A source other than the official one skips on those
+                # conditions alone. The official source also skips only when
+                # its stored trusted flag is True, it has no dev_ref, and its
+                # effective ref (the ref in its URL) is in _TRUSTED_BRANCHES.
+                # A dev_ref verdict depends on where the commit sits in the
+                # graph, so it is re-derived on every refresh. The stored
+                # trusted flag must be True because the reserved provider-id
+                # list is written only for a trusted official source, so a
+                # stored False means that list may be stale.
                 skip_commit = None
                 stored_entries = [
                     entry for entry in entries.values()
@@ -1348,9 +1357,13 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     # The kind checks run after the id and kind are recorded, so a refused
                     # plugin still reserves its id and counts toward the kind conflict rule.
                     kind = kind_for_api(parsed.kind_api)
-                    if kind is None or kind.name != parsed.kind:
+                    if kind is None:
                         rejected_plugins.append(_rejected_plugin(
                             source, manifest, PLUGIN_KIND_UNKNOWN_REASON))
+                        continue
+                    if kind.name != parsed.kind:
+                        rejected_plugins.append(_rejected_plugin(
+                            source, manifest, PLUGIN_KIND_MISMATCH_REASON))
                         continue
                     try:
                         kind.validate_manifest(manifest, trusted=bool(source.get("trusted", False)))
@@ -2476,6 +2489,12 @@ def _install_refusal(state: dict[str, Any], source_id: str | None, provider_id: 
     return None
 
 
+def _host_refusal(entry: dict[str, Any], host: HostFacts) -> str | None:
+    """Why this Bazarr+ cannot run a catalog entry, or None when it can."""
+    compatible, reason = entry_compatibility(entry, host)
+    return None if compatible else reason
+
+
 def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     """A serialized installation with its origin and the source Bazarr+ bound it to.
 
@@ -2752,7 +2771,8 @@ def stage_install(
             source_trusted,
         ),
     )
-    refusal = _install_refusal(state, source_id, validated.provider_id)
+    refusal = (_install_refusal(state, source_id, validated.provider_id)
+               or _host_refusal({"manifest": manifest}, current_host()))
     if refusal:
         raise ProviderHubInstallError(refusal)
     origin = "catalog"
@@ -2800,7 +2820,8 @@ def _requested_entry(
         raise ProviderHubInstallError(
             f"{source_id} does not list {provider_id} {version}; refresh the catalog and try again"
         )
-    refusal = _install_refusal(state, source_id, provider_id)
+    refusal = (_install_refusal(state, source_id, provider_id)
+               or _host_refusal(entry, current_host()))
     if refusal:
         raise ProviderHubInstallError(refusal)
     return entry
@@ -2861,6 +2882,9 @@ def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[st
             manifest,
             built_in_provider_ids=_built_in_provider_ids(),
         )
+        refusal = _host_refusal({"manifest": manifest}, current_host())
+        if refusal:
+            raise ProviderHubInstallError(refusal)
         return _stage_validated(
             validated,
             source_trusted=False,
@@ -3116,21 +3140,10 @@ def _latest_catalog_manifest(
     none gets no update, and a reserved id is updated only from the official one."""
     if source_id is None or _install_refusal(state, source_id, provider_id):
         return None
-    active_key = _version_key(active_version)
-    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    for entry in (state.get("catalog_entries") or {}).values():
-        if not isinstance(entry, dict) or entry.get("provider_id") != provider_id:
-            continue
-        if entry.get("source") != source_id:
-            continue
-        manifest = entry.get("manifest")
-        if not isinstance(manifest, dict):
-            continue
-        version_key = _version_key(manifest.get("version") or entry.get("version"))
-        if version_key is None:
-            continue
-        if active_key is not None and version_key <= active_key:
-            continue
+    host = current_host()
+
+    def usable(entry: dict[str, Any]) -> bool:
+        manifest = entry["manifest"]
         try:
             validate_manifest(
                 manifest,
@@ -3138,11 +3151,13 @@ def _latest_catalog_manifest(
                     manifest, bool(entry.get("trusted", False))),
             )
         except ValueError:
-            continue
-        candidates.append((version_key, manifest))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[0])[1]
+            return False
+        return _host_refusal(entry, host) is None
+
+    entry = select_entry(
+        _stored_manifest_entries(state), provider_id,
+        usable=usable, source_id=source_id, above_version=active_version)
+    return entry["manifest"] if entry else None
 
 
 def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:

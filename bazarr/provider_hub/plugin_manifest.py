@@ -12,9 +12,9 @@ entry module and config schema, for example) are the kind's to validate.
 Keys this host does not know are kept in the manifest and ignored.
 
 The compatibility fields (``kind_api``, ``min_host_version``, ``platforms``,
-``python_tags`` and ``runtime``) are checked when the manifest is read. Install
-and selection do not yet check them against the running host, so declaring
-one does not keep a plugin off a host that lacks it.
+``python_tags`` and ``runtime``) are checked when the manifest is read. The
+listing, install and selection then check them against the running host
+(compatibility.py), so a plugin the host cannot run is refused with the reason.
 """
 from __future__ import annotations
 
@@ -60,9 +60,14 @@ PLATFORMS = frozenset({
 
 PYTHON_BUNDLE = "python"
 STDIO_WORKER = "worker"
+# The runtime pairs a manifest may declare. Whether this host runs a declared pair is
+# decided by AVAILABLE_RUNTIMES in compatibility.py.
 RUNTIME_COMBINATIONS = frozenset({
     (PYTHON_BUNDLE, STDIO_WORKER),
     (PYTHON_BUNDLE, "daemon"),
+    ("archive", STDIO_WORKER),
+    ("archive", "daemon"),
+    ("oci", "daemon"),
     ("none", "external"),
 })
 PERMISSIONS = frozenset({"network", "media_read", "data_dir", "binaries", "docker", "interactive_login"})

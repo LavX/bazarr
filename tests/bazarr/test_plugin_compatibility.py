@@ -44,6 +44,12 @@ def _host(**overrides):
     ({"platforms": ["linux-aarch64"]}, {}, "not available for linux-x86_64"),
     ({"runtime": {"artifact": "python", "process": "daemon"}}, {},
      "needs the python daemon runtime, which this Bazarr+ does not provide"),
+    ({"runtime": {"artifact": "archive", "process": "worker"}}, {},
+     "needs the archive worker runtime, which this Bazarr+ does not provide"),
+    ({"runtime": {"artifact": "archive", "process": "daemon"}}, {},
+     "needs the archive daemon runtime, which this Bazarr+ does not provide"),
+    ({"runtime": {"artifact": "oci", "process": "daemon"}}, {},
+     "needs the oci daemon runtime, which this Bazarr+ does not provide"),
     ({"python_tags": ["cp312", "cp313"]}, {}, "not available for Python cp314"),
 ])
 def test_an_entry_that_cannot_run_here_says_why(overrides, host, reason):
@@ -51,6 +57,17 @@ def test_an_entry_that_cannot_run_here_says_why(overrides, host, reason):
     from provider_hub.plugin_manifest import parse_plugin_manifest
 
     assert evaluate(parse_plugin_manifest(provider_manifest_v2(**overrides)), _host(**host)) == (False, reason)
+
+
+def test_the_runtimes_a_host_offers_decide_what_it_can_run():
+    from provider_hub.compatibility import evaluate
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+
+    plugin = parse_plugin_manifest(provider_manifest_v2(runtime={"artifact": "archive", "process": "worker"}))
+    reason = "needs the archive worker runtime, which this Bazarr+ does not provide"
+
+    assert evaluate(plugin, _host()) == (False, reason)
+    assert evaluate(plugin, _host(runtimes=frozenset({("archive", "worker")}))) == (True, None)
 
 
 @pytest.mark.parametrize("overrides,host", [

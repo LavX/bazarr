@@ -59,9 +59,6 @@ def test_extends_names_the_parent_and_its_extension_point():
     ({"platforms": ["beos"]}, "unknown platform"),
     ({"platforms": ["any", "linux-x86_64"]}, "lists 'any' together"),
     ({"runtime": {"artifact": "oci", "process": "worker"}}, "not a supported combination"),
-    ({"runtime": {"artifact": "oci", "process": "daemon"}}, "not a supported combination"),
-    ({"runtime": {"artifact": "archive", "process": "worker"}}, "not a supported combination"),
-    ({"runtime": {"artifact": "archive", "process": "daemon"}}, "not a supported combination"),
     ({"permissions": ["root"]}, "unknown permission"),
     ({"requires": ["flaresolverr"]}, "must look like name.v1"),
     ({"provides": ["host.ffmpeg.v1"]}, "cannot provide a host capability"),
@@ -87,6 +84,13 @@ def test_the_envelope_refuses_what_it_cannot_honour(overrides, reason):
 
     with pytest.raises(ManifestValidationError, match=reason):
         _parse(service_manifest(**overrides))
+
+
+@pytest.mark.parametrize("artifact,process", [("archive", "worker"), ("archive", "daemon"), ("oci", "daemon")])
+def test_a_declared_runtime_pair_is_read_as_declared(artifact, process):
+    plugin = _parse(service_manifest(runtime={"artifact": artifact, "process": process}))
+
+    assert (plugin.artifact, plugin.process) == (artifact, process)
 
 
 def test_unknown_top_level_keys_are_kept_and_ignored():
