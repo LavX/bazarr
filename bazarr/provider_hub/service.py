@@ -3173,7 +3173,7 @@ def _refused_update_reason(
 ) -> str | None:
     """The host refusal of the newest refused version ``source_id`` lists for ``provider_id``
     above ``active_version``, or None when no refused version is above it. Callers pass the
-    offered version, or the installed version when none is offered."""
+    offered version, or the installed version (the staged version when nothing is active) when none is offered."""
     if source_id is None or _install_refusal(state, source_id, provider_id):
         return None
     host = current_host()
