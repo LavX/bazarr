@@ -3099,14 +3099,14 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
             active_version = installation.get("active_version")
             if not active_version:
                 continue
+            refusal = _refused_update_reason(
+                state, provider_id, active_version, _bound_source_id(installation))
+            if refusal:
+                refusals.append(f"{installation.get('name') or provider_id}: {refusal}")
             latest = _latest_catalog_manifest(
                 state, provider_id, active_version, _bound_source_id(installation)
             )
             if not isinstance(latest, dict):
-                refusal = _refused_update_reason(
-                    state, provider_id, active_version, _bound_source_id(installation))
-                if refusal:
-                    refusals.append(f"{installation.get('name') or provider_id}: {refusal}")
                 continue
             latest_version = latest.get("version")
             if not latest_version:
@@ -3123,7 +3123,7 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
         else:
             message = "Catalog metadata checked. No new updates available."
         if refusals:
-            message = f"{message} (update not offered for {'; '.join(refusals)})"
+            message = f"{message} (newer version not offered for {'; '.join(refusals)})"
         job.update(
             message=message,
             details={"updates_available": available, "providers": provider_summaries},

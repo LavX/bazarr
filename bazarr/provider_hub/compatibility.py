@@ -133,9 +133,9 @@ def evaluate(plugin: PluginManifest, host: HostFacts) -> tuple[bool, str | None]
 def entry_compatibility(entry: dict[str, Any], host: HostFacts) -> tuple[bool, str | None]:
     """Compatibility of a stored catalog entry, re-evaluated for this host.
 
-    Stored flags describe the host that refreshed the catalog. A host that was
-    upgraded since then, or that installs from the cached catalog during an
-    upgrade, evaluates again rather than trusting them.
+    The stored manifest is evaluated against this host on every call, so a host
+    that was upgraded since the catalog was refreshed, or that installs from the
+    cached catalog during an upgrade, gets its own answer.
     """
     try:
         plugin = parse_plugin_manifest(entry.get("manifest"))
