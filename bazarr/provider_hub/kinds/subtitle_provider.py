@@ -237,6 +237,21 @@ class SubtitleProviderKind(Kind):
         # A first install opts the provider into enabled_providers, so the new
         # plugin is search-eligible without a separate toggle. False means the
         # list could not be saved, which the core reports.
+        #
+        # A provider whose manifest requires settings that are still empty
+        # (an API key, a login) is left out: enabled, it would search without
+        # credentials, fail and get throttled. It stays installed and the user
+        # adds it to the enabled list once the settings are filled in.
+        from provider_hub import service
+        from provider_hub.state import load_state
+
+        installation = (load_state().get("installations") or {}).get(plugin_id)
+        if isinstance(installation, dict):
+            missing = service.missing_required_fields(installation)
+            if missing:
+                logger.info("Not enabling %s after install: required settings are empty (%s)",
+                            plugin_id, ", ".join(missing))
+                return True
         return set_bazarr_provider_enabled(plugin_id, True)
 
     def on_removed(self, plugin_id: str) -> bool:

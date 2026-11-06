@@ -1944,6 +1944,47 @@ def _unsatisfied_secret_fields(provider_id: str, installation: dict[str, Any],
     }
 
 
+def missing_required_fields(installation: dict[str, Any]) -> list[str]:
+    """The `config_schema.required` fields of the installation's manifest that
+    hold no usable value yet.
+
+    A field counts as set when the stored provider config holds a non-empty
+    value (a secret is stored encrypted, so it is only checked for presence,
+    never decrypted), when the plugin's own settings section supplies one, or
+    when the schema declares a default for it. The staged manifest stands in
+    for the active one on a first install, which has no active manifest yet.
+    """
+    manifest = installation.get("manifest")
+    if not isinstance(manifest, dict):
+        manifest = installation.get("staged_manifest")
+    if not isinstance(manifest, dict):
+        return []
+    schema = manifest.get("config_schema")
+    if not isinstance(schema, dict):
+        return []
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return []
+    properties = schema.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    config = installation.get("config")
+    config = config if isinstance(config, dict) else {}
+    provider_id = str(installation.get("provider_id") or "")
+    missing = []
+    for field in required:
+        if not isinstance(field, str):
+            continue
+        if config.get(field) not in (None, "", [], {}):
+            continue
+        declared = properties.get(field)
+        if isinstance(declared, dict) and declared.get("default") not in (None, "", [], {}):
+            continue
+        if _settings_section_supplies(provider_id, field):
+            continue
+        missing.append(field)
+    return missing
+
+
 # The state-derived inputs of the decrypt block, cached per state.json
 # version: the admission gate runs before every provider call, and loading
 # and re-walking state.json each time was most of its cost. The cache key is
@@ -2807,6 +2848,11 @@ def _stage_validated(
             )
         else:
             message = f"Staged install of v{validated.version} (restart Bazarr+ to activate)"
+            if validated.kind == SUBTITLE_PROVIDER and not get_kind(validated.kind).is_enabled(installation):
+                message += (
+                    ". It is not enabled yet because it still needs its required settings: "
+                    "add it under Enabled search providers and fill them in"
+                )
         job.update(message=message)
         return _redact_installation(installation)
 
