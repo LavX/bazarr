@@ -89,6 +89,11 @@ jobs_queue_thread.daemon = True
 jobs_queue_thread.start()
 logging.info("Interactive jobs queue started and waiting for tasks")
 
+# Look for a FlareSolverr container once, so the settings page can offer it.
+# This only fills a hint; nothing is saved or used until the user accepts it.
+from provider_hub.endpoints import start_flaresolverr_hint_probe  # noqa: E402
+start_flaresolverr_hint_probe()
+
 # Drop editor preview sessions left by the previous run and start the reaper
 # that stops preview encoders once nothing is watching them.
 from api.editor.editor import start_hls_housekeeping  # noqa: E402

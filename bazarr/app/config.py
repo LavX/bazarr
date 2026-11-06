@@ -18,7 +18,7 @@ import configparser
 import yaml
 import platform
 
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 from utilities.binaries import BinaryNotFound, get_binary
 from literals import (EXIT_VALIDATION_ERROR, LOG_BACKUP_COUNT_DEFAULT, LOG_BACKUP_COUNT_MAX, LOG_BACKUP_COUNT_MIN,
                       LOG_MAX_FILE_SIZE_MB_DEFAULT, LOG_MAX_FILE_SIZE_MB_MAX, LOG_MAX_FILE_SIZE_MB_MIN)
@@ -52,6 +52,20 @@ def validate_ip_address(ip_string):
         return True
     except ValueError:
         return False
+
+def validate_endpoint_url(value):
+    # An empty address clears the setting; anything else must be a plain
+    # http(s) URL with a host, the only kind the services behind it accept.
+    if value in (None, ''):
+        return True
+    if not isinstance(value, str) or value != value.strip():
+        return False
+    try:
+        parts = urlsplit(value)
+        return parts.scheme in ('http', 'https') and bool(parts.hostname)
+    except ValueError:
+        return False
+
 
 def is_not_bool(value):
     # is_type_of=int accepts True and False, and a form value of 'true' is saved as True.
@@ -854,6 +868,11 @@ validators = [
     Validator('omdb.apikey', default='', cast=str),
     # Validate new credential input before assignment, never interpolate a stored secret.
     Validator('discover.tmdb_access_token', default=''),
+    # Host-wide service addresses handed to Provider Hub plugins. One key per
+    # capability, named <capability with dots as underscores>_url, so the
+    # settings save and every validator keep their two-level shape.
+    Validator('endpoints.flaresolverr_v1_url', default='', is_type_of=str, cast=str,
+              condition=validate_endpoint_url),
     Validator('discover.locale', default='en-US'),
     Validator('general.metadata_language', default=''),
 ]
@@ -3059,6 +3078,11 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             if settings_keys[1] in active_provider_hub_provider_ids:
                 reset_compat_pool = True
                 provider_hub_status_clears.add(settings_keys[1])
+
+        if key == 'settings-endpoints-flaresolverr_v1_url':
+            # Providers get this address when their own is empty, so the pool
+            # has to be rebuilt after the write, not before it.
+            reset_compat_pool = True
 
         if key in ('settings-compat_endpoint-enabled', 'settings-compat_endpoint-serve_local_subs'):
             update_schedule = True
