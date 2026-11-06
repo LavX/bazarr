@@ -1267,7 +1267,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     source["last_checked_at"] = now
                     source["last_error"] = None
                 except Exception as error:
-                    source["last_error"] = scrub_text(_catalog_source_error_message(error))
+                    source["last_error"] = refusal_text(_catalog_source_error_message(error))
                     failed_sources.append(source.get("name") or source.get("id") or "?")
                     continue
                 if catalog is None:
@@ -2097,9 +2097,9 @@ def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None
 def _record_provider_last_error(provider_id: str, message: str | None) -> None:
     # The message is an exception's text, which for a worker failure is the
     # plugin's own words: it is stored in state, shown by the API and read
-    # by the next boot, so it is masked at this one write.
+    # by the next boot, so it is masked and cut at this one write.
     if message is not None:
-        message = scrub_text(message)
+        message = refusal_text(message)
 
     def update_error(state: dict[str, Any]) -> None:
         provider = state.setdefault("installations", {}).get(provider_id)

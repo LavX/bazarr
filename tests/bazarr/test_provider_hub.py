@@ -4460,6 +4460,76 @@ def test_catalog_refresh_masks_a_credential_that_straddles_the_cap_in_a_refusal(
     assert reason.startswith("x" * 188 + " Bearer ")
 
 
+def test_a_catalog_source_error_is_masked_and_capped_where_it_is_stored(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    token, message = _message_with_a_token_across_the_cap()
+
+    def failing_fetch(*_args, **_kwargs):
+        raise ValueError(message)
+
+    monkeypatch.setattr("provider_hub.service._fetch_github_catalog", failing_fetch)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    refresh_catalog(source_ids={"official"})
+
+    last_error = load_state()["catalog_sources"]["official"]["last_error"]
+    assert len(last_error) <= 200
+    assert token[:4] not in last_error
+    assert last_error.startswith("x" * 188 + " Bearer ")
+
+
+def test_a_failed_worker_health_check_masks_and_caps_the_stored_error(tmp_path, monkeypatch):
+    from provider_hub.service import test_provider_connection
+    from provider_hub.state import load_state, save_state
+
+    token, message = _message_with_a_token_across_the_cap()
+
+    class FailingWorkerClient:
+        def __init__(self, command, cwd=None, env=None):
+            pass
+
+        def request(self, op, payload=None, timeout=30):
+            raise RuntimeError(message)
+
+        def stop(self):
+            return None
+
+    bundle_path = tmp_path / "bundle"
+    bundle_path.mkdir()
+    python_path = tmp_path / "venv" / "bin" / "python"
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda _manifest, _path: None)
+    monkeypatch.setattr("provider_hub.service.ProviderWorkerClient", FailingWorkerClient)
+
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "active_path": str(bundle_path),
+            "python_path": str(python_path),
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    test_provider_connection("examplehub")
+
+    last_error = load_state()["installations"]["examplehub"]["last_error"]
+    assert len(last_error) <= 200
+    assert token[:4] not in last_error
+    assert last_error.startswith("x" * 188 + " Bearer ")
+
+
 @pytest.mark.parametrize("active_version", [None, "1.0.0"])
 def test_a_failed_install_caps_the_recorded_error_text(active_version):
     from types import SimpleNamespace
