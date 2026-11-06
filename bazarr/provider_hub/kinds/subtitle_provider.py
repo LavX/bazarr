@@ -128,12 +128,11 @@ def settings_section_plugin_ids() -> set[str]:
     """Ids of installed provider plugins, whose config.yaml section the pool reads.
 
     ``save_settings`` resets the compat pool when one of these sections is
-    saved. This is the body of ``config._active_provider_hub_provider_ids`` as
-    it is on ``development`` (rows with an active version that are not
-    removed, else the active installations), reached through ``sys.modules``
-    first for the same reason as before the move: config.py runs before the hub
-    is importable on some paths, and ``test_config_save.py`` replaces the
-    module there. Only subtitle providers count.
+    saved. The ids are the rows with an active version that are not removed,
+    else the active installations. The state module is reached through
+    ``sys.modules`` first because config.py runs before the hub is importable
+    on some paths, and ``test_config_save.py`` replaces the module there. Only
+    subtitle providers count.
     """
     import sys
 

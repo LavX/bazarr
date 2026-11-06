@@ -42,8 +42,6 @@ def _host(**overrides):
     ({"min_host_version": "2.8.1"}, {}, "needs Bazarr+ 2.8.1 or later"),
     ({"min_host_version": "2.8.0"}, {"version": "2.8.0-rc.2"}, "needs Bazarr+ 2.8.0 or later"),
     ({"platforms": ["linux-aarch64"]}, {}, "not available for linux-x86_64"),
-    ({"runtime": {"artifact": "python", "process": "daemon"}}, {},
-     "needs the python daemon runtime, which this Bazarr+ does not provide"),
     ({"runtime": {"artifact": "archive", "process": "worker"}}, {},
      "needs the archive worker runtime, which this Bazarr+ does not provide"),
     ({"runtime": {"artifact": "archive", "process": "daemon"}}, {},
@@ -57,6 +55,14 @@ def test_an_entry_that_cannot_run_here_says_why(overrides, host, reason):
     from provider_hub.plugin_manifest import parse_plugin_manifest
 
     assert evaluate(parse_plugin_manifest(provider_manifest_v2(**overrides)), _host(**host)) == (False, reason)
+
+
+def test_the_python_daemon_pair_is_refused_when_the_manifest_is_read():
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+
+    with pytest.raises(ManifestValidationError, match="runtime python run as daemon is not a supported combination"):
+        parse_plugin_manifest(provider_manifest_v2(runtime={"artifact": "python", "process": "daemon"}))
 
 
 def test_the_runtimes_a_host_offers_decide_what_it_can_run():

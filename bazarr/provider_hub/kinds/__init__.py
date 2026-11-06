@@ -7,7 +7,7 @@ that installing, enabling, configuring or removing one of its plugins has on
 the rest of Bazarr+. The shared Provider Hub core calls is_enabled,
 set_enabled, on_config_saved, on_installed and on_removed, and validate_manifest
 when a catalog refresh reads a plugin. The smoke_test hook is not called by the
-core yet; the core runs the same check directly.
+core; the core runs the same check directly.
 """
 from __future__ import annotations
 
@@ -79,8 +79,7 @@ class Kind:
     def smoke_test(self, validated: "ValidatedManifest", bundle_path, python_path) -> None:
         """Start the staged plugin once to prove it loads. The default has nothing to start.
 
-        The core does not call this hook yet. The subtitle provider kind
-        overrides it for when the core does.
+        The core does not call this hook. The subtitle provider kind overrides it.
         """
 
 

@@ -9,8 +9,8 @@ to use.
 
 The catalog listing, the install paths and the update and autoinstall selection
 call this module. An entry it refuses is listed as blocked, cannot be installed
-and is not chosen as an update. No host offers an archive or oci runtime yet, so
-an entry that needs one is refused everywhere.
+and is not chosen as an update. An entry that needs a runtime outside
+AVAILABLE_RUNTIMES is refused on every host.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from .versions import host_version_key, version_key
 logger = logging.getLogger(__name__)
 
 # The runtimes this host can start. New runtimes are added here once the host can start them.
-# No archive or oci runtime is listed, so an entry that needs one is refused on every host.
+# An entry that needs a runtime not listed here is refused on every host.
 AVAILABLE_RUNTIMES = frozenset({(PYTHON_BUNDLE, STDIO_WORKER)})
 
 
@@ -40,8 +40,7 @@ class HostFacts:
     platform: str
     runtimes: frozenset[tuple[str, str]]
     python_tag: str = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    # Whether Bazarr+ runs in a container. Only the oci gate in evaluate reads this flag,
-    # and the provider hub starts no managed container yet.
+    # Whether Bazarr+ runs in a container. Only the oci gate in evaluate reads this flag.
     in_container: bool = False
 
 
@@ -124,7 +123,7 @@ def evaluate(plugin: PluginManifest, host: HostFacts) -> tuple[bool, str | None]
         return False, f"not available for Python {host.python_tag}"
     if (plugin.artifact, plugin.process) not in host.runtimes:
         return False, f"needs the {plugin.artifact} {plugin.process} runtime, which this Bazarr+ does not provide"
-    # Not reached while AVAILABLE_RUNTIMES lists no oci runtime.
+    # Reached only for an oci runtime that the host offers.
     if plugin.artifact == "oci" and not host.in_container:
         return False, "a managed container needs Bazarr+ itself to run in a container"
     return True, None

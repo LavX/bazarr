@@ -64,7 +64,6 @@ STDIO_WORKER = "worker"
 # decided by AVAILABLE_RUNTIMES in compatibility.py.
 RUNTIME_COMBINATIONS = frozenset({
     (PYTHON_BUNDLE, STDIO_WORKER),
-    (PYTHON_BUNDLE, "daemon"),
     ("archive", STDIO_WORKER),
     ("archive", "daemon"),
     ("oci", "daemon"),
