@@ -1768,20 +1768,17 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
             pending_extractions = {}
 
             def refill_extractions(consumed=0):
-                # Items at or before the consumer's position were already
-                # handled, so their entries can never be popped again. Drop
-                # them, or they would hold window slots for the rest of the run.
-                for stale_index in [index for index in pending_extractions if index <= consumed]:
-                    pending_extractions.pop(stale_index).cancel()
                 while len(pending_extractions) < workers:
+                    # Check the gate before advancing the iterator, so an item
+                    # is never pulled and then dropped while translation is off.
+                    if not translation_available().available:
+                        break
                     next_item = next(embedded_items, None)
                     if next_item is None:
                         break
                     if next_item[0] <= consumed:
                         # Passed while translation was off: do not extract it now.
                         continue
-                    if not translation_available().available:
-                        break
                     index, embedded_item = next_item
                     # A cancel or failure can leave up to one extracted track per
                     # worker in the cache, counting any extraction still running.

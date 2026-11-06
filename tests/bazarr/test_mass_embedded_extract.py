@@ -320,13 +320,27 @@ def test_gate_closure_stops_extraction_and_fails_remaining_items(mass, monkeypat
     assert mass.published == [(5, {'child_jobs': [101]})]
 
 
-def test_prefetching_resumes_after_translation_turns_back_on_past_skipped_items(mass, monkeypatch):
+class _RecordingThreadPool(ThreadPoolExecutor):
+    """A real pool that records submissions, which happen on the batch thread."""
+
+    def __init__(self, *, max_workers, thread_name_prefix):
+        super().__init__(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
+        self.events = []
+
+    def submit(self, function, item):
+        self.events.append(('submit', item['sonarr_episode_id']))
+        return super().submit(function, item)
+
+
+@pytest.mark.parametrize('executor_class', [_ImmediateExecutor, _RecordingThreadPool])
+def test_prefetching_resumes_after_translation_turns_back_on_past_skipped_episodes(
+        mass, monkeypatch, executor_class):
     from app.jobs_queue import JobFailed
     from subtitles.tools.translate import availability
 
     mass.items = [_item(number) for number in range(1, 7)]
     mass.general.mass_embedded_extract_workers = 1
-    pools = _use_executor(monkeypatch, mass)
+    pools = _use_executor(monkeypatch, mass, executor_class)
     gate = availability.TranslationAvailability(True, '')
     off = availability.TranslationAvailability(False, 'Translation was switched off')
     extracted = []
@@ -353,13 +367,14 @@ def test_prefetching_resumes_after_translation_turns_back_on_past_skipped_items(
 
     pool = pools[0]
     submitted = [number for event, number in pool.events if event == 'submit']
-    # Items 2 and 3 were passed while the gate was closed, so they are never
-    # submitted afterwards. Item 4 runs inline once, then items 5 and 6 go
-    # back through the pool.
-    assert 3 not in submitted
+    # Episode 2 is prefetched by the refill after episode 1, before the gate
+    # closes. Episode 3 is passed while the gate is closed and must never be
+    # submitted afterwards. Episode 4 runs inline once, then 5 and 6 go back
+    # through the pool. Episode 2's pool extraction may or may not have been
+    # cancelled in time, so only the episodes below are asserted on.
     assert submitted == [1, 2, 5, 6]
-    assert extracted.count('/video/ep4.mkv') == 1
     assert extracted.count('/video/ep3.mkv') == 0
+    assert extracted.count('/video/ep4.mkv') == 1
     assert [item['sonarr_episode_id'] for item in mass.translated] == [1, 4, 5, 6]
 
 
