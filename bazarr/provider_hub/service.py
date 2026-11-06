@@ -2792,20 +2792,49 @@ def stage_install(
     )
 
 
-def _held_catalog_entry(
-    state: dict[str, Any], source_id: Any, provider_id: Any, version: Any
-) -> dict[str, Any] | None:
-    for entry in (state.get("catalog_entries") or {}).values():
-        if (isinstance(entry, dict) and entry.get("source") == source_id
+def _find_catalog_entry(
+    state: dict[str, Any], source_id: Any, provider_id: Any, version: Any, *,
+    entry_key: Any = None, catalog_list: Any = None, manifest: Any = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """The stored key and entry a request names, or None when the source lists none.
+
+    One source can list the same id and version in both the providers and the
+    plugins list, with different manifests, so the triple alone is not an identity.
+    A stored key names one entry exactly. Otherwise a manifest picks the entry it
+    equals, and failing that the list the caller prefers wins (providers when none
+    is given), so a request never lands on a copy it did not ask for.
+    """
+    wanted = _trust_manifest(manifest) if isinstance(manifest, dict) else None
+    preferred = catalog_list or CATALOG_LIST_PROVIDERS
+    best: tuple[int, str, dict[str, Any]] | None = None
+    for key, entry in (state.get("catalog_entries") or {}).items():
+        if not (isinstance(entry, dict) and entry.get("source") == source_id
                 and entry.get("provider_id") == provider_id and entry.get("version") == version
                 and isinstance(entry.get("manifest"), dict)):
-            return entry
-    return None
+            continue
+        if entry_key is not None and key != entry_key:
+            continue
+        if wanted is not None and _trust_manifest(entry["manifest"]) != wanted:
+            continue
+        # Entries stored before the plugins list existed carry no catalog_list and came from providers.
+        rank = 0 if entry.get("catalog_list", CATALOG_LIST_PROVIDERS) == preferred else 1
+        if best is None or rank < best[0]:
+            best = (rank, key, entry)
+    return (best[1], best[2]) if best else None
+
+
+def _held_catalog_entry(
+    state: dict[str, Any], source_id: Any, provider_id: Any, version: Any, entry_key: Any = None,
+) -> dict[str, Any] | None:
+    found = _find_catalog_entry(state, source_id, provider_id, version, entry_key=entry_key)
+    return found[1] if found else None
 
 
 def _requested_entry(
     state: dict[str, Any], source_id: Any, provider_id: Any, version: Any, manifest: Any = None,
-) -> dict[str, Any]:
+    *, entry_key: Any = None, catalog_list: Any = None,
+) -> tuple[str, dict[str, Any]]:
+    """The key and entry an install request names, or ProviderHubInstallError."""
     if manifest is not None:
         if not isinstance(manifest, dict):
             raise ProviderHubInstallError("manifest must be an object")
@@ -2817,39 +2846,53 @@ def _requested_entry(
         provider_id, version = manifest_provider_id(manifest), manifest.get("version")
     elif not all(isinstance(value, str) and value for value in (source_id, provider_id, version)):
         raise ProviderHubInstallError("source, provider_id and version are required")
-    entry = _held_catalog_entry(state, source_id, provider_id, version)
-    if entry is None:
+    found = _find_catalog_entry(state, source_id, provider_id, version,
+                                entry_key=entry_key, catalog_list=catalog_list, manifest=manifest)
+    if found is None:
         raise ProviderHubInstallError(
             f"{source_id} does not list {provider_id} {version}; refresh the catalog and try again"
         )
+    key, entry = found
     refusal = (_install_refusal(state, source_id, provider_id)
                or _host_refusal(entry, current_host()))
     if refusal:
         raise ProviderHubInstallError(refusal)
-    return entry
+    return key, entry
 
 
 def resolve_catalog_install(
     source_id: Any = None, provider_id: Any = None, version: Any = None, manifest: Any = None,
+    catalog_list: Any = None,
 ) -> dict[str, Any]:
     """The catalog entry an install request names, as ``{source, provider_id,
-    version, name}``, or ProviderHubInstallError with the reason it is refused.
+    version, name, entry_key}``, or ProviderHubInstallError with the reason it is refused.
 
     A request names an entry by source, provider id and version. A raw manifest
     is taken only when it equals an entry Bazarr+ holds, and then names that one.
+    ``catalog_list`` says which list to prefer when the source lists the same id
+    and version in both. The ``entry_key`` returned pins the one entry, so the
+    install that follows reads the entry that was checked here.
     """
-    entry = _requested_entry(load_state(), source_id, provider_id, version, manifest)
+    key, entry = _requested_entry(
+        load_state(), source_id, provider_id, version, manifest, catalog_list=catalog_list)
     return {
         "source": entry["source"],
         "provider_id": entry["provider_id"],
         "version": entry["version"],
         "name": entry.get("name") or entry["provider_id"],
+        "entry_key": key,
     }
 
 
-def install_catalog_entry(source_id: str, provider_id: str, version: str, checkpoint=None) -> dict[str, Any]:
-    """Install the entry ``source_id`` lists for ``provider_id`` at ``version``."""
-    entry = _requested_entry(load_state(), source_id, provider_id, version)
+def install_catalog_entry(
+    source_id: str, provider_id: str, version: str, checkpoint=None, entry_key: str | None = None,
+) -> dict[str, Any]:
+    """Install the entry ``source_id`` lists for ``provider_id`` at ``version``.
+
+    ``entry_key`` pins the stored entry a request resolved to, which matters when
+    the source lists the same id and version in both catalog lists.
+    """
+    _key, entry = _requested_entry(load_state(), source_id, provider_id, version, entry_key=entry_key)
     return stage_install(entry["manifest"], checkpoint=checkpoint, source_id=source_id)
 
 

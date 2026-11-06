@@ -99,11 +99,14 @@ class PluginsInstallations(Resource):
         if not isinstance(payload, dict):
             return 'source, id and version are required', 400
         try:
-            entry = service.resolve_catalog_install(payload.get("source"), payload.get("id"), payload.get("version"))
+            entry = service.resolve_catalog_install(
+                payload.get("source"), payload.get("id"), payload.get("version"),
+                catalog_list=service.CATALOG_LIST_PLUGINS)
         except service.ProviderHubInstallError as error:
             return str(error), 400
         return {"job_id": hub_jobs.queue_install(
-            entry["source"], entry["provider_id"], entry["version"], entry["name"])}, 202
+            entry["source"], entry["provider_id"], entry["version"], entry["name"],
+            entry_key=entry["entry_key"])}, 202
 
 
 @api_ns_plugins.route('plugins/installations/local')

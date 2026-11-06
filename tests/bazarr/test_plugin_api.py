@@ -135,7 +135,8 @@ def test_plugins_install_takes_a_catalog_reference_only(client, monkeypatch):
     assert refused.status_code == 400
     assert accepted.status_code == 202
     assert queued == [("install_provider", {"source_id": "official", "provider_id": "exampleservice",
-                                            "version": "1.0.0", "name": "Exampleservice"})]
+                                            "version": "1.0.0", "name": "Exampleservice",
+                                            "entry_key": "official:plugins:exampleservice:1.0.0"})]
 
 
 # The routes that start code. Whatever gate the provider-hub routes carry, the

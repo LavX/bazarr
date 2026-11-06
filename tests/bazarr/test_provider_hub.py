@@ -7661,6 +7661,57 @@ def test_an_install_from_a_community_source_is_bound_to_it_whatever_its_manifest
         "community", "community", False)
 
 
+def _two_copies_of_one_version(tmp_path, monkeypatch, *, plugin_overrides=None):
+    """A community source listing movedhub 1.0.0 in both lists, as two different manifests."""
+    legacy = _manifest(provider_id="movedhub", name="Legacy copy")
+    plugin = provider_manifest_v2("movedhub", name="Plugin copy", **(plugin_overrides or {}))
+    plugin_entry = {"source": "community", "source_name": "community", "provider_id": "movedhub",
+                    "name": "Plugin copy", "version": "1.0.0", "trusted": False, "manifest": plugin,
+                    "catalog_list": "plugins"}
+    entries = {**_entry("community", legacy)}
+    [legacy_key] = entries
+    entries["community:plugins:movedhub:1.0.0"] = plugin_entry
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"), entries=entries)
+    return legacy, plugin, legacy_key, "community:plugins:movedhub:1.0.0"
+
+
+def test_an_install_request_resolves_to_the_copy_it_asked_for_when_both_lists_hold_one(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, plugin, legacy_key, plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    staged = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest) or {"state": "staged"})
+
+    by_default = service.resolve_catalog_install("community", "movedhub", "1.0.0")
+    by_plugins = service.resolve_catalog_install("community", "movedhub", "1.0.0", catalog_list="plugins")
+    by_manifest = service.resolve_catalog_install(manifest=plugin)
+
+    assert by_default["entry_key"] == legacy_key
+    assert by_plugins["entry_key"] == plugin_key
+    assert by_manifest["entry_key"] == plugin_key
+    assert by_manifest["name"] == "Plugin copy"
+
+    service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=plugin_key)
+    service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=legacy_key)
+    assert [manifest["name"] for manifest in staged] == ["Plugin copy", "Legacy copy"]
+
+
+def test_the_compatibility_check_reads_the_copy_the_install_will_use(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, _plugin, legacy_key, plugin_key = _two_copies_of_one_version(
+        tmp_path, monkeypatch, plugin_overrides={"min_host_version": "9.0.0"})
+
+    with pytest.raises(service.ProviderHubInstallError, match="needs Bazarr.+ 9.0.0 or later"):
+        service.resolve_catalog_install("community", "movedhub", "1.0.0", catalog_list="plugins")
+    with pytest.raises(service.ProviderHubInstallError, match="needs Bazarr.+ 9.0.0 or later"):
+        service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=plugin_key)
+    assert service.resolve_catalog_install("community", "movedhub", "1.0.0")["entry_key"] == legacy_key
+
+
 def test_only_the_official_catalog_installs_or_updates_an_official_id(tmp_path, monkeypatch):
     from provider_hub import service
 

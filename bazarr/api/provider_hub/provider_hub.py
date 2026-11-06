@@ -184,7 +184,8 @@ class ProviderHubInstallations(Resource):
         # Validation, the bundle download and the smoke test run in the job,
         # which raises with the reason when any of them fails.
         return {"job_id": hub_jobs.queue_install(entry["source"], entry["provider_id"],
-                                                 entry["version"], entry["name"])}, 202
+                                                 entry["version"], entry["name"],
+                                                 entry_key=entry["entry_key"])}, 202
 
 
 def _package_too_large():

@@ -223,11 +223,11 @@ def hub_calls(monkeypatch, tmp_path):
     monkeypatch.setattr(service, 'get_catalog_source', lambda name: {'id': name})
     monkeypatch.setattr(service, 'refresh_catalog', lambda: None)
     monkeypatch.setattr(service, 'resolve_catalog_install',
-                        lambda source, provider_id, version, manifest=None:
+                        lambda source, provider_id, version, manifest=None, catalog_list=None:
                         {'source': source, 'provider_id': provider_id,
-                         'version': version, 'name': 'Some Provider'})
+                         'version': version, 'name': 'Some Provider', 'entry_key': 'key'})
     monkeypatch.setattr(hub_jobs, 'queue_install',
-                        lambda source, provider_id, version, name:
+                        lambda source, provider_id, version, name, entry_key=None:
                         calls.append((HUB_INSTALL, provider_id)) or 'job-install')
     monkeypatch.setattr(service, 'local_package_uploads_dir', lambda: tmp_path)
     monkeypatch.setattr(hub_jobs, 'queue_install_local',

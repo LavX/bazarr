@@ -555,6 +555,19 @@ def test_install_job_success_returns_the_installation(queue, monkeypatch):
     assert job["job_returned_value"] == {"provider_id": "examplehub", "state": "staged"}
 
 
+def test_an_install_job_carries_the_entry_key_to_the_install(queue, monkeypatch):
+    from provider_hub import jobs as hub_jobs
+    from provider_hub import service
+
+    calls = []
+    monkeypatch.setattr(service, "install_catalog_entry",
+                        lambda *reference, **kwargs: calls.append((reference, kwargs.get("entry_key"))) or {})
+    hub_jobs.queue_install(*EXAMPLE_ENTRY, entry_key="community:plugins:examplehub:1.0.0")
+    run_next(queue)
+
+    assert calls == [(("community", "examplehub", "1.0.0"), "community:plugins:examplehub:1.0.0")]
+
+
 def test_install_job_failure_names_the_provider_and_the_reason(queue, monkeypatch):
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
