@@ -114,7 +114,8 @@ def test_an_oci_runtime_must_declare_the_docker_permission():
     assert _parse(service_manifest(runtime=runtime, permissions=["docker", "network"])).permissions == (
         "docker", "network")
     for permissions in ({}, {"permissions": ["network"]}):
-        with pytest.raises(ManifestValidationError, match="starts a managed container, so permissions must include docker"):
+        with pytest.raises(
+                ManifestValidationError, match="starts a managed container, so permissions must include docker"):
             _parse(service_manifest(runtime=runtime, **permissions))
 
 

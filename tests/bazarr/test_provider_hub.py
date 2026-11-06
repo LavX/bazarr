@@ -1796,16 +1796,24 @@ def test_provider_hub_restart_activation_keeps_active_on_staged_failure(tmp_path
     assert installation["last_error"]
 
 
+def _message_with_a_token_across_the_cap():
+    """A token and a refusal message that holds it across the 200 character cap.
+
+    "Bearer " ends at character 196, so the first four characters of the token
+    sit inside the first 200 and the rest sit beyond them.
+    """
+    token = "Zq7Kx9Pw2Lm4Nv8Rt5Yh"
+    message = "x" * 188 + " Bearer " + token + " is not accepted"
+    assert message.index(token) == 196
+    return token, message
+
+
 def test_a_failed_restart_activation_caps_the_recorded_error_text(tmp_path, monkeypatch):
     from provider_hub.manifest import ManifestValidationError
     from provider_hub.service import activate_staged_installations
     from provider_hub.state import load_state
 
-    token = "Zq7Kx9Pw2Lm4Nv8Rt5Yh"
-    # "Bearer " ends at character 196, so the first four characters of the
-    # token sit inside the first 200 and the rest sit beyond them.
-    message = "x" * 188 + " Bearer " + token + " is not accepted"
-    assert message.index(token) == 196
+    token, message = _message_with_a_token_across_the_cap()
 
     def refusing_verify(manifest, bundle_path):
         raise ManifestValidationError(message)
@@ -4429,11 +4437,7 @@ def test_catalog_refresh_masks_a_credential_that_straddles_the_cap_in_a_refusal(
     from provider_hub.plugin_manifest import parse_plugin_manifest
     from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
 
-    token = "Zq7Kx9Pw2Lm4Nv8Rt5Yh"
-    # "Bearer " ends at character 196, so the first four characters of the
-    # token sit inside the first 200 and the rest sit beyond them.
-    message = "x" * 188 + " Bearer " + token + " is not accepted"
-    assert message.index(token) == 196
+    token, message = _message_with_a_token_across_the_cap()
 
     def refusing_parse(manifest):
         if manifest["id"] == "leakyhub":

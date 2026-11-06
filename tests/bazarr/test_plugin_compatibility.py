@@ -2,7 +2,7 @@
 """Version order, the host's own version, and whether an entry runs here."""
 import pytest
 
-from plugin_platform_helpers import archive_runtime, oci_runtime, provider_manifest_v2
+from plugin_platform_helpers import archive_runtime, oci_runtime, provider_manifest_v2, service_manifest
 
 
 @pytest.mark.parametrize("lower,higher", [
@@ -78,7 +78,6 @@ def test_the_runtimes_a_host_offers_decide_what_it_can_run():
 
 def test_a_catalog_entry_with_an_invalid_runtime_is_blocked_with_the_specific_reason():
     from provider_hub.compatibility import entry_compatibility
-    from plugin_platform_helpers import service_manifest
 
     runtimes = frozenset({("oci", "daemon")})
     entry = {"manifest": service_manifest(runtime={"artifact": "oci", "process": "daemon"})}
