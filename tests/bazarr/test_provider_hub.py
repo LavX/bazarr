@@ -6533,10 +6533,22 @@ def test_force_hi_whisper_fallback_downloads_only_flagged_hub_candidates(monkeyp
     assert [subtitle.provider_name for subtitle in subtitles] == ["whisperai"]
     downloads = []
     pool.download_subtitle = lambda subtitle: downloads.append(subtitle.id) or True
+    fallback_calls = []
+    real_fallback = pool.download_fallback_subtitles
 
+    def spy_fallback(*args, **kwargs):
+        result = real_fallback(*args, **kwargs)
+        fallback_calls.append([subtitle.id for subtitle in result])
+        return result
+
+    pool.download_fallback_subtitles = spy_fallback
+
+    # A minimum score no candidate can reach keeps the main loop from
+    # downloading anything, so only the fallback can produce a download.
     out = pool.download_best_subtitles(
-        subtitles, movie, languages, hearing_impaired="force HI", fallback_allowed=True)
+        subtitles, movie, languages, min_score=10_000, hearing_impaired="force HI", fallback_allowed=True)
 
+    assert fallback_calls == [expected]
     assert [subtitle.id for subtitle in out] == expected
     assert downloads == expected
 
