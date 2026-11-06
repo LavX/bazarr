@@ -1976,8 +1976,11 @@ def missing_required_fields(installation: dict[str, Any]) -> list[str]:
             continue
         if config.get(field) not in (None, "", [], {}):
             continue
+        # The runtime applies a schema default only when the key is absent, so
+        # a field the user saved empty does not fall back to its default.
         declared = properties.get(field)
-        if isinstance(declared, dict) and declared.get("default") not in (None, "", [], {}):
+        if (field not in config and isinstance(declared, dict)
+                and declared.get("default") not in (None, "", [], {})):
             continue
         if _settings_section_supplies(provider_id, field):
             continue
@@ -2832,7 +2835,9 @@ def _stage_validated(
             return dict(installation)
 
         installation = mutate_state(record_staged_install)
-        if not is_update and not get_kind(validated.kind).on_installed(validated.provider_id):
+        missing_required = [] if is_update else missing_required_fields(installation)
+        if not is_update and not get_kind(validated.kind).on_installed(
+                validated.provider_id, missing_required=missing_required):
             # First install: opt the provider into Bazarr's enabled_providers so
             # the new plugin is search-eligible without a separate UI toggle.
             # When that cannot be saved the install is staged but disabled,
@@ -2848,7 +2853,8 @@ def _stage_validated(
             )
         else:
             message = f"Staged install of v{validated.version} (restart Bazarr+ to activate)"
-            if validated.kind == SUBTITLE_PROVIDER and not get_kind(validated.kind).is_enabled(installation):
+            if (validated.kind == SUBTITLE_PROVIDER and missing_required
+                    and not get_kind(validated.kind).is_enabled(installation)):
                 message += (
                     ". It is not enabled yet because it still needs its required settings: "
                     "add it under Enabled search providers and fill them in"

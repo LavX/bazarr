@@ -3328,7 +3328,8 @@ def test_stage_install_local_persists_plugin_secret_paths(tmp_path, monkeypatch)
         registry.reset_plugin_secret_paths(saved_paths)
 
 
-def _install_local_recording_enables(tmp_path, monkeypatch, *, required, seeded_config=None):
+def _install_local_recording_enables(tmp_path, monkeypatch, *, required, seeded_config=None,
+                                     already_enabled=False):
     """Install a provider from a local package and return what the install
     asked Bazarr to enable, plus the job message."""
     from provider_hub.service import stage_install_local
@@ -3364,7 +3365,8 @@ def _install_local_recording_enables(tmp_path, monkeypatch, *, required, seeded_
     monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
                         lambda provider_id, enabled: enabled_calls.append((provider_id, enabled)) or True)
     monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers",
-                        lambda: [pid for pid, on in enabled_calls if on])
+                        lambda: (["needskeys"] if already_enabled else [])
+                        + [pid for pid, on in enabled_calls if on])
 
     from secret_store import registry
 
@@ -3410,6 +3412,37 @@ def test_install_enables_a_provider_with_no_required_settings(tmp_path, monkeypa
 
     assert enabled_calls == [("needskeys", True)]
     assert installation["enabled"] is True
+
+
+def test_install_keeps_an_already_enabled_provider_enabled_despite_missing_settings(tmp_path, monkeypatch):
+    enabled_calls, installation, job = _install_local_recording_enables(
+        tmp_path, monkeypatch, required=["api_key"], already_enabled=True)
+
+    # Nothing removes the provider from enabled_providers, and the job does not
+    # claim it is off.
+    assert (("needskeys", False) not in enabled_calls)
+    assert installation["enabled"] is True
+    assert "required settings" not in job["message"]
+
+
+def test_missing_required_field_saved_empty_does_not_fall_back_to_its_default(monkeypatch):
+    from provider_hub import service
+
+    manifest = {
+        "config_schema": {
+            "properties": {"base_url": {"type": "string", "default": "https://example.test"}},
+            "required": ["base_url"],
+        }
+    }
+    monkeypatch.setattr(service, "_settings_section_supplies", lambda provider_id, field: False)
+    absent = {"provider_id": "needskeys", "manifest": manifest, "config": {}}
+    emptied = {"provider_id": "needskeys", "manifest": manifest, "config": {"base_url": ""}}
+
+    assert service.missing_required_fields(absent) == []
+    assert service.missing_required_fields(emptied) == ["base_url"]
+
+    monkeypatch.setattr(service, "_settings_section_supplies", lambda provider_id, field: True)
+    assert service.missing_required_fields(emptied) == []
 
 
 def test_missing_required_fields_counts_defaults_and_settings_section_values(monkeypatch):

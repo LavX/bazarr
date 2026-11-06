@@ -145,7 +145,7 @@ def service_kind():
         def __init__(self):
             self.calls = []
 
-        def on_installed(self, plugin_id):
+        def on_installed(self, plugin_id, missing_required=()):
             self.calls.append(("installed", plugin_id))
             return True
 
