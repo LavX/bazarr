@@ -76,6 +76,25 @@ def test_the_runtimes_a_host_offers_decide_what_it_can_run():
     assert evaluate(plugin, _host(runtimes=frozenset({("archive", "worker")}))) == (True, None)
 
 
+def test_the_blocked_reason_of_an_unreadable_stored_manifest_is_capped(monkeypatch):
+    from provider_hub.compatibility import entry_compatibility
+    from provider_hub.manifest import ManifestValidationError
+    from secret_store.scrub import scrub_text
+
+    message = "settings field token has an unsupported type, which this Bazarr+ does not read. " * 4
+
+    def refusing_parse(manifest):
+        raise ManifestValidationError(message)
+
+    monkeypatch.setattr("provider_hub.compatibility.parse_plugin_manifest", refusing_parse)
+
+    compatible, reason = entry_compatibility({"manifest": {}}, _host())
+
+    assert compatible is False
+    assert len(reason) == 200
+    assert reason == scrub_text(message)[:200]
+
+
 @pytest.mark.parametrize("overrides,host", [
     ({}, {}),
     ({"min_host_version": "2.8.0-rc.1"}, {"version": "2.8.0-rc.1"}),

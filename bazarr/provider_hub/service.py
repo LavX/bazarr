@@ -30,7 +30,7 @@ from .manifest import ManifestValidationError, manifest_provider_id, validate_ma
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
 from .bundle import verify_bundle_tree
-from .compatibility import HostFacts, current_host, entry_compatibility, select_entry
+from .compatibility import HostFacts, current_host, entry_compatibility, refusal_text, select_entry
 from .migration import (
     MIGRATED_BUILT_IN_PROVIDER_IDS,
     OFFICIAL_CATALOG_PROVIDER_IDS,
@@ -91,7 +91,6 @@ PLUGIN_KIND_MISMATCH_REASON = (
 PLUGIN_IN_PROVIDERS_LIST_REASON = (
     "A schema 2 manifest belongs in the plugins list, so it was not stored from the providers list."
 )
-REFUSAL_TEXT_MAX_CHARS = 200
 
 
 def utcnow_iso() -> str:
@@ -1345,7 +1344,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         parsed = parse_plugin_manifest(manifest)
                     except ManifestValidationError as error:
                         rejected_plugins.append(_rejected_plugin(
-                            source, manifest, scrub_text(str(error))[:REFUSAL_TEXT_MAX_CHARS]))
+                            source, manifest, refusal_text(error)))
                         continue
                     except Exception:
                         rejected_plugins.append(_rejected_plugin(
@@ -2578,7 +2577,7 @@ def _failed_installation(
     source_id: str | None = None,
 ):
     existing = existing if isinstance(existing, dict) else {}
-    message = scrub_text(str(error))
+    message = refusal_text(error)
     if existing.get("active_version"):
         installation = dict(existing)
         installation["last_error"] = message

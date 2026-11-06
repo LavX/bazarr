@@ -4381,6 +4381,56 @@ def test_catalog_refresh_caps_the_recorded_text_of_a_refused_plugin_manifest(
     assert rejected[0]["reason"] == scrub_text(message)[:200]
 
 
+def test_catalog_refresh_masks_a_credential_that_straddles_the_cap_in_a_refusal(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+
+    token = "Zq7Kx9Pw2Lm4Nv8Rt5Yh"
+    # "Bearer " ends at character 196, so the first four characters of the
+    # token sit inside the first 200 and the rest sit beyond them.
+    message = "x" * 188 + " Bearer " + token + " is not accepted"
+    assert message.index(token) == 196
+
+    def refusing_parse(manifest):
+        if manifest["id"] == "leakyhub":
+            raise ManifestValidationError(message)
+        return parse_plugin_manifest(manifest)
+
+    monkeypatch.setattr("provider_hub.service.parse_plugin_manifest", refusing_parse)
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("leakyhub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    reason = list_jobs()[-1]["details"]["rejected_plugins"][0]["reason"]
+    assert len(reason) <= 200
+    assert token[:4] not in reason
+    assert reason.startswith("x" * 188 + " Bearer ")
+
+
+@pytest.mark.parametrize("active_version", [None, "1.0.0"])
+def test_a_failed_install_caps_the_recorded_error_text(active_version):
+    from types import SimpleNamespace
+
+    from provider_hub.service import _failed_installation
+    from secret_store.scrub import scrub_text
+
+    message = "the worker stopped before it answered the check, so the install was not kept. " * 4
+    validated = SimpleNamespace(provider_id="examplehub", kind="subtitle_provider", name="Example Hub", raw={})
+    existing = {"active_version": active_version, "provider_id": "examplehub"}
+
+    installation = _failed_installation(validated, existing, RuntimeError(message), True)
+
+    assert len(installation["last_error"]) == 200
+    assert installation["last_error"] == scrub_text(message)[:200]
+
+
 def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_sources(
         tmp_path, monkeypatch, service_kind):
     from provider_hub.service import RESERVED_ID_REASON, add_catalog_source, list_catalog, refresh_catalog

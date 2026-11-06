@@ -23,6 +23,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
+from secret_store.scrub import scrub_text
+
 from .manifest import ManifestValidationError
 from .plugin_manifest import ANY_PLATFORM, PYTHON_BUNDLE, STDIO_WORKER, PluginManifest, parse_plugin_manifest
 from .versions import host_version_key, version_key
@@ -32,6 +34,18 @@ logger = logging.getLogger(__name__)
 # The runtimes this host can start. New runtimes are added here once the host can start them.
 # An entry that needs a runtime not listed here is refused on every host.
 AVAILABLE_RUNTIMES = frozenset({(PYTHON_BUNDLE, STDIO_WORKER)})
+
+# The most characters of validator or failure text that is recorded or shown.
+REFUSAL_TEXT_MAX_CHARS = 200
+
+
+def refusal_text(text: Any) -> str:
+    """Text for a record or a listing: scrubbed first, then cut.
+
+    The cut comes second so a credential is masked whole before any of it can
+    fall at the boundary, where a half of it would no longer match a pattern.
+    """
+    return scrub_text(str(text))[:REFUSAL_TEXT_MAX_CHARS]
 
 
 @dataclass(frozen=True)
@@ -139,7 +153,7 @@ def entry_compatibility(entry: dict[str, Any], host: HostFacts) -> tuple[bool, s
     try:
         plugin = parse_plugin_manifest(entry.get("manifest"))
     except ManifestValidationError as error:
-        return False, str(error)
+        return False, refusal_text(error)
     return evaluate(plugin, host)
 
 
