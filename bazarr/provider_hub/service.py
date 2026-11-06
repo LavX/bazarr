@@ -30,7 +30,10 @@ from .manifest import ManifestValidationError, manifest_provider_id, validate_ma
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
 from .bundle import verify_bundle_tree
-from .compatibility import HostFacts, current_host, entry_compatibility, refusal_text, select_entry
+from .compatibility import (
+    CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
+    select_entry,
+)
 from .migration import (
     MIGRATED_BUILT_IN_PROVIDER_IDS,
     OFFICIAL_CATALOG_PROVIDER_IDS,
@@ -73,9 +76,6 @@ ENABLED_PROVIDERS_NOT_SAVED = "the enabled providers list could not be saved to 
 
 SECRET_PLACEHOLDER = "********"
 _JOB_LOG_LIMIT = 200
-# The two lists a catalog holds: "providers" for subtitle providers, "plugins" for schema 2 plugin manifests.
-CATALOG_LIST_PROVIDERS = "providers"
-CATALOG_LIST_PLUGINS = "plugins"
 PLUGIN_MANIFEST_UNREADABLE_REASON = "This plugin manifest could not be read, so it was not stored."
 PLUGIN_KIND_CONFLICT_REASON = (
     "Another plugin in this catalog claims this id with a different kind, so this claim was not stored."
@@ -2466,6 +2466,22 @@ def _catalog_binding(
     return binding or (None, False)
 
 
+def _manifest_catalog_list(manifest: dict[str, Any], state: dict[str, Any], source_id: str | None) -> str:
+    """The catalog list the entry ``manifest`` equals is stored under.
+
+    A manifest no entry holds installs untrusted with no source and gets no updates,
+    so the list only needs a value: a schema 2 manifest is a plugin, anything else a provider.
+    """
+    provider_id = manifest_provider_id(manifest)
+    for entry in (state.get("catalog_entries") or {}).values():
+        if (isinstance(entry, dict) and isinstance(entry.get("manifest"), dict)
+                and entry.get("provider_id") == provider_id and entry.get("version") == manifest.get("version")
+                and (source_id is None or entry.get("source") == source_id)
+                and _trust_manifest(entry["manifest"]) == _trust_manifest(manifest)):
+            return entry.get("catalog_list") or CATALOG_LIST_PROVIDERS
+    return CATALOG_LIST_PLUGINS if manifest.get("schema_version") == 2 else CATALOG_LIST_PROVIDERS
+
+
 RESERVED_ID_REASON = (
     "The official catalog publishes this provider, so only the official catalog can "
     "install or update it."
@@ -2532,6 +2548,30 @@ def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path) -> No
         _remove_bundle_runtime_artifacts(bundle_path)
 
 
+def _catalog_list_field(catalog_list: str | None) -> dict[str, str]:
+    """The ``catalog_list`` key an installation row records, or nothing for a local package."""
+    return {"catalog_list": catalog_list} if catalog_list else {}
+
+
+def _installed_catalog_list(installation: dict[str, Any]) -> str:
+    """The catalog list an installation came from, which its updates are taken from.
+
+    New installations record it. A row stored before it was recorded has none, so it
+    is inferred from the manifest: a schema 2 manifest is listed in the plugins list
+    only and every other manifest in the providers list only, which makes the
+    inference exact. A row with no readable manifest defaults to providers, the list
+    every installation came from before the plugins list existed.
+    """
+    recorded = installation.get("catalog_list")
+    if recorded in (CATALOG_LIST_PROVIDERS, CATALOG_LIST_PLUGINS):
+        return recorded
+    for key in ("manifest", "staged_manifest"):
+        manifest = installation.get(key)
+        if isinstance(manifest, dict):
+            return CATALOG_LIST_PLUGINS if manifest.get("schema_version") == 2 else CATALOG_LIST_PROVIDERS
+    return CATALOG_LIST_PROVIDERS
+
+
 def _staged_installation(
     validated,
     existing,
@@ -2540,9 +2580,11 @@ def _staged_installation(
     source_trusted: bool,
     origin: str = "catalog",
     source_id: str | None = None,
+    catalog_list: str | None = None,
 ):
     existing = existing if isinstance(existing, dict) else {}
     return {
+        **_catalog_list_field(catalog_list),
         "provider_id": validated.provider_id,
         "kind": validated.kind,
         "name": validated.name,
@@ -2575,6 +2617,7 @@ def _failed_installation(
     source_trusted: bool,
     origin: str = "catalog",
     source_id: str | None = None,
+    catalog_list: str | None = None,
 ):
     existing = existing if isinstance(existing, dict) else {}
     message = refusal_text(error)
@@ -2589,6 +2632,7 @@ def _failed_installation(
         return installation
 
     return {
+        **_catalog_list_field(catalog_list),
         "provider_id": validated.provider_id,
         "kind": validated.kind,
         "name": validated.name,
@@ -2623,6 +2667,7 @@ def _stage_validated(
     catalog_url: str | None = None,
     install_timeout: float | None = None,
     checkpoint=None,
+    catalog_list: str | None = None,
 ) -> dict[str, Any]:
     """Shared install core: stage the bundle, build the venv, smoke-test, record.
 
@@ -2687,7 +2732,7 @@ def _stage_validated(
                 installations = state.setdefault("installations", {})
                 current = installations.get(validated.provider_id, existing)
                 installation = _failed_installation(
-                    validated, current, install_error, source_trusted, origin, source_id
+                    validated, current, install_error, source_trusted, origin, source_id, catalog_list
                 )
                 installations[validated.provider_id] = installation
                 return dict(installation)
@@ -2706,6 +2751,7 @@ def _stage_validated(
                 source_trusted,
                 origin,
                 source_id,
+                catalog_list,
             )
             installations[validated.provider_id] = installation
             # The plugin's secret paths join the persisted set now, so a
@@ -2764,8 +2810,10 @@ def stage_install(
     state = load_state()
     if isinstance(manifest, dict):
         source_id, source_trusted = _catalog_binding(manifest, state, source_id)
+        catalog_list = _manifest_catalog_list(manifest, state, source_id)
     else:
         source_id, source_trusted = None, False
+        catalog_list = CATALOG_LIST_PROVIDERS
     validated = validate_manifest(
         manifest,
         built_in_provider_ids=_validation_built_in_provider_ids(
@@ -2789,6 +2837,7 @@ def stage_install(
         catalog_url=catalog_url,
         install_timeout=install_timeout,
         checkpoint=checkpoint,
+        catalog_list=catalog_list,
     )
 
 
@@ -3146,14 +3195,15 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
             active_version = installation.get("active_version")
             if not active_version:
                 continue
+            catalog_list = _installed_catalog_list(installation)
             latest = _latest_catalog_manifest(
-                state, provider_id, active_version, _bound_source_id(installation)
+                state, provider_id, active_version, _bound_source_id(installation), catalog_list
             )
             refusal_floor = active_version
             if isinstance(latest, dict) and latest.get("version"):
                 refusal_floor = latest["version"]
             refusal = _refused_update_reason(
-                state, provider_id, refusal_floor, _bound_source_id(installation))
+                state, provider_id, refusal_floor, _bound_source_id(installation), catalog_list)
             if refusal:
                 refusals.append(f"{installation.get('name') or provider_id}: {refusal}")
             if not isinstance(latest, dict):
@@ -3189,10 +3239,13 @@ def _bound_source_id(installation: dict[str, Any]) -> str | None:
 
 def _latest_catalog_manifest(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
+    catalog_list: str | None = None,
 ) -> dict[str, Any] | None:
     """The newest version ``source_id`` lists for ``provider_id`` that this host can
     run. An install updates only from the source it is bound to, so an install with
-    none gets no update, and a reserved id is updated only from the official one."""
+    none gets no update, and a reserved id is updated only from the official one.
+    ``catalog_list`` is the list the install came from: a version that list holds is
+    never taken from the other one."""
     if source_id is None or _install_refusal(state, source_id, provider_id):
         return None
     host = current_host()
@@ -3211,12 +3264,13 @@ def _latest_catalog_manifest(
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
-        usable=usable, source_id=source_id, above_version=active_version)
+        usable=usable, source_id=source_id, above_version=active_version, catalog_list=catalog_list)
     return entry["manifest"] if entry else None
 
 
 def _refused_update_reason(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
+    catalog_list: str | None = None,
 ) -> str | None:
     """The host refusal of the newest refused version ``source_id`` lists for ``provider_id``
     above ``active_version``, or None when no refused version is above it. Callers pass the
@@ -3230,7 +3284,7 @@ def _refused_update_reason(
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
-        usable=refused, source_id=source_id, above_version=active_version)
+        usable=refused, source_id=source_id, above_version=active_version, catalog_list=catalog_list)
     return _host_refusal(entry, host) if entry else None
 
 
@@ -3243,11 +3297,13 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
         return _redact_installation(provider)
     state = load_state()
     source_id = _bound_source_id(provider)
+    catalog_list = _installed_catalog_list(provider)
     manifest = _latest_catalog_manifest(
         state,
         provider_id,
         provider.get("active_version") or provider.get("staged_version"),
         source_id,
+        catalog_list,
     )
     if not isinstance(manifest, dict):
         target_name = provider.get("name") or provider_id
@@ -3256,6 +3312,7 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
             provider_id,
             provider.get("active_version") or provider.get("staged_version"),
             source_id,
+            catalog_list,
         ) or "No update manifest is available"
         with record_job(
             "stage_update",

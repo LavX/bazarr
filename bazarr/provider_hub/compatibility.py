@@ -31,6 +31,11 @@ from .versions import host_version_key, version_key
 
 logger = logging.getLogger(__name__)
 
+# The two lists a catalog holds: "providers" for subtitle providers, "plugins" for schema 2 plugin manifests.
+# An entry stored before the plugins list existed carries no list and came from providers.
+CATALOG_LIST_PROVIDERS = "providers"
+CATALOG_LIST_PLUGINS = "plugins"
+
 # The runtimes this host can start. New runtimes are added here once the host can start them.
 # An entry that needs a runtime not listed here is refused on every host.
 AVAILABLE_RUNTIMES = frozenset({(PYTHON_BUNDLE, STDIO_WORKER)})
@@ -169,25 +174,46 @@ def select_entry(
     usable: Callable[[dict[str, Any]], bool],
     source_id: str | None = None,
     above_version: Any = None,
+    catalog_list: str | None = None,
 ) -> dict[str, Any] | None:
     """The highest version of ``plugin_id`` among the entries ``usable`` accepts.
 
     ``source_id`` limits the choice to one catalog source, which is how an
     installed plugin stays bound to the source it came from. ``above_version``
     keeps only strictly newer versions, which is what an update needs.
+
+    ``catalog_list`` is the list the installed plugin came from. A source can
+    list one id and version in both lists with different manifests, so for a
+    version the plugin's own list holds, the other list's copy is never chosen,
+    usable or not. A version only the other list holds is still offered.
     """
     floor = version_key(above_version) if above_version is not None else None
-    best: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+    candidates: list[tuple[Any, dict[str, Any]]] = []
+    own_versions: set[tuple[Any, Any]] = set()
     for entry in entries:
         if not isinstance(entry, dict) or entry_plugin_id(entry) != plugin_id:
             continue
         if source_id is not None and entry.get("source") != source_id:
             continue
         key = version_key((entry.get("manifest") or {}).get("version") or entry.get("version"))
-        if key is None or (floor is not None and key <= floor):
+        if key is None:
+            continue
+        if catalog_list is not None and _entry_list(entry) == catalog_list:
+            own_versions.add((entry.get("source"), key))
+        candidates.append((key, entry))
+    best: tuple[Any, dict[str, Any]] | None = None
+    for key, entry in candidates:
+        if floor is not None and key <= floor:
+            continue
+        if catalog_list is not None and _entry_list(entry) != catalog_list \
+                and (entry.get("source"), key) in own_versions:
             continue
         if not usable(entry):
             continue
         if best is None or key > best[0]:
             best = (key, entry)
     return best[1] if best else None
+
+
+def _entry_list(entry: dict[str, Any]) -> str:
+    return entry.get("catalog_list") or CATALOG_LIST_PROVIDERS
