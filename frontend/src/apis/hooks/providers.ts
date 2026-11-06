@@ -12,6 +12,27 @@ export function useSystemProviders(history?: boolean) {
   });
 }
 
+export function useFlareSolverrStatus() {
+  return useQuery({
+    queryKey: [QueryKeys.System, QueryKeys.Providers, "flaresolverr"],
+    queryFn: () => api.providers.flaresolverr(),
+    retry: false,
+  });
+}
+
+export function useFlareSolverrDetect() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.providers.detectFlaresolverr(),
+    onSuccess: (status) => {
+      client.setQueryData(
+        [QueryKeys.System, QueryKeys.Providers, "flaresolverr"],
+        status,
+      );
+    },
+  });
+}
+
 // The manual searches run as standard jobs: the request queues one and the
 // query follows it to its rows. Closing the modal does not stop the job, and
 // pressing Search again for the same item follows the search that is running.

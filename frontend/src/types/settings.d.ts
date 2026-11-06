@@ -7,6 +7,10 @@ interface Settings {
     metadata_revision: string;
     locale: string;
   };
+  /** Host-wide service addresses, one `<capability>_url` key each. */
+  endpoints?: {
+    flaresolverr_v1_url: string;
+  };
   log: Settings.Log;
   proxy: Settings.Proxy;
   auth: Settings.Auth;
