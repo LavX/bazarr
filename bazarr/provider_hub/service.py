@@ -2583,8 +2583,18 @@ def _staged_installation(
     catalog_list: str | None = None,
 ):
     existing = existing if isinstance(existing, dict) else {}
+    previous = {}
+    if existing.get("active_version"):
+        # A staged update replaces the recorded list with the new version's. The
+        # list the active version came from is kept so a failed activation can
+        # put it back. Staging over a staged update keeps the first one.
+        restaged = existing.get("pending_restart") and existing.get("state") == "staged"
+        previous_list = existing.get("previous_catalog_list") if restaged else existing.get("catalog_list")
+        if previous_list:
+            previous = {"previous_catalog_list": previous_list}
     return {
         **_catalog_list_field(catalog_list),
+        **previous,
         "provider_id": validated.provider_id,
         "kind": validated.kind,
         "name": validated.name,
@@ -2799,18 +2809,21 @@ def _discard_stopped_install(paths, existing) -> None:
 
 def stage_install(
     manifest: dict[str, Any], install_timeout: float | None = None, checkpoint=None,
-    source_id: str | None = None,
+    source_id: str | None = None, catalog_list: str | None = None,
 ) -> dict[str, Any]:
     """Install ``manifest``, bound to the catalog entry Bazarr+ holds for it.
 
     ``source_id`` names the source whose entry it is; without it, the entry whose
     manifest equals this one binds it. A manifest no entry holds installs
-    untrusted with no source, so it gets no updates.
+    untrusted with no source, so it gets no updates. ``catalog_list`` is the list
+    the caller already resolved the entry from; without it the list is found by
+    matching the manifest against the stored entries.
     """
     state = load_state()
     if isinstance(manifest, dict):
         source_id, source_trusted = _catalog_binding(manifest, state, source_id)
-        catalog_list = _manifest_catalog_list(manifest, state, source_id)
+        if catalog_list not in (CATALOG_LIST_PROVIDERS, CATALOG_LIST_PLUGINS):
+            catalog_list = _manifest_catalog_list(manifest, state, source_id)
     else:
         source_id, source_trusted = None, False
         catalog_list = CATALOG_LIST_PROVIDERS
@@ -2942,7 +2955,11 @@ def install_catalog_entry(
     the source lists the same id and version in both catalog lists.
     """
     _key, entry = _requested_entry(load_state(), source_id, provider_id, version, entry_key=entry_key)
-    return stage_install(entry["manifest"], checkpoint=checkpoint, source_id=source_id)
+    # An entry stored before the plugins list existed carries no list and came from providers.
+    return stage_install(
+        entry["manifest"], checkpoint=checkpoint, source_id=source_id,
+        catalog_list=entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+    )
 
 
 def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[str, Any]:
@@ -3056,6 +3073,13 @@ def activate_staged_installations() -> list[str]:
                 _smoke_validate_worker(manifest, staged_bundle_path, Path(staged_python_path))
             except Exception as error:
                 installation["last_error"] = refusal_text(error)
+                # Back on the old version, so back on the list it came from.
+                previous_list = installation.pop("previous_catalog_list", None)
+                if installation.get("active_version"):
+                    if previous_list:
+                        installation["catalog_list"] = previous_list
+                    else:
+                        installation.pop("catalog_list", None)
                 installation["staged_version"] = None
                 installation["staged_path"] = None
                 installation["staged_python_path"] = None
@@ -3081,6 +3105,7 @@ def activate_staged_installations() -> list[str]:
             installation["staged_path"] = None
             installation["staged_python_path"] = None
             installation["staged_manifest"] = None
+            installation.pop("previous_catalog_list", None)
             installation["manifest"] = manifest.raw
             installation["state"] = "active"
             installation["pending_restart"] = False

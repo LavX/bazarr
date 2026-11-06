@@ -7950,6 +7950,130 @@ def test_an_install_records_the_catalog_list_of_the_entry_it_installed(tmp_path,
     assert (row["name"], row["catalog_list"]) == (name, list_name)
 
 
+@pytest.mark.parametrize("list_name", ["plugins", "providers"])
+def test_an_install_hands_the_pinned_entrys_list_to_the_staging_step(tmp_path, monkeypatch, list_name):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, _plugin, legacy_key, plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    seen = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: seen.append(kwargs.get("catalog_list")) or {"state": "staged"})
+
+    service.install_catalog_entry("community", "movedhub", "1.0.0",
+                                  entry_key=plugin_key if list_name == "plugins" else legacy_key)
+
+    assert seen == [list_name]
+
+
+def test_an_install_of_an_entry_stored_without_a_list_is_recorded_as_a_providers_install(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, _plugin, legacy_key, _plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    state = load_state()
+    del state["catalog_entries"][legacy_key]["catalog_list"]
+    save_state(state)
+    seen = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: seen.append(kwargs.get("catalog_list")) or {"state": "staged"})
+
+    service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=legacy_key)
+
+    assert seen == ["providers"]
+
+
+def test_staging_an_update_keeps_the_list_the_active_version_came_from(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    _patch_local_install_env(monkeypatch, tmp_path)
+    legacy, _plugin, _legacy_key, _plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    update = provider_manifest_v2("movedhub", name="Plugin update", version="1.1.0")
+    state = load_state()
+    state["catalog_entries"].update(_listed("community", "plugins", update))
+    state["installations"]["movedhub"] = {
+        "provider_id": "movedhub", "name": "Movedhub", "state": "active", "pending_restart": False,
+        "active_version": "1.0.0", "source_bound": True, "source_id": "community",
+        "catalog_list": "providers", "manifest": legacy}
+    save_state(state)
+
+    service.install_catalog_entry("community", "movedhub", "1.1.0",
+                                  entry_key="community:plugins:movedhub:1.1.0")
+
+    row = load_state()["installations"]["movedhub"]
+    assert (row["catalog_list"], row["previous_catalog_list"]) == ("plugins", "providers")
+    assert row["manifest"] == legacy
+
+
+def _staged_cross_list_update(**row):
+    return {"movedhub": {
+        "provider_id": "movedhub", "name": "Movedhub", "state": "staged", "pending_restart": True,
+        "active_version": "1.0.0", "staged_version": "1.1.0", "active_path": "/old/bundle",
+        "python_path": "/old/python", "staged_path": "/new/bundle", "staged_python_path": "/new/python",
+        "source_bound": True, "source_id": "community", "catalog_list": "plugins",
+        "manifest": _manifest(provider_id="movedhub"),
+        "staged_manifest": provider_manifest_v2("movedhub", version="1.1.0"), **row}}
+
+
+def test_a_failed_activation_puts_back_the_list_of_the_version_it_rolls_back_to(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update(previous_catalog_list="providers"))
+
+    def refuse(manifest, bundle_path, python_path):
+        raise service.ProviderHubInstallError("the worker did not start")
+
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr(service, "_smoke_validate_worker", refuse)
+
+    assert service.activate_staged_installations() == []
+
+    row = load_state()["installations"]["movedhub"]
+    assert (row["state"], row["active_version"], row["staged_version"]) == ("active", "1.0.0", None)
+    assert row["catalog_list"] == "providers"
+    assert "previous_catalog_list" not in row
+    assert service._installed_catalog_list(row) == "providers"
+
+
+def test_a_failed_activation_of_an_update_with_no_earlier_list_leaves_the_list_to_the_manifest(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update())
+
+    def refuse(manifest, bundle_path, python_path):
+        raise service.ProviderHubInstallError("the worker did not start")
+
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr(service, "_smoke_validate_worker", refuse)
+
+    assert service.activate_staged_installations() == []
+
+    row = load_state()["installations"]["movedhub"]
+    assert "catalog_list" not in row
+    assert service._installed_catalog_list(row) == "providers"
+
+
+def test_an_activated_cross_list_update_keeps_the_new_list(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update(previous_catalog_list="providers"))
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr(service, "_smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+
+    assert service.activate_staged_installations() == ["movedhub"]
+
+    row = load_state()["installations"]["movedhub"]
+    assert (row["state"], row["active_version"], row["catalog_list"]) == ("active", "1.1.0", "plugins")
+    assert "previous_catalog_list" not in row
+
+
 def test_an_install_request_with_a_key_that_names_another_entry_is_refused(tmp_path, monkeypatch):
     from provider_hub import service
     from provider_hub.state import load_state, save_state
