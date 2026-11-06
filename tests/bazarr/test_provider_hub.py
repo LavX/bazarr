@@ -4349,6 +4349,38 @@ def test_catalog_refresh_records_the_refusal_of_a_plugin_the_host_cannot_run(tmp
     assert [record["reason"] for record in rejected] == ["runtime python run as daemon is not a supported combination"]
 
 
+def test_catalog_refresh_caps_the_recorded_text_of_a_refused_plugin_manifest(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+    from secret_store.scrub import scrub_text
+
+    message = "settings field token has an unsupported type, which this Bazarr+ does not read. " * 4
+
+    def refusing_parse(manifest):
+        if manifest["id"] == "longhub":
+            raise ManifestValidationError(message)
+        return parse_plugin_manifest(manifest)
+
+    monkeypatch.setattr("provider_hub.service.parse_plugin_manifest", refusing_parse)
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("longhub")}, {"manifest": service_manifest("siblinghub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:siblinghub:1.0.0"]
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert len(rejected) == 1
+    assert len(rejected[0]["reason"]) <= 200
+    assert rejected[0]["reason"] == scrub_text(message)[:200]
+
+
 def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_sources(
         tmp_path, monkeypatch, service_kind):
     from provider_hub.service import RESERVED_ID_REASON, add_catalog_source, list_catalog, refresh_catalog

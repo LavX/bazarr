@@ -91,6 +91,7 @@ PLUGIN_KIND_MISMATCH_REASON = (
 PLUGIN_IN_PROVIDERS_LIST_REASON = (
     "A schema 2 manifest belongs in the plugins list, so it was not stored from the providers list."
 )
+REFUSAL_TEXT_MAX_CHARS = 200
 
 
 def utcnow_iso() -> str:
@@ -1344,7 +1345,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         parsed = parse_plugin_manifest(manifest)
                     except ManifestValidationError as error:
                         rejected_plugins.append(_rejected_plugin(
-                            source, manifest, scrub_text(str(error))))
+                            source, manifest, scrub_text(str(error))[:REFUSAL_TEXT_MAX_CHARS]))
                         continue
                     except Exception:
                         rejected_plugins.append(_rejected_plugin(
