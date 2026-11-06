@@ -477,7 +477,8 @@ def hub_catalog(tmp_path, monkeypatch):
         "url": "https://github.com/owner/repo/blob/main/catalog.json"}
     state["catalog_entries"]["community:examplehub:1.0.0"] = {
         "source": "community", "provider_id": "examplehub", "name": "Example", "version": "1.0.0",
-        "manifest": {"provider_id": "examplehub", "name": "Example", "version": "1.0.0"}}
+        "manifest": {"schema_version": 1, "api_version": "bazarr.provider-hub.v1",
+                     "provider_id": "examplehub", "name": "Example", "version": "1.0.0"}}
     save_state(state)
 
 
@@ -493,7 +494,7 @@ def test_install_is_queued_and_answers_at_once(queue, hub_catalog, monkeypatch):
     assert job.job_name == "Installing provider Example"
     assert (job.module, job.func) == ("provider_hub.jobs", "install_provider")
     assert job.kwargs == {"source_id": "community", "provider_id": "examplehub", "version": "1.0.0",
-                          "name": "Example"}
+                          "name": "Example", "entry_key": "community:examplehub:1.0.0"}
 
 
 def test_an_install_naming_no_catalog_entry_is_refused_and_queues_nothing(queue, hub_catalog):
