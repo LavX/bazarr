@@ -11,13 +11,17 @@ hostile or stale feed can cause is a result, never an exception.
 Trust model
 -----------
 * One or more root keys are baked into the host and passed in by the caller.
-  A root key never signs a catalog. It only certifies CI signing keys and
+  A root key never signs a catalog. It only vouches for the CI signing key list and
   revokes them.
-* The key file lists CI signing keys, each carrying a root certification, and
-  root-signed revocations. A CI key counts only when a trusted root certified
-  it. A revocation counts only when a trusted root signed it, so a stolen CI
-  key cannot revoke anything and a forged revocation is ignored.
-* A catalog is signed by a certified CI key over its exact bytes. The signed
+* The key file lists CI signing keys and revocations. A trusted root signs the
+  whole file (keys and revocations together) and numbers it with a
+  ``key_file_version`` that only goes up. A CI key counts only when it is in a
+  key file a trusted root signed, and a revocation counts only inside such a
+  file, so a stolen CI key cannot revoke anything and a revocation cannot be
+  stripped out of a signed file. The caller passes the highest key file version
+  it has accepted; an older file is refused (``KEY_FILE_ROLLBACK``), which
+  stops a replayed older file, or an emptier one, from hiding a revocation.
+* A catalog is signed by a listed CI key over its exact bytes. The signed
   document carries its own channel, a per-channel ``signed_version`` counter, a
   signing time (``not_before``) and an expiry.
 * A revoked key is rejected outright, for every catalog it signed, whatever
@@ -25,7 +29,8 @@ Trust model
   no date comparison can be trusted. Recovery is re-signing with a new key.
 
 Checks run in this order and the first failure decides the status: unsigned,
-malformed input, bad signature or broken chain, revoked key, channel mismatch,
+malformed input, key file not signed by a trusted root, key file rollback,
+bad signature, revoked key, channel mismatch,
 validity window, then the freshness rules below. Input is parsed strictly:
 UTF-8 only, duplicate JSON object keys refused, timestamps and key ids ASCII.
 
@@ -71,7 +76,7 @@ import hashlib
 import json
 import re
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -89,6 +94,7 @@ class Status(StrEnum):
     UNSIGNED = "unsigned"
     MALFORMED = "malformed"
     BAD_SIGNATURE = "bad_signature"
+    KEY_FILE_ROLLBACK = "key_file_rollback"
     REVOKED_KEY = "revoked_key"
     CHANNEL_MISMATCH = "channel_mismatch"
     NOT_YET_VALID = "not_yet_valid"
@@ -108,7 +114,9 @@ class CounterVerdict(StrEnum):
 class VerificationResult:
     """Outcome of ``verify_catalog``.
 
-    ``signer_key_id`` and ``root_key_id`` are set once a signature checked out.
+    ``root_key_id`` and ``key_file_version`` are set once the key file's root
+    signature checked out. ``signer_key_id`` is set once a catalog signature
+    checked out.
     The signed metadata fields (``channel``, ``signed_version``, ``not_before``,
     ``expires``) are set only after the signature and revocation checks pass,
     so they are never taken from unverified bytes. ``host_time`` is the ``now``
@@ -119,6 +127,7 @@ class VerificationResult:
     detail: str = ""
     signer_key_id: str | None = None
     root_key_id: str | None = None
+    key_file_version: int | None = None
     channel: str | None = None
     signed_version: int | None = None
     not_before: datetime | None = None
@@ -179,26 +188,24 @@ class WireFormatError(ValueError):
 
 
 @dataclass(frozen=True)
-class CertifiedKey:
+class SigningKey:
     key_id: str
     public_key: bytes
     added: str
-    root_key_id: str
-    certification: bytes
 
 
 @dataclass(frozen=True)
 class Revocation:
     key_id: str
-    revoked_at: datetime
-    revoked_at_text: str
-    root_key_id: str
-    signature: bytes
+    revoked_at: str
 
 
 @dataclass(frozen=True)
 class KeyFile:
-    keys: tuple[CertifiedKey, ...]
+    version: int
+    root_key_id: str
+    signature: bytes
+    keys: tuple[SigningKey, ...]
     revocations: tuple[Revocation, ...]
 
 
@@ -223,22 +230,44 @@ class WireDocuments:
     metadata: SignedMetadata
 
 
-_CERTIFICATION_CONTEXT = b"bazarr-catalog-key-certification-v1\n"
-_REVOCATION_CONTEXT = b"bazarr-catalog-key-revocation-v1\n"
+_KEY_FILE_CONTEXT = b"bazarr-catalog-key-file-v1\n"
 _ENVELOPE_SCHEMA_VERSION = 1
 _ALGORITHM = "ed25519"
 _KEY_ID_RE = re.compile(r"[0-9a-f]{16}", re.ASCII)
 _TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
 
 
-def certification_statement(signing_key_id: str, public_key: bytes) -> bytes:
-    """The bytes a root key signs to certify a CI signing key."""
-    return _CERTIFICATION_CONTEXT + signing_key_id.encode("ascii") + b"\n" + public_key.hex().encode("ascii")
+def key_file_statement(
+    root_key_id: str,
+    key_file_version: int,
+    keys: Iterable[Mapping[str, str]],
+    revocations: Iterable[Mapping[str, str]],
+) -> bytes:
+    """The bytes a root key signs to vouch for a whole key file.
 
-
-def revocation_statement(revoked_key_id: str, revoked_at: str) -> bytes:
-    """The bytes a root key signs to revoke a CI signing key from ``revoked_at`` on."""
-    return _REVOCATION_CONTEXT + revoked_key_id.encode("ascii") + b"\n" + revoked_at.encode("ascii")
+    Covers the root key id, the version, every signing key (``key_id``,
+    ``public_key`` as base64, ``added``) and every revocation (``key_id``,
+    ``revoked_at``). Entries are sorted by key id, so the order in the file does
+    not matter, and the encoding is canonical JSON so whitespace does not
+    matter either.
+    """
+    body = {
+        "root_key_id": root_key_id,
+        "key_file_version": key_file_version,
+        "keys": sorted(
+            (
+                {"added": k["added"], "algorithm": _ALGORITHM, "key_id": k["key_id"], "public_key": k["public_key"]}
+                for k in keys
+            ),
+            key=lambda k: k["key_id"],
+        ),
+        "revocations": sorted(
+            ({"key_id": r["key_id"], "revoked_at": r["revoked_at"]} for r in revocations),
+            key=lambda r: (r["key_id"], r["revoked_at"]),
+        ),
+    }
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return _KEY_FILE_CONTEXT + encoded.encode("ascii")
 
 
 def parse_wire_format(key_file: Any, envelope: Any, catalog: bytes) -> WireDocuments:
@@ -252,11 +281,12 @@ def parse_wire_format(key_file: Any, envelope: Any, catalog: bytes) -> WireDocum
 
     Raises ``WireFormatError`` on any deviation.
 
-    Key file: ``{"keys": [{"key_id", "algorithm", "public_key", "added",
-    "certification": {"root_key_id", "signature"}}], "revocations": [{"key_id",
-    "revoked_at", "root_key_id", "signature"}]}``. ``revocations`` may be
-    absent. Public keys and signatures are base64. Unknown extra fields are
-    ignored.
+    Key file: ``{"key_file_version": 1, "root_key_id", "signature", "keys":
+    [{"key_id", "algorithm", "public_key", "added"}], "revocations":
+    [{"key_id", "revoked_at"}]}``. ``revocations`` may be absent. Public keys
+    and the signature are base64. The root signs ``key_file_statement`` over the
+    whole file. Unknown extra fields are ignored (and so are not covered by the
+    signature).
 
     Envelope: ``{"schema_version": 1, "signatures": [{"algorithm": "ed25519",
     "key_id", "signature"}]}`` with at least one 64-byte signature over the
@@ -351,7 +381,10 @@ def _object_list(container: Mapping[str, Any], name: str, what: str, *, required
 
 
 def _parse_key_file(document: Mapping[str, Any]) -> KeyFile:
-    keys: list[CertifiedKey] = []
+    version = document.get("key_file_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise WireFormatError("key_file_version must be a positive integer")
+    keys: list[SigningKey] = []
     seen: set[str] = set()
     for entry in _object_list(document, "keys", "key file", required=True):
         if entry.get("algorithm") != _ALGORITHM:
@@ -363,31 +396,19 @@ def _parse_key_file(document: Mapping[str, Any]) -> KeyFile:
         if kid in seen:
             raise WireFormatError(f"key {kid} is listed twice")
         seen.add(kid)
-        certification = entry.get("certification")
-        if not isinstance(certification, Mapping):
-            raise WireFormatError(f"key {kid} needs a certification")
-        keys.append(
-            CertifiedKey(
-                key_id=kid,
-                public_key=public_key,
-                added=_text(entry, "added", "signing key"),
-                root_key_id=_key_id_field(certification, "root_key_id", "certification"),
-                certification=_base64_field(certification, "signature", "certification", 64),
-            )
-        )
+        keys.append(SigningKey(key_id=kid, public_key=public_key, added=_text(entry, "added", "signing key")))
     revocations: list[Revocation] = []
     for entry in _object_list(document, "revocations", "key file", required=False):
-        revoked_at_text = _text(entry, "revoked_at", "revocation")
-        revocations.append(
-            Revocation(
-                key_id=_key_id_field(entry, "key_id", "revocation"),
-                revoked_at=_timestamp(revoked_at_text, "revoked_at"),
-                revoked_at_text=revoked_at_text,
-                root_key_id=_key_id_field(entry, "root_key_id", "revocation"),
-                signature=_base64_field(entry, "signature", "revocation", 64),
-            )
-        )
-    return KeyFile(keys=tuple(keys), revocations=tuple(revocations))
+        revoked_at = _text(entry, "revoked_at", "revocation")
+        _timestamp(revoked_at, "revoked_at")
+        revocations.append(Revocation(key_id=_key_id_field(entry, "key_id", "revocation"), revoked_at=revoked_at))
+    return KeyFile(
+        version=version,
+        root_key_id=_key_id_field(document, "root_key_id", "key file"),
+        signature=_base64_field(document, "signature", "key file", 64),
+        keys=tuple(keys),
+        revocations=tuple(revocations),
+    )
 
 
 def _parse_envelope(document: Mapping[str, Any]) -> tuple[SignatureEntry, ...]:
@@ -444,6 +465,7 @@ def verify_catalog(
     channel: str,
     now: datetime,
     stored_counter: int | None = None,
+    stored_key_file_version: int | None = None,
     host_build_time: datetime | None = None,
     baked: bool = False,
 ) -> VerificationResult:
@@ -457,6 +479,10 @@ def verify_catalog(
     for; the signed document must name the same one. ``now`` and
     ``host_build_time`` are timezone-aware datetimes. ``stored_counter`` is the
     last ``signed_version`` accepted for that channel, if any.
+    ``stored_key_file_version`` is the highest ``key_file_version`` the caller
+    has accepted, if any; an older key file is refused. It is checked in baked
+    mode too, so a caller verifying a baked catalog against the image's older
+    key file should pass ``None`` or the image's own version.
 
     Expected failures come back as a result with a non-OK status. Passing a
     naive datetime is a programming error and raises ``ValueError``.
@@ -474,27 +500,53 @@ def verify_catalog(
         return VerificationResult(Status.MALFORMED, str(exc), host_time=now, baked=baked)
 
     metadata = wire.metadata
-    signer, revoked, problems = _find_signer(data, wire, roots)
+    key_file_doc = wire.key_file
+
+    def early(status: Status, detail: str, **fields: Any) -> VerificationResult:
+        return VerificationResult(status, detail, host_time=now, baked=baked, **fields)
+
+    root = roots.get(key_file_doc.root_key_id)
+    statement = key_file_statement(
+        key_file_doc.root_key_id,
+        key_file_doc.version,
+        [{"key_id": k.key_id, "public_key": base64.b64encode(k.public_key).decode("ascii"), "added": k.added} for k in key_file_doc.keys],
+        [{"key_id": r.key_id, "revoked_at": r.revoked_at} for r in key_file_doc.revocations],
+    )
+    if root is None or not _ed25519_verify(root, key_file_doc.signature, statement):
+        return early(Status.BAD_SIGNATURE, "the key file is not signed by a trusted root")
+    if stored_key_file_version is not None and key_file_doc.version < stored_key_file_version:
+        return early(
+            Status.KEY_FILE_ROLLBACK,
+            f"key file version {key_file_doc.version} is older than the accepted {stored_key_file_version}",
+            root_key_id=key_file_doc.root_key_id,
+            key_file_version=key_file_doc.version,
+        )
+
+    signer, revoked, problems = _find_signer(data, key_file_doc, wire.signatures)
     if signer is None:
         if revoked is not None:
-            revoked_key, revocation = revoked
-            return VerificationResult(
+            return early(
                 Status.REVOKED_KEY,
-                f"key {revoked_key.key_id} was revoked at {revocation.revoked_at_text}",
-                signer_key_id=revoked_key.key_id,
-                root_key_id=revoked_key.root_key_id,
-                host_time=now,
-                baked=baked,
+                f"key {revoked.key_id} is revoked",
+                signer_key_id=revoked.key_id,
+                root_key_id=key_file_doc.root_key_id,
+                key_file_version=key_file_doc.version,
             )
         detail = "; ".join(problems) if problems else "no signature checked out"
-        return VerificationResult(Status.BAD_SIGNATURE, detail, host_time=now, baked=baked)
+        return early(
+            Status.BAD_SIGNATURE,
+            detail,
+            root_key_id=key_file_doc.root_key_id,
+            key_file_version=key_file_doc.version,
+        )
 
     def result(status: Status, detail: str = "", counter: CounterVerdict | None = None) -> VerificationResult:
         return VerificationResult(
             status,
             detail,
             signer_key_id=signer.key_id,
-            root_key_id=signer.root_key_id,
+            root_key_id=key_file_doc.root_key_id,
+            key_file_version=key_file_doc.version,
             channel=metadata.channel,
             signed_version=metadata.signed_version,
             not_before=metadata.not_before,
@@ -563,50 +615,29 @@ def _ed25519_verify(public_key: bytes, signature: bytes, data: bytes) -> bool:
 
 def _find_signer(
     data: bytes,
-    wire: WireDocuments,
-    roots: Mapping[str, bytes],
-) -> tuple[CertifiedKey | None, tuple[CertifiedKey, Revocation] | None, list[str]]:
+    key_file: KeyFile,
+    signatures: tuple[SignatureEntry, ...],
+) -> tuple[SigningKey | None, SigningKey | None, list[str]]:
     """Return ``(signer, revoked, problems)``.
 
-    ``signer`` is a certified, unrevoked key whose signature over ``data``
-    verifies. ``revoked`` is set only when no such key exists but a certified
-    key did sign validly and is revoked, whatever date the catalog claims; it
-    holds the key and the revocation that applies.
+    ``signer`` is a listed, unrevoked key whose signature over ``data``
+    verifies. ``revoked`` is set only when no such key exists but a listed key
+    did sign validly and is revoked, whatever date the catalog claims.
     """
-    keys = {entry.key_id: entry for entry in wire.key_file.keys}
-    revoked_signer: tuple[CertifiedKey, Revocation] | None = None
+    keys = {entry.key_id: entry for entry in key_file.keys}
+    revoked_ids = {entry.key_id for entry in key_file.revocations}
+    revoked_signer: SigningKey | None = None
     problems: list[str] = []
-    for entry in wire.signatures:
+    for entry in signatures:
         key = keys.get(entry.key_id)
         if key is None:
             problems.append(f"key {entry.key_id} is not in the key file")
             continue
-        root = roots.get(key.root_key_id)
-        if root is None or not _ed25519_verify(root, key.certification, certification_statement(key.key_id, key.public_key)):
-            problems.append(f"key {key.key_id} is not certified by a trusted root")
-            continue
         if not _ed25519_verify(key.public_key, entry.signature, data):
             problems.append(f"signature by {key.key_id} does not match the catalog")
             continue
-        revocation = _applicable_revocation(key.key_id, wire.key_file.revocations, roots)
-        if revocation is not None:
-            revoked_signer = revoked_signer or (key, revocation)
+        if key.key_id in revoked_ids:
+            revoked_signer = revoked_signer or key
             continue
         return key, None, problems
     return None, revoked_signer, problems
-
-
-def _applicable_revocation(
-    signing_key_id: str,
-    revocations: tuple[Revocation, ...],
-    roots: Mapping[str, bytes],
-) -> Revocation | None:
-    for revocation in revocations:
-        if revocation.key_id != signing_key_id:
-            continue
-        root = roots.get(revocation.root_key_id)
-        if root is not None and _ed25519_verify(
-            root, revocation.signature, revocation_statement(revocation.key_id, revocation.revoked_at_text)
-        ):
-            return revocation
-    return None

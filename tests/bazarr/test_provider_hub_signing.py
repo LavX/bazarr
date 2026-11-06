@@ -13,11 +13,10 @@ from provider_hub.signing import (
     CounterVerdict,
     Status,
     WireFormatError,
-    certification_statement,
     compare_counter,
+    key_file_statement,
     key_id,
     parse_wire_format,
-    revocation_statement,
     verify_catalog,
 )
 
@@ -52,35 +51,36 @@ class Keys:
         self.ci_id = key_id(self.ci_public)
         self.roots = {self.root_id: self.root_public}
 
-    def entry(self, private=None, certifier=None):
-        private = private or self.ci
-        certifier = certifier or self.root
-        public = raw_public(private)
-        kid = key_id(public)
+    def entry(self, private=None):
+        public = raw_public(private or self.ci)
         return {
-            "key_id": kid,
+            "key_id": key_id(public),
             "algorithm": "ed25519",
             "public_key": b64(public),
             "added": "2026-10-01",
-            "certification": {
-                "root_key_id": key_id(raw_public(certifier)),
-                "signature": b64(certifier.sign(certification_statement(kid, public))),
-            },
         }
 
-    def revocation(self, revoked_at, kid=None, signer=None):
+    def revocation(self, revoked_at, kid=None):
+        return {"key_id": kid or self.ci_id, "revoked_at": stamp(revoked_at)}
+
+    def sign_key_file(self, document, signer=None):
+        """Sign the document's current keys and revocations as the root."""
         signer = signer or self.root
-        kid = kid or self.ci_id
-        text = stamp(revoked_at)
-        return {
-            "key_id": kid,
-            "revoked_at": text,
-            "root_key_id": key_id(raw_public(signer)),
-            "signature": b64(signer.sign(revocation_statement(kid, text))),
-        }
+        root_id = key_id(raw_public(signer))
+        document["root_key_id"] = root_id
+        statement = key_file_statement(
+            root_id, document["key_file_version"], document["keys"], document.get("revocations", [])
+        )
+        document["signature"] = b64(signer.sign(statement))
+        return document
 
-    def key_file(self, revocations=(), extra=()):
-        return {"keys": [self.entry(), *extra], "revocations": list(revocations)}
+    def key_file(self, revocations=(), extra=(), version=1, signer=None):
+        document = {
+            "key_file_version": version,
+            "keys": [self.entry(), *extra],
+            "revocations": list(revocations),
+        }
+        return self.sign_key_file(document, signer)
 
 
 def catalog_bytes(channel="main", version=10, not_before=SIGNED_AT, expires=EXPIRES, **extra):
@@ -210,63 +210,70 @@ def test_signature_from_a_key_missing_from_the_key_file(keys):
     assert "not in the key file" in result.detail
 
 
-def test_key_certified_by_an_untrusted_root_is_rejected(keys):
+def test_key_file_signed_by_an_untrusted_root_is_rejected(keys):
     data = catalog_bytes()
     other_root = Ed25519PrivateKey.generate()
-    key_file = {"keys": [keys.entry(certifier=other_root)], "revocations": []}
 
-    result = verify(keys, data, key_file=key_file)
+    result = verify(keys, data, key_file=keys.key_file(signer=other_root))
 
     assert result.status is Status.BAD_SIGNATURE
-    assert "not certified by a trusted root" in result.detail
+    assert "key file is not signed by a trusted root" in result.detail
 
 
-def test_self_certified_key_is_rejected(keys):
-    data = catalog_bytes()
-    key_file = {"keys": [keys.entry(certifier=keys.ci)], "revocations": []}
-
-    assert verify(keys, data, key_file=key_file).status is Status.BAD_SIGNATURE
+def test_key_file_signed_by_the_ci_key_is_rejected(keys):
+    assert verify(keys, key_file=keys.key_file(signer=keys.ci)).status is Status.BAD_SIGNATURE
 
 
-def test_certification_copied_to_another_key_is_rejected(keys):
+def test_key_file_must_be_signed_at_all(keys):
+    key_file = keys.key_file()
+    del key_file["signature"]
+
+    assert verify(keys, key_file=key_file).status is Status.MALFORMED
+
+
+def test_key_added_to_a_signed_key_file_is_rejected(keys):
     data = catalog_bytes()
     attacker = Ed25519PrivateKey.generate()
-    forged = keys.entry(private=attacker, certifier=attacker)
-    forged["certification"] = keys.entry()["certification"]
-    key_file = {"keys": [forged], "revocations": []}
+    key_file = keys.key_file()
+    key_file["keys"].append(keys.entry(private=attacker))
 
     result = verify(keys, data, envelope_for(data, attacker), key_file)
 
     assert result.status is Status.BAD_SIGNATURE
 
 
-def test_second_signature_can_carry_a_bad_first_one(keys):
+def test_key_file_bound_to_a_different_root_id_is_rejected(keys):
+    other = Keys()
+    key_file = keys.key_file()
+    key_file["root_key_id"] = other.root_id
+
+    assert verify(keys, key_file=key_file, roots={**keys.roots, **other.roots}).status is Status.BAD_SIGNATURE
+
+
+def test_key_file_entry_order_and_whitespace_do_not_matter(keys):
+    spare = Ed25519PrivateKey.generate()
+    key_file = keys.key_file(extra=[keys.entry(private=spare)])
+    key_file["keys"].reverse()
+    text = json.dumps(key_file, indent=4)
+
+    assert verify(keys, key_file=text).ok
+
+
+def test_root_key_signs_only_when_listed(keys):
     data = catalog_bytes()
-    stranger = Ed25519PrivateKey.generate()
-    envelope = envelope_for(data, stranger, keys.ci)
+    listed = keys.key_file(extra=[keys.entry(private=keys.root)])
 
-    assert verify(keys, data, envelope).ok
-
-
-def test_root_key_signs_only_when_listed_and_certified(keys):
-    data = catalog_bytes()
-    key_file = {"keys": [keys.entry(private=keys.root)], "revocations": []}
-
-    # The root listed as its own "CI key" is certified by itself, which is a
-    # valid certification, so listing it is the operator's choice. Without the
-    # listing the root signature alone is not enough.
     bare = verify(keys, data, envelope_for(data, keys.root), keys.key_file())
     assert bare.status is Status.BAD_SIGNATURE
-    assert verify(keys, data, envelope_for(data, keys.root), key_file).ok
+    assert verify(keys, data, envelope_for(data, keys.root), listed).ok
 
 
-def test_two_roots_either_may_certify(keys):
+def test_either_trusted_root_may_sign_the_key_file(keys):
     data = catalog_bytes()
     second = Keys()
     roots = {**keys.roots, **second.roots}
-    key_file = {"keys": [second.entry()], "revocations": []}
 
-    result = verify(keys, data, envelope_for(data, second.ci), key_file, roots=roots)
+    result = verify(keys, data, key_file=keys.key_file(signer=second.root), roots=roots)
 
     assert result.ok
     assert result.root_key_id == second.root_id
@@ -275,24 +282,19 @@ def test_two_roots_either_may_certify(keys):
 # Revocation
 
 
-def test_revocation_before_signing_time_revokes(keys):
+def test_revoked_key_is_rejected(keys):
     revocation = keys.revocation(SIGNED_AT - timedelta(hours=1))
 
     result = verify(keys, key_file=keys.key_file([revocation]))
 
     assert result.status is Status.REVOKED_KEY
     assert result.signer_key_id == keys.ci_id
+    assert result.key_file_version == 1
     assert not result.usable
     assert result.signed_version is None
 
 
-def test_revocation_at_the_signing_instant_revokes(keys):
-    revocation = keys.revocation(SIGNED_AT)
-
-    assert verify(keys, key_file=keys.key_file([revocation])).status is Status.REVOKED_KEY
-
-
-@pytest.mark.parametrize("offset", [timedelta(seconds=1), timedelta(days=30), timedelta(days=-400)])
+@pytest.mark.parametrize("offset", [timedelta(seconds=1), timedelta(days=30), timedelta(days=-400), timedelta(0)])
 def test_revoked_key_is_rejected_whatever_date_the_catalog_claims(keys, offset):
     # The key holder writes not_before, so a backdated catalog must not slip
     # under the revocation date.
@@ -316,24 +318,79 @@ def test_backdated_catalog_from_a_revoked_key_cannot_poison_the_counter(keys):
     assert not result.may_advance_state
 
 
-def test_revocation_not_signed_by_a_root_is_ignored(keys):
-    forged = keys.revocation(SIGNED_AT - timedelta(days=5), signer=keys.ci)
+def test_revocation_added_without_a_root_signature_is_rejected(keys):
+    key_file = keys.key_file()
+    key_file["revocations"].append(keys.revocation(SIGNED_AT))
 
-    assert verify(keys, key_file=keys.key_file([forged])).ok
-
-
-def test_revocation_signed_by_an_unknown_key_is_ignored(keys):
-    stranger = Ed25519PrivateKey.generate()
-    forged = keys.revocation(SIGNED_AT - timedelta(days=5), signer=stranger)
-
-    assert verify(keys, key_file=keys.key_file([forged])).ok
+    assert verify(keys, key_file=key_file).status is Status.BAD_SIGNATURE
 
 
-def test_revocation_with_a_tampered_date_is_ignored(keys):
-    revocation = keys.revocation(SIGNED_AT + timedelta(days=5))
-    revocation["revoked_at"] = stamp(SIGNED_AT - timedelta(days=5))
+def test_revocation_signed_by_the_ci_key_is_rejected(keys):
+    forged = keys.key_file([keys.revocation(SIGNED_AT)], signer=keys.ci)
 
-    assert verify(keys, key_file=keys.key_file([revocation])).ok
+    assert verify(keys, key_file=forged).status is Status.BAD_SIGNATURE
+
+
+def test_revocation_with_a_tampered_date_is_rejected(keys):
+    key_file = keys.key_file([keys.revocation(SIGNED_AT + timedelta(days=5))])
+    key_file["revocations"][0]["revoked_at"] = stamp(SIGNED_AT - timedelta(days=5))
+
+    assert verify(keys, key_file=key_file).status is Status.BAD_SIGNATURE
+
+
+def test_stripped_revocations_are_rejected(keys):
+    revoked = keys.key_file([keys.revocation(SIGNED_AT)])
+    stripped = copy.deepcopy(revoked)
+    stripped["revocations"] = []
+
+    assert verify(keys, key_file=revoked).status is Status.REVOKED_KEY
+    assert verify(keys, key_file=stripped).status is Status.BAD_SIGNATURE
+    del stripped["revocations"]
+    assert verify(keys, key_file=stripped).status is Status.BAD_SIGNATURE
+
+
+def test_older_key_file_without_the_revocation_is_a_rollback(keys):
+    old = keys.key_file(version=1)
+    current = keys.key_file([keys.revocation(SIGNED_AT)], version=2)
+
+    # Without remembered state the old file looks fine, which is why the
+    # caller has to pass the highest version it accepted.
+    assert verify(keys, key_file=old).ok
+    assert verify(keys, key_file=current, stored_key_file_version=1).status is Status.REVOKED_KEY
+
+    result = verify(keys, key_file=old, stored_key_file_version=2)
+    assert result.status is Status.KEY_FILE_ROLLBACK
+    assert not result.usable and not result.may_advance_state
+    assert result.key_file_version == 1
+    assert result.root_key_id == keys.root_id
+    assert "version 1" in result.detail and "2" in result.detail
+
+
+def test_emptied_key_file_is_refused_by_the_stored_version(keys):
+    emptied = keys.sign_key_file({"key_file_version": 1, "keys": [], "revocations": []})
+
+    result = verify(keys, key_file=emptied, stored_key_file_version=4)
+
+    assert result.status is Status.KEY_FILE_ROLLBACK
+
+
+@pytest.mark.parametrize("stored, status", [(None, Status.OK), (1, Status.OK), (3, Status.OK), (4, Status.KEY_FILE_ROLLBACK)])
+def test_key_file_version_boundaries(keys, stored, status):
+    assert verify(keys, key_file=keys.key_file(version=3), stored_key_file_version=stored).status is status
+
+
+def test_a_later_key_file_version_is_accepted(keys):
+    result = verify(keys, key_file=keys.key_file(version=9), stored_key_file_version=2)
+
+    assert result.ok
+    assert result.key_file_version == 9
+
+
+def test_key_file_rollback_applies_in_baked_mode(keys):
+    old = keys.key_file(version=1)
+
+    assert verify(keys, key_file=old, stored_key_file_version=2, baked=True).status is Status.KEY_FILE_ROLLBACK
+    assert verify(keys, key_file=old, baked=True).ok
 
 
 def test_revocation_names_only_its_own_key(keys):
@@ -614,14 +671,17 @@ def test_envelope_that_is_not_json_or_not_an_object(keys):
         lambda f: f["keys"][0].update(key_id="0" * 16),
         lambda f: f["keys"][0].update(public_key="***"),
         lambda f: f["keys"][0].update(public_key=b64(b"short")),
-        lambda f: f["keys"][0].pop("certification"),
-        lambda f: f["keys"][0]["certification"].update(signature=b64(b"short")),
-        lambda f: f["keys"][0]["certification"].update(root_key_id="nothex"),
+        lambda f: f.pop("key_file_version"),
+        lambda f: f.update(key_file_version=0),
+        lambda f: f.update(key_file_version=True),
+        lambda f: f.update(key_file_version="1"),
+        lambda f: f.pop("signature"),
+        lambda f: f.update(signature=b64(b"short")),
+        lambda f: f.update(root_key_id="nothex"),
         lambda f: f["keys"][0].update(added=""),
         lambda f: f["keys"].append(copy.deepcopy(f["keys"][0])),
-        lambda f: f.update(
-            revocations=[{"key_id": "a" * 16, "revoked_at": "2026-01-01", "root_key_id": "b" * 16, "signature": b64(b"s" * 64)}]
-        ),
+        lambda f: f.update(revocations=[{"key_id": "a" * 16, "revoked_at": "2026-01-01"}]),
+        lambda f: f.update(revocations=[{"key_id": "nothex", "revoked_at": "2026-01-01T00:00:00Z"}]),
     ],
 )
 def test_malformed_key_file(keys, mutate):
