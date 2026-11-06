@@ -58,7 +58,35 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo install alass-cli --version "${ALASS_CLI_VERSION}" --locked
 
 # =============================================================================
-# Stage 3: Production Image
+# Stage 3: Catalog release floor
+# =============================================================================
+# The image carries a snapshot of the official provider catalog, so a first run
+# with no network can still list and install providers. The snapshot is pinned
+# by docker/catalog-pin.lock.json (one catalog commit and the sha256 of every
+# file), not by whatever the catalog branch holds on build day. The script
+# fetches the branch, checks that the locked commit is the tip or an ancestor
+# of it, checks every file against the lock and the catalog's own pins, and
+# writes the files read-only. This stage's cache key is the lock and the
+# script, so a rebuild with an unchanged lock reuses the layer and the bytes
+# stay identical. Other stages that need the same catalog commit read the same
+# lock.
+FROM python:3.14-slim-trixie AS catalog-floor
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY scripts/release/catalog_floor.py /opt/catalog_floor.py
+COPY docker/catalog-pin.lock.json /opt/catalog-pin.lock.json
+
+RUN python -I /opt/catalog_floor.py build \
+        --lock /opt/catalog-pin.lock.json \
+        --dest /catalog_floor \
+        --expect-root-owner
+
+# =============================================================================
+# Stage 4: Production Image
 # =============================================================================
 FROM python:3.14-slim-trixie AS production
 
@@ -122,6 +150,18 @@ WORKDIR /app/bazarr
 # Copy Bazarr-owned compatibility libraries before main app code
 COPY custom_libs ./custom_libs
 COPY migrations ./migrations
+
+# The catalog release floor lives beside the application tree, outside the
+# /config volume, root-owned and read-only: files 0444, directories 0555. The
+# top directory is created by the COPY, so its mode is set explicitly, and then
+# every mode and owner is asserted. Nothing at runtime writes here.
+COPY --from=catalog-floor /catalog_floor ./catalog_floor
+RUN chmod 0555 /app/bazarr/catalog_floor \
+    && test -z "$(find /app/bazarr/catalog_floor ! -user root -print -quit)" \
+    && test -z "$(find /app/bazarr/catalog_floor -type f ! -perm 0444 -print -quit)" \
+    && test -z "$(find /app/bazarr/catalog_floor -type d ! -perm 0555 -print -quit)" \
+    && test -z "$(find /app/bazarr/catalog_floor ! -type f ! -type d -print -quit)" \
+    && test -f /app/bazarr/catalog_floor/catalog.json
 
 # Copy main application code (changes most frequently - keep at end)
 COPY bazarr.py ./
