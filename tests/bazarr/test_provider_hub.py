@@ -7826,6 +7826,167 @@ def test_an_update_comes_only_from_the_source_the_install_is_bound_to(tmp_path, 
     assert job["details"]["providers"] == ["Example Hub Provider: 1.0.0 -> 1.1.0"]
 
 
+def _listed(source, list_name, manifest):
+    plugin_id = manifest.get("id") or manifest["provider_id"]
+    key = f"{source}:{list_name}:{plugin_id}:{manifest['version']}"
+    return {key: {"source": source, "source_name": source, "provider_id": plugin_id,
+                  "name": manifest["name"], "version": manifest["version"], "trusted": False,
+                  "manifest": manifest, "catalog_list": list_name}}
+
+
+def _movedhub_state(tmp_path, monkeypatch, installed, *, entry_versions, only_in=None,
+                    plugin_overrides=None, **row):
+    """movedhub installed from a community source that lists it in both lists, as different manifests."""
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    entries = {}
+    for version in entry_versions:
+        if only_in != "plugins":
+            entries.update(_listed("community", "providers",
+                                   _manifest(provider_id="movedhub", name=f"Legacy {version}", version=version)))
+        if only_in != "providers":
+            entries.update(_listed("community", "plugins", provider_manifest_v2(
+                "movedhub", name=f"Plugin {version}", version=version, **(plugin_overrides or {}))))
+    installation = {"provider_id": "movedhub", "name": "Movedhub", "state": "active",
+                    "pending_restart": False, "active_version": "1.0.0", "source_bound": True,
+                    "source_id": "community", "manifest": installed, **row}
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"), entries=entries,
+               installations={"movedhub": installation})
+    return installation
+
+
+def _stage_names(monkeypatch):
+    from provider_hub import service
+
+    staged = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest["name"]) or {"state": "staged"})
+    return staged
+
+
+@pytest.mark.parametrize("installed_list", ["plugins", "providers"])
+def test_an_update_stays_on_the_catalog_list_the_install_came_from(tmp_path, monkeypatch, installed_list):
+    from provider_hub import service
+
+    plugin_install = installed_list == "plugins"
+    installed = (provider_manifest_v2("movedhub") if plugin_install
+                 else _manifest(provider_id="movedhub", name="Legacy 1.0.0"))
+    _movedhub_state(tmp_path, monkeypatch, installed, entry_versions=["1.1.0", "1.2.0"],
+                    catalog_list=installed_list)
+    staged = _stage_names(monkeypatch)
+
+    assert service.check_updates()["details"]["providers"] == ["Movedhub: 1.0.0 -> 1.2.0"]
+    service.apply_update("movedhub")
+
+    assert staged == ["Plugin 1.2.0" if plugin_install else "Legacy 1.2.0"]
+
+
+def test_a_version_the_install_list_holds_is_never_taken_from_the_other_list(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    # The plugins list holds 1.1.0 but this host cannot run it, so the providers copy of 1.1.0 stays unused.
+    _movedhub_state(tmp_path, monkeypatch, provider_manifest_v2("movedhub"), entry_versions=["1.1.0"],
+                    plugin_overrides={"min_host_version": "9.0.0"}, catalog_list="plugins")
+    staged = _stage_names(monkeypatch)
+
+    assert service.check_updates()["details"]["updates_available"] == 0
+    service.apply_update("movedhub")
+
+    assert staged == []
+
+
+def test_a_version_only_the_other_list_holds_is_still_offered(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    _movedhub_state(tmp_path, monkeypatch, provider_manifest_v2("movedhub"), entry_versions=["1.1.0"],
+                    only_in="providers", catalog_list="plugins")
+    staged = _stage_names(monkeypatch)
+
+    service.apply_update("movedhub")
+
+    assert staged == ["Legacy 1.1.0"]
+
+
+@pytest.mark.parametrize("installed, expected", [
+    (provider_manifest_v2("movedhub"), "Plugin 1.1.0"),
+    (_manifest(provider_id="movedhub", name="Legacy 1.0.0"), "Legacy 1.1.0"),
+])
+def test_an_install_stored_without_a_catalog_list_updates_from_the_list_its_manifest_belongs_to(
+        tmp_path, monkeypatch, installed, expected):
+    from provider_hub import service
+
+    installation = _movedhub_state(tmp_path, monkeypatch, installed, entry_versions=["1.1.0"])
+    assert "catalog_list" not in installation
+    staged = _stage_names(monkeypatch)
+
+    service.apply_update("movedhub")
+
+    assert staged == [expected]
+    # A stored row loads as it is: the list is worked out on read, not written back.
+    assert "catalog_list" not in service.load_state()["installations"]["movedhub"]
+
+
+def test_an_install_row_with_no_list_and_no_readable_manifest_counts_as_a_providers_install():
+    from provider_hub import service
+
+    assert service._installed_catalog_list({"state": "active"}) == "providers"
+    assert service._installed_catalog_list({"manifest": "broken", "catalog_list": "elsewhere"}) == "providers"
+    assert service._installed_catalog_list(
+        {"manifest": None, "staged_manifest": provider_manifest_v2("movedhub")}) == "plugins"
+
+
+@pytest.mark.parametrize("list_name, name", [("plugins", "Plugin copy"), ("providers", "Legacy copy")])
+def test_an_install_records_the_catalog_list_of_the_entry_it_installed(tmp_path, monkeypatch, list_name, name):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    _patch_local_install_env(monkeypatch, tmp_path)
+    _legacy, _plugin, legacy_key, plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+
+    service.install_catalog_entry("community", "movedhub", "1.0.0",
+                                  entry_key=plugin_key if list_name == "plugins" else legacy_key)
+
+    [row] = service.list_providers()
+    assert (row["name"], row["catalog_list"]) == (name, list_name)
+
+
+def test_an_install_request_with_a_key_that_names_another_entry_is_refused(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _two_copies_of_one_version(tmp_path, monkeypatch)
+    state = load_state()
+    state["catalog_entries"].update(_listed("community", "plugins", provider_manifest_v2("otherhub")))
+    save_state(state)
+
+    with pytest.raises(service.ProviderHubInstallError, match="does not list movedhub 1.0.0; refresh the catalog"):
+        service.install_catalog_entry("community", "movedhub", "1.0.0",
+                                      entry_key="community:plugins:otherhub:1.0.0")
+    with pytest.raises(service.ProviderHubInstallError, match="does not list movedhub 1.0.0; refresh the catalog"):
+        service.install_catalog_entry("elsewhere", "movedhub", "1.0.0",
+                                      entry_key="community:plugins:movedhub:1.0.0")
+
+
+def test_an_install_request_whose_key_is_gone_after_a_refresh_is_refused(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, _plugin, legacy_key, plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, **kwargs: staged.append(manifest))
+    state = load_state()
+    del state["catalog_entries"][plugin_key]
+    save_state(state)
+
+    # The providers copy of the same version is still listed, and is not a stand-in for the plugins key.
+    assert service.resolve_catalog_install("community", "movedhub", "1.0.0")["entry_key"] == legacy_key
+    with pytest.raises(service.ProviderHubInstallError, match="does not list movedhub 1.0.0; refresh the catalog"):
+        service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=plugin_key)
+    assert staged == []
+
+
 def test_the_first_official_refresh_binds_existing_installs_by_where_their_code_came_from(tmp_path, monkeypatch):
     from provider_hub.service import list_providers, refresh_catalog
 

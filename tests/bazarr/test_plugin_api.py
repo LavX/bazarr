@@ -139,6 +139,22 @@ def test_plugins_install_takes_a_catalog_reference_only(client, monkeypatch):
                                             "entry_key": "official:plugins:exampleservice:1.0.0"})]
 
 
+def test_the_provider_hub_install_route_queues_the_entry_key(client, monkeypatch):
+    from provider_hub import jobs as hub_jobs
+
+    queued = []
+    monkeypatch.setattr(hub_jobs, "_enqueue", lambda label, func, kwargs: queued.append((func, kwargs)) or "job-1")
+
+    accepted = client.post("/api/provider-hub/installations",
+                           json={"source": "official", "provider_id": "exampleservice", "version": "1.0.0"},
+                           headers={"X-API-KEY": API_KEY})
+
+    assert accepted.status_code == 202
+    assert queued == [("install_provider", {"source_id": "official", "provider_id": "exampleservice",
+                                            "version": "1.0.0", "name": "Exampleservice",
+                                            "entry_key": "official:plugins:exampleservice:1.0.0"})]
+
+
 # The routes that start code. Whatever gate the provider-hub routes carry, the
 # kind-neutral routes carry the same one: a gate is added to both families or
 # to neither, and these tests are what keep them from drifting apart.
