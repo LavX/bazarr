@@ -3,7 +3,8 @@
 
 Semantic versions sort by semantic-version precedence: the numeric core
 first, then a pre-release below its release, with numeric identifiers below
-alphanumeric ones. Build metadata is ignored. Anything else falls back to a
+alphanumeric ones. Alphanumeric identifiers compare by ASCII order, so case
+matters (`RC.1` sorts below `rc.1`). Build metadata is ignored. Anything else falls back to a
 token-wise order and always sorts below a semantic version.
 """
 from __future__ import annotations
@@ -42,7 +43,7 @@ def version_key(version: Any) -> tuple[Any, ...] | None:
                 if token.isdigit():
                     prerelease_tokens.append((0, int(token)))
                 else:
-                    prerelease_tokens.append((1, token.lower()))
+                    prerelease_tokens.append((1, token))
             prerelease_key = (0, tuple(prerelease_tokens))
         return (1, tuple(core_parts), prerelease_key)
 

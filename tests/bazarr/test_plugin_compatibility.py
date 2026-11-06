@@ -20,6 +20,27 @@ def test_versions_sort_by_semantic_version_precedence(lower, higher):
     assert version_key("1.2.3+build.5") == version_key("1.2.3")
 
 
+def test_the_semver_spec_example_ordering_holds():
+    from provider_hub.versions import version_key
+
+    ordered = [
+        "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
+        "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0",
+    ]
+    keys = [version_key(version) for version in ordered]
+    assert keys == sorted(keys)
+    assert len(set(keys)) == len(keys)
+
+
+def test_prerelease_identifiers_compare_case_sensitively():
+    from provider_hub.versions import host_version_key, version_key
+
+    assert version_key("2.8.0-RC.1") != version_key("2.8.0-rc.1")
+    assert version_key("2.8.0-RC.1") < version_key("2.8.0-rc.1")
+    assert version_key("2.8.0-Beta") < version_key("2.8.0-beta")
+    assert host_version_key("2.8.0-RC.1") < version_key("2.8.0-rc.1")
+
+
 def test_a_git_describe_build_counts_as_its_tag():
     from provider_hub.versions import host_version_key, version_key
 
