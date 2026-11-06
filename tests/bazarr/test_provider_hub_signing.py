@@ -292,10 +292,28 @@ def test_revocation_at_the_signing_instant_revokes(keys):
     assert verify(keys, key_file=keys.key_file([revocation])).status is Status.REVOKED_KEY
 
 
-def test_revocation_after_signing_time_keeps_older_signatures(keys):
-    revocation = keys.revocation(SIGNED_AT + timedelta(seconds=1))
+@pytest.mark.parametrize("offset", [timedelta(seconds=1), timedelta(days=30), timedelta(days=-400)])
+def test_revoked_key_is_rejected_whatever_date_the_catalog_claims(keys, offset):
+    # The key holder writes not_before, so a backdated catalog must not slip
+    # under the revocation date.
+    revocation = keys.revocation(SIGNED_AT + offset)
 
-    assert verify(keys, key_file=keys.key_file([revocation])).ok
+    result = verify(keys, stored_counter=3, key_file=keys.key_file([revocation]))
+
+    assert result.status is Status.REVOKED_KEY
+    assert not result.usable and not result.may_advance_state
+    assert result.counter is None
+
+
+def test_backdated_catalog_from_a_revoked_key_cannot_poison_the_counter(keys):
+    revoked_at = NOW - timedelta(hours=1)
+    data = catalog_bytes(version=10**18, not_before=revoked_at - timedelta(seconds=1))
+    key_file = keys.key_file([keys.revocation(revoked_at)])
+
+    result = verify(keys, data, key_file=key_file)
+
+    assert result.status is Status.REVOKED_KEY
+    assert not result.may_advance_state
 
 
 def test_revocation_not_signed_by_a_root_is_ignored(keys):
@@ -381,10 +399,21 @@ def test_not_before_boundaries(keys):
 
     early = not_before - CLOCK_SKEW - timedelta(seconds=1)
     result = verify(keys, data, now=early)
-    assert result.status is Status.CLOCK_WRONG
-    assert result.usable
+    assert result.status is Status.NOT_YET_VALID
+    assert not result.usable and not result.may_advance_state
     assert result.host_time == early
     assert result.not_before == not_before
+    assert stamp(early) in result.detail and stamp(not_before) in result.detail
+
+
+def test_future_not_before_is_not_a_clock_wrong_result(keys):
+    data = catalog_bytes(not_before=NOW + timedelta(days=300), expires=NOW + timedelta(days=360))
+
+    assert verify(keys, data).status is Status.NOT_YET_VALID
+    # Only a host clock earlier than the running build is "clock wrong".
+    wrong = verify(keys, data, host_build_time=NOW + timedelta(days=1))
+    assert wrong.status is Status.CLOCK_WRONG
+    assert wrong.usable
 
 
 def test_clock_before_build_time_skips_expiry(keys):
@@ -669,3 +698,150 @@ def test_extra_fields_in_the_key_file_and_envelope_are_ignored(keys):
     key_file["keys"][0]["label"] = "ci"
 
     assert verify(keys, data, envelope, key_file).ok
+
+
+# Strict parsing and hostile input
+
+
+def test_unknown_signature_algorithms_are_skipped(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    envelope["signatures"].insert(0, {"algorithm": "ml-dsa-65", "key_id": "x", "signature": 7})
+    envelope["signatures"].append({"algorithm": "rsa"})
+
+    assert verify(keys, data, envelope).ok
+
+
+def test_unknown_algorithm_does_not_rescue_a_bad_ed25519_signature(keys):
+    data = catalog_bytes()
+    stranger = Ed25519PrivateKey.generate()
+    envelope = envelope_for(data, stranger)
+    envelope["signatures"].append({"algorithm": "ml-dsa-65", "key_id": keys.ci_id, "signature": "AAAA"})
+
+    assert verify(keys, data, envelope).status is Status.BAD_SIGNATURE
+
+
+def test_envelope_with_only_unknown_algorithms_is_malformed_not_unsigned(keys):
+    data = catalog_bytes()
+    envelope = {"schema_version": 1, "signatures": [{"algorithm": "ml-dsa-65", "key_id": "x", "signature": "y"}]}
+
+    result = verify(keys, data, envelope)
+
+    assert result.status is Status.MALFORMED
+    assert "no ed25519 signature" in result.detail
+
+
+def test_signature_entry_without_an_algorithm_is_malformed(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    envelope["signatures"].append({"key_id": keys.ci_id})
+
+    assert verify(keys, data, envelope).status is Status.MALFORMED
+
+
+def test_duplicate_keys_in_the_catalog_are_rejected(keys):
+    data = (
+        b'{"channel": "beta", "channel": "main", "signed_version": 10, '
+        b'"not_before": "%s", "expires": "%s"}' % (stamp(SIGNED_AT).encode(), stamp(EXPIRES).encode())
+    )
+
+    assert verify(keys, data).status is Status.MALFORMED
+
+
+def test_duplicate_keys_in_the_envelope_and_key_file_are_rejected(keys):
+    data = catalog_bytes()
+    envelope = json.dumps(envelope_for(data, keys.ci))
+    duplicated_envelope = envelope.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1')
+    key_file = json.dumps(keys.key_file())
+    duplicated_key_file = key_file.replace('"revocations"', '"revocations": [], "revocations"')
+
+    assert duplicated_envelope != envelope and duplicated_key_file != key_file
+    assert verify(keys, data, duplicated_envelope).status is Status.MALFORMED
+    assert verify(keys, data, key_file=duplicated_key_file).status is Status.MALFORMED
+
+
+def test_catalog_bytes_must_be_utf8(keys):
+    document = catalog_bytes().decode("utf-8")
+
+    for encoded in (document.encode("utf-16"), b"\xef\xbb\xbf" + document.encode("utf-8")):
+        result = verify(keys, encoded, envelope_for(encoded, keys.ci))
+        assert result.status is Status.MALFORMED
+
+
+def test_non_finite_numbers_are_rejected(keys):
+    data = b'{"channel": "main", "signed_version": NaN, "not_before": "%s", "expires": "%s"}' % (
+        stamp(SIGNED_AT).encode(),
+        stamp(EXPIRES).encode(),
+    )
+
+    assert verify(keys, data).status is Status.MALFORMED
+
+
+FULLWIDTH = str.maketrans("0123456789", "\uff10\uff11\uff12\uff13\uff14\uff15\uff16\uff17\uff18\uff19")
+
+
+def test_fullwidth_digits_in_timestamps_are_malformed_not_a_crash(keys):
+    document = json.loads(catalog_bytes())
+    document["not_before"] = stamp(SIGNED_AT).translate(FULLWIDTH)
+    tampered = json.dumps(document).encode("utf-8")
+    assert verify(keys, tampered, envelope_for(tampered, keys.ci)).status is Status.MALFORMED
+
+    revocation = keys.revocation(NOW)
+    revocation["revoked_at"] = revocation["revoked_at"].translate(FULLWIDTH)
+    assert verify(keys, key_file=keys.key_file([revocation])).status is Status.MALFORMED
+
+
+def test_trailing_newline_is_rejected_in_key_ids_and_timestamps(keys):
+    data = catalog_bytes()
+    document = json.loads(data)
+    document["expires"] += "\n"
+    tampered = json.dumps(document).encode("utf-8")
+    assert verify(keys, tampered, envelope_for(tampered, keys.ci)).status is Status.MALFORMED
+
+    envelope = envelope_for(data, keys.ci)
+    envelope["signatures"][0]["key_id"] += "\n"
+    assert verify(keys, data, envelope).status is Status.MALFORMED
+
+
+def test_deeply_nested_documents_are_malformed_not_a_crash(keys):
+    data = catalog_bytes()
+    deep = "[" * 200000 + "]" * 200000
+    deep_object = '{"a":' * 100000 + "1" + "}" * 100000
+
+    assert verify(keys, data, deep).status is Status.MALFORMED
+    assert verify(keys, data, deep_object).status is Status.MALFORMED
+    assert verify(keys, data, key_file=deep).status is Status.MALFORMED
+    assert verify(keys, data, key_file=deep_object).status is Status.MALFORMED
+    nested = deep.encode("utf-8")
+    assert verify(keys, nested, envelope_for(nested, keys.ci)).status is Status.MALFORMED
+
+
+def test_extreme_dates_do_not_overflow(keys):
+    first = datetime(1, 1, 1, tzinfo=timezone.utc)
+    last = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+    old = catalog_bytes(not_before=first, expires=first + timedelta(days=30))
+    assert verify(keys, old, now=last).status is Status.EXPIRED
+    assert verify(keys, old, now=first).ok
+
+    far = catalog_bytes(not_before=last - timedelta(days=30), expires=last)
+    assert verify(keys, far, now=first).status is Status.NOT_YET_VALID
+    assert verify(keys, far, now=last).ok
+    assert verify(keys, far, now=datetime.max.replace(tzinfo=timezone.utc)).ok
+
+    both = catalog_bytes(not_before=first, expires=last)
+    assert verify(keys, both, now=NOW).status is Status.MALFORMED
+    assert verify(keys, old, now=NOW, host_build_time=last).status is Status.CLOCK_WRONG
+
+
+def test_garbage_never_raises(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    samples = [None, 0, 1.5, [], {}, "", "null", "[]", "{}", b"\x00", b"\xff", "\ud800", {"keys": None}, {"schema_version": None}]
+    for sample in samples:
+        for call in (
+            lambda v: verify_catalog(data, v, keys.key_file(), roots=keys.roots, channel="main", now=NOW),
+            lambda v: verify_catalog(data, envelope, v, roots=keys.roots, channel="main", now=NOW),
+            lambda v: verify_catalog(v if isinstance(v, (bytes, str)) else b"", envelope, keys.key_file(), roots=keys.roots, channel="main", now=NOW),
+        ):
+            assert not call(sample).usable

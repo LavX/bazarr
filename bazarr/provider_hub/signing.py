@@ -20,24 +20,25 @@ Trust model
 * A catalog is signed by a certified CI key over its exact bytes. The signed
   document carries its own channel, a per-channel ``signed_version`` counter, a
   signing time (``not_before``) and an expiry.
-* A revoked key fails every signature made at or after its ``revoked_at``.
-  Signatures made before that moment stay valid. The signing time is read from
-  the signed document, so ``revoked_at`` has to be set to the earliest moment
-  the key could have been exposed.
+* A revoked key is rejected outright, for every catalog it signed, whatever
+  date the catalog claims. The key holder controls the catalog's own dates, so
+  no date comparison can be trusted. Recovery is re-signing with a new key.
 
 Checks run in this order and the first failure decides the status: unsigned,
 malformed input, bad signature or broken chain, revoked key, channel mismatch,
-validity window, then the freshness rules below.
+validity window, then the freshness rules below. Input is parsed strictly:
+UTF-8 only, duplicate JSON object keys refused, timestamps and key ids ASCII.
 
 Freshness
 ---------
 Expiry and ``not_before`` both tolerate ``CLOCK_SKEW`` (24 hours). Past that,
-a catalog is ``EXPIRED`` and the result carries both the host time and the
-catalog time so the caller can show them. When the host clock reads earlier
-than the running release's build time, or more than the skew before
-``not_before``, the clock cannot be trusted: expiry is not evaluated and the
-replay counter alone decides. That outcome is reported as ``CLOCK_WRONG`` so it
-stays distinct from a healthy ``OK``. ``usable`` is true for both.
+a catalog is ``EXPIRED`` (host clock too late) or ``NOT_YET_VALID`` (``not_before``
+further ahead than the skew), neither is usable, and the result carries both
+the host time and the catalog time so the caller can show them. When the host
+clock reads earlier than the running release's build time, the clock cannot be
+trusted: expiry and ``not_before`` are not evaluated and the replay counter
+alone decides. That outcome is reported as ``CLOCK_WRONG`` so it stays distinct
+from a healthy ``OK``. ``usable`` is true for ``OK`` and ``CLOCK_WRONG``.
 
 Replay counter
 --------------
@@ -50,7 +51,7 @@ Baked catalogs
 --------------
 A catalog shipped inside an image (the release floor and the seed) is verified
 with ``baked=True``: signature, chain, revocation and channel are checked, but
-expiry, skew and the replay counter are not, and the result is marked so the
+expiry, ``not_before`` and the replay counter are not, and the result is marked so the
 caller never latches on it or raises the stored counter.
 
 Wire format
@@ -90,6 +91,7 @@ class Status(StrEnum):
     BAD_SIGNATURE = "bad_signature"
     REVOKED_KEY = "revoked_key"
     CHANNEL_MISMATCH = "channel_mismatch"
+    NOT_YET_VALID = "not_yet_valid"
     EXPIRED = "expired"
     REPLAYED = "replayed"
     CLOCK_WRONG = "clock_wrong"
@@ -225,8 +227,8 @@ _CERTIFICATION_CONTEXT = b"bazarr-catalog-key-certification-v1\n"
 _REVOCATION_CONTEXT = b"bazarr-catalog-key-revocation-v1\n"
 _ENVELOPE_SCHEMA_VERSION = 1
 _ALGORITHM = "ed25519"
-_KEY_ID_RE = re.compile(r"^[0-9a-f]{16}$")
-_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_KEY_ID_RE = re.compile(r"[0-9a-f]{16}", re.ASCII)
+_TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
 
 
 def certification_statement(signing_key_id: str, public_key: bytes) -> bytes:
@@ -258,7 +260,11 @@ def parse_wire_format(key_file: Any, envelope: Any, catalog: bytes) -> WireDocum
 
     Envelope: ``{"schema_version": 1, "signatures": [{"algorithm": "ed25519",
     "key_id", "signature"}]}`` with at least one 64-byte signature over the
-    exact catalog bytes.
+    exact catalog bytes. Entries with any other algorithm are skipped so a
+    second algorithm can be added later; an envelope with no ed25519 entry is
+    malformed (deliberately not "unsigned", so it never takes the legacy path).
+
+    All JSON is strict: UTF-8 only, duplicate object keys refused.
 
     Timestamps are ``YYYY-MM-DDTHH:MM:SSZ`` in UTC.
     """
@@ -269,12 +275,31 @@ def parse_wire_format(key_file: Any, envelope: Any, catalog: bytes) -> WireDocum
     )
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("duplicate object key")
+        result[name] = value
+    return result
+
+
+def _reject_constant(_name: str) -> Any:
+    raise ValueError("non-finite number")
+
+
+def _loads(raw: Any, what: str) -> Any:
+    """Strict JSON: UTF-8 bytes only, no duplicate object keys, no NaN or Infinity."""
+    try:
+        text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
+        return json.loads(text, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant)
+    except (ValueError, RecursionError, TypeError) as exc:
+        raise WireFormatError(f"{what} is not valid JSON") from exc
+
+
 def _as_object(value: Any, what: str) -> Mapping[str, Any]:
     if isinstance(value, (bytes, bytearray, str)):
-        try:
-            value = json.loads(value)
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise WireFormatError(f"{what} is not valid JSON") from exc
+        value = _loads(value, what)
     if not isinstance(value, Mapping):
         raise WireFormatError(f"{what} must be a JSON object")
     return value
@@ -289,7 +314,7 @@ def _text(container: Mapping[str, Any], name: str, what: str) -> str:
 
 def _key_id_field(container: Mapping[str, Any], name: str, what: str) -> str:
     value = _text(container, name, what)
-    if not _KEY_ID_RE.match(value):
+    if not _KEY_ID_RE.fullmatch(value):
         raise WireFormatError(f"{what} {name} must be 16 lowercase hex digits")
     return value
 
@@ -306,7 +331,7 @@ def _base64_field(container: Mapping[str, Any], name: str, what: str, length: in
 
 
 def _timestamp(value: Any, what: str) -> datetime:
-    if not isinstance(value, str) or not _TIMESTAMP_RE.match(value):
+    if not isinstance(value, str) or not _TIMESTAMP_RE.fullmatch(value):
         raise WireFormatError(f"{what} must look like 2026-12-31T00:00:00Z")
     try:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -374,22 +399,24 @@ def _parse_envelope(document: Mapping[str, Any]) -> tuple[SignatureEntry, ...]:
         raise WireFormatError("a signature envelope needs at least one signature")
     parsed = []
     for entry in entries:
-        if entry.get("algorithm") != _ALGORITHM:
-            raise WireFormatError("each signature must use ed25519")
+        algorithm = entry.get("algorithm")
+        if not isinstance(algorithm, str) or not algorithm:
+            raise WireFormatError("each signature needs an algorithm")
+        if algorithm != _ALGORITHM:
+            continue  # a future algorithm: skipped, never fatal
         parsed.append(
             SignatureEntry(
                 key_id=_key_id_field(entry, "key_id", "signature"),
                 signature=_base64_field(entry, "signature", "signature", 64),
             )
         )
+    if not parsed:
+        raise WireFormatError("the signature envelope has no ed25519 signature")
     return tuple(parsed)
 
 
 def _parse_metadata(catalog: bytes) -> SignedMetadata:
-    try:
-        document = json.loads(catalog)
-    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
-        raise WireFormatError("the signed catalog is not valid JSON") from exc
+    document = _loads(catalog, "the signed catalog")
     if not isinstance(document, Mapping):
         raise WireFormatError("the signed catalog must be a JSON object")
     signed_version = document.get("signed_version")
@@ -447,7 +474,7 @@ def verify_catalog(
         return VerificationResult(Status.MALFORMED, str(exc), host_time=now, baked=baked)
 
     metadata = wire.metadata
-    signer, revoked, problems = _find_signer(data, wire, roots, metadata.not_before)
+    signer, revoked, problems = _find_signer(data, wire, roots)
     if signer is None:
         if revoked is not None:
             revoked_key, revocation = revoked
@@ -493,18 +520,22 @@ def verify_catalog(
             counter,
         )
 
-    clock_early = host_build_time is not None and now < host_build_time
-    clock_behind = now < metadata.not_before - CLOCK_SKEW
-    if clock_early or clock_behind:
-        reason = "earlier than this release was built" if clock_early else "earlier than the catalog was signed"
+    if host_build_time is not None and now < host_build_time:
         return result(
             Status.CLOCK_WRONG,
-            f"host time {_iso(now)} is {reason} (catalog not_before {_iso(metadata.not_before)}); "
-            "expiry was not evaluated and the counter decided",
+            f"host time {_iso(now)} is earlier than this release was built ({_iso(host_build_time)}); "
+            "expiry and not_before were not evaluated and the counter decided",
             counter,
         )
 
-    if now > metadata.expires + CLOCK_SKEW:
+    # Differences, never shifted timestamps: shifting year 1 or year 9999 overflows.
+    if metadata.not_before - now > CLOCK_SKEW:
+        return result(
+            Status.NOT_YET_VALID,
+            f"the catalog is valid from {_iso(metadata.not_before)}, host time is {_iso(now)}",
+            counter,
+        )
+    if now - metadata.expires > CLOCK_SKEW:
         return result(
             Status.EXPIRED,
             f"host time {_iso(now)} is past the catalog expiry {_iso(metadata.expires)}",
@@ -534,14 +565,13 @@ def _find_signer(
     data: bytes,
     wire: WireDocuments,
     roots: Mapping[str, bytes],
-    signed_at: datetime,
 ) -> tuple[CertifiedKey | None, tuple[CertifiedKey, Revocation] | None, list[str]]:
     """Return ``(signer, revoked, problems)``.
 
     ``signer`` is a certified, unrevoked key whose signature over ``data``
     verifies. ``revoked`` is set only when no such key exists but a certified
-    key did sign validly and was revoked at ``signed_at``; it holds the key and
-    the revocation that applies.
+    key did sign validly and is revoked, whatever date the catalog claims; it
+    holds the key and the revocation that applies.
     """
     keys = {entry.key_id: entry for entry in wire.key_file.keys}
     revoked_signer: tuple[CertifiedKey, Revocation] | None = None
@@ -558,7 +588,7 @@ def _find_signer(
         if not _ed25519_verify(key.public_key, entry.signature, data):
             problems.append(f"signature by {key.key_id} does not match the catalog")
             continue
-        revocation = _applicable_revocation(key.key_id, wire.key_file.revocations, roots, signed_at)
+        revocation = _applicable_revocation(key.key_id, wire.key_file.revocations, roots)
         if revocation is not None:
             revoked_signer = revoked_signer or (key, revocation)
             continue
@@ -570,10 +600,9 @@ def _applicable_revocation(
     signing_key_id: str,
     revocations: tuple[Revocation, ...],
     roots: Mapping[str, bytes],
-    signed_at: datetime,
 ) -> Revocation | None:
     for revocation in revocations:
-        if revocation.key_id != signing_key_id or revocation.revoked_at > signed_at:
+        if revocation.key_id != signing_key_id:
             continue
         root = roots.get(revocation.root_key_id)
         if root is not None and _ed25519_verify(
