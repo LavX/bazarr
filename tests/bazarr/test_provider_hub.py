@@ -1796,6 +1796,48 @@ def test_provider_hub_restart_activation_keeps_active_on_staged_failure(tmp_path
     assert installation["last_error"]
 
 
+def test_a_failed_restart_activation_caps_the_recorded_error_text(tmp_path, monkeypatch):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.service import activate_staged_installations
+    from provider_hub.state import load_state
+
+    token = "Zq7Kx9Pw2Lm4Nv8Rt5Yh"
+    # "Bearer " ends at character 196, so the first four characters of the
+    # token sit inside the first 200 and the rest sit beyond them.
+    message = "x" * 188 + " Bearer " + token + " is not accepted"
+    assert message.index(token) == 196
+
+    def refusing_verify(manifest, bundle_path):
+        raise ManifestValidationError(message)
+
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", refusing_verify)
+    provider_id = "stagehub"
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"installations": {provider_id: {
+            "provider_id": provider_id,
+            "name": "Stage Hub Provider",
+            "staged_version": "1.1.0",
+            "staged_path": str(tmp_path / "bundle"),
+            "staged_python_path": str(tmp_path / "python"),
+            "staged_manifest": _manifest(provider_id=provider_id, version="1.1.0"),
+            "state": "staged",
+            "pending_restart": True,
+            "manifest": _manifest(provider_id=provider_id, version="1.1.0"),
+        }}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    assert activate_staged_installations() == []
+
+    installation = load_state()["installations"][provider_id]
+    assert installation["state"] == "failed"
+    assert len(installation["last_error"]) <= 200
+    assert token[:4] not in installation["last_error"]
+    assert installation["last_error"].startswith("x" * 188 + " Bearer ")
+
+
 def test_provider_hub_restart_activation_finalizes_removed_installation(tmp_path, monkeypatch):
     from provider_hub.service import activate_staged_installations
     from provider_hub.state import load_state

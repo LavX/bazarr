@@ -2963,7 +2963,7 @@ def activate_staged_installations() -> list[str]:
                 verify_bundle_tree(manifest, staged_bundle_path)
                 _smoke_validate_worker(manifest, staged_bundle_path, Path(staged_python_path))
             except Exception as error:
-                installation["last_error"] = scrub_text(str(error))
+                installation["last_error"] = refusal_text(error)
                 installation["staged_version"] = None
                 installation["staged_path"] = None
                 installation["staged_python_path"] = None
