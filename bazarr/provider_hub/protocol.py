@@ -35,6 +35,11 @@ class HubWorkerSubtitle(Subtitle):
     provider_name = "providerhub"
     hash_verifiable = False
     hearing_impaired_verifiable = False
+    # Served through the distribution hub. Under a forced hearing-impaired
+    # request, the host keeps this candidate only when the worker flags it as
+    # hearing-impaired (see download_best_subtitles in
+    # custom_libs/subliminal_patch/core.py).
+    hub_proxy = True
 
     def __init__(
         self,
@@ -123,7 +128,7 @@ def language_from_payload(payload: dict[str, Any]):
     country = payload.get("country_alpha2")
     script = payload.get("script")
     kwargs = {
-        "hi": bool(payload.get("hi", False)),
+        "hi": payload.get("hi") is True,
         "forced": bool(payload.get("forced", False)),
     }
     if isinstance(script, str) and re.fullmatch(r"[A-Za-z]{4}", script):
@@ -223,6 +228,9 @@ _RESERVED_DISPLAY_ATTRS = frozenset({
     "hash_verifiable",
     "hearing_impaired_verifiable",
     "ai_translated",
+    # Class marker the forced hearing-impaired gate reads. A worker display of
+    # {"hub_proxy": false} would shadow it on the instance and skip the gate.
+    "hub_proxy",
 })
 
 
@@ -246,7 +254,7 @@ def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWor
         worker_id=worker_id,
         language=language,
         provider_payload=provider_payload,
-        hearing_impaired=bool(payload.get("hearing_impaired", getattr(language, "hi", False))),
+        hearing_impaired=payload.get("hearing_impaired", getattr(language, "hi", False)) is True,
         page_link=payload.get("page_link"),
     )
     subtitle.release_info = payload.get("release_info")
@@ -257,7 +265,7 @@ def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWor
     subtitle.score_without_hash = payload.get("score_without_hash")
     subtitle.score_out_of = payload.get("score_out_of")
     subtitle.hash_verifiable = bool(payload.get("hash_verifiable", False))
-    subtitle.hearing_impaired_verifiable = bool(payload.get("hearing_impaired_verifiable", False))
+    subtitle.hearing_impaired_verifiable = payload.get("hearing_impaired_verifiable") is True
     subtitle.ai_translated = payload.get("ai_translated") is True
 
     # Preserve reported facts separately from the legacy flags, whose defaults
