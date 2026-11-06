@@ -4021,10 +4021,12 @@ def test_catalog_refresh_refuses_a_schema_2_entry_in_the_providers_list(tmp_path
 
 
 def test_catalog_refresh_skips_an_entry_whose_manifest_declares_no_id(tmp_path, monkeypatch):
-    from provider_hub.service import add_catalog_source, refresh_catalog
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
     from provider_hub.state import load_state
 
     # The wrapper names an id that its manifest does not declare, so nothing is stored.
+    # The entry sits in the plugins list, where a schema 2 manifest is read, so the
+    # missing id is the only reason it can be refused.
     manifest = provider_manifest_v2("wrapperhub")
     manifest.pop("id")
     item = {"provider_id": "wrapperhub", "version": "1.0.0", "manifest": manifest}
@@ -4034,7 +4036,7 @@ def test_catalog_refresh_skips_an_entry_whose_manifest_declares_no_id(tmp_path, 
             return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
         if "LavX/bazarr-provider-catalog" in url:
             return _FakeResponse({"providers": []})
-        return _FakeResponse({"providers": [item]})
+        return _FakeResponse({"providers": [], "plugins": [item]})
 
     monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
     state_file = tmp_path / "state.json"
@@ -4045,6 +4047,7 @@ def test_catalog_refresh_skips_an_entry_whose_manifest_declares_no_id(tmp_path, 
     refresh_catalog()
 
     assert load_state()["catalog_entries"] == {}
+    assert [record["reason"] for record in list_jobs()[-1]["details"]["rejected_plugins"]] == ["id must be a non-empty string"]
 
 
 def test_a_schema_1_catalog_entry_without_a_provider_id_is_not_listed(tmp_path, monkeypatch):
@@ -8056,6 +8059,33 @@ def test_a_failed_activation_of_an_update_with_no_earlier_list_leaves_the_list_t
 
     row = load_state()["installations"]["movedhub"]
     assert "catalog_list" not in row
+    assert service._installed_catalog_list(row) == "providers"
+
+
+@pytest.mark.parametrize("previous, expected", [({"previous_catalog_list": "providers"}, "providers"), ({}, None)])
+def test_a_failed_restage_puts_back_the_list_of_the_active_version(tmp_path, monkeypatch, previous, expected):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    _patch_local_install_env(monkeypatch, tmp_path)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               installations=_staged_cross_list_update(**previous))
+
+    def refuse(manifest, bundle_path, python_path):
+        raise service.ProviderHubInstallError("the worker did not start")
+
+    monkeypatch.setattr(service, "_smoke_validate_worker", refuse)
+
+    with pytest.raises(service.ProviderHubInstallError, match="the worker did not start"):
+        service.stage_install(provider_manifest_v2("movedhub", version="1.2.0"),
+                              source_id="community", catalog_list="plugins")
+
+    row = load_state()["installations"]["movedhub"]
+    assert (row["active_version"], row["staged_version"]) == ("1.0.0", None)
+    assert row.get("catalog_list") == expected
+    assert "previous_catalog_list" not in row
     assert service._installed_catalog_list(row) == "providers"
 
 

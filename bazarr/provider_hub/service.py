@@ -2572,6 +2572,23 @@ def _installed_catalog_list(installation: dict[str, Any]) -> str:
     return CATALOG_LIST_PROVIDERS
 
 
+def _abandon_staged_catalog_list(installation: dict[str, Any]) -> None:
+    """Put back the catalog list of the active version when its staged update is dropped.
+
+    A staged update records the new version's list and remembers the one the active
+    version came from. Dropping the staged update puts that list back, or removes the
+    field when none was remembered so it is worked out from the active manifest. A row
+    with no active version has nothing to go back to and keeps what it records.
+    """
+    previous_list = installation.pop("previous_catalog_list", None)
+    if not installation.get("active_version"):
+        return
+    if previous_list:
+        installation["catalog_list"] = previous_list
+    else:
+        installation.pop("catalog_list", None)
+
+
 def _staged_installation(
     validated,
     existing,
@@ -2633,6 +2650,9 @@ def _failed_installation(
     message = refusal_text(error)
     if existing.get("active_version"):
         installation = dict(existing)
+        if installation.get("state") == "staged":
+            # A restage that fails drops the staged update the row still holds.
+            _abandon_staged_catalog_list(installation)
         installation["last_error"] = message
         installation["staged_version"] = None
         installation["staged_path"] = None
@@ -3073,13 +3093,7 @@ def activate_staged_installations() -> list[str]:
                 _smoke_validate_worker(manifest, staged_bundle_path, Path(staged_python_path))
             except Exception as error:
                 installation["last_error"] = refusal_text(error)
-                # Back on the old version, so back on the list it came from.
-                previous_list = installation.pop("previous_catalog_list", None)
-                if installation.get("active_version"):
-                    if previous_list:
-                        installation["catalog_list"] = previous_list
-                    else:
-                        installation.pop("catalog_list", None)
+                _abandon_staged_catalog_list(installation)
                 installation["staged_version"] = None
                 installation["staged_path"] = None
                 installation["staged_python_path"] = None
