@@ -6346,6 +6346,107 @@ def test_worker_flagged_hearing_impaired_candidate_keeps_flag_from_base_language
     assert out[0].language.hi is True
 
 
+@pytest.mark.parametrize("malformed", ["false", "true", "no", 1, 0, [], {}, None])
+def test_worker_hearing_impaired_flag_must_be_a_json_boolean(malformed):
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    candidate = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-1",
+            "language": language_to_payload(Language("eng")),
+            "hearing_impaired": malformed,
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+
+    assert candidate.hearing_impaired is False
+    assert candidate._reported_hearing_impaired is None
+
+
+@pytest.mark.parametrize("malformed", ["false", "true", 1, [], {}])
+def test_worker_language_hi_flag_must_be_a_json_boolean(malformed):
+    from provider_hub.protocol import candidate_from_worker, language_from_payload, language_to_payload
+
+    language = language_to_payload(Language("eng"))
+    language["hi"] = malformed
+
+    assert language_from_payload(language).hi is False
+
+    candidate = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-1",
+            "language": language,
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+
+    assert candidate.hearing_impaired is False
+
+
+def test_worker_hearing_impaired_verifiable_must_be_a_json_boolean():
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    def build(value):
+        return candidate_from_worker(
+            "hihub",
+            {
+                "provider": "fake",
+                "id": "sub-1",
+                "language": language_to_payload(Language("eng")),
+                "hearing_impaired_verifiable": value,
+                "provider_payload": {"provider": "fake", "schema": 1},
+            },
+        )
+
+    assert build("false").hearing_impaired_verifiable is False
+    assert build(True).hearing_impaired_verifiable is True
+
+
+def test_worker_boolean_hearing_impaired_flags_are_kept():
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    flagged = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-1",
+            "language": language_to_payload(Language("eng")),
+            "hearing_impaired": True,
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+    from_language = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-2",
+            "language": language_to_payload(Language("eng", hi=True)),
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+
+    assert flagged.hearing_impaired is True
+    assert flagged._reported_hearing_impaired is True
+    assert from_language.hearing_impaired is True
+
+
+def test_force_hi_does_not_download_hub_candidate_with_string_hearing_impaired_flag(monkeypatch):
+    pool, _worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate(hearing_impaired="false"))
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    subtitles = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+    pool.download_subtitle = lambda subtitle: True
+
+    out = pool.download_best_subtitles(subtitles, movie, {Language("eng", hi=True)}, hearing_impaired="force HI")
+
+    assert [subtitle.id for subtitle in subtitles] == ["fake:sub-1"]
+    assert out == []
+
+
 def test_force_hi_does_not_download_unflagged_hub_candidate(monkeypatch):
     pool, _worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate())
     movie = Movie("/media/example.mkv", "Example Movie", year=2024)
