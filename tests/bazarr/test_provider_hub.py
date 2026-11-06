@@ -4286,8 +4286,7 @@ def test_catalog_refresh_reads_plugins_when_stored_entries_predate_catalog_list(
 
 
 def test_catalog_refresh_records_an_unreadable_plugin_and_keeps_its_sibling(tmp_path, monkeypatch, service_kind):
-    from provider_hub.service import (
-        PLUGIN_MANIFEST_UNREADABLE_REASON, add_catalog_source, list_jobs, refresh_catalog)
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
     from provider_hub.state import load_state
 
     unreadable = service_manifest("unreadhub", settings_version=1, settings={
@@ -4304,7 +4303,50 @@ def test_catalog_refresh_records_an_unreadable_plugin_and_keeps_its_sibling(tmp_
 
     assert list(load_state()["catalog_entries"]) == ["community:plugins:siblinghub:1.0.0"]
     rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == ["settings field token has an unsupported type"]
+
+
+def test_catalog_refresh_records_a_crashing_parser_as_unreadable_and_keeps_its_sibling(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+    from provider_hub.service import (
+        PLUGIN_MANIFEST_UNREADABLE_REASON, add_catalog_source, list_jobs, refresh_catalog)
+    from provider_hub.state import load_state
+
+    def crashing_parse(manifest):
+        if manifest["id"] == "crashhub":
+            raise RuntimeError("the parser crashed")
+        return parse_plugin_manifest(manifest)
+
+    monkeypatch.setattr("provider_hub.service.parse_plugin_manifest", crashing_parse)
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("crashhub")}, {"manifest": service_manifest("siblinghub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:siblinghub:1.0.0"]
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
     assert [record["reason"] for record in rejected] == [PLUGIN_MANIFEST_UNREADABLE_REASON]
+
+
+def test_catalog_refresh_records_the_refusal_of_a_plugin_the_host_cannot_run(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    daemon_plugin = service_manifest("daemonhub", runtime={"artifact": "python", "process": "daemon"})
+    _serve_community_catalog(monkeypatch, {"providers": [], "plugins": [{"manifest": daemon_plugin}]})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == ["runtime python run as daemon is not a supported combination"]
 
 
 def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_sources(

@@ -1342,6 +1342,10 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     try:
                         manifest = _normalize_catalog_manifest(manifest, source, commit)
                         parsed = parse_plugin_manifest(manifest)
+                    except ManifestValidationError as error:
+                        rejected_plugins.append(_rejected_plugin(
+                            source, manifest, scrub_text(str(error))))
+                        continue
                     except Exception:
                         rejected_plugins.append(_rejected_plugin(
                             source, manifest, PLUGIN_MANIFEST_UNREADABLE_REASON))
