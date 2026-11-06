@@ -35,6 +35,9 @@ class HubWorkerSubtitle(Subtitle):
     provider_name = "providerhub"
     hash_verifiable = False
     hearing_impaired_verifiable = False
+    # Served through the distribution hub. For a hearing-impaired request the
+    # host searches the base language unless the provider lists that variant;
+    # see _hub_search_languages in custom_libs/subliminal_patch/core.py.
     hub_proxy = True
 
     def __init__(

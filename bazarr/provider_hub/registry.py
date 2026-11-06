@@ -78,6 +78,9 @@ class HubProxyProvider(Provider):
     languages = set()
     video_types = (Episode, Movie)
     subtitle_class = None
+    # Served through the distribution hub. For a hearing-impaired request the
+    # host searches the base language unless the provider lists that variant;
+    # see _hub_search_languages in custom_libs/subliminal_patch/core.py.
     hub_proxy = True
     #: Set by the pool that owns this instance: a callable answering whether
     #: the pool may still call this provider. Searches and downloads recheck it
