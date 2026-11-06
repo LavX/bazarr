@@ -6230,6 +6230,364 @@ def test_pool_drops_subtitles_whose_language_is_not_a_language_object(monkeypatc
     assert out == [good]
 
 
+class _HiListingWorker:
+    """Answers every search with the same candidate and records each request."""
+
+    def __init__(self, candidate):
+        self.candidate = candidate
+        self.requests = []
+
+    def request(self, op, payload, timeout):
+        self.requests.append((op, payload, timeout))
+        return type("Result", (), {"payload": {"candidates": [self.candidate]}, "events": []})()
+
+    def stop(self):
+        return None
+
+
+def _hi_listing_candidate(**overrides):
+    from provider_hub.protocol import language_to_payload
+
+    candidate = {
+        "provider": "fake",
+        "id": "sub-1",
+        "language": language_to_payload(Language("eng")),
+        "provider_payload": {"provider": "fake", "schema": 1, "data": {"file_id": "sub-1"}},
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+def _hi_listing_pool(monkeypatch, candidate, *, listed_languages=None, provider_id="hihub"):
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.registry import _make_provider_class
+    from subliminal_patch import extensions
+    from subliminal_patch.core import SZProviderPool
+
+    worker = _HiListingWorker(candidate)
+    manifest = validate_manifest(_manifest(provider_id=provider_id, languages=["eng"]), built_in_provider_ids=set())
+    provider_class = _make_provider_class(manifest, worker_client=worker)
+    # Manifests cannot express a hearing-impaired variant, so a test that needs one lists it directly.
+    if listed_languages is not None:
+        provider_class.languages = listed_languages
+    monkeypatch.setitem(extensions.provider_registry.providers, provider_id, provider_class)
+    pool = SZProviderPool(providers=[provider_id])
+    pool.initialized_providers[provider_id] = provider_class()
+    return pool, worker
+
+
+def test_hi_request_searches_base_language_on_hub_provider_without_hi_variant(monkeypatch):
+    from provider_hub.protocol import language_to_payload
+
+    pool, worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate())
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    out = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+
+    assert [subtitle.id for subtitle in out] == ["fake:sub-1"]
+    assert worker.requests[0][1]["languages"] == [language_to_payload(Language("eng"))]
+
+
+def test_hi_request_is_sent_unchanged_when_hub_provider_lists_the_hi_variant(monkeypatch):
+    from provider_hub.protocol import language_to_payload
+
+    pool, worker = _hi_listing_pool(
+        monkeypatch, _hi_listing_candidate(), listed_languages={Language("eng"), Language("eng", hi=True)})
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    out = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+
+    assert [subtitle.id for subtitle in out] == ["fake:sub-1"]
+    assert worker.requests[0][1]["languages"] == [language_to_payload(Language("eng", hi=True))]
+
+
+def test_hi_request_stays_unsupported_for_native_provider_without_hi_variant(monkeypatch):
+    from subliminal_patch import extensions
+    from subliminal_patch.core import SZProviderPool
+
+    calls = []
+
+    class FakeNativeProvider(object):
+        languages = {Language("eng")}
+
+        @classmethod
+        def check(cls, video):
+            return True
+
+        def list_subtitles(self, video, languages):
+            calls.append(languages)
+            return []
+
+    monkeypatch.setitem(extensions.provider_registry.providers, "fakenative", FakeNativeProvider)
+    pool = SZProviderPool(providers=["fakenative"])
+    pool.initialized_providers["fakenative"] = FakeNativeProvider()
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    result = pool.list_subtitles_provider("fakenative", movie, {Language("eng", hi=True)}, detailed=True)
+
+    assert (result.status, result.reason) == ("skipped", "unsupported_language")
+    assert calls == []
+
+
+def test_worker_flagged_hearing_impaired_candidate_keeps_flag_from_base_language_search(monkeypatch):
+    from provider_hub.protocol import language_to_payload
+
+    pool, worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate(hearing_impaired=True))
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    out = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+
+    assert worker.requests[0][1]["languages"] == [language_to_payload(Language("eng"))]
+    assert [subtitle.hearing_impaired for subtitle in out] == [True]
+    assert out[0].language.hi is True
+
+
+@pytest.mark.parametrize("malformed", ["false", "true", "no", 1, 0, [], {}, None])
+def test_worker_hearing_impaired_flag_must_be_a_json_boolean(malformed):
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    candidate = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-1",
+            "language": language_to_payload(Language("eng")),
+            "hearing_impaired": malformed,
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+
+    assert candidate.hearing_impaired is False
+    assert candidate._reported_hearing_impaired is None
+
+
+@pytest.mark.parametrize("malformed", ["false", "true", 1, [], {}])
+def test_worker_language_hi_flag_must_be_a_json_boolean(malformed):
+    from provider_hub.protocol import candidate_from_worker, language_from_payload, language_to_payload
+
+    language = language_to_payload(Language("eng"))
+    language["hi"] = malformed
+
+    assert language_from_payload(language).hi is False
+
+    candidate = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-1",
+            "language": language,
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+
+    assert candidate.hearing_impaired is False
+
+
+def test_worker_hearing_impaired_verifiable_must_be_a_json_boolean():
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    def build(value):
+        return candidate_from_worker(
+            "hihub",
+            {
+                "provider": "fake",
+                "id": "sub-1",
+                "language": language_to_payload(Language("eng")),
+                "hearing_impaired_verifiable": value,
+                "provider_payload": {"provider": "fake", "schema": 1},
+            },
+        )
+
+    assert build("false").hearing_impaired_verifiable is False
+    assert build(True).hearing_impaired_verifiable is True
+
+
+def test_worker_boolean_hearing_impaired_flags_are_kept():
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    flagged = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-1",
+            "language": language_to_payload(Language("eng")),
+            "hearing_impaired": True,
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+    from_language = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-2",
+            "language": language_to_payload(Language("eng", hi=True)),
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+
+    assert flagged.hearing_impaired is True
+    assert flagged._reported_hearing_impaired is True
+    assert from_language.hearing_impaired is True
+
+
+def test_force_hi_does_not_download_hub_candidate_with_string_hearing_impaired_flag(monkeypatch):
+    pool, _worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate(hearing_impaired="false"))
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    subtitles = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+    pool.download_subtitle = lambda subtitle: True
+
+    out = pool.download_best_subtitles(subtitles, movie, {Language("eng", hi=True)}, hearing_impaired="force HI")
+
+    assert [subtitle.id for subtitle in subtitles] == ["fake:sub-1"]
+    assert out == []
+
+
+def test_force_hi_does_not_download_unflagged_hub_candidate(monkeypatch):
+    pool, _worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate())
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    subtitles = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+    pool.download_subtitle = lambda subtitle: True
+
+    out = pool.download_best_subtitles(subtitles, movie, {Language("eng", hi=True)}, hearing_impaired="force HI")
+
+    assert [subtitle.id for subtitle in subtitles] == ["fake:sub-1"]
+    assert out == []
+
+
+def test_force_hi_does_not_download_hub_candidate_listing_a_hearing_impaired_match_without_the_flag(monkeypatch):
+    candidate = _hi_listing_candidate(hearing_impaired=False, matches=["hearing_impaired"])
+    pool, _worker = _hi_listing_pool(monkeypatch, candidate)
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    subtitles = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+    pool.download_subtitle = lambda subtitle: True
+
+    out = pool.download_best_subtitles(subtitles, movie, {Language("eng", hi=True)}, hearing_impaired="force HI")
+
+    assert [subtitle.id for subtitle in subtitles] == ["fake:sub-1"]
+    assert subtitles[0].hearing_impaired is False
+    assert "hearing_impaired" in subtitles[0].matches
+    assert out == []
+
+
+def test_force_hi_does_not_download_hub_candidate_whose_display_disables_the_hub_marker(monkeypatch):
+    candidate = _hi_listing_candidate(display={"hub_proxy": False})
+    pool, _worker = _hi_listing_pool(monkeypatch, candidate)
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    subtitles = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+    pool.download_subtitle = lambda subtitle: True
+
+    out = pool.download_best_subtitles(subtitles, movie, {Language("eng", hi=True)}, hearing_impaired="force HI")
+
+    assert [subtitle.id for subtitle in subtitles] == ["fake:sub-1"]
+    assert subtitles[0].hub_proxy is True
+    assert out == []
+
+
+def test_worker_display_cannot_override_the_hub_proxy_marker():
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    candidate = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-1",
+            "language": language_to_payload(Language("eng")),
+            "display": {"hub_proxy": False},
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+
+    assert candidate.hub_proxy is True
+    assert "hub_proxy" not in vars(candidate)
+
+
+def test_force_hi_downloads_flagged_hub_candidate(monkeypatch):
+    pool, _worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate(hearing_impaired=True))
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    subtitles = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+    pool.download_subtitle = lambda subtitle: True
+
+    out = pool.download_best_subtitles(subtitles, movie, {Language("eng", hi=True)}, hearing_impaired="force HI")
+
+    assert [subtitle.id for subtitle in subtitles] == ["fake:sub-1"]
+    assert [subtitle.id for subtitle in out] == ["fake:sub-1"]
+
+
+@pytest.mark.parametrize(("flagged", "expected"), [(False, []), (True, ["fake:sub-1"])])
+def test_force_hi_whisper_fallback_downloads_only_flagged_hub_candidates(monkeypatch, flagged, expected):
+    candidate = _hi_listing_candidate(**({"hearing_impaired": True} if flagged else {}))
+    pool, _worker = _hi_listing_pool(monkeypatch, candidate, provider_id="whisperai")
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    languages = {Language("eng", hi=True)}
+    subtitles = pool.list_subtitles_provider("whisperai", movie, languages)
+    assert [subtitle.provider_name for subtitle in subtitles] == ["whisperai"]
+    downloads = []
+    pool.download_subtitle = lambda subtitle: downloads.append(subtitle.id) or True
+    fallback_calls = []
+    real_fallback = pool.download_fallback_subtitles
+
+    def spy_fallback(*args, **kwargs):
+        result = real_fallback(*args, **kwargs)
+        fallback_calls.append([subtitle.id for subtitle in result])
+        return result
+
+    pool.download_fallback_subtitles = spy_fallback
+
+    # A minimum score no candidate can reach keeps the main loop from
+    # downloading anything, so only the fallback can produce a download.
+    out = pool.download_best_subtitles(
+        subtitles, movie, languages, min_score=10_000, hearing_impaired="force HI", fallback_allowed=True)
+
+    assert fallback_calls == [expected]
+    assert [subtitle.id for subtitle in out] == expected
+    assert downloads == expected
+
+
+def test_prefer_hi_still_downloads_unflagged_hub_candidate(monkeypatch):
+    pool, _worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate())
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    subtitles = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+    pool.download_subtitle = lambda subtitle: True
+
+    out = pool.download_best_subtitles(subtitles, movie, {Language("eng", hi=True)}, hearing_impaired="prefer")
+
+    assert [subtitle.id for subtitle in subtitles] == ["fake:sub-1"]
+    assert [subtitle.id for subtitle in out] == ["fake:sub-1"]
+
+
+def test_force_hi_keeps_unverifiable_native_candidate_downloadable():
+    from subliminal_patch.core import SZProviderPool
+    from subliminal_patch.subtitle import Subtitle as PatchedSubtitle
+
+    class FakeNativeSubtitle(PatchedSubtitle):
+        provider_name = "fakenative"
+        hearing_impaired_verifiable = False
+
+        def get_matches(self, video):
+            return set()
+
+    native = FakeNativeSubtitle(Language("eng"), subtitle_id="native-1")
+    pool = SZProviderPool()
+    pool.download_subtitle = lambda subtitle: True
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    out = pool.download_best_subtitles([native], movie, {Language("eng", hi=True)}, hearing_impaired="force HI")
+
+    assert out == [native]
+
+
 @pytest.mark.parametrize("status", [403, 429])
 def test_catalog_rate_limit_preserves_cached_source(tmp_path, monkeypatch, status):
     import requests

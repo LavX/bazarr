@@ -533,6 +533,40 @@ def _format_callback_failure(exc, error):
     return "".join(lines)
 
 
+def _hub_candidate_fails_forced_hi(subtitle, hearing_impaired):
+    """Whether a forced hearing-impaired request must refuse this candidate.
+
+    Under "force HI" a hub candidate is kept only when the worker flags it as
+    hearing-impaired. Test the parsed flag, not the match set: scoring keeps
+    worker-supplied matches, so a worker could list "hearing_impaired" there
+    while reporting the subtitle as not hearing-impaired. Every download path,
+    the Whisper fallback included, applies this one rule.
+    """
+    return (hearing_impaired == "force HI" and getattr(subtitle, "hub_proxy", False)
+            and subtitle.hearing_impaired is not True)
+
+
+def _hub_search_languages(provider_class, languages):
+    """Return the languages to request from a provider.
+
+    Hub manifests cannot declare hearing-impaired variants, so a hearing-impaired request never
+    matches the languages a hub provider lists. For a hub provider, such a request is searched as
+    its base language unless the provider lists that exact variant. The candidates the worker
+    returns keep the hearing-impaired flag the worker reports. Any other provider gets the same
+    set back, and the caller's set is never changed.
+    """
+
+    if not getattr(provider_class, "hub_proxy", False):
+        return languages
+
+    listed = set(provider_class.languages)
+    search = set()
+    for lang in languages:
+        hearing_impaired = bool(getattr(lang, "hi", False) or getattr(lang, "hearing_impaired", False))
+        search.add(Language.rebuild(lang, hi=False) if hearing_impaired and lang not in listed else lang)
+    return search
+
+
 class SZProviderPool(ProviderPool):
     @staticmethod
     def _dedupe_provider_names(providers):
@@ -850,7 +884,8 @@ class SZProviderPool(ProviderPool):
             return finish([], "skipped", "excluded_language")
 
         # check supported languages
-        provider_languages = self.lang_equals.check_set(set(provider_registry[provider].languages)) & use_languages
+        search_languages = _hub_search_languages(provider_registry[provider], use_languages)
+        provider_languages = self.lang_equals.check_set(set(provider_registry[provider].languages)) & search_languages
         if not provider_languages:
             logger.info('Skipping provider %r: no language to search for', provider)
             return finish([], "skipped", "unsupported_language")
@@ -1450,6 +1485,11 @@ class SZProviderPool(ProviderPool):
                              score, hearing_impaired)
                 continue
 
+            if _hub_candidate_fails_forced_hi(subtitle, hearing_impaired):
+                logger.debug('%r: Skipping hub subtitle with score %d because it is not flagged hearing-impaired '
+                             'and hearing-impaired set to %s', subtitle, score, hearing_impaired)
+                continue
+
             if is_episode and not self._episode_candidate_is_valid(subtitle, orig_matches, matches):
                 logger.debug("%r: Skipping subtitle with score %d, because it doesn't match our series/episode",
                              subtitle, score)
@@ -1531,6 +1571,10 @@ class SZProviderPool(ProviderPool):
         whisper_subtitles = [s for s in subtitles if s.provider_name == 'whisperai']
         for subtitle, score, _score_without_hash, matches, orig_matches in self._score_subtitles(
                 whisper_subtitles, video, languages, hearing_impaired):
+            if _hub_candidate_fails_forced_hi(subtitle, hearing_impaired):
+                logger.debug('%r: Skipping hub fallback subtitle because it is not flagged hearing-impaired '
+                             'and hearing-impaired set to %s', subtitle, hearing_impaired)
+                continue
             logger.info('BAZARR Bulk Task: Falling back to Whisper for %r', video.name)
             subtitle.use_original_format = use_original_format
             if self.download_subtitle(subtitle):
