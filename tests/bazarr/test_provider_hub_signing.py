@@ -1,0 +1,671 @@
+import base64
+import copy
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from provider_hub.signing import (
+    CLOCK_SKEW,
+    CounterVerdict,
+    Status,
+    WireFormatError,
+    certification_statement,
+    compare_counter,
+    key_id,
+    parse_wire_format,
+    revocation_statement,
+    verify_catalog,
+)
+
+NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
+SIGNED_AT = NOW - timedelta(days=1)
+EXPIRES = NOW + timedelta(days=89)
+
+
+def stamp(moment):
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def raw_public(private):
+    return private.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+
+
+def b64(raw):
+    return base64.b64encode(raw).decode("ascii")
+
+
+class Keys:
+    """A throwaway root and CI key pair, generated fresh for every test."""
+
+    def __init__(self):
+        self.root = Ed25519PrivateKey.generate()
+        self.root_public = raw_public(self.root)
+        self.root_id = key_id(self.root_public)
+        self.ci = Ed25519PrivateKey.generate()
+        self.ci_public = raw_public(self.ci)
+        self.ci_id = key_id(self.ci_public)
+        self.roots = {self.root_id: self.root_public}
+
+    def entry(self, private=None, certifier=None):
+        private = private or self.ci
+        certifier = certifier or self.root
+        public = raw_public(private)
+        kid = key_id(public)
+        return {
+            "key_id": kid,
+            "algorithm": "ed25519",
+            "public_key": b64(public),
+            "added": "2026-10-01",
+            "certification": {
+                "root_key_id": key_id(raw_public(certifier)),
+                "signature": b64(certifier.sign(certification_statement(kid, public))),
+            },
+        }
+
+    def revocation(self, revoked_at, kid=None, signer=None):
+        signer = signer or self.root
+        kid = kid or self.ci_id
+        text = stamp(revoked_at)
+        return {
+            "key_id": kid,
+            "revoked_at": text,
+            "root_key_id": key_id(raw_public(signer)),
+            "signature": b64(signer.sign(revocation_statement(kid, text))),
+        }
+
+    def key_file(self, revocations=(), extra=()):
+        return {"keys": [self.entry(), *extra], "revocations": list(revocations)}
+
+
+def catalog_bytes(channel="main", version=10, not_before=SIGNED_AT, expires=EXPIRES, **extra):
+    document = {
+        "channel": channel,
+        "signed_version": version,
+        "not_before": stamp(not_before),
+        "expires": stamp(expires),
+        "plugins": [{"id": "demo"}],
+    }
+    document.update(extra)
+    return json.dumps(document, sort_keys=True).encode("utf-8")
+
+
+def envelope_for(data, *signers):
+    return {
+        "schema_version": 1,
+        "signatures": [
+            {
+                "algorithm": "ed25519",
+                "key_id": key_id(raw_public(private)),
+                "signature": b64(private.sign(data)),
+            }
+            for private in signers
+        ],
+    }
+
+
+@pytest.fixture
+def keys():
+    return Keys()
+
+
+def verify(keys, data=None, envelope=None, key_file=None, **kwargs):
+    data = catalog_bytes() if data is None else data
+    options = {"roots": keys.roots, "channel": "main", "now": NOW}
+    options.update(kwargs)
+    return verify_catalog(
+        data,
+        envelope if envelope is not None else envelope_for(data, keys.ci),
+        key_file if key_file is not None else keys.key_file(),
+        **options,
+    )
+
+
+def test_valid_catalog_is_ok(keys):
+    result = verify(keys)
+
+    assert result.status is Status.OK
+    assert result.ok and result.usable and result.may_advance_state
+    assert result.signer_key_id == keys.ci_id
+    assert result.root_key_id == keys.root_id
+    assert result.channel == "main"
+    assert result.signed_version == 10
+    assert result.not_before == SIGNED_AT
+    assert result.expires == EXPIRES
+    assert result.host_time == NOW
+    assert result.counter is CounterVerdict.FIRST
+    assert result.baked is False
+
+
+def test_accepts_json_text_and_bytes_for_documents(keys):
+    data = catalog_bytes()
+    envelope = json.dumps(envelope_for(data, keys.ci))
+    key_file = json.dumps(keys.key_file()).encode("utf-8")
+
+    assert verify(keys, data, envelope, key_file).ok
+
+
+def test_key_id_is_sha256_prefix_of_the_public_key(keys):
+    assert key_id(keys.ci_public) == hashlib.sha256(keys.ci_public).hexdigest()[:16]
+    assert len(key_id(keys.ci_public)) == 16
+
+
+@pytest.mark.parametrize("envelope", [None, "", b"", "   "])
+def test_missing_envelope_is_unsigned(keys, envelope):
+    result = verify_catalog(
+        catalog_bytes(), envelope, keys.key_file(), roots=keys.roots, channel="main", now=NOW
+    )
+
+    assert result.status is Status.UNSIGNED
+    assert not result.usable
+
+
+def test_flipped_catalog_byte_is_a_bad_signature(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    tampered = bytearray(data)
+    tampered[len(tampered) // 2] ^= 0x01
+
+    result = verify(keys, bytes(tampered), envelope)
+
+    # A flipped byte may also break the JSON; either way it must not verify.
+    assert result.status in (Status.BAD_SIGNATURE, Status.MALFORMED)
+    assert not result.usable
+
+
+def test_flipped_byte_inside_a_json_value_is_a_bad_signature(keys):
+    data = catalog_bytes(note="alpha")
+    envelope = envelope_for(data, keys.ci)
+    tampered = data.replace(b"alpha", b"alphb")
+
+    result = verify(keys, tampered, envelope)
+
+    assert result.status is Status.BAD_SIGNATURE
+    assert result.signer_key_id is None
+    assert result.channel is None
+
+
+def test_flipped_signature_byte_is_a_bad_signature(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    raw = bytearray(base64.b64decode(envelope["signatures"][0]["signature"]))
+    raw[0] ^= 0x80
+    envelope["signatures"][0]["signature"] = b64(bytes(raw))
+
+    assert verify(keys, data, envelope).status is Status.BAD_SIGNATURE
+
+
+def test_signature_from_a_key_missing_from_the_key_file(keys):
+    data = catalog_bytes()
+    stranger = Ed25519PrivateKey.generate()
+
+    result = verify(keys, data, envelope_for(data, stranger))
+
+    assert result.status is Status.BAD_SIGNATURE
+    assert "not in the key file" in result.detail
+
+
+def test_key_certified_by_an_untrusted_root_is_rejected(keys):
+    data = catalog_bytes()
+    other_root = Ed25519PrivateKey.generate()
+    key_file = {"keys": [keys.entry(certifier=other_root)], "revocations": []}
+
+    result = verify(keys, data, key_file=key_file)
+
+    assert result.status is Status.BAD_SIGNATURE
+    assert "not certified by a trusted root" in result.detail
+
+
+def test_self_certified_key_is_rejected(keys):
+    data = catalog_bytes()
+    key_file = {"keys": [keys.entry(certifier=keys.ci)], "revocations": []}
+
+    assert verify(keys, data, key_file=key_file).status is Status.BAD_SIGNATURE
+
+
+def test_certification_copied_to_another_key_is_rejected(keys):
+    data = catalog_bytes()
+    attacker = Ed25519PrivateKey.generate()
+    forged = keys.entry(private=attacker, certifier=attacker)
+    forged["certification"] = keys.entry()["certification"]
+    key_file = {"keys": [forged], "revocations": []}
+
+    result = verify(keys, data, envelope_for(data, attacker), key_file)
+
+    assert result.status is Status.BAD_SIGNATURE
+
+
+def test_second_signature_can_carry_a_bad_first_one(keys):
+    data = catalog_bytes()
+    stranger = Ed25519PrivateKey.generate()
+    envelope = envelope_for(data, stranger, keys.ci)
+
+    assert verify(keys, data, envelope).ok
+
+
+def test_root_key_signs_only_when_listed_and_certified(keys):
+    data = catalog_bytes()
+    key_file = {"keys": [keys.entry(private=keys.root)], "revocations": []}
+
+    # The root listed as its own "CI key" is certified by itself, which is a
+    # valid certification, so listing it is the operator's choice. Without the
+    # listing the root signature alone is not enough.
+    bare = verify(keys, data, envelope_for(data, keys.root), keys.key_file())
+    assert bare.status is Status.BAD_SIGNATURE
+    assert verify(keys, data, envelope_for(data, keys.root), key_file).ok
+
+
+def test_two_roots_either_may_certify(keys):
+    data = catalog_bytes()
+    second = Keys()
+    roots = {**keys.roots, **second.roots}
+    key_file = {"keys": [second.entry()], "revocations": []}
+
+    result = verify(keys, data, envelope_for(data, second.ci), key_file, roots=roots)
+
+    assert result.ok
+    assert result.root_key_id == second.root_id
+
+
+# Revocation
+
+
+def test_revocation_before_signing_time_revokes(keys):
+    revocation = keys.revocation(SIGNED_AT - timedelta(hours=1))
+
+    result = verify(keys, key_file=keys.key_file([revocation]))
+
+    assert result.status is Status.REVOKED_KEY
+    assert result.signer_key_id == keys.ci_id
+    assert not result.usable
+    assert result.signed_version is None
+
+
+def test_revocation_at_the_signing_instant_revokes(keys):
+    revocation = keys.revocation(SIGNED_AT)
+
+    assert verify(keys, key_file=keys.key_file([revocation])).status is Status.REVOKED_KEY
+
+
+def test_revocation_after_signing_time_keeps_older_signatures(keys):
+    revocation = keys.revocation(SIGNED_AT + timedelta(seconds=1))
+
+    assert verify(keys, key_file=keys.key_file([revocation])).ok
+
+
+def test_revocation_not_signed_by_a_root_is_ignored(keys):
+    forged = keys.revocation(SIGNED_AT - timedelta(days=5), signer=keys.ci)
+
+    assert verify(keys, key_file=keys.key_file([forged])).ok
+
+
+def test_revocation_signed_by_an_unknown_key_is_ignored(keys):
+    stranger = Ed25519PrivateKey.generate()
+    forged = keys.revocation(SIGNED_AT - timedelta(days=5), signer=stranger)
+
+    assert verify(keys, key_file=keys.key_file([forged])).ok
+
+
+def test_revocation_with_a_tampered_date_is_ignored(keys):
+    revocation = keys.revocation(SIGNED_AT + timedelta(days=5))
+    revocation["revoked_at"] = stamp(SIGNED_AT - timedelta(days=5))
+
+    assert verify(keys, key_file=keys.key_file([revocation])).ok
+
+
+def test_revocation_names_only_its_own_key(keys):
+    data = catalog_bytes()
+    other = Ed25519PrivateKey.generate()
+    other_id = key_id(raw_public(other))
+    revocation = keys.revocation(SIGNED_AT - timedelta(days=1), kid=other_id)
+    key_file = keys.key_file([revocation], extra=[keys.entry(private=other)])
+
+    assert verify(keys, data, envelope_for(data, keys.ci), key_file).ok
+    result = verify(keys, data, envelope_for(data, other), key_file)
+    assert result.status is Status.REVOKED_KEY
+    assert result.signer_key_id == other_id
+
+
+def test_revoked_key_does_not_hide_a_good_second_signature(keys):
+    data = catalog_bytes()
+    spare = Ed25519PrivateKey.generate()
+    revocation = keys.revocation(SIGNED_AT - timedelta(days=1))
+    key_file = keys.key_file([revocation], extra=[keys.entry(private=spare)])
+
+    result = verify(keys, data, envelope_for(data, keys.ci, spare), key_file)
+
+    assert result.ok
+    assert result.signer_key_id == key_id(raw_public(spare))
+
+
+def test_revoked_key_with_a_bad_signature_is_a_bad_signature(keys):
+    data = catalog_bytes()
+    revocation = keys.revocation(SIGNED_AT - timedelta(days=1))
+    envelope = envelope_for(b"something else", keys.ci)
+
+    result = verify(keys, data, envelope, keys.key_file([revocation]))
+
+    assert result.status is Status.BAD_SIGNATURE
+
+
+# Expiry and skew
+
+
+def test_expiry_boundaries(keys):
+    data = catalog_bytes(expires=NOW)
+
+    assert verify(keys, data, now=NOW).ok
+    assert verify(keys, data, now=NOW + timedelta(seconds=1)).ok
+    assert verify(keys, data, now=NOW + CLOCK_SKEW).ok
+
+    late = NOW + CLOCK_SKEW + timedelta(seconds=1)
+    result = verify(keys, data, now=late)
+    assert result.status is Status.EXPIRED
+    assert not result.usable
+    assert result.host_time == late
+    assert result.expires == NOW
+    assert stamp(late) in result.detail and stamp(NOW) in result.detail
+
+
+def test_not_before_boundaries(keys):
+    not_before = NOW + timedelta(days=10)
+    data = catalog_bytes(not_before=not_before, expires=not_before + timedelta(days=30))
+
+    assert verify(keys, data, now=not_before).ok
+    assert verify(keys, data, now=not_before - CLOCK_SKEW).ok
+
+    early = not_before - CLOCK_SKEW - timedelta(seconds=1)
+    result = verify(keys, data, now=early)
+    assert result.status is Status.CLOCK_WRONG
+    assert result.usable
+    assert result.host_time == early
+    assert result.not_before == not_before
+
+
+def test_clock_before_build_time_skips_expiry(keys):
+    data = catalog_bytes(not_before=NOW - timedelta(days=200), expires=NOW - timedelta(days=110))
+    build_time = NOW + timedelta(days=1)
+
+    stale = verify(keys, data, now=NOW)
+    assert stale.status is Status.EXPIRED
+
+    result = verify(keys, data, now=NOW, host_build_time=build_time)
+    assert result.status is Status.CLOCK_WRONG
+    assert result.usable and result.may_advance_state
+    assert not result.ok
+    assert "host time" in result.detail
+
+
+def test_clock_before_build_time_still_applies_the_counter(keys):
+    result = verify(keys, now=NOW, host_build_time=NOW + timedelta(days=1), stored_counter=11)
+
+    assert result.status is Status.REPLAYED
+
+
+def test_clock_at_or_after_build_time_is_trusted(keys):
+    data = catalog_bytes(not_before=NOW - timedelta(days=200), expires=NOW - timedelta(days=110))
+
+    result = verify(keys, data, now=NOW, host_build_time=NOW)
+
+    assert result.status is Status.EXPIRED
+
+
+def test_validity_window_longer_than_366_days_is_rejected(keys):
+    ok = catalog_bytes(not_before=SIGNED_AT, expires=SIGNED_AT + timedelta(days=366))
+    too_long = catalog_bytes(not_before=SIGNED_AT, expires=SIGNED_AT + timedelta(days=366, seconds=1))
+
+    assert verify(keys, ok).ok
+    assert verify(keys, too_long).status is Status.MALFORMED
+
+
+@pytest.mark.parametrize("delta", [timedelta(0), timedelta(days=-1)])
+def test_validity_window_must_be_positive(keys, delta):
+    data = catalog_bytes(not_before=SIGNED_AT, expires=SIGNED_AT + delta)
+
+    assert verify(keys, data).status is Status.MALFORMED
+
+
+# Replay counter
+
+
+@pytest.mark.parametrize(
+    "stored, verdict",
+    [
+        (None, CounterVerdict.FIRST),
+        (9, CounterVerdict.ADVANCED),
+        (10, CounterVerdict.UNCHANGED),
+        (11, CounterVerdict.REPLAYED),
+    ],
+)
+def test_compare_counter(stored, verdict):
+    assert compare_counter(10, stored) is verdict
+
+
+@pytest.mark.parametrize(
+    "stored, status",
+    [
+        (None, Status.OK),
+        (0, Status.OK),
+        (9, Status.OK),
+        (10, Status.OK),
+        (11, Status.REPLAYED),
+    ],
+)
+def test_verify_applies_the_counter(keys, stored, status):
+    result = verify(keys, stored_counter=stored)
+
+    assert result.status is status
+    assert result.signed_version == 10
+    assert not (status is Status.REPLAYED and result.usable)
+
+
+def test_counter_is_compared_per_channel(keys):
+    beta = catalog_bytes(channel="beta", version=40)
+    main = catalog_bytes(channel="main", version=7)
+    stored = {"beta": 40, "main": 5}
+
+    beta_result = verify(keys, beta, channel="beta", stored_counter=stored["beta"])
+    main_result = verify(keys, main, channel="main", stored_counter=stored["main"])
+    assert beta_result.ok and main_result.ok
+
+    # The main counter is far below beta's. Comparing against the wrong
+    # channel's value would lock the host out, so a channel switch must use
+    # that channel's own stored value.
+    assert verify(keys, main, channel="main", stored_counter=stored["beta"]).status is Status.REPLAYED
+    assert verify(keys, main, channel="main", stored_counter=stored["main"]).ok
+
+
+def test_catalog_for_another_channel_is_rejected(keys):
+    beta = catalog_bytes(channel="beta")
+
+    result = verify(keys, beta, channel="main")
+
+    assert result.status is Status.CHANNEL_MISMATCH
+    assert result.channel == "beta"
+    assert not result.usable
+
+
+# Baked mode
+
+
+def test_baked_catalog_ignores_expiry(keys):
+    data = catalog_bytes(not_before=NOW - timedelta(days=500), expires=NOW - timedelta(days=410))
+
+    assert verify(keys, data).status is Status.EXPIRED
+    result = verify(keys, data, baked=True)
+
+    assert result.status is Status.OK
+    assert result.baked is True
+    assert result.usable
+    assert not result.may_advance_state
+    assert result.counter is None
+
+
+def test_baked_catalog_ignores_the_counter_and_the_clock(keys):
+    result = verify(
+        keys, baked=True, stored_counter=999, host_build_time=NOW + timedelta(days=30)
+    )
+
+    assert result.status is Status.OK
+    assert result.counter is None
+    assert not result.may_advance_state
+
+
+def test_baked_catalog_still_needs_a_valid_signature(keys):
+    data = catalog_bytes(note="alpha")
+    envelope = envelope_for(data, keys.ci)
+
+    assert verify(keys, data.replace(b"alpha", b"alphb"), envelope, baked=True).status is Status.BAD_SIGNATURE
+    stranger = Ed25519PrivateKey.generate()
+    assert verify(keys, data, envelope_for(data, stranger), baked=True).status is Status.BAD_SIGNATURE
+    unsigned = verify_catalog(
+        data, None, keys.key_file(), roots=keys.roots, channel="main", now=NOW, baked=True
+    )
+    assert unsigned.status is Status.UNSIGNED
+    assert unsigned.baked is True
+
+
+def test_baked_catalog_still_checks_revocation_and_channel(keys):
+    revocation = keys.revocation(SIGNED_AT - timedelta(days=1))
+
+    revoked = verify(keys, key_file=keys.key_file([revocation]), baked=True)
+    assert revoked.status is Status.REVOKED_KEY
+
+    beta = catalog_bytes(channel="beta")
+    assert verify(keys, beta, channel="main", baked=True).status is Status.CHANNEL_MISMATCH
+
+
+# Malformed input
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda e: e.update(schema_version=2),
+        lambda e: e.update(schema_version=True),
+        lambda e: e.update(signatures=[]),
+        lambda e: e.update(signatures="nope"),
+        lambda e: e.pop("signatures"),
+        lambda e: e["signatures"][0].update(algorithm="rsa"),
+        lambda e: e["signatures"][0].update(key_id="XYZ"),
+        lambda e: e["signatures"][0].update(signature="***"),
+        lambda e: e["signatures"][0].update(signature=b64(b"short")),
+        lambda e: e["signatures"][0].pop("key_id"),
+    ],
+)
+def test_malformed_envelope(keys, mutate):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    mutate(envelope)
+
+    result = verify(keys, data, envelope)
+
+    assert result.status is Status.MALFORMED
+    assert not result.usable
+
+
+def test_envelope_that_is_not_json_or_not_an_object(keys):
+    assert verify(keys, envelope="{not json").status is Status.MALFORMED
+    assert verify(keys, envelope="[1, 2]").status is Status.MALFORMED
+    assert verify(keys, envelope=b"\xff\xfe").status is Status.MALFORMED
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda f: f.pop("keys"),
+        lambda f: f.update(keys={}),
+        lambda f: f.update(revocations="x"),
+        lambda f: f["keys"][0].update(algorithm="rsa"),
+        lambda f: f["keys"][0].update(key_id="0" * 16),
+        lambda f: f["keys"][0].update(public_key="***"),
+        lambda f: f["keys"][0].update(public_key=b64(b"short")),
+        lambda f: f["keys"][0].pop("certification"),
+        lambda f: f["keys"][0]["certification"].update(signature=b64(b"short")),
+        lambda f: f["keys"][0]["certification"].update(root_key_id="nothex"),
+        lambda f: f["keys"][0].update(added=""),
+        lambda f: f["keys"].append(copy.deepcopy(f["keys"][0])),
+        lambda f: f.update(
+            revocations=[{"key_id": "a" * 16, "revoked_at": "2026-01-01", "root_key_id": "b" * 16, "signature": b64(b"s" * 64)}]
+        ),
+    ],
+)
+def test_malformed_key_file(keys, mutate):
+    key_file = keys.key_file()
+    mutate(key_file)
+
+    assert verify(keys, key_file=key_file).status is Status.MALFORMED
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"not json",
+        b"[]",
+        b"\xff\xfe",
+        json.dumps({"signed_version": 1, "not_before": "2026-10-31T12:00:00Z", "expires": "2027-01-01T00:00:00Z"}).encode(),
+        json.dumps({"channel": "main", "signed_version": True, "not_before": "2026-10-31T12:00:00Z", "expires": "2027-01-01T00:00:00Z"}).encode(),
+        json.dumps({"channel": "main", "signed_version": 0, "not_before": "2026-10-31T12:00:00Z", "expires": "2027-01-01T00:00:00Z"}).encode(),
+        json.dumps({"channel": "main", "signed_version": "7", "not_before": "2026-10-31T12:00:00Z", "expires": "2027-01-01T00:00:00Z"}).encode(),
+        json.dumps({"channel": "main", "signed_version": 1, "not_before": "2026-10-31", "expires": "2027-01-01T00:00:00Z"}).encode(),
+        json.dumps({"channel": "main", "signed_version": 1, "not_before": "2026-10-31T12:00:00Z", "expires": "2027-02-30T00:00:00Z"}).encode(),
+        json.dumps({"channel": "main", "signed_version": 1, "not_before": "2026-10-31T12:00:00Z"}).encode(),
+    ],
+)
+def test_malformed_signed_metadata(keys, data):
+    envelope = envelope_for(data, keys.ci)
+
+    result = verify(keys, data, envelope)
+
+    assert result.status is Status.MALFORMED
+    assert not result.usable
+
+
+def test_parse_wire_format_raises_wire_format_error(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+
+    parsed = parse_wire_format(keys.key_file(), envelope, data)
+    assert parsed.metadata.channel == "main"
+    assert parsed.metadata.signed_version == 10
+    assert [entry.key_id for entry in parsed.signatures] == [keys.ci_id]
+    assert [entry.key_id for entry in parsed.key_file.keys] == [keys.ci_id]
+
+    with pytest.raises(WireFormatError):
+        parse_wire_format(keys.key_file(), {"schema_version": 1, "signatures": []}, data)
+
+
+def test_naive_datetimes_are_a_programming_error(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    naive = datetime(2026, 11, 1, 12, 0, 0)
+
+    with pytest.raises(ValueError):
+        verify_catalog(data, envelope, keys.key_file(), roots=keys.roots, channel="main", now=naive)
+    with pytest.raises(ValueError):
+        verify_catalog(
+            data, envelope, keys.key_file(), roots=keys.roots, channel="main", now=NOW, host_build_time=naive
+        )
+
+
+def test_unknown_root_in_the_caller_map_trusts_nothing(keys):
+    result = verify(keys, roots={})
+
+    assert result.status is Status.BAD_SIGNATURE
+
+
+def test_extra_fields_in_the_key_file_and_envelope_are_ignored(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    envelope["comment"] = "extra"
+    envelope["signatures"][0]["note"] = "extra"
+    key_file = keys.key_file()
+    key_file["generated"] = "2026-10-01"
+    key_file["keys"][0]["label"] = "ci"
+
+    assert verify(keys, data, envelope, key_file).ok
