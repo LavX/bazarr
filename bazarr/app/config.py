@@ -422,7 +422,7 @@ validators = [
     Validator('translator.min_source_score', must_exist=True, default=90, is_type_of=int, gte=0, lte=100),
     Validator('translator.default_score', must_exist=True, default=50, is_type_of=int, gte=0),
     Validator('translator.gemini_keys', must_exist=True, default=[], is_type_of=list),
-    Validator('translator.gemini_model', must_exist=True, default='gemini-2.0-flash', is_type_of=str, cast=str),
+    Validator('translator.gemini_model', must_exist=True, default='gemini-3.6-flash', is_type_of=str, cast=str),
     Validator('translator.gemini_batch_size', must_exist=True, default=300, is_type_of=int, gte=1),
     Validator('translator.translator_info', must_exist=True, default=True, is_type_of=bool),
     Validator('translator.translator_type', must_exist=True, default='google_translate', is_type_of=str,
@@ -1160,6 +1160,21 @@ def migrate_retired_openrouter_model(settings) -> bool:
     return True
 
 
+# Google shut down gemini-2.0-flash, which used to be the default. A saved value of exactly
+# that id means the user never picked another model, so it moves to the current default.
+RETIRED_GEMINI_DEFAULT_MODEL = 'gemini-2.0-flash'
+CURRENT_GEMINI_DEFAULT_MODEL = 'gemini-3.6-flash'
+
+
+def migrate_retired_gemini_model(settings) -> bool:
+    current_model = str(settings.translator.gemini_model).strip()
+    if current_model != RETIRED_GEMINI_DEFAULT_MODEL:
+        return False
+    settings.translator.gemini_model = CURRENT_GEMINI_DEFAULT_MODEL
+    logging.warning(f'Replaced retired Gemini model {current_model} with {CURRENT_GEMINI_DEFAULT_MODEL}')  # noqa: G004
+    return True
+
+
 def remove_settings_section(name):
     """Drop a whole top-level section from the live settings, for good.
 
@@ -1245,6 +1260,7 @@ if hasattr(settings.translator, 'gemini_key'):
     del settings.translator.gemini_key
 
 migrate_retired_openrouter_model(settings)
+migrate_retired_gemini_model(settings)
 
 # save updated settings to file. The boot write is what carries the
 # encryption migration to disk, so while a plaintext credential remains
