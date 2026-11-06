@@ -6230,6 +6230,122 @@ def test_pool_drops_subtitles_whose_language_is_not_a_language_object(monkeypatc
     assert out == [good]
 
 
+class _HiListingWorker:
+    """Answers every search with the same candidate and records each request."""
+
+    def __init__(self, candidate):
+        self.candidate = candidate
+        self.requests = []
+
+    def request(self, op, payload, timeout):
+        self.requests.append((op, payload, timeout))
+        return type("Result", (), {"payload": {"candidates": [self.candidate]}, "events": []})()
+
+    def stop(self):
+        return None
+
+
+def _hi_listing_candidate(**overrides):
+    from provider_hub.protocol import language_to_payload
+
+    candidate = {
+        "provider": "fake",
+        "id": "sub-1",
+        "language": language_to_payload(Language("eng")),
+        "provider_payload": {"provider": "fake", "schema": 1, "data": {"file_id": "sub-1"}},
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+def _hi_listing_pool(monkeypatch, candidate, *, listed_languages=None):
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.registry import _make_provider_class
+    from subliminal_patch import extensions
+    from subliminal_patch.core import SZProviderPool
+
+    worker = _HiListingWorker(candidate)
+    manifest = validate_manifest(_manifest(provider_id="hihub", languages=["eng"]), built_in_provider_ids=set())
+    provider_class = _make_provider_class(manifest, worker_client=worker)
+    # Manifests cannot express a hearing-impaired variant, so a test that needs one lists it directly.
+    if listed_languages is not None:
+        provider_class.languages = listed_languages
+    monkeypatch.setitem(extensions.provider_registry.providers, "hihub", provider_class)
+    pool = SZProviderPool(providers=["hihub"])
+    pool.initialized_providers["hihub"] = provider_class()
+    return pool, worker
+
+
+def test_hi_request_searches_base_language_on_hub_provider_without_hi_variant(monkeypatch):
+    from provider_hub.protocol import language_to_payload
+
+    pool, worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate())
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    out = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+
+    assert [subtitle.id for subtitle in out] == ["fake:sub-1"]
+    assert worker.requests[0][1]["languages"] == [language_to_payload(Language("eng"))]
+
+
+def test_hi_request_is_sent_unchanged_when_hub_provider_lists_the_hi_variant(monkeypatch):
+    from provider_hub.protocol import language_to_payload
+
+    pool, worker = _hi_listing_pool(
+        monkeypatch, _hi_listing_candidate(), listed_languages={Language("eng"), Language("eng", hi=True)})
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    out = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+
+    assert [subtitle.id for subtitle in out] == ["fake:sub-1"]
+    assert worker.requests[0][1]["languages"] == [language_to_payload(Language("eng", hi=True))]
+
+
+def test_hi_request_stays_unsupported_for_native_provider_without_hi_variant(monkeypatch):
+    from subliminal_patch import extensions
+    from subliminal_patch.core import SZProviderPool
+
+    calls = []
+
+    class FakeNativeProvider(object):
+        languages = {Language("eng")}
+
+        @classmethod
+        def check(cls, video):
+            return True
+
+        def list_subtitles(self, video, languages):
+            calls.append(languages)
+            return []
+
+    monkeypatch.setitem(extensions.provider_registry.providers, "fakenative", FakeNativeProvider)
+    pool = SZProviderPool(providers=["fakenative"])
+    pool.initialized_providers["fakenative"] = FakeNativeProvider()
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    result = pool.list_subtitles_provider("fakenative", movie, {Language("eng", hi=True)}, detailed=True)
+
+    assert (result.status, result.reason) == ("skipped", "unsupported_language")
+    assert calls == []
+
+
+def test_worker_flagged_hearing_impaired_candidate_keeps_flag_from_base_language_search(monkeypatch):
+    from provider_hub.protocol import language_to_payload
+
+    pool, worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate(hearing_impaired=True))
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    out = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+
+    assert worker.requests[0][1]["languages"] == [language_to_payload(Language("eng"))]
+    assert [subtitle.hearing_impaired for subtitle in out] == [True]
+    assert out[0].language.hi is True
+
+
 @pytest.mark.parametrize("status", [403, 429])
 def test_catalog_rate_limit_preserves_cached_source(tmp_path, monkeypatch, status):
     import requests
