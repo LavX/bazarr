@@ -533,6 +533,19 @@ def _format_callback_failure(exc, error):
     return "".join(lines)
 
 
+def _hub_candidate_fails_forced_hi(subtitle, hearing_impaired):
+    """Whether a forced hearing-impaired request must refuse this candidate.
+
+    Under "force HI" a hub candidate is kept only when the worker flags it as
+    hearing-impaired. Test the parsed flag, not the match set: scoring keeps
+    worker-supplied matches, so a worker could list "hearing_impaired" there
+    while reporting the subtitle as not hearing-impaired. Every download path,
+    the Whisper fallback included, applies this one rule.
+    """
+    return (hearing_impaired == "force HI" and getattr(subtitle, "hub_proxy", False)
+            and subtitle.hearing_impaired is not True)
+
+
 def _hub_search_languages(provider_class, languages):
     """Return the languages to request from a provider.
 
@@ -1472,11 +1485,7 @@ class SZProviderPool(ProviderPool):
                              score, hearing_impaired)
                 continue
 
-            # Under a forced request, a hub candidate is kept only when the worker flags it as hearing-impaired.
-            # Test the parsed flag, not the match set: scoring keeps worker-supplied matches, so a worker could
-            # list "hearing_impaired" there while reporting the subtitle as not hearing-impaired.
-            if hearing_impaired == "force HI" and getattr(subtitle, "hub_proxy", False) and \
-                    subtitle.hearing_impaired is not True:
+            if _hub_candidate_fails_forced_hi(subtitle, hearing_impaired):
                 logger.debug('%r: Skipping hub subtitle with score %d because it is not flagged hearing-impaired '
                              'and hearing-impaired set to %s', subtitle, score, hearing_impaired)
                 continue
@@ -1562,6 +1571,10 @@ class SZProviderPool(ProviderPool):
         whisper_subtitles = [s for s in subtitles if s.provider_name == 'whisperai']
         for subtitle, score, _score_without_hash, matches, orig_matches in self._score_subtitles(
                 whisper_subtitles, video, languages, hearing_impaired):
+            if _hub_candidate_fails_forced_hi(subtitle, hearing_impaired):
+                logger.debug('%r: Skipping hub fallback subtitle because it is not flagged hearing-impaired '
+                             'and hearing-impaired set to %s', subtitle, hearing_impaired)
+                continue
             logger.info('BAZARR Bulk Task: Falling back to Whisper for %r', video.name)
             subtitle.use_original_format = use_original_format
             if self.download_subtitle(subtitle):
