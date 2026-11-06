@@ -154,7 +154,8 @@ def entry_compatibility(entry: dict[str, Any], host: HostFacts) -> tuple[bool, s
         plugin = parse_plugin_manifest(entry.get("manifest"))
     except ManifestValidationError as error:
         return False, refusal_text(error)
-    return evaluate(plugin, host)
+    compatible, reason = evaluate(plugin, host)
+    return compatible, None if compatible else refusal_text(reason)
 
 
 def entry_plugin_id(entry: dict[str, Any]) -> str:

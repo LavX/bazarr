@@ -99,6 +99,21 @@ def test_an_oci_runtime_needs_a_host_that_runs_in_a_container():
     assert evaluate(plugin, _host(runtimes=runtimes, in_container=True)) == (True, None)
 
 
+@pytest.mark.parametrize("overrides", [
+    {"min_host_version": "999.0.0+" + "a" * 220},
+    {"kind_api": "bazarr.subtitle_provider_" + "a" * 220 + ".v1"},
+])
+def test_the_blocked_reason_of_a_valid_but_incompatible_manifest_is_capped(overrides):
+    from provider_hub.compatibility import entry_compatibility
+
+    entry = {"manifest": provider_manifest_v2(**overrides)}
+
+    compatible, reason = entry_compatibility(entry, _host())
+
+    assert compatible is False
+    assert len(reason) == 200
+
+
 def test_the_blocked_reason_of_an_unreadable_stored_manifest_is_capped(monkeypatch):
     from provider_hub.compatibility import entry_compatibility
     from provider_hub.manifest import ManifestValidationError
