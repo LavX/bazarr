@@ -121,6 +121,33 @@ class EpisodeApi extends BaseApi {
     });
   }
 
+  // The duplicate-search flag: the next wanted search, Search All or series
+  // Search for this episode ignores its embedded tracks and looks for external
+  // subtitles. Setting it runs nothing; clearing it only takes it back.
+  async setForcedSearch(
+    seriesid: number,
+    episodeid: number,
+    arrInstanceId?: number,
+  ) {
+    await this.post("/forced-search", undefined, {
+      seriesid,
+      episodeid,
+      arr_instance_id: arrInstanceId,
+    });
+  }
+
+  async clearForcedSearch(
+    seriesid: number,
+    episodeid: number,
+    arrInstanceId?: number,
+  ) {
+    await this.delete("/forced-search", undefined, {
+      seriesid,
+      episodeid,
+      arr_instance_id: arrInstanceId,
+    });
+  }
+
   async blacklist() {
     const response =
       await this.get<DataWrapper<Blacklist.Episode[]>>("/blacklist");

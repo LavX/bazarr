@@ -211,6 +211,9 @@ declare namespace Item {
     AudioLanguageType & {
       season: number;
       episode: number;
+      // True while a duplicate search is requested for this episode and no run
+      // has finished it yet. Absent from an older backend.
+      forced_search_pending?: boolean;
     };
 
   type RefTracks = {
