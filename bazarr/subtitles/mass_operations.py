@@ -1767,11 +1767,19 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                               if item.get('embedded'))
             pending_extractions = {}
 
-            def refill_extractions():
+            def refill_extractions(consumed=0):
+                # Items at or before the consumer's position were already
+                # handled, so their entries can never be popped again. Drop
+                # them, or they would hold window slots for the rest of the run.
+                for stale_index in [index for index in pending_extractions if index <= consumed]:
+                    pending_extractions.pop(stale_index).cancel()
                 while len(pending_extractions) < workers:
                     next_item = next(embedded_items, None)
                     if next_item is None:
                         break
+                    if next_item[0] <= consumed:
+                        # Passed while translation was off: do not extract it now.
+                        continue
                     if not translation_available().available:
                         break
                     index, embedded_item = next_item
@@ -1804,7 +1812,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                         finally:
                             # Even a completed future occupies the window until
                             # its result is consumed, including a failed result.
-                            refill_extractions()
+                            refill_extractions(i)
                     result = _process_subtitle_item(
                         item, action, options, job_id, source_srt_file=source_srt_file, **item_kwargs)
                 else:

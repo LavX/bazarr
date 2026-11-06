@@ -320,6 +320,49 @@ def test_gate_closure_stops_extraction_and_fails_remaining_items(mass, monkeypat
     assert mass.published == [(5, {'child_jobs': [101]})]
 
 
+def test_prefetching_resumes_after_translation_turns_back_on_past_skipped_items(mass, monkeypatch):
+    from app.jobs_queue import JobFailed
+    from subtitles.tools.translate import availability
+
+    mass.items = [_item(number) for number in range(1, 7)]
+    mass.general.mass_embedded_extract_workers = 1
+    pools = _use_executor(monkeypatch, mass)
+    gate = availability.TranslationAvailability(True, '')
+    off = availability.TranslationAvailability(False, 'Translation was switched off')
+    extracted = []
+
+    def extract(video_path, language, media_type, **kwargs):
+        extracted.append(video_path)
+        return video_path.replace('/video/', '/extracted/').replace('.mkv', '.en.srt')
+
+    def progress(**kwargs):
+        nonlocal gate
+        mass.progress.append(kwargs)
+        message = kwargs.get('progress_message', '')
+        if kwargs.get('progress_value') == 1 and '(1/6)' in message:
+            gate = off
+        elif kwargs.get('progress_value') == 3 and '(4/6)' in message:
+            gate = availability.TranslationAvailability(True, '')
+
+    monkeypatch.setattr(mass.extract_module, 'extract_embedded_subtitle', extract)
+    monkeypatch.setattr(availability, 'translation_available', lambda: gate)
+    monkeypatch.setattr(mass.module.jobs_queue, 'update_job_progress', progress)
+
+    with pytest.raises(JobFailed):
+        mass.run()
+
+    pool = pools[0]
+    submitted = [number for event, number in pool.events if event == 'submit']
+    # Items 2 and 3 were passed while the gate was closed, so they are never
+    # submitted afterwards. Item 4 runs inline once, then items 5 and 6 go
+    # back through the pool.
+    assert 3 not in submitted
+    assert submitted == [1, 2, 5, 6]
+    assert extracted.count('/video/ep4.mkv') == 1
+    assert extracted.count('/video/ep3.mkv') == 0
+    assert [item['sonarr_episode_id'] for item in mass.translated] == [1, 4, 5, 6]
+
+
 def test_cancellation_from_an_extraction_result_propagates_and_cancels_pending_work(mass, monkeypatch):
     from app.jobs_queue import JobCancelled
 
