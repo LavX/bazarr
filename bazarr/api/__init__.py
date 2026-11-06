@@ -21,6 +21,7 @@ from .silo import api_ns_list_silo
 from .translator import api_ns_list_translator
 from .editor import api_ns_list_editor
 from .provider_hub import api_ns_list_provider_hub
+from .plugins import api_ns_list_plugins
 from .distribution_hub import api_ns_list_distribution_hub
 from .discover import api_ns_list_discover
 from .seerr import api_ns_list_seerr
@@ -45,6 +46,7 @@ api_ns_list = [
     api_ns_list_translator,
     api_ns_list_editor,
     api_ns_list_provider_hub,
+    api_ns_list_plugins,
     api_ns_list_distribution_hub,
     api_ns_list_discover,
     api_ns_list_seerr,

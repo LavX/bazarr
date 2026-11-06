@@ -355,6 +355,17 @@ def manifest_secret_fields(manifest) -> set[str]:
         for key, field in properties.items():
             if isinstance(field, dict) and field.get("secret") is True and isinstance(key, str):
                 names.add(key)
+    settings = manifest.get("settings")
+    if isinstance(settings, dict):
+        groups = [settings.get("fields")]
+        backend_types = settings.get("backend_types")
+        if isinstance(backend_types, dict):
+            groups.extend(item.get("fields") for item in backend_types.values() if isinstance(item, dict))
+        for fields in groups:
+            for field in fields if isinstance(fields, list) else []:
+                if (isinstance(field, dict) and isinstance(field.get("key"), str)
+                        and (field.get("type") == "secret" or field.get("secret") is True)):
+                    names.add(field["key"])
     return names
 
 

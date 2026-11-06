@@ -355,6 +355,7 @@ Provider Hub supports the official [LavX/bazarr-provider-catalog](https://github
 - **Isolated dependencies**: plugin dependencies install into provider-specific virtual environments instead of the app-wide runtime
 - **Activity log**: catalog refreshes, installs, updates, tests, removals, durations, target identities, version changes, and errors are visible to operators
 - **Provider author SDK**: `python3 -B -m sdk validate`, `python3 -B -m sdk hash providers/<id>`, `python3 -B -m sdk build-catalog`, and `python3 -B -m sdk smoke-test` help authors validate manifests, bundle hashes, catalog output, and smoke behavior
+- **Plugin routes by kind**: the routes under `/api/plugins` serve every kind Bazarr+ supports. `GET /api/plugins/catalog` and `GET /api/plugins/installations` take an optional `kind` query filter, and an unknown kind returns 400. An installation of any kind Bazarr+ supports is addressed by its plugin ID. The provider-hub routes keep their paths as the Subtitle Hub's view of the subtitle provider kind
 
 ### Distribution Hub
 Bazarr+ exposes an OpenSubtitles-compatible REST API (`/api/v1`) so external clients can query your Bazarr+ instance as a federated subtitle service. The Distribution Hub is the top-level menu where you manage that API as a multi-tenant control plane. Two first-party clients pair with it: a [Jellyfin 10.11+ subtitle plugin](https://github.com/LavX/jellyfin-plugin-bazarr-plus) and a [VLC 3.0+ Lua extension (VLSub Bazarr+)](https://github.com/LavX/vlsub-bazarr-plus).

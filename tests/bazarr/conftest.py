@@ -128,3 +128,46 @@ def _keep_the_session_generation():
     auth = live_auth()
     if auth is not None and before is not None:
         auth["session_generation"] = before
+
+
+@pytest.fixture
+def service_kind():
+    """A second plugin kind, registered for one test, that records every hook call."""
+    from plugin_platform_helpers import SERVICE_KIND, SERVICE_KIND_API
+    from provider_hub.kinds import ATTACH_LIVE, Kind, register_kind, unregister_kind
+
+    class RecordingKind(Kind):
+        name = SERVICE_KIND
+        kind_apis = frozenset({SERVICE_KIND_API})
+        attach_policy = ATTACH_LIVE
+        noun = "service"
+
+        def __init__(self):
+            self.calls = []
+
+        def on_installed(self, plugin_id):
+            self.calls.append(("installed", plugin_id))
+            return True
+
+        def on_removed(self, plugin_id):
+            self.calls.append(("removed", plugin_id))
+            return True
+
+        def set_enabled(self, installation, enabled):
+            super().set_enabled(installation, enabled)
+            self.calls.append(("enabled", installation["provider_id"], enabled))
+            return True
+
+        def on_config_saved(self, plugin_id):
+            self.calls.append(("configured", plugin_id))
+
+        def validate_manifest(self, manifest, trusted):
+            # The shared bundle checks every kind has, so a test plugin can be staged.
+            from provider_hub.manifest import validate_plugin_bundle
+            return validate_plugin_bundle(manifest)
+
+    kind = register_kind(RecordingKind())
+    try:
+        yield kind
+    finally:
+        unregister_kind(SERVICE_KIND)

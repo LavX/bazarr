@@ -16,6 +16,7 @@ from app.job_errors import reason_of
 from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 
 from . import service
+from .kinds import SUBTITLE_PROVIDER, UnknownKindError, catalog_kind_of, get_kind
 
 JOB_MODULE = "provider_hub.jobs"
 
@@ -51,15 +52,28 @@ def _enqueue(label, func, kwargs):
         return_existing=True)
 
 
-def queue_install(source_id, provider_id, version, name=None):
+def _noun(source_id, provider_id, version, entry_key=None):
+    """What the job list calls the plugin: "provider" for a subtitle provider, else "plugin"."""
+    entry = service._held_catalog_entry(service.load_state(), source_id, provider_id, version, entry_key)
+    kind = catalog_kind_of(entry) if entry else SUBTITLE_PROVIDER
+    try:
+        return get_kind(kind).noun
+    except UnknownKindError:
+        return "plugin"
+
+
+def queue_install(source_id, provider_id, version, name=None, entry_key=None):
     """Queue the install of the entry ``source_id`` lists for ``provider_id``.
 
     The job carries the reference, not a manifest: it installs what the source
-    holds when it runs, bound to that source.
+    holds when it runs, bound to that source. ``entry_key`` pins the stored entry
+    that was resolved, for a source that lists one id and version twice.
     """
-    return _enqueue(f"Installing provider {name or provider_id}", "install_provider",
-                    {"source_id": source_id, "provider_id": provider_id, "version": version,
-                     "name": name})
+    kwargs = {"source_id": source_id, "provider_id": provider_id, "version": version, "name": name}
+    if entry_key is not None:
+        kwargs["entry_key"] = entry_key
+    return _enqueue(f"Installing {_noun(source_id, provider_id, version, entry_key)} {name or provider_id}",
+                    "install_provider", kwargs)
 
 
 def _discard_abandoned_packages():
@@ -110,11 +124,11 @@ def queue_catalog_refresh():
     return _enqueue("Refreshing provider catalog", "refresh_catalog", {})
 
 
-def install_provider(source_id, provider_id, version, name=None, job_id=None):
+def install_provider(source_id, provider_id, version, name=None, job_id=None, entry_key=None):
     label = name or provider_id
     try:
         return service.install_catalog_entry(source_id, provider_id, version,
-                                             checkpoint=_checkpoint(job_id))
+                                             checkpoint=_checkpoint(job_id), entry_key=entry_key)
     except service.ProviderHubStopped as stopped:
         raise JobCancelled(str(stopped)) from stopped
     except Exception as error:

@@ -223,18 +223,19 @@ def hub_calls(monkeypatch, tmp_path):
     monkeypatch.setattr(service, 'get_catalog_source', lambda name: {'id': name})
     monkeypatch.setattr(service, 'refresh_catalog', lambda: None)
     monkeypatch.setattr(service, 'resolve_catalog_install',
-                        lambda source, provider_id, version, manifest=None:
+                        lambda source, provider_id, version, manifest=None, catalog_list=None:
                         {'source': source, 'provider_id': provider_id,
-                         'version': version, 'name': 'Some Provider'})
+                         'version': version, 'name': 'Some Provider', 'entry_key': 'key'})
     monkeypatch.setattr(hub_jobs, 'queue_install',
-                        lambda source, provider_id, version, name:
+                        lambda source, provider_id, version, name, entry_key=None:
                         calls.append((HUB_INSTALL, provider_id)) or 'job-install')
     monkeypatch.setattr(service, 'local_package_uploads_dir', lambda: tmp_path)
     monkeypatch.setattr(hub_jobs, 'queue_install_local',
                         lambda package_path, filename=None:
                         calls.append((HUB_UPLOAD, filename)) or 'job-local')
     monkeypatch.setattr(service, 'get_provider',
-                        lambda provider_id: {'provider_id': provider_id, 'name': 'Some Provider'})
+                        lambda provider_id, redact=True:
+                        {'provider_id': provider_id, 'name': 'Some Provider'})
     monkeypatch.setattr(hub_jobs, 'queue_update',
                         lambda provider_id, name:
                         calls.append((HUB_UPDATE, provider_id)) or 'job-update')
@@ -741,11 +742,12 @@ def test_startup_auto_install_and_boot_activation_run_ungated(monkeypatch, auth_
     _auth(monkeypatch, auth_type=auth_type)
     from flask import has_request_context
     from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.delenv('BAZARR_DISABLE_PROVIDER_AUTOINSTALL', raising=False)
     monkeypatch.setitem(settings.general, 'provider_hub_auto_install', True)
     monkeypatch.setattr(service, 'load_state', lambda: {'installations': {}})
-    monkeypatch.setattr(service, '_bazarr_enabled_providers', lambda: ['stubbed-provider'])
+    monkeypatch.setattr(provider_kind, 'bazarr_enabled_providers', lambda: ['stubbed-provider'])
     monkeypatch.setattr(service, 'refresh_catalog', lambda **kwargs: None)
     monkeypatch.setattr(service, '_latest_official_catalog_manifest',
                         lambda state, provider_id: {'id': provider_id, 'name': 'Stubbed'})

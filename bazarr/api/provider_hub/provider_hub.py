@@ -10,10 +10,20 @@ from api.utils import (UploadTooLarge, authenticate, copy_bounded_upload, upload
                        upload_too_large_message)
 from provider_hub import jobs as hub_jobs
 from provider_hub import service
+from provider_hub.kinds import SUBTITLE_PROVIDER, catalog_kind_of, kind_of
 from provider_hub.service import CatalogSourceError, ProviderHubSettingsError
 
 
 api_ns_provider_hub = Namespace('Provider Hub', description='Provider Hub catalog and installation lifecycle')
+
+
+def _provider(provider_id, redact=True):
+    """The installation, when it is a subtitle provider. These routes are the
+    Subtitle Hub's; every other kind is addressed through the plugins routes."""
+    installation = service.get_provider(provider_id, redact=False)
+    if installation and kind_of(installation) == SUBTITLE_PROVIDER:
+        return service.get_provider(provider_id, redact=redact)
+    return None
 
 
 @api_ns_provider_hub.route('provider-hub/catalog')
@@ -22,7 +32,9 @@ class ProviderHubCatalog(Resource):
     @api_ns_provider_hub.response(200, 'Success')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def get(self):
-        return service.list_catalog(auto_refresh=True)
+        catalog = service.list_catalog(auto_refresh=True)
+        catalog["entries"] = [entry for entry in catalog["entries"] if catalog_kind_of(entry) == SUBTITLE_PROVIDER]
+        return catalog
 
 
 @api_ns_provider_hub.route('provider-hub/catalog/refresh')
@@ -103,7 +115,7 @@ class ProviderHubProvider(Resource):
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     @api_ns_provider_hub.response(404, 'Provider not found')
     def get(self, provider_id):
-        provider = service.get_provider(provider_id)
+        provider = _provider(provider_id)
         if not provider:
             return 'Provider not found', 404
         return provider
@@ -114,8 +126,11 @@ class ProviderHubProvider(Resource):
     @api_ns_provider_hub.response(404, 'Provider not found')
     @api_ns_provider_hub.response(500, 'The change could not be saved')
     def patch(self, provider_id):
-        payload = request.json or {}
         try:
+            installation = service.get_provider(provider_id, redact=False)
+            if installation is not None and kind_of(installation) != SUBTITLE_PROVIDER:
+                return 'Provider not found', 404
+            payload = request.json or {}
             provider = service.update_provider(
                 provider_id,
                 enabled=payload.get("enabled") if "enabled" in payload else None,
@@ -137,6 +152,8 @@ class ProviderHubProviderTest(Resource):
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     @api_ns_provider_hub.response(404, 'Provider not found')
     def post(self, provider_id):
+        if not _provider(provider_id):
+            return 'Provider not found', 404
         result = service.test_provider_connection(provider_id)
         if not result:
             return 'Provider not found', 404
@@ -167,7 +184,8 @@ class ProviderHubInstallations(Resource):
         # Validation, the bundle download and the smoke test run in the job,
         # which raises with the reason when any of them fails.
         return {"job_id": hub_jobs.queue_install(entry["source"], entry["provider_id"],
-                                                 entry["version"], entry["name"])}, 202
+                                                 entry["version"], entry["name"],
+                                                 entry_key=entry["entry_key"])}, 202
 
 
 def _package_too_large():
@@ -218,7 +236,7 @@ class ProviderHubInstallation(Resource):
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     @api_ns_provider_hub.response(404, 'Provider not found')
     def delete(self, provider_id):
-        provider = service.get_provider(provider_id)
+        provider = _provider(provider_id)
         if not provider:
             return 'Provider not found', 404
         return {"job_id": hub_jobs.queue_uninstall(provider_id, provider.get("name"))}, 202
@@ -231,7 +249,7 @@ class ProviderHubUpdatesCheck(Resource):
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def post(self):
         service.refresh_catalog()
-        return service.check_updates()
+        return service.check_updates(kind=SUBTITLE_PROVIDER)
 
 
 @api_ns_provider_hub.route('provider-hub/updates/apply')
@@ -248,7 +266,7 @@ class ProviderHubUpdatesApply(Resource):
     @api_ns_provider_hub.response(404, 'Provider not found')
     def post(self):
         args = self.post_request_parser.parse_args()
-        provider = service.get_provider(args["provider_id"])
+        provider = _provider(args["provider_id"])
         if not provider:
             return 'Provider not found', 404
         return {"job_id": hub_jobs.queue_update(args["provider_id"], provider.get("name"))}, 202

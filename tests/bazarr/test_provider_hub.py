@@ -23,6 +23,7 @@ from retired_providers import (
     LEGACY_RETIRED_PROVIDER_IDS,
     RETIRED_PROVIDER_IDS_UNDER_TEST,
 )
+from plugin_platform_helpers import archive_runtime, provider_manifest_v2, service_manifest
 
 
 @pytest.fixture(autouse=True)
@@ -127,7 +128,8 @@ def _patch_local_install_env(monkeypatch, tmp_path):
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
     monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
     monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
-    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
 
 
 class _FakeResponse:
@@ -1532,17 +1534,18 @@ def test_provider_hub_update_task_refreshes_catalog_before_checking_updates(monk
 def test_provider_hub_updates_check_endpoint_refreshes_catalog_before_check(monkeypatch):
     from api.provider_hub.provider_hub import ProviderHubUpdatesCheck
     from api.provider_hub import provider_hub
+    from provider_hub.kinds import SUBTITLE_PROVIDER
 
     calls = []
     monkeypatch.setattr(provider_hub.service, "refresh_catalog", lambda: calls.append("refresh"))
     monkeypatch.setattr(
         provider_hub.service,
         "check_updates",
-        lambda: calls.append("check") or {"state": "completed"},
+        lambda *, kind=None: calls.append(("check", kind)) or {"state": "completed"},
     )
 
     assert ProviderHubUpdatesCheck.post.__wrapped__(ProviderHubUpdatesCheck()) == {"state": "completed"}
-    assert calls == ["refresh", "check"]
+    assert calls == ["refresh", ("check", SUBTITLE_PROVIDER)]
 
 
 def test_apply_update_without_available_manifest_does_not_stage(tmp_path, monkeypatch):
@@ -1791,6 +1794,56 @@ def test_provider_hub_restart_activation_keeps_active_on_staged_failure(tmp_path
     assert installation["manifest"] == old_manifest
     assert installation["pending_restart"] is False
     assert installation["last_error"]
+
+
+def _message_with_a_token_across_the_cap():
+    """A token and a refusal message that holds it across the 200 character cap.
+
+    "Bearer " ends at character 196, so the first four characters of the token
+    sit inside the first 200 and the rest sit beyond them.
+    """
+    token = "Zq7Kx9Pw2Lm4Nv8Rt5Yh"
+    message = "x" * 188 + " Bearer " + token + " is not accepted"
+    assert message.index(token) == 196
+    return token, message
+
+
+def test_a_failed_restart_activation_caps_the_recorded_error_text(tmp_path, monkeypatch):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.service import activate_staged_installations
+    from provider_hub.state import load_state
+
+    token, message = _message_with_a_token_across_the_cap()
+
+    def refusing_verify(manifest, bundle_path):
+        raise ManifestValidationError(message)
+
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", refusing_verify)
+    provider_id = "stagehub"
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"installations": {provider_id: {
+            "provider_id": provider_id,
+            "name": "Stage Hub Provider",
+            "staged_version": "1.1.0",
+            "staged_path": str(tmp_path / "bundle"),
+            "staged_python_path": str(tmp_path / "python"),
+            "staged_manifest": _manifest(provider_id=provider_id, version="1.1.0"),
+            "state": "staged",
+            "pending_restart": True,
+            "manifest": _manifest(provider_id=provider_id, version="1.1.0"),
+        }}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    assert activate_staged_installations() == []
+
+    installation = load_state()["installations"][provider_id]
+    assert installation["state"] == "failed"
+    assert len(installation["last_error"]) <= 200
+    assert token[:4] not in installation["last_error"]
+    assert installation["last_error"].startswith("x" * 188 + " Bearer ")
 
 
 def test_provider_hub_restart_activation_finalizes_removed_installation(tmp_path, monkeypatch):
@@ -2046,7 +2099,7 @@ def test_update_provider_with_failing_encrypter_stores_nothing(tmp_path, monkeyp
 
     enabled_calls = []
     monkeypatch.setattr(
-        "provider_hub.service._set_bazarr_provider_enabled",
+        "provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
         lambda provider_id, enabled: enabled_calls.append((provider_id, enabled)) or True,
     )
 
@@ -2275,7 +2328,8 @@ def test_removed_plugin_keeps_registered_secret_paths(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
-    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
 
     # Configuring the plugin persists its manifest's secret path.
     update_provider("examplehub", config={"api_key": "unit-secret"})  # pragma: allowlist secret
@@ -3873,6 +3927,27 @@ def test_list_catalog_auto_refreshes_unchecked_sources(tmp_path, monkeypatch):
     assert catalog["entries"][0]["trusted"] is True
 
 
+def test_subtitle_hub_catalog_lists_only_subtitle_entries(tmp_path, monkeypatch):
+    from flask import Flask
+    from provider_hub.state import OFFICIAL_CATALOG_SOURCE_ID, load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    # A checked official source is not refreshed over the network by the listing.
+    state["catalog_sources"][OFFICIAL_CATALOG_SOURCE_ID]["last_checked_at"] = _OLD_CHECK
+    state["catalog_entries"].update(_entry(OFFICIAL_CATALOG_SOURCE_ID, _manifest(provider_id="subtitlehub")))
+    state["catalog_entries"].update(
+        _entry(OFFICIAL_CATALOG_SOURCE_ID, _manifest(provider_id="otherhub", kind="other_kind", schema_version=2)))
+    save_state(state)
+
+    import api.provider_hub.provider_hub as hub_api
+    app = Flask(__name__)
+    with app.test_request_context("/api/provider-hub/catalog"):
+        catalog = hub_api.ProviderHubCatalog.get.__wrapped__(hub_api.ProviderHubCatalog())
+
+    assert [entry["provider_id"] for entry in catalog["entries"]] == ["subtitlehub"]
+
+
 def test_custom_catalog_source_rejects_non_github_url(tmp_path, monkeypatch):
     from provider_hub.service import CatalogSourceError, add_catalog_source
 
@@ -3916,6 +3991,90 @@ def test_catalog_refresh_fetches_github_catalog_entries(tmp_path, monkeypatch):
         30,
     ) in calls
     assert catalog["entries"][0]["manifest"]["source"]["commit"] == "d" * 40
+
+
+def test_catalog_refresh_refuses_a_schema_2_entry_in_the_providers_list(tmp_path, monkeypatch):
+    from provider_hub.service import (
+        PLUGIN_IN_PROVIDERS_LIST_REASON, add_catalog_source, list_catalog, list_jobs, refresh_catalog)
+
+    manifest = provider_manifest_v2("modernhub")
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if "LavX/bazarr-provider-catalog" in url:
+            return _FakeResponse({"providers": []})
+        return _FakeResponse({"providers": [{"manifest": manifest}]})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    result = refresh_catalog()
+
+    assert result["entries"] == 0
+    assert list_catalog()["entries"] == []
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_IN_PROVIDERS_LIST_REASON]
+
+
+def test_catalog_refresh_skips_an_entry_whose_manifest_declares_no_id(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    # The wrapper names an id that its manifest does not declare, so nothing is stored.
+    # The entry sits in the plugins list, where a schema 2 manifest is read, so the
+    # missing id is the only reason it can be refused.
+    manifest = provider_manifest_v2("wrapperhub")
+    manifest.pop("id")
+    item = {"provider_id": "wrapperhub", "version": "1.0.0", "manifest": manifest}
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if "LavX/bazarr-provider-catalog" in url:
+            return _FakeResponse({"providers": []})
+        return _FakeResponse({"providers": [], "plugins": [item]})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    assert [record["reason"] for record in list_jobs()[-1]["details"]["rejected_plugins"]] == ["id must be a non-empty string"]
+
+
+def test_a_schema_1_catalog_entry_without_a_provider_id_is_not_listed(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, refresh_catalog
+    from provider_hub.state import load_state
+
+    # The wrapper names an id that its manifest does not declare, so nothing is stored.
+    manifest = _manifest(provider_id="wrapperhub")
+    manifest.pop("provider_id")
+    entry = {"provider_id": "wrapperhub", "version": "1.0.0", "manifest": manifest}
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if "LavX/bazarr-provider-catalog" in url:
+            return _FakeResponse({"providers": []})
+        return _FakeResponse({"providers": [entry]})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"catalog_sources": {}, "installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
 
 
 def test_catalog_refresh_prunes_stale_entries_for_successful_source(tmp_path, monkeypatch):
@@ -3965,6 +4124,564 @@ def test_catalog_refresh_prunes_stale_entries_for_successful_source(tmp_path, mo
     provider_ids = {entry["provider_id"] for entry in list_catalog()["entries"]}
     assert "freshhub" in provider_ids
     assert "stalehub" not in provider_ids
+
+
+def _serve_community_catalog(monkeypatch, catalog):
+    """Serve ``catalog`` from the community source. The official source lists nothing."""
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if "LavX/bazarr-provider-catalog" in url:
+            return _FakeResponse({"providers": []})
+        return _FakeResponse(catalog)
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+
+
+def test_catalog_refresh_reads_the_plugins_list(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import add_catalog_source, list_catalog, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("pluginhub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:pluginhub:1.0.0"]
+    [entry] = list_catalog()["entries"]
+    assert (entry["provider_id"], entry["catalog_list"], entry["manifest"]["kind"]) == (
+        "pluginhub", "plugins", "test_service")
+
+
+def test_catalog_refresh_rejects_a_plugin_whose_kind_is_not_defined(tmp_path, monkeypatch):
+    from provider_hub.service import PLUGIN_KIND_UNKNOWN_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest(
+            "unknownhub", kind="unknown_kind", kind_api="bazarr.unknown_kind.v1")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_KIND_UNKNOWN_REASON]
+
+
+def test_catalog_refresh_rejects_a_plugin_its_kind_refuses(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import PLUGIN_KIND_REFUSED_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("emptyhub", files={})}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_KIND_REFUSED_REASON]
+
+
+def test_catalog_refresh_rejects_a_plugin_whose_kind_mismatches_its_kind_api(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import PLUGIN_KIND_MISMATCH_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("mismatchhub", kind_api="bazarr.subtitle_provider.v1")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_KIND_MISMATCH_REASON]
+
+
+def test_catalog_refresh_skips_a_non_schema_2_plugins_entry(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": _manifest(provider_id="oldhub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    assert list_jobs()[-1]["details"]["rejected_plugins"] == []
+
+
+def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_across_lists(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import PLUGIN_KIND_CONFLICT_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [{"manifest": _manifest(provider_id="crosshub")}],
+        "plugins": [{"manifest": service_manifest("crosshub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    # The providers copy stays, because released hosts read only that list.
+    assert list(load_state()["catalog_entries"]) == ["community:providers:crosshub:1.0.0"]
+    assert list_jobs()[-1]["details"]["rejected_plugins"] == [{
+        "source": "community",
+        "provider_id": "crosshub",
+        "version": "1.0.0",
+        "reason": PLUGIN_KIND_CONFLICT_REASON,
+    }]
+
+
+def test_catalog_refresh_keeps_the_same_id_and_kind_in_both_lists(tmp_path, monkeypatch):
+    from provider_hub.service import add_catalog_source, list_catalog, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [{"manifest": _manifest(provider_id="movedhub")}],
+        "plugins": [{"manifest": provider_manifest_v2("movedhub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert set(load_state()["catalog_entries"]) == {
+        "community:providers:movedhub:1.0.0",
+        "community:plugins:movedhub:1.0.0",
+    }
+    assert sorted(entry["catalog_list"] for entry in list_catalog()["entries"]) == ["plugins", "providers"]
+
+
+def test_catalog_refresh_rejects_a_repeated_version_within_a_list(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import (
+        PLUGIN_VERSION_REPEATED_REASON, add_catalog_source, list_jobs, refresh_catalog)
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [
+            {"manifest": service_manifest("repeathub")},
+            {"manifest": service_manifest("repeathub")},
+            {"manifest": service_manifest("repeathub", "2.0.0")},
+        ],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:repeathub:2.0.0"]
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_VERSION_REPEATED_REASON] * 2
+
+
+def test_catalog_refresh_rejects_an_id_claimed_by_two_kinds_within_the_plugins_list(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import PLUGIN_KIND_CONFLICT_REASON, add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [
+            {"manifest": service_manifest("splithub")},
+            {"manifest": provider_manifest_v2("splithub")},
+        ],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_KIND_CONFLICT_REASON] * 2
+
+
+def test_catalog_refresh_reads_plugins_when_stored_entries_predate_catalog_list(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    stored = {"community:examplehub:1.0.0": {
+        "source": "community", "source_name": "community", "provider_id": "examplehub",
+        "name": "Example Hub Provider", "version": "1.0.0", "trusted": False, "manifest": _manifest(),
+    }}
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community", resolved_commit="d" * 40),
+               entries=stored)
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("pluginhub")}],
+    })
+
+    refresh_catalog(source_ids={"community"})
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:pluginhub:1.0.0"]
+
+
+def test_catalog_refresh_records_an_unreadable_plugin_and_keeps_its_sibling(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    unreadable = service_manifest("unreadhub", settings_version=1, settings={
+        "fields": [{"key": "token", "type": "not_a_setting_type"}],
+    })
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": unreadable}, {"manifest": service_manifest("siblinghub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:siblinghub:1.0.0"]
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == ["settings field token has an unsupported type"]
+
+
+def test_catalog_refresh_records_a_crashing_parser_as_unreadable_and_keeps_its_sibling(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+    from provider_hub.service import (
+        PLUGIN_MANIFEST_UNREADABLE_REASON, add_catalog_source, list_jobs, refresh_catalog)
+    from provider_hub.state import load_state
+
+    def crashing_parse(manifest):
+        if manifest["id"] == "crashhub":
+            raise RuntimeError("the parser crashed")
+        return parse_plugin_manifest(manifest)
+
+    monkeypatch.setattr("provider_hub.service.parse_plugin_manifest", crashing_parse)
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("crashhub")}, {"manifest": service_manifest("siblinghub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:siblinghub:1.0.0"]
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == [PLUGIN_MANIFEST_UNREADABLE_REASON]
+
+
+def test_catalog_refresh_records_the_refusal_of_a_plugin_the_host_cannot_run(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    daemon_plugin = service_manifest("daemonhub", runtime={"artifact": "python", "process": "daemon"})
+    _serve_community_catalog(monkeypatch, {"providers": [], "plugins": [{"manifest": daemon_plugin}]})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_entries"] == {}
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert [record["reason"] for record in rejected] == ["runtime python run as daemon is not a supported combination"]
+
+
+def test_catalog_refresh_caps_the_recorded_text_of_a_refused_plugin_manifest(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+    from secret_store.scrub import scrub_text
+
+    message = "settings field token has an unsupported type, which this Bazarr+ does not read. " * 4
+
+    def refusing_parse(manifest):
+        if manifest["id"] == "longhub":
+            raise ManifestValidationError(message)
+        return parse_plugin_manifest(manifest)
+
+    monkeypatch.setattr("provider_hub.service.parse_plugin_manifest", refusing_parse)
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("longhub")}, {"manifest": service_manifest("siblinghub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert list(load_state()["catalog_entries"]) == ["community:plugins:siblinghub:1.0.0"]
+    rejected = list_jobs()[-1]["details"]["rejected_plugins"]
+    assert len(rejected) == 1
+    assert len(rejected[0]["reason"]) <= 200
+    assert rejected[0]["reason"] == scrub_text(message)[:200]
+
+
+def test_catalog_refresh_masks_a_credential_that_straddles_the_cap_in_a_refusal(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+    from provider_hub.service import add_catalog_source, list_jobs, refresh_catalog
+
+    token, message = _message_with_a_token_across_the_cap()
+
+    def refusing_parse(manifest):
+        if manifest["id"] == "leakyhub":
+            raise ManifestValidationError(message)
+        return parse_plugin_manifest(manifest)
+
+    monkeypatch.setattr("provider_hub.service.parse_plugin_manifest", refusing_parse)
+    _serve_community_catalog(monkeypatch, {
+        "providers": [],
+        "plugins": [{"manifest": service_manifest("leakyhub")}],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    reason = list_jobs()[-1]["details"]["rejected_plugins"][0]["reason"]
+    assert len(reason) <= 200
+    assert token[:4] not in reason
+    assert reason.startswith("x" * 188 + " Bearer ")
+
+
+def test_a_catalog_source_error_is_masked_and_capped_where_it_is_stored(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    token, message = _message_with_a_token_across_the_cap()
+
+    def failing_fetch(*_args, **_kwargs):
+        raise ValueError(message)
+
+    monkeypatch.setattr("provider_hub.service._fetch_github_catalog", failing_fetch)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    refresh_catalog(source_ids={"official"})
+
+    last_error = load_state()["catalog_sources"]["official"]["last_error"]
+    assert len(last_error) <= 200
+    assert token[:4] not in last_error
+    assert last_error.startswith("x" * 188 + " Bearer ")
+
+
+def test_a_failed_worker_health_check_masks_and_caps_the_stored_error(tmp_path, monkeypatch):
+    from provider_hub.service import test_provider_connection
+    from provider_hub.state import load_state, save_state
+
+    token, message = _message_with_a_token_across_the_cap()
+
+    class FailingWorkerClient:
+        def __init__(self, command, cwd=None, env=None):
+            pass
+
+        def request(self, op, payload=None, timeout=30):
+            raise RuntimeError(message)
+
+        def stop(self):
+            return None
+
+    bundle_path = tmp_path / "bundle"
+    bundle_path.mkdir()
+    python_path = tmp_path / "venv" / "bin" / "python"
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda _manifest, _path: None)
+    monkeypatch.setattr("provider_hub.service.ProviderWorkerClient", FailingWorkerClient)
+
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "active_path": str(bundle_path),
+            "python_path": str(python_path),
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    test_provider_connection("examplehub")
+
+    last_error = load_state()["installations"]["examplehub"]["last_error"]
+    assert len(last_error) <= 200
+    assert token[:4] not in last_error
+    assert last_error.startswith("x" * 188 + " Bearer ")
+
+
+@pytest.mark.parametrize("active_version", [None, "1.0.0"])
+def test_a_failed_install_caps_the_recorded_error_text(active_version):
+    from types import SimpleNamespace
+
+    from provider_hub.service import _failed_installation
+    from secret_store.scrub import scrub_text
+
+    message = "the worker stopped before it answered the check, so the install was not kept. " * 4
+    validated = SimpleNamespace(provider_id="examplehub", kind="subtitle_provider", name="Example Hub", raw={})
+    existing = {"active_version": active_version, "provider_id": "examplehub"}
+
+    installation = _failed_installation(validated, existing, RuntimeError(message), True)
+
+    assert len(installation["last_error"]) == 200
+    assert installation["last_error"] == scrub_text(message)[:200]
+
+
+def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_sources(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import RESERVED_ID_REASON, add_catalog_source, list_catalog, refresh_catalog
+    from provider_hub.state import load_state
+
+    official_plugin = service_manifest("reservedsvc")
+    community_provider = _manifest(provider_id="reservedsvc")
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _FakeResponse({"providers": [], "plugins": [{"manifest": official_plugin}]})
+        return _FakeResponse({"providers": [{"manifest": community_provider}]})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")
+    refresh_catalog()
+
+    assert load_state()["catalog_sources"]["official"]["provider_ids"] == ["reservedsvc"]
+    blocked = {entry["source"]: entry.get("blocked_reason") for entry in list_catalog()["entries"]}
+    assert blocked == {"official": None, "community": RESERVED_ID_REASON}
+
+
+def _plugin_entry(source, manifest):
+    key = f"{source}:plugins:{manifest['id']}:{manifest['version']}"
+    return {key: {"source": source, "source_name": source, "provider_id": manifest["id"],
+                  "name": manifest["name"], "version": manifest["version"], "trusted": False,
+                  "manifest": manifest, "catalog_list": "plugins"}}
+
+
+ARCHIVE_WORKER_REASON = "needs the archive worker runtime, which this Bazarr+ does not provide"
+
+
+def test_the_catalog_lists_a_plugin_this_host_cannot_run_with_the_reason(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    archive = provider_manifest_v2("archivehub", **archive_runtime())
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_plugin_entry("community", archive))
+
+    [entry] = [entry for entry in service.list_catalog()["entries"] if entry["source"] == "community"]
+    assert entry["blocked_reason"] == ARCHIVE_WORKER_REASON
+
+
+def test_an_install_refuses_a_catalog_plugin_this_host_cannot_run(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    archive = provider_manifest_v2("archivehub", **archive_runtime())
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_plugin_entry("community", archive))
+
+    with pytest.raises(service.ProviderHubInstallError, match="needs the archive worker runtime"):
+        service.install_catalog_entry("community", "archivehub", "1.0.0")
+
+
+def test_a_local_package_for_a_runtime_the_host_lacks_is_refused(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    _hub_state(tmp_path, monkeypatch)
+    archive = provider_manifest_v2("localarchive", **archive_runtime())
+    package = _provider_zip(archive, {"provider.py": b"class ExampleProvider: pass\n"}, prefix="localarchive/")
+
+    with pytest.raises(service.ProviderHubInstallError, match="needs the archive worker runtime"):
+        service.stage_install_local(package)
+
+
+@pytest.mark.parametrize("newer_fields,reason", [
+    ({"min_host_version": "2.8.0"}, "needs Bazarr+ 2.8.0 or later"),
+    (archive_runtime(), ARCHIVE_WORKER_REASON),
+])
+def test_a_newer_version_this_host_cannot_run_is_not_offered_and_says_why(
+        tmp_path, monkeypatch, newer_fields, reason):
+    from provider_hub.service import apply_update, check_updates
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.7.0")
+    newer = provider_manifest_v2("examplehub", version="1.1.0", **newer_fields)
+    installation = {"provider_id": "examplehub", "name": "Examplehub", "state": "active",
+                    "pending_restart": False, "active_version": "1.0.0", "source_bound": True,
+                    "source_id": "community", "manifest": provider_manifest_v2("examplehub")}
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_plugin_entry("community", newer), installations={"examplehub": installation})
+
+    job = check_updates()
+    assert job["details"]["updates_available"] == 0
+    assert reason in job["message"]
+    assert apply_update("examplehub")["last_error"] == reason
+
+
+@pytest.mark.parametrize("newer_fields,reason", [
+    ({"min_host_version": "2.8.0"}, "needs Bazarr+ 2.8.0 or later"),
+    (archive_runtime(), ARCHIVE_WORKER_REASON),
+])
+def test_a_compatible_update_is_offered_beside_a_newer_version_this_host_cannot_run(
+        tmp_path, monkeypatch, newer_fields, reason):
+    from provider_hub.service import check_updates
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.7.0")
+    middle = provider_manifest_v2("examplehub", version="1.0.1")
+    newer = provider_manifest_v2("examplehub", version="1.1.0", **newer_fields)
+    installation = {"provider_id": "examplehub", "name": "Examplehub", "state": "active",
+                    "pending_restart": False, "active_version": "1.0.0", "source_bound": True,
+                    "source_id": "community", "manifest": provider_manifest_v2("examplehub")}
+    entries = {**_plugin_entry("community", middle), **_plugin_entry("community", newer)}
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=entries, installations={"examplehub": installation})
+
+    job = check_updates()
+    assert job["details"]["updates_available"] == 1
+    assert job["details"]["providers"] == ["Examplehub: 1.0.0 -> 1.0.1"]
+    assert f"newer version not offered for Examplehub: {reason}" in job["message"]
+
+
+def test_a_refused_version_below_the_offered_update_is_not_named(tmp_path, monkeypatch):
+    from provider_hub.service import check_updates
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.7.0")
+    refused = provider_manifest_v2("examplehub", version="1.0.1", min_host_version="2.8.0")
+    compatible = provider_manifest_v2("examplehub", version="1.1.0")
+    installation = {"provider_id": "examplehub", "name": "Examplehub", "state": "active",
+                    "pending_restart": False, "active_version": "1.0.0", "source_bound": True,
+                    "source_id": "community", "manifest": provider_manifest_v2("examplehub")}
+    entries = {**_plugin_entry("community", refused), **_plugin_entry("community", compatible)}
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=entries, installations={"examplehub": installation})
+
+    job = check_updates()
+    assert job["details"]["updates_available"] == 1
+    assert job["details"]["providers"] == ["Examplehub: 1.0.0 -> 1.1.0"]
+    assert "not offered" not in job["message"]
 
 
 def test_stage_install_fetches_bundle_builds_env_and_records_staged_paths(tmp_path, monkeypatch):
@@ -4161,6 +4878,39 @@ def test_stage_install_trust_comes_from_catalog_entry_only(tmp_path, monkeypatch
     assert installation["trusted"] is False
 
 
+def test_catalog_binding_reads_a_schema_2_provider_id():
+    from provider_hub.service import _catalog_binding
+    from provider_hub.state import official_catalog_source
+
+    catalog_manifest = provider_manifest_v2(
+        "modernhub",
+        source={
+            "type": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "commit": "e" * 40,
+            "catalog_url": "https://github.com/owner/repo/blob/main/catalog.json",
+            "trusted": True,
+        },
+    )
+    install_manifest = json.loads(json.dumps(catalog_manifest))
+    install_manifest["source"].pop("trusted")
+    state = {
+        "catalog_sources": {"official": official_catalog_source()},
+        "catalog_entries": {
+            "official:modernhub:1.0.0": {
+                "source": "official",
+                "provider_id": "modernhub",
+                "version": "1.0.0",
+                "trusted": True,
+                "manifest": catalog_manifest,
+            }
+        },
+    }
+
+    assert _catalog_binding(install_manifest, state) == ("official", True)
+
+
 def test_stage_install_rejects_untrusted_built_in_shadow(tmp_path, monkeypatch):
     from provider_hub.manifest import ManifestValidationError
     from provider_hub.service import stage_install
@@ -4235,7 +4985,8 @@ def test_stage_install_accepts_trusted_migrated_built_in_shadow(tmp_path, monkey
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
     monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
     monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
-    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
 
     installation = stage_install(install_manifest)
 
@@ -4247,6 +4998,79 @@ def test_stage_install_accepts_trusted_migrated_built_in_shadow(tmp_path, monkey
     stored = load_state()["installations"]["gestdown"]
     assert stored["trusted"] is True
     assert stored["staged_manifest"] == install_manifest
+
+
+def test_stage_install_accepts_trusted_schema_2_built_in_shadow(tmp_path, monkeypatch):
+    from provider_hub.service import stage_install
+    from provider_hub.state import load_state, official_catalog_source
+
+    provider_content = b"class GestdownProvider: pass\n"
+    catalog_manifest = provider_manifest_v2(
+        "gestdown",
+        name="Gestdown",
+        file_payloads={"provider.py": provider_content},
+        dependencies={"requirements": []},
+        source={
+            "type": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "commit": "e" * 40,
+            "catalog_url": "https://github.com/owner/repo/blob/main/catalog.json",
+            "trusted": True,
+        },
+    )
+    install_manifest = json.loads(json.dumps(catalog_manifest))
+    install_manifest["source"].pop("trusted")
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps(
+            {
+                "catalog_sources": {"official": official_catalog_source()},
+                "catalog_entries": {
+                    "official:gestdown:1.0.0": {
+                        "source": "official",
+                        "provider_id": "gestdown",
+                        "version": "1.0.0",
+                        "trusted": True,
+                        "manifest": catalog_manifest,
+                    }
+                },
+                "installations": {},
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr("provider_hub.service._built_in_provider_ids", lambda: {"gestdown"})
+    monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated, timeout=None):
+            return self.root / "envs" / validated.provider_id / validated.version / "test"
+
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
+
+    installation = stage_install(install_manifest)
+
+    assert installation["provider_id"] == "gestdown"
+    assert installation["trusted"] is True
+    assert installation["state"] == "staged"
+    assert installation["pending_restart"] is True
+    assert installation["staged_version"] == "1.0.0"
+    stored = load_state()["installations"]["gestdown"]
+    assert stored["trusted"] is True
+    # validate_manifest fills provider_id into a schema 2 manifest, so the staged copy carries it.
+    assert stored["staged_manifest"] == {**install_manifest, "provider_id": "gestdown"}
 
 
 def test_stage_install_smoke_failure_records_failed_install(tmp_path, monkeypatch):
@@ -5242,8 +6066,7 @@ def test_list_providers_overlays_enabled_from_bazarr_enabled_providers(
     }
     save_state(state)
 
-    monkeypatch.setattr(
-        service, "_bazarr_enabled_providers", lambda: ["examplehub", "other"]
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["examplehub", "other"]
     )
 
     providers = service.list_providers()
@@ -5251,7 +6074,7 @@ def test_list_providers_overlays_enabled_from_bazarr_enabled_providers(
         p["provider_id"] == "examplehub" and p["enabled"] is True for p in providers
     )
 
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["other"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["other"])
     providers = service.list_providers()
     assert any(
         p["provider_id"] == "examplehub" and p["enabled"] is False for p in providers
@@ -5276,9 +6099,7 @@ def test_update_provider_syncs_enabled_providers(tmp_path, monkeypatch):
     save_state(state)
 
     calls = []
-    monkeypatch.setattr(
-        service,
-        "_set_bazarr_provider_enabled",
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
         lambda pid, enabled: calls.append((pid, enabled)) or True,
     )
 
@@ -5305,9 +6126,7 @@ def test_remove_installation_clears_enabled_providers(tmp_path, monkeypatch):
     save_state(state)
 
     calls = []
-    monkeypatch.setattr(
-        service,
-        "_set_bazarr_provider_enabled",
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
         lambda pid, enabled: calls.append((pid, enabled)) or True,
     )
 
@@ -5655,7 +6474,8 @@ def test_autoinstall_stages_enabled_official_providers_not_yet_installed(tmp_pat
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl", "opensubtitlescom"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers",
+                        lambda: ["subdl", "opensubtitlescom"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5679,7 +6499,7 @@ def test_autoinstall_is_idempotent_skips_existing_installs(tmp_path, monkeypatch
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5696,7 +6516,7 @@ def test_autoinstall_ignores_non_official_catalog_entries(tmp_path, monkeypatch)
     state_file = _catalog_state(tmp_path, entries={"thirdparty:subdl:1.0.0": third_party})
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5713,7 +6533,7 @@ def test_autoinstall_swallows_stage_failures(tmp_path, monkeypatch):
     })
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl", "gestdown"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl", "gestdown"])
 
     calls = []
 
@@ -5732,7 +6552,7 @@ def test_autoinstall_swallows_stage_failures(tmp_path, monkeypatch):
 def test_autoinstall_kill_switch_returns_empty(monkeypatch):
     from provider_hub import service
     monkeypatch.setenv("BAZARR_DISABLE_PROVIDER_AUTOINSTALL", "1")
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     assert service.autoinstall_enabled_builtins() == []
 
 
@@ -5756,7 +6576,7 @@ def test_autoinstall_proceeds_when_catalog_refresh_fails(tmp_path, monkeypatch):
         raise RuntimeError("github unreachable")
 
     monkeypatch.setattr(service, "refresh_catalog", boom)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5777,7 +6597,7 @@ def test_autoinstall_retries_failed_install_rows(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: staged.append(manifest["provider_id"]))
 
@@ -5799,7 +6619,7 @@ def test_autoinstall_skips_refresh_when_nothing_to_install(tmp_path, monkeypatch
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     refresh_calls = []
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: refresh_calls.append(source_ids))
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: (_ for _ in ()).throw(AssertionError("should not install")))
 
     assert service.autoinstall_enabled_builtins() == []
@@ -5814,7 +6634,7 @@ def test_autoinstall_refreshes_only_the_official_source(tmp_path, monkeypatch):
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     refresh_calls = []
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: refresh_calls.append(source_ids))
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     monkeypatch.setattr(service, "stage_install", lambda manifest, install_timeout=None: None)
 
     service.autoinstall_enabled_builtins()
@@ -5827,7 +6647,7 @@ def test_autoinstall_bounds_each_install_with_remaining_budget(tmp_path, monkeyp
     state_file = _catalog_state(tmp_path, entries={"official:subdl:1.0.0": _official_entry("subdl")})
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     monkeypatch.setattr(service, "refresh_catalog", lambda source_ids=None: None)
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: ["subdl"])
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: ["subdl"])
     captured = {}
 
     def capture(manifest, install_timeout=None):
@@ -6715,9 +7535,9 @@ def test_failed_initial_catalog_refresh_waits_for_explicit_retry(tmp_path, monke
 # installing only the first". Two very different faults produce that symptom: an
 # install that fails and stops the run, or an install that succeeds and then
 # vanishes because the next one read a stale enabled_providers and wrote it back
-# without the previous entry. _set_bazarr_provider_enabled read-modify-writes
-# that list, so this pins the second possibility shut: three sequential installs
-# leave all three ids in the list, in memory and on disk.
+# without the previous entry. set_bazarr_provider_enabled reads, edits and writes
+# that list under CONFIG_LOCK, so this pins the second possibility shut: three
+# sequential installs leave all three ids in the list, in memory and on disk.
 #
 # It runs in a child process with its own config dir because it exercises the
 # real settings singleton and a real write_config(); doing that in the test
@@ -6741,19 +7561,23 @@ assert os.path.realpath(args.config_dir) == os.path.realpath(
 ), "child resolved config_dir to %r" % (args.config_dir,)
 
 from app.config import config_yaml_file
-from provider_hub import service
-from provider_hub.service import _bazarr_enabled_providers, _set_bazarr_provider_enabled
+from provider_hub.kinds import subtitle_provider as provider_kind
+from provider_hub.kinds.subtitle_provider import (
+    bazarr_enabled_providers as _bazarr_enabled_providers,
+    set_bazarr_provider_enabled as _set_bazarr_provider_enabled,
+)
 
 ids = json.loads(os.environ["PROVIDER_IDS"])
 returned = [_set_bazarr_provider_enabled(provider_id, True) for provider_id in ids]
 
 sequential_in_memory = list(_bazarr_enabled_providers())
 
-# Concurrent half. A parallel install run reaches _set_bazarr_provider_enabled
-# from several threads at once; widening the gap between its read and its write
-# turns the lost update from a rare interleaving into a certainty, so the lock
-# is what the assertion is really measuring.
-_real_read = service._bazarr_enabled_providers
+# Concurrent install run. Parallel installs reach set_bazarr_provider_enabled
+# from several threads at once. The slow read widens the window between that
+# read and the write, so a missing CONFIG_LOCK would show up here as a lost
+# update. The assertion measures that the lock covers the read, the edit and
+# the write together.
+_real_read = provider_kind.bazarr_enabled_providers
 
 
 def _slow_read():
@@ -6762,7 +7586,7 @@ def _slow_read():
     return value
 
 
-service._bazarr_enabled_providers = _slow_read
+provider_kind.bazarr_enabled_providers = _slow_read
 
 threaded_ids = json.loads(os.environ["THREADED_PROVIDER_IDS"])
 errors = []
@@ -6770,7 +7594,7 @@ errors = []
 
 def _enable(provider_id):
     try:
-        service._set_bazarr_provider_enabled(provider_id, True)
+        _set_bazarr_provider_enabled(provider_id, True)
     except Exception as error:  # noqa: BLE001
         errors.append(repr(error))
 
@@ -6781,7 +7605,7 @@ for thread in threads:
 for thread in threads:
     thread.join()
 
-service._bazarr_enabled_providers = _real_read
+provider_kind.bazarr_enabled_providers = _real_read
 
 from dynaconf import Dynaconf
 
@@ -6855,22 +7679,22 @@ def test_installs_keep_every_enabled_provider_sequentially_and_in_parallel(tmp_p
 
 def test_enabled_providers_that_cannot_be_saved_are_put_back(monkeypatch):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
     monkeypatch.setattr(config, "write_config", lambda: False)
 
-    assert service._set_bazarr_provider_enabled("beta", True) is False
+    assert provider_kind.set_bazarr_provider_enabled("beta", True) is False
     assert list(config.settings.general.enabled_providers) == ["alpha"]
-    assert service._set_bazarr_provider_enabled("alpha", False) is False
+    assert provider_kind.set_bazarr_provider_enabled("alpha", False) is False
     assert list(config.settings.general.enabled_providers) == ["alpha"]
     # A list that already holds the requested state needs no write, and is not a failure.
-    assert service._set_bazarr_provider_enabled("alpha", True) is True
+    assert provider_kind.set_bazarr_provider_enabled("alpha", True) is True
 
 
 def test_enabling_a_provider_clears_its_disabled_entry_in_the_same_save(monkeypatch):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
     monkeypatch.setattr(
@@ -6885,14 +7709,14 @@ def test_enabling_a_provider_clears_its_disabled_entry_in_the_same_save(monkeypa
 
     monkeypatch.setattr(config, "write_config", write_config)
 
-    assert service._set_bazarr_provider_enabled("beta", True) is True
+    assert provider_kind.set_bazarr_provider_enabled("beta", True) is True
     assert saved == [(["alpha", "beta"], ["other"])]
     assert list(config.settings.general.disabled_providers) == ["other"]
 
 
 def test_enabling_an_enabled_provider_clears_its_stale_disabled_entry(monkeypatch):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha", "beta"])
     monkeypatch.setattr(
@@ -6907,7 +7731,7 @@ def test_enabling_an_enabled_provider_clears_its_stale_disabled_entry(monkeypatc
 
     monkeypatch.setattr(config, "write_config", write_config)
 
-    assert service._set_bazarr_provider_enabled("beta", True) is True
+    assert provider_kind.set_bazarr_provider_enabled("beta", True) is True
     assert saved == [(["alpha", "beta"], ["other"])]
     assert list(config.settings.general.disabled_providers) == ["other"]
 
@@ -6915,7 +7739,7 @@ def test_enabling_an_enabled_provider_clears_its_stale_disabled_entry(monkeypatc
 @pytest.mark.parametrize("failure", ["false", "exception"])
 def test_failed_provider_activation_restores_both_provider_lists(monkeypatch, failure):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
     monkeypatch.setattr(config.settings.general, "disabled_providers", ["beta", "other"], raising=False)
@@ -6930,7 +7754,7 @@ def test_failed_provider_activation_restores_both_provider_lists(monkeypatch, fa
 
     monkeypatch.setattr(config, "write_config", write_config)
 
-    assert service._set_bazarr_provider_enabled("beta", True) is False
+    assert provider_kind.set_bazarr_provider_enabled("beta", True) is False
     assert attempted == [(["alpha", "beta"], ["other"])]
     assert list(config.settings.general.enabled_providers) == ["alpha"]
     assert list(config.settings.general.disabled_providers) == ["beta", "other"]
@@ -6938,13 +7762,13 @@ def test_failed_provider_activation_restores_both_provider_lists(monkeypatch, fa
 
 def test_disabling_a_hub_provider_preserves_the_disabled_list(monkeypatch):
     from app import config
-    from provider_hub import service
+    from provider_hub.kinds import subtitle_provider as provider_kind
 
     monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha", "beta"])
     monkeypatch.setattr(config.settings.general, "disabled_providers", ["other"], raising=False)
     monkeypatch.setattr(config, "write_config", lambda: True)
 
-    assert service._set_bazarr_provider_enabled("beta", False) is True
+    assert provider_kind.set_bazarr_provider_enabled("beta", False) is True
     assert list(config.settings.general.enabled_providers) == ["alpha"]
     assert list(config.settings.general.disabled_providers) == ["other"]
 
@@ -6973,8 +7797,9 @@ def test_an_update_whose_enabled_state_cannot_be_saved_changes_nothing(tmp_path,
     from provider_hub.state import load_state
 
     _installed_examplehub(tmp_path, monkeypatch)
-    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
-    monkeypatch.setattr(service, "_forget_credential_throttle", lambda provider_id: None)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: False)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.forget_credential_throttle", lambda provider_id: None)
 
     with pytest.raises(service.ProviderHubSettingsError):
         service.update_provider("examplehub", enabled=False, config={"api_key": "new"})
@@ -6996,11 +7821,12 @@ def test_an_update_whose_enabled_state_cannot_be_saved_changes_nothing(tmp_path,
 
 def test_a_removal_whose_disable_cannot_be_saved_leaves_the_provider_installed(tmp_path, monkeypatch):
     from app.jobs_queue import JobFailed
-    from provider_hub import jobs as hub_jobs, service
+    from provider_hub import jobs as hub_jobs
     from provider_hub.state import load_state
 
     _installed_examplehub(tmp_path, monkeypatch)
-    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: False)
 
     with pytest.raises(JobFailed, match="could not be saved"):
         hub_jobs.uninstall_provider("examplehub", "Example")
@@ -7073,7 +7899,8 @@ def test_a_first_install_that_cannot_be_enabled_is_reported_as_failed(tmp_path, 
     state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     _patch_local_install_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: False)
 
     with pytest.raises(service.ProviderHubSettingsError, match="could not be enabled"):
         stage_install_local(package)
@@ -7168,7 +7995,7 @@ def _entry(source, manifest):
     key = f"{source}:{manifest['provider_id']}:{manifest['version']}"
     return {key: {"source": source, "source_name": source, "provider_id": manifest["provider_id"],
                   "name": manifest["name"], "version": manifest["version"], "trusted": source == "official",
-                  "manifest": manifest}}
+                  "manifest": manifest, "catalog_list": "providers"}}
 
 
 def _installed(manifest, *, trusted, **fields):
@@ -7269,6 +8096,57 @@ def test_an_install_from_a_community_source_is_bound_to_it_whatever_its_manifest
         "community", "community", False)
 
 
+def _two_copies_of_one_version(tmp_path, monkeypatch, *, plugin_overrides=None):
+    """A community source listing movedhub 1.0.0 in both lists, as two different manifests."""
+    legacy = _manifest(provider_id="movedhub", name="Legacy copy")
+    plugin = provider_manifest_v2("movedhub", name="Plugin copy", **(plugin_overrides or {}))
+    plugin_entry = {"source": "community", "source_name": "community", "provider_id": "movedhub",
+                    "name": "Plugin copy", "version": "1.0.0", "trusted": False, "manifest": plugin,
+                    "catalog_list": "plugins"}
+    entries = {**_entry("community", legacy)}
+    [legacy_key] = entries
+    entries["community:plugins:movedhub:1.0.0"] = plugin_entry
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"), entries=entries)
+    return legacy, plugin, legacy_key, "community:plugins:movedhub:1.0.0"
+
+
+def test_an_install_request_resolves_to_the_copy_it_asked_for_when_both_lists_hold_one(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, plugin, legacy_key, plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    staged = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest) or {"state": "staged"})
+
+    by_default = service.resolve_catalog_install("community", "movedhub", "1.0.0")
+    by_plugins = service.resolve_catalog_install("community", "movedhub", "1.0.0", catalog_list="plugins")
+    by_manifest = service.resolve_catalog_install(manifest=plugin)
+
+    assert by_default["entry_key"] == legacy_key
+    assert by_plugins["entry_key"] == plugin_key
+    assert by_manifest["entry_key"] == plugin_key
+    assert by_manifest["name"] == "Plugin copy"
+
+    service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=plugin_key)
+    service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=legacy_key)
+    assert [manifest["name"] for manifest in staged] == ["Plugin copy", "Legacy copy"]
+
+
+def test_the_compatibility_check_reads_the_copy_the_install_will_use(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, _plugin, legacy_key, plugin_key = _two_copies_of_one_version(
+        tmp_path, monkeypatch, plugin_overrides={"min_host_version": "9.0.0"})
+
+    with pytest.raises(service.ProviderHubInstallError, match="needs Bazarr.+ 9.0.0 or later"):
+        service.resolve_catalog_install("community", "movedhub", "1.0.0", catalog_list="plugins")
+    with pytest.raises(service.ProviderHubInstallError, match="needs Bazarr.+ 9.0.0 or later"):
+        service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=plugin_key)
+    assert service.resolve_catalog_install("community", "movedhub", "1.0.0")["entry_key"] == legacy_key
+
+
 def test_only_the_official_catalog_installs_or_updates_an_official_id(tmp_path, monkeypatch):
     from provider_hub import service
 
@@ -7307,6 +8185,318 @@ def test_an_update_comes_only_from_the_source_the_install_is_bound_to(tmp_path, 
     job = check_updates()
 
     assert job["details"]["providers"] == ["Example Hub Provider: 1.0.0 -> 1.1.0"]
+
+
+def _listed(source, list_name, manifest):
+    plugin_id = manifest.get("id") or manifest["provider_id"]
+    key = f"{source}:{list_name}:{plugin_id}:{manifest['version']}"
+    return {key: {"source": source, "source_name": source, "provider_id": plugin_id,
+                  "name": manifest["name"], "version": manifest["version"], "trusted": False,
+                  "manifest": manifest, "catalog_list": list_name}}
+
+
+def _movedhub_state(tmp_path, monkeypatch, installed, *, entry_versions, only_in=None,
+                    plugin_overrides=None, **row):
+    """movedhub installed from a community source that lists it in both lists, as different manifests."""
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    entries = {}
+    for version in entry_versions:
+        if only_in != "plugins":
+            entries.update(_listed("community", "providers",
+                                   _manifest(provider_id="movedhub", name=f"Legacy {version}", version=version)))
+        if only_in != "providers":
+            entries.update(_listed("community", "plugins", provider_manifest_v2(
+                "movedhub", name=f"Plugin {version}", version=version, **(plugin_overrides or {}))))
+    installation = {"provider_id": "movedhub", "name": "Movedhub", "state": "active",
+                    "pending_restart": False, "active_version": "1.0.0", "source_bound": True,
+                    "source_id": "community", "manifest": installed, **row}
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"), entries=entries,
+               installations={"movedhub": installation})
+    return installation
+
+
+def _stage_names(monkeypatch):
+    from provider_hub import service
+
+    staged = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest["name"]) or {"state": "staged"})
+    return staged
+
+
+@pytest.mark.parametrize("installed_list", ["plugins", "providers"])
+def test_an_update_stays_on_the_catalog_list_the_install_came_from(tmp_path, monkeypatch, installed_list):
+    from provider_hub import service
+
+    plugin_install = installed_list == "plugins"
+    installed = (provider_manifest_v2("movedhub") if plugin_install
+                 else _manifest(provider_id="movedhub", name="Legacy 1.0.0"))
+    _movedhub_state(tmp_path, monkeypatch, installed, entry_versions=["1.1.0", "1.2.0"],
+                    catalog_list=installed_list)
+    staged = _stage_names(monkeypatch)
+
+    assert service.check_updates()["details"]["providers"] == ["Movedhub: 1.0.0 -> 1.2.0"]
+    service.apply_update("movedhub")
+
+    assert staged == ["Plugin 1.2.0" if plugin_install else "Legacy 1.2.0"]
+
+
+def test_a_version_the_install_list_holds_is_never_taken_from_the_other_list(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    # The plugins list holds 1.1.0 but this host cannot run it, so the providers copy of 1.1.0 stays unused.
+    _movedhub_state(tmp_path, monkeypatch, provider_manifest_v2("movedhub"), entry_versions=["1.1.0"],
+                    plugin_overrides={"min_host_version": "9.0.0"}, catalog_list="plugins")
+    staged = _stage_names(monkeypatch)
+
+    assert service.check_updates()["details"]["updates_available"] == 0
+    service.apply_update("movedhub")
+
+    assert staged == []
+
+
+def test_a_version_only_the_other_list_holds_is_still_offered(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    _movedhub_state(tmp_path, monkeypatch, provider_manifest_v2("movedhub"), entry_versions=["1.1.0"],
+                    only_in="providers", catalog_list="plugins")
+    staged = _stage_names(monkeypatch)
+
+    service.apply_update("movedhub")
+
+    assert staged == ["Legacy 1.1.0"]
+
+
+@pytest.mark.parametrize("installed, expected", [
+    (provider_manifest_v2("movedhub"), "Plugin 1.1.0"),
+    (_manifest(provider_id="movedhub", name="Legacy 1.0.0"), "Legacy 1.1.0"),
+])
+def test_an_install_stored_without_a_catalog_list_updates_from_the_list_its_manifest_belongs_to(
+        tmp_path, monkeypatch, installed, expected):
+    from provider_hub import service
+
+    installation = _movedhub_state(tmp_path, monkeypatch, installed, entry_versions=["1.1.0"])
+    assert "catalog_list" not in installation
+    staged = _stage_names(monkeypatch)
+
+    service.apply_update("movedhub")
+
+    assert staged == [expected]
+    # A stored row loads as it is: the list is worked out on read, not written back.
+    assert "catalog_list" not in service.load_state()["installations"]["movedhub"]
+
+
+def test_an_install_row_with_no_list_and_no_readable_manifest_counts_as_a_providers_install():
+    from provider_hub import service
+
+    assert service._installed_catalog_list({"state": "active"}) == "providers"
+    assert service._installed_catalog_list({"manifest": "broken", "catalog_list": "elsewhere"}) == "providers"
+    assert service._installed_catalog_list(
+        {"manifest": None, "staged_manifest": provider_manifest_v2("movedhub")}) == "plugins"
+
+
+@pytest.mark.parametrize("list_name, name", [("plugins", "Plugin copy"), ("providers", "Legacy copy")])
+def test_an_install_records_the_catalog_list_of_the_entry_it_installed(tmp_path, monkeypatch, list_name, name):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    _patch_local_install_env(monkeypatch, tmp_path)
+    _legacy, _plugin, legacy_key, plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+
+    service.install_catalog_entry("community", "movedhub", "1.0.0",
+                                  entry_key=plugin_key if list_name == "plugins" else legacy_key)
+
+    [row] = service.list_providers()
+    assert (row["name"], row["catalog_list"]) == (name, list_name)
+
+
+@pytest.mark.parametrize("list_name", ["plugins", "providers"])
+def test_an_install_hands_the_pinned_entrys_list_to_the_staging_step(tmp_path, monkeypatch, list_name):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, _plugin, legacy_key, plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    seen = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: seen.append(kwargs.get("catalog_list")) or {"state": "staged"})
+
+    service.install_catalog_entry("community", "movedhub", "1.0.0",
+                                  entry_key=plugin_key if list_name == "plugins" else legacy_key)
+
+    assert seen == [list_name]
+
+
+def test_an_install_of_an_entry_stored_without_a_list_is_recorded_as_a_providers_install(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, _plugin, legacy_key, _plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    state = load_state()
+    del state["catalog_entries"][legacy_key]["catalog_list"]
+    save_state(state)
+    seen = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: seen.append(kwargs.get("catalog_list")) or {"state": "staged"})
+
+    service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=legacy_key)
+
+    assert seen == ["providers"]
+
+
+def test_staging_an_update_keeps_the_list_the_active_version_came_from(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    _patch_local_install_env(monkeypatch, tmp_path)
+    legacy, _plugin, _legacy_key, _plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    update = provider_manifest_v2("movedhub", name="Plugin update", version="1.1.0")
+    state = load_state()
+    state["catalog_entries"].update(_listed("community", "plugins", update))
+    state["installations"]["movedhub"] = {
+        "provider_id": "movedhub", "name": "Movedhub", "state": "active", "pending_restart": False,
+        "active_version": "1.0.0", "source_bound": True, "source_id": "community",
+        "catalog_list": "providers", "manifest": legacy}
+    save_state(state)
+
+    service.install_catalog_entry("community", "movedhub", "1.1.0",
+                                  entry_key="community:plugins:movedhub:1.1.0")
+
+    row = load_state()["installations"]["movedhub"]
+    assert (row["catalog_list"], row["previous_catalog_list"]) == ("plugins", "providers")
+    assert row["manifest"] == legacy
+
+
+def _staged_cross_list_update(**row):
+    return {"movedhub": {
+        "provider_id": "movedhub", "name": "Movedhub", "state": "staged", "pending_restart": True,
+        "active_version": "1.0.0", "staged_version": "1.1.0", "active_path": "/old/bundle",
+        "python_path": "/old/python", "staged_path": "/new/bundle", "staged_python_path": "/new/python",
+        "source_bound": True, "source_id": "community", "catalog_list": "plugins",
+        "manifest": _manifest(provider_id="movedhub"),
+        "staged_manifest": provider_manifest_v2("movedhub", version="1.1.0"), **row}}
+
+
+def test_a_failed_activation_puts_back_the_list_of_the_version_it_rolls_back_to(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update(previous_catalog_list="providers"))
+
+    def refuse(manifest, bundle_path, python_path):
+        raise service.ProviderHubInstallError("the worker did not start")
+
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr(service, "_smoke_validate_worker", refuse)
+
+    assert service.activate_staged_installations() == []
+
+    row = load_state()["installations"]["movedhub"]
+    assert (row["state"], row["active_version"], row["staged_version"]) == ("active", "1.0.0", None)
+    assert row["catalog_list"] == "providers"
+    assert "previous_catalog_list" not in row
+    assert service._installed_catalog_list(row) == "providers"
+
+
+def test_a_failed_activation_of_an_update_with_no_earlier_list_leaves_the_list_to_the_manifest(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update())
+
+    def refuse(manifest, bundle_path, python_path):
+        raise service.ProviderHubInstallError("the worker did not start")
+
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr(service, "_smoke_validate_worker", refuse)
+
+    assert service.activate_staged_installations() == []
+
+    row = load_state()["installations"]["movedhub"]
+    assert "catalog_list" not in row
+    assert service._installed_catalog_list(row) == "providers"
+
+
+@pytest.mark.parametrize("previous, expected", [({"previous_catalog_list": "providers"}, "providers"), ({}, None)])
+def test_a_failed_restage_puts_back_the_list_of_the_active_version(tmp_path, monkeypatch, previous, expected):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    _patch_local_install_env(monkeypatch, tmp_path)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               installations=_staged_cross_list_update(**previous))
+
+    def refuse(manifest, bundle_path, python_path):
+        raise service.ProviderHubInstallError("the worker did not start")
+
+    monkeypatch.setattr(service, "_smoke_validate_worker", refuse)
+
+    with pytest.raises(service.ProviderHubInstallError, match="the worker did not start"):
+        service.stage_install(provider_manifest_v2("movedhub", version="1.2.0"),
+                              source_id="community", catalog_list="plugins")
+
+    row = load_state()["installations"]["movedhub"]
+    assert (row["active_version"], row["staged_version"]) == ("1.0.0", None)
+    assert row.get("catalog_list") == expected
+    assert "previous_catalog_list" not in row
+    assert service._installed_catalog_list(row) == "providers"
+
+
+def test_an_activated_cross_list_update_keeps_the_new_list(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update(previous_catalog_list="providers"))
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
+    monkeypatch.setattr(service, "_smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+
+    assert service.activate_staged_installations() == ["movedhub"]
+
+    row = load_state()["installations"]["movedhub"]
+    assert (row["state"], row["active_version"], row["catalog_list"]) == ("active", "1.1.0", "plugins")
+    assert "previous_catalog_list" not in row
+
+
+def test_an_install_request_with_a_key_that_names_another_entry_is_refused(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _two_copies_of_one_version(tmp_path, monkeypatch)
+    state = load_state()
+    state["catalog_entries"].update(_listed("community", "plugins", provider_manifest_v2("otherhub")))
+    save_state(state)
+
+    with pytest.raises(service.ProviderHubInstallError, match="does not list movedhub 1.0.0; refresh the catalog"):
+        service.install_catalog_entry("community", "movedhub", "1.0.0",
+                                      entry_key="community:plugins:otherhub:1.0.0")
+    with pytest.raises(service.ProviderHubInstallError, match="does not list movedhub 1.0.0; refresh the catalog"):
+        service.install_catalog_entry("elsewhere", "movedhub", "1.0.0",
+                                      entry_key="community:plugins:movedhub:1.0.0")
+
+
+def test_an_install_request_whose_key_is_gone_after_a_refresh_is_refused(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_VERSION", "2.8.0")
+    _legacy, _plugin, legacy_key, plugin_key = _two_copies_of_one_version(tmp_path, monkeypatch)
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, **kwargs: staged.append(manifest))
+    state = load_state()
+    del state["catalog_entries"][plugin_key]
+    save_state(state)
+
+    # The providers copy of the same version is still listed, and is not a stand-in for the plugins key.
+    assert service.resolve_catalog_install("community", "movedhub", "1.0.0")["entry_key"] == legacy_key
+    with pytest.raises(service.ProviderHubInstallError, match="does not list movedhub 1.0.0; refresh the catalog"):
+        service.install_catalog_entry("community", "movedhub", "1.0.0", entry_key=plugin_key)
+    assert staged == []
 
 
 def test_the_first_official_refresh_binds_existing_installs_by_where_their_code_came_from(tmp_path, monkeypatch):
@@ -7475,7 +8665,7 @@ def test_one_source_failing_does_not_block_other_sources(tmp_path, monkeypatch):
     assert broken["resolved_commit"] == "c" * 40
     live = state["catalog_sources"]["live"]
     assert (live["last_error"], live["resolved_commit"]) == (None, live_commit)
-    assert set(state["catalog_entries"]) == {"broken:brokenhub:1.0.0", "live:livehub:2.0.0"}
+    assert set(state["catalog_entries"]) == {"broken:brokenhub:1.0.0", "live:providers:livehub:2.0.0"}
 
 
 # Catalog ref resolution over the git smart-HTTP protocol: the ref
@@ -8309,7 +9499,7 @@ def test_a_source_pinned_to_a_full_sha_still_fetches_raw(tmp_path, monkeypatch):
     source = load_state()["catalog_sources"]["community"]
     assert source["last_error"] is None
     assert source["resolved_commit"] == "c" * 40
-    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+    assert list(load_state()["catalog_entries"]) == ["community:providers:examplehub:1.0.0"]
 
 
 def test_a_short_sha_failure_keeps_the_cached_catalog(tmp_path, monkeypatch):
@@ -8892,3 +10082,25 @@ def test_a_malformed_state_document_refuses_a_hub_config_move(tmp_path, monkeypa
                         "could not be read, so the address was not changed")
     finally:
         remove_settings_section("examplehub")
+
+
+def test_an_unparseable_state_document_refuses_a_hub_enable_change(tmp_path, monkeypatch):
+    """A state document that does not parse is the state being unreadable: the
+    Hub's PATCH answers 400 for it and leaves the document as it was."""
+    from flask import Flask
+    import api.provider_hub.provider_hub as hub_api
+
+    state_path = tmp_path / "provider_hub" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text("{")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    before = state_path.read_bytes()
+
+    app = Flask(__name__)
+    with app.test_request_context("/api/provider-hub/providers/examplehub", method="PATCH",
+                                  json={"enabled": False}):
+        body, status = hub_api.ProviderHubProvider.patch.__wrapped__(
+            hub_api.ProviderHubProvider(), "examplehub")
+
+    assert status == 400, body
+    assert state_path.read_bytes() == before

@@ -5,7 +5,7 @@ import hashlib
 
 from pathlib import Path
 
-from .manifest import ValidatedManifest
+from .manifest import BUNDLE_MANIFEST_FILE, ValidatedManifest
 
 
 class BundleValidationError(ValueError):
@@ -51,7 +51,7 @@ def verify_bundle_tree(manifest: ValidatedManifest, root: str | Path) -> None:
             raise BundleValidationError(f"symlink not allowed: {relative_path}")
         if not file_path.is_file():
             raise BundleValidationError(f"missing bundle file: {relative_path}")
-        if file_path.suffix != ".py":
+        if manifest.schema_version == 1 and file_path.suffix != ".py":
             raise BundleValidationError(f"only .py files are allowed: {relative_path}")
 
         actual = _sha256_file(file_path)
@@ -67,7 +67,10 @@ def verify_bundle_tree(manifest: ValidatedManifest, root: str | Path) -> None:
         relative = path.relative_to(root).as_posix()
         if path.is_symlink():
             raise BundleValidationError(f"symlink not allowed: {relative}")
-        if path.is_file() and path.suffix != ".py" and relative != "provider.json":
+        if not path.is_file() or relative == BUNDLE_MANIFEST_FILE or relative in declared:
+            continue
+        # Schema 1 bundles hold Python modules only; schema 2 may hold any
+        # declared file. Either way nothing undeclared may sit in a bundle.
+        if manifest.schema_version == 1 and path.suffix != ".py":
             raise BundleValidationError(f"unexpected bundle file: {relative}")
-        if path.is_file() and path.suffix == ".py" and relative not in declared:
-            raise BundleValidationError(f"undeclared bundle file: {relative}")
+        raise BundleValidationError(f"undeclared bundle file: {relative}")

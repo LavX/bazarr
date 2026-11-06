@@ -385,11 +385,11 @@ def test_provider_updates_and_removal_clear_account_quota(tmp_path, monkeypatch)
     from provider_hub.state import load_state, save_state
 
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(service, "_forget_credential_throttle", lambda provider_id: None)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.forget_credential_throttle", lambda provider_id: None)
     enabled_provider_ids = {"examplehub"}
-    monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: list(enabled_provider_ids))
-    monkeypatch.setattr(
-        service, "_set_bazarr_provider_enabled",
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers",
+                        lambda: list(enabled_provider_ids))
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
         lambda provider_id, enabled: (enabled_provider_ids.add(provider_id)
                                       if enabled else enabled_provider_ids.discard(provider_id)) or True,
     )

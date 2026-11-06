@@ -11,6 +11,8 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
+from .kinds import SUBTITLE_PROVIDER, kind_of
+
 
 OFFICIAL_CATALOG_SOURCE_ID = "official"
 OFFICIAL_CATALOG_SOURCE_NAME = "Official Bazarr Provider Catalog"
@@ -36,6 +38,7 @@ class ProviderHubInstallation:
     trusted: bool = False
     origin: str = "catalog"
     source_id: str | None = None
+    kind: str = SUBTITLE_PROVIDER
 
 
 def official_catalog_source() -> dict[str, Any]:
@@ -214,7 +217,12 @@ def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:
                 continue
             source = catalog_source_for_entry(sources, entry)
             entry["trusted"] = bool(source.get("trusted", False))
-    data.setdefault("installations", {})
+    installations = data.setdefault("installations", {})
+    if isinstance(installations, dict):
+        for installation in installations.values():
+            # Every row written before kinds existed is a subtitle provider.
+            if isinstance(installation, dict) and not installation.get("kind"):
+                installation["kind"] = SUBTITLE_PROVIDER
     data.setdefault("jobs", [])
     data.setdefault("plugin_secret_paths", [])
     return data
@@ -251,14 +259,26 @@ def _installation_from_row(provider_id: str, item: dict[str, Any],
         trusted=bool(item.get("trusted", False)),
         origin=str(item.get("origin") or "catalog"),
         source_id=item.get("source_id"),
+        kind=kind_of(item),
     )
 
 
-def active_installations(path: str | os.PathLike[str] | None = None) -> list[ProviderHubInstallation]:
+def active_installations(
+    path: str | os.PathLike[str] | None = None,
+    *,
+    kind: str | None = SUBTITLE_PROVIDER,
+) -> list[ProviderHubInstallation]:
+    """Installations whose active release runs now, of one kind.
+
+    Defaults to subtitle providers, which is what every caller before kinds
+    meant. ``kind=None`` returns every kind and is for kind-neutral code only.
+    """
     data = load_state(path)
     installations = []
     for provider_id, item in (data.get("installations") or {}).items():
         if not isinstance(item, dict):
+            continue
+        if kind is not None and kind_of(item) != kind:
             continue
         if item.get("state") != "active" or item.get("pending_restart"):
             continue
@@ -269,7 +289,11 @@ def active_installations(path: str | os.PathLike[str] | None = None) -> list[Pro
     return installations
 
 
-def running_installations(path: str | os.PathLike[str] | None = None) -> list[ProviderHubInstallation]:
+def running_installations(
+    path: str | os.PathLike[str] | None = None,
+    *,
+    kind: str | None = SUBTITLE_PROVIDER,
+) -> list[ProviderHubInstallation]:
     """Installations whose active code is running, keyed off active_version.
 
     The active provider class stays registered until restart, even while an
@@ -277,11 +301,14 @@ def running_installations(path: str | os.PathLike[str] | None = None) -> list[Pr
     every row with an active_version, whatever its state and restart
     flag. The settings overlay walks exactly this population: cutting it to
     the non-pending rows would let a provider be admitted on a
-    settings-section credential that never reaches its worker config."""
+    settings-section credential that never reaches its worker config.
+    Defaults to subtitle providers; ``kind=None`` returns every kind."""
     data = load_state(path)
     installations = []
     for provider_id, item in (data.get("installations") or {}).items():
         if not isinstance(item, dict):
+            continue
+        if kind is not None and kind_of(item) != kind:
             continue
         if not item.get("active_version"):
             continue
