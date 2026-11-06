@@ -60,13 +60,15 @@ PLATFORMS = frozenset({
 
 PYTHON_BUNDLE = "python"
 STDIO_WORKER = "worker"
+ARCHIVE = "archive"
+OCI = "oci"
 # The runtime pairs a manifest may declare. Whether this host runs a declared pair is
 # decided by AVAILABLE_RUNTIMES in compatibility.py.
 RUNTIME_COMBINATIONS = frozenset({
     (PYTHON_BUNDLE, STDIO_WORKER),
-    ("archive", STDIO_WORKER),
-    ("archive", "daemon"),
-    ("oci", "daemon"),
+    (ARCHIVE, STDIO_WORKER),
+    (ARCHIVE, "daemon"),
+    (OCI, "daemon"),
     ("none", "external"),
 })
 PERMISSIONS = frozenset({"network", "media_read", "data_dir", "binaries", "docker", "interactive_login"})
@@ -188,6 +190,23 @@ def _runtime(value: Any) -> tuple[str, str]:
     if (artifact, process) not in RUNTIME_COMBINATIONS:
         raise ManifestValidationError(f"runtime {artifact} run as {process} is not a supported combination")
     return artifact, process
+
+
+def _check_runtime_needs(artifact: str, process: str, platforms: tuple[str, ...], permissions: tuple[str, ...]) -> None:
+    """Refuse a manifest that declares a runtime without what that runtime needs.
+
+    A platform archive carries a native build with a digest per platform, so the
+    manifest must name the platforms it is built for. A managed container needs
+    Docker access, which a plugin declares as the docker permission. Whether this
+    host can start the runtime is decided later, in compatibility.py.
+    """
+    if artifact == ARCHIVE and ANY_PLATFORM in platforms:
+        raise ManifestValidationError(
+            f"runtime {artifact} run as {process} ships a native build per platform, "
+            "so platforms must name the platforms it is built for, not any")
+    if artifact == OCI and "docker" not in permissions:
+        raise ManifestValidationError(
+            f"runtime {artifact} run as {process} starts a managed container, so permissions must include docker")
 
 
 def _permissions(value: Any) -> tuple[str, ...]:
@@ -381,6 +400,8 @@ def parse_plugin_manifest(manifest: Any) -> PluginManifest:
     if extends is not None and extends.plugin_id == plugin_id:
         raise ManifestValidationError("a plugin cannot extend itself")
     permissions = _permissions(manifest.get("permissions"))
+    platforms = _platforms(manifest.get("platforms"))
+    _check_runtime_needs(artifact, process, platforms, permissions)
     login = _login(manifest, permissions)
     return PluginManifest(
         raw=dict(manifest),
@@ -391,7 +412,7 @@ def parse_plugin_manifest(manifest: Any) -> PluginManifest:
         name=_text(manifest.get("name"), "name"),
         version=_text(manifest.get("version"), "version"),
         min_host_version=min_host_version,
-        platforms=_platforms(manifest.get("platforms")),
+        platforms=platforms,
         artifact=artifact,
         process=process,
         permissions=permissions,

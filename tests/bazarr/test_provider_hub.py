@@ -23,7 +23,7 @@ from retired_providers import (
     LEGACY_RETIRED_PROVIDER_IDS,
     RETIRED_PROVIDER_IDS_UNDER_TEST,
 )
-from plugin_platform_helpers import provider_manifest_v2, service_manifest
+from plugin_platform_helpers import archive_runtime, provider_manifest_v2, service_manifest
 
 
 @pytest.fixture(autouse=True)
@@ -4470,7 +4470,7 @@ ARCHIVE_WORKER_REASON = "needs the archive worker runtime, which this Bazarr+ do
 def test_the_catalog_lists_a_plugin_this_host_cannot_run_with_the_reason(tmp_path, monkeypatch):
     from provider_hub import service
 
-    archive = provider_manifest_v2("archivehub", runtime={"artifact": "archive", "process": "worker"})
+    archive = provider_manifest_v2("archivehub", **archive_runtime())
     _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
                entries=_plugin_entry("community", archive))
 
@@ -4481,7 +4481,7 @@ def test_the_catalog_lists_a_plugin_this_host_cannot_run_with_the_reason(tmp_pat
 def test_an_install_refuses_a_catalog_plugin_this_host_cannot_run(tmp_path, monkeypatch):
     from provider_hub import service
 
-    archive = provider_manifest_v2("archivehub", runtime={"artifact": "archive", "process": "worker"})
+    archive = provider_manifest_v2("archivehub", **archive_runtime())
     _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
                entries=_plugin_entry("community", archive))
 
@@ -4493,7 +4493,7 @@ def test_a_local_package_for_a_runtime_the_host_lacks_is_refused(tmp_path, monke
     from provider_hub import service
 
     _hub_state(tmp_path, monkeypatch)
-    archive = provider_manifest_v2("localarchive", runtime={"artifact": "archive", "process": "worker"})
+    archive = provider_manifest_v2("localarchive", **archive_runtime())
     package = _provider_zip(archive, {"provider.py": b"class ExampleProvider: pass\n"}, prefix="localarchive/")
 
     with pytest.raises(service.ProviderHubInstallError, match="needs the archive worker runtime"):
@@ -4502,7 +4502,7 @@ def test_a_local_package_for_a_runtime_the_host_lacks_is_refused(tmp_path, monke
 
 @pytest.mark.parametrize("newer_fields,reason", [
     ({"min_host_version": "2.8.0"}, "needs Bazarr+ 2.8.0 or later"),
-    ({"runtime": {"artifact": "archive", "process": "worker"}}, ARCHIVE_WORKER_REASON),
+    (archive_runtime(), ARCHIVE_WORKER_REASON),
 ])
 def test_a_newer_version_this_host_cannot_run_is_not_offered_and_says_why(
         tmp_path, monkeypatch, newer_fields, reason):
@@ -4524,7 +4524,7 @@ def test_a_newer_version_this_host_cannot_run_is_not_offered_and_says_why(
 
 @pytest.mark.parametrize("newer_fields,reason", [
     ({"min_host_version": "2.8.0"}, "needs Bazarr+ 2.8.0 or later"),
-    ({"runtime": {"artifact": "archive", "process": "worker"}}, ARCHIVE_WORKER_REASON),
+    (archive_runtime(), ARCHIVE_WORKER_REASON),
 ])
 def test_a_compatible_update_is_offered_beside_a_newer_version_this_host_cannot_run(
         tmp_path, monkeypatch, newer_fields, reason):

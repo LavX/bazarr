@@ -2,7 +2,8 @@
 """Manifest v2: the shared envelope, schema-2 providers and non-Python files."""
 import pytest
 
-from plugin_platform_helpers import provider_manifest_v1, provider_manifest_v2, service_manifest
+from plugin_platform_helpers import (
+    archive_runtime, oci_runtime, provider_manifest_v1, provider_manifest_v2, service_manifest)
 
 
 def _parse(manifest):
@@ -86,11 +87,35 @@ def test_the_envelope_refuses_what_it_cannot_honour(overrides, reason):
         _parse(service_manifest(**overrides))
 
 
-@pytest.mark.parametrize("artifact,process", [("archive", "worker"), ("archive", "daemon"), ("oci", "daemon")])
-def test_a_declared_runtime_pair_is_read_as_declared(artifact, process):
-    plugin = _parse(service_manifest(runtime={"artifact": artifact, "process": process}))
+@pytest.mark.parametrize("fields", [archive_runtime("worker"), archive_runtime("daemon"), oci_runtime()],
+                         ids=["archive worker", "archive daemon", "oci daemon"])
+def test_a_declared_runtime_pair_is_read_as_declared(fields):
+    plugin = _parse(service_manifest(**fields))
 
-    assert (plugin.artifact, plugin.process) == (artifact, process)
+    assert (plugin.artifact, plugin.process) == (fields["runtime"]["artifact"], fields["runtime"]["process"])
+
+
+@pytest.mark.parametrize("process", ["worker", "daemon"])
+def test_an_archive_runtime_must_name_the_platforms_it_is_built_for(process):
+    from provider_hub.manifest import ManifestValidationError
+
+    runtime = {"artifact": "archive", "process": process}
+    named = _parse(service_manifest(runtime=runtime, platforms=["linux-x86_64", "linux-aarch64"]))
+    assert named.platforms == ("linux-x86_64", "linux-aarch64")
+    for platforms in ({}, {"platforms": ["any"]}):
+        with pytest.raises(ManifestValidationError, match="ships a native build per platform, so platforms must name"):
+            _parse(service_manifest(runtime=runtime, **platforms))
+
+
+def test_an_oci_runtime_must_declare_the_docker_permission():
+    from provider_hub.manifest import ManifestValidationError
+
+    runtime = {"artifact": "oci", "process": "daemon"}
+    assert _parse(service_manifest(runtime=runtime, permissions=["docker", "network"])).permissions == (
+        "docker", "network")
+    for permissions in ({}, {"permissions": ["network"]}):
+        with pytest.raises(ManifestValidationError, match="starts a managed container, so permissions must include docker"):
+            _parse(service_manifest(runtime=runtime, **permissions))
 
 
 def test_unknown_top_level_keys_are_kept_and_ignored():

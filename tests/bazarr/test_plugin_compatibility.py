@@ -2,7 +2,7 @@
 """Version order, the host's own version, and whether an entry runs here."""
 import pytest
 
-from plugin_platform_helpers import provider_manifest_v2
+from plugin_platform_helpers import archive_runtime, oci_runtime, provider_manifest_v2
 
 
 @pytest.mark.parametrize("lower,higher", [
@@ -42,11 +42,11 @@ def _host(**overrides):
     ({"min_host_version": "2.8.1"}, {}, "needs Bazarr+ 2.8.1 or later"),
     ({"min_host_version": "2.8.0"}, {"version": "2.8.0-rc.2"}, "needs Bazarr+ 2.8.0 or later"),
     ({"platforms": ["linux-aarch64"]}, {}, "not available for linux-x86_64"),
-    ({"runtime": {"artifact": "archive", "process": "worker"}}, {},
+    (archive_runtime("worker"), {},
      "needs the archive worker runtime, which this Bazarr+ does not provide"),
-    ({"runtime": {"artifact": "archive", "process": "daemon"}}, {},
+    (archive_runtime("daemon"), {},
      "needs the archive daemon runtime, which this Bazarr+ does not provide"),
-    ({"runtime": {"artifact": "oci", "process": "daemon"}}, {},
+    (oci_runtime(), {},
      "needs the oci daemon runtime, which this Bazarr+ does not provide"),
     ({"python_tags": ["cp312", "cp313"]}, {}, "not available for Python cp314"),
 ])
@@ -69,11 +69,34 @@ def test_the_runtimes_a_host_offers_decide_what_it_can_run():
     from provider_hub.compatibility import evaluate
     from provider_hub.plugin_manifest import parse_plugin_manifest
 
-    plugin = parse_plugin_manifest(provider_manifest_v2(runtime={"artifact": "archive", "process": "worker"}))
+    plugin = parse_plugin_manifest(provider_manifest_v2(**archive_runtime()))
     reason = "needs the archive worker runtime, which this Bazarr+ does not provide"
 
     assert evaluate(plugin, _host()) == (False, reason)
     assert evaluate(plugin, _host(runtimes=frozenset({("archive", "worker")}))) == (True, None)
+
+
+def test_a_catalog_entry_with_an_invalid_runtime_is_blocked_with_the_specific_reason():
+    from provider_hub.compatibility import entry_compatibility
+    from plugin_platform_helpers import service_manifest
+
+    runtimes = frozenset({("oci", "daemon")})
+    entry = {"manifest": service_manifest(runtime={"artifact": "oci", "process": "daemon"})}
+
+    assert entry_compatibility(entry, _host(runtimes=runtimes)) == (
+        False, "runtime oci run as daemon starts a managed container, so permissions must include docker")
+
+
+def test_an_oci_runtime_needs_a_host_that_runs_in_a_container():
+    from provider_hub.compatibility import evaluate
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+
+    plugin = parse_plugin_manifest(provider_manifest_v2(**oci_runtime()))
+    runtimes = frozenset({("oci", "daemon")})
+
+    assert evaluate(plugin, _host(runtimes=runtimes, in_container=False)) == (
+        False, "a managed container needs Bazarr+ itself to run in a container")
+    assert evaluate(plugin, _host(runtimes=runtimes, in_container=True)) == (True, None)
 
 
 def test_the_blocked_reason_of_an_unreadable_stored_manifest_is_capped(monkeypatch):

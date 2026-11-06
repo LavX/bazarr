@@ -27,6 +27,23 @@ def bundle_digest(file_payloads: dict[str, bytes]) -> str:
     return digest.hexdigest()
 
 
+# Every platform an archive build may be published for, so a test does not depend on the machine it runs on.
+NATIVE_PLATFORMS = [
+    "linux-x86_64", "linux-aarch64", "linux-armv7l", "linux-i686", "linux-musl-x86_64", "linux-musl-aarch64",
+    "windows-x86_64", "macos-x86_64", "macos-arm64",
+]
+
+
+def archive_runtime(process="worker"):
+    """Manifest fields for an archive runtime that passes validation."""
+    return {"runtime": {"artifact": "archive", "process": process}, "platforms": list(NATIVE_PLATFORMS)}
+
+
+def oci_runtime():
+    """Manifest fields for an oci daemon runtime that passes validation."""
+    return {"runtime": {"artifact": "oci", "process": "daemon"}, "permissions": ["docker"]}
+
+
 def provider_manifest_v1(provider_id="examplehub", version="1.0.0", **overrides):
     payloads = overrides.pop("file_payloads", {"provider.py": b"class ExampleProvider: pass\n"})
     manifest = {
