@@ -6460,6 +6460,55 @@ def test_force_hi_does_not_download_unflagged_hub_candidate(monkeypatch):
     assert out == []
 
 
+def test_force_hi_does_not_download_hub_candidate_listing_a_hearing_impaired_match_without_the_flag(monkeypatch):
+    candidate = _hi_listing_candidate(hearing_impaired=False, matches=["hearing_impaired"])
+    pool, _worker = _hi_listing_pool(monkeypatch, candidate)
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    subtitles = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+    pool.download_subtitle = lambda subtitle: True
+
+    out = pool.download_best_subtitles(subtitles, movie, {Language("eng", hi=True)}, hearing_impaired="force HI")
+
+    assert [subtitle.id for subtitle in subtitles] == ["fake:sub-1"]
+    assert subtitles[0].hearing_impaired is False
+    assert "hearing_impaired" in subtitles[0].matches
+    assert out == []
+
+
+def test_force_hi_does_not_download_hub_candidate_whose_display_disables_the_hub_marker(monkeypatch):
+    candidate = _hi_listing_candidate(display={"hub_proxy": False})
+    pool, _worker = _hi_listing_pool(monkeypatch, candidate)
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+    subtitles = pool.list_subtitles_provider("hihub", movie, {Language("eng", hi=True)})
+    pool.download_subtitle = lambda subtitle: True
+
+    out = pool.download_best_subtitles(subtitles, movie, {Language("eng", hi=True)}, hearing_impaired="force HI")
+
+    assert [subtitle.id for subtitle in subtitles] == ["fake:sub-1"]
+    assert subtitles[0].hub_proxy is True
+    assert out == []
+
+
+def test_worker_display_cannot_override_the_hub_proxy_marker():
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    candidate = candidate_from_worker(
+        "hihub",
+        {
+            "provider": "fake",
+            "id": "sub-1",
+            "language": language_to_payload(Language("eng")),
+            "display": {"hub_proxy": False},
+            "provider_payload": {"provider": "fake", "schema": 1},
+        },
+    )
+
+    assert candidate.hub_proxy is True
+    assert "hub_proxy" not in vars(candidate)
+
+
 def test_force_hi_downloads_flagged_hub_candidate(monkeypatch):
     pool, _worker = _hi_listing_pool(monkeypatch, _hi_listing_candidate(hearing_impaired=True))
     movie = Movie("/media/example.mkv", "Example Movie", year=2024)

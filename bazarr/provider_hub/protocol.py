@@ -228,6 +228,9 @@ _RESERVED_DISPLAY_ATTRS = frozenset({
     "hash_verifiable",
     "hearing_impaired_verifiable",
     "ai_translated",
+    # Class marker the forced hearing-impaired gate reads. A worker display of
+    # {"hub_proxy": false} would shadow it on the instance and skip the gate.
+    "hub_proxy",
 })
 
 

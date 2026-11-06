@@ -1472,9 +1472,11 @@ class SZProviderPool(ProviderPool):
                              score, hearing_impaired)
                 continue
 
-            # under a forced request, a hub candidate is kept only when the worker flags it as hearing-impaired
+            # Under a forced request, a hub candidate is kept only when the worker flags it as hearing-impaired.
+            # Test the parsed flag, not the match set: scoring keeps worker-supplied matches, so a worker could
+            # list "hearing_impaired" there while reporting the subtitle as not hearing-impaired.
             if hearing_impaired == "force HI" and getattr(subtitle, "hub_proxy", False) and \
-                    "hearing_impaired" not in matches:
+                    subtitle.hearing_impaired is not True:
                 logger.debug('%r: Skipping hub subtitle with score %d because it is not flagged hearing-impaired '
                              'and hearing-impaired set to %s', subtitle, score, hearing_impaired)
                 continue
