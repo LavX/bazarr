@@ -35,6 +35,7 @@ class HubWorkerSubtitle(Subtitle):
     provider_name = "providerhub"
     hash_verifiable = False
     hearing_impaired_verifiable = False
+    hub_proxy = True
 
     def __init__(
         self,

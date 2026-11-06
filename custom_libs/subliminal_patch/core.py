@@ -542,9 +542,8 @@ def _hub_search_languages(provider_class, languages):
     returns keep the hearing-impaired flag the worker reports. Any other provider gets the same
     set back, and the caller's set is never changed.
     """
-    from provider_hub.registry import HubProxyProvider
 
-    if not issubclass(provider_class, HubProxyProvider):
+    if not getattr(provider_class, "hub_proxy", False):
         return languages
 
     listed = set(provider_class.languages)
@@ -1471,6 +1470,13 @@ class SZProviderPool(ProviderPool):
                     hearing_impaired in ("force HI", "force non-HI"):
                 logger.debug('%r: Skipping subtitle with score %d because hearing-impaired set to %s', subtitle,
                              score, hearing_impaired)
+                continue
+
+            # under a forced request, a hub candidate is kept only when the worker flags it as hearing-impaired
+            if hearing_impaired == "force HI" and getattr(subtitle, "hub_proxy", False) and \
+                    "hearing_impaired" not in matches:
+                logger.debug('%r: Skipping hub subtitle with score %d because it is not flagged hearing-impaired '
+                             'and hearing-impaired set to %s', subtitle, score, hearing_impaired)
                 continue
 
             if is_episode and not self._episode_candidate_is_valid(subtitle, orig_matches, matches):

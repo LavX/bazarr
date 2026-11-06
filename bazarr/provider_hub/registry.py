@@ -78,6 +78,7 @@ class HubProxyProvider(Provider):
     languages = set()
     video_types = (Episode, Movie)
     subtitle_class = None
+    hub_proxy = True
     #: Set by the pool that owns this instance: a callable answering whether
     #: the pool may still call this provider. Searches and downloads recheck it
     #: once they get their turn on the worker; None sends them ungated.
