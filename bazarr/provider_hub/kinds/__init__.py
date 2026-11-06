@@ -74,7 +74,7 @@ class Kind:
         """
         from ..manifest import ManifestValidationError
 
-        raise ManifestValidationError(f"this Bazarr+ cannot install {self.name} plugins yet")
+        raise ManifestValidationError(f"this Bazarr+ does not install {self.name} plugins")
 
     def smoke_test(self, validated: "ValidatedManifest", bundle_path, python_path) -> None:
         """Start the staged plugin once to prove it loads. The default has nothing to start.
