@@ -17,8 +17,10 @@ _SEMVER_RE = re.compile(
     r"^\s*v?(?P<core>\d+(?:\.\d+)*)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?\s*$"
 )
 # What `git describe` appends to a tag on a development build: commits since
-# the tag, then the abbreviated commit. Such a build counts as its tag.
-_GIT_DESCRIBE_RE = re.compile(r"^\d+-g[0-9a-f]{4,40}$")
+# the tag, the abbreviated commit, and `-dirty` for a modified tree. Such a
+# build counts as its tag. The suffix is only recognised at the very end, so
+# the tag's own pre-release (`beta.1`, `rc-2`) is kept for the comparison.
+_GIT_DESCRIBE_SUFFIX_RE = re.compile(r"-\d+-g[0-9a-f]{7,40}(?:-dirty)?$")
 
 
 def version_key(version: Any) -> tuple[Any, ...] | None:
@@ -61,10 +63,7 @@ def host_version_key(version: Any) -> tuple[Any, ...] | None:
     which only happens when running from a source tree without a VERSION file.
     """
     raw_version = str(version or "").strip().split("+", 1)[0]
-    match = _SEMVER_RE.match(raw_version)
-    if not match:
+    raw_version = _GIT_DESCRIBE_SUFFIX_RE.sub("", raw_version)
+    if not _SEMVER_RE.match(raw_version):
         return None
-    prerelease = match.group("prerelease")
-    if prerelease is not None and _GIT_DESCRIBE_RE.match(prerelease):
-        raw_version = match.group("core")
     return version_key(raw_version)

@@ -28,6 +28,44 @@ def test_a_git_describe_build_counts_as_its_tag():
     assert host_version_key("unknown") is None
 
 
+@pytest.mark.parametrize("described,tag", [
+    ("2.8.0-beta.1-12-gabc1234", "2.8.0-beta.1"),
+    ("2.8.0-rc.1-3-g0123abcdef", "2.8.0-rc.1"),
+    ("v2.8.0-12-gabc1234", "2.8.0"),
+    ("2.8.0-12-gabc1234-dirty", "2.8.0"),
+    ("2.8.0-beta.1-12-gabc1234-dirty", "2.8.0-beta.1"),
+    ("2.8.0-beta.1-12-gabc1234+build.7", "2.8.0-beta.1"),
+])
+def test_a_described_prerelease_build_keeps_its_tags_prerelease(described, tag):
+    from provider_hub.versions import host_version_key, version_key
+
+    assert host_version_key(described) == version_key(tag)
+
+
+def test_a_described_beta_build_is_below_the_next_beta_and_the_release():
+    from provider_hub.versions import host_version_key, version_key
+
+    described = host_version_key("2.8.0-beta.1-12-gabc1234")
+    assert described < version_key("2.8.0-beta.2")
+    assert described < version_key("2.8.0")
+    assert described > version_key("2.8.0-alpha.9")
+
+
+@pytest.mark.parametrize("plain", ["2.8.0-beta-2", "2.8.0-rc.1", "2.8.0-beta.2", "2.8.0", "v2.8"])
+def test_a_plain_version_is_not_changed_by_describe_handling(plain):
+    from provider_hub.versions import host_version_key, version_key
+
+    assert host_version_key(plain) == version_key(plain)
+
+
+def test_a_beta_host_does_not_pass_a_later_beta_requirement():
+    from provider_hub.compatibility import host_meets
+
+    assert not host_meets("2.8.0-beta.1-12-gabc1234", "2.8.0-beta.2")
+    assert host_meets("2.8.0-beta.2-1-gabc1234", "2.8.0-beta.2")
+    assert host_meets("2.8.0-12-gabc1234", "2.8.0")
+
+
 def _host(**overrides):
     from provider_hub.compatibility import AVAILABLE_RUNTIMES, HostFacts
 
