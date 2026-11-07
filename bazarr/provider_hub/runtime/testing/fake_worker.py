@@ -33,7 +33,10 @@ Operations:
                    the worker's process group unless ``detached`` is set.
 ``leak``           writes the request's secret values to stderr.
 ``leak_error``     raises an exception whose message starts with the request's
-                   secret, ``tail`` characters long after it.
+                   secret, ``tail`` characters long after it. With ``part``
+                   only that line of a multiline secret is used.
+``leak_seen_error`` raises an exception carrying a secret from an earlier
+                   request: ``pad`` characters, the secret, ``tail`` more.
 ``parallel_calls``  makes the host calls named in ``names``, each from its own thread.
 ``list_result``     returns a JSON array instead of an object.
 ``nan_result``      returns a result that cannot be encoded as JSON.
@@ -47,6 +50,7 @@ Operations:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -159,6 +163,8 @@ def _translate(operation, params):
 def _handle(operation):
     params = operation.params
     name = operation.op
+    # A careless plugin keeps what it was given; leak_seen_error uses it.
+    _STATE.setdefault("seen", []).extend(v for v in operation.secrets.values() if isinstance(v, str))
     if name == "echo":
         return {"echo": params, "secrets": sorted(operation.secrets)}
     if name == "sleep":
@@ -170,6 +176,12 @@ def _handle(operation):
     if name == "chunks":
         size = int(params.get("size", 1000))
         pattern = (b"0123456789abcdef" * (size // 16 + 1))[:size]
+        if params.get("no_chunks"):
+            # Data frames and a reply that leaves out the chunk count.
+            count, total = operation._channel._writer.write_data(operation.id, pattern)
+            operation._channel._send({"t": frames.RES, "id": operation.id, "ok": True, "result": {},
+                                      "bytes": total, "sha256": hashlib.sha256(pattern).hexdigest()})
+            return {}
         if params.get("no_sha"):
             # Chunks and a reply that leaves out the checksum.
             count, total = operation._channel._writer.write_data(operation.id, pattern)
@@ -233,7 +245,11 @@ def _handle(operation):
         # A plugin exception that carries a secret, with a long message so the
         # traceback is cut at the worker.
         value = next(iter(operation.secrets.values()))
+        if "part" in params:
+            value = value.splitlines()[int(params["part"])]
         raise ValueError(value + "B" * int(params.get("tail", 10)))
+    if name == "leak_seen_error":
+        raise ValueError("P" * int(params.get("pad", 0)) + _STATE["seen"][0] + "B" * int(params.get("tail", 10)))
     if name == "parallel_calls":
         # Calls for one request, sent from separate threads without waiting on each other.
         results = [None] * len(params["names"])

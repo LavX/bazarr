@@ -920,10 +920,21 @@ def test_a_secret_straddling_the_stderr_display_limit_does_not_leak_a_prefix(mak
     lines = []
     session = make_session(on_stderr=lines.append)
     session.start()
-    session.request("leak", {"pad": 1990}, secrets={"key": SECRET}, timeout=5)
+    session.request("leak", {"pad": 1985}, secrets={"key": SECRET}, timeout=5)
     assert wait_until(lambda: lines)
     assert all(SECRET[:8] not in line and SECRET[-8:] not in line for line in lines)
     assert all(len(line) <= 2000 for line in lines)
+
+
+def test_an_error_from_a_later_request_cannot_leak_an_earlier_requests_secret(session):
+    session.request("echo", secrets={"key": SECRET}, timeout=5)
+    # Request B has no secrets of its own. Its message puts the first ten
+    # characters of request A's secret right at the 4096 character cut.
+    with pytest.raises(RequestFailed) as caught:
+        session.request("leak_seen_error", {"pad": 4096 - 10, "tail": 50}, timeout=5)
+    for text in (str(caught.value), caught.value.traceback):
+        for start in range(len(SECRET) - 5):
+            assert SECRET[start:start + 6] not in text
 
 
 def test_chunked_result_without_a_checksum_is_a_protocol_error(session):
@@ -1376,6 +1387,27 @@ def test_multiline_secret_is_redacted_from_error_text_too(session):
     for part in PEM_SECRET.splitlines():
         assert part not in str(caught.value)
         assert part not in caught.value.traceback
+
+
+SHORT_LINES_SECRET = "abc123\nxyz456"
+
+
+def test_short_lines_of_a_multiline_secret_are_redacted_from_stderr(make_session):
+    lines = []
+    session = make_session(on_stderr=lines.append)
+    session.start()
+    session.request("leak", secrets={"key": SHORT_LINES_SECRET}, timeout=5)
+    assert wait_until(lambda: len(lines) >= 2)
+    assert not any("abc123" in line or "xyz456" in line for line in lines)
+
+
+@pytest.mark.parametrize("part", [0, 1])
+def test_a_single_short_line_of_a_multiline_secret_is_scrubbed_from_error_text(session, part):
+    line = SHORT_LINES_SECRET.splitlines()[part]
+    with pytest.raises(RequestFailed) as caught:
+        session.request("leak_error", {"tail": 5, "part": part}, secrets={"key": SHORT_LINES_SECRET}, timeout=5)
+    assert line not in str(caught.value)
+    assert line not in caught.value.traceback
 
 
 def test_start_after_close_is_refused_and_spawns_nothing():

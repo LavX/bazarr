@@ -33,6 +33,19 @@ _MESSAGE_LIMIT = 4096
 _CODE_LIMIT = 200
 
 
+def _secret_parts(value):
+    """A secret value plus every nonempty line of a multiline one.
+
+    Logs and tracebacks are cut into lines, so each line of a multiline secret
+    has to be scrubbed on its own. A line is kept at any length: a short line is
+    still part of the secret.
+    """
+    parts = [value]
+    if "\n" in value or "\r" in value:
+        parts.extend(line.strip() for line in value.splitlines() if line.strip())
+    return parts
+
+
 class OperationError(Exception):
     def __init__(self, code, message="", *, retryable=False, retry_after=None):
         super().__init__(message or code)
@@ -133,6 +146,10 @@ class WorkerChannel:
         self._writer = frames.FrameWriter(stdout)
         self._lock = threading.Lock()
         self._operations = {}
+        # Every secret value the host has sent this worker, whichever request
+        # carried it. A plugin may keep a secret past its request, so an error
+        # reply is scrubbed with all of them, not only its own request's.
+        self._secret_values = set()
         self._threads = []
         self._pending_calls = {}
         self._next_cid = 1
@@ -311,8 +328,18 @@ class WorkerChannel:
             self._ended.set()
         return False
 
+    def _remember_secrets(self, message):
+        secrets = message.get("secrets")
+        if not isinstance(secrets, dict):
+            return
+        with self._lock:
+            for value in secrets.values():
+                if isinstance(value, str) and value:
+                    self._secret_values.update(_secret_parts(value))
+
     def _start_operation(self, message):
         req_id = message["id"]
+        self._remember_secrets(message)
         if self._stopping.is_set():
             self._respond_error(req_id, OperationError(Codes.SHUTTING_DOWN, "worker is shutting down"))
             return
@@ -371,9 +398,9 @@ class WorkerChannel:
                 except ChannelClosed:
                     raise
                 except Exception as error:
-                    self._respond_error(operation.id, error, operation)
+                    self._respond_error(operation.id, error)
             else:
-                self._respond_error(operation.id, reply[1], operation)
+                self._respond_error(operation.id, reply[1])
         except ChannelClosed:
             pass
 
@@ -389,20 +416,18 @@ class WorkerChannel:
             message.update({"chunks": chunks, "bytes": total, "sha256": hashlib.sha256(data).hexdigest()})
         self._send(message)
 
-    def _respond_error(self, req_id, error, operation=None):
+    def _respond_error(self, req_id, error):
         """Send the terminal error reply for a request. Always sends something.
 
-        The request's secret values are replaced in the full text before it is
-        cut to size, so a cut cannot leave half of a secret. Every text field is
+        Every secret value this worker has received, from any request, is
+        replaced in the full text before it is cut to size, so a cut cannot
+        leave half of a secret. Every text field is
         bounded after that. If the reply cannot be built or serialized, a small
         fixed error goes out instead, so the host never waits on a request that
         has no terminal reply.
         """
-        values = [v for v in (operation.secrets.values() if operation else ()) if isinstance(v, str) and v]
-        for value in list(values):
-            if "\n" in value or "\r" in value:
-                values.extend(line.strip() for line in value.splitlines() if len(line.strip()) >= 8)
-        secrets = sorted(values, key=len, reverse=True)
+        with self._lock:
+            secrets = sorted(self._secret_values, key=len, reverse=True)
 
         def clean(text, limit):
             text = text if isinstance(text, str) else str(text)

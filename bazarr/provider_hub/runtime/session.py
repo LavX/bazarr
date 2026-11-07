@@ -166,16 +166,17 @@ class RequestHandle:
 
 
 def _with_line_parts(values):
-    """The secret values plus each substantial line of a multiline one.
+    """The secret values plus every nonempty line of a multiline one.
 
     Stderr and tracebacks are cut into lines, so a PEM key never appears whole
-    in a log line; each of its lines has to be a secret of its own.
+    in a log line; each of its lines has to be a secret of its own, at any
+    length. A single-line secret is registered whole, with no minimum.
     """
     out = []
     for value in values:
         out.append(value)
         if "\n" in value or "\r" in value:
-            out.extend(line.strip() for line in value.splitlines() if len(line.strip()) >= 8)
+            out.extend(line.strip() for line in value.splitlines() if line.strip())
     return out
 
 
