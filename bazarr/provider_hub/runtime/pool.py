@@ -47,11 +47,11 @@ Limits and what enforces them:
   carried. The pool adds its own log rate limit and a short tail for status
   pages. Request parameters and secrets never reach a pool log line.
 * Every stop that is not an instant kill (idle, LRU, recycle, drain, close)
-  asks politely first. When the polite window ends, a launcher-started worker
-  gets the launcher's own cleanup (its lifeline is cut and ``stop()`` runs),
-  which also removes children that moved themselves into a new session. A bare
-  group kill would take the launcher down before it could do that.
-
+  asks politely first. When the polite window ends, the session hands a
+  launcher-started worker to the launcher's own cleanup (its lifeline is cut
+  and ``stop()`` runs), which also removes children that moved themselves into
+  a new session. A bare group kill would take the launcher down before it
+  could do that.
 * The pool never signals a process group. Only the session knows whether the
   leader was already reaped (and its number may be someone else's), so a plain
   child is ended through ``session.close`` and a launcher or anchored worker
@@ -1617,27 +1617,15 @@ class WorkerPool:
                 logger.debug("ending a worker failed", exc_info=True)
 
     def _polite_close(self, slot, grace):
-        """Shutdown frame, wait, SIGTERM, and then the launcher's own cleanup.
+        """Shutdown frame, wait, SIGTERM, and then the process's own cleanup.
 
-        ``WorkerSession.close`` ends with a SIGKILL of the whole group, which
-        would take the launcher down before it could clean up a worker that
-        ignored the shutdown. So when the polite window is over, a timer cuts
-        the lifeline first and the launcher does the killing.
+        ``WorkerSession.close`` hands a launcher or anchored worker over to its
+        ``stop()`` instead of killing the group, so the launcher can reach
+        children that moved into a new session. The pool's own call afterwards
+        is the backstop and finds the work done.
         """
-        session = slot.session
-        process = session.process
-        timer = None
-        if callable(getattr(process, "stop", None)):
-            timer = threading.Timer(grace + 0.25, self._end_process, (slot, 0.5))
-            timer.daemon = True
-            timer.start()
-        try:
-            session.close(grace=grace)
-        finally:
-            if timer is not None:
-                timer.cancel()
-                timer.join()
-            self._end_process(slot, 0.5)
+        slot.session.close(grace=grace)
+        self._end_process(slot, 0.5)
 
     def _run_close(self, job):
         slot, entry, mode, grace = job
