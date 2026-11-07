@@ -1,0 +1,357 @@
+# coding=utf-8
+"""Sandbox launcher: runs a worker with limits and a Landlock ruleset.
+
+The host starts this file with ``subprocess.Popen([python, "-I", "-S", "-B",
+launcher.py, spec_fd, lifeline_fd])``. It is deliberately standard library
+only: no Bazarr+ import, no third-party package, no ``site`` processing (so no
+``.pth`` hook can run before the ruleset is applied). The fresh interpreter has
+one thread, which makes the single ``fork`` below safe and lets
+``landlock_restrict_self`` cover the whole process.
+
+What happens, in order:
+
+1. Read the JSON spec from ``spec_fd``. The host keeps the write end of the
+   ``lifeline_fd`` pipe; end-of-file there means the host died.
+2. Become a child subreaper, then fork once. The launcher stays behind as the
+   reaper. When the worker exits, when the host dies (lifeline EOF) or on
+   SIGTERM, every descendant is killed, ``setsid`` children included.
+3. The child sets the parent-death signal, core size 0, open-file and
+   file-size limits, nice, ``oom_score_adj``, umask, ``no_new_privs``, changes
+   to the working directory, applies the ruleset and ``execve``s the worker
+   interpreter with exactly the environment in the spec.
+
+Exit codes: the worker's own code (128 + signal when it was killed by one);
+64 for a bad spec; 78 when the sandbox could not be applied (the worker never
+ran); 127 when ``execve`` failed. A line starting with ``bazarr-sandbox:`` on
+stderr says why.
+
+Spec layout (JSON object)::
+
+    {
+      "interpreter": "/path/to/python", "args": ["-I", "worker.py"],
+      "cwd": "/path", "env": {"NAME": "value"},
+      "mode": "enforce" | "declared",
+      "min_abi": 1,
+      "abi_cap": null,
+      "read_only": [...], "read_write": [...], "devices": [...],
+      "resolve_unix": [...], "connect_ports": null | [443, 80],
+      "limits": {"nofile": 1024, "fsize": 536870912, "core": 0, "nproc": null,
+                 "nice": 10, "oom_score_adj": 800, "umask": 63},
+      "term_grace": 3.0
+    }
+
+In ``declared`` mode no ruleset is applied; limits, ``no_new_privs`` and the
+clean environment still are.
+"""
+import importlib.util
+import json
+import os
+import resource
+import select
+import signal
+import sys
+import time
+
+EXIT_BAD_SPEC = 64
+EXIT_SANDBOX_FAILED = 78
+EXIT_EXEC_FAILED = 127
+MESSAGE_PREFIX = "bazarr-sandbox: "
+
+MAX_SPEC_BYTES = 1 << 20
+DEFAULT_TERM_GRACE = 3.0
+_TERMINATING = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+def _say(message):
+    try:
+        os.write(2, (MESSAGE_PREFIX + message + "\n").encode("utf-8", "replace"))
+    except OSError:
+        pass
+
+
+def _load_landlock():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "landlock.py")
+    spec = importlib.util.spec_from_file_location("bazarr_sandbox_landlock", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _read_spec(fd):
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_SPEC_BYTES:
+            raise ValueError("spec too large")
+        chunks.append(chunk)
+    os.close(fd)
+    spec = json.loads(b"".join(chunks).decode("utf-8"))
+    if not isinstance(spec, dict):
+        raise ValueError("spec is not an object")
+    for key in ("interpreter", "args", "cwd", "env"):
+        if key not in spec:
+            raise ValueError("spec lacks %r" % key)
+    if not isinstance(spec["env"], dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in spec["env"].items()
+    ):
+        raise ValueError("env must map strings to strings")
+    if not isinstance(spec["args"], list) or not all(isinstance(a, str) for a in spec["args"]):
+        raise ValueError("args must be a list of strings")
+    if spec.get("mode", "enforce") not in ("enforce", "declared"):
+        raise ValueError("unknown mode")
+    return spec
+
+
+def _set_rlimit(which, value):
+    if value is None:
+        return
+    _soft, hard = resource.getrlimit(which)
+    if hard != resource.RLIM_INFINITY and value > hard:
+        value = hard
+    resource.setrlimit(which, (value, value))
+
+
+def _apply_limits(limits):
+    """Hard failures here fail closed: a worker must not run unlimited."""
+    _set_rlimit(resource.RLIMIT_CORE, int(limits.get("core", 0)))
+    _set_rlimit(resource.RLIMIT_NOFILE, limits.get("nofile"))
+    _set_rlimit(resource.RLIMIT_FSIZE, limits.get("fsize"))
+    if limits.get("nproc") is not None:
+        _set_rlimit(resource.RLIMIT_NPROC, int(limits["nproc"]))
+    os.umask(int(limits.get("umask", 0o077)))
+    # Priority and OOM ordering only make the worker the first thing to give
+    # way. They are best effort: some containers mount /proc read-only.
+    try:
+        nice = limits.get("nice", 10)
+        if nice:
+            os.nice(int(nice))
+    except OSError as exc:
+        _say("nice not applied: %s" % exc)
+    adj = limits.get("oom_score_adj", 800)
+    if adj is not None:
+        try:
+            with open("/proc/self/oom_score_adj", "w") as handle:
+                handle.write(str(int(adj)))
+        except OSError as exc:
+            _say("oom_score_adj not applied: %s" % exc)
+
+
+def _child(spec, landlock, parent_pid, close_fds):
+    """Runs in the forked child. Never returns."""
+    code = EXIT_SANDBOX_FAILED
+    try:
+        for sig in (*_TERMINATING, signal.SIGCHLD):
+            signal.signal(sig, signal.SIG_DFL)
+        signal.set_wakeup_fd(-1)
+        for fd in close_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        landlock.prctl(landlock.PR_SET_PDEATHSIG, int(signal.SIGKILL))
+        if os.getppid() != parent_pid:
+            os._exit(EXIT_SANDBOX_FAILED)
+        _apply_limits(spec.get("limits") or {})
+        landlock.prctl(landlock.PR_SET_NO_NEW_PRIVS, 1)
+        os.chdir(spec["cwd"])
+        if spec.get("mode", "enforce") == "enforce":
+            landlock.apply_ruleset(
+                read_only=spec.get("read_only", ()),
+                read_write=spec.get("read_write", ()),
+                devices=spec.get("devices", ()),
+                resolve_unix=spec.get("resolve_unix", ()),
+                connect_ports=spec.get("connect_ports"),
+                abi_cap=spec.get("abi_cap"),
+                min_abi=int(spec.get("min_abi", 1)),
+            )
+        code = EXIT_EXEC_FAILED
+        interpreter = spec["interpreter"]
+        os.execve(interpreter, [interpreter] + spec["args"], spec["env"])
+    except BaseException as exc:
+        _say("%s: %s" % (("exec failed" if code == EXIT_EXEC_FAILED else "could not apply sandbox"), exc))
+    os._exit(code)
+
+
+def _children_map():
+    """Map pid to ppid for every process we can see in /proc."""
+    result = {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return result
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % name, "rb") as handle:
+                data = handle.read().decode("utf-8", "replace")
+            ppid = int(data.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        result[int(name)] = ppid
+    return result
+
+
+def _descendants(root):
+    parents = _children_map()
+    found = []
+    frontier = [root]
+    while frontier:
+        current = frontier.pop()
+        for pid, ppid in parents.items():
+            if ppid == current and pid not in found:
+                found.append(pid)
+                frontier.append(pid)
+    return found
+
+
+def _kill_descendants(sig=signal.SIGKILL):
+    for pid in _descendants(os.getpid()):
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
+def _reap(main_pid):
+    """Reap every exited child. Returns the main child's status or None."""
+    status = None
+    while True:
+        try:
+            pid, st = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return status
+        if pid == 0:
+            return status
+        if pid == main_pid:
+            status = st
+
+
+def _exit_code(status):
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return 1
+
+
+def _supervise(main_pid, wake_r, lifeline_fd, grace):
+    deadline = None
+    status = None
+    poller = select.poll()
+    poller.register(wake_r, select.POLLIN)
+    poller.register(lifeline_fd, select.POLLIN | select.POLLHUP)
+    host_alive = True
+    while status is None:
+        try:
+            events = poller.poll(1000)
+        except InterruptedError:
+            events = []
+        for fd, _flag in events:
+            if fd == wake_r:
+                try:
+                    data = os.read(wake_r, 256)
+                except BlockingIOError:
+                    data = b""
+                if any(b in _TERMINATING for b in data) and deadline is None:
+                    deadline = time.monotonic() + grace
+                    try:
+                        os.kill(main_pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+            elif fd == lifeline_fd and host_alive:
+                try:
+                    data = os.read(lifeline_fd, 64)
+                except OSError:
+                    data = b""
+                if not data:
+                    host_alive = False
+                    poller.unregister(lifeline_fd)
+                    _kill_descendants()
+                    try:
+                        os.kill(main_pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+        status = _reap(main_pid)
+        if status is None and deadline is not None and time.monotonic() >= deadline:
+            _kill_descendants()
+            try:
+                os.kill(main_pid, signal.SIGKILL)
+            except OSError:
+                pass
+            deadline = time.monotonic() + 60
+    return status
+
+
+def _cleanup_tree():
+    """The worker is gone: kill whatever it left behind and reap it."""
+    for _ in range(100):
+        left = _descendants(os.getpid())
+        if not left:
+            break
+        _kill_descendants()
+        time.sleep(0.02)
+        _reap(-1)
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        try:
+            pid, _st = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            if not _descendants(os.getpid()):
+                return
+            time.sleep(0.02)
+
+
+def main(argv):
+    try:
+        spec_fd = int(argv[1])
+        lifeline_fd = int(argv[2])
+    except (IndexError, ValueError):
+        _say("usage: launcher.py SPEC_FD LIFELINE_FD")
+        return EXIT_BAD_SPEC
+    try:
+        spec = _read_spec(spec_fd)
+    except (OSError, ValueError) as exc:
+        _say("bad spec: %s" % exc)
+        return EXIT_BAD_SPEC
+    try:
+        landlock = _load_landlock()
+        landlock.prctl(landlock.PR_SET_CHILD_SUBREAPER, 1)
+    except Exception as exc:
+        _say("launcher setup failed: %s" % exc)
+        return EXIT_SANDBOX_FAILED
+
+    wake_r, wake_w = os.pipe()
+    os.set_blocking(wake_r, False)
+    os.set_blocking(wake_w, False)
+    signal.set_wakeup_fd(wake_w, warn_on_full_buffer=False)
+    for sig in (*_TERMINATING, signal.SIGCHLD):
+        signal.signal(sig, lambda _s, _f: None)
+
+    parent_pid = os.getpid()
+    # One thread here, so this fork is safe. The host never forks itself.
+    pid = os.fork()
+    if pid == 0:
+        _child(spec, landlock, parent_pid, (lifeline_fd, wake_r, wake_w))
+    try:
+        status = _supervise(pid, wake_r, lifeline_fd, float(spec.get("term_grace", DEFAULT_TERM_GRACE)))
+        _cleanup_tree()
+    except BaseException:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        _kill_descendants()
+        raise
+    return _exit_code(status)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
