@@ -20,8 +20,8 @@ What happens, in order:
    SIGTERM, every descendant is killed, ``setsid`` children included.
 3. The child sets the parent-death signal, core size 0, open-file and
    file-size limits, nice, ``oom_score_adj``, umask, ``no_new_privs``, a
-   seccomp filter that denies chmod, chown, utime and xattr calls (see
-   ``seccomp.py``), changes to the working directory, applies the ruleset and
+   every Linux capability dropped (see ``capabilities.py``), a seccomp filter
+   that denies chmod, chown, utime and xattr calls (see ``seccomp.py``), changes to the working directory, applies the ruleset and
    ``execve``s the worker
    interpreter with exactly the environment in the spec.
 
@@ -170,7 +170,7 @@ def _apply_limits(limits):
             _say("oom_score_adj not applied: %s" % exc)
 
 
-def _child(spec, landlock, seccomp, parent_pid, close_fds, report_fd):
+def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_fd):
     """Runs in the forked child. Never returns.
 
     ``report_fd`` is a close-on-exec pipe: whatever is written there is a
@@ -192,6 +192,17 @@ def _child(spec, landlock, seccomp, parent_pid, close_fds, report_fd):
             os._exit(EXIT_SANDBOX_FAILED)
         _apply_limits(spec.get("limits") or {})
         landlock.prctl(landlock.PR_SET_NO_NEW_PRIVS, 1)
+        # no_new_privs keeps an exec from gaining privilege but not from keeping
+        # it: a host running as root would hand its capabilities to the worker.
+        # This goes before the seccomp filter, which is then free to deny calls
+        # the drop itself needs. Required when enforced; best effort otherwise.
+        if spec.get("mode", "enforce") == "enforce":
+            capabilities.drop_all()
+        else:
+            try:
+                capabilities.drop_all()
+            except OSError as exc:
+                _say("capabilities not dropped: %s" % exc)
         # chmod, chown, utime and xattr calls cannot be scoped by Landlock or by
         # a path-blind filter, so they are denied outright. Required when the
         # sandbox is enforced; best effort on a host that only declares.
@@ -452,6 +463,7 @@ def main(argv):
     try:
         landlock = _load_landlock()
         seccomp = _load_sibling("seccomp")
+        capabilities = _load_sibling("capabilities")
         landlock.prctl(landlock.PR_SET_CHILD_SUBREAPER, 1)
     except Exception as exc:
         _say("launcher setup failed: %s" % exc)
@@ -480,7 +492,7 @@ def main(argv):
     # One thread here, so this fork is safe. The host never forks itself.
     pid = os.fork()
     if pid == 0:
-        _child(spec, landlock, seccomp, parent_pid, (lifeline_fd, wake_r, wake_w, report_r, _STATUS_FD), report_w)
+        _child(spec, landlock, seccomp, capabilities, parent_pid, (lifeline_fd, wake_r, wake_w, report_r, _STATUS_FD), report_w)
     os.close(report_w)
     try:
         status = _supervise(pid, wake_r, lifeline_fd, float(spec.get("term_grace", DEFAULT_TERM_GRACE)))

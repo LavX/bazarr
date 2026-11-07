@@ -36,6 +36,7 @@ from provider_hub.sandbox import (
     SandboxProbe,
     SandboxRefused,
     admission,
+    capabilities,
     clean_env,
     landlock,
     policy as policy_module,
@@ -1255,6 +1256,256 @@ def test_metadata_changes_fail_with_eperm_inside_and_outside_the_grants(mode, tm
     assert (after.st_mode, after.st_mtime_ns) == (before.st_mode, before.st_mtime_ns)
 
 
+# --- Capabilities -------------------------------------------------------------
+
+
+class FakeKernel:
+    """Just enough of libc's prctl and syscall to follow the capability drop."""
+
+    CAPS = 41  # capabilities 0..40, like a current kernel
+
+    def __init__(self, held=(), setpcap=True, ambient=(), fail=None, ambient_supported=True):
+        full = (1 << self.CAPS) - 1
+        self.effective = self.permitted = (1 << 8 if setpcap else 0) | sum(1 << c for c in held)
+        self.inheritable = self.permitted
+        self.bounding = full
+        self.ambient = sum(1 << c for c in ambient)
+        self.securebits = 0
+        self.fail = fail
+        self.ambient_supported = ambient_supported
+        self.calls = []
+        self.path = self.lie = None
+
+    def prctl(self, option, a2=None, *rest):
+        option = option.value
+        arg = a2.value if a2 is not None else 0
+        self.calls.append(("prctl", option, arg))
+        ctypes_module = capabilities.ctypes
+        if self.fail == option:
+            ctypes_module.set_errno(errno.EPERM)
+            return -1
+        if option == capabilities.PR_SET_SECUREBITS:
+            self.securebits = arg
+            return 0
+        if option == capabilities.PR_CAP_AMBIENT:
+            if not self.ambient_supported:
+                ctypes_module.set_errno(errno.EINVAL)
+                return -1
+            self.ambient = 0
+            return 0
+        if option == capabilities.PR_CAPBSET_READ:
+            if arg >= self.CAPS:
+                ctypes_module.set_errno(errno.EINVAL)
+                return -1
+            return (self.bounding >> arg) & 1
+        if option == capabilities.PR_CAPBSET_DROP:
+            self.bounding &= ~(1 << arg)
+            return 0
+        raise AssertionError("unexpected prctl %d" % option)
+
+    def syscall(self, number, header, data):
+        ctypes_module = capabilities.ctypes
+        self.calls.append(("syscall", number.value))
+        words = ctypes_module.cast(data, ctypes_module.POINTER(capabilities._Data * 2)).contents
+        if number.value == 125:
+            for name in ("effective", "permitted", "inheritable"):
+                value = getattr(self, name)
+                setattr(words[0], name, value & 0xFFFFFFFF)
+                setattr(words[1], name, value >> 32)
+            return 0
+        if self.fail == "capset":
+            ctypes_module.set_errno(errno.EPERM)
+            return -1
+        for name in ("effective", "permitted", "inheritable"):
+            setattr(self, name, getattr(words[0], name) | (getattr(words[1], name) << 32))
+        if self.path is not None:
+            self.render()
+        return 0
+
+    def status(self, tmp_path, lie=None):
+        """A status file that follows the kernel state; ``lie`` overrides fields after every change."""
+        self.path, self.lie = tmp_path / "status", lie
+        self.render()
+        return str(self.path)
+
+    def render(self):
+        fields = {
+            "CapInh": self.inheritable, "CapPrm": self.permitted, "CapEff": self.effective,
+            "CapBnd": self.bounding, "CapAmb": self.ambient, **(self.lie or {}),
+        }
+        self.path.write_text("Name:\tx\n" + "".join("%s:\t%016x\n" % item for item in fields.items()), encoding="ascii")
+
+
+@pytest.fixture
+def kernel(monkeypatch):
+    def install(**kwargs):
+        fake = FakeKernel(**kwargs)
+        monkeypatch.setattr(capabilities, "_get_libc", lambda: fake)
+        monkeypatch.setattr(capabilities, "_syscall_numbers", lambda: (125, 126))
+        return fake
+
+    return install
+
+
+def test_the_drop_locks_securebits_clears_ambient_empties_bounding_and_capset(kernel, tmp_path):
+    fake = kernel(held=(21, 0, 36), ambient=(21,))
+    result = capabilities.drop_all(fake.status(tmp_path))
+    assert result == {"bounding_dropped": True}
+    assert fake.securebits == capabilities.LOCKED_SECUREBITS
+    assert capabilities.LOCKED_SECUREBITS == 0b11101111
+    assert (fake.effective, fake.permitted, fake.inheritable, fake.ambient, fake.bounding) == (0, 0, 0, 0, 0)
+    order = [(kind, what) for kind, what, *_ in fake.calls if (kind, what) != ("prctl", capabilities.PR_CAPBSET_READ)]
+    firsts = [pair for index, pair in enumerate(order) if pair not in order[:index]]
+    assert firsts == [
+        ("syscall", 125),
+        ("prctl", capabilities.PR_SET_SECUREBITS),
+        ("prctl", capabilities.PR_CAP_AMBIENT),
+        ("prctl", capabilities.PR_CAPBSET_DROP),
+        ("syscall", 126),
+    ]
+    dropped = [arg for kind, what, arg in (c for c in fake.calls if c[0] == "prctl") if what == capabilities.PR_CAPBSET_DROP]
+    assert dropped == list(range(FakeKernel.CAPS))
+
+
+def test_without_setpcap_the_bounding_set_and_securebits_are_left_alone(kernel, tmp_path):
+    fake = kernel(setpcap=False)
+    result = capabilities.drop_all(fake.status(tmp_path))
+    assert result == {"bounding_dropped": False}
+    assert fake.securebits == 0 and fake.bounding == (1 << FakeKernel.CAPS) - 1
+    assert (fake.effective, fake.permitted, fake.inheritable, fake.ambient) == (0, 0, 0, 0)
+    options = {what for kind, what, *_ in fake.calls if kind == "prctl"}
+    assert options == {capabilities.PR_CAP_AMBIENT}
+
+
+def test_a_kernel_without_ambient_capabilities_is_not_an_error(kernel, tmp_path):
+    fake = kernel(ambient_supported=False)
+    assert capabilities.drop_all(fake.status(tmp_path)) == {"bounding_dropped": True}
+
+
+@pytest.mark.parametrize(
+    "failing",
+    [capabilities.PR_SET_SECUREBITS, capabilities.PR_CAP_AMBIENT, capabilities.PR_CAPBSET_DROP, "capset"],
+)
+def test_a_step_that_fails_aborts_the_drop(kernel, tmp_path, failing):
+    fake = kernel(held=(21,), fail=failing)
+    with pytest.raises(OSError):
+        capabilities.drop_all(fake.status(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "lie",
+    [{"CapEff": 1}, {"CapPrm": 1 << 21}, {"CapAmb": 1 << 21}, {"CapInh": 1}, {"CapBnd": 1 << 3}],
+)
+def test_a_status_that_still_shows_capabilities_is_an_error(kernel, tmp_path, lie):
+    fake = kernel()
+    with pytest.raises(OSError, match="still|missing"):
+        capabilities.drop_all(fake.status(tmp_path, lie))
+
+
+def test_a_status_without_the_capability_lines_cannot_confirm_the_drop(kernel, tmp_path):
+    kernel()
+    path = tmp_path / "status"
+    path.write_text("Name:\tx\n", encoding="ascii")
+    with pytest.raises(OSError, match="missing"):
+        capabilities.drop_all(str(path))
+
+
+def test_the_unprivileged_bounding_set_is_not_demanded_empty(kernel, tmp_path):
+    # An unprivileged user keeps a full bounding set; only the usable sets matter.
+    fake = kernel(setpcap=False)
+    assert capabilities.drop_all(fake.status(tmp_path))["bounding_dropped"] is False
+
+
+def test_a_launcher_child_drops_capabilities_before_the_filter_and_fails_closed(monkeypatch):
+    import types
+
+    file_spec = importlib.util.spec_from_file_location("launcher_under_test", spawn.LAUNCHER_PATH)
+    launcher = importlib.util.module_from_spec(file_spec)
+    file_spec.loader.exec_module(launcher)
+    # Nothing here may touch the test process: no signal handlers, no limits.
+    monkeypatch.setattr(
+        launcher,
+        "signal",
+        types.SimpleNamespace(
+            SIGKILL=9, SIGTERM=15, SIGINT=2, SIGHUP=1, SIGCHLD=17, SIG_DFL=0,
+            signal=lambda *a: None, set_wakeup_fd=lambda *a: None,
+        ),
+    )
+    monkeypatch.setattr(launcher, "_apply_limits", lambda limits: None)
+    order = []
+
+    class Boom(Exception):
+        pass
+
+    class FakeCaps:
+        @staticmethod
+        def drop_all():
+            order.append("caps")
+            raise OSError(errno.EPERM, "nope")
+
+    class FakeSeccomp:
+        @staticmethod
+        def apply_filter():
+            order.append("filter")
+
+    class FakeLandlock:
+        PR_SET_PDEATHSIG = PR_SET_NO_NEW_PRIVS = 1
+
+        @staticmethod
+        def prctl(*args):
+            return 0
+
+    reports = []
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(os, "getppid", lambda: 4242)
+
+    def fake_exit(code):
+        reports.append(code)
+        raise Boom()
+
+    monkeypatch.setattr(os, "_exit", fake_exit)
+    spec = {"interpreter": "/bin/true", "args": [], "cwd": "/", "env": {}, "mode": "enforce"}
+    try:
+        with pytest.raises(Boom):
+            launcher._child(spec, FakeLandlock, FakeSeccomp, FakeCaps, 4242, (), write_fd)
+        os.close(write_fd)
+        record = json.loads(os.read(read_fd, 4096))
+    finally:
+        os.close(read_fd)
+    assert order == ["caps"], "the filter must not go on after a failed drop"
+    assert reports == [launcher.EXIT_SANDBOX_FAILED]
+    assert record["kind"] == "sandbox" and "nope" in record["message"]
+
+
+CAPS_SCRIPT = """
+    import json
+    out = {}
+    with open("/proc/self/status") as handle:
+        for line in handle:
+            name, _, value = line.partition(":")
+            if name in ("CapInh", "CapPrm", "CapEff", "CapAmb"):
+                out[name] = int(value.strip(), 16)
+    print(json.dumps(out))
+"""
+
+
+@linux_only
+def test_a_worker_holds_no_capabilities(mode, tmp_path):
+    rc, out, err = run(make_spec(tmp_path, CAPS_SCRIPT), mode)
+    assert rc == 0, err
+    result = json.loads(out)
+    assert result["CapEff"] == 0 and result["CapPrm"] == 0 and result["CapInh"] == 0
+    assert result.get("CapAmb", 0) == 0
+
+
+@linux_only
+def test_the_live_probe_reports_the_capabilities_as_dropped(live):
+    assert live.capabilities_dropped
+    assert sandbox_status(live)["capabilities"] == "dropped"
+    assert sandbox_status(DECLARED)["capabilities"] == "declared"
+    assert sandbox_status(SandboxProbe(abi=6, verified=True))["capabilities"] == "declared"
+
+
 @linux_only
 @pytest.mark.skipif(not seccomp.supported(), reason="no metadata filter for this architecture")
 def test_ordinary_writes_still_work_and_modes_come_from_the_umask(mode, tmp_path):
@@ -1394,6 +1645,7 @@ def test_the_live_canary_checks_truncation_and_metadata(live):
 # --- Walk with descriptors ----------------------------------------------------
 
 
+@pytest.mark.skipif(not policy_module._use_descriptors(), reason="the descriptor walk only exists where O_PATH does")
 def test_a_directory_swapped_during_the_walk_cannot_redirect_the_recorded_identity(tmp_path, monkeypatch):
     rw = tmp_path / "rw"
     (rw / "a" / "b").mkdir(parents=True)

@@ -357,6 +357,7 @@ describe("System Status", () => {
         filesystem: "declared",
         network: "declared",
         signal_scope: "declared",
+        capabilities: "declared",
         label: "Not sandboxed on this host",
         reason: "kernel has no Landlock (ENOSYS)",
         limitations: [],
@@ -383,6 +384,7 @@ describe("System Status", () => {
         filesystem: "enforced",
         network: "enforced",
         signal_scope: "enforced",
+        capabilities: "dropped",
         label:
           "Sandbox available: Landlock ABI 6. Not active for plugin workers yet.",
         reason: "",

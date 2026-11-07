@@ -93,6 +93,8 @@ class SandboxProbe:
     verified: bool
     network_verified: bool = False
     signal_scope_verified: bool = False
+    # The canary held no effective, permitted or ambient capability.
+    capabilities_dropped: bool = False
     reason: str = ""
 
     @property
@@ -149,6 +151,7 @@ def sandbox_status(probe: SandboxProbe | None = None) -> dict[str, Any]:
         "filesystem": "enforced" if probe.enforced else "declared",
         "network": "enforced" if probe.network_enforced else "declared",
         "signal_scope": "enforced" if probe.signal_scope_enforced else "declared",
+        "capabilities": "dropped" if probe.enforced and probe.capabilities_dropped else "declared",
         "workers_sandboxed": bool(probe.enforced and WORKERS_SANDBOXED),
         "label": label,
         "reason": probe.reason,
@@ -213,6 +216,15 @@ attempt("setxattr_outside", setxattr_outside)
 attempt("io_uring_setup", io_uring_setup)
 attempt("connect", connect)
 attempt("signal", lambda: os.kill(os.getppid(), 0))
+def capabilities_dropped():
+    held = {}
+    with open("/proc/self/status") as handle:
+        for line in handle:
+            name, _, value = line.partition(":")
+            if name in ("CapEff", "CapPrm", "CapAmb"):
+                held[name] = int(value.strip(), 16)
+    return "CapEff" in held and "CapPrm" in held and not any(held.values())
+out["capabilities"] = "dropped" if capabilities_dropped() else "kept"
 print(json.dumps(out))
 """
 
@@ -321,6 +333,7 @@ def _run_probe(python: str) -> SandboxProbe:
             verified=True,
             network_verified=abi >= 4 and result.get("connect") == "denied",
             signal_scope_verified=abi >= 6 and result.get("signal") == "denied",
+            capabilities_dropped=result.get("capabilities") == "dropped",
             reason="kernel reports ABI %d, canary confined" % abi,
         )
     except (OSError, ValueError, PolicyError, json.JSONDecodeError) as exc:
@@ -569,8 +582,8 @@ def spawn_worker(
       for and is reported as declared: truncate(2) is not covered.
 
     "Enforced" means all of: the ruleset (filesystem, plus network and signal
-    scope where the ABI has them), the seccomp filter that denies chmod, chown,
-    utime and xattr calls, and the limits.
+    scope where the ABI has them), every Linux capability dropped, the seccomp
+    filter that denies chmod, chown, utime and xattr calls, and the limits.
 
     ``popen_kwargs`` (``text``, ``bufsize`` and so on) go to ``subprocess.Popen``;
     ``preexec_fn`` is refused. On a platform other than Linux the worker starts

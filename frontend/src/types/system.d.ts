@@ -161,6 +161,7 @@ declare namespace System {
     filesystem: "enforced" | "declared";
     network: "enforced" | "declared";
     signal_scope: "enforced" | "declared";
+    capabilities: "dropped" | "declared";
     label: string;
     reason: string;
     limitations: string[];
