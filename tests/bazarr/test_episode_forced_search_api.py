@@ -168,3 +168,34 @@ def test_the_episodes_listing_reports_the_pending_request(forced_api):
     assert client.delete(ROOT, data=_form(), headers=HEADERS).status_code == 204
     assert pending() == {1: False, 3: False}
 
+
+
+@pytest.mark.parametrize("verb", ["post", "delete"])
+def test_a_reused_local_id_is_not_written(forced_api, monkeypatch, verb):
+    """A sync can delete the episode after the lookup and the id can go to another episode."""
+    from api.episodes import episodes as api_mod
+
+    client, session, _events = forced_api
+    real = api_mod.database
+    swapped = []
+
+    class Swapping:
+        def execute(self, statement, *args, **kwargs):
+            if not swapped and getattr(statement, "is_update", False):
+                swapped.append(True)
+                real.execute(sa.delete(TableEpisodes).where(TableEpisodes.id == 3))
+                real.execute(sa.insert(TableEpisodes).values(
+                    id=3, arr_instance_id=1, series_id=1, sonarrSeriesId=5, sonarrEpisodeId=53, title="Other",
+                    path="/tv/other.mkv", season=1, episode=9,
+                    forced_search_requested_at=(None if verb == "post" else sa.func.current_timestamp())))
+            return real.execute(statement, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(api_mod, "database", Swapping())
+    assert getattr(client, verb)(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    assert swapped
+    flag = _flags(session)[3]
+    # The new episode that took the id is exactly as it was inserted.
+    assert (flag is None) if verb == "post" else (flag is not None)

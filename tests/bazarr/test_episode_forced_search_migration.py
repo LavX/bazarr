@@ -138,7 +138,7 @@ def test_sqlite_forced_search_migration(tmp_path):
 def test_postgres_forced_search_migration():
     url = os.environ.get("BAZARR_PG_TEST_URL")
     if not url:
-        pytest.skip("BAZARR_PG_TEST_URL is required for the PostgreSQL lane")
+        pytest.skip("BAZARR_PG_TEST_URL is required for the PostgreSQL test")
     engine = sa.create_engine(url)
     try:
         with _postgres_schema(engine) as fresh:

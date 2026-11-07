@@ -452,3 +452,30 @@ def test_a_stopped_episode_search_reaches_the_series_loop(mass, library, monkeyp
     with pytest.raises(JobCancelled):
         mass.series_download_subtitles(10, job_id=1)
     assert _flag(library, 101) == REQUESTED_AT
+
+
+def test_a_stop_set_during_the_last_download_keeps_the_request(flag_runs, library, monkeypatch):
+    from app.jobs_queue import JobCancelled
+
+    state = SimpleNamespace(stopped=False)
+
+    class Stop:
+        def __init__(self, job_id):
+            self.job_id = job_id
+
+        def is_set(self):
+            if state.stopped:
+                raise JobCancelled('stopped', job_id=self.job_id)
+            return False
+
+    def search_that_is_stopped_at_the_end(*args, **kwargs):
+        # The search finishes cleanly, but Stop arrived while its last download was running.
+        state.stopped = True
+        return _result('downloaded')
+
+    monkeypatch.setattr(flag_runs, '_JobStop', Stop)
+    monkeypatch.setattr(flag_runs, 'run_forced_search', search_that_is_stopped_at_the_end)
+
+    with pytest.raises(JobCancelled):
+        flag_runs.run_flagged_search(_flagged_episode(), job_id=3)
+    assert _flag(library, 101) == REQUESTED_AT

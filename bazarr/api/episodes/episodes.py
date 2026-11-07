@@ -147,7 +147,7 @@ class EpisodesForcedSearch(Resource):
         args = EpisodesForcedSearch.request_parser.parse_args()
         episode_id = args.get('episodeid')
         rows = database.execute(
-            scoped(select(TableEpisodes.id)
+            scoped(select(TableEpisodes.id, TableEpisodes.arr_instance_id)
                    .where(TableEpisodes.sonarrEpisodeId == episode_id,
                           TableEpisodes.sonarrSeriesId == args.get('seriesid')),
                    TableEpisodes.arr_instance_id, args.get('arr_instance_id')).limit(2)).all()
@@ -160,9 +160,15 @@ class EpisodesForcedSearch(Resource):
         # Asking again keeps the time of the first request, and withdrawing a
         # request that is not there changes nothing: each write only touches a
         # row that is in the other state, so both answer success.
+        # The write names the episode the way the lookup did, owner and upstream ids included. The
+        # app runs on autocommit, so a sync can delete the row between the two statements and the
+        # local id can be handed to a different episode.
         flag = TableEpisodes.forced_search_requested_at
         database.execute(update(TableEpisodes)
                          .where(TableEpisodes.id == row.id,
+                                TableEpisodes.arr_instance_id.is_not_distinct_from(row.arr_instance_id),
+                                TableEpisodes.sonarrEpisodeId == episode_id,
+                                TableEpisodes.sonarrSeriesId == args.get('seriesid'),
                                 flag.is_(None) if requested_at is not None else flag.is_not(None))
                          .values(forced_search_requested_at=requested_at))
         event_stream(type='series', action='update', payload=args.get('seriesid'))

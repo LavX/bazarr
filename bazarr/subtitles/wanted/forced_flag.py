@@ -46,8 +46,9 @@ def run_flagged_search(episode, job_id=None):
     A stop (``JobCancelled``) propagates with the request still set. Any other error is logged and also
     leaves the request set, so one broken episode does not end the run for the rest.
     """
+    cancel = _JobStop(job_id) if job_id else None
     try:
-        result = run_forced_search(episode, job_id=job_id, cancel=_JobStop(job_id) if job_id else None)
+        result = run_forced_search(episode, job_id=job_id, cancel=cancel)
     except JobCancelled:
         raise
     except Exception:
@@ -55,6 +56,10 @@ def run_flagged_search(episode, job_id=None):
                           getattr(episode, 'path', episode))
         return None
     if result.complete:
+        # Stop pressed while the last download ran must not drop the request: ask once more, right
+        # before the write. A stop raises JobCancelled out of here with the request still set.
+        if cancel is not None:
+            cancel.is_set()
         clear_forced_search_request(episode)
     else:
         logging.info('BAZARR forced search for %s is not complete; the request stays set',
