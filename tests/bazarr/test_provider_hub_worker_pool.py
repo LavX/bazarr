@@ -86,11 +86,17 @@ def definition(key="tr", *, session=None, **kwargs):
 
 
 def pid_alive(pid):
+    if os.name != "posix":
+        # os.kill(pid, 0) terminates the process on Windows.
+        pytest.skip("probing a pid with signal 0 is POSIX only")
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
+        return True
+    if not sys.platform.startswith("linux"):
+        # No /proc here: signal 0 is all there is.
         return True
     try:
         with open("/proc/%d/stat" % pid) as handle:
@@ -1310,7 +1316,7 @@ def test_a_folder_scan_that_cannot_read_a_subtree_is_incomplete(tmp_path, monkey
     assert folder_usage(str(tmp_path / "missing")) == (0, False)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs a non-root POSIX user")
 def test_a_directory_without_list_permission_fails_the_budget_check(make_pool, tmp_path):
     data = tmp_path / "data"
     sealed = data / "sealed"
@@ -1707,6 +1713,7 @@ def test_a_tree_with_an_unreadable_live_process_is_killed_as_over_its_limit(make
         handle.wait(10)
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
 def test_pid_alive_keeps_the_signal_zero_answer_when_proc_is_unreadable(monkeypatch):
     real_open = open
 
