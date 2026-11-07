@@ -694,16 +694,41 @@ def _start_http_request(transport, url, phase="worker"):
 
 
 @pytest.mark.parametrize("phase", ["stream", "worker"])
-def test_slow_headers_have_an_absolute_deadline(slow_headers_server, phase):
-    from sportarr.transport import OwnedHTTPTransport
+def test_slow_headers_have_an_absolute_deadline(
+    slow_headers_server, monkeypatch, phase
+):
+    import sportarr.transport as module
 
     port, started = slow_headers_server
-    transport = OwnedHTTPTransport(setup_timeout=1)
+    timers = []
+
+    class TimerArmedByTheServer(threading.Timer):
+        """The real deadline timer, counting down from the moment the server
+        sees the request. The transport arms its timer before the worker
+        process has even booted, and booting takes as long as the machine is
+        slow, so a one-second deadline could expire before any request
+        reached the server."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            timers.append(self)
+
+        def run(self):
+            while not started.wait(0.05):
+                if self.finished.is_set():
+                    return
+            super().run()
+
+    monkeypatch.setattr(module, "Timer", TimerArmedByTheServer)
+    transport = module.OwnedHTTPTransport(setup_timeout=1)
     thread, errors = _start_http_request(transport, f"http://127.0.0.1:{port}", phase)
     try:
-        assert started.wait(2)
-        thread.join(2)
+        # Both waits are hang bounds. The server drips bytes forever, so a
+        # missing deadline leaves the request open and the join times out.
+        assert started.wait(60)
+        thread.join(60)
         assert not thread.is_alive() and errors
+        assert [timer.interval for timer in timers] == [1]
         assert transport._process.poll() is not None
     finally:
         transport.close()
