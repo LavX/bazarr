@@ -264,6 +264,100 @@ def test_a_worker_cannot_widen_grants_by_editing_its_venv(tmp_path):
     assert str(secret) not in " ".join(policy_module.interpreter_read_paths(interpreter, [rw]))
 
 
+def _secret_prefix(tmp_path):
+    secret = tmp_path / "secret"
+    (secret / "bin").mkdir(parents=True)
+    (secret / "bin" / "python").write_text("")
+    return secret
+
+
+def test_an_alias_whose_chain_crosses_a_writable_link_is_not_followed(tmp_path):
+    rw = tmp_path / "rw"
+    rw.mkdir()
+    secret = _secret_prefix(tmp_path)
+    outside = tmp_path / "outside" / "bin"
+    outside.mkdir(parents=True)
+    alias = outside / "python"
+    hop = rw / "hop"
+    alias.symlink_to(hop)
+    # Benign while the worker has not touched the link.
+    hop.symlink_to(sys.executable)
+    benign = SandboxPolicy.for_interpreter(alias, read_write=[rw])
+    # The worker repoints the hop; the next build must not follow it.
+    hop.unlink()
+    hop.symlink_to(secret / "bin" / "python")
+    steered = SandboxPolicy.for_interpreter(alias, read_write=[rw])
+    assert not any(str(secret) in p for p in (*steered.read_only, *steered.read_write))
+    paths = policy_module.interpreter_read_paths(alias, [rw])
+    assert str(secret) not in " ".join(paths)
+    assert str(tmp_path / "outside") not in paths
+    # Restoring the link does not bring the chain back into favor.
+    hop.unlink()
+    hop.symlink_to(sys.executable)
+    restored = SandboxPolicy.for_interpreter(alias, read_write=[rw])
+    assert restored.read_only == steered.read_only
+    assert set(benign.read_only) >= set(steered.read_only) - {sys.base_prefix, sys.base_exec_prefix}
+
+
+def test_a_hop_deep_in_the_chain_counts_as_well(tmp_path):
+    rw = tmp_path / "rw"
+    rw.mkdir()
+    secret = _secret_prefix(tmp_path)
+    (rw / "dir").symlink_to(secret / "bin")
+    first = tmp_path / "first"
+    first.symlink_to(tmp_path / "second")
+    (tmp_path / "second").symlink_to(rw / "dir" / "python")
+    paths = policy_module.interpreter_read_paths(first, [rw])
+    assert str(secret) not in " ".join(paths)
+
+
+def test_a_pyvenv_cfg_reached_through_a_writable_link_is_ignored(tmp_path):
+    import venv
+
+    rw = tmp_path / "rw"
+    rw.mkdir()
+    secret = _secret_prefix(tmp_path)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "pyvenv.cfg").write_text("home = %s\n" % (secret / "bin"))
+    outside = tmp_path / "outside"
+    venv.create(outside, with_pip=False, symlinks=True)
+    cfg = outside / "pyvenv.cfg"
+    cfg.unlink()
+    cfg.symlink_to(rw / "cfg-hop")
+    (rw / "cfg-hop").symlink_to(decoy / "pyvenv.cfg")
+    paths = policy_module.interpreter_read_paths(outside / "bin" / "python", [rw])
+    assert str(secret) not in " ".join(paths)
+    # With no writable grant involved the same file is honored.
+    cfg.unlink()
+    cfg.symlink_to(decoy / "pyvenv.cfg")
+    assert str(secret) in " ".join(policy_module.interpreter_read_paths(outside / "bin" / "python", [rw]))
+
+
+def test_a_read_only_grant_that_passes_through_a_writable_link_is_refused(tmp_path):
+    rw = tmp_path / "rw"
+    rw.mkdir()
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (rw / "hop").symlink_to(secret)
+    alias = tmp_path / "alias"
+    alias.symlink_to(rw / "hop")
+    with pytest.raises(PolicyError, match="through a symlink"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[alias])
+    # A plain link outside every writable tree is still fine.
+    plain = tmp_path / "plain"
+    plain.symlink_to(secret)
+    policy = SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[plain])
+    assert str(secret) in policy.read_only
+
+
+def test_a_runaway_link_chain_is_treated_as_steerable(tmp_path):
+    loop_a, loop_b = tmp_path / "a", tmp_path / "b"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+    assert policy_module._trace(str(loop_a), ())[1] is True
+
+
 def test_clean_env_inherits_nothing(monkeypatch):
     monkeypatch.setenv("BAZARR_TEST_SECRET", "hunter2")
     env = clean_env(home="/data/home", tmpdir="/data/tmp", extra={"TZ": "UTC"})

@@ -215,6 +215,53 @@ def _walk_by_path(root_real: str, parts: Sequence[str], root_lexical: str) -> tu
     return info.st_dev, info.st_ino, info.st_mode
 
 
+def _inside_any(path: str, roots: Iterable[str]) -> bool:
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+MAX_LINK_HOPS = 40
+
+
+def _trace(path: str, roots: Iterable[str]) -> tuple[str, bool]:
+    """Resolve ``path`` one component at a time and say whether a worker could steer it.
+
+    Returns ``(resolved, tainted)``. ``resolved`` is what ``realpath`` would
+    give. ``tainted`` is true when any step of the walk touches a writable
+    root: a symlink that lives inside one (the worker can repoint it, and put
+    it back before the launch), a directory inside one, or a chain too long to
+    follow. Every hop is checked where it sits, not only where the chain ends,
+    so a trusted alias that passes through a worker-writable link is caught
+    even when its final target is far outside the writable tree.
+    """
+    roots = tuple(roots)
+    resolved = "/"
+    pending = path.split("/")[::-1]
+    tainted = False
+    hops = 0
+    while pending:
+        part = pending.pop()
+        if part in ("", "."):
+            continue
+        if part == "..":
+            resolved = os.path.dirname(resolved) or "/"
+            continue
+        candidate = os.path.join(resolved, part)
+        if _inside_any(candidate, roots):
+            tainted = True
+        try:
+            target = os.readlink(candidate)
+        except OSError:
+            resolved = candidate
+            continue
+        hops += 1
+        if hops > MAX_LINK_HOPS:
+            return candidate, True
+        if target.startswith("/"):
+            resolved = "/"
+        pending.extend(target.split("/")[::-1])
+    return resolved, tainted
+
+
 def _resolve_grants(
     items: Iterable[str | os.PathLike],
     writable: Iterable[str | os.PathLike],
@@ -227,7 +274,8 @@ def _resolve_grants(
     ``_walk_below``) and must contain no symlink below the tree's root. Links
     above the root, such as a ``/config`` that points at another disk, are the
     host's own business. A grant outside every writable tree is resolved the
-    ordinary way, but it may not resolve into one: that would be a link
+    ordinary way, but it may not resolve into one, nor pass through one on the
+    way (a link the worker could repoint and restore): that would be a link
     reaching in. ``/proc/self`` is skipped; the launcher's child resolves it.
     """
     roots = [os.path.normpath(_abs(g)) for g in writable]
@@ -254,10 +302,9 @@ def _resolve_grants(
             path = os.path.join(real_root, *parts)
             dev, ino, mode = found
         else:
-            path = os.path.realpath(lexical)
-            for root, real_root in zip(roots, real_roots):
-                if path == real_root or path.startswith(real_root.rstrip("/") + "/"):
-                    raise PolicyError("%s reaches the writable tree %s through a symlink" % (lexical, root))
+            path, tainted = _trace(lexical, (*roots, *real_roots))
+            if tainted:
+                raise PolicyError("%s reaches a writable tree through a symlink" % lexical)
             try:
                 info = os.stat(path)
             except OSError:
@@ -271,10 +318,6 @@ def _resolve_grants(
     return result
 
 
-def _inside_any(path: str, roots: Iterable[str]) -> bool:
-    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
-
-
 def interpreter_read_paths(
     interpreter: str | os.PathLike,
     writable: Iterable[str | os.PathLike] = (),
@@ -286,28 +329,38 @@ def interpreter_read_paths(
 
     A worker can rewrite anything inside a writable grant: a ``pyvenv.cfg`` or
     an interpreter symlink there could name any directory the host user can
-    read, and the next policy build would grant it. So neither the symlink
-    chain of an interpreter, nor a ``pyvenv.cfg``, that sits inside a writable
-    grant is ever consulted. The base interpreter's prefixes then come from the
-    host's own ``sys.base_prefix`` and ``sys.base_exec_prefix``, which a worker
-    cannot touch.
+    read, and the next policy build would grant it. So an interpreter whose
+    symlink chain touches a writable grant at any hop (not only at its end:
+    a trusted alias may pass through a link the worker can repoint and later
+    restore), and a ``pyvenv.cfg`` reached the same way, is never consulted.
+    The base interpreter's prefixes then come from the host's own
+    ``sys.base_prefix`` and ``sys.base_exec_prefix``, which a worker cannot
+    touch.
     """
     roots: list[str] = []
     for item in writable:
         lexical = os.path.normpath(_abs(item))
         roots.extend((lexical, os.path.realpath(lexical)))
     exe = Path(_abs(interpreter))
-    found: list[Path] = [exe.parent.parent]
-    if _inside_any(str(exe), roots) or _inside_any(os.path.realpath(exe.parent), roots):
+    real_exe, steerable = _trace(str(exe), roots)
+    found: list[Path] = []
+    if steerable:
+        # Some hop of the chain, or the interpreter itself, sits where a worker
+        # can rewrite it. Only the host's own prefixes are trustworthy then, plus
+        # the venv root when it lies inside a writable grant (the walk of that
+        # grant vets it).
+        if _inside_any(str(exe), roots):
+            found.append(exe.parent.parent)
         found.extend(Path(p) for p in (sys.base_prefix, sys.base_exec_prefix))
         candidates: list[Path] = []
     else:
-        candidates = [exe, Path(os.path.realpath(exe))]
+        found.append(exe.parent.parent)
+        candidates = [exe, Path(real_exe)]
     for candidate in candidates:
         prefix = candidate.parent.parent
         found.append(prefix)
         cfg = prefix / "pyvenv.cfg"
-        if _inside_any(str(cfg), roots) or _inside_any(os.path.realpath(cfg), roots):
+        if _trace(str(cfg), roots)[1]:
             continue
         try:
             for line in cfg.read_text(encoding="utf-8").splitlines():
