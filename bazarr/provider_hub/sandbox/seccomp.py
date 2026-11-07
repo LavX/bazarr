@@ -7,6 +7,18 @@ would lock the host out of its own configuration. Seccomp cannot inspect the
 path argument of those calls, so they cannot be scoped to the worker's own
 directories: every one of them returns ``EPERM``, everywhere.
 
+File attribute ioctls are denied too: ``FS_IOC_SETFLAGS`` and
+``FS_IOC_FSSETXATTR`` (what ``chattr`` uses; it opens the file read-only, so a
+read grant is enough), ``FS_IOC_ENABLE_VERITY`` (makes a file permanently
+read-only), ``FS_IOC_SET_ENCRYPTION_POLICY``, and ``FIFREEZE``/``FITHAW``
+(which also need a capability the launcher has already dropped).
+
+Kernel keyring calls are denied: a same-user worker would share the host's
+user keyring. So are the calls that change the scheduling of other processes
+(``setpriority``, ``ioprio_set``, ``sched_set*``): Landlock does not scope
+them, and a worker could otherwise niceness-starve or pin its launcher or the
+host.
+
 Two further rules: ``io_uring`` is denied outright (it can perform the same
 metadata operations from inside the ring), and resource limits are frozen:
 ``setrlimit`` is denied and ``prlimit64`` may only query (a NULL new limit).
@@ -72,6 +84,20 @@ _COMMON = {
 # lower its launcher's open-file limit. setrlimit is denied outright.
 PRLIMIT64 = {AUDIT_ARCH_X86_64: 302, AUDIT_ARCH_AARCH64: 261}
 
+# ioctl is allowed except for these commands (the low 32 bits of its second
+# argument, which is all the kernel reads). The encodings are the same on
+# x86-64 and AArch64.
+IOCTL = {AUDIT_ARCH_X86_64: 16, AUDIT_ARCH_AARCH64: 29}
+DENIED_IOCTLS = {
+    "FS_IOC_SETFLAGS": 0x40086602,
+    "FS_IOC32_SETFLAGS": 0x40046602,
+    "FS_IOC_FSSETXATTR": 0x401C5820,
+    "FS_IOC_ENABLE_VERITY": 0x40806685,
+    "FS_IOC_SET_ENCRYPTION_POLICY": 0x800C6613,
+    "FIFREEZE": 0xC0045877,
+    "FITHAW": 0xC0045878,
+}
+
 DENIED_SYSCALLS = {
     AUDIT_ARCH_X86_64: {
         "chmod": 90,
@@ -92,6 +118,15 @@ DENIED_SYSCALLS = {
         "fchmodat": 268,
         "utimensat": 280,
         "setrlimit": 160,
+        "setpriority": 141,
+        "sched_setparam": 142,
+        "sched_setscheduler": 144,
+        "sched_setaffinity": 203,
+        "add_key": 248,
+        "request_key": 249,
+        "keyctl": 250,
+        "ioprio_set": 251,
+        "sched_setattr": 314,
         **_COMMON,
     },
     # The generic table has no path-based chmod, chown or utime(s): libc maps
@@ -109,6 +144,15 @@ DENIED_SYSCALLS = {
         "fchown": 55,
         "utimensat": 88,
         "setrlimit": 164,
+        "ioprio_set": 30,
+        "sched_setparam": 118,
+        "sched_setscheduler": 119,
+        "sched_setaffinity": 122,
+        "setpriority": 140,
+        "add_key": 217,
+        "request_key": 218,
+        "keyctl": 219,
+        "sched_setattr": 274,
         **_COMMON,
     },
 }
@@ -139,7 +183,7 @@ def build_filter(arch: int | None = None) -> bytes:
 
     Layout: arch check (a different arch kills the process), x32 check on
     x86-64, one compare per denied number returning ``EPERM``, the prlimit64
-    new-limit check, otherwise allow. Little-endian only (the halves of a 64-bit
+    new-limit check, the ioctl command list, otherwise allow. Little-endian only (the halves of a 64-bit
     argument are read at fixed offsets).
     """
     arch = arch if arch is not None else native_audit_arch()
@@ -163,6 +207,7 @@ def build_filter(arch: int | None = None) -> bytes:
         emit(_BPF_JSET_K, "kill", 0, X32_SYSCALL_BIT)
     for number in numbers:
         emit(_BPF_JEQ_K, "deny", 0, number)
+    emit(_BPF_JEQ_K, "ioctl", 0, IOCTL[arch])
     emit(_BPF_JEQ_K, 0, "allow", PRLIMIT64[arch])
     # prlimit64(pid, resource, new_limit, old_limit): a query when new_limit is
     # NULL. new_limit is a pointer, so both halves must be zero.
@@ -170,6 +215,11 @@ def build_filter(arch: int | None = None) -> bytes:
     emit(_BPF_JEQ_K, 0, "deny", 0)
     emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 2 + 4)
     emit(_BPF_JEQ_K, "allow", "deny", 0)
+    label("ioctl")
+    emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8)
+    for command in sorted(DENIED_IOCTLS.values()):
+        emit(_BPF_JEQ_K, "deny", 0, command)
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW)
     label("allow")
     emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW)
     label("deny")

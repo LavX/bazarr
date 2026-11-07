@@ -21,7 +21,9 @@ What happens, in order:
 3. The child sets the parent-death signal, core size 0, open-file and
    file-size limits, nice, ``oom_score_adj``, umask, ``no_new_privs``, a
    every Linux capability dropped (see ``capabilities.py``), a seccomp filter
-   that denies chmod, chown, utime and xattr calls (see ``seccomp.py``), changes to the working directory, applies the ruleset and
+   that denies chmod, chown, utime and xattr calls, file attribute ioctls,
+   keyrings and changes to the scheduling of other processes (see
+   ``seccomp.py``), changes to the working directory, applies the ruleset and
    ``execve``s the worker
    interpreter with exactly the environment in the spec.
 
@@ -314,9 +316,34 @@ def _emergency_kill(reason):
     os._exit(EXIT_SANDBOX_FAILED)
 
 
+def _freeze_descendants(root):
+    """SIGSTOP the tree until a scan finds nobody new; return the final list.
+
+    A stopped process cannot fork, so a worker that forks while the launcher
+    scans is outrun after a few passes instead of being chased forever. The
+    caller kills what this returns.
+    """
+    seen = []
+    for _ in range(10):
+        pids = _descendants(root)
+        fresh = [pid for pid in pids if pid not in seen]
+        for pid in fresh:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except OSError:
+                pass
+        seen.extend(fresh)
+        if not fresh:
+            break
+    return seen
+
+
 def _kill_descendants(sig=signal.SIGKILL):
     try:
-        pids = _descendants(os.getpid())
+        pids = _freeze_descendants(os.getpid()) if sig == signal.SIGKILL else _descendants(os.getpid())
+        if sig == signal.SIGKILL:
+            # Anything that appeared after the last freeze pass dies here too.
+            pids = list(dict.fromkeys([*pids, *_descendants(os.getpid())]))
     except EnumerationError as exc:
         _emergency_kill(exc)
         return
@@ -397,33 +424,34 @@ def _supervise(main_pid, wake_r, lifeline_fd, grace):
     return status
 
 
+CLEANUP_SECONDS = 7.0
+
+
 def _cleanup_tree():
-    """The worker is gone: kill whatever it left behind and reap it."""
-    for _ in range(100):
+    """The worker is gone: kill whatever it left behind and reap it.
+
+    Returns ``True`` when nothing is left. Running out of time with a
+    descendant still alive returns ``False``, and the caller reports it: a
+    launcher that exits quietly over a live descendant would hide exactly the
+    leak this loop exists to prevent.
+    """
+    end = time.monotonic() + CLEANUP_SECONDS
+    while time.monotonic() < end:
         try:
             left = _descendants(os.getpid())
         except EnumerationError as exc:
             _emergency_kill(exc)
-            return
+            return False
         if not left:
-            break
+            return True
         _kill_descendants()
         time.sleep(0.02)
         _reap(-1)
-    end = time.monotonic() + 5
-    while time.monotonic() < end:
-        try:
-            pid, _st = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return
-        if pid == 0:
-            try:
-                if not _descendants(os.getpid()):
-                    return
-            except EnumerationError as exc:
-                _emergency_kill(exc)
-                return
-            time.sleep(0.02)
+    try:
+        return not _descendants(os.getpid())
+    except EnumerationError as exc:
+        _emergency_kill(exc)
+        return False
 
 
 def _forward_child_report(report_r):
@@ -497,7 +525,10 @@ def main(argv):
     try:
         status = _supervise(pid, wake_r, lifeline_fd, float(spec.get("term_grace", DEFAULT_TERM_GRACE)))
         _forward_child_report(report_r)
-        _cleanup_tree()
+        if not _cleanup_tree():
+            _say("a descendant of the worker survived the cleanup")
+            _report("sandbox", "a descendant of the worker survived the launcher's cleanup")
+            return EXIT_SANDBOX_FAILED
     except BaseException:
         try:
             os.kill(pid, signal.SIGKILL)

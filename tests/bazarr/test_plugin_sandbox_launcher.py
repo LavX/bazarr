@@ -1985,6 +1985,114 @@ def test_io_uring_returns_eperm_inside_the_sandbox(mode, tmp_path):
     assert json.loads(out) == {"setup": "EPERM", "enter": "EPERM", "register": "EPERM"}
 
 
+@pytest.mark.parametrize("arch", sorted(seccomp.DENIED_SYSCALLS))
+def test_file_attribute_ioctls_are_denied_and_other_ioctls_are_not(arch):
+    program = seccomp.build_filter(arch)
+    number = seccomp.IOCTL[arch]
+    eperm = seccomp.SECCOMP_RET_ERRNO | errno.EPERM
+    allow = seccomp.SECCOMP_RET_ALLOW
+    assert {"FS_IOC_SETFLAGS", "FS_IOC_FSSETXATTR", "FS_IOC_ENABLE_VERITY", "FIFREEZE"} <= set(seccomp.DENIED_IOCTLS)
+    for command in seccomp.DENIED_IOCTLS.values():
+        assert run_bpf(program, arch, number, (3, command)) == eperm, hex(command)
+        # Only the low half is the command; the high half is ignored by the kernel.
+        assert run_bpf(program, arch, number, (3, command, 0)) == eperm
+        assert run_bpf(program, arch, number, (3, (7 << 32) | command)) == eperm
+        # The same value as an argument of some other call is not an ioctl.
+        assert run_bpf(program, arch, number + 1000, (3, command)) == allow
+    for command in (0x5401, 0x541B, 0x5413, 0x40086603, 0x80086601):  # TCGETS, FIONREAD, TIOCGWINSZ, nearby values
+        assert run_bpf(program, arch, number, (3, command)) == allow, hex(command)
+
+
+@pytest.mark.parametrize("arch", sorted(seccomp.DENIED_SYSCALLS))
+def test_keyrings_and_the_scheduling_of_other_processes_are_denied(arch):
+    names = seccomp.DENIED_SYSCALLS[arch]
+    wanted = {"add_key", "request_key", "keyctl", "setpriority", "ioprio_set", "sched_setparam", "sched_setscheduler", "sched_setaffinity", "sched_setattr"}
+    assert wanted <= set(names)
+    program = seccomp.build_filter(arch)
+    for name in wanted:
+        assert run_bpf(program, arch, names[name]) == seccomp.SECCOMP_RET_ERRNO | errno.EPERM, name
+
+
+@linux_only
+@pytest.mark.skipif(not seccomp.supported(), reason="no metadata filter for this architecture")
+def test_a_worker_cannot_reach_host_keyrings_attributes_or_scheduling(mode, tmp_path):
+    script = """
+        import ctypes, errno, fcntl, json, os, struct
+        libc = ctypes.CDLL(None, use_errno=True)
+        out = {}
+        parent = os.getppid()
+        def attempt(name, fn):
+            try:
+                fn(); out[name] = "allowed"
+            except OSError as exc:
+                out[name] = errno.errorcode.get(exc.errno, exc.errno)
+        def raw(number, *args):
+            ctypes.set_errno(0)
+            if libc.syscall(number, *[ctypes.c_long(a) for a in args]) < 0:
+                raise OSError(ctypes.get_errno(), "syscall")
+        import platform
+        arm = platform.machine().lower() in ("aarch64", "arm64")
+        keyctl, add_key = (219, 217) if arm else (250, 248)
+        attempt("keyctl_user_keyring", lambda: raw(keyctl, 0, -4, 0))
+        attempt("add_key", lambda: raw(add_key, 0, 0, 0, 0, 0))
+        attempt("setpriority_parent", lambda: os.setpriority(os.PRIO_PROCESS, parent, 19))
+        attempt("setpriority_self", lambda: os.setpriority(os.PRIO_PROCESS, 0, 19))
+        attempt("affinity_parent", lambda: os.sched_setaffinity(parent, {0}))
+        attempt("scheduler_self", lambda: os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0)))
+        attempt("getpriority", lambda: os.getpriority(os.PRIO_PROCESS, 0))
+        attempt("getaffinity", lambda: os.sched_getaffinity(0))
+        fd = os.open("f.txt", os.O_RDWR | os.O_CREAT, 0o600)
+        attempt("fs_ioc_setflags", lambda: fcntl.ioctl(fd, 0x40086602, struct.pack("l", 0)))
+        attempt("fs_ioc_fssetxattr", lambda: fcntl.ioctl(fd, 0x401C5820, bytes(28)))
+        attempt("enable_verity", lambda: fcntl.ioctl(fd, 0x40806685, bytes(128)))
+        r, w = os.pipe()
+        os.write(w, b"abc")
+        attempt("ordinary_ioctl", lambda: fcntl.ioctl(r, 0x541B, bytes(4)))
+        print(json.dumps(out))
+    """
+    rc, out, err = run(make_spec(tmp_path, script), mode)
+    assert rc == 0, err
+    result = json.loads(out)
+    for name in ("keyctl_user_keyring", "add_key", "setpriority_parent", "setpriority_self", "affinity_parent", "scheduler_self",
+                 "fs_ioc_setflags", "fs_ioc_fssetxattr", "enable_verity"):
+        assert result[name] == "EPERM", (name, result)
+    for name in ("getpriority", "getaffinity", "ordinary_ioctl"):
+        assert result[name] == "allowed", (name, result)
+
+
+@linux_only
+def test_landlock_keeps_a_worker_from_tracing_or_reading_its_launcher(live, tmp_path):
+    script = """
+        import ctypes, errno, json, os
+        libc = ctypes.CDLL(None, use_errno=True)
+        out = {}
+        parent = os.getppid()
+        def raw(number, *args):
+            ctypes.set_errno(0)
+            if libc.syscall(number, *[ctypes.c_long(a) for a in args]) < 0:
+                raise OSError(ctypes.get_errno(), "syscall")
+        def attempt(name, fn):
+            try:
+                fn(); out[name] = "allowed"
+            except OSError as exc:
+                out[name] = errno.errorcode.get(exc.errno, exc.errno)
+        import platform
+        arm = platform.machine().lower() in ("aarch64", "arm64")
+        ptrace, pidfd_open, pidfd_getfd = (117, 434, 438) if arm else (101, 434, 438)
+        attempt("ptrace_seize", lambda: raw(ptrace, 0x4206, parent, 0, 0))
+        attempt("ptrace_attach", lambda: raw(ptrace, 16, parent, 0, 0))
+        attempt("pidfd_getfd", lambda: raw(pidfd_getfd, libc.syscall(pidfd_open, parent, 0), 0, 0))
+        attempt("proc_mem", lambda: open("/proc/%d/mem" % parent, "rb").read(1))
+        attempt("proc_environ", lambda: open("/proc/%d/environ" % parent, "rb").read(1))
+        attempt("proc_fd", lambda: os.listdir("/proc/%d/fd" % parent))
+        print(json.dumps(out))
+    """
+    rc, out, err = run(make_spec(tmp_path, script), live)
+    assert rc == 0, err
+    result = json.loads(out)
+    assert set(result.values()) <= {"EPERM", "EACCES"}, result
+
+
 def test_the_canary_demands_io_uring_be_denied():
     assert "io_uring_setup" in spawn._CANARY_SCRIPT
     assert "io_uring_setup" in spawn._CANARY_REQUIRED_DENIED
@@ -2045,6 +2153,66 @@ def test_cleanup_falls_back_to_killing_the_group_when_the_scan_fails(monkeypatch
     launcher._kill_descendants()
     launcher._cleanup_tree()
     assert reasons == ["no descriptors", "no descriptors"]
+
+
+@linux_only
+def test_a_descendant_that_survives_the_cleanup_is_reported_not_forgotten(monkeypatch):
+    launcher = load_launcher()
+    monkeypatch.setattr(launcher, "CLEANUP_SECONDS", 0.3)
+    monkeypatch.setattr(launcher, "_descendants", lambda root: [999999])
+    monkeypatch.setattr(launcher, "_kill_descendants", lambda sig=9: None)
+    assert launcher._cleanup_tree() is False
+    monkeypatch.setattr(launcher, "_descendants", lambda root: [])
+    assert launcher._cleanup_tree() is True
+
+
+@linux_only
+def test_the_tree_is_frozen_before_it_is_killed(monkeypatch):
+    launcher = load_launcher()
+    scans = iter([[10, 11], [10, 11, 12], [10, 11, 12], [10, 11, 12, 13]])
+    sent = []
+    monkeypatch.setattr(launcher, "_descendants", lambda root: next(scans))
+    monkeypatch.setattr(launcher.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    launcher._kill_descendants()
+    stops = [pid for pid, sig in sent if sig == signal.SIGSTOP]
+    kills = [pid for pid, sig in sent if sig == signal.SIGKILL]
+    assert stops == [10, 11, 12]
+    assert kills == [10, 11, 12, 13]
+    assert sent.index((12, signal.SIGSTOP)) < sent.index((10, signal.SIGKILL))
+
+
+STORM = """
+    import os, time
+    def grow(depth):
+        open("pids", "a").write("%d\\n" % os.getpid())
+        if depth:
+            for _ in range(2):
+                if os.fork() == 0:
+                    time.sleep(0.01)
+                    grow(depth - 1)
+                    os._exit(0)
+        time.sleep(300)
+    grow(6)
+"""
+
+
+@linux_only
+def test_stop_ends_a_worker_that_keeps_forking(mode, tmp_path):
+    process = spawn_worker(make_spec(tmp_path, STORM), probe=mode)
+    pids_file = tmp_path / "rw" / "pids"
+    end = time.monotonic() + 10
+    while time.monotonic() < end:
+        try:
+            if len(pids_file.read_text().split()) >= 60:
+                break
+        except OSError:
+            pass
+        time.sleep(0.05)
+    process.stop(0.2)
+    assert process.poll() is not None
+    pids = [int(p) for p in pids_file.read_text().split()]
+    assert pids
+    assert all(wait_dead(pid) for pid in pids), "part of a forking tree outlived stop()"
 
 
 @linux_only
