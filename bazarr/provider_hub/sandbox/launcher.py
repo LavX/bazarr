@@ -249,6 +249,13 @@ def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_
                 os.close(fd)
             except OSError:
                 pass
+        # The launcher is non-dumpable and this fork inherited that, which would
+        # keep it from writing its own /proc/self/oom_score_adj. The worker is
+        # dumpable again after execve anyway; only the launcher stays closed.
+        try:
+            landlock.prctl(landlock.PR_SET_DUMPABLE, 1)
+        except OSError:
+            pass
         landlock.prctl(landlock.PR_SET_PDEATHSIG, int(signal.SIGKILL))
         if os.getppid() != parent_pid:
             os._exit(EXIT_SANDBOX_FAILED)

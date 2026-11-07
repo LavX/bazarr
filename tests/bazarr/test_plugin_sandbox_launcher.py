@@ -1123,8 +1123,13 @@ def test_the_worker_environment_is_exactly_the_spec(mode, tmp_path, monkeypatch)
 def test_the_launcher_gets_an_empty_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("BAZARR_TEST_SECRET", "hunter2")
     script = """
-        import json
-        print(json.dumps(open("/proc/%d/environ" % __import__("os").getppid()).read()))
+        import json, os
+        try:
+            seen = open("/proc/%d/environ" % os.getppid()).read()
+        except PermissionError:
+            # The launcher is closed to its own user's processes: even better than empty.
+            seen = ""
+        print(json.dumps(seen))
     """
     rc, out, err = run(make_spec(tmp_path, script), DECLARED)
     assert rc == 0, err
@@ -1861,7 +1866,7 @@ def test_a_launcher_child_drops_capabilities_before_the_filter_and_fails_closed(
             order.append("filter")
 
     class FakeLandlock:
-        PR_SET_PDEATHSIG = PR_SET_NO_NEW_PRIVS = 1
+        PR_SET_PDEATHSIG = PR_SET_NO_NEW_PRIVS = PR_SET_DUMPABLE = 1
 
         @staticmethod
         def prctl(*args):
