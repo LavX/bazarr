@@ -2279,19 +2279,88 @@ def test_a_slot_is_free_for_the_next_request_while_a_result_streams():
         harness.finish()
 
 
-def test_a_session_cancels_a_streaming_result_inside_the_grace():
+def test_a_session_cancels_a_streaming_result_inside_the_grace(tmp_path):
     session = WorkerSession(
         fake_worker_command(), env=fake_worker_env(), kind="translator",
-        limits=fast_limits(cancel_grace=1.0))
+        limits=fast_limits(cancel_grace=5.0))
     session.start()
+    received = []
+    real_on_data = session._on_data
+
+    def counting(op_id, chunk):
+        received.append(len(chunk))
+        return real_on_data(op_id, chunk)
+
+    session._on_data = counting
+    paused = tmp_path / "first-chunk"
     try:
-        handle = session.submit("chunks", {"size": frames.DEFAULT_CHUNK_BYTES * 3}, timeout=0)
-        with pytest.raises(RequestTimeout):
+        process = session.process
+        handle = session.submit(
+            "chunks", {"size": frames.DEFAULT_CHUNK_BYTES * 3, "pause_file": str(paused)}, timeout=30)
+        # The worker has sent one chunk and waits for a cancel before the next.
+        assert wait_until(paused.exists, timeout=8)
+        handle.cancel("enough")
+        with pytest.raises(RequestCancelled):
             handle.wait(8)
-        assert session.alive
+        # The transfer stopped early, by a cancelled reply and not by ending the worker.
+        assert len(received) < 3
+        assert session.alive and session.process is process and process.poll() is None
         assert session.request("echo", timeout=5).result["echo"] == {}
     finally:
         session.close(grace=1.0)
+
+
+def test_shutdown_drains_for_the_graced_time_the_host_asked_for():
+    # The host asked for ten seconds; the channel's own default is five.
+    usage = []
+
+    def handler(operation):
+        operation.cancelled.wait(10)
+        time.sleep(6)
+        usage.append(operation.call("usage", {}, timeout=10, cancellable=False))
+        return {}
+
+    harness = ChannelHarness(handler)
+    harness.start()
+    try:
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}})
+        assert wait_until(lambda: 1 in harness.channel._operations)
+        harness.host_out.write_control({"t": "shutdown", "grace_ms": 10_000})
+        assert wait_until(lambda: any(m["t"] == "call" for m in harness.messages), timeout=12)
+        call = next(m for m in harness.messages if m["t"] == "call")
+        harness.host_out.write_control({"t": "ack", "cid": call["cid"], "ok": True, "result": {"settled": True}})
+        assert wait_until(lambda: any(m["t"] == "bye" for m in harness.messages), timeout=8)
+        assert usage == [{"settled": True}]
+        reply = next(m for m in harness.messages if m["t"] == "res")
+        assert reply["id"] == 1 and reply["ok"] is True
+        assert harness.messages.index(reply) < next(
+            i for i, m in enumerate(harness.messages) if m["t"] == "bye")
+    finally:
+        harness.finish()
+
+
+def test_shutdown_without_a_grace_uses_the_channels_own_budget():
+    gate = threading.Event()
+    harness = ChannelHarness(lambda operation: gate.wait(10) and {}, wait_grace=0.3)
+    harness.start()
+    try:
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}})
+        assert wait_until(lambda: 1 in harness.channel._operations)
+        harness.host_out.write_control({"t": "shutdown"})
+        # The handler never finishes: the drain gives up after its own 0.3 seconds.
+        assert wait_until(lambda: any(m["t"] == "bye" for m in harness.messages), timeout=3)
+    finally:
+        gate.set()
+        harness.finish()
+
+
+@pytest.mark.parametrize("grace_ms", [-1, True, "5000", 1.5, frames.MAX_SHUTDOWN_GRACE_MS + 1])
+def test_a_shutdown_grace_outside_its_bounds_is_malformed(grace_ms):
+    with pytest.raises(frames.MalformedFrame):
+        frames.validate_message({"t": "shutdown", "grace_ms": grace_ms}, "host")
+    for fine in (0, 1, frames.MAX_SHUTDOWN_GRACE_MS):
+        frames.validate_message({"t": "shutdown", "grace_ms": fine}, "host")
+    frames.validate_message({"t": "shutdown"}, "host")
 
 
 # ---------------------------------------------------- partial start and teardown

@@ -12,7 +12,8 @@ Operations:
 ``sleep``          waits ``seconds``, cancellable unless ``ignore_cancel``.
 ``progress``       sends ``steps`` progress messages, then returns.
 ``chunks``         returns ``size`` bytes of data (``overshoot`` sends them
-                   without honoring the request's limit).
+                   without honoring the request's limit; ``pause_file`` is
+                   written after the first chunk, then the stream waits for a cancel).
 ``call``           makes the host call ``name`` with ``params`` and returns the ack.
 ``translate``      a fake translator: reserve, work in batches with a
                    checkpoint each, report usage, return the lines. Knobs in
@@ -195,6 +196,22 @@ def _handle(operation):
                                       "chunks": count, "bytes": total,
                                       "sha256": hashlib.sha256(pattern + b"!").hexdigest()})
             return {}
+        if params.get("pause_file"):
+            # Stream the result, but stop after the first chunk until the host cancels.
+            writer = operation._channel._writer
+            real_write = writer._write
+            sent = []
+
+            def gated(ftype, body):
+                real_write(ftype, body)
+                if ftype == frames.FRAME_DATA and not sent:
+                    sent.append(1)
+                    with open(params["pause_file"], "w") as handle:
+                        handle.write("1")
+                    operation.cancelled.wait(20)
+
+            writer._write = gated
+            return worker_channel.OperationResult({"size": size}, pattern)
         if params.get("overshoot"):
             # A worker that sends more than the request allows.
             operation._channel._writer.write_data(operation.id, pattern)

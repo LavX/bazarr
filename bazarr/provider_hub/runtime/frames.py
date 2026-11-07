@@ -99,6 +99,8 @@ HANDSHAKE_CONTROL_BYTES = 64 * 1024
 DEFAULT_HEARTBEAT_INTERVAL = 15.0
 DEFAULT_HEARTBEAT_MISSES = 3
 DEFAULT_MAX_IN_FLIGHT = 4
+# The longest drain a host may ask for in a shutdown frame: ten minutes.
+MAX_SHUTDOWN_GRACE_MS = 600_000
 DEFAULT_MAX_RESULT_BYTES = 32 * 1024 * 1024
 
 # The first byte of a v1 line (a JSON object).
@@ -300,6 +302,10 @@ def _is_int(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _is_grace_ms(value):
+    return _is_int(value) and 0 <= value <= MAX_SHUTDOWN_GRACE_MS
+
+
 def _is_num(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -416,7 +422,7 @@ _OPTIONAL = {
     },
     HB: {"in_flight": _opt(_is_int), "rss_kb": _opt(_is_int)},
     SANDBOX_BLOCKED: {"id": _opt(_is_int), "errno": _opt(_is_int)},
-    SHUTDOWN: {"grace_ms": _opt(_is_int)},
+    SHUTDOWN: {"grace_ms": _opt(_is_grace_ms)},
 }
 
 

@@ -163,7 +163,10 @@ class WorkerChannel:
         self._max_in_flight = max_in_flight
         self._worker = worker or {}
         self._heartbeat_interval = heartbeat_interval
+        # The drain budget when the host did not name one (it hung up, or its
+        # shutdown frame carried no grace). A grace in the frame replaces it.
         self._wait_grace = wait_grace
+        self._shutdown_grace = None
         if stdin is None or stdout is None:
             stdin, stdout = self._take_stdio(redirect_stdout)
         self._reader = frames.FrameReader(stdin, {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES})
@@ -375,6 +378,9 @@ class WorkerChannel:
                 slot["event"].set()
         elif kind == frames.SHUTDOWN:
             # Reading goes on: draining operations may still wait for acks.
+            grace_ms = message.get("grace_ms")
+            if grace_ms is not None:
+                self._shutdown_grace = grace_ms / 1000.0
             self._stopping.set()
             self._ended.set()
         return False
@@ -595,7 +601,8 @@ class WorkerChannel:
         for operation in running:
             operation.cancel_reason = "shutdown"
             operation.cancelled.set()
-        deadline = time.monotonic() + self._wait_grace
+        grace = self._shutdown_grace if self._shutdown_grace is not None else self._wait_grace
+        deadline = time.monotonic() + grace
         for thread in threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
         if self._stopping.is_set():
