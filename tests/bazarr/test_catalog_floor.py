@@ -465,6 +465,103 @@ def test_a_catalog_that_declares_a_reserved_root_name_is_refused(catalog, path):
         floor.make_lock(clone, commit)
 
 
+# ---- destination safety -------------------------------------------------
+
+def _locked(catalog):
+    commit = catalog.publish()
+    return _lock_for(catalog, commit)
+
+
+def test_a_destination_that_is_a_symlink_is_refused(catalog, tmp_path, capsys):
+    lock = _locked(catalog)
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    link = tmp_path / 'link'
+    os.symlink(elsewhere, link)
+
+    code, _dest = _build(catalog, lock, tmp_path, 'link')
+
+    assert code == 1
+    assert 'is a symlink' in capsys.readouterr().err
+    assert list(elsewhere.iterdir()) == []
+    assert stat.S_IMODE(os.stat(elsewhere).st_mode) != 0o555
+
+
+def test_a_destination_with_a_symlinked_ancestor_is_refused(catalog, tmp_path, capsys):
+    lock = _locked(catalog)
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    os.symlink(elsewhere, tmp_path / 'ancestor')
+    lock_path = tmp_path / 'pin.lock.json'
+    lock_path.write_text(floor.dump_lock(lock))
+
+    code = floor.main([
+        'build', '--lock', str(lock_path), '--repo-url', str(catalog.path),
+        '--dest', str(tmp_path / 'ancestor' / 'nested' / 'out'),
+    ])
+
+    assert code == 1
+    assert 'is a symlink' in capsys.readouterr().err
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_symlink_swapped_in_for_a_directory_never_leaves_the_destination(tmp_path, monkeypatch):
+    """The path check passed, then a directory became a link before the write:
+    the write must fail instead of following it."""
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    dest = tmp_path / 'dest'
+    real_check = floor._reject_symlinked_path
+    calls = []
+
+    def swapping_check(path):
+        real_check(path)
+        calls.append(path)
+        if len(calls) == 2:  # the re-check after the destination was created
+            os.symlink(outside, dest / 'providers')
+
+    monkeypatch.setattr(floor, '_reject_symlinked_path', swapping_check)
+
+    with pytest.raises(floor.FloorError, match='could not be written'):
+        floor.write_floor(_good_lock(), {'providers/alpha/provider.py': b'x\n'}, dest)
+    assert len(calls) == 2
+    assert list(outside.iterdir()) == []
+
+
+def test_a_file_and_a_directory_claiming_one_path_are_refused(tmp_path):
+    dest = tmp_path / 'dest'
+    lock = {**_good_lock()}
+    with pytest.raises(floor.FloorError):
+        floor.write_floor(lock, {'a': b'1', 'a/b': b'2'}, dest)
+
+
+# ---- first-component reserved names -------------------------------------
+
+@pytest.mark.parametrize('path', ['floor.json/signature', 'floor.json/a/b', 'catalog.json/x'])
+def test_an_opaque_path_beneath_a_reserved_name_is_refused(path):
+    with pytest.raises(floor.FloorError, match='reserved'):
+        floor.validate_lock({**_good_lock(), 'opaque_files': {path: 'c' * 64}})
+
+
+def test_a_lock_file_beneath_a_reserved_name_is_refused():
+    lock = {**_good_lock(), 'files': {'catalog.json': 'b' * 64, 'floor.json/x': 'c' * 64}}
+    with pytest.raises(floor.FloorError, match='reserved'):
+        floor.validate_lock(lock)
+
+
+@pytest.mark.parametrize('path', ['floor.json/signature', 'catalog.json/x'])
+def test_a_catalog_that_declares_a_path_beneath_a_reserved_name_is_refused(catalog, path):
+    providers = [_entry('clash', {path: b'{}\n'}, path='')]
+    catalog.write('catalog.json', json.dumps({'providers': providers}).encode())
+    catalog.git('add', '-A')
+    catalog.git('commit', '--quiet', '-m', 'clash')
+    commit = catalog.git('rev-parse', 'HEAD')
+
+    clone = floor.fetch_branch(str(catalog.path), 'main', _fresh_dir(catalog))
+    with pytest.raises(floor.FloorError, match='reserves'):
+        floor.make_lock(clone, commit)
+
+
 # ---- the lock command ---------------------------------------------------
 
 def test_the_lock_command_defaults_to_the_branch_tip_and_round_trips(catalog, tmp_path):

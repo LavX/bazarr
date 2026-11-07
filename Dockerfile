@@ -60,16 +60,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # =============================================================================
 # Stage 3: Catalog release floor
 # =============================================================================
-# The image carries a snapshot of the official provider catalog, so a first run
-# with no network can still list and install providers. The snapshot is pinned
-# by docker/catalog-pin.lock.json (one catalog commit and the sha256 of every
-# file), not by whatever the catalog branch holds on build day. The script
-# fetches the branch, checks that the locked commit is the tip or an ancestor
-# of it, checks every file against the lock and the catalog's own pins, and
-# writes the files read-only. This stage's cache key is the lock and the
-# script, so a rebuild with an unchanged lock reuses the layer and the bytes
-# stay identical. Other stages that need the same catalog commit read the same
-# lock.
+# The image carries a read-only snapshot of the official provider catalog, on
+# disk for a runtime reader to use later (nothing reads it yet). The snapshot
+# is pinned by docker/catalog-pin.lock.json (one catalog commit and the sha256
+# of every file), not by whatever the catalog branch holds on build day. The
+# script fetches the branch, checks that the locked commit is the tip or an
+# ancestor of it, checks every file against the lock and the catalog's own
+# pins, and writes the files read-only. This stage's cache key is the lock and
+# the script, so a rebuild with an unchanged lock reuses the layer and the
+# bytes stay identical. Other stages that need the same catalog commit read the
+# same lock.
 FROM python:3.14-slim-trixie AS catalog-floor
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
