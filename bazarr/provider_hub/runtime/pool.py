@@ -59,6 +59,23 @@ Limits and what enforces them:
   entry stays ``stopping``, until its process is confirmed gone; one that
   survives a stop is ended again on every sweep.
 
+Accounting. A worker's process is counted, in one of these places, from the
+moment it can exist until its teardown is confirmed, and it moves between them
+inside a single lock hold so the count never dips:
+
+* resident: an entry that is starting or ready (counted once per entry);
+* a starting worker whose entry was removed (``_detached``), until its start
+  ends and it is queued for teardown;
+* retiring: draining workers of an entry;
+* closing (``_closing``): every queued or running stop, kill or reap, added when
+  the job is queued and taken off when the job ends;
+* stuck (``_stuck``): the job ended but the process or a launcher's cleanup was
+  not confirmed; ended again on each sweep and removed by the one pass that
+  confirms it.
+
+A one-off run holds a permit from before it starts until its process is
+confirmed gone, or until the stuck pass that confirms it releases it.
+
 Threading: all state is guarded by one lock. Slow work (spawn, handshake,
 shutdown, reading ``/proc``, measuring folders) runs outside it. Shutdowns run
 on their own short-lived threads, so ``submit``, ``wait`` and ``sweep`` never
@@ -963,7 +980,7 @@ class WorkerPool:
                 self._ephemeral.discard(slot)
                 if not gone:
                     # The permit stays taken until the process is really gone.
-                    self._stuck.append((slot, None, self._oneshot.release))
+                    self._add_stuck(slot, None, self._oneshot.release)
             if gone:
                 self._oneshot.release()
 
@@ -1770,7 +1787,7 @@ class WorkerPool:
                 if not gone:
                     # Its process is still there: it keeps its place in the process
                     # cap, and its entry stays stopping, until a later pass ends it.
-                    self._stuck.append((slot, entry, None))
+                    self._add_stuck(slot, entry, None)
                     self._events.append((slot.definition.key, "stuck", {}))
                     logger.warning("%s: worker process could not be confirmed gone", slot.definition.key)
                 elif entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None:
@@ -1778,6 +1795,18 @@ class WorkerPool:
                 self._close_threads.discard(threading.current_thread())
                 self._cond.notify_all()
             self._deliver_events()
+
+    def _add_stuck(self, slot, entry, release):
+        """Put a worker on the stuck list once; a second report of it only adds what it must release.
+
+        Caller holds the lock.
+        """
+        for index, (known, known_entry, known_release) in enumerate(self._stuck):
+            if known is slot:
+                if known_release is None and release is not None:
+                    self._stuck[index] = (known, known_entry, release)
+                return
+        self._stuck.append((slot, entry, release))
 
     def _retry_stuck(self):
         """End again the workers that survived a stop, and release what they held once they are gone."""

@@ -1565,3 +1565,18 @@ def test_a_worker_whose_registration_vanished_during_its_start_is_torn_down(make
     assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0
     if how == "unregister":
         assert "a" not in pool._entries
+
+
+def test_a_worker_reported_stuck_twice_is_listed_once_and_keeps_its_release(make_pool):
+    pool = make_pool(use_clock=False)
+    slot = pool_module._Slot(definition(), 0.0, pool.limits)
+    freed = []
+    with pool._cond:
+        pool._add_stuck(slot, None, None)
+        pool._add_stuck(slot, None, lambda: freed.append(1))
+        pool._add_stuck(slot, None, None)
+    assert len(pool._stuck) == 1
+    assert pool.status()["processes"] == 1
+    pool._stuck[0][2]()
+    assert freed == [1]
+    pool._stuck.clear()
