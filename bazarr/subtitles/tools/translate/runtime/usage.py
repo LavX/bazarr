@@ -205,6 +205,8 @@ class UsageLedger:
             if row is not None and row.state == BUDGET_ACTIVE:
                 if row.month != month:
                     self._roll_row(row, limits, month, counted, now)
+                else:
+                    self._fit_to_caps(row, limits, month, counted, now)
                 return JobBudget(RESERVED, self._hold(row, counted), row.month)
 
             allowance, status = self._allowance(job_id, limits, month, counted)
@@ -251,14 +253,15 @@ class UsageLedger:
             return CallReservation(True, None, worst_case_micros)
 
     def settle_call(self, job_id: str, call_id: str, *, input_tokens: int, output_tokens: int,
-                    actual_micros: int, model: str | None = None) -> Settlement:
+                    actual_micros: int, model: str | None = None, limits: CostLimits | None = None) -> Settlement:
         """Replace a call's worst-case charge with what it used. Settling twice changes nothing.
 
         ``over_budget`` is true when the job's recorded cost has crossed its budget,
         which is the caller's cue to cancel the job. A call is settled even when it
         used more than it reserved: the money is spent, and the ledger says so. What a
         call did not use goes back to the job's hold only while the budget is still in
-        the month the call was made in; after a rollover it goes back to that old month.
+        the month the call was made in; after a rollover it goes back to that old month. With ``limits``,
+        the job's budget is first held to the caps that apply now, so ``over_budget`` compares against them.
         """
         _micros(actual_micros, "actual_micros")
         if input_tokens < 0 or output_tokens < 0:
@@ -279,6 +282,10 @@ class UsageLedger:
             row.state = CALL_SETTLED
             row.settled_at = now
             self._return_unused_to_the_calls_month(job_id, row.month, unused)
+            if limits is not None:
+                budget = self._budget_row(job_id)
+                if budget is not None and budget.state == BUDGET_ACTIVE:
+                    self._fit_to_caps(budget, limits, month_key(now), self._job_counted(job_id), now)
             self._session.flush()
             self._history.refresh_in_transaction(job_id)
             return Settlement(self._job_counted(job_id), self._over_budget(job_id))
@@ -378,6 +385,8 @@ class UsageLedger:
                 return REFUSED_MONTH_SPENT
         elif row.month != month:
             self._roll_row(row, limits, month, counted, now)
+        else:
+            self._fit_to_caps(row, limits, month, counted, now)
         if worst_case > self._hold(row, counted):
             return REFUSED_JOB_BUDGET
         return None
@@ -391,6 +400,27 @@ class UsageLedger:
         row.month = month
         row.updated_at = now
         self._session.flush()
+
+    def _fit_to_caps(self, row, limits: CostLimits, month: str, counted: int, now: datetime) -> None:
+        """Hold a finite budget to the caps that apply now, which may be lower than when it was reserved.
+
+        The job cap bounds the job's whole cost, so the budget cannot exceed it. The month cap bounds what
+        the month has spent plus what jobs hold, so the hold shrinks by however far the month is over it
+        (the other jobs' holds and the spending stay as they are). A budget already inside both is untouched.
+        """
+        if row.budget_micros is None or row.month != month:
+            return
+        budget = row.budget_micros
+        if limits.job_cap is not None:
+            budget = min(budget, limits.job_cap)
+        if limits.month_cap is not None:
+            stored_hold = max(0, row.budget_micros - counted)
+            room = max(0, limits.month_cap - self._committed(month) + stored_hold)
+            budget = min(budget, counted + min(max(0, budget - counted), room))
+        if budget != row.budget_micros:
+            row.budget_micros = budget
+            row.updated_at = now
+            self._session.flush()
 
     def _return_unused_to_the_calls_month(self, job_id: str, call_month: str, unused: int) -> None:
         """Keep what a call did not use out of a budget that has moved on to a later month.

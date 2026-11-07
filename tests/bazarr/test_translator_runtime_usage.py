@@ -410,6 +410,97 @@ def test_a_budget_asked_for_again_in_a_new_month_moves_with_it(ledger, clock):
     assert (again.month, again.amount) == ("2026-12", usd(6.0))
 
 
+# ------------------------------------------------------------ caps that change while a job holds a budget
+
+def test_a_job_holding_ten_dollars_is_held_to_the_caps_that_apply_now(ledger):
+    ledger.reserve_job_budget("job", CostLimits.from_dollars(month_cap=100.0, job_cap=10.0))
+    lowered = CostLimits.from_dollars(month_cap=1.0, job_cap=1.0)
+    refused = _call(ledger, "job", "c1", 5.0, lowered)
+    assert not refused.admitted and refused.reason == REFUSED_JOB_BUDGET
+    assert ledger.job_hold("job") == usd(1.0)
+    assert _call(ledger, "job", "c2", 1.0, lowered).admitted
+    assert ledger.month_committed() == usd(1.0)
+
+
+def test_a_month_cap_that_drops_below_what_is_already_held_trims_each_job_that_asks(ledger):
+    wide = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger.reserve_job_budget("one", wide)
+    ledger.reserve_job_budget("two", wide)
+    tight = CostLimits.from_dollars(month_cap=15.0, job_cap=10.0)
+    assert not _call(ledger, "one", "c1", 6.0, tight).admitted  # 15 less the 10 that "two" still holds is 5
+    assert ledger.job_hold("one") == usd(5.0)
+    assert _call(ledger, "one", "c2", 5.0, tight).admitted
+
+
+def test_asking_for_a_budget_again_applies_the_caps_that_apply_now(ledger):
+    ledger.reserve_job_budget("job", CostLimits.from_dollars(month_cap=100.0, job_cap=10.0))
+    again = ledger.reserve_job_budget("job", CostLimits.from_dollars(month_cap=100.0, job_cap=3.0))
+    assert again.amount == usd(3.0)
+
+
+def test_settling_against_lowered_caps_reports_the_overspend(ledger):
+    wide = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger.reserve_job_budget("job", wide)
+    assert _call(ledger, "job", "c1", 5.0, wide).admitted
+    lowered = CostLimits.from_dollars(month_cap=100.0, job_cap=1.0)
+    assert _settle(ledger, "job", "c1", 5.0, limits=lowered).over_budget is True
+
+
+def test_a_budget_within_the_caps_is_left_alone(ledger):
+    limits = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger.reserve_job_budget("job", limits)
+    assert _call(ledger, "job", "c1", 4.0, limits).admitted
+    assert ledger.job_hold("job") == usd(6.0)
+    assert _settle(ledger, "job", "c1", 4.0, limits=limits).over_budget is False
+
+
+# ------------------------------------------------------------ lock order
+
+@pytest.mark.parametrize("ledger_first", [True, False])
+def test_two_threads_entering_by_each_helper_do_not_wait_on_each_other_for_ever(session, ledger_first):
+    """One thread is in a write transaction and goes on to take the ledger, the other is in the ledger and
+    goes on to write. If each held one lock while waiting for the other's, both would wait until a timeout."""
+    from sqlalchemy import event
+
+    from subtitles.tools.translate.runtime.transaction import ledger_transaction, write_transaction
+
+    engine = session.get_bind()
+    if engine.dialect.name == "sqlite":
+        @event.listens_for(engine, "connect")
+        def _short_timeout(dbapi_connection, _record):
+            dbapi_connection.execute("PRAGMA busy_timeout=2000")
+
+    entered = {"first": threading.Event(), "second": threading.Event()}
+    failures = []
+
+    def run(name, outer, inner):
+        try:
+            if name == "second":
+                assert entered["first"].wait(timeout=10)
+            entered[name].set()
+            with outer(session):
+                if name == "first":
+                    entered["second"].wait(timeout=10)
+                    threading.Event().wait(0.5)  # let the other thread try to enter
+                with inner(session):
+                    pass
+        except BaseException as error:  # noqa: BLE001 - the test reports whatever went wrong
+            failures.append(repr(error))
+        finally:
+            session.remove()
+
+    outer_first, outer_second = ((ledger_transaction, write_transaction) if ledger_first
+                                 else (write_transaction, ledger_transaction))
+    threads = [threading.Thread(target=run, args=("first", outer_first, outer_second)),
+               threading.Thread(target=run, args=("second", outer_second, outer_first))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not any(thread.is_alive() for thread in threads)
+    assert failures == []
+
+
 # ---------------------------------------------------------------------- history
 
 def _open(history, job="job-1", **kwargs):

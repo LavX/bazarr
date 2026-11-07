@@ -4,7 +4,8 @@
 Reservations only keep two jobs from spending the same money if the read of what
 is free and the write that takes it happen as one step. This module is that
 step: a real transaction that takes the database's write lock before the first
-read, and, for the usage ledger, a lock for the threads of this process.
+read. The threads of this process take their own lock first, always, so two threads that nest
+the helpers in opposite orders cannot each hold one lock and wait for the other's.
 
 * SQLite: ``BEGIN IMMEDIATE``. A plain ``BEGIN`` that has read and then meets another
   connection's commit cannot become a writer in WAL mode; SQLite fails it at once
@@ -17,7 +18,7 @@ read, and, for the usage ledger, a lock for the threads of this process.
   and not left to the server's default.
 
 Two helpers share the rules below: ``write_transaction`` (jobs, checkpoints, settings) and
-``ledger_transaction`` (usage and history, which adds the locks).
+``ledger_transaction`` (usage and history, which adds the advisory lock on PostgreSQL).
 
 * A helper that finds none of this module's transactions open starts and ends one.
 * A helper called inside another one only opens a savepoint. The outer helper owns the
@@ -33,8 +34,11 @@ from contextlib import contextmanager
 
 from sqlalchemy import text
 
-# One lock for the whole ledger, history included: the writes are small and short.
-_LEDGER_LOCK = threading.RLock()
+# One lock for every write transaction of the runtime, ledger and history included: the writes are small
+# and short. Every outermost transaction takes it before it asks the database for its write lock, and
+# never the other way round, so two threads cannot each hold one lock and wait for the other's. It is
+# re-entrant, so a step that nests another one takes it again without waiting.
+_WRITE_LOCK = threading.RLock()
 # Arbitrary, fixed, and unlikely to meet another advisory lock in the same database.
 _ADVISORY_KEY = 0x7472616E736C6564
 # How many of this module's transactions the session is inside. A session belongs to one thread.
@@ -63,30 +67,33 @@ def _transaction(session, *, ledger: bool):
                 session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADVISORY_KEY})
             yield
         return
-    connection = session.connection()
-    driver = connection.connection.driver_connection
-    sqlite = connection.dialect.name == "sqlite"
-    postgresql = connection.dialect.name == "postgresql"
-    active = driver.in_transaction if sqlite else driver.info.transaction_status != 0
-    own = not active
-    try:
-        if own:
-            connection.exec_driver_sql("BEGIN IMMEDIATE" if sqlite else "BEGIN")
-            if postgresql:
-                connection.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        with _marked(session), session.begin_nested():
-            if ledger and postgresql:
-                session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADVISORY_KEY})
-            yield
-        if own:
-            connection.exec_driver_sql("COMMIT")
-        else:
-            session.commit()
-    except BaseException:
-        if own:
-            connection.exec_driver_sql("ROLLBACK")
-        session.expire_all()
-        raise
+    with _WRITE_LOCK:
+        connection = session.connection()
+        driver = connection.connection.driver_connection
+        sqlite = connection.dialect.name == "sqlite"
+        postgresql = connection.dialect.name == "postgresql"
+        active = driver.in_transaction if sqlite else driver.info.transaction_status != 0
+        own = not active
+        begun = False
+        try:
+            if own:
+                connection.exec_driver_sql("BEGIN IMMEDIATE" if sqlite else "BEGIN")
+                begun = True
+                if postgresql:
+                    connection.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            with _marked(session), session.begin_nested():
+                if ledger and postgresql:
+                    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADVISORY_KEY})
+                yield
+            if own:
+                connection.exec_driver_sql("COMMIT")
+            else:
+                session.commit()
+        except BaseException:
+            if begun:
+                connection.exec_driver_sql("ROLLBACK")
+            session.expire_all()
+            raise
 
 
 @contextmanager
@@ -99,6 +106,5 @@ def write_transaction(session):
 @contextmanager
 def ledger_transaction(session):
     """Run the block as one durable transaction that no other ledger writer overlaps."""
-    with _LEDGER_LOCK:
-        with _transaction(session, ledger=True):
-            yield
+    with _transaction(session, ledger=True):
+        yield
