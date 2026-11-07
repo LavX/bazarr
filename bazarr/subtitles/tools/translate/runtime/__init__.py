@@ -18,8 +18,11 @@ logger = logging.getLogger(__name__)
 
 SWITCH_PATH = "translator.runtime_v2"
 
-_REQUIRED_TABLES = frozenset({"translator_engine_instances", "translator_connections", "translator_secrets",
-                              "translator_jobs", "translator_checkpoints"})
+_REQUIRED_TABLES = frozenset({
+    "translator_engine_instances", "translator_connections", "translator_secrets",
+    "translator_jobs", "translator_checkpoints",
+    "translation_history", "translation_history_connections", "translation_usage", "translation_budgets",
+})
 # A positive answer is final for the process: tables are never dropped while it runs.
 _tables_present = False
 # A negative answer (the revisions are not applied yet, or the check failed) is remembered for a while, so a

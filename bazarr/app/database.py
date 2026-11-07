@@ -1110,6 +1110,136 @@ class TableTranslatorCheckpoint(Base):
     expires_at = mapped_column(DateTime)
 
 
+class TableTranslationHistory(Base):
+    """One row per translation job: what it was for, what it cost and how it ended.
+
+    Money is whole micro-dollars (millionths of a dollar) in every table of the
+    ledger, so reserving and settling never add floating-point fractions.
+
+    ``job_id`` is the job's own id, so every attempt of one job writes the same
+    row. ``engine_instance_id``, ``declined_by_instance_id`` and
+    ``taken_over_by_instance_id`` name engine instances, which can be deleted later,
+    so they are plain integers and not foreign keys.
+    """
+
+    __tablename__ = 'translation_history'
+    __table_args__ = (
+        UniqueConstraint('job_id', name='ux_translation_history_job_id'),
+        Index('ix_translation_history_created_at', 'created_at'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id = mapped_column(Text, nullable=False)
+    media_type = mapped_column(Text)
+    media_id = mapped_column(Integer)
+    media_title = mapped_column(Text)
+    arr_instance_id = mapped_column(Integer, index=True)
+    source_language = mapped_column(Text)
+    target_language = mapped_column(Text)
+    plugin_id = mapped_column(Text)
+    plugin_version = mapped_column(Text)
+    engine_instance_id = mapped_column(Integer)
+    status = mapped_column(Text, nullable=False, default='running', server_default='running', index=True)
+    input_tokens = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    output_tokens = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    cost_micros = mapped_column(BigInteger, nullable=False, default=0, server_default='0')
+    error_class = mapped_column(Text)
+    error_detail = mapped_column(Text)
+    failovers = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    declined_by_instance_id = mapped_column(Integer)
+    declined_reason = mapped_column(Text)
+    taken_over_by_instance_id = mapped_column(Integer)
+    started_at = mapped_column(DateTime)
+    finished_at = mapped_column(DateTime)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableTranslationHistoryConnection(Base):
+    """What one connection contributed to one job, including a connection that
+    failed over before it produced a batch.
+
+    ``connection_id`` is the connection's id when the job ran. The connection can be
+    deleted afterwards, so it is not a foreign key; ``backend_type`` keeps the row
+    readable on its own.
+    """
+
+    __tablename__ = 'translation_history_connections'
+    __table_args__ = (
+        UniqueConstraint('history_id', 'connection_id', name='ux_translation_history_connections_job'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    history_id = mapped_column(Integer, ForeignKey('translation_history.id', ondelete='CASCADE'),
+                               nullable=False, index=True)
+    connection_id = mapped_column(Integer, nullable=False)
+    backend_type = mapped_column(Text, nullable=False, default='', server_default='')
+    models_json = mapped_column(Text, nullable=False, default='[]', server_default='[]')
+    attempts = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    batches = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    input_tokens = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    output_tokens = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    cost_micros = mapped_column(BigInteger, nullable=False, default=0, server_default='0')
+    failed_over = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    last_error_class = mapped_column(Text)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableTranslationUsage(Base):
+    """One paid call: reserved at its worst-case charge, then settled against what it used.
+
+    A row that is never settled (the process died between the call and its
+    settlement) keeps counting at its worst-case charge, so a retry cannot push a
+    job or the month past its cap. ``month`` is the month the call was made in.
+    ``connection_id`` is empty for an engine that has no connections.
+    """
+
+    __tablename__ = 'translation_usage'
+    __table_args__ = (
+        UniqueConstraint('job_id', 'call_id', name='ux_translation_usage_call'),
+        Index('ix_translation_usage_month', 'month'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id = mapped_column(Text, nullable=False, index=True)
+    call_id = mapped_column(Text, nullable=False)
+    connection_id = mapped_column(Integer)
+    backend_type = mapped_column(Text, nullable=False, default='', server_default='')
+    model = mapped_column(Text, nullable=False, default='', server_default='')
+    month = mapped_column(Text, nullable=False)
+    worst_case_micros = mapped_column(BigInteger, nullable=False, default=0, server_default='0')
+    input_tokens = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    output_tokens = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    actual_micros = mapped_column(BigInteger)
+    state = mapped_column(Text, nullable=False, default='reserved', server_default='reserved')
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    settled_at = mapped_column(DateTime)
+
+
+class TableTranslationBudget(Base):
+    """The budget a job holds against a month. ``budget_micros`` empty means no cap applies.
+
+    ``budget_micros`` is the job's whole allowance, what it has already counted included, so
+    what it still holds is ``budget_micros`` less its counted usage. ``month`` is the month
+    that hold is taken from.
+    """
+
+    __tablename__ = 'translation_budgets'
+    __table_args__ = (
+        UniqueConstraint('job_id', name='ux_translation_budgets_job_id'),
+        Index('ix_translation_budgets_month_state', 'month', 'state'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id = mapped_column(Text, nullable=False)
+    month = mapped_column(Text, nullable=False)
+    budget_micros = mapped_column(BigInteger)
+    state = mapped_column(Text, nullable=False, default='active', server_default='active')
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
 # Tables that only a migration creates. The translation runtime is dark behind a switch, so a boot with the
 # switch off must not add its tables; init_db() leaves them out of create_all. Take a name out of this set
 # when the revision that creates the table has merged and the table should exist on a fresh install.
@@ -1119,6 +1249,10 @@ MIGRATION_ONLY_TABLES = frozenset({
     TableTranslatorSecret.__tablename__,
     TableTranslatorJob.__tablename__,
     TableTranslatorCheckpoint.__tablename__,
+    TableTranslationHistory.__tablename__,
+    TableTranslationHistoryConnection.__tablename__,
+    TableTranslationUsage.__tablename__,
+    TableTranslationBudget.__tablename__,
 })
 
 

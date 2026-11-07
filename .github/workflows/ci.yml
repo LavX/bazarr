@@ -629,6 +629,7 @@ jobs:
             tests/bazarr/test_translate_job_media_name.py \
             tests/bazarr/test_translate_surface_refusals.py \
             tests/bazarr/test_translator_auth.py \
+            tests/bazarr/test_translation_history_api.py \
             tests/bazarr/test_translator_sidecar_errors.py \
             tests/bazarr/test_upgrade_embedded_history.py \
             tests/bazarr/test_upgrade_subtitle_toggles.py \
@@ -940,6 +941,7 @@ jobs:
             tests/bazarr/test_translator_output_checks.py \
             tests/bazarr/test_translator_request_normalization.py \
             tests/bazarr/test_translator_runtime_jobs.py \
+            tests/bazarr/test_translator_runtime_usage.py \
             tests/bazarr/test_sportarr_library_migration.py \
             tests/bazarr/test_sportarr_review_guards.py \
             tests/bazarr/test_sportarr_output.py \

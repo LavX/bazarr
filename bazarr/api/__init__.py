@@ -52,6 +52,15 @@ api_ns_list = [
     api_ns_list_seerr,
 ]
 
+# The v2 translation runtime's routes exist only while its switch is on, and a switched-off boot does not
+# import them. Each route also answers 404 on its own while the runtime is off or its tables are missing.
+from app.config import settings  # noqa: E402
+
+if getattr(settings.translator, "runtime_v2", False) is True:
+    from .translation import api_ns_list_translation
+
+    api_ns_list.append(api_ns_list_translation)
+
 authorizations = {
     'apikey': {
         'type': 'apiKey',
