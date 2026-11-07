@@ -26,7 +26,7 @@ from .state import active_installations, provider_hub_dir
 from . import runtime_status
 from .env_registry import env_dir_of
 from .venv import hold_environment, interpreter_inside_hub
-from .worker import ProviderWorkerClient, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
+from .worker import ProviderWorkerClient, release_when_gone, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ class HubProxyProvider(Provider):
                 _PROXY_OPERATIONS_ENDED.notify_all()
             try:
                 if last_of_retired:
-                    self._shutdown_worker()
+                    self._terminate_holding()
             except Exception:
                 # The drain holds the environment until the worker has exited,
                 # so a failed stop here keeps it pinned rather than freeing it.
@@ -171,8 +171,27 @@ class HubProxyProvider(Provider):
                 release()
 
     def terminate(self):
-        if self.worker_client:
-            self.worker_client.stop()
+        self._terminate_holding()
+
+    def _terminate_holding(self, release=None):
+        """The one way a proxy's worker is ended.
+
+        The proxy is retired, so nothing new starts on it, its worker is
+        stopped, and the environment it runs from stays pinned until the worker
+        and everything it started are gone: ``release`` (a hold the caller took
+        when it detached the proxy) or one taken here. A survivor keeps the pin
+        and is released later by a watcher, so a pool that drops the instance
+        never frees an environment that is still in use.
+        """
+        if release is None:
+            env_dir = _instance_environment(self)
+            release = hold_environment(env_dir) if env_dir else (lambda: None)
+        self.retire()
+        try:
+            self._shutdown_worker()
+        except Exception:
+            logger.exception("Provider Hub: could not stop the worker of %s", self.provider_name)
+        release_when_gone(self.worker_client, release, self.provider_name)
 
     def outcome_recorded(self):
         """Called by the pool once the outcome of a call is recorded, so the
@@ -478,52 +497,19 @@ def _wait_for_operations(instance) -> None:
 
 
 def _drain_instance(instance, release) -> None:
-    """Let the instance finish what it was admitted for, stop its worker, then free its environment.
+    """Let the instance finish what it was admitted for, then end its worker through the one termination path.
 
     A call admitted before the retirement may still be on its way to the worker,
     or between the two requests of a download. Stopping first would fail it as
-    busy or cut it between them, so the stop waits for those calls. The
-    environment is released only once the worker is confirmed gone: if it
-    cannot be, the pin stays, and cleanup leaves the environment alone.
+    busy or cut it between them, so the stop waits for those calls. ``release``
+    is the hold taken at detach time; it is given up only once the worker and
+    its process group are confirmed gone.
     """
-    provider_name = getattr(instance, "provider_name", "?")
     try:
         _wait_for_operations(instance)
-        instance._shutdown_worker()
     except Exception:
-        logger.exception("Provider Hub: could not stop a replaced worker for %s", provider_name)
-    client = getattr(instance, "worker_client", None)
-    try:
-        _confirm_worker_gone(client, provider_name)
-    except Exception:
-        logger.exception(
-            "Provider Hub: a replaced worker for %s may still be running; its environment stays in place",
-            provider_name,
-        )
-        return
-    release()
-
-
-def _confirm_worker_gone(client, provider_name) -> None:
-    """Return only when the worker has exited and nothing it started is left running.
-
-    The wait does not collect the worker (the stopper does, after it has ended
-    the worker's group), and a group that is not empty keeps the caller here:
-    survivors run from the same environment.
-    """
-    process = getattr(client, "process", None)
-    if process is None or not hasattr(client, "group_gone"):
-        return
-    while not client._has_exited(process):
-        time.sleep(0.05)
-    warned = False
-    while not client.group_gone(10.0):
-        if not warned:
-            warned = True
-            logger.error(
-                "Provider Hub: processes started by a replaced worker for %s are still running; "
-                "its environment stays in place until they end", provider_name,
-            )
+        logger.exception("Provider Hub: could not wait for the calls of a replaced %s", getattr(instance, "provider_name", "?"))
+    instance._terminate_holding(release)
 
 
 class RetirementIncomplete(RuntimeError):

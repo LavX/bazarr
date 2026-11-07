@@ -1151,7 +1151,13 @@ def test_the_environment_stays_pinned_while_the_workers_group_is_not_empty(hub, 
     emptied.set()
     for drain in drains:
         drain.join(15)
-    assert env_registry.cleanup_environments(hub) == [str(old)]
+    # The hold is given up by the watcher a moment after the last survivor is gone.
+    removed = []
+    deadline = time.monotonic() + 10
+    while not removed and time.monotonic() < deadline:
+        removed = env_registry.cleanup_environments(hub)
+        time.sleep(0.05)
+    assert removed == [str(old)]
 
 
 def test_a_repair_that_lands_between_the_generation_check_and_the_cache_store_still_retires_the_instance(
@@ -1292,6 +1298,50 @@ def test_a_failed_connection_test_keeps_the_environment_while_its_worker_left_su
     survivors.emptied.set()
     deadline = time.monotonic() + 10
     removed = []
+    while not removed and time.monotonic() < deadline:
+        removed = env_registry.cleanup_environments(hub)
+        time.sleep(0.05)
+    assert removed == [str(old)]
+
+
+@pytest.mark.parametrize("path", ["delete", "config_reload", "pool_shutdown"])
+def test_every_pool_termination_keeps_the_environment_until_the_workers_survivors_are_gone(
+    hub, hub_registry, monkeypatch, path
+):
+    import sys
+
+    from provider_hub.worker import ProviderWorkerClient
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    interpreter = old / "bin" / "python"
+    interpreter.write_text(f"#!{sys.executable}\n{WORKER_SCRIPT}", encoding="utf-8")
+    interpreter.chmod(0o755)
+    client = ProviderWorkerClient([str(interpreter)])
+    stale.worker_client = client
+    client.request("search", {}, timeout=10)
+    survivors = _SurvivorsAfterStop(monkeypatch)
+
+    if path == "delete":
+        del pool["examplehub"]
+    elif path == "config_reload":
+        pool.retire_provider("examplehub")
+    else:
+        pool.terminate()
+    # The installation is repaired meanwhile: it points at the new environment, nothing references the old one.
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+
+    assert env_registry.cleanup_environments(hub) == []
+    assert (old / "bin" / "python").exists()
+
+    survivors.emptied.set()
+    removed = []
+    deadline = time.monotonic() + 10
     while not removed and time.monotonic() < deadline:
         removed = env_registry.cleanup_environments(hub)
         time.sleep(0.05)

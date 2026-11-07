@@ -212,7 +212,7 @@ def reap_idle_workers(idle_seconds: float) -> int:
 def _client_gone(client, budget: float) -> bool:
     """Whether a client's worker has exited and nothing it started is left, waiting at most ``budget`` seconds."""
     process = getattr(client, "process", None)
-    if process is None:
+    if process is None or not hasattr(client, "_has_exited"):
         return True
     deadline = time.monotonic() + budget
     while not client._has_exited(process):
