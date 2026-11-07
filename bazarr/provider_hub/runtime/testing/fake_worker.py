@@ -81,6 +81,7 @@ CONFIG_KEYS = (
     "script",         # translate outcomes by attempt (see the module docstring)
     "no_hello",       # never say hello (a v1 runner looks like this)
     "hello_delay",    # seconds before the hello
+    "stubborn",       # ignore SIGTERM and the shutdown frame
 )
 
 
@@ -407,6 +408,11 @@ def main():
     )
     if config.get("silent"):
         channel._heartbeat_loop = lambda: None
+    if config.get("stubborn"):
+        import signal
+
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        channel._drain = threading.Event().wait
     return channel.run()
 
 
