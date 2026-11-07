@@ -95,8 +95,11 @@ def pid_alive(pid):
     try:
         with open("/proc/%d/stat" % pid) as handle:
             return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError:
+        # /proc is hidden or unreadable (hidepid): signal 0 said it exists.
+        return True
 
 
 def wait_until(predicate, timeout=8.0):
@@ -1662,3 +1665,55 @@ def test_no_one_off_worker_is_spawned_once_the_pool_is_closing(make_pool):
     with pytest.raises(PoolClosed):
         pool._open_session(slot)
     assert spawned == [] and slot.session is None
+
+
+@needs_smaps
+def test_a_live_descendant_whose_memory_cannot_be_read_makes_the_sample_incomplete(monkeypatch):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    real = pool_module._read_kb
+    try:
+        assert wait_until(lambda: read_process_tree_memory(os.getpid()).processes >= 2)
+        assert read_process_tree_memory(os.getpid()).truncated is False
+
+        def denying(path, *names):
+            if "/proc/%d/" % child.pid in path:
+                raise PermissionError(13, "Permission denied")
+            return real(path, *names)
+
+        monkeypatch.setattr(pool_module, "_read_kb", denying)
+        sample = read_process_tree_memory(os.getpid())
+        assert sample is not None and sample.truncated is True
+
+        def vanished(path, *names):
+            if "/proc/%d/" % child.pid in path:
+                raise FileNotFoundError(2, "No such file or directory")
+            return real(path, *names)
+
+        # A process that exited between the listing and the read is not an unknown.
+        monkeypatch.setattr(pool_module, "_read_kb", vanished)
+        assert read_process_tree_memory(os.getpid()).truncated is False
+    finally:
+        monkeypatch.undo()
+        child.kill()
+        child.wait()
+
+
+def test_a_tree_with_an_unreadable_live_process_is_killed_as_over_its_limit(make_pool):
+    pool = make_pool(memory_reader=lambda pid: MemorySample(1 * MIB, 1 * MIB, 3, "test", truncated=True))
+    pool.register(definition(memory_limit_bytes=100 * MIB))
+    handle = pool.submit("tr", "sleep", {"seconds": 30})
+    pool.sweep()
+    with pytest.raises(WorkerKilled):
+        handle.wait(10)
+
+
+def test_pid_alive_keeps_the_signal_zero_answer_when_proc_is_unreadable(monkeypatch):
+    real_open = open
+
+    def denied(path, *args, **kwargs):
+        if str(path).startswith("/proc/%d/stat" % os.getpid()):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", denied)
+    assert pid_alive(os.getpid()) is True

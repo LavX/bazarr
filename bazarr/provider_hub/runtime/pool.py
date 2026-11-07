@@ -473,7 +473,8 @@ def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample
     full by each. A process without ``smaps_rollup`` (older kernel, or a
     hardened ``/proc``) falls back to ``VmRSS`` from ``status``. Returns None
     when the root process is gone or ``/proc`` is unavailable. A tree larger
-    than ``max_processes`` comes back with ``truncated`` set.
+    than ``max_processes``, or with a live process whose memory cannot be
+    read, comes back with ``truncated`` set.
     """
     if not os.path.isdir("/proc/self"):
         return None
@@ -489,13 +490,22 @@ def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample
             rss = values.get("Rss", used)
             if used is None:
                 raise OSError("no memory figure")
+        except (FileNotFoundError, ProcessLookupError):
+            # Gone between the listing and the read: not part of the tree any more.
+            continue
         except OSError:
             try:
                 values = _read_kb("/proc/%d/status" % member, "VmRSS")
+            except (FileNotFoundError, ProcessLookupError):
+                continue
             except OSError:
+                # Alive (it was listed, and its entry is there) but closed to us:
+                # its memory is unknown, so the total is only a floor.
+                truncated = True
                 continue
             used = rss = values.get("VmRSS")
             if used is None:
+                # A zombie or a kernel thread has no memory to count.
                 continue
             source = "status"
         total += used

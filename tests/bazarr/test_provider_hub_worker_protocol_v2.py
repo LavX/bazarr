@@ -104,8 +104,11 @@ def pid_alive(pid):
     try:
         with open("/proc/%d/stat" % pid) as handle:
             return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError:
+        # /proc is hidden or unreadable (hidepid): signal 0 said it exists.
+        return True
 
 
 def submit_running(session, params, **kwargs):
