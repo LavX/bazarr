@@ -341,6 +341,130 @@ def test_a_non_empty_destination_is_refused(catalog, tmp_path, capsys):
     assert 'is not empty' in capsys.readouterr().err
 
 
+# ---- opaque files and reserved names -----------------------------------
+
+def test_opaque_files_are_pinned_copied_verbatim_and_mode_checked(catalog, tmp_path):
+    commit = catalog.publish()
+    catalog.write('catalog.json.sig', b'\x00signature bytes\xff')
+    catalog.write('keys/catalog-signing-keys.json', b'{"keys": []}\n')
+    catalog.git('add', '-A')
+    catalog.git('commit', '--quiet', '-m', 'signature and keys')
+    commit = catalog.git('rev-parse', 'HEAD')
+
+    clone = floor.fetch_branch(str(catalog.path), 'main', _fresh_dir(catalog))
+    lock = floor.make_lock(clone, commit, opaque_paths=['catalog.json.sig', 'keys/catalog-signing-keys.json'])
+    assert lock['opaque_files'] == {
+        'catalog.json.sig': _sha(b'\x00signature bytes\xff'),
+        'keys/catalog-signing-keys.json': _sha(b'{"keys": []}\n'),
+    }
+    code, dest = _build(catalog, lock, tmp_path)
+
+    assert code == 0
+    tree = _tree(dest)
+    assert tree['catalog.json.sig'] == b'\x00signature bytes\xff'
+    assert tree['keys/catalog-signing-keys.json'] == b'{"keys": []}\n'
+    assert json.loads(tree['floor.json'])['files'] == 6
+    floor.check_modes(dest)
+    assert stat.S_IMODE(os.stat(dest / 'keys').st_mode) == 0o555
+    assert stat.S_IMODE(os.stat(dest / 'catalog.json.sig').st_mode) == 0o444
+
+
+def test_an_opaque_file_that_changed_since_the_lock_is_refused(catalog, tmp_path, capsys):
+    catalog.publish()
+    catalog.write('catalog.json.sig', b'one')
+    catalog.git('add', '-A')
+    catalog.git('commit', '--quiet', '-m', 'sig')
+    commit = catalog.git('rev-parse', 'HEAD')
+    clone = floor.fetch_branch(str(catalog.path), 'main', _fresh_dir(catalog))
+    lock = floor.make_lock(clone, commit, opaque_paths=['catalog.json.sig'])
+    lock['opaque_files']['catalog.json.sig'] = _sha(b'two')
+
+    code, dest = _build(catalog, lock, tmp_path)
+
+    assert code == 1
+    assert 'opaque file catalog.json.sig does not match the lock hash' in capsys.readouterr().err
+    assert not dest.exists()
+
+
+def test_an_opaque_file_missing_at_the_commit_is_refused(catalog):
+    commit = catalog.publish()
+    clone = floor.fetch_branch(str(catalog.path), 'main', _fresh_dir(catalog))
+    with pytest.raises(floor.FloorError, match='does not exist'):
+        floor.make_lock(clone, commit, opaque_paths=['catalog.json.sig'])
+
+
+def test_an_opaque_file_the_catalog_also_declares_is_refused(catalog):
+    commit = catalog.publish()
+    clone = floor.fetch_branch(str(catalog.path), 'main', _fresh_dir(catalog))
+    lock = floor.make_lock(clone, commit)
+    lock['opaque_files'] = {'providers/alpha/provider.py': _sha(b'print("alpha")\n')}
+    # Taken out of files so only the opaque listing claims it.
+    del lock['files']['providers/alpha/provider.py']
+
+    with pytest.raises(floor.FloorError, match='also declared by catalog.json'):
+        floor.verify_lock(lock, clone)
+
+
+def test_the_lock_command_pins_opaque_files_and_keeps_them_on_a_rewrite(catalog, tmp_path):
+    catalog.publish()
+    catalog.write('catalog.json.sig', b'sig one')
+    catalog.git('add', '-A')
+    catalog.git('commit', '--quiet', '-m', 'sig')
+    out = tmp_path / 'pin.lock.json'
+
+    assert floor.main(['lock', '--repo-url', str(catalog.path), '--opaque', 'catalog.json.sig', '--out', str(out)]) == 0
+    assert floor.load_lock(out)['opaque_files'] == {'catalog.json.sig': _sha(b'sig one')}
+
+    catalog.write('catalog.json.sig', b'sig two')
+    catalog.git('add', '-A')
+    catalog.git('commit', '--quiet', '-m', 'new sig')
+    assert floor.main(['lock', '--repo-url', str(catalog.path), '--out', str(out)]) == 0
+    assert floor.load_lock(out)['opaque_files'] == {'catalog.json.sig': _sha(b'sig two')}
+
+
+def test_a_lock_without_opaque_files_is_still_valid_and_reads_as_empty(catalog, tmp_path):
+    commit = catalog.publish()
+    lock = _lock_for(catalog, commit)
+    del lock['opaque_files']
+    assert floor.validate_lock(lock)
+    code, dest = _build(catalog, lock, tmp_path)
+    assert code == 0 and 'floor.json' in _tree(dest)
+
+
+@pytest.mark.parametrize('opaque', [
+    {'floor.json': 'c' * 64},
+    {'catalog.json': 'c' * 64},
+    {'../escape': 'c' * 64},
+    {'ok.sig': 'C' * 64},
+    {'catalog.json.sig': 'c' * 64, 'x/../y': 'c' * 64},
+    ['not', 'a', 'map'],
+])
+def test_a_malformed_opaque_map_is_refused(opaque):
+    with pytest.raises(floor.FloorError):
+        floor.validate_lock({**_good_lock(), 'opaque_files': opaque})
+
+
+def test_an_opaque_path_that_is_also_in_files_is_refused():
+    lock = {**_good_lock(), 'files': {'catalog.json': 'b' * 64, 'a.py': 'd' * 64}, 'opaque_files': {'a.py': 'd' * 64}}
+    with pytest.raises(floor.FloorError, match='also listed in files'):
+        floor.validate_lock(lock)
+
+
+@pytest.mark.parametrize('path', ['floor.json', 'catalog.json'])
+def test_a_catalog_that_declares_a_reserved_root_name_is_refused(catalog, path):
+    providers = [_entry('clash', {path: b'{}\n'}, path='')]
+    catalog.write('catalog.json', json.dumps({'providers': providers}).encode())
+    if path != 'catalog.json':
+        catalog.write(path, b'{}\n')
+    catalog.git('add', '-A')
+    catalog.git('commit', '--quiet', '-m', 'clash')
+    commit = catalog.git('rev-parse', 'HEAD')
+
+    clone = floor.fetch_branch(str(catalog.path), 'main', _fresh_dir(catalog))
+    with pytest.raises(floor.FloorError, match='reserves'):
+        floor.make_lock(clone, commit)
+
+
 # ---- the lock command ---------------------------------------------------
 
 def test_the_lock_command_defaults_to_the_branch_tip_and_round_trips(catalog, tmp_path):

@@ -78,5 +78,6 @@
     "providers/zimuku/yunsuo_templates.py": "abad0d629bb24b28c40f7dc5a0257660266e6be449fbd8cda81a044d26c4959d"
   },
   "lock_version": 1,
+  "opaque_files": {},
   "repo": "LavX/bazarr-provider-catalog"
 }
