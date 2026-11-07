@@ -292,6 +292,13 @@ class _ProviderConfigs(dict):
 
             logger.debug("Config changed. Restarting provider: %s", key)
 
+            # An instance that is being built right now read the old settings.
+            # The change is made above, so a build that starts after this sees
+            # the new ones; this makes the pool refuse the one already running,
+            # which would otherwise be stored and then skipped by every later
+            # update, since the stored config already matches.
+            bump_provider_generation(key)
+
             # Tear the old instance down before building its replacement.
             # Dropping the reference releases nothing it owns, and a Provider
             # Hub provider owns a worker process and the threads pumping its

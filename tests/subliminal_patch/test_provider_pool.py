@@ -7,6 +7,7 @@ and the ordered-list shape of pool.providers that it relies on.
 """
 
 import logging
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -1397,3 +1398,46 @@ def test_an_unexpected_failure_keeps_one_error_record_with_one_traceback(monkeyp
     assert record.exc_info and record.exc_info[0] is type(error)
     assert "Traceback" not in record.getMessage()
     assert caplog.text.count("Traceback (most recent call last)") == 1
+
+
+def test_a_config_change_during_construction_replaces_the_instance_built_with_the_old_one(monkeypatch):
+    import threading
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    terminated = []
+
+    class Provider(_FakeProvider):
+        def initialize(self):
+            super().initialize()
+            if self.kwargs.get("token") == "old":
+                entered.set()
+                proceed.wait(10)
+
+        def terminate(self):
+            terminated.append(self)
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    pool = core.SZProviderPool(["alpha"], {"alpha": {"token": "old"}})
+    found = {}
+    first = threading.Thread(target=lambda: found.setdefault("first", pool["alpha"]))
+    first.start()
+    assert entered.wait(10)
+
+    # The settings change lands while the instance is still being built with the old token.
+    second = threading.Thread(
+        target=lambda: pool.provider_configs.update({"alpha": {"token": "new"}})
+    )
+    second.start()
+    time.sleep(0.2)
+    proceed.set()
+    first.join(10)
+    second.join(10)
+
+    stored = pool.initialized_providers["alpha"]
+    assert stored.kwargs == {"token": "new"}
+    assert found["first"] is stored
+    assert [item.kwargs for item in terminated] == [{"token": "old"}]
+    # Nothing is left to rebuild: a repeat of the same update changes nothing.
+    pool.provider_configs.update({"alpha": {"token": "new"}})
+    assert pool.initialized_providers["alpha"] is stored
