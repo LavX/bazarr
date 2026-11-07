@@ -383,6 +383,57 @@ def test_a_secret_is_encrypted_at_rest(store, session):
     assert store.secrets_for_request(owner, frozenset({"d"})) == {"token": KEY}
 
 
+@pytest.fixture
+def scrub_with_the_runtime_on(monkeypatch, session):
+    """The log scrubber seeing a settings credential, a Hub credential and this test's database."""
+    from app import database
+    from app.config import settings
+    from subtitles.tools.translate import runtime
+    from secret_store import scrub
+
+    settings_value, hub_value = "settings-credential-0123456789", "hub-credential-0123456789"
+    monkeypatch.setattr(settings.translator, "runtime_v2", True, raising=False)
+    monkeypatch.setattr(database, "database", session)
+    monkeypatch.setattr(runtime, "_tables_present", True)
+    monkeypatch.setattr(scrub, "collect_settings_secret_values", lambda settings_obj: {settings_value})
+    monkeypatch.setattr(scrub, "collect_hub_secret_values", lambda state=None: {hub_value})
+    scrub.clear_secret_values()
+    scrub.refresh_secret_values()
+    try:
+        yield scrub, {settings_value, hub_value}
+    finally:
+        scrub.clear_secret_values()
+
+
+def test_a_translator_secret_is_scrubbed_without_unmasking_the_other_credentials(store, scrub_with_the_runtime_on):
+    scrub, others = scrub_with_the_runtime_on
+    assert scrub.registered_secret_values() == others
+    owner = (INSTANCE, _ai_engine(store, with_connection=False).id)
+
+    store.set_secret(owner, "token", KEY, destinations=frozenset())
+    assert scrub.registered_secret_values() == others | {KEY}
+    assert scrub.scrub_text(f"failed with {KEY}") == f"failed with {scrub.MASK}"
+
+    # What the next boot, settings save or Hub write does: rebuild the set from its sources.
+    scrub.clear_secret_values()
+    scrub.refresh_secret_values()
+    assert scrub.registered_secret_values() == others | {KEY}
+
+    store.clear_secret(owner, "token", destinations=frozenset())
+    assert scrub.registered_secret_values() == others
+
+
+def test_with_the_switch_off_the_translator_secrets_are_not_collected(store, scrub_with_the_runtime_on, monkeypatch):
+    from app.config import settings
+
+    scrub, others = scrub_with_the_runtime_on
+    owner = (INSTANCE, _ai_engine(store, with_connection=False).id)
+    store.set_secret(owner, "token", KEY, destinations=frozenset())
+    monkeypatch.setattr(settings.translator, "runtime_v2", False, raising=False)
+    scrub.refresh_secret_values()
+    assert scrub.registered_secret_values() == others
+
+
 def test_an_empty_value_keeps_the_stored_secret_and_clear_removes_it(store):
     instance = _ai_engine(store, with_connection=False)
     owner = (INSTANCE, instance.id)
@@ -446,14 +497,6 @@ def test_an_instance_save_with_a_new_destination_marks_it_awaiting(store):
     result = store.save_instance_settings(instance.id, {"server": "http://b:9876"}, schema=schema)
     assert result.new_destinations == {"http://b:9876"} and result.awaiting_secrets
     assert store.get_instance(instance.id).awaiting_secrets == 1
-
-
-def test_secrets_are_scrubbed_from_text_once_stored(store):
-    from secret_store.scrub import scrub_text
-
-    instance = _ai_engine(store, with_connection=False)
-    store.set_secret((INSTANCE, instance.id), "token", KEY, destinations=frozenset())
-    assert KEY not in scrub_text(f"failed with {KEY}")
 
 
 # ---------------------------------------------------------------- plugin update

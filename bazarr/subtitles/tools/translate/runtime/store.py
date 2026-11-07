@@ -117,6 +117,28 @@ def _loads(text: str | None, default: Any) -> Any:
     return value if isinstance(value, type(default)) else default
 
 
+def collect_secret_values() -> set[str]:
+    """Every stored translator secret, decrypted, for the log scrubber.
+
+    A secret that will not decrypt is skipped with a warning. A database error
+    raises, so the scrubber keeps the set it already has.
+    """
+    from app.database import database
+    from secret_store import decrypt_secret
+
+    values: set[str] = set()
+    for encrypted in database.execute(select(TableTranslatorSecret.encrypted_value)).scalars().all():
+        try:
+            plain = decrypt_secret(encrypted)
+        except Exception as error:
+            logger.warning("A stored translator secret could not be decrypted to register it for scrubbing: %s",
+                           type(error).__name__)
+            continue
+        if isinstance(plain, str) and plain:
+            values.add(plain)
+    return values
+
+
 def default_plugin_active(plugin_id: str) -> bool:
     """True when the plugin is installed with a running release and is switched on."""
     from provider_hub import state as hub_state
@@ -369,7 +391,7 @@ class TranslatorStore:
                 row.updated_at = datetime.now()
             self._session.flush()
             self._refresh_awaiting(owner, destinations)
-        self._register_for_scrubbing(value)
+        self._refresh_scrubbing()
 
     def clear_secret(self, owner: Owner, field_name: str, *, destinations: frozenset[str]) -> None:
         with atomic(self._session, durable=True):
@@ -377,6 +399,7 @@ class TranslatorStore:
                 TableTranslatorSecret.owner_kind == owner[0], TableTranslatorSecret.owner_id == owner[1],
                 TableTranslatorSecret.field == field_name))
             self._refresh_awaiting(owner, destinations)
+        self._refresh_scrubbing()
 
     def secrets_for_request(self, owner: Owner, destinations: frozenset[str]) -> dict[str, str]:
         """The decrypted secrets a request with these effective destinations may carry.
@@ -444,12 +467,17 @@ class TranslatorStore:
             TableTranslatorSecret.owner_kind == owner[0], TableTranslatorSecret.owner_id == owner[1]))
 
     @staticmethod
-    def _register_for_scrubbing(value: str) -> None:
+    def _refresh_scrubbing() -> None:
+        """Rebuild the whole log-scrub set, which now includes the stored translator secrets.
+
+        Never registers a value on its own: registering replaces the set, which would
+        unmask every settings and Provider Hub credential.
+        """
         try:
-            from secret_store.scrub import register_secret_values
-            register_secret_values([value])
+            from secret_store.scrub import refresh_secret_values
+            refresh_secret_values()
         except Exception:
-            logger.debug("Could not register a translator secret for log scrubbing", exc_info=True)
+            logger.debug("Could not refresh the log scrubbing after a translator secret change", exc_info=True)
 
     # ----------------------------------------------------------- plugin update
     def destination_changes_for_update(
