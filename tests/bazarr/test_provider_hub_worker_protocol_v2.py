@@ -87,6 +87,9 @@ def session(make_session):
 
 
 def pid_alive(pid):
+    if os.name != "posix":
+        # os.kill(pid, 0) terminates the process on Windows.
+        pytest.skip("probing a pid with signal 0 is POSIX only")
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -2802,6 +2805,47 @@ def test_a_surviving_descendant_is_killed_when_the_exit_is_found_without_waitid(
     ours = list(session._threads)
     assert ours
     assert wait_until(lambda: not [t.name for t in ours if t.is_alive()]), [t.name for t in ours if t.is_alive()]
+
+
+def test_a_healthy_worker_is_not_probed_with_signal_zero_where_that_would_kill_it(make_session, monkeypatch):
+    session = make_session()
+    session.start()
+    process = session.process
+    # What Windows looks like to the session: no waitid, and os.kill is TerminateProcess.
+    monkeypatch.setattr(session_module, "_is_posix", lambda: False)
+    monkeypatch.delattr(os, "waitid", raising=False)
+    kills = []
+    real_kill = os.kill
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)) if sig == 0 else real_kill(pid, sig))
+    assert session.alive
+    assert session._exited(process) is False
+    assert session._wait_exit(process, 0.1) is False
+    with session._group_lock:
+        session._ours(process)
+    assert session.alive
+    assert kills == []
+    assert process.returncode is None
+    monkeypatch.undo()
+    assert pid_alive(process.pid)
+    assert session.request("echo", {"still": True}, timeout=5).result["echo"] == {"still": True}
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_close_reaps_the_worker_where_a_zombie_cannot_be_told_from_a_live_process(make_session, monkeypatch):
+    # No waitid, and no /proc: kill(pid, 0) answers yes for a zombie, so the exit is never seen.
+    monkeypatch.delattr(os, "waitid", raising=False)
+    monkeypatch.setattr(session_module, "_has_proc", lambda: False)
+    session = make_session(limits=fast_limits(kill_grace=3.0, term_grace=0.3))
+    session.start()
+    process = session.process
+    child = session.request("fork", {"inherit": True}, timeout=5).result["child"]
+    started = time.monotonic()
+    session.close(grace=0.5)
+    assert time.monotonic() - started < 8
+    assert process.returncode is not None
+    assert wait_until(lambda: not pid_alive(child), timeout=5)
+    ours = list(session._threads)
+    assert wait_until(lambda: not [t.name for t in ours if t.is_alive()])
 
 
 def test_run_returns_and_its_threads_leave_while_a_write_is_blocked_on_a_full_pipe():

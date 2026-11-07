@@ -222,6 +222,20 @@ def _signal_group(process, sig):
 _RUNNING, _EXITED, _GONE = "running", "exited", "gone"
 
 
+def _is_posix():
+    """Where process groups, ``waitid`` and signal 0 mean what the teardown code assumes.
+
+    On Windows ``os.kill`` terminates the process whatever the signal, there are
+    no process groups to protect from a reused number, and reaping early is
+    harmless, so none of the non-reaping logic below applies there.
+    """
+    return os.name == "posix"
+
+
+def _has_proc():
+    return sys.platform.startswith("linux")
+
+
 def _zombie_or_gone(pid):
     """Without ``waitid``: ``running`` (maybe alive), ``exited`` (a zombie) or ``gone``, never reaping.
 
@@ -229,7 +243,7 @@ def _zombie_or_gone(pid):
     ``/proc/<pid>/stat`` says whether it is one. Elsewhere a zombie reads as
     running: the caller then ends the group anyway at its deadline.
     """
-    if sys.platform.startswith("linux"):
+    if _has_proc():
         try:
             with open("/proc/%d/stat" % pid, "rb") as handle:
                 state = handle.read().rsplit(b")", 1)[1].split()[0]
@@ -258,6 +272,9 @@ def _probe(process):
     """
     if process.returncode is not None:
         return _EXITED
+    if not _is_posix():
+        # Never ``os.kill(pid, 0)`` here: on Windows that terminates the process.
+        return _EXITED if process.poll() is not None else _RUNNING
     waitid = getattr(os, "waitid", None)
     flag = getattr(os, "WNOWAIT", None)
     if waitid is None or flag is None:
@@ -1073,7 +1090,11 @@ class WorkerSession:
         process = self.process
         if process is None or not self._exited(process):
             return None
-        return self._reap(process, 0.0)
+        try:
+            return self._reap(process, 0.0)
+        except subprocess.TimeoutExpired:
+            # The group was just ended and the leader is not dead yet.
+            return None
 
     def _wait_exit(self, process, timeout):
         """Wait until the worker has exited, leaving it unreaped. False if it has not within ``timeout``."""
@@ -1095,11 +1116,19 @@ class WorkerSession:
                 _signal_group(process, _SIGKILL)
 
     def _reap(self, process, timeout):
-        """Wait for the exit, end the group, then reap the leader. Returns the exit code."""
-        if not self._wait_exit(process, timeout):
-            raise subprocess.TimeoutExpired(process.args, timeout)
-        self._end_group(process)
-        return process.wait()
+        """Wait for the exit, end the group, then reap the leader. Returns the exit code.
+
+        Once the group is ended (or the leader is known to be lost) there is
+        nothing left to protect, so the reap is a plain ``wait`` for the
+        remaining time: where an exit cannot be told from a live process without
+        reaping, waiting for the probe would never finish.
+        """
+        deadline = time.monotonic() + timeout
+        if not (self._group_ended or self._group_lost):
+            if not self._wait_exit(process, timeout):
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            self._end_group(process)
+        return process.wait(timeout=max(0.0, deadline - time.monotonic()))
 
     def _signal_leader_group(self, process, sig):
         """Signal the group only while the leader is certainly unreaped. True if handled.
