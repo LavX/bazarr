@@ -1042,6 +1042,7 @@ class JobsQueue:
         last_logged = None
         while True:
             try:
+                self._warm_translation_runtime_check()
                 job = self._reserve_next_job()
                 if job is None:
                     sleep(0.5)
@@ -1056,6 +1057,18 @@ class JobsQueue:
                     last_logged = now
                     logging.exception("BAZARR the jobs queue consumer hit an error and goes on")
                 sleep(0.5)
+
+    @staticmethod
+    def _warm_translation_runtime_check():
+        """With the v2 runtime switch on, look for its tables here, outside the queue lock.
+
+        The answer is remembered by the runtime, so the check the reservation makes under the lock is
+        served from memory. With the switch off this is one setting read and nothing else.
+        """
+        if getattr(settings.translator, "runtime_v2", False) is not True:
+            return
+        from subtitles.tools.translate.runtime import runtime_v2_enabled
+        runtime_v2_enabled()
 
     def _has_capacity_for(self, job) -> bool:
         """Whether ``job`` may start now. Call with ``_queue_lock`` held.
@@ -1075,6 +1088,27 @@ class JobsQueue:
 
         running_translations = sum(1 for running in self.jobs_running_queue if is_translation_job(running))
         return running_translations < settings.translator.openrouter_max_concurrent
+
+    def _translation_lane_is_full_only(self, job) -> bool:
+        """Whether ``job`` waits only because the translation lane is full, and the v2 runtime says to pass it over.
+
+        This is the one place the queue looks at the translation runtime switch. With the switch off it
+        is always False and a translation at the front holds the line, as it always did. With it on, a
+        translation that is held back by its lane alone does not hold up the jobs behind it: a mass
+        translation's batch of children no longer keeps a search or a download from starting while the
+        general limit has room. Call with ``_queue_lock`` held.
+        """
+        if not is_translation_job(job):
+            return False
+        if len(self.jobs_running_queue) >= settings.general.concurrent_jobs:
+            return False
+        # The raw setting first, the way the kind registration reads it: with the switch off the runtime
+        # package is never imported here. With it on the table check is answered from memory; the consumer
+        # loop refreshes it outside the lock (_warm_translation_runtime_check).
+        if getattr(settings.translator, "runtime_v2", False) is not True:
+            return False
+        from subtitles.tools.translate.runtime import runtime_v2_enabled
+        return runtime_v2_enabled()
 
     def translation_lane_counts(self) -> dict:
         """The translations waiting and the ones holding a lane slot, counted the way the lane counts them."""
@@ -1119,6 +1153,8 @@ class JobsQueue:
                 if not self._lane_has_room(job):
                     continue
                 if not self._has_capacity_for(job):
+                    if self._translation_lane_is_full_only(job):
+                        continue
                     return None
 
                 self.jobs_pending_queue.remove(job)

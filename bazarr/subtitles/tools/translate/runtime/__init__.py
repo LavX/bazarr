@@ -12,14 +12,21 @@ Modules in this package may be imported with the switch off; they must not run.
 from __future__ import annotations
 
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 SWITCH_PATH = "translator.runtime_v2"
 
-_REQUIRED_TABLES = frozenset({"translator_engine_instances", "translator_connections", "translator_secrets"})
+_REQUIRED_TABLES = frozenset({"translator_engine_instances", "translator_connections", "translator_secrets",
+                              "translator_jobs", "translator_checkpoints"})
 # A positive answer is final for the process: tables are never dropped while it runs.
 _tables_present = False
+# A negative answer (the revisions are not applied yet, or the check failed) is remembered for a while, so a
+# caller that asks on every pass does not inspect the database each time, and a failing check is not logged
+# on every pass.
+ABSENT_RECHECK_SECONDS = 30.0
+_absent_until = 0.0
 
 
 def runtime_v2_flag() -> bool:
@@ -33,9 +40,11 @@ def runtime_v2_flag() -> bool:
 
 
 def _runtime_tables_exist() -> bool:
-    global _tables_present
+    global _tables_present, _absent_until
     if _tables_present:
         return True
+    if time.monotonic() < _absent_until:
+        return False
     try:
         from sqlalchemy import inspect
 
@@ -44,8 +53,11 @@ def _runtime_tables_exist() -> bool:
         present = _REQUIRED_TABLES <= set(inspect(engine).get_table_names())
     except Exception:
         logger.exception("Could not check for the translation runtime tables")
+        _absent_until = time.monotonic() + ABSENT_RECHECK_SECONDS
         return False
     _tables_present = present
+    if not present:
+        _absent_until = time.monotonic() + ABSENT_RECHECK_SECONDS
     return present
 
 

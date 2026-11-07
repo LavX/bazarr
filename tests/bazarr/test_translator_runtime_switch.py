@@ -27,6 +27,7 @@ def fresh_table_check(monkeypatch):
     from subtitles.tools.translate import runtime
 
     monkeypatch.setattr(runtime, "_tables_present", False)
+    monkeypatch.setattr(runtime, "_absent_until", 0.0)
     return runtime
 
 
@@ -58,8 +59,14 @@ def test_on_but_without_the_tables_the_runtime_stays_off(monkeypatch, tmp_path, 
         assert runtime.runtime_v2_enabled() is False
         database.Base.metadata.create_all(engine, tables=[
             database.TableTranslatorEngineInstance.__table__, database.TableTranslatorConnection.__table__])
+        monkeypatch.setattr(runtime, "_absent_until", 0.0)  # past the short wait after a no
         assert runtime.runtime_v2_enabled() is False  # a table is still missing
         database.Base.metadata.create_all(engine, tables=[database.TableTranslatorSecret.__table__])
+        monkeypatch.setattr(runtime, "_absent_until", 0.0)
+        assert runtime.runtime_v2_enabled() is False  # the job tables are still missing
+        database.Base.metadata.create_all(engine, tables=[
+            database.TableTranslatorJob.__table__, database.TableTranslatorCheckpoint.__table__])
+        monkeypatch.setattr(runtime, "_absent_until", 0.0)
         assert runtime.runtime_v2_enabled() is True
     finally:
         engine.dispose()
@@ -89,6 +96,40 @@ def test_a_boot_builds_no_translator_tables(monkeypatch, tmp_path, fresh_table_c
     finally:
         session.close()
         engine.dispose()
+
+
+def test_a_missing_table_answer_is_remembered_for_a_short_while(monkeypatch, fresh_table_check):
+    runtime = fresh_table_check
+    monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: True)
+    now = [1000.0]
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: now[0])
+    asked = []
+
+    def inspect_names(_engine):
+        asked.append(1)
+        return type("Inspector", (), {"get_table_names": staticmethod(lambda: [])})()
+
+    monkeypatch.setattr("sqlalchemy.inspect", inspect_names)
+    for _ in range(5):  # a consumer loop asking every pass
+        assert runtime.runtime_v2_enabled() is False
+    assert len(asked) == 1
+    now[0] += runtime.ABSENT_RECHECK_SECONDS
+    assert runtime.runtime_v2_enabled() is False
+    assert len(asked) == 2
+
+
+def test_a_failing_table_check_is_not_repeated_on_every_pass(monkeypatch, fresh_table_check, caplog):
+    runtime = fresh_table_check
+    monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: True)
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: 1000.0)
+
+    def broken(_engine):
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr("sqlalchemy.inspect", broken)
+    for _ in range(5):
+        assert runtime.runtime_v2_enabled() is False
+    assert caplog.text.count("Could not check for the translation runtime tables") == 1
 
 
 def test_only_a_real_true_turns_the_switch_on(monkeypatch):

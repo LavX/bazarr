@@ -1038,6 +1038,78 @@ class TableTranslatorSecret(Base):
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+class TableTranslatorJob(Base):
+    """One translation of a source subtitle into a target, from the request to its end.
+
+    At most one row per ``source_path`` and ``target`` is active (queued, running or
+    awaiting a retry); the partial unique index holds that against two requests that
+    arrive together. Ended rows stay as the record of what happened.
+    ``queue_job_id`` is the in-memory jobs queue's id and means nothing after a restart.
+    The engine fields are filled in when the job starts, because the engine is chosen
+    at dispatch.
+    """
+
+    __tablename__ = 'translator_jobs'
+    __table_args__ = (
+        CheckConstraint("state IN ('queued', 'running', 'awaiting_retry', 'completed', 'failed', 'cancelled', "
+                        "'superseded')", name='ck_translator_jobs_state'),
+        Index('ux_translator_jobs_active', 'source_path', 'target', unique=True,
+              sqlite_where=text("state IN ('queued', 'running', 'awaiting_retry')"),
+              postgresql_where=text("state IN ('queued', 'running', 'awaiting_retry')")),
+        Index('ix_translator_jobs_state', 'state'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_path = mapped_column(Text, nullable=False)
+    target = mapped_column(Text, nullable=False)
+    state = mapped_column(Text, nullable=False, default='queued', server_default='queued')
+    queue_job_id = mapped_column(Integer)
+    manual = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    pinned_connection_id = mapped_column(Integer)
+    engine_instance_id = mapped_column(Integer)
+    settings_revision = mapped_column(Integer)
+    release_digest = mapped_column(Text)
+    source_digest = mapped_column(Text)
+    error_class = mapped_column(Text)
+    error_message = mapped_column(Text)
+    retry_at = mapped_column(DateTime)
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    started_at = mapped_column(DateTime)
+    finished_at = mapped_column(DateTime)
+
+
+class TableTranslatorCheckpoint(Base):
+    """The batches of one translation that are already done, so a restart resumes after them.
+
+    The key is the source path, a digest of its normalized lines, the target, the engine
+    instance, that instance's settings revision and the engine release digest. The
+    connection that served a batch is not part of it. ``batches_json`` maps a batch
+    index to its translated lines. ``expires_at`` is set only while a failed job waits
+    for a retry.
+    """
+
+    __tablename__ = 'translator_checkpoints'
+    __table_args__ = (
+        UniqueConstraint('source_path', 'source_digest', 'target', 'engine_instance_id', 'settings_revision',
+                         'release_digest', name='ux_translator_checkpoints_key'),
+        Index('ix_translator_checkpoints_source', 'source_path', 'target'),
+        Index('ix_translator_checkpoints_expires_at', 'expires_at'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_path = mapped_column(Text, nullable=False)
+    source_digest = mapped_column(Text, nullable=False)
+    target = mapped_column(Text, nullable=False)
+    engine_instance_id = mapped_column(Integer, nullable=False)
+    settings_revision = mapped_column(Integer, nullable=False)
+    release_digest = mapped_column(Text, nullable=False, default='', server_default='')
+    batches_json = mapped_column(Text, nullable=False, default='{}', server_default='{}')
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    expires_at = mapped_column(DateTime)
+
+
 # Tables that only a migration creates. The translation runtime is dark behind a switch, so a boot with the
 # switch off must not add its tables; init_db() leaves them out of create_all. Take a name out of this set
 # when the revision that creates the table has merged and the table should exist on a fresh install.
@@ -1045,6 +1117,8 @@ MIGRATION_ONLY_TABLES = frozenset({
     TableTranslatorEngineInstance.__tablename__,
     TableTranslatorConnection.__tablename__,
     TableTranslatorSecret.__tablename__,
+    TableTranslatorJob.__tablename__,
+    TableTranslatorCheckpoint.__tablename__,
 })
 
 
