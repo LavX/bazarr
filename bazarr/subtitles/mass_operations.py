@@ -1767,19 +1767,26 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                               if item.get('embedded'))
             pending_extractions = {}
 
+            # The next embedded item, pulled but not yet submitted. Holding it
+            # keeps an item from being lost when the gate is closed at refill
+            # time, without asking the gate when no embedded item is left.
+            held = None
+
             def refill_extractions(consumed=0):
+                nonlocal held
                 while len(pending_extractions) < workers:
-                    # Check the gate before advancing the iterator, so an item
-                    # is never pulled and then dropped while translation is off.
+                    if held is None:
+                        held = next(embedded_items, None)
+                        if held is None:
+                            break
+                    if held[0] <= consumed:
+                        # Passed while translation was off: do not extract it now.
+                        held = None
+                        continue
                     if not translation_available().available:
                         break
-                    next_item = next(embedded_items, None)
-                    if next_item is None:
-                        break
-                    if next_item[0] <= consumed:
-                        # Passed while translation was off: do not extract it now.
-                        continue
-                    index, embedded_item = next_item
+                    index, embedded_item = held
+                    held = None
                     # A cancel or failure can leave up to one extracted track per
                     # worker in the cache, counting any extraction still running.
                     # These are harmless cache files, and the batch does not wait
