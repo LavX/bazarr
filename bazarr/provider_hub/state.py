@@ -150,6 +150,40 @@ def mutate_state(
         return result
 
 
+def mutate_state_checked(
+    mutator: Callable[[dict[str, Any]], Any],
+    validate: Callable[[Any], None],
+    path: str | os.PathLike[str] | None = None,
+) -> Any:
+    """``mutate_state`` for a decision that must not run on a state it cannot read.
+
+    The stored document is read as it is, under the write lock, and handed to
+    ``validate`` before anything else happens. A missing file, text that is not
+    JSON, or a ``validate`` that raises ends the call with that error and writes
+    nothing: ``load_state`` would have turned any of them into an empty default.
+    """
+    with state_write_lock():
+        data = read_state_document(path)
+        validate(data)
+        data = _normalized_state(data)
+        result = mutator(data)
+        save_state(data, path)
+        return result
+
+
+def read_state_document(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """The stored document as it is, normalised, or an error: never a default.
+
+    Raises when the file is missing, is not JSON, or its root is not an object.
+    """
+    current = Path(path) if path is not None else state_file()
+    with current.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError("the Provider Hub state document is not an object")
+    return data
+
+
 def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     current = Path(path) if path is not None else state_file()
     if not current.exists():

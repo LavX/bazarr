@@ -29,7 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .state import load_state, mutate_state
+from .state import load_state, load_state_strict, mutate_state, mutate_state_checked, read_state_document
 from .venv import (
     SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, is_pinned, path_key, pinned_paths, python_executable,
 )
@@ -179,7 +179,13 @@ def reconcile_environments(
     that skips any row that changed in the meantime.
     """
     summary: dict[str, list[str]] = {"adopted": [], "repointed": [], "needs_repair": [], "kept": []}
-    state = load_state()
+    try:
+        state = load_state_strict()
+    except (OSError, ValueError):
+        # An unreadable document is not an empty inventory: reading it as one
+        # would record nothing and then write the default over what is stored.
+        logger.warning("Provider Hub: the state could not be read, so no environment was reconciled", exc_info=True)
+        return summary
     envs = {fp: dict(entry) for fp, entry in registry(state).items() if isinstance(entry, dict)}
     adoptions: dict[str, str] = {}
     flags: list[str] = []
@@ -393,6 +399,47 @@ def remove_inside_hub(root: str | Path, target: str | Path) -> bool:
     return True
 
 
+class StateUnreadable(RuntimeError):
+    """The stored installation inventory is missing or malformed, so nothing may be deleted on its say-so."""
+
+
+def validate_inventory(document: Any) -> None:
+    """Refuse a state document whose installation inventory cannot be trusted.
+
+    A cleanup deletes whatever the inventory does not reference, so an inventory
+    that is absent, of the wrong type, or has a row it cannot read must stop it:
+    treating that as "nothing is referenced" would delete every environment.
+    """
+    if not isinstance(document, dict):
+        raise StateUnreadable("the state document is not an object")
+    installations = document.get("installations")
+    if not isinstance(installations, dict):
+        raise StateUnreadable("the state has no installation inventory")
+    for provider_id, row in installations.items():
+        if not isinstance(row, dict):
+            raise StateUnreadable(f"the installation {provider_id!r} is not readable")
+        for key in ("python_path", "staged_python_path"):
+            if row.get(key) is not None and not isinstance(row[key], str):
+                raise StateUnreadable(f"the installation {provider_id!r} has an unreadable {key}")
+    envs = document.get(ENV_REGISTRY_KEY)
+    if envs is not None and not isinstance(envs, dict):
+        raise StateUnreadable("the environment record is not readable")
+
+
+def _checked_state() -> dict[str, Any]:
+    """The current state, only if its inventory validates. Raises ``StateUnreadable`` or the read error.
+
+    A hub that has never written a state document has nothing recorded, which is
+    a fresh install and not a damaged one: it reads as the default.
+    """
+    try:
+        document = read_state_document()
+    except FileNotFoundError:
+        return load_state()
+    validate_inventory(document)
+    return load_state()
+
+
 def discard_if_unused(root: str | Path, env_path: str | Path) -> bool:
     """Remove an environment a failed or stopped install built, unless something uses it.
 
@@ -400,7 +447,12 @@ def discard_if_unused(root: str | Path, env_path: str | Path) -> bool:
     ``venv.release_pins`` so this install's own hold does not count.
     """
     with _ENV_LOCK:
-        return _remove_environment(root, env_path, protected_env_paths(load_state()))
+        try:
+            state = _checked_state()
+        except (StateUnreadable, OSError, ValueError):
+            logger.warning("Provider Hub: the state could not be read, so no environment was removed", exc_info=True)
+            return False
+        return _remove_environment(root, env_path, protected_env_paths(state))
 
 
 def _legacy_environment_dirs(root: Path) -> list[Path]:
@@ -472,5 +524,8 @@ def cleanup_environments(root: str | Path) -> list[str]:
     # to read the record and pin, so an install never sees a record whose
     # directory a cleanup is about to remove.
     with _ENV_LOCK:
-        mutate_state(apply)
+        try:
+            mutate_state_checked(apply, validate_inventory)
+        except (StateUnreadable, OSError, ValueError):
+            logger.warning("Provider Hub: the state could not be read, so no environment was removed", exc_info=True)
     return removed

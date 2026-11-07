@@ -714,3 +714,62 @@ def test_an_environment_with_packages_is_not_adopted_as_an_empty_one(hub, no_sub
     recorded = {entry["path"] for entry in load_state()["plugin_envs"].values()}
     # No requirements file is accepted for an empty set; one that lists packages is not.
     assert recorded == {str(bare)}
+
+
+MALFORMED_STATES = [
+    "null",
+    "[]",
+    '"text"',
+    "42",
+    "{}",
+    '{"installations": null}',
+    '{"installations": []}',
+    '{"installations": {"alpha": 5}}',
+    '{"installations": {"alpha": {"python_path": 7}}}',
+    '{"installations": {}, "plugin_envs": []}',
+    "{not json",
+    None,
+]
+
+
+def _two_environments(hub):
+    shared = _plain_env(hub / "shared_envs" / "recorded")
+    legacy = _plain_env(hub / "envs" / "alpha" / "1.0.0" / "fp")
+    return shared, legacy
+
+
+@pytest.mark.parametrize("document", MALFORMED_STATES)
+def test_cleanup_deletes_nothing_when_the_state_cannot_be_read(hub, document):
+    shared, legacy = _two_environments(hub)
+    state_file = hub / "state.json"
+    if document is not None:
+        state_file.write_text(document, encoding="utf-8")
+
+    assert env_registry.cleanup_environments(hub) == []
+
+    assert (shared / "bin" / "python").exists() and (legacy / "bin" / "python").exists()
+    # The unreadable document is left as it was, not rewritten as an empty default.
+    assert state_file.exists() is (document is not None)
+    if document is not None:
+        assert state_file.read_text(encoding="utf-8") == document
+
+
+@pytest.mark.parametrize("document", [item for item in MALFORMED_STATES if item is not None])
+def test_a_stopped_install_keeps_a_recorded_environment_when_the_state_cannot_be_read(hub, document):
+    recorded = _plain_env(hub / "shared_envs" / "recorded")
+    (hub / "state.json").write_text(document, encoding="utf-8")
+
+    assert env_registry.discard_if_unused(hub, recorded) is False
+
+    assert (recorded / "bin" / "python").exists()
+
+
+@pytest.mark.parametrize("document", ["null", "[]", '"text"', "42", "{not json"])
+def test_boot_reconcile_leaves_an_unreadable_state_alone(hub, no_subprocess, document):
+    _legacy_env(hub, "alpha", [REQ_A])
+    (hub / "state.json").write_text(document, encoding="utf-8")
+
+    summary = env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+
+    assert summary == {"adopted": [], "repointed": [], "needs_repair": [], "kept": []}
+    assert (hub / "state.json").read_text(encoding="utf-8") == document
