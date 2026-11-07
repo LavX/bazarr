@@ -484,7 +484,7 @@ def test_two_threads_entering_by_each_helper_do_not_wait_on_each_other_for_ever(
                     threading.Event().wait(0.5)  # let the other thread try to enter
                 with inner(session):
                     pass
-        except BaseException as error:  # noqa: BLE001 - the test reports whatever went wrong
+        except BaseException as error:
             failures.append(repr(error))
         finally:
             session.remove()
