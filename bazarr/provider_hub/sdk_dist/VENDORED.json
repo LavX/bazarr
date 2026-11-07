@@ -1,0 +1,25 @@
+{
+  "files": {
+    "__init__.py": "811b8c90ba415b1a4ae2a3e0394a9a4bdbf7e6ea44c9891a8a55d73a33b7ddb0",
+    "__main__.py": "4a8ab7e3ad54a474e86fb87d164ccc6de14d9f2fdb61241f1af6f84a9807b648",
+    "_bootstrap.py": "f639c4e61c0828be6e7e08dc4957f5ea0f729ba6cbd2f26564719da1a27adabb",
+    "_protocol/__init__.py": "4a53bc8fd53033e754d70df21ec17a5fa4f48606b750c0ad69951fe1cdeb7602",
+    "_protocol/frames.py": "3005c0f827acfdb72b998fb925ecdf693e36a48aae0da2873bfdff648ae81f69",
+    "_protocol/worker_channel.py": "d49370279dc99695cbba5d27562f53d3d8195f6563104c908150006a27469d27",
+    "context.py": "a359b16a992f5cf0b57763568be41500efaefb82912e25991cb7faba50718761",
+    "errors.py": "795ddcbb5acba29103cad14b0bbd7097e6e890559a5657856a0ba05607972849",
+    "kinds.py": "dc225a61b3f41293d759493b1e463f3b75afedd2fee6b85ad983b30484c72e9d",
+    "protocol.py": "be0480366543156bc52f7586fb30d5a90c1838533fd37786a1780d86a51c6ab7",
+    "py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "runner.py": "449c2d58187bfd9063a45c3d71e4a6811756eb8fb39b127f6817d4bb9a858852",
+    "testing/__init__.py": "618f7a95cababa6f883b02248993a2a86fca785706957357316b0073fc6585c0",
+    "testing/conformance.py": "39a3e8dd3b4c74591c863b7b24a5afa76bc7e793386669199a604d2041b5ffc1",
+    "testing/host.py": "683f139316c15b9a98c43a65f1bb9fbd96a74a0044892f46ab6a7146744b8517",
+    "translator/__init__.py": "421ef78a4384852dee8a5116ca50ff769108db41853a1967bf7d8825836b00cd",
+    "translator/v1.py": "edf65cd90819f5886cd9479ca4e69e2392425b3a7b453866018b657ab6fa8292"
+  },
+  "package": "bazarr_plugin_sdk",
+  "source_commit": "7f73ca67005621d8d5b2735d93956fa069499a03",
+  "tag": "v0.1.0",
+  "version": "0.1.0"
+}
