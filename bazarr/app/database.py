@@ -400,6 +400,11 @@ class TableEpisodes(Base):
         Index('ix_table_episodes_wanted', 'sonarrEpisodeId',
               sqlite_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'"),
               postgresql_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'")),
+        # Search runs look up the few episodes with a pending forced search
+        # request; the index holds only those rows.
+        Index('ix_table_episodes_forced_search', 'id',
+              sqlite_where=text('forced_search_requested_at IS NOT NULL'),
+              postgresql_where=text('forced_search_requested_at IS NOT NULL')),
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)

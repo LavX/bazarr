@@ -134,11 +134,12 @@ class EpisodesForcedSearch(Resource):
     run that covers the episode picks it up and clears it once it has finished.
     """
     request_parser = reqparse.RequestParser()
-    request_parser.add_argument('seriesid', type=int, required=True,
+    # The query string wins over a form or JSON body.
+    request_parser.add_argument('seriesid', type=int, required=True, location=('args', 'form', 'json'),
                                 help='Upstream Sonarr series ID (legacy; not unique across instances)')
-    request_parser.add_argument('episodeid', type=int, required=True,
+    request_parser.add_argument('episodeid', type=int, required=True, location=('args', 'form', 'json'),
                                 help='Upstream Sonarr episode ID (legacy; not unique across instances)')
-    request_parser.add_argument('arr_instance_id', type=int, required=False,
+    request_parser.add_argument('arr_instance_id', type=int, required=False, location=('args', 'form', 'json'),
                                 help='Owning Sonarr instance id; required when the ids exist in more than one')
 
     @staticmethod

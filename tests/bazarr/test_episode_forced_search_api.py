@@ -90,6 +90,28 @@ def test_clearing_a_request_that_is_not_there_succeeds(forced_api):
 
 
 @pytest.mark.parametrize("verb", ["post", "delete"])
+def test_the_ids_can_come_in_the_query_string(forced_api, verb):
+    client, session, _events = forced_api
+    url = ROOT + "?seriesid=5&episodeid=51&arr_instance_id=2"
+    assert client.post(url, headers=HEADERS).status_code == 204
+    assert _flags(session)[2] is not None
+    if verb == "delete":
+        assert client.delete(url, headers=HEADERS).status_code == 204
+        assert _flags(session)[2] is None
+    # Without the owner the query string alone is still ambiguous.
+    assert getattr(client, verb)(ROOT + "?seriesid=5&episodeid=51", headers=HEADERS).status_code == 409
+
+
+def test_the_query_string_wins_over_a_body(forced_api):
+    client, session, _events = forced_api
+    assert client.post(ROOT + "?seriesid=5&episodeid=52", data=_form(episode=999),
+                       headers=HEADERS).status_code == 204
+    assert _flags(session)[3] is not None
+    assert client.delete(ROOT, json=_form(), headers=HEADERS).status_code == 204
+    assert _flags(session)[3] is None
+
+
+@pytest.mark.parametrize("verb", ["post", "delete"])
 @pytest.mark.parametrize("form", [_form(episode=999), {"seriesid": 6, "episodeid": 52}])
 def test_an_unknown_episode_is_not_found(forced_api, verb, form):
     client, session, events = forced_api

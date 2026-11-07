@@ -14,6 +14,7 @@ from alembic.operations import Operations
 REVISION = "a5e2c8d19f73"
 PREVIOUS = "f3b8d2a6c417"
 COLUMN = "forced_search_requested_at"
+INDEX = "ix_table_episodes_forced_search"
 ROOT = Path(__file__).parents[2]
 
 
@@ -35,7 +36,9 @@ def _shape(connection):
     # Sorted by name: an added column lands last, a fresh table has its ORM order.
     columns = sorted((c["name"], str(c["type"]), c["nullable"], c["default"])
                      for c in inspector.get_columns("table_episodes"))
-    indexes = sorted((i["name"], tuple(i["column_names"]), bool(i["unique"]))
+    indexes = sorted((i["name"], tuple(i["column_names"]), bool(i["unique"]),
+                      str((i.get("dialect_options") or {}).get("postgresql_where")
+                          or (i.get("dialect_options") or {}).get("sqlite_where")))
                      for i in inspector.get_indexes("table_episodes"))
     foreign_keys = sorted((tuple(f["constrained_columns"]), f["referred_table"],
                            (f.get("options") or {}).get("ondelete"))
@@ -50,6 +53,7 @@ def _build(connection):
 
 def _drop_column(connection):
     """The table as the previous head left it: the ORM schema without the column."""
+    connection.execute(sa.text(f"DROP INDEX {INDEX}"))
     connection.execute(sa.text(f"ALTER TABLE table_episodes DROP COLUMN {COLUMN}"))
 
 
@@ -75,8 +79,12 @@ def _exercise(connection, reference):
     column = _columns(connection)[COLUMN]
     assert column["nullable"] is True and column["default"] is None
     assert isinstance(column["type"], sa.DateTime)
-    # An upgraded database and a fresh install end up with the same table.
+    # An upgraded database and a fresh install end up with the same table,
+    # with the index that holds only the pending rows.
     assert _shape(connection) == reference
+    indexes = {i[0]: i for i in _shape(connection)[1]}
+    assert indexes[INDEX][1] == ("id",)
+    assert "forced_search_requested_at IS NOT NULL" in indexes[INDEX][3]
     row = connection.execute(sa.text(f"SELECT title, {COLUMN} FROM table_episodes WHERE id = 1")).one()
     assert tuple(row) == ("E", None)
 
@@ -140,6 +148,16 @@ def test_postgres_forced_search_migration():
             _exercise(connection, reference)
     finally:
         engine.dispose()
+
+
+def test_upgrading_a_schema_that_is_already_current_changes_nothing(tmp_path):
+    with _sqlite(tmp_path, "current.db") as connection:
+        _build(connection)
+        before = _shape(connection)
+        migration = _migration()
+        with Operations.context(MigrationContext.configure(connection, opts={"render_as_batch": True})):
+            migration.upgrade()
+        assert _shape(connection) == before
 
 
 def test_the_migration_is_the_only_head_of_the_chain():
