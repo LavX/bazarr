@@ -34,6 +34,8 @@ Operations:
 ``leak``           writes the request's secret values to stderr.
 ``leak_error``     raises an exception whose message starts with the request's
                    secret, ``tail`` characters long after it.
+``parallel_calls``  makes the host calls named in ``names``, each from its own thread.
+``list_result``     returns a JSON array instead of an object.
 ``nan_result``      returns a result that cannot be encoded as JSON.
 ``bad_str``        raises an exception that cannot be turned into text.
 ``raw_error``      answers with an error carrying the secret, uncleaned.
@@ -49,6 +51,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -231,6 +234,24 @@ def _handle(operation):
         # traceback is cut at the worker.
         value = next(iter(operation.secrets.values()))
         raise ValueError(value + "B" * int(params.get("tail", 10)))
+    if name == "parallel_calls":
+        # Calls for one request, sent from separate threads without waiting on each other.
+        results = [None] * len(params["names"])
+
+        def run_call(index, call_name):
+            results[index] = operation.call(call_name, {})
+
+        threads = []
+        for index, call_name in enumerate(params["names"]):
+            thread = threading.Thread(target=run_call, args=(index, call_name))
+            thread.start()
+            threads.append(thread)
+            time.sleep(0.1)
+        for thread in threads:
+            thread.join()
+        return {"results": results}
+    if name == "list_result":
+        return [1, 2, 3]
     if name == "nan_result":
         return {"value": float("nan")}
     if name == "bad_str":

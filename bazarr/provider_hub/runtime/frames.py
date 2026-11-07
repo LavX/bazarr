@@ -178,12 +178,6 @@ class MalformedFrame(FrameError):
         self.type_byte = type_byte
 
 
-def shown(value, limit=64):
-    """A worker-supplied value, bounded and quoted, for use in an error message."""
-    text = value if isinstance(value, str) else repr(value)
-    return repr(text[:limit]) + ("..." if len(text) > limit else "")
-
-
 def default_caps():
     return {FRAME_CONTROL: MAX_CONTROL_BYTES, FRAME_DATA: MAX_DATA_BYTES}
 
@@ -375,7 +369,8 @@ def validate_message(message, sender):
         raise MalformedFrame("control message has no type")
     allowed = FROM_WORKER if sender == "worker" else FROM_HOST
     if name not in allowed:
-        raise MalformedFrame("%s is not a message a %s may send" % (shown(name), sender))
+        # The value is the peer's own text and may be a secret echoed back: never repeat it.
+        raise MalformedFrame("unknown message type for a %s" % sender)
     for key, check in _REQUIRED[name].items():
         if key not in message or not check(message[key]):
             raise MalformedFrame("%s message has a missing or invalid %r" % (name, key))

@@ -840,16 +840,37 @@ def test_a_slow_host_call_does_not_stall_another_requests_calls(make_session):
     assert slow_handle.wait(5).result["ack"] == {"slow": True}
 
 
-def test_calls_of_one_request_run_in_order_and_one_at_a_time(make_session):
-    active = []
+def test_calls_of_one_request_are_serialized_even_when_sent_back_to_back(make_session):
+    release = threading.Event()
+    log = []
+
+    def first(call):
+        log.append("first start")
+        release.wait(5)
+        log.append("first end")
+        return {}
+
+    def second(call):
+        log.append("second start")
+        return {}
+
+    session = make_session(host_calls={"first": first, "second": second})
+    session.start()
+    handle = session.submit("parallel_calls", {"names": ["first", "second"]}, timeout=10)
+    assert wait_until(lambda: "first start" in log)
+    time.sleep(0.5)
+    # The second call reached the host while the first handler still ran, and waited.
+    assert log == ["first start"]
+    release.set()
+    handle.wait(5)
+    assert log == ["first start", "first end", "second start"]
+
+
+def test_calls_of_one_request_run_in_the_order_sent(make_session):
     order = []
 
     def checkpoint(call):
-        active.append(1)
-        assert len(active) == 1
-        time.sleep(0.05)
         order.append(call.params["done"])
-        active.pop()
         return {}
 
     session = make_session(host_calls={"reserve": lambda c: {}, "checkpoint": checkpoint, "usage": lambda c: {}})
@@ -1203,23 +1224,27 @@ def test_one_slot_worker_accepts_the_next_request_at_once(make_session):
 # ------------------------------------------- worker text, encoding and shutdown
 
 
-def test_unknown_message_name_echoing_a_secret_is_scrubbed_from_the_violation(tmp_path):
+LONG_SECRET = "sk-" + "abcdefghij" * 20
+
+
+def test_unknown_message_name_is_never_echoed_in_the_violation(tmp_path):
     body = with_reader(
         """
         next_request()
         out.write_control({"t": %r})
         time.sleep(30)
         """
-        % SECRET
+        % LONG_SECRET
     )
     session = hostile_session(tmp_path, body)
     try:
         session.start()
         with pytest.raises(ProtocolViolation) as caught:
-            session.submit("x", secrets={"key": SECRET}).wait(8)
-        assert SECRET not in str(caught.value)
-        assert "***" in str(caught.value)
-        assert len(str(caught.value)) < 400
+            session.submit("x", secrets={"key": LONG_SECRET}).wait(8)
+        text = str(caught.value)
+        assert "unknown message type" in text
+        # Not the whole value and not a piece of it, whatever the cut.
+        assert LONG_SECRET[:10] not in text and LONG_SECRET[-10:] not in text
     finally:
         session.close(grace=0.3)
 
@@ -1325,3 +1350,92 @@ def test_requests_during_shutdown_are_refused(tmp_path):
     assert seen == ["res", "bye"]
     thread.join(5)
     assert status == [0]
+
+
+PEM_SECRET = (
+    "-----BEGIN PRIVATE KEY-----\n"
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n"
+    "q1w2e3r4t5y6u7i8o9p0aSdFgHjKlZxCvBnMqWeRtYuIoPaSdFgH\n"
+    "-----END PRIVATE KEY-----"
+)
+
+
+def test_each_line_of_a_multiline_secret_is_redacted_from_stderr(make_session):
+    lines = []
+    session = make_session(on_stderr=lines.append)
+    session.start()
+    session.request("leak", secrets={"key": PEM_SECRET}, timeout=5)
+    assert wait_until(lambda: len(lines) >= 4)
+    for part in PEM_SECRET.splitlines():
+        assert not any(part in line for line in lines)
+
+
+def test_multiline_secret_is_redacted_from_error_text_too(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("leak_error", {"tail": 5}, secrets={"key": PEM_SECRET}, timeout=5)
+    for part in PEM_SECRET.splitlines():
+        assert part not in str(caught.value)
+        assert part not in caught.value.traceback
+
+
+def test_start_after_close_is_refused_and_spawns_nothing():
+    spawned = []
+    session = WorkerSession(spawn=lambda: spawned.append(1), limits=fast_limits())
+    session.close()
+    with pytest.raises(SessionClosed):
+        session.start()
+    assert spawned == []
+
+
+def test_close_racing_start_ends_the_worker_that_was_spawned():
+    import subprocess
+
+    started = threading.Event()
+    processes = []
+
+    def slow_spawn():
+        started.set()
+        time.sleep(0.4)
+        process = subprocess.Popen(
+            fake_worker_command(), env={**os.environ, **fake_worker_env()},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        processes.append(process)
+        return process
+
+    session = WorkerSession(spawn=slow_spawn, kind="translator", limits=fast_limits())
+    outcome = []
+
+    def run_start():
+        try:
+            session.start()
+            outcome.append("started")
+        except Exception as error:
+            outcome.append(error)
+
+    thread = threading.Thread(target=run_start, daemon=True)
+    thread.start()
+    assert started.wait(5)
+    session.close(grace=0.5)
+    thread.join(10)
+    assert processes
+    assert wait_until(lambda: processes[0].poll() is not None)
+    assert not session.alive
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0])
+def test_unusable_timeout_is_refused_before_a_slot_is_taken(make_session, bad):
+    session = make_session({"max_in_flight": 1})
+    session.start()
+    with pytest.raises(ValueError):
+        session.submit("echo", timeout=bad)
+    assert session.in_flight == 0
+    assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+def test_a_handler_returning_a_list_fails_only_that_request(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("list_result", timeout=5)
+    assert caught.value.code == frames.Codes.PLUGIN_ERROR
+    assert "not an object" in str(caught.value)
+    assert session.alive
+    assert session.request("echo", timeout=5).result["echo"] == {}

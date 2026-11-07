@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import queue
 import re
@@ -164,6 +165,20 @@ class RequestHandle:
         return self._request.outcome
 
 
+def _with_line_parts(values):
+    """The secret values plus each substantial line of a multiline one.
+
+    Stderr and tracebacks are cut into lines, so a PEM key never appears whole
+    in a log line; each of its lines has to be a secret of its own.
+    """
+    out = []
+    for value in values:
+        out.append(value)
+        if "\n" in value or "\r" in value:
+            out.extend(line.strip() for line in value.splitlines() if len(line.strip()) >= 8)
+    return out
+
+
 def _default_env():
     return {
         "PATH": os.environ.get("PATH", ""),
@@ -276,6 +291,8 @@ class WorkerSession:
     def start(self) -> Welcome:
         """Spawn the worker and run the handshake. Raises ``HandshakeError``."""
         with self._lock:
+            if self._closed:
+                raise self._failure or SessionClosed("session is closed")
             if self.process is not None:
                 raise RuntimeError("session already started")
             if self._spawn is not None:
@@ -329,6 +346,10 @@ class WorkerSession:
             int(max_result_bytes), self.limits.max_result_bytes)
         # Encoded before anything is registered: params that cannot be sent
         # (not JSON, NaN, too big) must not cost an in-flight slot.
+        if timeout is not None:
+            timeout = float(timeout)
+            if not math.isfinite(timeout) or timeout < 0:
+                raise ValueError("timeout must be a finite number of seconds, not negative")
         frames.pack_control({"t": frames.REQ, "id": 0, "op": op, "params": params or {},
                              "max_result_bytes": cap, "secrets": secrets or {}})
         with self._lock:
@@ -337,9 +358,9 @@ class WorkerSession:
             if len(self._requests) >= limit:
                 raise SessionBusy("worker has %d requests in flight" % len(self._requests))
             req_id = self._next_id
-            deadline = time.monotonic() + float(timeout) if timeout is not None else None
+            deadline = time.monotonic() + timeout if timeout is not None else None
             request = _Request(req_id, op, deadline, cap, on_progress, secrets)
-            fresh = [value for value in request.secrets if value not in self._secret_values]
+            fresh = [value for value in _with_line_parts(request.secrets) if value not in self._secret_values]
             if len(self._secret_values) + len(set(fresh)) > self.limits.max_secret_values:
                 self.recycle_needed = True
                 raise SessionError(
@@ -426,7 +447,7 @@ class WorkerSession:
                 message = frames.decode_control(body, "worker")
                 if not welcomed:
                     if message["t"] != frames.HELLO:
-                        raise FrameError("first message was %s, not hello" % frames.shown(message["t"]))
+                        raise FrameError("first message was not hello")
                     self._on_hello(message)
                     welcomed = True
                     reader.caps.update(frames.default_caps())
@@ -686,7 +707,7 @@ class WorkerSession:
             handler = self._host_calls.get(name)
         if handler is None:
             return {"t": frames.ACK, "cid": cid, "ok": False,
-                    "error": frames.error_object(Codes.UNKNOWN_CALL, "no host call named %s" % frames.shown(name))}
+                    "error": frames.error_object(Codes.UNKNOWN_CALL, "no host call with that name")}
         try:
             result = handler(HostCall(name, message["params"], message.get("id"), self))
             if result is None:
@@ -870,9 +891,15 @@ class WorkerSession:
         the worker has not exited after ``grace`` it gets SIGTERM, then after
         ``term_grace`` SIGKILL for the group, whether or not it was reading.
         """
-        process = self.process
         with self._lock:
+            process = self.process
             already = self._closed
+            if process is None and not already:
+                # Never started: mark it closed under the same lock start() takes,
+                # so a start racing this call cannot spawn a worker nobody ends.
+                self._closed = True
+                self._failure = SessionClosed("session closed")
+                already = True
         if not already and process is not None and process.poll() is None:
             self._send_quietly({"t": frames.SHUTDOWN, "grace_ms": int(grace * 1000)})
             try:

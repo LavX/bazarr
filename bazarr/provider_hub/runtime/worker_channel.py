@@ -344,9 +344,14 @@ class WorkerChannel:
             try:
                 value = self._handler(operation)
                 if isinstance(value, OperationResult):
-                    reply = ("ok", value.result, value.data)
+                    result, data = value.result, value.data
                 else:
-                    reply = ("ok", value or {}, b"")
+                    result, data = ({} if value is None else value), b""
+                if not isinstance(result, dict):
+                    # Not the host's protocol violation: this request's failure.
+                    raise OperationError(
+                        Codes.PLUGIN_ERROR, "the operation returned %s, not an object" % type(result).__name__)
+                reply = ("ok", result, data)
             except OperationCancelled:
                 reply = ("error", OperationError(Codes.CANCELLED, "cancelled"))
             except ChannelClosed:
@@ -373,6 +378,8 @@ class WorkerChannel:
             pass
 
     def _respond_ok(self, operation, result, data):
+        if not isinstance(result, dict):
+            raise OperationError(Codes.PLUGIN_ERROR, "the result must be an object")
         cap = operation.max_result_bytes
         if cap is not None and len(data) > cap:
             raise OperationError(Codes.RESULT_TOO_LARGE, "result is %d bytes, the request allows %d" % (len(data), cap))
@@ -391,8 +398,11 @@ class WorkerChannel:
         fixed error goes out instead, so the host never waits on a request that
         has no terminal reply.
         """
-        secrets = sorted((v for v in (operation.secrets.values() if operation else ()) if isinstance(v, str) and v),
-                         key=len, reverse=True)
+        values = [v for v in (operation.secrets.values() if operation else ()) if isinstance(v, str) and v]
+        for value in list(values):
+            if "\n" in value or "\r" in value:
+                values.extend(line.strip() for line in value.splitlines() if len(line.strip()) >= 8)
+        secrets = sorted(values, key=len, reverse=True)
 
         def clean(text, limit):
             text = text if isinstance(text, str) else str(text)
