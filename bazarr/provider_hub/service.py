@@ -55,7 +55,7 @@ from .state import (
 from . import env_registry
 from .venv import (
     _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
-    release_pins, validated_interpreter,
+    release_pins, validated_bundle_path, validated_interpreter,
 )
 from .worker import ProviderWorkerClient, release_when_gone, worker_command
 
@@ -2119,7 +2119,13 @@ def _record_provider_last_error(provider_id: str, message: str | None, python_pa
 
 
 def _remove_bundle_runtime_artifacts(bundle_path: Path) -> None:
-    for cache_dir in list(bundle_path.rglob("__pycache__")):
+    # Only inside the hub's own bundles, reached without a ``..`` or a symlink:
+    # the path often comes out of the state, and a stored value must not point
+    # this at someone else's directory tree.
+    bundle = validated_bundle_path(provider_hub_dir(), bundle_path)
+    if bundle is None:
+        return
+    for cache_dir in list(bundle.rglob("__pycache__")):
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
@@ -2180,7 +2186,10 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                     trusted,
                 ),
             )
-            bundle_path = Path(active_path)
+            bundle_path = validated_bundle_path(provider_hub_dir(), active_path)
+            if bundle_path is None:
+                env_registry.mark_needs_repair(provider_id, python_path)
+                raise ProviderHubInstallError("active bundle path is not one of the hub's bundles")
             _remove_bundle_runtime_artifacts(bundle_path)
             verify_bundle_tree(manifest, bundle_path)
 
@@ -3164,7 +3173,9 @@ def activate_staged_installations() -> list[str]:
                 staged_interpreter = validated_interpreter(provider_hub_dir(), staged_python_path)
                 if staged_interpreter is None:
                     raise ProviderHubInstallError("staged python path is not one of the hub's environments")
-                staged_bundle_path = Path(staged_path)
+                staged_bundle_path = validated_bundle_path(provider_hub_dir(), staged_path)
+                if staged_bundle_path is None:
+                    raise ProviderHubInstallError("staged bundle path is not one of the hub's bundles")
                 _remove_bundle_runtime_artifacts(staged_bundle_path)
                 verify_bundle_tree(manifest, staged_bundle_path)
                 _smoke_validate_worker(manifest, staged_bundle_path, staged_interpreter)
@@ -3275,6 +3286,9 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
     manifest_data = row.get("manifest")
     if not active_path or not isinstance(manifest_data, dict):
         raise ProviderHubInstallError(f"{provider_id} has no bundle to repair")
+    bundle_path = validated_bundle_path(provider_hub_dir(), active_path)
+    if bundle_path is None:
+        raise ProviderHubInstallError(f"{provider_id} has a bundle path outside the hub's bundles; nothing was changed")
     name = row.get("name") or provider_id
     with record_job(
         "repair",
@@ -3295,7 +3309,7 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             env_path = PluginEnvironment(provider_hub_dir()).install(validated, rebuild=True)
             python_path = python_executable(env_path)
             step("Checking that the plugin starts")
-            _smoke_validate_worker(validated, Path(active_path), python_path)
+            _smoke_validate_worker(validated, bundle_path, python_path)
             # A stop pressed during the check ends the repair here, before the
             # installation is pointed at the new environment.
             step("Recording the repair")

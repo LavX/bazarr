@@ -1652,7 +1652,7 @@ def test_provider_hub_restart_activation_promotes_staged_install(tmp_path, monke
     from provider_hub.state import load_state
 
     provider_id = "stagehub"
-    staged_path = tmp_path / "provider_hub" / "bundles" / provider_id / "1.1.0" / ("b" * 40)
+    staged_path = tmp_path / "bundles" / provider_id / "1.1.0" / ("b" * 40)
     staged_python_path = tmp_path / "envs" / provider_id / "1.1.0" / "test" / "bin" / "python"
     state_file = tmp_path / "state.json"
     state_file.write_text(
@@ -1826,7 +1826,7 @@ def test_a_failed_restart_activation_caps_the_recorded_error_text(tmp_path, monk
             "provider_id": provider_id,
             "name": "Stage Hub Provider",
             "staged_version": "1.1.0",
-            "staged_path": str(tmp_path / "bundle"),
+            "staged_path": str(tmp_path / "bundles" / "p" / "1.0.0" / "c"),
             "staged_python_path": str(tmp_path / "shared_envs" / "fp" / "bin" / "python"),
             "staged_manifest": _manifest(provider_id=provider_id, version="1.1.0"),
             "state": "staged",
@@ -3600,8 +3600,8 @@ def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch):
         def stop(self):
             requests.append(("stop", None, None, self.cwd, self.env))
 
-    bundle_path = tmp_path / "bundle"
-    bundle_path.mkdir()
+    bundle_path = tmp_path / "provider_hub" / "bundles" / "p" / "1.0.0" / "c"
+    bundle_path.mkdir(parents=True)
     python_path = tmp_path / "provider_hub" / "envs" / "p" / "1.0.0" / "fp" / "bin" / "python"
     python_path.parent.mkdir(parents=True)
     python_path.write_text("", encoding="utf-8")
@@ -3657,8 +3657,8 @@ def test_provider_hub_connection_test_ignores_runtime_pycache(tmp_path, monkeypa
             return None
 
     provider_content = b"class ExampleProvider: pass\n"
-    bundle_path = tmp_path / "bundle"
-    bundle_path.mkdir()
+    bundle_path = tmp_path / "provider_hub" / "bundles" / "p" / "1.0.0" / "c"
+    bundle_path.mkdir(parents=True)
     (bundle_path / "provider.py").write_bytes(provider_content)
     pycache_path = bundle_path / "__pycache__"
     pycache_path.mkdir()
@@ -4499,8 +4499,8 @@ def test_a_failed_worker_health_check_masks_and_caps_the_stored_error(tmp_path, 
         def stop(self):
             return None
 
-    bundle_path = tmp_path / "bundle"
-    bundle_path.mkdir()
+    bundle_path = tmp_path / "provider_hub" / "bundles" / "p" / "1.0.0" / "c"
+    bundle_path.mkdir(parents=True)
     python_path = tmp_path / "provider_hub" / "envs" / "p" / "1.0.0" / "fp" / "bin" / "python"
     python_path.parent.mkdir(parents=True)
     python_path.write_text("", encoding="utf-8")
@@ -8410,7 +8410,8 @@ def _staged_cross_list_update(tmp_path, **row):
     return {"movedhub": {
         "provider_id": "movedhub", "name": "Movedhub", "state": "staged", "pending_restart": True,
         "active_version": "1.0.0", "staged_version": "1.1.0", "active_path": "/old/bundle",
-        "python_path": "/old/python", "staged_path": "/new/bundle",
+        "python_path": "/old/python",
+        "staged_path": str(tmp_path / "provider_hub" / "bundles" / "movedhub" / "1.1.0" / "c"),
         "staged_python_path": str(tmp_path / "provider_hub" / "shared_envs" / "fp" / "bin" / "python"),
         "source_bound": True, "source_id": "community", "catalog_list": "plugins",
         "manifest": _manifest(provider_id="movedhub"),

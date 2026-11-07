@@ -217,16 +217,10 @@ def has_parent_reference(path: str | os.PathLike[str]) -> bool:
     return any(part == ".." for part in Path(path).parts)
 
 
-def validated_hub_path(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> Path | None:
-    """``path`` as an absolute path, if it is below the hub's own ``shared_envs`` or ``envs`` by real directories only.
+BUNDLE_DIR = "bundles"
 
-    The path that comes back is the one to use: the check and whoever runs
-    something from it never look at different spellings. A ``..`` anywhere in the
-    raw path refuses it. The comparison is against the hub itself, not against
-    whatever the container directories resolve to, and a symlink anywhere on the
-    way down fails it: a ``shared_envs`` that points outside the hub must not make
-    outside paths look like the hub's own.
-    """
+
+def _validated_below(root, path, containers: tuple[str, ...], minimum_parts: int) -> Path | None:
     if has_parent_reference(path):
         return None
     candidate = Path(os.path.abspath(path))
@@ -239,7 +233,7 @@ def validated_hub_path(root: str | os.PathLike[str], path: str | os.PathLike[str
         break
     else:
         return None
-    if len(parts) < 2 or parts[0] not in (SHARED_ENV_DIR, "envs"):
+    if len(parts) < minimum_parts or parts[0] not in containers:
         return None
     current = hub
     for part in parts:
@@ -253,6 +247,31 @@ def validated_hub_path(root: str | os.PathLike[str], path: str | os.PathLike[str
         if stat.S_ISLNK(mode):
             return None
     return candidate
+
+
+def validated_hub_path(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> Path | None:
+    """``path`` as an absolute path, if it is below the hub's own ``shared_envs`` or ``envs`` by real directories only.
+
+    The path that comes back is the one to use: the check and whoever runs
+    something from it never look at different spellings. A ``..`` anywhere in the
+    raw path refuses it. The comparison is against the hub itself, not against
+    whatever the container directories resolve to, and a symlink anywhere on the
+    way down fails it: a ``shared_envs`` that points outside the hub must not make
+    outside paths look like the hub's own.
+    """
+    return _validated_below(root, path, (SHARED_ENV_DIR, "envs"), 2)
+
+
+def validated_bundle_path(root: str | os.PathLike[str], path: str | os.PathLike[str] | None) -> Path | None:
+    """A plugin bundle directory from the state, if it is below the hub's ``bundles`` area by real directories only.
+
+    The same rules as for environments (no ``..``, no symlinked component), and
+    the path returned is the one to use as a working directory, to verify, or to
+    clean.
+    """
+    if not path:
+        return None
+    return _validated_below(root, path, (BUNDLE_DIR,), 2)
 
 
 def path_inside_hub(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> bool:

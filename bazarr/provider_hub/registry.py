@@ -25,7 +25,7 @@ from .protocol import candidate_from_worker, language_to_payload, video_to_paylo
 from .state import active_installations, provider_hub_dir
 from . import runtime_status
 from .env_registry import env_dir_of
-from .venv import hold_environment, validated_interpreter
+from .venv import hold_environment, validated_bundle_path, validated_interpreter
 from .worker import ProviderWorkerClient, release_when_gone, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
 
 logger = logging.getLogger(__name__)
@@ -400,7 +400,10 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
         attrs["worker_client"] = worker_client
     if installation is not None:
         if installation.active_path:
-            attrs["bundle_path"] = installation.active_path
+            bundle = validated_bundle_path(provider_hub_dir(), installation.active_path)
+            if bundle is None:
+                raise ValueError(f"the bundle {installation.active_path} is not one of the hub's bundles")
+            attrs["bundle_path"] = str(bundle)
         if getattr(installation, "python_path", None):
             interpreter = validated_interpreter(provider_hub_dir(), installation.python_path)
             if interpreter is None:
@@ -457,6 +460,13 @@ def register_active_provider_classes(installations=None) -> list[str]:
             # than be left deleted (provider_registry.register overwrites in place, so
             # no explicit delete is needed on the success path).
             logger.exception("Skipping Provider Hub provider %s because its proxy class could not be built", provider_id)
+            try:
+                # A path the hub did not build is something to repair, not to run.
+                from .env_registry import mark_needs_repair
+
+                mark_needs_repair(provider_id)
+            except Exception:
+                logger.exception("Provider Hub: could not flag %s for repair", provider_id)
             continue
         provider_registry.register(manifest.provider_id, provider_cls)
         _REGISTERED_PROVIDER_HUB_IDS.add(manifest.provider_id)

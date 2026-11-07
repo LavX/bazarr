@@ -34,7 +34,7 @@ from .state import (
 )
 from .venv import (
     SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, has_parent_reference, is_pinned, path_key, pinned_paths,
-    python_executable, validated_hub_path, validated_interpreter,
+    python_executable, validated_bundle_path, validated_hub_path, validated_interpreter,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,6 +215,11 @@ def reconcile_environments(
                     flags.append(provider_id)
                     summary["needs_repair"].append(provider_id)
                 continue
+            if not staged and validated_bundle_path(root, row.get("active_path")) is None:
+                # A bundle the hub did not put there is neither run nor cleaned.
+                flags.append(provider_id)
+                summary["needs_repair"].append(provider_id)
+                continue
             if not staged and row.get("needs_repair") and row.get("last_error") == NEEDS_REPAIR_MESSAGE:
                 unflags.append(provider_id)
             try:
@@ -242,8 +247,11 @@ def reconcile_environments(
             if path_key(recorded) == str(env_dir) or staged or not row.get("active_path"):
                 continue
             shared_python = python_executable(recorded)
+            bundle = validated_bundle_path(root, row["active_path"])
+            if bundle is None:
+                continue
             try:
-                probe(manifest, Path(row["active_path"]), shared_python)
+                probe(manifest, bundle, shared_python)
             except Exception as error:
                 logger.warning(
                     "Provider Hub: %s stays on its own environment, the shared one failed the check: %s",

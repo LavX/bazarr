@@ -28,6 +28,11 @@ def _env(path):
 
 
 def _active_row(bundle, python_path, **extra):
+    import os
+
+    # The bundle is kept where the hub keeps bundles; a path elsewhere is refused.
+    bundle = Path(os.environ["BAZARR_PROVIDER_HUB_STATE"]).parent / "bundles" / "examplehub" / "1.0.0" / "c"
+    bundle.mkdir(parents=True, exist_ok=True)
     row = {
         "provider_id": "examplehub",
         "name": "Example Hub Provider",

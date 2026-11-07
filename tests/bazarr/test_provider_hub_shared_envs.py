@@ -60,7 +60,17 @@ def _legacy_env(root, provider_id, requirements, version="1.0.0", old_fp="0ldf1n
     return env
 
 
-def _row(provider_id, env=None, requirements=(), active_path="bundle"):
+def _hub_bundle(provider_id="alpha"):
+    """A bundle directory where the hub keeps them, for the hub the test state file belongs to."""
+    import os
+
+    path = Path(os.environ["BAZARR_PROVIDER_HUB_STATE"]).parent / "bundles" / provider_id / "1.0.0" / "c"
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def _row(provider_id, env=None, requirements=(), active_path=None):
+    active_path = active_path or _hub_bundle(provider_id)
     return {
         "provider_id": provider_id,
         "active_version": "1.0.0",
@@ -1141,3 +1151,73 @@ def test_a_stored_interpreter_with_dotdot_is_never_run_by_the_test_reconcile_or_
     assert summary["adopted"] == [] and summary["repointed"] == []
     assert env_registry.cleanup_environments(hub) == []
     assert (victim / "bin" / "python").exists()
+
+
+def _bundle_with_cache(path):
+    (path / "__pycache__").mkdir(parents=True)
+    (path / "__pycache__" / "provider.cpython-314.pyc").write_bytes(b"bytecode")
+    return path
+
+
+def test_a_bundle_path_outside_the_hubs_bundles_is_refused_and_nothing_under_it_is_touched(hub, tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.venv import validated_bundle_path
+    from test_provider_hub import _manifest as plugin_manifest
+
+    outside = _bundle_with_cache(tmp_path / "elsewhere" / "bundle")
+    real = hub / "bundles" / "examplehub" / "1.0.0" / "c"
+    _bundle_with_cache(real)
+    # A symlinked component: bundles/examplehub points at an outside directory.
+    linked_root = _bundle_with_cache(tmp_path / "linked-target" / "1.0.0" / "c")
+    (hub / "bundles" / "linked").symlink_to(tmp_path / "linked-target", target_is_directory=True)
+    through_link = hub / "bundles" / "linked" / "1.0.0" / "c"
+    # A ``..`` that steps through a link before collapsing.
+    dotdot = f"{hub}/bundles/linked/../elsewhere"
+
+    assert validated_bundle_path(hub, real) == real
+    for refused in (outside, through_link, dotdot, "", None):
+        assert validated_bundle_path(hub, refused) is None
+
+    # The cleanup that runs before every check or test leaves each refused path alone.
+    for refused in (outside, through_link):
+        service._remove_bundle_runtime_artifacts(refused)
+    assert (outside / "__pycache__").exists() and (linked_root / "__pycache__").exists()
+    service._remove_bundle_runtime_artifacts(real)
+    assert not (real / "__pycache__").exists()
+
+    # The connection test refuses to run from them, flags the installation, and removes nothing.
+    env = _plain_env(hub / "envs" / "examplehub" / "1.0.0" / "fp")
+    for refused in (outside, through_link):
+        row = {
+            "provider_id": "examplehub", "name": "Example", "active_version": "1.0.0", "active_path": str(refused),
+            "python_path": str(env / "bin" / "python"), "state": "active", "pending_restart": False,
+            "manifest": plugin_manifest(dependencies={"requirements": []}), "config": {}, "last_error": None,
+        }
+        state = load_state()
+        state["installations"] = {"examplehub": row}
+        save_state(state)
+
+        def never(*args, **kwargs):
+            raise AssertionError("a worker was started for a bundle outside the hub")
+
+        monkeypatch.setattr(service, "ProviderWorkerClient", never)
+        result = service.test_provider_connection("examplehub")
+        assert result["ok"] is False and "hub's bundles" in result["message"]
+        assert load_state()["installations"]["examplehub"]["needs_repair"] is True
+        assert (outside / "__pycache__").exists() and (linked_root / "__pycache__").exists()
+
+
+def test_boot_flags_an_installation_whose_bundle_is_outside_the_hub_and_registers_nothing(hub, tmp_path, no_subprocess):
+    from provider_hub.registry import register_active_provider_classes
+    from provider_hub.state import active_installations
+
+    outside = _bundle_with_cache(tmp_path / "elsewhere" / "bundle")
+    env = _legacy_env(hub, "alpha", [])
+    _state_with(_row("alpha", env, [], active_path=str(outside)))
+
+    summary = env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+
+    assert summary["needs_repair"] == ["alpha"]
+    assert load_state()["installations"]["alpha"]["needs_repair"] is True
+    assert register_active_provider_classes(active_installations()) == []
+    assert (outside / "__pycache__").exists()
