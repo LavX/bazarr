@@ -5,7 +5,7 @@ from app.job_errors import reason_of
 from app.jobs_queue import JobFailed, jobs_queue
 
 from .jobs import failed_catalog_sources
-from .service import check_updates, refresh_catalog
+from .service import check_updates, cleanup_plugin_environments, refresh_catalog
 
 
 def provider_hub_check_updates(job_id=None, wait_for_completion=False):
@@ -35,6 +35,11 @@ def provider_hub_check_updates(job_id=None, wait_for_completion=False):
     except Exception as error:
         logging.exception("Provider Hub update check failed")
         raise JobFailed(f"Could not check provider updates: {reason_of(error)}", reason="update_check_failed") from error
+    try:
+        # Scheduled, so never at boot: drops environments nothing references.
+        cleanup_plugin_environments()
+    except Exception:
+        logging.exception("Provider Hub environment cleanup failed")
     if refresh_failure:
         logging.warning("Provider Hub update check failed: reason=catalog_refresh_failed: %s", refresh_failure)
         raise JobFailed(refresh_failure, reason="catalog_refresh_failed")

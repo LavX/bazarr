@@ -164,6 +164,13 @@ try:
 except Exception:  # pragma: no cover - hub failures must not prevent startup
     logging.exception("Unable to activate staged Provider Hub installations on startup")
 try:
+    # Records the environments installations already use and flags the ones
+    # that went missing. It runs no pip: repairing is never a boot step.
+    from provider_hub.service import reconcile_plugin_environments
+    reconcile_plugin_environments()
+except Exception:  # pragma: no cover - hub failures must not prevent startup
+    logging.exception("Unable to reconcile Provider Hub environments on startup")
+try:
     # A package uploaded for an install that never ran: its job did not
     # survive the restart, so nothing will install or remove it now.
     from provider_hub.service import discard_local_package_uploads

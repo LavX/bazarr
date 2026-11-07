@@ -39,6 +39,7 @@ class ProviderHubInstallation:
     origin: str = "catalog"
     source_id: str | None = None
     kind: str = SUBTITLE_PROVIDER
+    needs_repair: bool = False
 
 
 def official_catalog_source() -> dict[str, Any]:
@@ -95,6 +96,9 @@ def default_state() -> dict[str, Any]:
         # removed plugin keeps its registrations: the row goes at the next
         # restart, the path never leaves.
         "plugin_secret_paths": [],
+        # fingerprint -> {"path": venv directory}. Which environment each
+        # dependency set runs in; see env_registry.
+        "plugin_envs": {},
     }
 
 
@@ -225,6 +229,7 @@ def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:
                 installation["kind"] = SUBTITLE_PROVIDER
     data.setdefault("jobs", [])
     data.setdefault("plugin_secret_paths", [])
+    data.setdefault("plugin_envs", {})
     return data
 
 
@@ -260,6 +265,7 @@ def _installation_from_row(provider_id: str, item: dict[str, Any],
         origin=str(item.get("origin") or "catalog"),
         source_id=item.get("source_id"),
         kind=kind_of(item),
+        needs_repair=bool(item.get("needs_repair", False)),
     )
 
 

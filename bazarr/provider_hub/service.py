@@ -51,7 +51,8 @@ from .state import (
     provider_hub_dir,
     spoofs_official_catalog_source,
 )
-from .venv import PluginEnvironment, python_executable
+from . import env_registry
+from .venv import PluginEnvironment, environment_fingerprint, pin_scope, python_executable
 from .worker import ProviderWorkerClient, worker_command
 
 
@@ -2180,6 +2181,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 _remove_bundle_runtime_artifacts(bundle_path)
 
             _record_provider_last_error(provider_id, None)
+            env_registry.clear_needs_repair(provider_id)
             job.update(
                 message="Worker health check passed",
                 details={"status": "ready"},
@@ -2738,7 +2740,7 @@ def _stage_validated(
         from_version=existing_version,
         to_version=validated.version,
         details={"catalog_url": catalog_url, "trusted": source_trusted, "origin": origin},
-    ) as job:
+    ) as job, pin_scope():
         try:
             deadline = None if install_timeout is None else time.monotonic() + max(0.0, install_timeout)
             step("Downloading the provider")
@@ -2784,6 +2786,9 @@ def _stage_validated(
                 catalog_list,
             )
             installations[validated.provider_id] = installation
+            # The environment passed the worker check, so it is now the one
+            # recorded for this dependency set (a no-op when it already is).
+            env_registry.register_environment(state, environment_fingerprint(validated), env_path)
             # The plugin's secret paths join the persisted set now, so a
             # credential configured through the settings card is encrypted
             # at rest from the first save and stays covered after removal.
@@ -2814,15 +2819,18 @@ def _stage_validated(
 def _discard_stopped_install(paths, existing) -> None:
     """Remove the bundle and venv a stopped install staged, unless they are in use.
 
-    Both live at paths keyed by the version, so reinstalling the version that is
-    already active or staged lands on that installation's own files, which stay.
+    The bundle lives at a path keyed by the version, so reinstalling the version
+    that is already active or staged lands on that installation's own files,
+    which stay. A venv can be shared, so any venv an installation references or
+    the environment record names stays too.
     """
     existing = existing if isinstance(existing, dict) else {}
     in_use = {existing.get(key) for key in ("active_path", "staged_path", "python_path", "staged_python_path")}
     in_use.discard(None)
+    shared = env_registry.protected_env_paths(load_state())
     for path in paths:
         # A bundle is recorded by its directory, a venv by its interpreter.
-        if {str(path), str(python_executable(path))} & in_use:
+        if {str(path), str(python_executable(path))} & in_use or str(path) in shared:
             continue
         shutil.rmtree(path, ignore_errors=True)
 
@@ -3124,6 +3132,7 @@ def activate_staged_installations() -> list[str]:
             installation["state"] = "active"
             installation["pending_restart"] = False
             installation["last_error"] = None
+            installation.pop("needs_repair", None)
             installation["activated_at"] = utcnow_iso()
             activated.append(provider_id)
             changed = True
@@ -3146,6 +3155,28 @@ def activate_staged_installations() -> list[str]:
 
         mutate_state(persist_activated)
     return activated
+
+
+def reconcile_plugin_environments() -> dict[str, list[str]]:
+    """Boot step: adopt the environments installations already use.
+
+    Runs no pip and needs no network. An active installation whose environment
+    is gone is marked ``needs_repair`` instead of being rebuilt here.
+    """
+
+    def validate(row: dict[str, Any], staged: bool):
+        raw = row.get("staged_manifest") if staged and isinstance(row.get("staged_manifest"), dict) else row.get("manifest")
+        return validate_manifest(
+            raw,
+            built_in_provider_ids=_validation_built_in_provider_ids(raw, bool(row.get("trusted", False))),
+        )
+
+    return env_registry.reconcile_environments(validate=validate, probe=_smoke_validate_worker)
+
+
+def cleanup_plugin_environments() -> list[str]:
+    """Remove environments no installation references. Not for boot."""
+    return env_registry.cleanup_environments(provider_hub_dir())
 
 
 def remove_installation(provider_id: str) -> bool:

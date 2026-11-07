@@ -863,7 +863,7 @@ def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     assert "-r" in install_cmd
     assert "/usr/local" not in install_cmd
     assert "custom_libs" not in install_cmd
-    requirements_files = list(tmp_path.glob("envs/examplehub/1.0.0/*/requirements.txt"))
+    requirements_files = list(tmp_path.glob("shared_envs/*/requirements.txt"))
     assert len(requirements_files) == 1
     requirements_text = requirements_files[0].read_text(encoding="utf-8")
     assert "cloudscraper==1.2.58" in requirements_text
@@ -4752,6 +4752,42 @@ def test_stage_install_fetches_bundle_builds_env_and_records_staged_paths(tmp_pa
     stored = load_state()["installations"]["examplehub"]
     assert stored["staged_path"] == str(bundle_path)
     assert stored["staged_python_path"] == str(python_path)
+    # The environment that passed the worker check is recorded for its dependency set.
+    from provider_hub.venv import environment_fingerprint
+    from provider_hub.manifest import validate_manifest
+    fingerprint = environment_fingerprint(validate_manifest(manifest, built_in_provider_ids=set()))
+    assert load_state()["plugin_envs"] == {fingerprint: {"path": str(python_path.parent.parent)}}
+
+
+def test_stage_install_does_not_record_an_environment_that_fails_the_worker_check(tmp_path, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, stage_install
+    from provider_hub.state import load_state
+
+    provider_content = b"class ExampleProvider: pass\n"
+    manifest = _manifest(file_payloads={"provider.py": provider_content}, dependencies={"requirements": []})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated, timeout=None):
+            env_path = self.root / "shared_envs" / "fp"
+            (env_path / "bin").mkdir(parents=True, exist_ok=True)
+            (env_path / "bin" / "python").write_text("", encoding="utf-8")
+            return env_path
+
+    def failing_probe(manifest, bundle_path, python_path):
+        raise RuntimeError("worker would not start")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", lambda url, timeout: _FakeResponse(content=provider_content))
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", failing_probe)
+
+    with pytest.raises(ProviderHubInstallError):
+        stage_install(manifest)
+
+    assert load_state()["plugin_envs"] == {}
 
 
 def test_stage_install_fetches_bundle_from_manifest_source_path(tmp_path, monkeypatch):
