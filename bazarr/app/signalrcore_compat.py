@@ -30,6 +30,16 @@ def _make_reconnection_handler(intervals=RECONNECT_INTERVALS):
             self.attempt_number += 1
             return self.intervals[index]
 
+        def reset(self):
+            # signalrcore calls this after every successful send, including
+            # the outgoing SignalR handshake. A server that accepts the socket
+            # and closes it before answering would then restart the backoff at
+            # 5s forever. Use reset_backoff() once a handshake really lands.
+            pass
+
+        def reset_backoff(self):
+            super().reset()
+
     return BackoffReconnectionHandler()
 
 
@@ -54,6 +64,12 @@ def _wait_for_handshake(self, wakeup, timeout=None):
         if wakeup.wait(wait_time):
             return False
     return False
+
+
+def _reset_backoff(transport):
+    handler = getattr(transport, "reconnection_handler", None)
+    if handler is not None:
+        getattr(handler, "reset_backoff", handler.reset)()
 
 
 def _abandon_client(client):
@@ -106,7 +122,7 @@ def patch_signalrcore_reconnect():
                         if _wait_for_handshake(
                                 self, wakeup,
                                 timeout=getattr(self.reconnection_handler, "sleep_time", None)):
-                            self.reconnection_handler.reset()
+                            _reset_backoff(self)
                         else:
                             _abandon_client(self._client)
                             self.deferred_reconnect(self.reconnection_handler.next())
@@ -142,7 +158,7 @@ def patch_signalrcore_reconnect():
                 if _wait_for_handshake(
                         self, wakeup,
                         timeout=getattr(self.reconnection_handler, "sleep_time", None)):
-                    self.reconnection_handler.reset()
+                    _reset_backoff(self)
                     return
                 _abandon_client(self._client)
                 sleep_time = self.reconnection_handler.next()
@@ -181,6 +197,9 @@ def patch_signalrcore_stop():
 
             old_state = self.state
             self.state = new_state
+            if new_state == TransportState.connected:
+                # Only a received handshake response gets here.
+                _reset_backoff(self)
 
             self.logger.debug(
                 "Transport state changed: %s -> %s", old_state.name, new_state.name)

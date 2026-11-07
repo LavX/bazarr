@@ -603,7 +603,10 @@ def test_signalr_connection_builder_uses_bounded_reconnect_backoff():
     waits = [handler.next() for _ in range(8)]
 
     assert waits == [5, 10, 15, 30, 30, 30, 30, 30]
+    # signalrcore resets after every send; that must not restart the backoff.
     handler.reset()
+    assert handler.next() == 30
+    handler.reset_backoff()
     assert handler.next() == 5
     assert handler.sleep_time == 30
 
@@ -636,3 +639,51 @@ def test_signalrcore_reconnect_keeps_retrying_an_arr_that_stays_down_within_the_
     # backs off: 5, 10, 15, then holds at 30 instead of waiting minutes.
     assert waits == [5, 10, 15, 30, 30, 30]
     assert transport.negotiate.call_count == 6
+
+
+def test_signalrcore_reconnect_backs_off_when_upgrade_succeeds_but_handshake_never_completes():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    transport.reconnection_handler = _built_reconnection_handler()
+    waits = []
+
+    class RecordingWakeup:
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            if len(waits) >= 5:
+                transport.manually_closing = True
+            return False
+
+        def set(self):
+            pass
+
+    def accept_then_close():
+        # The websocket upgrade works and the outgoing handshake is sent
+        # (signalrcore resets its handler after any successful send), then
+        # the server closes before it answers.
+        transport.reconnection_handler.reset()
+        client = transport.create_client.return_value
+        client.is_connection_closed.return_value = True
+
+    transport._bazarr_retry_wakeup = RecordingWakeup()
+    transport.negotiate = MagicMock(return_value=None)
+    transport._client.connect.side_effect = accept_then_close
+
+    try:
+        transport.handle_reconnect()
+    finally:
+        transport.stop()
+
+    assert waits == [5, 10, 15, 30, 30]
+    assert transport.negotiate.call_count == 5
+
+
+def test_signalrcore_backoff_restarts_once_the_handshake_completes():
+    patch_signalrcore_stop()
+    transport = _make_transport(state=TransportState.reconnecting)
+    transport.reconnection_handler = _built_reconnection_handler()
+    assert [transport.reconnection_handler.next() for _ in range(3)] == [5, 10, 15]
+
+    transport._set_state(TransportState.connected)
+
+    assert transport.reconnection_handler.next() == 5
