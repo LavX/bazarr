@@ -407,41 +407,60 @@ def verify_lock(lock, repo):
 # writing the snapshot
 # --------------------------------------------------------------------------
 
-def _reject_symlinked_path(path):
-    """Fail if any existing component of ``path``, the last one included, is a
-    symlink. The path is taken as written (made absolute, not resolved)."""
-    current = Path(os.path.abspath(path))
-    for candidate in [*reversed(current.parents), current]:
-        try:
-            info = candidate.lstat()
-        except FileNotFoundError:
-            return
-        except OSError as error:
-            raise FloorError(f'{candidate} could not be inspected: {error}') from error
-        if stat.S_ISLNK(info.st_mode):
-            raise FloorError(f'{candidate} is a symlink: refusing to write the snapshot through it')
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _open_destination(dest):
+    """Open ``dest`` as a directory descriptor, creating what is missing.
+
+    Every component is opened (or created) relative to the descriptor of its
+    parent, starting from the filesystem root, with links never followed. A
+    component swapped for a link at any point fails the open instead of
+    redirecting the write, which a path check made beforehand cannot promise.
+    The caller closes the returned descriptor."""
+    parts = Path(dest).parts
+    fd = os.open(parts[0], _DIR_FLAGS)
+    walked = Path(parts[0])
+    try:
+        for part in parts[1:]:
+            walked = walked / part
+            try:
+                try:
+                    child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(part, 0o755, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                    child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except OSError as error:
+                try:
+                    info = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                except OSError:
+                    raise error from None
+                if stat.S_ISLNK(info.st_mode):
+                    raise FloorError(
+                        f'{walked} is a symlink: refusing to write the snapshot through it'
+                    ) from error
+                if not stat.S_ISDIR(info.st_mode):
+                    raise FloorError(f'{walked} is not a directory') from error
+                raise
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def write_floor(lock, data, dest):
     """Write the snapshot under ``dest``.
 
-    The destination path may not contain a symlink. Every file and directory
-    is then created relative to an open directory descriptor, without
-    following links and without replacing anything, so a component swapped for
-    a link after the check cannot send a write outside the destination."""
+    The destination and every directory and file inside it are created
+    relative to open directory descriptors, without following links and
+    without replacing anything, so a component swapped for a link at any time
+    cannot send a write outside the destination."""
     dest = Path(os.path.abspath(dest))
-    _reject_symlinked_path(dest)
-    if dest.exists():
-        if not dest.is_dir():
-            raise FloorError(f'{dest} is not a directory')
-        if any(dest.iterdir()):
-            raise FloorError(f'{dest} is not empty')
-    else:
-        try:
-            dest.mkdir(parents=True)
-        except OSError as error:
-            raise FloorError(f'{dest} could not be created: {error}') from error
-        _reject_symlinked_path(dest)
 
     meta = {
         'lock_version': lock['lock_version'],
@@ -455,11 +474,15 @@ def write_floor(lock, data, dest):
     entries = dict(data)
     entries[FLOOR_META_FILE] = (json.dumps(meta, indent=2, sort_keys=True) + '\n').encode('utf-8')
 
-    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-    opened = {(): None}
+    opened = {}
     try:
-        opened[()] = os.open(dest, dir_flags)
+        try:
+            opened[()] = _open_destination(dest)
+            if os.listdir(opened[()]):
+                raise FloorError(f'{dest} is not empty')
+        except OSError as error:
+            raise FloorError(f'{dest} could not be opened for writing: {error}') from error
 
         def directory(parts):
             if parts not in opened:
@@ -468,7 +491,7 @@ def write_floor(lock, data, dest):
                     os.mkdir(parts[-1], 0o755, dir_fd=parent)
                 except FileExistsError:
                     pass
-                opened[parts] = os.open(parts[-1], dir_flags, dir_fd=parent)
+                opened[parts] = os.open(parts[-1], _DIR_FLAGS, dir_fd=parent)
             return opened[parts]
 
         for path in sorted(entries):
@@ -483,8 +506,7 @@ def write_floor(lock, data, dest):
         raise FloorError(f'snapshot could not be written under {dest}: {error}') from error
     finally:
         for fd in opened.values():
-            if fd is not None:
-                os.close(fd)
+            os.close(fd)
 
 
 def check_modes(dest, expect_root_owner=False):
