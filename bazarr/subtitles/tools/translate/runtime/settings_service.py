@@ -540,6 +540,8 @@ class TranslatorSettingsService:
                     errors[key] = "must be text"
                 else:
                     host[key] = value
+            elif value is None:
+                host[key] = 0  # an emptied price goes back to its default, like any other emptied field
             elif not is_finite_number(value) or value < 0:
                 errors[key] = "must be a number from 0 up"
             else:

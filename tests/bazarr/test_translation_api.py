@@ -277,6 +277,19 @@ def test_a_connection_is_created_listed_edited_reordered_and_deleted(world):
     assert world.store.secrets_for_request(("connection", connection["id"]), frozenset()) == {}
 
 
+def test_an_emptied_price_goes_back_to_its_default_and_other_bad_prices_are_still_refused(world):
+    created = _new_connection(world, values={"api_key": SECRET, "price_input_per_million": 0.5,
+                                             "price_output_per_million": 1.5}).json["connection"]
+    path = f"connections/{created['id']}"
+    reset = world.call("patch", path, {"values": {"price_input_per_million": None}})
+    assert reset.status_code == 200, reset.json
+    values = reset.json["connection"]["values"]
+    assert values["price_input_per_million"] == 0 and values["price_output_per_million"] == 1.5
+    assert _new_connection(world, values={"api_key": "k", "price_input_per_million": None}).status_code == 201
+    assert world.call("patch", path, {"values": {"price_output_per_million": "x"}}).status_code == 400
+    assert world.call("patch", path, {"values": {"price_output_per_million": -1}}).status_code == 400
+
+
 def test_a_connection_of_an_unknown_type_or_with_bad_values_is_refused(world):
     assert _new_connection(world, backend_type="nope").status_code == 400
     assert _new_connection(world, backend_type="").status_code == 400
