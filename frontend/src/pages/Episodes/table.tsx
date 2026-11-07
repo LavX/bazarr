@@ -291,13 +291,17 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
       {/* Shown whatever the setting and the tracks are now, so a flag set
           earlier never hides. */}
       {episode.forced_search_pending && (
-        <Badge
-          variant="light"
-          color="yellow"
-          title="The next wanted search ignores this episode's embedded subtitles and looks for external ones."
+        // Focusable so a keyboard or a tap opens the explanation too.
+        <Tooltip
+          multiline
+          w={260}
+          events={{ hover: true, focus: true, touch: true }}
+          label="The next wanted search ignores this episode's embedded subtitles and looks for external ones."
         >
-          Duplicate search pending
-        </Badge>
+          <Badge variant="light" color="yellow" tabIndex={0}>
+            Duplicate search pending
+          </Badge>
+        </Tooltip>
       )}
     </Group>
   );

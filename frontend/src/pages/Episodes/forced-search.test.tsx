@@ -12,6 +12,7 @@ import { Table as TableInstance } from "@tanstack/react-table";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
+import { useEpisodesBySeriesId } from "@/apis/hooks";
 import queryClient from "@/apis/queries";
 import type { EmbeddedHiddenTrack } from "@/apis/raw/subtitles";
 import { AllProviders } from "@/providers";
@@ -284,5 +285,96 @@ describe("Episodes Table, duplicate search action", () => {
     expect(
       screen.queryByText("Duplicate search pending"),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows the badge after a set and drops it after a clear, without a reload", async () => {
+    // A backend that keeps the flag, so the list the page refetches changes.
+    let pending = false;
+    serve();
+    server.use(
+      http.get("/api/episodes", () =>
+        HttpResponse.json({
+          data: [
+            makeEpisode([track("fr")], { forced_search_pending: pending }),
+          ],
+        }),
+      ),
+      http.post("/api/episodes/forced-search", () => {
+        pending = true;
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.delete("/api/episodes/forced-search", () => {
+        pending = false;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
+    function Page() {
+      const ref = useRef<TableInstance<Item.Episode> | null>(null);
+      const { data } = useEpisodesBySeriesId(3);
+      return (
+        <Table
+          ref={ref}
+          episodes={data ?? null}
+          profile={profile}
+          onAllRowsExpandedChanged={vi.fn()}
+        />
+      );
+    }
+    const router = createMemoryRouter([{ path: "/", element: <Page /> }]);
+    rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    );
+    const user = userEvent.setup();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Force duplicate search" }),
+    );
+    await user.click(
+      within(
+        await screen.findByRole("dialog", {
+          name: "Search again for this episode?",
+        }),
+      ).getByRole("button", { name: "Search again" }),
+    );
+    expect(
+      await screen.findByText("Duplicate search pending"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Clear duplicate search" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Duplicate search pending"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Force duplicate search" }),
+    ).toBeInTheDocument();
+  });
+
+  it("explains the pending badge to a keyboard user", async () => {
+    serve();
+    await mountTable(
+      makeEpisode([track("fr")], { forced_search_pending: true }),
+    );
+
+    // Tab to the badge: it is in the tab order.
+    const user = userEvent.setup();
+    for (let i = 0; i < 20; i += 1) {
+      if (document.activeElement?.textContent === "Duplicate search pending") {
+        break;
+      }
+      await user.tab();
+    }
+    expect(document.activeElement?.textContent).toBe(
+      "Duplicate search pending",
+    );
+    expect(
+      await screen.findByText(/ignores this episode's embedded subtitles/),
+    ).toBeInTheDocument();
   });
 });
