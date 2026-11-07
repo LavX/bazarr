@@ -857,3 +857,25 @@ def test_boot_reconcile_and_cleanup_do_not_turn_a_document_without_an_inventory_
     assert (hub / "state.json").read_text(encoding="utf-8") == document
     assert len(corrupt_copies()) == 1
     assert (shared / "bin" / "python").exists() and (legacy / "bin" / "python").exists()
+
+
+def test_a_symlinked_environment_container_is_never_reused_or_built_into(hub, tmp_path, monkeypatch):
+    manifest = _manifest("alpha", [REQ_A])
+    outside = tmp_path / "elsewhere"
+    canonical = outside / environment_fingerprint(manifest)
+    _plain_env(canonical)
+    (canonical / venvmod.COMPLETE_MARKER).write_text("", encoding="utf-8")
+    recorded = _plain_env(outside / "recorded")
+    (hub / "shared_envs").symlink_to(outside, target_is_directory=True)
+    state = load_state()
+    state["plugin_envs"] = {environment_fingerprint(manifest): {"path": str(hub / "shared_envs" / "recorded")}}
+    save_state(state)
+    calls = []
+    monkeypatch.setattr(venvmod.subprocess, "run", _fake_run_that_builds(calls))
+
+    with pytest.raises(venvmod.PluginEnvironmentError):
+        PluginEnvironment(hub).install(manifest)
+
+    # Neither the finished environment outside the hub nor the recorded one was used or touched.
+    assert calls == []
+    assert sorted(path.name for path in outside.iterdir()) == sorted([canonical.name, recorded.name])

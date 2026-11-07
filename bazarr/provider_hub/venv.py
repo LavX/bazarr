@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import os
 import platform
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -225,11 +226,37 @@ class PluginEnvironment:
         return self.root / SHARED_ENV_DIR / self._fingerprint(manifest)
 
     def _inside_hub(self, path: Path) -> bool:
-        key = Path(path_key(path))
-        return any(
-            key != Path(path_key(self.root / name)) and key.is_relative_to(Path(path_key(self.root / name)))
-            for name in (SHARED_ENV_DIR, "envs")
-        )
+        """Whether ``path`` is below the hub's own ``shared_envs`` or ``envs``, by real directories only.
+
+        The comparison is against the hub itself, not against whatever the
+        container directories resolve to, and a symlink anywhere on the way down
+        fails it: a ``shared_envs`` that points outside the hub must not make
+        outside paths look like the hub's own.
+        """
+        candidate = Path(os.path.abspath(path))
+        hub = Path(path_key(self.root))
+        for base in (Path(os.path.abspath(self.root)), hub):
+            try:
+                parts = candidate.relative_to(base).parts
+            except ValueError:
+                continue
+            break
+        else:
+            return False
+        if len(parts) < 2 or parts[0] not in (SHARED_ENV_DIR, "envs"):
+            return False
+        current = hub
+        for part in parts:
+            current = current / part
+            try:
+                mode = os.lstat(current).st_mode
+            except FileNotFoundError:
+                break
+            except OSError:
+                return False
+            if stat.S_ISLNK(mode):
+                return False
+        return True
 
     def _recorded_path(self, manifest: ValidatedManifest) -> Path | None:
         """The environment recorded for this dependency set, whether or not it is intact.
@@ -289,7 +316,7 @@ class PluginEnvironment:
         # cannot vanish in between.
         with _ENV_LOCK:
             reusable = self._recorded_path(manifest)
-            if reusable is None and self._is_complete(canonical):
+            if reusable is None and self._inside_hub(canonical) and self._is_complete(canonical):
                 reusable = canonical
             if reusable is not None:
                 _pin(reusable)
