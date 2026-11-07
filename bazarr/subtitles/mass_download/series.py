@@ -22,6 +22,7 @@ from app.event_handler import event_stream
 from app.config import settings
 
 from ..download import generate_subtitles
+from ..wanted.forced_flag import run_flagged_search
 
 
 def series_download_subtitles(no, job_id=None, job_sub_function=False, arr_instance_id=None):
@@ -59,6 +60,31 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
         .where(reduce(operator.and_, conditions)),
         TableEpisodes.arr_instance_id, arr_instance_id)) \
         .all()
+
+    # The series Search consumes forced-search requests. The query above is left as it is; flagged
+    # episodes it did not return (nothing looks missing, which is the case a request exists for) come
+    # from a second query under the same exclusions.
+    flagged_conditions = [(TableEpisodes.sonarrSeriesId == no),
+                          TableEpisodes.forced_search_requested_at.is_not(None)]
+    flagged_conditions += get_exclusion_clause('series')
+    flagged_details = database.execute(scoped(
+        select(TableEpisodes.sonarrEpisodeId,
+               TableEpisodes.arr_instance_id,
+               TableShows.title,
+               TableEpisodes.season,
+               TableEpisodes.episode,
+               TableEpisodes.title.label('episodeTitle'),
+               TableEpisodes.missing_subtitles)
+        .select_from(TableEpisodes)
+        .join(TableShows)
+        .where(reduce(operator.and_, flagged_conditions)),
+        TableEpisodes.arr_instance_id, arr_instance_id)) \
+        .all()
+    flagged_keys = {(episode.arr_instance_id, episode.sonarrEpisodeId) for episode in flagged_details}
+    listed_keys = {(episode.arr_instance_id, episode.sonarrEpisodeId) for episode in episodes_details}
+    episodes_details = list(episodes_details) + [
+        episode for episode in flagged_details
+        if (episode.arr_instance_id, episode.sonarrEpisodeId) not in listed_keys]
     throttled = False
     if not episodes_details:
         logging.debug(f"BAZARR no episode for that sonarrSeriesId have been found in database or they have all been "  # noqa: G004
@@ -86,7 +112,8 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
             if providers_list:
                 episode_download_subtitles(no=episode.sonarrEpisodeId, job_id=job_id, job_sub_function=True,
                                            providers_list=providers_list, fallback_allowed=fallback_allowed,
-                                           arr_instance_id=episode.arr_instance_id)
+                                           arr_instance_id=episode.arr_instance_id,
+                                           forced=(episode.arr_instance_id, episode.sonarrEpisodeId) in flagged_keys)
             else:
                 if not job_sub_function:
                     jobs_queue.update_job_progress(job_id=job_id, progress_value=count_episodes_details)
@@ -119,7 +146,13 @@ def _episode_series_title(sonarr_episode_id, arr_instance_id):
 
 
 def episode_download_subtitles(no, job_id=None, job_sub_function=False, providers_list=None, fallback_allowed=False,
-                               arr_instance_id=None):
+                               arr_instance_id=None, forced=False):
+    """Search one episode for its missing subtitles.
+
+    ``forced`` lets the search consume a forced-search request on the episode: the series Search passes it,
+    and the Sonarr and Plex webhooks, the Sonarr sync and the blacklist API do not, so they search the
+    normal way and leave the request alone.
+    """
     if not job_sub_function and not job_id:
         # No local variables here: the queue re-binds this frame's locals as the
         # job's keyword arguments.
@@ -144,7 +177,9 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
                   TableEpisodes.season,
                   TableEpisodes.episode,
                   TableShows.profileId,
-                  TableEpisodes.subtitles)
+                  TableEpisodes.subtitles,
+                  TableEpisodes.forced_search_requested_at,
+                  TableEpisodes.failedAttempts)
         .select_from(TableEpisodes)
         .join(TableShows)
         .where(reduce(operator.and_, conditions)),
@@ -178,7 +213,17 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
         providers_list = get_providers()
 
     downloaded_count = 0
-    if providers_list:
+    if providers_list and forced and episode.forced_search_requested_at is not None:
+        # A flagged episode gets the forced duplicate search in place of the normal one.
+        if not job_sub_function and job_id:
+            jobs_queue.update_job_progress(job_id=job_id, progress_max=1,
+                                           progress_message=f'{episode.title} - S{episode.season:02d}E'
+                                                            f'{episode.episode:02d} - {episode.episodeTitle}')
+        searched = run_flagged_search(episode, job_id=job_id)
+        downloaded_count = len(searched.downloaded) if searched else 0
+        outcome_msg = (f"{downloaded_count} subtitle(s) downloaded"
+                       if downloaded_count else "No subtitles found")
+    elif providers_list:
         audio_language_list = get_audio_profile_languages(episode.audio_language)
         if len(audio_language_list) > 0:
             audio_language = audio_language_list[0]['name']

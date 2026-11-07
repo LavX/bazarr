@@ -28,10 +28,17 @@ from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
 from ..language_profiles import build_translate_from_map
 from ..tools.translate.failure_record import translation_recently_failed
+from .forced_flag import run_flagged_search
 from .utils import _find_existing_subtitle_path, _provider_file_on_disk, evaluate_translation_gate
 
 
 def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True):
+    if getattr(episode, 'forced_search_requested_at', None) is not None:
+        # A flagged episode gets the forced duplicate search in place of the normal one. It looks at
+        # every profile language, ignores the adaptive window and does not translate from another language.
+        run_flagged_search(episode, job_id=job_id)
+        return
+
     arr_instance_id = getattr(episode, 'arr_instance_id', None)
     audio_language_list = get_audio_profile_languages(episode.audio_language)
     if len(audio_language_list) > 0:
@@ -306,7 +313,8 @@ def wanted_download_subtitles(sonarr_episode_id, job_id=None, arr_instance_id=No
                TableEpisodes.failedAttempts,
                TableShows.title,
                TableShows.profileId,
-               TableEpisodes.subtitles)
+               TableEpisodes.subtitles,
+               TableEpisodes.forced_search_requested_at)
         .select_from(TableEpisodes)
         .join(TableShows)
         .where((TableEpisodes.sonarrEpisodeId == sonarr_episode_id)),
@@ -397,6 +405,31 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
         .join(TableShows)
         .where(reduce(operator.and_, conditions))) \
         .all()
+
+    # The query above stays as it is so it keeps using the wanted index. Flagged episodes that it did
+    # not return (a broken embedded track makes an episode look complete, so nothing is missing) come
+    # from a second, small query under the same exclusions. A flagged episode the first query did
+    # return is already in the list; the search reads its flag itself.
+    flagged_conditions = [TableEpisodes.forced_search_requested_at.is_not(None)]
+    flagged_conditions += get_exclusion_clause('series')
+    flagged = database.execute(
+        select(TableEpisodes.sonarrSeriesId,
+               TableEpisodes.sonarrEpisodeId,
+               TableEpisodes.arr_instance_id,
+               TableShows.tags,
+               TableEpisodes.monitored,
+               TableShows.title,
+               TableEpisodes.season,
+               TableEpisodes.episode,
+               TableEpisodes.title.label('episodeTitle'),
+               TableShows.seriesType)
+        .select_from(TableEpisodes)
+        .join(TableShows)
+        .where(reduce(operator.and_, flagged_conditions))) \
+        .all()
+    already_listed = {(episode.arr_instance_id, episode.sonarrEpisodeId) for episode in episodes}
+    episodes = list(episodes) + [episode for episode in flagged
+                                 if (episode.arr_instance_id, episode.sonarrEpisodeId) not in already_listed]
 
     count_episodes = len(episodes)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=count_episodes)

@@ -691,6 +691,7 @@ jobs:
             tests/bazarr/test_history_owner_resolution.py \
             tests/bazarr/test_navigation_local_ids.py \
             tests/bazarr/test_wanted_instance_scope.py \
+            tests/bazarr/test_forced_search_runs.py \
             tests/bazarr/test_wanted_translate_gate.py \
             tests/bazarr/test_api_utils_images.py \
             tests/bazarr/test_blacklist_delete_scope.py \
