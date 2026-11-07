@@ -179,6 +179,79 @@ def test_unknown_type_truncation_and_legacy_first_byte():
         frames.FrameReader(io.BytesIO(frames.HEADER.pack(frames.FRAME_CONTROL, 10) + b"abc")).read_frame()
 
 
+_RES_HEAD = b'{"t":"res","id":1,"ok":true,'
+
+
+@pytest.mark.parametrize("sender, head", [
+    ("worker", _RES_HEAD),
+    ("host", b'{"t":"ack","cid":1,"ok":true,'),
+])
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity", b"1e999", b"-1e999"])
+@pytest.mark.parametrize("shape", ["flat", "nested", "in-list"])
+def test_non_finite_numbers_are_refused_on_both_sides(sender, head, constant, shape):
+    value = {
+        "flat": constant,
+        "nested": b'{"a":{"b":' + constant + b"}}",
+        "in-list": b"[1,[" + constant + b"]]",
+    }[shape]
+    body = head + b'"result":{"x":' + value + b"}}"
+    with pytest.raises(frames.MalformedFrame):
+        frames.decode_control(body, sender)
+    # The same frame with a finite number is fine.
+    frames.decode_control(head + b'"result":{"x":1.5}}', sender)
+
+
+def test_duplicate_keys_are_refused_at_any_depth():
+    for body in (
+        b'{"t":"hb","seq":1,"seq":2}',
+        b'{"t":"hb","seq":1,"extra":{"a":1,"a":2}}',
+        b'{"t":"hb","seq":1,"extra":[{"a":1,"a":1}]}',
+    ):
+        with pytest.raises(frames.MalformedFrame):
+            frames.decode_control(body, "worker")
+    frames.decode_control(b'{"t":"hb","seq":1,"extra":{"a":1},"other":{"a":2}}', "worker")
+
+
+def test_nesting_is_bounded_and_deep_input_is_a_protocol_error():
+    def nested(levels):
+        return b'{"t":"hb","seq":1,"extra":' + b"[" * levels + b"]" * levels + b"}"
+
+    frames.decode_control(nested(frames.MAX_JSON_DEPTH - 2), "worker")
+    for levels in (frames.MAX_JSON_DEPTH + 1, 5000, 200_000):
+        with pytest.raises(frames.MalformedFrame):
+            frames.decode_control(nested(levels), "worker")
+    # Unterminated, so the parser itself runs out of stack.
+    with pytest.raises(frames.MalformedFrame):
+        frames.decode_control(b'{"t":"hb","seq":1,"extra":' + b"[" * 500_000, "worker")
+
+
+def test_text_that_cannot_be_encoded_is_refused():
+    with pytest.raises(frames.MalformedFrame):
+        frames.decode_control(b'{"t":"hb","seq":1,"note":"\\ud800"}', "worker")
+    with pytest.raises(frames.MalformedFrame):
+        frames.decode_control(b'{"t":"hb","seq":1,"\\udc00":1}', "worker")
+    with pytest.raises(frames.MalformedFrame):
+        frames.decode_control(b'{"t":"hb","seq":1,"note":"\xff"}', "worker")
+
+
+def test_a_worker_reply_with_a_non_finite_result_fails_the_session(tmp_path):
+    body = with_reader("""
+    rid = next_request()
+    payload = b'{"t":"res","id":%d,"ok":true,"result":{"x":[NaN]}}' % rid
+    sys.stdout.buffer.write(frames.HEADER.pack(frames.FRAME_CONTROL, len(payload)) + payload)
+    sys.stdout.buffer.flush()
+    time.sleep(30)
+    """)
+    session = hostile_session(tmp_path, body)
+    try:
+        session.start()
+        with pytest.raises(ProtocolViolation):
+            session.submit("x").wait(8)
+        assert not session.alive
+    finally:
+        session.close(grace=0.3)
+
+
 def test_writer_refuses_a_message_over_the_cap():
     writer = frames.FrameWriter(io.BytesIO(), {frames.FRAME_CONTROL: 32, frames.FRAME_DATA: 64})
     with pytest.raises(frames.FrameTooLarge):
@@ -2213,9 +2286,11 @@ def test_close_during_the_handshake_queues_no_frame_ahead_of_the_welcome(tmp_pat
 class _ChunkedWorker:
     """A WorkerChannel whose big result takes a while to stream, one chunk at a time."""
 
-    def __init__(self, **kwargs):
+    def __init__(self, hold=False, **kwargs):
         self.written = []
         self.first_chunk = threading.Event()
+        # With ``hold`` the stream stops after its first chunk until ``release`` is set.
+        self.release = threading.Event()
         data = b"x" * (frames.DEFAULT_CHUNK_BYTES * 6)
 
         def handler(operation):
@@ -2231,7 +2306,10 @@ class _ChunkedWorker:
             if ftype == frames.FRAME_DATA:
                 self.written.append(len(body))
                 self.first_chunk.set()
-                time.sleep(0.3)
+                if hold and len(self.written) == 1:
+                    self.release.wait(20)
+                else:
+                    time.sleep(0.3)
             return real_write(ftype, body)
 
         writer._write = slow_write
@@ -2259,7 +2337,7 @@ def test_a_cancel_stops_a_result_that_is_being_streamed():
 
 
 def test_a_slot_is_free_for_the_next_request_while_a_result_streams():
-    worker = _ChunkedWorker(max_in_flight=1)
+    worker = _ChunkedWorker(hold=True, max_in_flight=1)
     harness = worker.harness
     harness.start()
     try:
@@ -2275,7 +2353,11 @@ def test_a_slot_is_free_for_the_next_request_while_a_result_streams():
             lambda: any(m["t"] == "res" and m["id"] == 1 and not m["ok"] for m in harness.messages), timeout=8)
         refused = next(m for m in harness.messages if m["t"] == "res" and m["id"] == 1 and not m["ok"])
         assert refused["error"]["code"] == frames.Codes.INVALID_REQUEST
+        # The first stream was held the whole time: it is still on the wire.
+        assert 1 in harness.channel._transmitting
+        assert not any(m["t"] == "res" and m["id"] == 1 and m["ok"] for m in harness.messages)
     finally:
+        worker.release.set()
         harness.finish()
 
 

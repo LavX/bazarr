@@ -101,6 +101,8 @@ DEFAULT_HEARTBEAT_MISSES = 3
 DEFAULT_MAX_IN_FLIGHT = 4
 # The longest drain a host may ask for in a shutdown frame: ten minutes.
 MAX_SHUTDOWN_GRACE_MS = 600_000
+# Containers nested deeper than this in a control frame are refused.
+MAX_JSON_DEPTH = 100
 DEFAULT_MAX_RESULT_BYTES = 32 * 1024 * 1024
 
 # The first byte of a v1 line (a JSON object).
@@ -454,12 +456,61 @@ def validate_message(message, sender):
     return message
 
 
+def _no_constant(name):
+    # NaN, Infinity and -Infinity are not JSON, and the encoder refuses them.
+    raise ValueError("non-finite number")
+
+
+def _finite_float(text):
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        # A literal such as 1e999 overflows to infinity.
+        raise ValueError("non-finite number")
+    return value
+
+
+def _no_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+def _check_tree(value):
+    """Refuse a tree nested past ``MAX_JSON_DEPTH`` or holding text that is not valid Unicode."""
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, str):
+            try:
+                node.encode("utf-8")
+            except UnicodeEncodeError:
+                # A lone surrogate escape (\ud800): it could never be sent on again.
+                raise MalformedFrame("control frame holds text that is not valid Unicode") from None
+            continue
+        if isinstance(node, dict):
+            children = list(node.keys()) + list(node.values())
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > MAX_JSON_DEPTH:
+            raise MalformedFrame("control frame is nested too deeply")
+        stack.extend((child, depth + 1) for child in children)
+
+
 def decode_control(body, sender):
+    """Parse one control frame strictly: valid Unicode, finite numbers, unique keys, bounded depth."""
     try:
-        message = json.loads(body.decode("utf-8"))
+        message = json.loads(
+            body.decode("utf-8"), parse_constant=_no_constant, parse_float=_finite_float,
+            object_pairs_hook=_no_duplicates)
     except (UnicodeDecodeError, ValueError, RecursionError) as error:
         # RecursionError: JSON nested deeper than the interpreter allows.
         raise MalformedFrame("control frame is not valid JSON") from error
+    _check_tree(message)
     return validate_message(message, sender)
 
 
