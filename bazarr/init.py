@@ -150,6 +150,14 @@ provider_hub_registration_ok = True
 # below bring them live and shadow the built-in in this same boot. Best-effort:
 # failures must never prevent startup.
 try:
+    # The translator kind exists only while the translation runtime switch is on. Registered here, ahead of
+    # anything that stages or activates a plugin, and not when the kinds package loads, because reading the
+    # switch needs the translation modules, which cannot load that early.
+    from provider_hub.kinds.translator import register_when_enabled
+    register_when_enabled()
+except Exception:  # pragma: no cover - a dark feature must not prevent startup
+    logging.exception("Unable to register the translator plugin kind on startup")
+try:
     from provider_hub.service import autoinstall_enabled_builtins
     auto_staged = autoinstall_enabled_builtins()
     if auto_staged:

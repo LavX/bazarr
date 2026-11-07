@@ -10,7 +10,7 @@ import flask_migrate
 from dogpile.cache import make_region
 from datetime import datetime
 
-from sqlalchemy import event, create_engine, inspect, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, Integer, LargeBinary, Text, Boolean, func, text, BigInteger
+from sqlalchemy import event, create_engine, inspect, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, Integer, LargeBinary, Text, Boolean, Float, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
@@ -953,6 +953,85 @@ class TableProviderHubState(Base):
     schema_version = mapped_column(Integer, nullable=False, default=1)
     revision = mapped_column(Integer, nullable=False, default=1)
     document = mapped_column(Text, nullable=False)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableTranslatorEngineInstance(Base):
+    """One configured translator plugin: its settings, an on/off state and a revision.
+
+    ``plugin_id`` names an installation in the Provider Hub state, which is kept in
+    the Provider Hub state document rather than a table of its own, so it is not a foreign key. ``revision``
+    counts saves of ``settings_json``; it is part of a translation checkpoint key,
+    so a changed prompt starts pending jobs afresh. ``plugin_version`` is the
+    version of the plugin that declares these settings.
+    """
+
+    __tablename__ = 'translator_engine_instances'
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plugin_id = mapped_column(Text, nullable=False, index=True)
+    name = mapped_column(Text, nullable=False, default='', server_default='')
+    enabled = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    settings_json = mapped_column(Text, nullable=False, default='{}', server_default='{}')
+    settings_version = mapped_column(Integer)
+    plugin_version = mapped_column(Text)
+    revision = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    awaiting_secrets = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableTranslatorConnection(Base):
+    """One back-end connection of an engine instance, tried in ``position`` order.
+
+    ``plugin_id`` is the plugin that declares this connection's settings: the
+    engine's own plugin for a built-in back-end type, or the extension that
+    serves the type. Prices are per million tokens, and 0 means free.
+    """
+
+    __tablename__ = 'translator_connections'
+    __table_args__ = (
+        UniqueConstraint('instance_id', 'position', name='ux_translator_connections_position'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    instance_id = mapped_column(Integer, ForeignKey('translator_engine_instances.id', ondelete='CASCADE'),
+                                nullable=False, index=True)
+    position = mapped_column(Integer, nullable=False)
+    plugin_id = mapped_column(Text, nullable=False, default='', server_default='')
+    backend_type = mapped_column(Text, nullable=False)
+    model = mapped_column(Text, nullable=False, default='', server_default='')
+    settings_json = mapped_column(Text, nullable=False, default='{}', server_default='{}')
+    settings_version = mapped_column(Integer)
+    plugin_version = mapped_column(Text)
+    price_input_per_million = mapped_column(Float, nullable=False, default=0, server_default='0')
+    price_output_per_million = mapped_column(Float, nullable=False, default=0, server_default='0')
+    enabled = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    awaiting_secrets = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class TableTranslatorSecret(Base):
+    """An encrypted secret of an engine instance or a connection, bound to the
+    destinations it was entered under (``destinations_json``).
+
+    ``owner_id`` points at the instance or the connection by ``owner_kind``, so
+    it cannot be a foreign key; the store deletes a row's secrets with it.
+    """
+
+    __tablename__ = 'translator_secrets'
+    __table_args__ = (
+        UniqueConstraint('owner_kind', 'owner_id', 'field', name='ux_translator_secrets_owner_field'),
+        CheckConstraint("owner_kind IN ('instance', 'connection')", name='ck_translator_secrets_owner_kind'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_kind = mapped_column(Text, nullable=False)
+    owner_id = mapped_column(Integer, nullable=False)
+    field = mapped_column(Text, nullable=False)
+    encrypted_value = mapped_column(Text, nullable=False)
+    destinations_json = mapped_column(Text, nullable=False, default='[]', server_default='[]')
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 

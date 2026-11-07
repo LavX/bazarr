@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ..manifest import ValidatedManifest
 
 SUBTITLE_PROVIDER = "subtitle_provider"
+TRANSLATOR = "translator"
 
 ATTACH_ON_RESTART = "restart"
 ATTACH_LIVE = "live"
