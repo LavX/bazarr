@@ -223,12 +223,17 @@ const SystemStatusView: FunctionComponent = () => {
   // that window returns exactly what the page already shows.
   const sandboxPending = status?.sandbox?.pending === true;
   const pollDelay = useMemo(() => {
+    // The worker sandbox check runs once, in the background, after boot. It
+    // outranks a media server's own schedule: a server holding a fresh answer
+    // for minutes must not keep the page on "Checking" for as long.
+    if (sandboxPending) {
+      return probePollMs;
+    }
     const soonest = Math.min(...mediaServers.map(mediaServerPollDelay));
     if (Number.isFinite(soonest)) {
       return Math.max(soonest, probePollMs);
     }
-    // The worker sandbox check runs once, in the background, after boot.
-    return sandboxPending ? probePollMs : null;
+    return null;
   }, [mediaServers, sandboxPending]);
   const { refetch: refetchStatus } = statusQuery;
   const pollVersions = useCallback(() => {

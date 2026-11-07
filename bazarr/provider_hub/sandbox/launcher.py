@@ -17,7 +17,11 @@ What happens, in order:
    otherwise.
 2. Become a child subreaper, then fork once. The launcher stays behind as the
    reaper. When the worker exits, when the host dies (lifeline EOF) or on
-   SIGTERM, every descendant is killed, ``setsid`` children included.
+   SIGTERM, every descendant is killed, ``setsid`` children included. The tree
+   is never judged empty from a ``/proc`` listing alone (``hidepid`` and
+   undumpable processes hide entries): the launcher's own children list and
+   ``waitpid`` returning ``ECHILD`` decide, and a launcher that can use neither
+   nor a complete ``/proc`` refuses to start.
 3. The child sets the parent-death signal, core size 0, open-file and
    file-size limits, nice, ``oom_score_adj``, umask, ``no_new_privs``, a
    every Linux capability dropped (see ``capabilities.py``), a seccomp filter
@@ -295,6 +299,100 @@ def _descendants(root):
     return found
 
 
+def _proc_mount_options(mountinfo):
+    """Option names of the last mount at ``/proc``, or ``None`` when there is none.
+
+    ``mountinfo`` is the text of ``/proc/self/mountinfo``.
+    """
+    found = None
+    for line in mountinfo.splitlines():
+        head, separator, tail = line.partition(" - ")
+        fields = head.split()
+        if not separator or len(fields) < 6 or fields[4] != "/proc":
+            continue
+        super_fields = tail.split()
+        if not super_fields or super_fields[0] != "proc":
+            continue
+        options = fields[5].split(",")
+        if len(super_fields) >= 3:
+            options += super_fields[2].split(",")
+        found = options
+    return found
+
+
+def _proc_is_unfiltered(mountinfo=None):
+    """True only when ``/proc`` shows every process to this launcher.
+
+    ``hidepid`` (any value but ``0``/``off``) and ``subset=pid`` hide processes
+    from an unprivileged caller, and a process that called
+    ``prctl(PR_SET_DUMPABLE, 0)`` is hidden by ``hidepid`` even from its own
+    user. When that cannot be ruled out, listing ``/proc`` is not proof that a
+    tree is empty. An unreadable or missing mount record counts as "cannot be
+    ruled out".
+    """
+    if mountinfo is None:
+        try:
+            with open("/proc/self/mountinfo", encoding="utf-8", errors="replace") as handle:
+                mountinfo = handle.read()
+        except OSError:
+            return False
+    options = _proc_mount_options(mountinfo)
+    if options is None:
+        return False
+    for option in options:
+        name, _eq, value = option.partition("=")
+        if name == "hidepid" and value not in ("0", "off"):
+            return False
+        if name == "subset" and value == "pid":
+            return False
+    return True
+
+
+def _direct_children():
+    """Pids of the launcher's own children, whatever ``/proc`` hides.
+
+    Read from ``/proc/self/task/<tid>/children``, which the kernel always shows
+    to the process itself: ``hidepid`` and a worker's undumpable state do not
+    apply. Returns ``None`` when the kernel does not provide the file. A
+    subreaper's children include every orphaned descendant, so killing these
+    until none are left reaches a tree no listing can see.
+    """
+    pids = []
+    try:
+        tids = os.listdir("/proc/self/task")
+    except OSError:
+        return None
+    for tid in tids:
+        try:
+            with open("/proc/self/task/%s/children" % tid, "rb") as handle:
+                text = handle.read().decode("ascii", "replace")
+        except FileNotFoundError:
+            if os.path.isdir("/proc/self/task/%s" % tid):
+                return None
+            continue
+        except OSError:
+            return None
+        pids.extend(int(token) for token in text.split() if token.isdigit())
+    return pids
+
+
+def _tree_tracking_error():
+    """Why this launcher could not stop every descendant, or ``None``.
+
+    Needs either a complete ``/proc`` or the children file. The launcher is
+    already a subreaper by the time this runs: that is what makes the children
+    list complete and ``waitpid`` able to prove the tree is gone.
+    """
+    if _proc_is_unfiltered():
+        return None
+    if _direct_children() is not None:
+        return None
+    return (
+        "/proc hides processes (hidepid or subset=pid) and the kernel does not list "
+        "child processes, so descendants that left the process group could not be killed"
+    )
+
+
 def _emergency_kill(reason):
     """Last resort when the tree cannot be listed: kill the whole process group.
 
@@ -327,6 +425,8 @@ def _freeze_descendants(root):
     seen = []
     for _ in range(10):
         pids = _descendants(root)
+        if root == os.getpid():
+            pids = list(dict.fromkeys([*pids, *(_direct_children() or ())]))
         fresh = [pid for pid in pids if pid not in seen]
         for pid in fresh:
             try:
@@ -344,7 +444,7 @@ def _kill_descendants(sig=signal.SIGKILL):
         pids = _freeze_descendants(os.getpid()) if sig == signal.SIGKILL else _descendants(os.getpid())
         if sig == signal.SIGKILL:
             # Anything that appeared after the last freeze pass dies here too.
-            pids = list(dict.fromkeys([*pids, *_descendants(os.getpid())]))
+            pids = list(dict.fromkeys([*pids, *_descendants(os.getpid()), *(_direct_children() or ())]))
     except EnumerationError as exc:
         _emergency_kill(exc)
         return
@@ -428,13 +528,31 @@ def _supervise(main_pid, wake_r, lifeline_fd, grace):
 CLEANUP_SECONDS = 7.0
 
 
+def _children_remain():
+    """Reap exited children; True while any child of the launcher is alive.
+
+    The launcher is a subreaper, so an orphaned descendant becomes its child
+    and every descendant has an ancestor that is. "No children" (``ECHILD``)
+    therefore proves the tree is gone, however much of it ``/proc`` hid.
+    """
+    while True:
+        try:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return False
+        if pid == 0:
+            return True
+
+
 def _cleanup_tree():
     """The worker is gone: kill whatever it left behind and reap it.
 
-    Returns ``True`` when nothing is left. Running out of time with a
-    descendant still alive returns ``False``, and the caller reports it: a
-    launcher that exits quietly over a live descendant would hide exactly the
-    leak this loop exists to prevent.
+    Returns ``True`` when nothing is left, which is only established when
+    ``waitpid`` reports no children: a listing of ``/proc`` can miss a process
+    (``hidepid``, an undumpable descendant), so an empty listing alone never
+    ends the loop. Running out of time with a descendant still alive returns
+    ``False``, and the caller reports it: a launcher that exits quietly over a
+    live descendant would hide exactly the leak this loop exists to prevent.
     """
     end = time.monotonic() + CLEANUP_SECONDS
     while time.monotonic() < end:
@@ -443,13 +561,12 @@ def _cleanup_tree():
         except EnumerationError as exc:
             _emergency_kill(exc)
             return False
-        if not left:
+        if not _children_remain() and not left:
             return True
         _kill_descendants()
         time.sleep(0.02)
-        _reap(-1)
     try:
-        return not _descendants(os.getpid())
+        return not _descendants(os.getpid()) and not _children_remain()
     except EnumerationError as exc:
         _emergency_kill(exc)
         return False
@@ -508,6 +625,12 @@ def main(argv):
         _report("sandbox", "cannot list processes: %s" % exc)
         return EXIT_SANDBOX_FAILED
 
+    unsafe = _tree_tracking_error()
+    if unsafe:
+        _say(unsafe)
+        _report("sandbox", unsafe)
+        return EXIT_SANDBOX_FAILED
+
     wake_r, wake_w = os.pipe()
     os.set_blocking(wake_r, False)
     os.set_blocking(wake_w, False)
@@ -536,6 +659,7 @@ def main(argv):
         except OSError:
             pass
         _kill_descendants()
+        _cleanup_tree()
         raise
     return _exit_code(status)
 

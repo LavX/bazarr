@@ -444,6 +444,45 @@ describe("System Status", () => {
     expect(screen.queryByText("Checking the worker sandbox")).toBeNull();
   }, 20000);
 
+  it("keeps asking about a pending sandbox check while a media server holds a fresh answer", async () => {
+    // The server above settled for ten minutes. That schedule must not slow
+    // the poll for the sandbox check, which lands within seconds.
+    const pending: System.SandboxStatus = {
+      abi: 0,
+      enforced: false,
+      workers_sandboxed: false,
+      filesystem: "declared",
+      network: "declared",
+      signal_scope: "declared",
+      capabilities: "declared",
+      label: "Checking the worker sandbox",
+      reason: "",
+      limitations: [],
+      pending: true,
+    };
+    statusWith({ mediaServers: [mediaServer()], sandbox: pending });
+    let requests = 0;
+    const count = ({ request }: { request: Request }) => {
+      if (new URL(request.url).pathname === "/api/system/status") {
+        requests += 1;
+      }
+    };
+    server.events.on("request:start", count);
+    try {
+      customRender(<SystemStatusView />);
+      expect(
+        await screen.findByText("Checking the worker sandbox", undefined, {
+          timeout: 8000,
+        }),
+      ).toBeInTheDocument();
+      const first = requests;
+      await new Promise((resolve) => setTimeout(resolve, 6000));
+      expect(requests).toBeGreaterThan(first);
+    } finally {
+      server.events.removeListener("request:start", count);
+    }
+  }, 20000);
+
   it("leaves the sandbox row out when the endpoint does not report one", async () => {
     statusWith({});
     customRender(<SystemStatusView />);

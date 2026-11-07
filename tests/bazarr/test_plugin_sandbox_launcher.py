@@ -1226,6 +1226,45 @@ def test_stop_with_the_default_grace_leaves_no_descendant_and_lets_the_launcher_
     assert elapsed < 8, elapsed
 
 
+HIDDEN = """
+    import ctypes, os, signal, sys, time
+
+    def hide():
+        os.setsid()
+        ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE
+
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if os.fork() == 0:
+        hide()
+        if os.fork() == 0:
+            hide()
+            if os.fork() == 0:
+                hide()
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                open("grand.pid", "w").write(str(os.getpid()))
+                %s
+            os._exit(0)
+        os.kill(os.getpid(), signal.SIGSTOP)
+    while not os.path.exists("grand.pid") or not open("grand.pid").read():
+        time.sleep(0.02)
+    open("worker.pid", "w").write(str(os.getpid()))
+    time.sleep(300)
+"""
+
+
+@linux_only
+@pytest.mark.parametrize("grand_ending", ["time.sleep(300)", "os.kill(os.getpid(), signal.SIGSTOP)"], ids=["running", "stopped"])
+def test_stop_leaves_no_undumpable_setsid_double_forked_descendant(mode, tmp_path, grand_ending):
+    spec = make_spec(tmp_path, HIDDEN % grand_ending)
+    process = spawn_worker(spec, probe=mode)
+    grand = read_pid(tmp_path / "rw" / "grand.pid")
+    worker = read_pid(tmp_path / "rw" / "worker.pid")
+    assert alive(grand) and alive(worker)
+    process.stop(0.2)
+    assert process.poll() is not None
+    assert wait_dead(worker) and wait_dead(grand), "an undumpable descendant outlived stop()"
+
+
 @linux_only
 def test_stop_wakes_a_stopped_launcher_so_it_can_clean_up(mode, tmp_path):
     spec = make_spec(tmp_path, GRANDCHILD % "time.sleep(300)")
@@ -2055,6 +2094,31 @@ def test_the_fallback_stop_kills_children_of_a_worker_that_exits_on_sigterm(tmp_
     assert wait_dead(child), "a child outlived a worker that left promptly"
 
 
+def test_the_fallback_stop_kills_children_of_a_worker_that_already_exited(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    spec = make_spec(
+        tmp_path,
+        """
+        import subprocess, sys
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        open("child.pid", "w").write(str(child.pid))
+        """,
+    )
+    process = spawn_worker(spec, probe=DECLARED)
+    child = read_pid(tmp_path / "rw" / "child.pid")
+    # Wait for the leader to exit without letting the process object reap it.
+    end = time.monotonic() + 10
+    while time.monotonic() < end:
+        with open("/proc/%d/stat" % process.pid) as handle:
+            if handle.read().rsplit(")", 1)[1].split()[0] == "Z":
+                break
+        time.sleep(0.05)
+    assert process.returncode is None and alive(child)
+    process.stop(1.0)
+    assert process.returncode == 0
+    assert wait_dead(child), "a child outlived a worker that had already exited"
+
+
 def test_status_does_not_claim_resource_limits_where_none_are_applied(tmp_path, monkeypatch):
     assert "with resource limits" in " ".join(sandbox_status(DECLARED)["limitations"])
     monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
@@ -2407,9 +2471,22 @@ def test_a_descendant_that_survives_the_cleanup_is_reported_not_forgotten(monkey
     launcher = load_launcher()
     monkeypatch.setattr(launcher, "CLEANUP_SECONDS", 0.3)
     monkeypatch.setattr(launcher, "_descendants", lambda root: [999999])
+    monkeypatch.setattr(launcher, "_children_remain", lambda: False)
     monkeypatch.setattr(launcher, "_kill_descendants", lambda sig=9: None)
     assert launcher._cleanup_tree() is False
     monkeypatch.setattr(launcher, "_descendants", lambda root: [])
+    assert launcher._cleanup_tree() is True
+
+
+@linux_only
+def test_an_empty_listing_is_not_proof_the_tree_is_gone(monkeypatch):
+    launcher = load_launcher()
+    monkeypatch.setattr(launcher, "CLEANUP_SECONDS", 0.3)
+    monkeypatch.setattr(launcher, "_descendants", lambda root: [])
+    monkeypatch.setattr(launcher, "_kill_descendants", lambda sig=9: None)
+    monkeypatch.setattr(launcher, "_children_remain", lambda: True)
+    assert launcher._cleanup_tree() is False
+    monkeypatch.setattr(launcher, "_children_remain", lambda: False)
     assert launcher._cleanup_tree() is True
 
 
@@ -2419,6 +2496,7 @@ def test_the_tree_is_frozen_before_it_is_killed(monkeypatch):
     scans = iter([[10, 11], [10, 11, 12], [10, 11, 12], [10, 11, 12, 13]])
     sent = []
     monkeypatch.setattr(launcher, "_descendants", lambda root: next(scans))
+    monkeypatch.setattr(launcher, "_direct_children", lambda: [])
     monkeypatch.setattr(launcher.os, "kill", lambda pid, sig: sent.append((pid, sig)))
     launcher._kill_descendants()
     stops = [pid for pid, sig in sent if sig == signal.SIGSTOP]
@@ -2426,6 +2504,138 @@ def test_the_tree_is_frozen_before_it_is_killed(monkeypatch):
     assert stops == [10, 11, 12]
     assert kills == [10, 11, 12, 13]
     assert sent.index((12, signal.SIGSTOP)) < sent.index((10, signal.SIGKILL))
+
+
+MOUNTINFO = (
+    "25 1 0:23 / /proc rw,nosuid,nodev,noexec,relatime shared:13 - proc proc %s\n"
+    "30 25 0:24 / /proc/sys/fs/binfmt_misc rw,relatime shared:14 - autofs systemd-1 rw\n"
+)
+
+
+@linux_only
+@pytest.mark.parametrize(
+    "options, unfiltered",
+    [
+        ("rw", True),
+        ("rw,hidepid=0", True),
+        ("rw,hidepid=off", True),
+        ("rw,hidepid=1", False),
+        ("rw,hidepid=2", False),
+        ("rw,hidepid=invisible", False),
+        ("rw,hidepid=noaccess", False),
+        ("rw,hidepid=ptraceable,gid=1000", False),
+        ("rw,subset=pid", False),
+    ],
+)
+def test_a_filtered_proc_is_recognised_from_the_mount_options(options, unfiltered):
+    launcher = load_launcher()
+    assert launcher._proc_is_unfiltered(MOUNTINFO % options) is unfiltered
+
+
+@linux_only
+def test_a_proc_that_cannot_be_seen_in_the_mount_table_is_not_trusted():
+    launcher = load_launcher()
+    assert launcher._proc_is_unfiltered("") is False
+    assert launcher._proc_is_unfiltered("36 35 98:0 /a /b rw - ext4 /dev/sda rw\n") is False
+    # The last mount at /proc wins, so a filtered mount over a plain one counts.
+    stacked = MOUNTINFO % "rw" + MOUNTINFO % "rw,hidepid=2"
+    assert launcher._proc_is_unfiltered(stacked) is False
+    assert launcher._proc_is_unfiltered(MOUNTINFO % "rw,hidepid=2" + MOUNTINFO % "rw") is True
+
+
+@linux_only
+def test_a_filtered_proc_without_the_children_file_refuses_to_start(monkeypatch):
+    launcher = load_launcher()
+    monkeypatch.setattr(launcher, "_proc_is_unfiltered", lambda mountinfo=None: False)
+    monkeypatch.setattr(launcher, "_direct_children", lambda: None)
+    assert "hides processes" in launcher._tree_tracking_error()
+    monkeypatch.setattr(launcher, "_direct_children", lambda: [])
+    assert launcher._tree_tracking_error() is None
+    monkeypatch.setattr(launcher, "_proc_is_unfiltered", lambda mountinfo=None: True)
+    monkeypatch.setattr(launcher, "_direct_children", lambda: None)
+    assert launcher._tree_tracking_error() is None
+
+
+@linux_only
+def test_the_launcher_reports_a_sandbox_failure_when_it_cannot_track_its_tree(tmp_path):
+    status_r, status_w = os.pipe()
+    spec_r, spec_w = os.pipe()
+    life_r, life_w = os.pipe()
+    spec = {"interpreter": sys.executable, "args": ["-c", "pass"], "cwd": str(tmp_path), "env": {}, "mode": "declared"}
+    os.write(spec_w, json.dumps(spec).encode())
+    os.close(spec_w)
+    code = textwrap.dedent(
+        """
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("l", %r)
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        launcher._proc_is_unfiltered = lambda mountinfo=None: False
+        launcher._direct_children = lambda: None
+        sys.exit(launcher.main(["l", %d, %d, %d]))
+        """
+    ) % (str(spawn.LAUNCHER_PATH), spec_r, life_r, status_w)
+    process = subprocess.run(
+        [sys.executable, "-I", "-c", code], pass_fds=(spec_r, life_r, status_w), capture_output=True, timeout=30
+    )
+    os.close(status_w)
+    try:
+        assert process.returncode == 78, process.stderr
+        record = json.loads(os.read(status_r, 4096).decode())
+        assert record["kind"] == "sandbox" and "descendants" in record["message"]
+    finally:
+        for fd in (status_r, spec_r, life_r, life_w):
+            os.close(fd)
+
+
+BLIND_TREE = """
+    import ctypes, importlib.util, os, signal, sys, time
+
+    spec = importlib.util.spec_from_file_location("l", %r)
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+
+    def detach_and_hide():
+        os.setsid()
+        ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE
+
+    # worker -> middle (exits) -> grandchild: every one undumpable, in its own session.
+    worker = os.fork()
+    if worker == 0:
+        detach_and_hide()
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        middle = os.fork()
+        if middle == 0:
+            detach_and_hide()
+            grand = os.fork()
+            if grand == 0:
+                detach_and_hide()
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                open(%r, "a").write("%%d\\n" %% os.getpid())
+                time.sleep(300)
+            os._exit(0)
+        open(%r, "a").write("%%d\\n" %% os.getpid())
+        time.sleep(300)
+    time.sleep(0.5)
+    open(%r, "a").write("%%d\\n" %% worker)
+
+    # A /proc that shows nothing but the launcher: no listing can find them.
+    launcher._children_map = lambda: {os.getpid(): os.getppid()}
+    print(launcher._cleanup_tree(), flush=True)
+    print(launcher._children_remain(), flush=True)
+"""
+
+
+@linux_only
+def test_an_undumpable_setsid_double_forked_descendant_is_reaped_with_a_blind_proc(tmp_path):
+    pids_file = tmp_path / "pids"
+    code = textwrap.dedent(BLIND_TREE) % (str(spawn.LAUNCHER_PATH), str(pids_file), str(pids_file), str(pids_file))
+    result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    assert result.stdout.split() == ["True", "False"], (result.stdout, result.stderr)
+    pids = [int(p) for p in pids_file.read_text().split()]
+    assert len(pids) == 3
+    assert all(wait_dead(pid) for pid in pids), "a hidden descendant survived the cleanup"
 
 
 STORM = """

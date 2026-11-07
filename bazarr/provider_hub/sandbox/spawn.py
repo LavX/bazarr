@@ -451,12 +451,16 @@ class WorkerProcess(subprocess.Popen):
     def stop(self, grace: float = 3.0) -> None:
         """Terminate the worker, then kill its whole process group.
 
-        The group is always cleaned up, not only when the worker ignores
-        SIGTERM: a worker that exits at once can leave children behind in the
-        group it started. The group id is the worker's pid, and the kernel does
-        not hand that pid out again while any process still belongs to the
-        group, so the kill cannot reach an unrelated process.
+        The group is cleaned up whether or not the worker is still running: a
+        worker that exited on its own can leave children behind in the group it
+        started. The group id is the worker's pid, and the kernel does not hand
+        that pid out again while the worker is unreaped (it is a zombie until
+        this object collects it) or any process still belongs to the group. So
+        the kill is made only when this object had not reaped the worker before
+        the call, which keeps it from reaching an unrelated process after a pid
+        was reused.
         """
+        unreaped = self.returncode is None
         if self.poll() is None:
             try:
                 self.terminate()
@@ -467,7 +471,10 @@ class WorkerProcess(subprocess.Popen):
                 self.wait(timeout=grace)
             except subprocess.TimeoutExpired:
                 timed_out = True
-            killpg = getattr(os, "killpg", None)
+        else:
+            timed_out = False
+        killpg = getattr(os, "killpg", None)
+        if unreaped:
             try:
                 if killpg is not None:
                     killpg(self.pid, signal.SIGKILL)
@@ -475,11 +482,11 @@ class WorkerProcess(subprocess.Popen):
                     self.kill()
             except OSError:
                 pass
-            if timed_out:
-                try:
-                    self.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
+        if timed_out:
+            try:
+                self.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 class LauncherProcess(WorkerProcess):
