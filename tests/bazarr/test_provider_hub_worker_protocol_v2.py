@@ -1213,15 +1213,27 @@ def test_data_for_nothing_in_flight_is_not_proof_of_life(tmp_path):
 
 
 def test_call_then_reply_cannot_stack_blocked_handlers_past_the_cap(tmp_path):
+    # Each reply waits until the host's handler for that request's call has
+    # started, so the call is running (and counted) before its request ends.
     body = """
     while True:
         rid = next_request()
         out.write_control({"t": "call", "cid": rid, "id": rid, "name": "stuck", "params": {}})
+        flag = os.path.join(%r, "started-%%d" %% rid)
+        waited = 0.0
+        while not os.path.exists(flag) and waited < 20:
+            time.sleep(0.01)
+            waited += 0.01
         out.write_control({"t": "res", "id": rid, "ok": True, "result": {}})
-    """
+    """ % str(tmp_path)
     release = threading.Event()
     session = hostile_session(tmp_path, with_reader(body), max_pending_calls=4)
-    session.register_host_call("stuck", lambda call: release.wait(10) and {})
+
+    def stuck(call):
+        (tmp_path / ("started-%d" % call.request_id)).write_text("1")
+        return release.wait(10) and {}
+
+    session.register_host_call("stuck", stuck)
     try:
         session.start()
         process = session.process
