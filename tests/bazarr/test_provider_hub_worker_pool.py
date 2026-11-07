@@ -1826,3 +1826,30 @@ def test_a_worker_whose_every_process_denies_the_read_is_over_budget(make_pool, 
     with pytest.raises(WorkerKilled) as killed:
         handle.wait(10)
     assert killed.value.code == "memory_limit"
+
+
+# ------------------------------------------- bookkeeping settles without wait()
+
+
+def test_requests_that_are_only_polled_settle_their_bookkeeping(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition())
+    for _ in range(1000):
+        request = pool.submit("tr", "echo", {"n": 1}, context=object())
+        deadline = time.monotonic() + 10
+        while not request.done() and time.monotonic() < deadline:
+            time.sleep(0.0005)
+        assert request.done()
+    slot = pool._entry("tr").slot
+    assert wait_until(lambda: slot.active == 0 and not slot.contexts, timeout=10), (slot.active, len(slot.contexts))
+
+
+def test_a_cancelled_request_nobody_waits_on_still_settles(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition())
+    request = pool.submit("tr", "sleep", {"seconds": 30}, context=object())
+    slot = pool._entry("tr").slot
+    assert slot.active == 1 and len(slot.contexts) == 1
+    request.cancel()
+    assert wait_until(request.done)
+    assert wait_until(lambda: slot.active == 0 and not slot.contexts)

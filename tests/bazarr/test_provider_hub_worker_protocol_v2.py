@@ -4047,3 +4047,22 @@ def test_a_process_with_its_own_group_signal_is_asked_to_send_it(monkeypatch, an
     session._group_ended = True
     assert session._signal_leader_group(process, signal.SIGTERM) is True
     assert process.signals == [signal.SIGTERM]
+
+
+def test_a_done_callback_runs_once_whether_it_was_added_before_or_after_the_finish(session):
+    handle = session.submit("sleep", {"seconds": 0.3})
+    early, late, broken = [], [], []
+    handle.add_done_callback(lambda: early.append(handle.done()))
+    handle.add_done_callback(lambda: broken.append(1) or (_ for _ in ()).throw(RuntimeError("boom")))
+    assert not handle.done()
+    handle.wait(10)
+    assert wait_until(lambda: early == [True] and broken == [1])
+    handle.add_done_callback(lambda: late.append(handle.done()))
+    assert late == [True]
+    assert handle.error is None
+    failing = session.submit("raise", {})
+    seen = []
+    failing.add_done_callback(lambda: seen.append(failing.error))
+    with pytest.raises(RequestFailed):
+        failing.wait(10)
+    assert wait_until(lambda: len(seen) == 1 and isinstance(seen[0], RequestFailed))

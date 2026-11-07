@@ -683,6 +683,9 @@ class PoolRequest:
         self._finish(None)
         return result
 
+    def _settled(self):
+        self._finish(getattr(self._handle, "error", None))
+
     def _finish(self, error):
         with self._finish_lock:
             if self._finished:
@@ -921,7 +924,13 @@ class WorkerPool:
                 if context is not None:
                     slot.contexts[handle.id] = context
                 self._cond.notify_all()
-            return PoolRequest(self, entry, slot, handle)
+            request = PoolRequest(self, entry, slot, handle)
+            register = getattr(handle, "add_done_callback", None)
+            if callable(register):
+                # The pool's books are settled when the request really finishes,
+                # not when somebody happens to call wait().
+                register(request._settled)
+            return request
         raise last_error  # type: ignore[misc]
 
     @staticmethod

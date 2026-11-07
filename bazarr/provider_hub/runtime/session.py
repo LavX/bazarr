@@ -152,6 +152,10 @@ class _Request:
         self.done = threading.Event()
         self.outcome: RequestResult | None = None
         self.error: BaseException | None = None
+        # Callbacks to run once the request has finished, and the lock that
+        # decides, for each one, whether it runs now or at the finish.
+        self.callbacks: list = []
+        self.callback_lock = threading.Lock()
 
 
 class RequestHandle:
@@ -168,6 +172,25 @@ class RequestHandle:
     def done(self):
         return self._request.done.is_set()
 
+    @property
+    def error(self):
+        """The error the request ended with, or None (still running, or it succeeded)."""
+        return self._request.error
+
+    def add_done_callback(self, callback):
+        """Call ``callback()`` once the request has finished, whether or not anybody waits.
+
+        Runs at once, on the caller's thread, if it already finished; otherwise
+        on a short-lived thread of its own after the finish, never under a session
+        lock. An exception from a callback is logged and dropped.
+        """
+        request = self._request
+        with request.callback_lock:
+            if not request.done.is_set():
+                request.callbacks.append(callback)
+                return
+        _run_callbacks([callback])
+
     def cancel(self, reason="cancelled"):
         self._session._cancel(self._request, reason)
 
@@ -177,6 +200,14 @@ class RequestHandle:
         if self._request.error is not None:
             raise self._request.error
         return self._request.outcome
+
+
+def _run_callbacks(callbacks):
+    for callback in callbacks:
+        try:
+            callback()
+        except Exception:
+            logger.warning("a request completion callback failed", exc_info=True)
 
 
 _REASON_LIMIT = 200
@@ -869,6 +900,13 @@ class WorkerSession:
         request.error = error
         request.chunks = []
         request.done.set()
+        with request.callback_lock:
+            callbacks, request.callbacks = request.callbacks, []
+        if callbacks:
+            # Not on this thread: it may hold session locks, and a callback is
+            # free to call back into whatever owns the session.
+            threading.Thread(target=_run_callbacks, args=(callbacks,), name="%s-done" % self.name,
+                             daemon=True).start()
 
     # ------------------------------------------------------------ host calls
     #
