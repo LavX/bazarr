@@ -132,3 +132,48 @@ def test_a_release_whose_new_rules_the_saved_settings_do_not_meet_holds_them_bac
     # The back end met the new rules and was migrated normally.
     assert store.get_connection(connection.id).enabled == 1
     assert store.connection_usable(store.get_connection(connection.id)) is True
+
+
+def _activate_with_connections(lifecycle, connections, new_backend_fields):
+    """One engine with the given connections (name -> keyword arguments), then a release that changes the rules."""
+    store = lifecycle.store
+    instance = store.create_instance(PLUGIN, settings={"label": "mine"})
+    made = {name: store.add_connection(instance.id, "openrouter", plugin_id=PLUGIN, **kwargs)
+            for name, kwargs in connections.items()}
+    keep = [{"key": "label", "type": "text"}]
+    lifecycle.stage(_manifest("1.0.0", keep, [{"key": "label", "type": "text"}]),
+                    _manifest("2.0.0", keep, new_backend_fields))
+    installation = _activate()
+    store._session.expire_all()
+    return installation, {name: store.get_connection(row.id) for name, row in made.items()}, store.get_instance(
+        instance.id)
+
+
+def test_a_release_that_requires_a_model_holds_back_the_connections_that_have_none(lifecycle):
+    installation, rows, engine = _activate_with_connections(
+        lifecycle, {"bare": {"model": ""}, "named": {"model": "vendor/m"}},
+        [{"key": "label", "type": "text"}, {"key": "model", "type": "options", "required": True}])
+    assert rows["bare"].enabled == 0 and rows["bare"].awaiting_secrets == 1
+    assert rows["named"].enabled == 1 and rows["named"].awaiting_secrets == 0
+    assert engine.enabled == 1 and "Settings > Translation" in installation["last_error"]
+
+
+def test_a_release_that_tightens_a_price_limit_holds_back_the_connections_over_it(lifecycle):
+    _installation, rows, _engine = _activate_with_connections(
+        lifecycle, {"dear": {"price_input_per_million": 5}, "cheap": {"price_input_per_million": 1}},
+        [{"key": "label", "type": "text"}, {"key": "price_input_per_million", "type": "number", "max": 2}])
+    assert rows["dear"].enabled == 0 and rows["dear"].awaiting_secrets == 1
+    assert rows["cheap"].enabled == 1
+    assert rows["dear"].price_input_per_million == 5  # held back as it was, not rewritten
+
+
+def test_a_field_required_only_for_one_model_holds_back_the_connections_that_use_it(lifecycle):
+    _installation, rows, _engine = _activate_with_connections(
+        lifecycle,
+        {"special": {"model": "special", "settings": {"label": "c"}},
+         "special_ok": {"model": "special", "settings": {"label": "c", "extra": "given"}},
+         "plain": {"model": "plain", "settings": {"label": "c"}}},
+        [{"key": "label", "type": "text"},
+         {"key": "extra", "type": "text", "required": True, "show_if": {"key": "model", "equals": "special"}}])
+    assert rows["special"].enabled == 0 and rows["special"].awaiting_secrets == 1
+    assert rows["special_ok"].enabled == 1 and rows["plain"].enabled == 1

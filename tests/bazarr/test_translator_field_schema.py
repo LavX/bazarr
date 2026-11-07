@@ -163,3 +163,23 @@ def test_a_condition_sees_the_default_for_a_field_sent_empty_as_it_will_be_store
     assert validate_values(fields, {"mode": "other"}).errors == {}
     # A toggle sent off is a value, not an empty one.
     assert validate_values(fields, {"flag": False, "api_key": "k"}).errors == {"extra": "is required"}
+
+
+def test_one_function_checks_a_connection_with_its_model_and_prices():
+    from subtitles.tools.translate.runtime.host_fields import validate_connection
+
+    fields = [{"key": "extra", "type": "text", "required": True, "show_if": {"key": "model", "equals": "special"}},
+              {"key": "model", "type": "options", "required": True},
+              {"key": "price_input_per_million", "type": "number", "max": 2}]
+    host = {"model": "plain", "price_input_per_million": 1, "price_output_per_million": 0}
+    assert validate_connection(fields, {}, host).errors == {}
+    assert validate_connection(fields, {}, {**host, "model": "special"}).errors == {"extra": "is required"}
+    assert validate_connection(fields, {"extra": "x"}, {**host, "model": "special"}).errors == {}
+    assert validate_connection(fields, {}, {**host, "model": ""}).errors == {"model": "is required"}
+    assert validate_connection(fields, {}, {**host, "price_input_per_million": 3}).errors == {
+        "price_input_per_million": "must be at most 2"}
+    # The host's own rule applies when the manifest does not declare the field: a price is never negative.
+    assert validate_connection(fields, {}, {**host, "price_output_per_million": -1}).errors == {
+        "price_output_per_million": "must be at least 0"}
+    # The settings side holds only the JSON fields.
+    assert validate_connection(fields, {"extra": "x"}, host).settings == {"extra": "x"}

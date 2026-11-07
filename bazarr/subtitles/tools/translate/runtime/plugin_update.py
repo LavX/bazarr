@@ -15,13 +15,11 @@ from typing import Any, Mapping
 from provider_hub.plugin_manifest import parse_plugin_manifest
 
 from .destinations import DestinationSchema
-from .field_schema import is_secret_field, validate_values
+from .field_schema import is_secret_field
+from .host_fields import HOST_KEYS, host_of, validate_owner
 from .store import INSTANCE, TranslatorStore
 
 logger = logging.getLogger(__name__)
-
-# Kept by the host in columns of their own, so never part of a connection's settings JSON.
-HOST_KEYS = frozenset({"model", "price_input_per_million", "price_output_per_million"})
 
 NEEDS_ATTENTION = ("Some saved translation settings no longer fit this version of the plugin and were turned "
                    "off. Open Settings > Translation to review them.")
@@ -46,7 +44,7 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
             return list(parsed.settings_fields)
         if row.backend_type not in backend_fields:
             return None
-        return [item for item in backend_fields[row.backend_type] if item["key"] not in HOST_KEYS]
+        return list(backend_fields[row.backend_type])
 
     blocked = []
     for kind, row in store.owners_of_plugin(plugin_id):
@@ -59,7 +57,7 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
         fields = fields_of(kind, row)
         if fields is None:
             return None
-        known = {item["key"] for item in fields}
+        known = {item["key"] for item in fields} - HOST_KEYS
         stored = store.settings_of(row)
         kept = {key: value for key, value in stored.items() if key in known}
         return kept if kept != stored else None
@@ -75,11 +73,16 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
 
 
 def _fits(store: TranslatorStore, owner, row, fields) -> bool:
-    """Whether the owner's settings, once its newly secret values have moved, satisfy the new manifest."""
+    """Whether the owner's settings, once its newly secret values have moved, satisfy the new manifest.
+
+    A connection is checked together with the model and prices its columns hold, with the same function a save
+    uses, so a release that requires a model, tightens a price limit or shows a field only for one model holds
+    back the connections that do not meet it.
+    """
     settings = store.settings_of(row)
     secret_keys = {item["key"] for item in fields if is_secret_field(item)}
-    known = {item["key"] for item in fields}
+    known = {item["key"] for item in fields} - HOST_KEYS
     moved = [key for key in secret_keys if settings.get(key) not in (None, "", [])]
     remaining = {key: value for key, value in settings.items() if key in known and key not in secret_keys}
     held = frozenset(store.secret_summary(owner, frozenset())) | frozenset(moved)
-    return not validate_values(fields, remaining, stored_secrets=held).errors
+    return not validate_owner(fields, remaining, held, None if owner[0] == INSTANCE else host_of(row)).errors

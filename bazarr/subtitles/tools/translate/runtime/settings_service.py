@@ -27,26 +27,13 @@ from typing import Any, Callable, Mapping
 from provider_hub.plugin_manifest import parse_plugin_manifest
 
 from .destinations import DestinationError, DestinationSchema, effective_destinations, normalize_destination
-from .field_schema import (ValidatedValues, field_visible, is_finite_number, is_secret_field, validate_values)
+from .field_schema import (ValidatedValues, field_visible, is_finite_number, is_secret_field, validate_draft)
+from .host_fields import (HOST_FIELDS, HOST_KEYS, MODEL_KEY, PRICE_KEYS, host_default, host_definitions, host_of,
+                          validate_owner)
 from .store import (CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, StaleRevisionError as StoreStale,
                     TranslatorStore, TranslatorStoreError)
 
 logger = logging.getLogger(__name__)
-
-MODEL_KEY = "model"
-PRICE_KEYS = ("price_input_per_million", "price_output_per_million")
-HOST_KEYS = frozenset({MODEL_KEY, *PRICE_KEYS})
-
-# The fields every back-end type gets, ahead of what the manifest declares. A manifest that declares its own
-# ``model`` field keeps its declaration (label, help, limits) and only loses the duplicate.
-HOST_FIELDS: tuple[dict[str, Any], ...] = (
-    {"key": MODEL_KEY, "type": "options", "label": "Model", "host": True},
-    {"key": PRICE_KEYS[0], "type": "number", "label": "Input price per million tokens", "min": 0, "default": 0,
-     "group": "Prices", "host": True},
-    {"key": PRICE_KEYS[1], "type": "number", "label": "Output price per million tokens", "min": 0, "default": 0,
-     "group": "Prices", "host": True},
-)
-
 
 class ServiceError(Exception):
     """A request the service refuses. ``status`` is the HTTP status it maps to."""
@@ -408,8 +395,8 @@ class TranslatorSettingsService:
         if not isinstance(values, dict):
             raise ServiceError("values must be an object")
         host, plain = self._split_host(values, schema=schema)
-        validated = self._validate(self._without_host(schema), plain, frozenset(), plugin.plugin_id, "connection",
-                                   backend_type, context=host)
+        validated = self._validate(schema, plain, frozenset(), plugin.plugin_id, "connection", backend_type,
+                                   host=host)
         self._require_consent(schema, {}, validated.settings, payload, new_owner=True)
         parsed = self._parsed(plugin)
         with self._store.transaction():
@@ -450,12 +437,11 @@ class TranslatorSettingsService:
         # A save that only turns it off needs nothing checked, so a broken connection can always be switched off.
         validated = ValidatedValues()
         checked = values is not None or bool(clear) or enabled is True
-        host = {MODEL_KEY: connection.model, PRICE_KEYS[0]: connection.price_input_per_million,
-                PRICE_KEYS[1]: connection.price_output_per_million}
+        host = host_of(connection)
         if checked:
             host, plain = self._split_host(values or {}, keep=connection, schema=schema)
-            validated = self._validate(self._without_host(schema), self._merged(before, plain, schema), stored,
-                                       plugin.plugin_id, "connection", connection.backend_type, context=host)
+            validated = self._validate(schema, self._merged(before, plain, schema), stored, plugin.plugin_id,
+                                       "connection", connection.backend_type, host=host)
         after = validated.settings if checked else before
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
@@ -541,9 +527,9 @@ class TranslatorSettingsService:
         # A draft is checked like a save is, minus what is merely missing: every value it carries must be of the
         # field's type and within its limits, and an address must be a clean one. A source is never handed
         # anything else, and the refusal never repeats a value.
-        checked = validate_values([{**item, "required": False} for item in fields if item["key"] in clean], clean)
-        if checked.errors:
-            raise InvalidValuesError("The values are not valid.", field_errors=checked.errors)
+        errors = validate_draft(fields, clean)
+        if errors:
+            raise InvalidValuesError("The values are not valid.", field_errors=errors)
         source = self._options_source
         answer = source(instance_id, backend_type, field_key, clean) if source is not None else None
         if not answer or not isinstance(answer.get("items"), list):
@@ -593,33 +579,17 @@ class TranslatorSettingsService:
         return merged
 
     @staticmethod
-    def _without_host(schema: DestinationSchema) -> DestinationSchema:
-        """The schema for the settings JSON: the model has its own column, so a field of that name is checked apart."""
-        return DestinationSchema(fields=tuple(item for item in schema.fields if item["key"] not in HOST_KEYS),
-                                 endpoints=schema.endpoints)
-
-    @staticmethod
     def _split_host(values: Mapping[str, Any], keep=None, schema: DestinationSchema | None = None
                     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Take the model and the prices out of a connection's values; the rest is the back end's settings.
 
-        The three are checked like any other field: against the manifest's own declaration of them when it has
-        one (limits, required, default), else against the host's. A value that was left out of a new connection
-        or sent empty takes the field's default before it is checked and stored.
+        This only reads them: the right type, and the field's default for one that was left out of a new
+        connection or sent empty. Whether they are within the manifest's limits is decided with everything else
+        by ``validate_connection``.
         """
-        declared = {item["key"]: item for item in (schema.fields if schema else ()) if item["key"] in HOST_KEYS}
-        definitions = {item["key"]: declared.get(item["key"], item) for item in HOST_FIELDS}
-
-        def default_of(key: str):
-            found = definitions[key].get("default")
-            if key == MODEL_KEY:
-                return found if isinstance(found, str) else ""
-            return found if is_finite_number(found) and found >= 0 else 0
-
-        host: dict[str, Any] = {
-            MODEL_KEY: keep.model if keep is not None else default_of(MODEL_KEY),
-            PRICE_KEYS[0]: keep.price_input_per_million if keep is not None else default_of(PRICE_KEYS[0]),
-            PRICE_KEYS[1]: keep.price_output_per_million if keep is not None else default_of(PRICE_KEYS[1])}
+        definitions = host_definitions(schema.fields if schema else ())
+        host: dict[str, Any] = (host_of(keep) if keep is not None
+                                else {key: host_default(definitions, key) for key in (MODEL_KEY, *PRICE_KEYS)})
         plain = dict(values)
         errors: dict[str, str] = {}
         for key in HOST_KEYS:
@@ -630,23 +600,21 @@ class TranslatorSettingsService:
                 if not isinstance(value, str):
                     errors[key] = "must be text"
                 else:
-                    host[key] = value if value.strip() else default_of(key)
+                    host[key] = value if value.strip() else host_default(definitions, key)
             elif value is None or value == "":
-                host[key] = default_of(key)  # an emptied price goes back to its default, like any other field
+                host[key] = host_default(definitions, key)  # an emptied price goes back to its default
             elif not is_finite_number(value):
                 errors[key] = "must be a number"
             else:
                 host[key] = value
-        if not errors:
-            checked = validate_values([definitions[item["key"]] for item in HOST_FIELDS], dict(host), context=plain)
-            errors.update(checked.errors)
         if errors:
             raise InvalidValuesError("The values are not valid.", field_errors=errors)
         return host, plain
 
     def _validate(self, schema: DestinationSchema, values: dict[str, Any], stored: frozenset[str], plugin_id: str,
-                  scope: str, backend_type: str, context: Mapping[str, Any] | None = None) -> ValidatedValues:
-        validated = validate_values(schema.fields, values, stored_secrets=stored, context=context)
+                  scope: str, backend_type: str, host: Mapping[str, Any] | None = None) -> ValidatedValues:
+        # A connection is checked together with its host-kept model and prices; an engine is just its fields.
+        validated = validate_owner(schema.fields, values, stored, host)
         errors = dict(validated.errors)
         if not errors and self._validator is not None:
             merged = {**validated.settings, **validated.secrets}

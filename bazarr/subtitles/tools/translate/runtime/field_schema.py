@@ -202,3 +202,10 @@ def validate_values(fields: Sequence[Mapping[str, Any]], values: Mapping[str, An
             if not has:
                 result.errors.setdefault(key, "is required")
     return result
+
+
+def validate_draft(fields: Sequence[Mapping[str, Any]], values: Mapping[str, Any]) -> dict[str, str]:
+    """The errors in a draft that is not being saved (a model list is asked for while the form is half filled):
+    every value it carries must be of its field's type and within its limits, but nothing is required yet."""
+    relaxed = [{**item, "required": False} for item in fields if item["key"] in values]
+    return dict(validate_values(relaxed, values).errors)
