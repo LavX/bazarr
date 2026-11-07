@@ -511,26 +511,60 @@ def test_a_destination_with_a_symlinked_ancestor_is_refused(catalog, tmp_path, c
     assert list(elsewhere.iterdir()) == []
 
 
-def test_a_symlink_swapped_in_for_a_directory_never_leaves_the_destination(tmp_path, monkeypatch):
-    """The path check passed, then a directory became a link before the write:
+def _swap_directory_for_link_on_creation(monkeypatch, name, target):
+    """Make the directory called ``name`` become a link to ``target`` right
+    after it is created, the way a concurrent process could."""
+    real_mkdir = os.mkdir
+    swapped = []
+
+    def mkdir(path, mode=0o777, *, dir_fd=None):
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if path == name:
+            os.rmdir(path, dir_fd=dir_fd)
+            os.symlink(target, path, dir_fd=dir_fd)
+            swapped.append(path)
+
+    monkeypatch.setattr(os, 'mkdir', mkdir)
+    return swapped
+
+
+def test_a_symlink_swapped_in_for_a_snapshot_directory_never_leaves_the_destination(tmp_path, monkeypatch):
+    """A directory inside the snapshot became a link before it was opened:
     the write must fail instead of following it."""
     outside = tmp_path / 'outside'
     outside.mkdir()
     dest = tmp_path / 'dest'
-    real_check = floor._reject_symlinked_path
-    calls = []
-
-    def swapping_check(path):
-        real_check(path)
-        calls.append(path)
-        if len(calls) == 2:  # the re-check after the destination was created
-            os.symlink(outside, dest / 'providers')
-
-    monkeypatch.setattr(floor, '_reject_symlinked_path', swapping_check)
+    swapped = _swap_directory_for_link_on_creation(monkeypatch, 'providers', outside)
 
     with pytest.raises(floor.FloorError, match='could not be written'):
         floor.write_floor(_good_lock(), {'providers/alpha/provider.py': b'x\n'}, dest)
-    assert len(calls) == 2
+    assert swapped == ['providers']
+    assert list(outside.iterdir()) == []
+
+
+def test_a_symlink_swapped_in_for_a_destination_ancestor_never_leaves_the_destination(tmp_path, monkeypatch):
+    """An ancestor of the destination became a link while the destination path
+    was still being created: the write must be refused and nothing may land in
+    the link's target."""
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    dest = tmp_path / 'ancestor' / 'nested' / 'out'
+    swapped = _swap_directory_for_link_on_creation(monkeypatch, 'nested', outside)
+
+    with pytest.raises(floor.FloorError, match='is a symlink'):
+        floor.write_floor(_good_lock(), {'providers/alpha/provider.py': b'x\n'}, dest)
+    assert swapped == ['nested']
+    assert list(outside.iterdir()) == []
+
+
+def test_an_existing_ancestor_that_is_a_link_is_refused(tmp_path):
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (tmp_path / 'real').mkdir()
+    os.symlink(outside, tmp_path / 'real' / 'nested')
+
+    with pytest.raises(floor.FloorError, match='is a symlink'):
+        floor.write_floor(_good_lock(), {'a': b'x\n'}, tmp_path / 'real' / 'nested' / 'out')
     assert list(outside.iterdir()) == []
 
 
