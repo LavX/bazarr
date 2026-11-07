@@ -1899,9 +1899,13 @@ def test_a_queued_host_call_does_not_start_once_the_session_is_closed(make_sessi
 
 def test_a_call_queued_behind_a_slow_one_is_refused_once_its_request_has_finished(tmp_path):
     marker = tmp_path / "acks.json"
+    started_file = tmp_path / "slow-started"
     body = with_reader("""
     rid = next_request()
     out.write_control({"t": "call", "cid": 1, "id": rid, "name": "slow", "params": {}})
+    # Nothing else is sent until the host says its handler is running.
+    while not os.path.exists(%r):
+        time.sleep(0.01)
     out.write_control({"t": "call", "cid": 2, "id": rid, "name": "checkpoint", "params": {}})
     out.write_control({"t": "call", "cid": 3, "id": rid, "name": "checkpoint", "params": {}})
     out.write_control({"t": "res", "id": rid, "ok": True, "result": {}})
@@ -1916,12 +1920,13 @@ def test_a_call_queued_behind_a_slow_one_is_refused_once_its_request_has_finishe
                 acks[message["cid"]] = message
     open(%r, "w").write(__import__("json").dumps(acks))
     time.sleep(30)
-    """ % str(marker))
+    """ % (str(started_file), str(marker)))
     release = threading.Event()
     started = threading.Event()
     ran = []
 
     def slow(call):
+        started_file.write_text("1")
         started.set()
         release.wait(10)
         return {"slow": True}
@@ -1949,6 +1954,32 @@ def test_a_call_queued_behind_a_slow_one_is_refused_once_its_request_has_finishe
         assert session.alive
     finally:
         release.set()
+        session.close(grace=0.3)
+
+
+def test_a_call_pipelined_behind_a_rejected_hello_never_runs(tmp_path):
+    script = tmp_path / "pipelined.py"
+    script.write_text(textwrap.dedent("""
+        import sys, time
+        sys.path.insert(0, %r)
+        import frames
+        out = frames.FrameWriter(sys.stdout.buffer)
+        # An incompatible hello and a host call with no request, written back to back.
+        out.write_control({"t": "hello", "protocols": [{"major": 99, "minor": 0}], "kinds": []})
+        out.write_control({"t": "call", "cid": 1, "name": "poke", "params": {}})
+        time.sleep(30)
+    """) % str(RUNTIME_DIR), encoding="utf-8")
+    ran = []
+    session = WorkerSession([sys.executable, "-B", str(script)], limits=fast_limits(heartbeat_timeout=30.0))
+    session.register_host_call("poke", lambda call: ran.append(call.name) or {})
+    try:
+        with pytest.raises(HandshakeError) as caught:
+            session.start()
+        assert caught.value.code == frames.Codes.VERSION_MISMATCH
+        time.sleep(0.5)
+        assert ran == []
+        assert session._call_pending == 0 and not session._call_queues
+    finally:
         session.close(grace=0.3)
 
 

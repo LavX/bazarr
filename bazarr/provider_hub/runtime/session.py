@@ -513,6 +513,10 @@ class WorkerSession:
                 frame = reader.read_frame()
                 if frame is None:
                     break
+                if self._closed:
+                    # The session decided to end while this frame was being read
+                    # (``_closed`` is set a moment before ``_stop``): dispatch nothing.
+                    return
                 ftype, body = frame
                 if ftype == frames.FRAME_DATA:
                     if not welcomed:
@@ -529,7 +533,10 @@ class WorkerSession:
                 if not welcomed:
                     if message["t"] != frames.HELLO:
                         raise FrameError("first message was not hello")
-                    self._on_hello(message)
+                    if not self._on_hello(message):
+                        # Negotiation failed: nothing the worker sent after its
+                        # hello may be dispatched, only start() decides what next.
+                        return
                     welcomed = True
                     reader.caps.update(frames.default_caps())
                     continue
@@ -576,16 +583,17 @@ class WorkerSession:
                        kill=True)
 
     def _on_hello(self, hello):
+        """Answer a hello. True only when the welcome was queued and the session is negotiated."""
         protocol = frames.negotiate_protocol(hello["protocols"])
         if protocol is None:
             self._reject(Codes.VERSION_MISMATCH, "no protocol major in common")
-            return
+            return False
         kind = None
         if self.kind is not None:
             kind = frames.negotiate_kind(hello["kinds"], self.kind, self._kind_versions)
             if kind is None:
                 self._reject(Codes.VERSION_MISMATCH, "worker does not serve a usable %s API" % self.kind)
-                return
+                return False
         limits = {
             "heartbeat_interval_ms": int(self.limits.heartbeat_interval * 1000),
             "max_in_flight": self.limits.max_in_flight,
@@ -621,6 +629,7 @@ class WorkerSession:
         if status != _QUEUED:
             self._handshake_error = HandshakeError("session ended during the handshake")
         self._hello.set()
+        return status == _QUEUED
 
     def _reject(self, code, message):
         if self._send_quietly({"t": frames.REJECT, "code": code, "message": message}):
@@ -787,6 +796,8 @@ class WorkerSession:
         refused = None
         start = False
         with self._lock:
+            if self._closed:
+                return
             if key is not None and key not in self._requests:
                 refused = frames.error_object(Codes.INVALID_REQUEST, "call for a request that is not running")
             elif self._call_pending >= self.limits.max_pending_calls:
