@@ -34,6 +34,7 @@ Operations:
 ``leak``           writes the request's secret values to stderr.
 ``leak_error``     raises an exception whose message starts with the request's
                    secret, ``tail`` characters long after it.
+``bad_str``        raises an exception that cannot be turned into text.
 ``raw_error``      answers with an error carrying the secret, uncleaned.
 ``progress_secret`` sends a progress message carrying the secret.
 ``blocked``        reports a refused connect, then fails with sandbox_blocked.
@@ -125,7 +126,7 @@ def _translate(operation, params):
     out = []
 
     def report_usage():
-        operation.call("usage", {"units": len(out), "target": target, "partial": True})
+        operation.call("usage", {"units": len(out), "target": target, "partial": True}, cancellable=False)
 
     try:
         for number, start in enumerate(range(0, len(lines), batch), 1):
@@ -219,6 +220,8 @@ def _handle(operation):
         )
         return {"child": child.pid}
     if name == "leak":
+        if params.get("after"):
+            time.sleep(float(params["after"]))
         for value in operation.secrets.values():
             print("x" * int(params.get("pad", 0)) + "leaked %s" % value, file=sys.stderr, flush=True)
         return {"leaked": len(operation.secrets)}
@@ -227,6 +230,12 @@ def _handle(operation):
         # traceback is cut at the worker.
         value = next(iter(operation.secrets.values()))
         raise ValueError(value + "B" * int(params.get("tail", 10)))
+    if name == "bad_str":
+        class Unprintable(Exception):
+            def __str__(self):
+                raise RuntimeError("no text for this one")
+
+        raise Unprintable()
     if name == "raw_error":
         # An error reply that skips the worker's own scrubbing.
         value = next(iter(operation.secrets.values()))

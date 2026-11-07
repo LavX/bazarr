@@ -142,6 +142,7 @@ class Codes:
     LEGACY_PROTOCOL = "legacy_protocol"
     HEARTBEAT_TIMEOUT = "heartbeat_timeout"
     WRITE_TIMEOUT = "write_timeout"
+    RECYCLE_REQUIRED = "recycle_required"
     WORKER_EXITED = "worker_exited"
     SESSION_CLOSED = "session_closed"
     SANDBOX_BLOCKED = "sandbox_blocked"

@@ -1003,3 +1003,198 @@ def test_fake_script_gives_each_attempt_its_own_outcome(make_session):
     assert first.value.retry_after == 3
     with pytest.raises(WorkerExited):
         session.request("translate", {"lines": ["a", "b"]}, timeout=10)
+
+
+# ------------------------------------------------------- second review round
+
+READS_REQUESTS = """
+def next_request():
+    while True:
+        frame = inp.read_frame()
+        if frame is None:
+            sys.exit(0)
+        if frame[0] == frames.FRAME_CONTROL:
+            message = frames.decode_control(frame[1], "host")
+            if message["t"] == "req":
+                return message["id"]
+"""
+
+
+def with_reader(body):
+    return READS_REQUESTS + textwrap.dedent(body)
+
+
+def test_empty_data_chunk_is_a_protocol_violation(tmp_path):
+    body = with_reader("""
+    rid = next_request()
+    sys.stdout.buffer.write(frames.HEADER.pack(frames.FRAME_DATA, 4) + frames.DATA_PREFIX.pack(rid))
+    sys.stdout.buffer.flush()
+    time.sleep(30)
+    """)
+    session = hostile_session(tmp_path, body)
+    try:
+        session.start()
+        with pytest.raises(ProtocolViolation):
+            session.submit("x").wait(8)
+    finally:
+        session.close(grace=0.3)
+
+
+def test_a_result_arriving_in_too_many_chunks_is_refused(tmp_path):
+    body = with_reader("""
+    rid = next_request()
+    for _ in range(200):
+        out.write_data(rid, b"x", chunk_size=1)
+    out.write_control({"t": "res", "id": rid, "ok": True, "result": {}, "chunks": 200, "bytes": 200})
+    time.sleep(30)
+    """)
+    session = hostile_session(tmp_path, body, max_result_chunks=50)
+    try:
+        session.start()
+        with pytest.raises(ResultTooLarge):
+            session.submit("x").wait(8)
+    finally:
+        session.close(grace=0.3)
+
+
+def test_data_for_nothing_in_flight_is_not_proof_of_life(tmp_path):
+    body = """
+    while True:
+        out.write_data(999, b"junk")
+        time.sleep(0.05)
+    """
+    session = hostile_session(tmp_path, body, heartbeat_timeout=0.6)
+    try:
+        session.start()
+        handle = session.submit("x")
+        with pytest.raises(HeartbeatTimeout):
+            handle.wait(8)
+    finally:
+        session.close(grace=0.3)
+
+
+def test_call_then_reply_cannot_stack_blocked_handlers_past_the_cap(tmp_path):
+    body = """
+    while True:
+        rid = next_request()
+        out.write_control({"t": "call", "cid": rid, "id": rid, "name": "stuck", "params": {}})
+        out.write_control({"t": "res", "id": rid, "ok": True, "result": {}})
+    """
+    release = threading.Event()
+    session = hostile_session(tmp_path, with_reader(body), max_pending_calls=4)
+    session.register_host_call("stuck", lambda call: release.wait(10) and {})
+    try:
+        session.start()
+        process = session.process
+        for _ in range(12):
+            if not session.alive:
+                break
+            try:
+                session.request("x", timeout=3)
+            except Exception:
+                break
+        assert wait_until(lambda: process.poll() is not None, timeout=8)
+        assert not session.alive
+        live = [t for t in threading.enumerate() if "calls" in t.name and t.is_alive()]
+        assert len(live) <= 4
+    finally:
+        release.set()
+        session.close(grace=0.3)
+
+
+def test_worker_that_closes_stdout_but_keeps_running_is_ended(tmp_path):
+    body = """
+    out.write_control({"t": "bye"})
+    os.close(1)
+    time.sleep(60)
+    """
+    session = hostile_session(tmp_path, body)
+    try:
+        session.start()
+        process = session.process
+        assert wait_until(lambda: process.poll() is not None, timeout=8)
+    finally:
+        session.close(grace=0.3)
+
+
+def test_secret_rotation_does_not_forget_a_secret_of_an_active_request(make_session):
+    lines = []
+    session = make_session(on_stderr=lines.append)
+    session.start()
+    first = "sk-first-0123456789abcdef"
+    active = session.submit("leak", {"after": 1.0}, secrets={"key": first}, timeout=10)
+    for index in range(80):
+        session.request("echo", secrets={"key": "sk-other-%04d-padding" % index}, timeout=5)
+    active.wait(8)
+    assert wait_until(lambda: any("leaked" in line for line in lines))
+    assert not any(first in line for line in lines)
+
+
+def test_session_asks_to_be_replaced_at_the_secret_cap(make_session):
+    session = make_session(limits=fast_limits(max_secret_values=3))
+    session.start()
+    for index in range(3):
+        session.request("echo", secrets={"key": "secret-value-%d" % index}, timeout=5)
+    from provider_hub.runtime.errors import SessionError
+
+    with pytest.raises(SessionError) as caught:
+        session.submit("echo", secrets={"key": "one-more-secret"})
+    assert caught.value.code == frames.Codes.RECYCLE_REQUIRED
+    assert session.recycle_needed
+    assert session.request("echo", secrets={"key": "secret-value-1"}, timeout=5).result["echo"] == {}
+
+
+def test_host_call_failure_is_logged_without_the_raw_exception(make_session, caplog):
+    def boom(call):
+        raise RuntimeError("upstream said key " + SECRET)
+
+    session = make_session(host_calls={"boom": boom})
+    session.start()
+    caplog.set_level("WARNING", logger="provider_hub.runtime.session")
+    with pytest.raises(RequestFailed):
+        session.request("call", {"name": "boom"}, secrets={"key": SECRET}, timeout=5)
+    records = [r for r in caplog.records if "boom" in r.getMessage()]
+    assert records
+    for record in records:
+        assert SECRET not in record.getMessage()
+        assert record.exc_info is None
+        assert SECRET not in (record.exc_text or "")
+
+
+def test_error_text_is_bounded_after_scrubbing(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("raise", {"message": "m" * 1_000_000}, timeout=5)
+    assert len(str(caught.value)) <= 4096
+    assert len(caught.value.traceback) <= 8000
+
+
+def test_an_unprintable_error_still_gets_a_terminal_reply(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("bad_str", timeout=5)
+    assert caught.value.code == frames.Codes.PLUGIN_ERROR
+    assert session.alive
+
+
+def test_cancel_interrupts_the_wait_for_a_host_call_ack(make_session):
+    release = threading.Event()
+    session = make_session(host_calls={"slow": lambda call: release.wait(10) and {}})
+    session.start()
+    try:
+        handle = session.submit("call", {"name": "slow"})
+        time.sleep(0.2)
+        started = time.monotonic()
+        handle.cancel("user")
+        with pytest.raises(RequestCancelled):
+            handle.wait(5)
+        assert time.monotonic() - started < 0.35
+        # The worker answered the cancel itself: it was not killed for ignoring it.
+        assert session.alive
+    finally:
+        release.set()
+
+
+def test_one_slot_worker_accepts_the_next_request_at_once(make_session):
+    session = make_session({"max_in_flight": 1})
+    session.start()
+    for index in range(60):
+        assert session.request("echo", {"n": index}, timeout=5).result["echo"] == {"n": index}

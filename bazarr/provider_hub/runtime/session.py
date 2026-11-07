@@ -79,6 +79,12 @@ class SessionLimits:
     max_queued_bytes: int = 8 * 1024 * 1024
     # Worker calls waiting for a host handler, over the whole session.
     max_pending_calls: int = 64
+    # Chunks one result may arrive in; honest senders use big chunks.
+    max_result_chunks: int = 4096
+    # Distinct secret values one worker may be sent over its life. Every one is
+    # kept for redaction (a late stderr line can name any of them); past this the
+    # session asks to be replaced rather than forget one.
+    max_secret_values: int = 512
     max_in_flight: int = frames.DEFAULT_MAX_IN_FLIGHT
     max_result_bytes: int = frames.DEFAULT_MAX_RESULT_BYTES
     # Watchdog resolution. Tests lower it.
@@ -240,7 +246,9 @@ class WorkerSession:
         self._bye = threading.Event()
         # Secret values seen in requests, kept after the request ends: its last
         # stderr lines can reach the drain thread after the reply reached the caller.
-        self._secret_values: list[str] = []
+        self._secret_values: set[str] = set()
+        self._secrets_by_length: tuple = ()
+        self.recycle_needed = False
 
     # ------------------------------------------------------------------ setup
 
@@ -323,14 +331,19 @@ class WorkerSession:
             if len(self._requests) >= limit:
                 raise SessionBusy("worker has %d requests in flight" % len(self._requests))
             req_id = self._next_id
-            self._next_id += 1
             deadline = time.monotonic() + float(timeout) if timeout is not None else None
             request = _Request(req_id, op, deadline, cap, on_progress, secrets)
+            fresh = [value for value in request.secrets if value not in self._secret_values]
+            if len(self._secret_values) + len(set(fresh)) > self.limits.max_secret_values:
+                self.recycle_needed = True
+                raise SessionError(
+                    "worker has been sent %d distinct secrets; start a new one" % len(self._secret_values),
+                    code=Codes.RECYCLE_REQUIRED)
+            if fresh:
+                self._secret_values.update(fresh)
+                self._secrets_by_length = tuple(sorted(self._secret_values, key=len, reverse=True))
+            self._next_id += 1
             self._requests[req_id] = request
-            for value in request.secrets:
-                if value not in self._secret_values:
-                    self._secret_values.append(value)
-            del self._secret_values[:-64]
         message = {
             "t": frames.REQ,
             "id": req_id,
@@ -390,13 +403,18 @@ class WorkerSession:
                 frame = reader.read_frame()
                 if frame is None:
                     break
-                self.last_frame_at = time.monotonic()
                 ftype, body = frame
                 if ftype == frames.FRAME_DATA:
                     if not welcomed:
                         raise FrameError("data frame before the handshake finished")
-                    self._on_data(*frames.split_data(body))
+                    op_id, chunk = frames.split_data(body)
+                    if not chunk:
+                        raise FrameError("empty data chunk")
+                    # Only data a running request is waiting for counts as proof of life.
+                    if self._on_data(op_id, chunk):
+                        self.last_frame_at = time.monotonic()
                     continue
+                self.last_frame_at = time.monotonic()
                 message = frames.decode_control(body, "worker")
                 if not welcomed:
                     if message["t"] != frames.HELLO:
@@ -439,7 +457,9 @@ class WorkerSession:
             self._hello.set()
             return
         if self._bye.is_set() or self._closed:
-            self._fail(SessionClosed("worker exited"), kill=False)
+            # Always end and reap the group: the leader may still be alive after
+            # the stream closed, and anything it forked has to go with it.
+            self._fail(SessionClosed("worker exited"), kill=True)
         else:
             self._fail(WorkerExited("worker exited (exit code %s)" % exit_code, exit_code=exit_code), kill=True)
 
@@ -515,14 +535,15 @@ class WorkerSession:
         with self._lock:
             request = self._requests.get(op_id)
         if request is None or request.overflow:
-            return
+            return False
         request.received += len(chunk)
-        if request.received > request.max_result_bytes:
+        if request.received > request.max_result_bytes or len(request.chunks) >= self.limits.max_result_chunks:
             request.overflow = True
             request.chunks = []
             self._cancel(request, Codes.RESULT_TOO_LARGE)
-            return
+            return False
         request.chunks.append(chunk)
+        return True
 
     def _on_result(self, message):
         with self._lock:
@@ -629,8 +650,13 @@ class WorkerSession:
                     self._call_queues.pop(key, None)
                     return
                 message = pending.popleft()
-                self._call_pending -= 1
-            self._send_quietly(self._answer_call(message))
+            answer = self._answer_call(message)
+            # Counted until the handler is done: a handler that blocks keeps its
+            # slot, so a worker cannot stack blocked handler threads past the cap.
+            with self._lock:
+                if not self._stop.is_set():
+                    self._call_pending = max(0, self._call_pending - 1)
+            self._send_quietly(answer)
 
     def _answer_call(self, message):
         name = message["name"]
@@ -652,7 +678,9 @@ class WorkerSession:
                     "error": frames.error_object(error.code, self._redact(error.message),
                                                  retryable=error.retryable)}
         except Exception as error:
-            logger.warning("%s: host call %s failed", self.name, name, exc_info=True)
+            # Logged redacted and without the raw exception, which may carry a secret.
+            logger.warning("%s: host call %s failed: %s", self.name, name,
+                           self._redact("%s: %s" % (type(error).__name__, error)))
             return {"t": frames.ACK, "cid": cid, "ok": False,
                     "error": frames.error_object(Codes.HOST_CALL_FAILED, self._redact(str(error)))}
 
@@ -898,11 +926,11 @@ class WorkerSession:
 
     def _secrets_snapshot(self):
         with self._lock:
-            return list(self._secret_values)
+            return self._secrets_by_length
 
     def _redact(self, text):
         """Replace every secret value this session has carried, then the generic patterns."""
-        for secret in sorted(self._secrets_snapshot(), key=len, reverse=True):
+        for secret in self._secrets_snapshot():
             text = text.replace(secret, "***")
         return scrub_text(text)
 
