@@ -251,6 +251,8 @@ def test_a_source_that_cannot_be_fetched_still_gets_the_check_and_then_fails_the
     monkeypatch.setattr(tasks, "refresh_catalog", lambda: steps.append("refresh"))
     monkeypatch.setattr(tasks, "failed_catalog_sources", lambda: ["Mirror (timed out)"])
     monkeypatch.setattr(tasks, "check_updates", lambda: steps.append("check") or {"message": "none"})
+    # The cleanup has its own warning when it finds no state; this test counts the job's.
+    monkeypatch.setattr(tasks, "cleanup_plugin_environments", lambda: [])
 
     with caplog.at_level("WARNING"):
         failure = _fails(lambda: tasks.provider_hub_check_updates(job_id=3), "catalog_refresh_failed")
@@ -276,3 +278,24 @@ def test_a_refresh_or_check_that_raises_fails_the_job_with_its_own_words(queued,
     monkeypatch.setattr(tasks, "check_updates", boom)
     failure = _fails(lambda: tasks.provider_hub_check_updates(job_id=3), "update_check_failed")
     assert "catalog host unreachable" in str(failure)
+
+
+def test_a_paused_environment_cleanup_is_published_with_the_check_message(queued, monkeypatch):
+    from pathlib import Path
+
+    from provider_hub import tasks
+
+    monkeypatch.setattr(tasks, "refresh_catalog", lambda: None)
+    monkeypatch.setattr(tasks, "failed_catalog_sources", lambda: [])
+    monkeypatch.setattr(tasks, "check_updates", lambda: {"message": "2 update(s) available: A, B"})
+    monkeypatch.setattr(tasks, "cleanup_plugin_environments", lambda: [])
+    monkeypatch.setattr(tasks, "corrupt_copies", lambda: [Path("/hub/state.json.20260101T000000.corrupt")])
+
+    tasks.provider_hub_check_updates(job_id=3)
+
+    progress = [value for kind, value in queued if kind == "progress"]
+    # The last message published carries both the check's result and the paused notice.
+    assert len(progress) == 1
+    assert "2 update(s) available: A, B" in progress[0]
+    assert "Environment cleanup is paused" in progress[0]
+    assert "state.json.20260101T000000.corrupt" in progress[0]

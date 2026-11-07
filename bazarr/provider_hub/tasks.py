@@ -41,19 +41,17 @@ def provider_hub_check_updates(job_id=None, wait_for_completion=False):
         cleanup_plugin_environments()
     except Exception:
         logging.exception("Provider Hub environment cleanup failed")
+    paused = None
     kept = corrupt_copies()
     if kept:
         # Cleanup stays off until an operator has looked at the damaged state.
         logging.error("Provider Hub environment cleanup is paused: a damaged state document was kept at %s", kept[-1])
-        jobs_queue.update_job_progress(
-            job_id=job_id,
-            progress_message=f"Environment cleanup is paused: a damaged state copy is kept at {kept[-1]}",
-            allow_cancelled=True,
-        )
+        paused = f"Environment cleanup is paused: a damaged state copy is kept at {kept[-1]}"
     if refresh_failure:
         logging.warning("Provider Hub update check failed: reason=catalog_refresh_failed: %s", refresh_failure)
         raise JobFailed(refresh_failure, reason="catalog_refresh_failed")
-    message = (outcome or {}).get("message")
+    # One message, so the paused notice is not overwritten by the check's own.
+    message = " ".join(part for part in ((outcome or {}).get("message"), paused) if part)
     if message:
         jobs_queue.update_job_progress(job_id=job_id, progress_message=message, allow_cancelled=True)
     return outcome
