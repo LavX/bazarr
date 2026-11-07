@@ -2452,7 +2452,7 @@ def test_an_unreadable_proc_is_an_error_never_an_empty_tree(monkeypatch):
 
 
 @linux_only
-def test_cleanup_falls_back_to_killing_the_group_when_the_scan_fails(monkeypatch):
+def test_cleanup_uses_the_emergency_path_only_when_nothing_can_be_listed(monkeypatch):
     launcher = load_launcher()
     reasons = []
 
@@ -2461,9 +2461,59 @@ def test_cleanup_falls_back_to_killing_the_group_when_the_scan_fails(monkeypatch
 
     monkeypatch.setattr(launcher, "_descendants", broken)
     monkeypatch.setattr(launcher, "_emergency_kill", lambda reason: reasons.append(str(reason)))
+    # The scan fails but the children list works: the launcher carries on.
+    monkeypatch.setattr(launcher, "_direct_children", lambda: [])
+    launcher._kill_descendants()
+    assert launcher._cleanup_tree() is True
+    assert reasons == []
+    # Neither works: nothing can be named, so the emergency path runs.
+    monkeypatch.setattr(launcher, "_direct_children", lambda: None)
     launcher._kill_descendants()
     launcher._cleanup_tree()
     assert reasons == ["no descriptors", "no descriptors"]
+
+
+@linux_only
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EPERM, errno.ENOENT, errno.ESRCH])
+def test_a_proc_entry_the_kernel_refuses_is_skipped_not_an_error(monkeypatch, code):
+    launcher = load_launcher()
+    real_open = open
+    own = "/proc/%d/stat" % os.getpid()
+    refused = []
+
+    def hidden(path, *args, **kwargs):
+        text = str(path)
+        if text.startswith("/proc/") and text.endswith("/stat") and text != own:
+            refused.append(text)
+            raise OSError(code, os.strerror(code))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", hidden)
+    assert launcher._children_map().keys() == {os.getpid()}
+    assert refused
+    # The launcher's own entry is the one that must always be readable.
+    monkeypatch.setattr("builtins.open", lambda path, *a, **k: hidden(path, *a, **k) if str(path) != own else (_ for _ in ()).throw(PermissionError(code, "denied")))
+    with pytest.raises(launcher.EnumerationError, match="missing"):
+        launcher._children_map()
+
+
+@linux_only
+def test_the_tree_scan_falls_back_to_the_children_list_when_the_scan_fails(monkeypatch):
+    launcher = load_launcher()
+
+    def broken(root):
+        raise launcher.EnumerationError("denied")
+
+    monkeypatch.setattr(launcher, "_descendants", broken)
+    monkeypatch.setattr(launcher, "_direct_children", lambda: [31, 32])
+    assert launcher._tree_pids(os.getpid()) == [31, 32]
+    monkeypatch.setattr(launcher, "_direct_children", lambda: None)
+    with pytest.raises(launcher.EnumerationError):
+        launcher._tree_pids(os.getpid())
+    # A root that is not the launcher has no children list to fall back on.
+    monkeypatch.setattr(launcher, "_direct_children", lambda: [31])
+    with pytest.raises(launcher.EnumerationError):
+        launcher._tree_pids(os.getpid() + 1)
 
 
 @linux_only
@@ -2620,22 +2670,57 @@ BLIND_TREE = """
     time.sleep(0.5)
     open(%r, "a").write("%%d\\n" %% worker)
 
-    # A /proc that shows nothing but the launcher: no listing can find them.
-    launcher._children_map = lambda: {os.getpid(): os.getppid()}
+    # PROC_VIEW
     print(launcher._cleanup_tree(), flush=True)
     print(launcher._children_remain(), flush=True)
 """
 
 
+def blind_tree_code(pids_file, proc_view):
+    code = textwrap.dedent(BLIND_TREE) % (str(spawn.LAUNCHER_PATH), str(pids_file), str(pids_file), str(pids_file))
+    return code.replace("# PROC_VIEW", textwrap.dedent(proc_view))
+
+
 @linux_only
 def test_an_undumpable_setsid_double_forked_descendant_is_reaped_with_a_blind_proc(tmp_path):
     pids_file = tmp_path / "pids"
-    code = textwrap.dedent(BLIND_TREE) % (str(spawn.LAUNCHER_PATH), str(pids_file), str(pids_file), str(pids_file))
+    code = blind_tree_code(
+        pids_file,
+        "# A /proc that shows nothing but the launcher: no listing can find them.\n"
+        "launcher._children_map = lambda: {os.getpid(): os.getppid()}",
+    )
     result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
     assert result.stdout.split() == ["True", "False"], (result.stdout, result.stderr)
     pids = [int(p) for p in pids_file.read_text().split()]
     assert len(pids) == 3
     assert all(wait_dead(pid) for pid in pids), "a hidden descendant survived the cleanup"
+
+
+DENIED_PROC = """
+    # hidepid=1: every other process refuses its stat file with EACCES.
+    import builtins
+    real_open = builtins.open
+
+    def refusing(path, *args, **kwargs):
+        text = str(path)
+        if text.startswith("/proc/") and text.endswith("/stat") and text != "/proc/%d/stat" % os.getpid():
+            raise PermissionError(13, "Permission denied", text)
+        return real_open(path, *args, **kwargs)
+
+    builtins.open = refusing
+"""
+
+
+@linux_only
+def test_descendants_a_filtered_proc_refuses_to_show_are_still_killed_and_reaped(tmp_path):
+    pids_file = tmp_path / "pids"
+    code = blind_tree_code(pids_file, DENIED_PROC)
+    result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    # Before the fix the launcher took the whole group (and itself) down here.
+    assert result.returncode == 0 and result.stdout.split() == ["True", "False"], (result.returncode, result.stdout, result.stderr)
+    pids = [int(p) for p in pids_file.read_text().split()]
+    assert len(pids) == 3
+    assert all(wait_dead(pid) for pid in pids), "a descendant the scan was refused survived the cleanup"
 
 
 STORM = """
@@ -2672,37 +2757,69 @@ def test_stop_ends_a_worker_that_keeps_forking(mode, tmp_path):
     assert all(wait_dead(pid) for pid in pids), "part of a forking tree outlived stop()"
 
 
-@linux_only
-def test_the_emergency_kill_ends_the_whole_group_and_reports_why(tmp_path):
+EMERGENCY = """
+    import ctypes, importlib.util, os, signal, subprocess, sys, time
+    spec = importlib.util.spec_from_file_location("l", %r)
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    launcher._STATUS_FD = %d
+    ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+    same_group = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(300)"])
+    detached = subprocess.Popen(
+        [sys.executable, "-I", "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)"],
+        start_new_session=True,
+    )
+    print(same_group.pid, detached.pid, flush=True)
+    %s
+    launcher._emergency_kill("test")
+"""
+
+
+def run_emergency(extra=""):
     status_r, status_w = os.pipe()
-    code = textwrap.dedent(
-        """
-        import importlib.util, os, subprocess, sys, time
-        spec = importlib.util.spec_from_file_location("l", %r)
-        launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(launcher)
-        launcher._STATUS_FD = %d
-        sleeper = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(300)"])
-        print(sleeper.pid, flush=True)
-        launcher._emergency_kill("test")
-        """
-    ) % (str(spawn.LAUNCHER_PATH), status_w)
+    code = textwrap.dedent(EMERGENCY) % (str(spawn.LAUNCHER_PATH), status_w, extra)
     process = subprocess.Popen(
         [sys.executable, "-I", "-c", code], stdout=subprocess.PIPE, start_new_session=True, pass_fds=(status_w,)
     )
     os.close(status_w)
     try:
-        sleeper = int(process.stdout.readline())
-        assert process.wait(timeout=20) == -9
-        assert wait_dead(sleeper), "a member of the process group survived"
+        pids = [int(p) for p in process.stdout.readline().split()]
+        code = process.wait(timeout=30)
         record = json.loads(os.read(status_r, 4096).decode())
-        assert record["kind"] == "sandbox" and "process tree" in record["message"]
+        return code, pids, record
     finally:
         os.close(status_r)
         try:
             os.killpg(process.pid, 9)
         except OSError:
             pass
+
+
+@linux_only
+def test_the_emergency_kill_reaches_detached_children_through_the_children_list():
+    code, pids, record = run_emergency()
+    assert code == 78
+    assert all(wait_dead(pid) for pid in pids), "a child survived the emergency kill"
+    assert record["kind"] == "sandbox"
+    assert "process tree" in record["message"] and "reaped every child" in record["message"]
+
+
+@linux_only
+def test_the_emergency_kill_ends_the_group_only_when_nothing_lists_the_children():
+    code, pids, record = run_emergency("launcher._direct_children = lambda: None")
+    assert code == -9
+    assert wait_dead(pids[0]), "a member of the process group survived"
+    assert record["kind"] == "sandbox" and "killed its process group" in record["message"]
+    # The record is written before the group goes, so the host always learns why.
+
+
+@linux_only
+def test_the_emergency_kill_reports_a_survivor_it_could_not_reap():
+    code, _pids, record = run_emergency(
+        "launcher.CLEANUP_SECONDS = 0.3; launcher._children_remain = lambda: True; launcher._kill_own_children = lambda: True"
+    )
+    assert code == 78
+    assert "survived" in record["message"]
 
 
 # --- Platforms without O_PATH ---------------------------------------------------

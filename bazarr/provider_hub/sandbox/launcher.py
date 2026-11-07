@@ -61,6 +61,7 @@ In ``declared`` mode no ruleset is applied; limits, ``no_new_privs``, the
 clean environment and, where the architecture is supported, the metadata
 filter still are.
 """
+import errno
 import importlib.util
 import json
 import os
@@ -255,12 +256,15 @@ class EnumerationError(Exception):
 
 
 def _children_map():
-    """Map pid to ppid for every process visible in /proc.
+    """Map pid to ppid for every process this launcher is allowed to read in /proc.
 
-    A process that exits while it is being read is normal and skipped. Any
-    other failure (out of file descriptors, /proc missing or unreadable) raises
-    ``EnumerationError``: a scan that silently saw nothing would let detached
-    children outlive their worker. Our own entry must be in the result.
+    A process that exits while it is being read is normal and skipped. So is one
+    the kernel refuses to show (``hidepid`` answers EACCES or EPERM for another
+    user's process, and for a descendant that cleared its dumpable flag): the
+    listing is then incomplete, which is why no caller treats it as proof that a
+    tree is empty. Any other failure (out of file descriptors, /proc missing or
+    unreadable) raises ``EnumerationError`` and the callers fall back to the
+    children list. Our own entry must be in the result.
     """
     result = {}
     try:
@@ -274,9 +278,11 @@ def _children_map():
             with open("/proc/%s/stat" % name, "rb") as handle:
                 data = handle.read().decode("utf-8", "replace")
             ppid = int(data.rsplit(")", 1)[1].split()[1])
-        except (FileNotFoundError, ProcessLookupError):
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue
         except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EPERM, errno.ENOENT, errno.ESRCH):
+                continue
             raise EnumerationError("cannot read /proc/%s/stat: %s" % (name, exc))
         except (ValueError, IndexError):
             raise EnumerationError("unreadable /proc/%s/stat" % name)
@@ -296,6 +302,30 @@ def _descendants(root):
             if ppid == current and pid not in found:
                 found.append(pid)
                 frontier.append(pid)
+    return found
+
+
+def _tree_pids(root):
+    """Every descendant of ``root`` that can be named, by every means available.
+
+    The /proc scan can miss processes (``hidepid``, an undumpable descendant)
+    or fail outright. For the launcher itself the children list is added to it,
+    and when the scan fails that list alone is used: the launcher is a
+    subreaper, so a descendant that lost its parent is a direct child. This
+    raises ``EnumerationError`` only when the scan failed and the children list
+    is not available either, which is the one case where nothing can be named.
+    """
+    failure = None
+    try:
+        found = _descendants(root)
+    except EnumerationError as exc:
+        found, failure = [], exc
+    if root == os.getpid():
+        children = _direct_children()
+        if children is not None:
+            return list(dict.fromkeys([*found, *children]))
+    if failure is not None:
+        raise failure
     return found
 
 
@@ -393,25 +423,78 @@ def _tree_tracking_error():
     )
 
 
-def _emergency_kill(reason):
-    """Last resort when the tree cannot be listed: kill the whole process group.
+def _kill_own_children():
+    """SIGSTOP, then SIGKILL, every child the launcher has. False when the list is unavailable."""
+    children = _direct_children()
+    if children is None:
+        return False
+    for sig in (signal.SIGSTOP, signal.SIGKILL):
+        for pid in children:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+    return True
 
-    The launcher leads its own group and session (the host starts it with
-    ``start_new_session``), so this reaches everything that did not leave it
-    and also ends the launcher, which then reports the reason. A descendant that
-    called ``setsid`` is out of reach without a listing; that is the cost of
-    failing safe, and the reason says so.
+
+def _free_descriptors():
+    """Close every descriptor but the three standard ones and the status pipe.
+
+    The reason the tree could not be listed is often a full descriptor table,
+    and the children list needs a descriptor to be read.
     """
-    _report("sandbox", "launcher could not list its process tree (%s); killed its process group" % reason)
-    _say("cannot list the process tree (%s); killing the process group" % reason)
-    # Only when it really leads the group: a launcher run by hand inside a
-    # shell's group must not take the shell down. The worker has a parent-death
-    # signal, so it still dies when this process exits.
-    if os.getpgrp() == os.getpid():
-        try:
-            os.killpg(os.getpgrp(), signal.SIGKILL)
-        except OSError:
-            pass
+    keep = sorted({0, 1, 2, _STATUS_FD if _STATUS_FD is not None else 2})
+    try:
+        limit = os.sysconf("SC_OPEN_MAX")
+    except (ValueError, OSError):
+        limit = 65536
+    start = 0
+    for fd in keep:
+        if fd > start:
+            os.closerange(start, fd)
+        start = fd + 1
+    os.closerange(start, max(limit, start))
+
+
+def _emergency_kill(reason):
+    """The tree cannot be listed at all: stop it through the children list, then exit.
+
+    The launcher is a subreaper, so every descendant that lost its parent is
+    one of its children: ``/proc/self/task/*/children`` names them whatever
+    ``/proc`` hides, and ``waitpid`` reporting no children proves they are gone.
+    The loop frees descriptors first (a full table is the usual reason to get
+    here) and then kills and reaps until that proof arrives or the ceiling
+    passes. Only when the kernel has no children list either is the process
+    group killed as a last resort; that also ends the launcher, and a
+    descendant that called ``setsid`` is then out of reach. The record sent to
+    the host says which of the three happened. The exit code is always a
+    sandbox failure: the launcher could not do its job the normal way.
+    """
+    _free_descriptors()
+    outcome = None
+    end = time.monotonic() + CLEANUP_SECONDS
+    while time.monotonic() < end:
+        if not _kill_own_children():
+            break
+        if not _children_remain():
+            outcome = "killed and reaped every child it had"
+            break
+        time.sleep(0.02)
+    else:
+        outcome = "a descendant of the worker survived"
+    if outcome is None:
+        outcome = "could not list its children either and killed its process group"
+    _report("sandbox", "launcher could not list its process tree (%s); %s" % (reason, outcome))
+    _say("cannot list the process tree (%s); %s" % (reason, outcome))
+    if outcome.startswith("could not"):
+        # Only when it really leads the group: a launcher run by hand inside a
+        # shell's group must not take the shell down. The worker has a
+        # parent-death signal, so it still dies when this process exits.
+        if os.getpgrp() == os.getpid():
+            try:
+                os.killpg(os.getpgrp(), signal.SIGKILL)
+            except OSError:
+                pass
     os._exit(EXIT_SANDBOX_FAILED)
 
 
@@ -420,13 +503,12 @@ def _freeze_descendants(root):
 
     A stopped process cannot fork, so a worker that forks while the launcher
     scans is outrun after a few passes instead of being chased forever. The
-    caller kills what this returns.
+    caller kills what this returns. The scan is ``_tree_pids``: it survives a
+    /proc that hides or refuses processes.
     """
     seen = []
     for _ in range(10):
-        pids = _descendants(root)
-        if root == os.getpid():
-            pids = list(dict.fromkeys([*pids, *(_direct_children() or ())]))
+        pids = _tree_pids(root)
         fresh = [pid for pid in pids if pid not in seen]
         for pid in fresh:
             try:
@@ -441,10 +523,10 @@ def _freeze_descendants(root):
 
 def _kill_descendants(sig=signal.SIGKILL):
     try:
-        pids = _freeze_descendants(os.getpid()) if sig == signal.SIGKILL else _descendants(os.getpid())
+        pids = _freeze_descendants(os.getpid()) if sig == signal.SIGKILL else _tree_pids(os.getpid())
         if sig == signal.SIGKILL:
             # Anything that appeared after the last freeze pass dies here too.
-            pids = list(dict.fromkeys([*pids, *_descendants(os.getpid()), *(_direct_children() or ())]))
+            pids = list(dict.fromkeys([*pids, *_tree_pids(os.getpid())]))
     except EnumerationError as exc:
         _emergency_kill(exc)
         return
@@ -557,7 +639,7 @@ def _cleanup_tree():
     end = time.monotonic() + CLEANUP_SECONDS
     while time.monotonic() < end:
         try:
-            left = _descendants(os.getpid())
+            left = _tree_pids(os.getpid())
         except EnumerationError as exc:
             _emergency_kill(exc)
             return False
@@ -566,7 +648,7 @@ def _cleanup_tree():
         _kill_descendants()
         time.sleep(0.02)
     try:
-        return not _descendants(os.getpid()) and not _children_remain()
+        return not _tree_pids(os.getpid()) and not _children_remain()
     except EnumerationError as exc:
         _emergency_kill(exc)
         return False
@@ -658,8 +740,13 @@ def main(argv):
             os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
-        _kill_descendants()
-        _cleanup_tree()
+        try:
+            _kill_descendants()
+            survived = not _cleanup_tree()
+        except Exception:
+            survived = True
+        if survived:
+            _report("sandbox", "a descendant of the worker may have survived the launcher's cleanup")
         raise
     return _exit_code(status)
 
