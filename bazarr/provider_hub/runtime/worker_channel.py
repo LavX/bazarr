@@ -232,6 +232,100 @@ class _WakeableInput:
             pass
 
 
+class _WakeableOutput:
+    """The channel's output, with a write that another thread can end where the platform allows.
+
+    A buffered stream blocked writing to a pipe the peer no longer reads holds
+    its own lock, so nothing can close it. On POSIX this writes straight to the
+    descriptor in non-blocking mode and waits for it to become writable together
+    with a private wake pipe: ``interrupt`` makes a blocked ``write`` raise
+    ``BrokenPipeError``, which the channel treats as a closed transport. Where
+    that is not possible the writes go through the stream itself, and a write
+    blocked on a stalled peer can outlive ``run()`` (its thread is a daemon).
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._fd = self._wake_r = self._wake_w = None
+        self._selector = None
+        if _select_on_pipes():
+            try:
+                self._fd = stream.fileno()
+                self._wake_r, self._wake_w = os.pipe()
+                self._selector = selectors.DefaultSelector()
+                self._selector.register(self._fd, selectors.EVENT_WRITE)
+                self._selector.register(self._wake_r, selectors.EVENT_READ)
+                os.set_blocking(self._fd, False)
+            except (AttributeError, OSError, ValueError):
+                self._release_wait()
+
+    @property
+    def interruptible(self):
+        return self._fd is not None
+
+    @property
+    def closed(self):
+        return self._stream.closed
+
+    def write(self, data):
+        if self._fd is None:
+            return self._stream.write(data)
+        view = memoryview(data)
+        while view:
+            fd = self._fd
+            try:
+                if fd is None:
+                    raise BrokenPipeError("output closed")
+                view = view[os.write(fd, view):]
+                continue
+            except BlockingIOError:
+                pass
+            selector, wake = self._selector, self._wake_r
+            try:
+                ready = selector.select()
+            except InterruptedError:
+                continue
+            except (AttributeError, OSError, ValueError):
+                raise BrokenPipeError("output closed") from None
+            if any(key.fd == wake for key, _ in ready):
+                raise BrokenPipeError("output closed")
+        return len(data)
+
+    def flush(self):
+        if self._fd is None:
+            self._stream.flush()
+
+    def interrupt(self):
+        if self._wake_w is not None:
+            try:
+                os.write(self._wake_w, b"x")
+            except OSError:
+                pass
+
+    def _release_wait(self):
+        if self._selector is not None:
+            try:
+                self._selector.close()
+            except Exception:
+                pass
+        for fd in (self._wake_r, self._wake_w):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        self._selector = None
+        self._wake_r = self._wake_w = None
+        self._fd = None
+
+    def close(self):
+        self._release_wait()
+        try:
+            self._stream.close()
+        except Exception:
+            pass
+
+
 class WorkerChannel:
     """Runs the worker side of one session.
 
@@ -259,7 +353,8 @@ class WorkerChannel:
         # The channel owns both streams from here on and releases them when run() ends.
         self._input = _WakeableInput(stdin)
         self._reader = frames.FrameReader(self._input, {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES})
-        self._writer = frames.FrameWriter(stdout, sender="worker")
+        self._output = _WakeableOutput(stdout)
+        self._writer = frames.FrameWriter(self._output, sender="worker")
         self._reader_thread = None
         self._heartbeat_thread = None
         self._lock = threading.Lock()
@@ -432,9 +527,21 @@ class WorkerChannel:
         else:
             # Closing a stream another thread is blocked reading may itself block.
             self._close_bounded(self._input.close)
-        # Closing the output waits for a write in progress; a peer that stopped
-        # reading must not hold the exit, so it is closed on its own thread.
-        self._close_bounded(self._close_output)
+        # A write blocked on a peer that stopped reading is ended by the wake pipe
+        # (where the platform allows), so the threads stuck in it can leave.
+        self._output.interrupt()
+        end = time.monotonic() + 2.0
+        with self._lock:
+            threads = list(self._threads)
+        for thread in threads:
+            if thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=max(0.0, end - time.monotonic()))
+        # Closing a buffered stream waits for a write in progress, so where the
+        # write could not be interrupted the close runs on its own bounded thread.
+        if self._output.interruptible:
+            self._output.close()
+        else:
+            self._close_bounded(self._close_output)
         # A reader woken by the interrupt may report the cut stream as a failure.
         self.exit_status = status
 
@@ -446,7 +553,7 @@ class WorkerChannel:
 
     def _close_output(self):
         try:
-            self._writer._stream.close()
+            self._output.close()
         except Exception:
             pass
 

@@ -2722,6 +2722,94 @@ def test_a_worker_reaped_by_someone_else_is_never_signalled(make_session, monkey
     assert session._group_lost or process.returncode is not None
 
 
+class _ReapingProcess:
+    """A worker handle whose ``poll()`` collects the child, as ``Popen.poll`` does."""
+
+    pid = 4_000_001
+    args = ["worker"]
+
+    def __init__(self):
+        self.returncode = None
+        self.polled = 0
+
+    def poll(self):
+        self.polled += 1
+        self.returncode = 0
+        return 0
+
+    def wait(self, timeout=None):
+        return self.poll()
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+@pytest.mark.parametrize("how", ["no-waitid", "waitid-fails"])
+def test_the_group_is_signalled_before_any_poll_that_could_reap_the_leader(monkeypatch, how):
+    session = WorkerSession(["worker"])
+    process = _ReapingProcess()
+    if how == "no-waitid":
+        monkeypatch.delattr(os, "waitid", raising=False)
+    else:
+        def failing(*args, **kwargs):
+            raise OSError(22, "invalid argument")
+
+        monkeypatch.setattr(os, "waitid", failing, raising=False)
+    calls = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig, process.returncode)))
+    session._end_group(process)
+    # Signalled while the leader was still unreaped, and nothing polled first.
+    assert calls == [(process.pid, signal.SIGKILL, None)]
+    assert process.polled == 0
+    # Once reaped, the group is never signalled again.
+    process.poll()
+    session._kill_tree(process)
+    assert len(calls) == 1
+
+
+def test_run_returns_and_its_threads_leave_while_a_write_is_blocked_on_a_full_pipe():
+    to_worker_r, to_worker_w = os.pipe()
+    from_worker_r, from_worker_w = os.pipe()
+    channel = worker_channel.WorkerChannel(
+        lambda operation: worker_channel.OperationResult({}, b"x" * (4 * 1024 * 1024)),
+        kinds=[{"kind": "translator", "major": 1, "minor": 0}],
+        stdin=os.fdopen(to_worker_r, "rb", buffering=0), stdout=os.fdopen(from_worker_w, "wb"),
+        redirect_stdout=False, heartbeat_interval=30)
+    host_in = os.fdopen(to_worker_w, "wb")
+    host_out = frames.FrameWriter(host_in)
+    from_worker = os.fdopen(from_worker_r, "rb")
+    status = []
+    runner = threading.Thread(target=lambda: status.append(channel.run()), daemon=True)
+    try:
+        host_out.write_control({"t": "welcome", "protocol": {"major": 2, "minor": 0}, "kind": None,
+                                "limits": {"heartbeat_interval_ms": 30000}, "session": "t"})
+        runner.start()
+        # Read the hello and then never read again: the pipe fills up.
+        hello = frames.FrameReader(from_worker).read_frame()
+        assert frames.decode_control(hello[1], "worker")["t"] == "hello"
+        host_out.write_control({"t": "req", "id": 1, "op": "big", "params": {}})
+        assert wait_until(lambda: 1 in channel._transmitting)
+        # The result streams until the pipe is full, then the writer blocks holding its lock.
+        assert wait_until(lambda: channel._writer._lock.locked())
+        time.sleep(0.5)
+        assert channel._writer._lock.locked()
+        workers = [t for t in list(channel._threads) if t.is_alive()]
+        assert workers
+        host_out.write_control({"t": "shutdown", "grace_ms": 200})
+        started = time.monotonic()
+        runner.join(8)
+        assert not runner.is_alive()
+        assert time.monotonic() - started < 6
+        # The blocked write was ended, so the thread that was in it is gone, and so is the stream.
+        assert wait_until(lambda: not any(t.is_alive() for t in workers), timeout=4)
+        assert channel._output.closed
+        assert not channel._writer._lock.locked()
+    finally:
+        for stream in (host_in, from_worker):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
 def test_the_wakeable_input_is_used_on_posix():
     assert worker_channel._select_on_pipes() is (os.name == "posix")
 

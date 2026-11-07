@@ -221,7 +221,7 @@ def _signal_group(process, sig):
 _RUNNING, _EXITED, _GONE = "running", "exited", "gone"
 
 
-def _probe(process):
+def _probe(process, reap_ok=True):
     """What the worker is doing, without reaping it: ``running``, ``exited`` or ``gone``.
 
     A reaped leader frees its pid, and with it the process group number: a
@@ -230,18 +230,26 @@ def _probe(process):
     this looks at it with ``WNOWAIT`` instead of ``poll()``, which reaps.
     ``gone`` means somebody else already collected it (``ECHILD``): the pid is
     no longer ours.
+
+    Without ``WNOWAIT`` the only way to see an exit is ``poll()``, which reaps.
+    ``reap_ok=False`` (used before a signal) never does that: it reports
+    ``running``, meaning "not known to be gone", and the caller signals first.
     """
     if process.returncode is not None:
         return _EXITED
     waitid = getattr(os, "waitid", None)
     flag = getattr(os, "WNOWAIT", None)
     if waitid is None or flag is None:
+        if not reap_ok:
+            return _RUNNING
         return _EXITED if process.poll() is not None else _RUNNING
     try:
         found = waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | flag)
     except ChildProcessError:
         return _GONE
     except OSError:
+        if not reap_ok:
+            return _RUNNING
         return _EXITED if process.poll() is not None else _RUNNING
     return _RUNNING if found is None else _EXITED
 
@@ -1038,10 +1046,11 @@ class WorkerSession:
         """
         if self._group_ended or self._group_lost or process.returncode is not None:
             return False
-        if _probe(process) == _GONE:
+        if _probe(process, reap_ok=False) == _GONE:
             self._group_lost = True
             return False
-        return True
+        # Whatever the probe did, a leader that is reaped now is not ours.
+        return process.returncode is None
 
     def _poll(self):
         process = self.process
