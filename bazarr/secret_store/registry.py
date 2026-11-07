@@ -905,6 +905,30 @@ def _persist_plugin_secret_paths(paths) -> None:
     mutate_state(add_paths)
 
 
+def _sync_state_file_copy() -> None:
+    """Leave no plaintext credential in the state.json copy.
+
+    The database holds the state; the file is a copy refreshed after each
+    write, and that refresh is best effort. The migration cannot rely on it:
+    a credential encrypted in the database must not stay readable in the file
+    because the refresh failed, or because an earlier run left them apart. A
+    copy that cannot be made to match fails the boot, like any other
+    credential the migration cannot secure.
+    """
+    try:
+        from provider_hub.state import sync_snapshot
+    except ImportError:
+        return
+    try:
+        sync_snapshot()
+    except Exception as error:
+        raise HubSecretMigrationError(
+            "The Provider Hub state file could not be rewritten to match the "
+            "encrypted credentials; startup does not complete while they may "
+            "remain readable in the clear in it"
+        ) from error
+
+
 def _flush_pending_persisted_paths() -> None:
     """Write the paths the boot loader found while the state was read-only."""
     if not _PENDING_PERSISTED_PATHS:
@@ -1099,6 +1123,9 @@ def migrate_installation_config_secrets(state=None) -> None:
             "in the clear"
         )
     if not plaintext and not canonicalize:
+        # Nothing to encrypt in the database, but the file copy may still hold
+        # what an earlier run encrypted there.
+        _sync_state_file_copy()
         return
 
     if plaintext:
@@ -1174,6 +1201,7 @@ def migrate_installation_config_secrets(state=None) -> None:
             "(encryption failed); they stay covered and are rewritten when "
             "the key works"
         ) from error
+    _sync_state_file_copy()
     logger.info("Encrypted %d Provider Hub plugin credential(s) left "
                 "in the clear by an earlier version", len(plaintext))
 

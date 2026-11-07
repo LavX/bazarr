@@ -25,7 +25,8 @@ ORIGIN_BUNDLED = "bundled"
 # The trust reason of an official source whose catalog came from that snapshot.
 RELEASE_FLOOR_TRUST_REASON = "release floor"
 _STATE_LOCK = threading.RLock()
-# The mutate_state call this thread is inside, as the document it is editing.
+# The mutate_state calls this thread is inside, each as the store it edits and
+# the document it holds. A nested call coalesces only into one on the same store.
 _ACTIVE = threading.local()
 
 
@@ -250,11 +251,39 @@ def _write_snapshot(data: dict[str, Any]) -> None:
     The file is the copy settings load reads before the database is open, and
     the one an older build finds after a downgrade. The database is the state:
     a failure here is logged and the write that was just committed stands.
+    ``sync_snapshot`` is the strict form for the callers that must not leave
+    the file behind.
     """
     try:
         write_state_file(data, state_file())
     except Exception as error:
         logger.warning("Could not refresh the Provider Hub state file: %s", type(error).__name__)
+
+
+def sync_snapshot() -> bool:
+    """Make state.json match the database, raising if it cannot.
+
+    For the credential migration: a plaintext credential encrypted in the
+    database must not stay readable in the file, whether the refresh after the
+    write failed or an earlier run left the two apart. Returns True when the
+    file was rewritten. Does nothing for the file backend, where the file is
+    the state.
+    """
+    if _uses_file(None) or _DATABASE_HELD:
+        return False
+    data = load_state()
+    current = state_file()
+    try:
+        with current.open("r", encoding="utf-8") as handle:
+            if json.load(handle) == data:
+                return False
+    except FileNotFoundError:
+        if data == default_state():
+            return False
+    except (OSError, ValueError):
+        pass
+    write_state_file(data, current)
+    return True
 
 
 def write_state_file(data: dict[str, Any], current: Path) -> None:
@@ -288,6 +317,32 @@ def _parse_document(text: str, *, strict: bool) -> dict[str, Any]:
     return _normalized_state(data)
 
 
+def _target(path: str | os.PathLike[str] | None) -> str:
+    """Which store a call edits: the database, or one file by its path."""
+    if _uses_file(path):
+        return "file:" + str(Path(path) if path is not None else state_file())
+    return "database"
+
+
+@contextlib.contextmanager
+def _editing(target: str, data: dict[str, Any]):
+    stack = getattr(_ACTIVE, "stack", None)
+    if stack is None:
+        stack = _ACTIVE.stack = []
+    stack.append((target, data))
+    try:
+        yield
+    finally:
+        stack.pop()
+
+
+def _enclosing(target: str) -> dict[str, Any] | None:
+    for held_target, data in reversed(getattr(_ACTIVE, "stack", None) or []):
+        if held_target == target:
+            return data
+    return None
+
+
 def mutate_state(
     mutator: Callable[[dict[str, Any]], Any],
     path: str | os.PathLike[str] | None = None,
@@ -305,12 +360,14 @@ def mutate_state(
     operator action, not for any routine writer.
     """
     with state_write_lock():
-        nested = getattr(_ACTIVE, "data", None)
+        target = _target(path)
+        nested = _enclosing(target)
         if nested is not None:
-            # A mutator that calls mutate_state edits the document the outer
-            # call is already holding and commits with it, on either backend.
-            # A second write would only be overwritten by the outer one (file)
-            # or make the outer one lose its revision (database).
+            # A mutator that calls mutate_state on the store it is already
+            # editing changes the document the outer call holds and commits
+            # with it, on either backend. A second write would only be
+            # overwritten by the outer one (file) or make the outer one lose
+            # its revision (database). Another store is written as usual.
             return mutator(nested)
         if _uses_file(path):
             current = Path(path) if path is not None else state_file()
@@ -322,11 +379,8 @@ def mutate_state(
                 data = default_state()
             else:
                 data = default_state() if data is None else _normalized_state(data)
-            _ACTIVE.data = data
-            try:
+            with _editing(target, data):
                 result = mutator(data)
-            finally:
-                _ACTIVE.data = None
             save_state(data, path)
             return result
         if _DATABASE_HELD:
@@ -335,11 +389,8 @@ def mutate_state(
 
         def step(text: str) -> tuple[str, Any]:
             data = _parse_document(text, strict=False)
-            _ACTIVE.data = data
-            try:
+            with _editing(target, data):
                 result = mutator(data)
-            finally:
-                _ACTIVE.data = None
             written.append(data)
             return json.dumps(data, sort_keys=True), result
 
@@ -386,7 +437,8 @@ def mutate_state_checked(
             data = read_state_document(path)
             validate(data)
             data = _normalized_state(data)
-            result = mutator(data)
+            with _editing(_target(path), data):
+                result = mutator(data)
             save_state(data, path)
             return result
         if _DATABASE_HELD:
@@ -397,7 +449,8 @@ def mutate_state_checked(
             data = _stored_document(text)
             validate(data)
             data = _normalized_state(data)
-            result = mutator(data)
+            with _editing("database", data):
+                result = mutator(data)
             written.append(data)
             return json.dumps(data, sort_keys=True), result
 

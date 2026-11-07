@@ -342,3 +342,40 @@ def test_a_nested_mutate_commits_with_its_outer_call_on_the_file_backend(monkeyp
     with pytest.raises(RuntimeError):
         mutate_state(refused)
     assert load_state()["plugin_secret_paths"] == ["demo.token"]
+
+
+def test_a_corrupt_file_copy_does_not_block_a_populated_database(hub_store, hub_engine):
+    from provider_hub.state import load_state, load_state_strict, mutate_state
+    mutate_state(lambda state: state["jobs"].append({"id": "kept"}))
+    _legacy_file(hub_store, "{this is not json")
+    hub_store.use_engine(hub_engine)  # a new process: the first access runs the import check again
+    assert [job["id"] for job in load_state()["jobs"]] == ["kept"]
+    assert [job["id"] for job in load_state_strict()["jobs"]] == ["kept"]
+    mutate_state(lambda state: state["jobs"].append({"id": "next"}))
+    assert raw_row(hub_engine)[0] == 3
+
+
+def test_a_nested_mutate_on_another_file_writes_that_file(monkeypatch, tmp_path):
+    from provider_hub.state import load_state, mutate_state
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(first))
+
+    def outer(state):
+        state["jobs"].append({"id": "in a"})
+        mutate_state(lambda other: other["jobs"].append({"id": "in b"}), path=second)
+
+    mutate_state(outer)
+    assert [job["id"] for job in load_state(first)["jobs"]] == ["in a"]
+    assert [job["id"] for job in load_state(second)["jobs"]] == ["in b"]
+
+
+def test_a_nested_mutate_on_the_same_path_still_coalesces(monkeypatch, tmp_path):
+    from provider_hub.state import load_state, mutate_state
+    target = tmp_path / "a.json"
+
+    def outer(state):
+        state["jobs"].append({"id": "outer"})
+        mutate_state(lambda other: other["jobs"].append({"id": "inner"}), path=target)
+
+    mutate_state(outer, path=target)
+    assert [job["id"] for job in load_state(target)["jobs"]] == ["outer", "inner"]

@@ -168,13 +168,13 @@ def import_legacy_state(connection, path: Path | None) -> bool:
     disk as the backup of what was imported, and an existing row is never
     touched, so running this again is harmless.
     """
-    # Read the file before any statement runs, so a file that cannot be read
-    # fails without touching the transaction the caller may be in.
-    document = _legacy_document(path)
     present = connection.execute(
         sa.select(_state_table.c.id).where(_state_table.c.id == ROW_ID)).first()
     if present is not None:
+        # The row is the state. The file is not opened, so a copy that is
+        # corrupt or unreadable cannot block a database that is fine.
         return False
+    document = _legacy_document(path)
     result = connection.execute(_insert_if_absent({
         "id": ROW_ID,
         "schema_version": SCHEMA_VERSION,

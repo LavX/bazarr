@@ -74,7 +74,7 @@ def test_a_local_install_is_stored_and_registers_its_secret_paths(hub, tmp_path,
     assert load_state()["installations"]["locallyinstalled"]["trusted"] is False
     # The file copy the next start reads before the database is open.
     copy = json.loads((tmp_path / "provider_hub" / "state.json").read_text(encoding="utf-8"))
-    assert copy == json.loads(raw_row(hub)[1]) or "locallyinstalled" in copy["installations"]
+    assert copy == json.loads(raw_row(hub)[1])
     assert any(job["action"] == "install" for job in stored["jobs"])
 
 
@@ -274,3 +274,65 @@ def test_the_boot_reads_the_copy_then_moves_to_the_database(backend, tmp_path):
             with admin.connect() as connection:
                 connection.exec_driver_sql(f'DROP SCHEMA "{schema}" CASCADE')
             admin.dispose()
+
+
+def _plaintext_installation(provider_id="credhub"):
+    return {provider_id: {
+        "provider_id": provider_id, "name": "Cred Hub", "active_version": "1.0.0", "state": "active",
+        "pending_restart": False, "manifest": _manifest(provider_id=provider_id),
+        "config": {"api_key": "plaintext-credential"},
+    }}
+
+
+@pytest.fixture
+def migration_env(hub, monkeypatch):
+    """The credential migration without touching the real settings store."""
+    monkeypatch.setattr("secret_store.crypto.persist_master_key", lambda: None)
+    return hub
+
+
+def _copy_text(tmp_path):
+    return (tmp_path / "provider_hub" / "state.json").read_text(encoding="utf-8")
+
+
+def test_a_credential_migration_fails_when_the_file_copy_cannot_be_rewritten(migration_env, tmp_path, monkeypatch):
+    from provider_hub import state
+    from secret_store.registry import HubSecretMigrationError, migrate_installation_config_secrets
+    _seed(_plaintext_installation())
+    assert "plaintext-credential" in _copy_text(tmp_path)
+
+    def broken(data, current):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(state, "write_state_file", broken)
+    with pytest.raises(HubSecretMigrationError):
+        migrate_installation_config_secrets()
+
+    # The database was encrypted; the file still holds the plaintext.
+    assert _stored(migration_env)["installations"]["credhub"]["config"]["api_key"].startswith("enc:v1:")
+    assert "plaintext-credential" in _copy_text(tmp_path)
+
+
+def test_the_next_credential_migration_sanitizes_a_file_the_database_has_outgrown(migration_env, tmp_path, monkeypatch):
+    from provider_hub import state
+    from secret_store.registry import HubSecretMigrationError, migrate_installation_config_secrets
+    _seed(_plaintext_installation())
+    real = state.write_state_file
+    monkeypatch.setattr(state, "write_state_file", lambda data, current: (_ for _ in ()).throw(OSError("full")))
+    with pytest.raises(HubSecretMigrationError):
+        migrate_installation_config_secrets()
+    monkeypatch.setattr(state, "write_state_file", real)
+
+    # A second start: nothing left to encrypt in the database, the file is repaired.
+    migrate_installation_config_secrets()
+
+    assert "plaintext-credential" not in _copy_text(tmp_path)
+    assert json.loads(_copy_text(tmp_path)) == _stored(migration_env)
+
+
+def test_a_successful_credential_migration_leaves_no_plaintext_in_either_place(migration_env, tmp_path):
+    from secret_store.registry import migrate_installation_config_secrets
+    _seed(_plaintext_installation())
+    migrate_installation_config_secrets()
+    assert "plaintext-credential" not in raw_row(migration_env)[1]
+    assert "plaintext-credential" not in _copy_text(tmp_path)

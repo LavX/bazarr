@@ -447,6 +447,16 @@ def scrub_job_secrets(job) -> bool:
     return changed
 
 
+def _sync_state_file_copy() -> None:
+    """Make the state.json copy match the scrubbed database, best effort."""
+    try:
+        from provider_hub.state import sync_snapshot
+        sync_snapshot()
+    except Exception as error:
+        logger.warning("The Provider Hub state file could not be refreshed after the "
+                       "scrub: %s", type(error).__name__)
+
+
 def scrub_persisted_secrets(state=None) -> bool:
     """Rewrite the secrets an earlier version left in Provider Hub's
     state.json, atomically, or leave the file untouched. Returns True when
@@ -466,10 +476,12 @@ def scrub_persisted_secrets(state=None) -> bool:
                            "stored diagnostics: %s", type(error).__name__)
             return False
     if not scrub_state_secrets(state):
+        _sync_state_file_copy()
         return False
     try:
         from provider_hub.state import mutate_state
         mutate_state(lambda current: scrub_state_secrets(current))
+        _sync_state_file_copy()
     except Exception as error:
         logger.warning("The scrubbed Provider Hub state could not be written: %s",
                        type(error).__name__)

@@ -63,9 +63,9 @@ def _import_state(bind, table):
     back to, and an existing row is never touched, so a second run, or an
     upgrade after a downgrade, imports only when the row is absent.
     """
-    document = _legacy_document()
     if bind.execute(sa.select(table.c.id).where(table.c.id == 1)).first() is not None:
         return
+    document = _legacy_document()
     values = {"id": 1, "schema_version": _SCHEMA_VERSION, "revision": 1,
               "document": document, "updated_at": datetime.now()}
     if bind.dialect.name == "sqlite":
