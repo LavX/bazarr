@@ -26,7 +26,8 @@ EXPIRES = NOW + timedelta(days=89)
 
 
 def stamp(moment):
-    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # strftime("%Y") does not zero-pad years below 1000 on glibc.
+    return f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}T{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}Z"
 
 
 def raw_public(private):
@@ -905,3 +906,31 @@ def test_garbage_never_raises(keys):
             lambda v: verify_catalog(v if isinstance(v, (bytes, str)) else b"", envelope, keys.key_file(), roots=keys.roots, channel="main", now=NOW),
         ):
             assert not call(sample).usable
+
+
+@pytest.mark.parametrize(
+    "value",
+    [10**5000, 2**63, 0, -1, True, 1.5, "1"],
+    ids=["huge", "2**63", "zero", "negative", "bool", "float", "string"],
+)
+def test_out_of_range_counters_are_malformed_not_a_crash(keys, value):
+    # A parsed key file can hold an int far past the JSON digit limit.
+    key_file = keys.key_file()
+    key_file["key_file_version"] = value
+    assert verify(keys, key_file=key_file).status is Status.MALFORMED
+
+    literal = b"9" * 6000 if value == 10**5000 else json.dumps(value).encode("ascii")
+    data = catalog_bytes().replace(b'"signed_version": 10', b'"signed_version": ' + literal)
+    assert verify(keys, data, envelope_for(data, keys.ci)).status is Status.MALFORMED
+
+
+def test_oversized_digit_strings_in_json_text_are_malformed(keys):
+    text = '{"key_file_version": %s}' % ("9" * 6000)
+
+    assert verify(keys, key_file=text).status is Status.MALFORMED
+
+
+def test_largest_counters_are_accepted(keys):
+    data = catalog_bytes(version=2**63 - 1)
+
+    assert verify(keys, data, key_file=keys.key_file(version=2**63 - 1)).ok

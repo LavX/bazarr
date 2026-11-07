@@ -233,6 +233,7 @@ class WireDocuments:
 _KEY_FILE_CONTEXT = b"bazarr-catalog-key-file-v1\n"
 _ENVELOPE_SCHEMA_VERSION = 1
 _ALGORITHM = "ed25519"
+_MAX_COUNTER = 2**63
 _KEY_ID_RE = re.compile(r"[0-9a-f]{16}", re.ASCII)
 _TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
 
@@ -380,10 +381,14 @@ def _object_list(container: Mapping[str, Any], name: str, what: str, *, required
     return value
 
 
+def _is_counter(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value < _MAX_COUNTER
+
+
 def _parse_key_file(document: Mapping[str, Any]) -> KeyFile:
     version = document.get("key_file_version")
-    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
-        raise WireFormatError("key_file_version must be a positive integer")
+    if not _is_counter(version):
+        raise WireFormatError("key_file_version must be a positive integer below 2**63")
     keys: list[SigningKey] = []
     seen: set[str] = set()
     for entry in _object_list(document, "keys", "key file", required=True):
@@ -441,8 +446,8 @@ def _parse_metadata(catalog: bytes) -> SignedMetadata:
     if not isinstance(document, Mapping):
         raise WireFormatError("the signed catalog must be a JSON object")
     signed_version = document.get("signed_version")
-    if isinstance(signed_version, bool) or not isinstance(signed_version, int) or signed_version < 1:
-        raise WireFormatError("signed_version must be a positive integer")
+    if not _is_counter(signed_version):
+        raise WireFormatError("signed_version must be a positive integer below 2**63")
     return SignedMetadata(
         channel=_text(document, "channel", "signed catalog"),
         signed_version=signed_version,
@@ -506,12 +511,15 @@ def verify_catalog(
         return VerificationResult(status, detail, host_time=now, baked=baked, **fields)
 
     root = roots.get(key_file_doc.root_key_id)
-    statement = key_file_statement(
-        key_file_doc.root_key_id,
-        key_file_doc.version,
-        [{"key_id": k.key_id, "public_key": base64.b64encode(k.public_key).decode("ascii"), "added": k.added} for k in key_file_doc.keys],
-        [{"key_id": r.key_id, "revoked_at": r.revoked_at} for r in key_file_doc.revocations],
-    )
+    try:
+        statement = key_file_statement(
+            key_file_doc.root_key_id,
+            key_file_doc.version,
+            [{"key_id": k.key_id, "public_key": base64.b64encode(k.public_key).decode("ascii"), "added": k.added} for k in key_file_doc.keys],
+            [{"key_id": r.key_id, "revoked_at": r.revoked_at} for r in key_file_doc.revocations],
+        )
+    except (ValueError, TypeError, RecursionError) as exc:
+        return early(Status.MALFORMED, f"the key file cannot be serialised: {exc.__class__.__name__}")
     if root is None or not _ed25519_verify(root, key_file_doc.signature, statement):
         return early(Status.BAD_SIGNATURE, "the key file is not signed by a trusted root")
     if stored_key_file_version is not None and key_file_doc.version < stored_key_file_version:
