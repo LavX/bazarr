@@ -2,15 +2,18 @@ import io
 import json
 import os
 import struct
+import subprocess
 import sys
 import textwrap
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import pytest
 
-from provider_hub.runtime import frames
+from provider_hub.runtime import frames, worker_channel
+from provider_hub.runtime import session as session_module
 from provider_hub.runtime.errors import (
     HandshakeError,
     HeartbeatTimeout,
@@ -22,6 +25,7 @@ from provider_hub.runtime.errors import (
     ResultTooLarge,
     SessionBusy,
     SessionClosed,
+    SessionError,
     WorkerExited,
 )
 from provider_hub.runtime.session import SessionLimits, WorkerSession
@@ -1589,3 +1593,371 @@ def test_a_handler_returning_a_list_fails_only_that_request(session):
     assert "not an object" in str(caught.value)
     assert session.alive
     assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+# ------------------------------------- redaction, acceptance and wake paths
+
+NUMERIC_SECRET = "4815162342"
+
+
+@pytest.mark.parametrize("field", ["bytes", "chunks"])
+def test_a_count_mismatch_does_not_echo_a_numeric_secret(tmp_path, field):
+    body = with_reader("""
+    rid = next_request()
+    out.write_control({"t": "res", "id": rid, "ok": True, "result": {}, "%s": 4815162342})
+    time.sleep(30)
+    """ % field)
+    session = hostile_session(tmp_path, body)
+    try:
+        session.start()
+        with pytest.raises(ProtocolViolation) as caught:
+            session.submit("x", secrets={"pin": NUMERIC_SECRET}).wait(8)
+    finally:
+        session.close(grace=0.3)
+    assert NUMERIC_SECRET not in str(caught.value)
+    assert "***" in str(caught.value)
+
+
+def test_numbers_that_spell_a_secret_are_dropped_from_every_worker_field(tmp_path):
+    body = with_reader("""
+    rid = next_request()
+    out.write_control({"t": "hb", "seq": 1, "rss_kb": 4815162342, "note": "n4815162342"})
+    out.write_control({"t": "progress", "id": rid, "fraction": 4815162342,
+                       "data": {"4815162342": [4815162342, 7]}})
+    out.write_control({"t": "res", "id": rid, "ok": False,
+                       "error": {"code": "plugin_error", "message": "m",
+                                 "retry_after": 4815162342, "errno": 4815162342}})
+    time.sleep(30)
+    """)
+    session = hostile_session(tmp_path, body)
+    seen = []
+    try:
+        session.start()
+        with pytest.raises(RequestFailed) as caught:
+            session.submit("x", secrets={"pin": NUMERIC_SECRET}, on_progress=seen.append).wait(8)
+        heartbeat = session.last_heartbeat
+        rss = session.rss_kb
+    finally:
+        session.close(grace=0.3)
+    assert caught.value.errno is None
+    assert caught.value.retry_after is None
+    assert seen
+    assert NUMERIC_SECRET not in json.dumps(seen)
+    assert seen[0]["data"] == {"***": [None, 7]}
+    assert NUMERIC_SECRET not in json.dumps(heartbeat)
+    assert rss is None
+
+
+def test_callback_failures_are_logged_without_the_raw_exception(make_session, caplog):
+    def bad_progress(message):
+        raise ValueError("progress callback saw " + SECRET)
+
+    def bad_event(name, payload):
+        raise ValueError("event callback saw " + SECRET)
+
+    session = make_session(on_event=bad_event)
+    session.start()
+    caplog.set_level("DEBUG", logger="provider_hub.runtime.session")
+    session.request("progress_secret", secrets={"key": SECRET}, on_progress=bad_progress, timeout=5)
+    with pytest.raises(RequestFailed):
+        session.request("blocked", secrets={"key": SECRET}, timeout=5)
+    records = [r for r in caplog.records if "callback failed" in r.getMessage()]
+    assert {"progress", "event"} <= {r.getMessage().split(" callback failed")[0].split()[-1] for r in records}
+    for record in records:
+        assert SECRET not in record.getMessage()
+        assert record.exc_info is None
+        assert not record.exc_text
+
+
+def test_a_success_after_the_deadline_is_a_timeout_before_the_watchdog_ticks(make_session):
+    session = make_session(limits=fast_limits(tick=30.0, heartbeat_timeout=60.0))
+    session.start()
+    with pytest.raises(RequestTimeout):
+        session.request("sleep", {"seconds": 0.7}, timeout=0.2)
+    assert session.alive
+
+
+def test_a_cancelled_reply_after_the_deadline_is_a_timeout_before_the_watchdog_ticks(tmp_path):
+    body = with_reader("""
+    rid = next_request()
+    time.sleep(0.6)
+    out.write_control({"t": "res", "id": rid, "ok": False, "error": {"code": "cancelled", "message": "c"}})
+    time.sleep(30)
+    """)
+    session = hostile_session(tmp_path, body, tick=30.0)
+    try:
+        session.start()
+        with pytest.raises(RequestTimeout):
+            session.submit("x", timeout=0.2).wait(8)
+    finally:
+        session.close(grace=0.3)
+
+
+def test_a_reply_that_breaks_the_reader_does_not_strand_its_request(make_session, monkeypatch):
+    session = make_session()
+    session.start()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("cannot build the error")
+
+    monkeypatch.setattr(session, "_failed", broken)
+    with pytest.raises(ProtocolViolation):
+        session.submit("raise").wait(8)
+
+
+def test_a_watchdog_that_crashes_ends_the_session_instead_of_dying_quietly(make_session, monkeypatch):
+    session = make_session()
+    session.start()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("tick broke")
+
+    monkeypatch.setattr(session, "_cancel", broken)
+    handle = session.submit("sleep", {"seconds": 30}, timeout=0.1)
+    with pytest.raises(SessionError):
+        handle.wait(8)
+    assert not session.alive
+
+
+class _BreaksOnSecondWrite:
+    """A worker stdin that takes the welcome and then fails with something other than an OSError."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._writes = 0
+
+    def write(self, data):
+        self._writes += 1
+        if self._writes > 1:
+            raise RuntimeError("write broke")
+        return self._stream.write(data)
+
+    def flush(self):
+        self._stream.flush()
+
+    def close(self):
+        self._stream.close()
+
+
+def test_a_writer_that_breaks_ends_the_session_instead_of_dying_quietly(tmp_path):
+    script = tmp_path / "quiet.py"
+    script.write_text(HOSTILE_PRELUDE + "time.sleep(30)\n", encoding="utf-8")
+
+    def spawn():
+        process = subprocess.Popen([sys.executable, "-B", str(script)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        process.stdin = _BreaksOnSecondWrite(process.stdin)
+        return process
+
+    session = WorkerSession(spawn=spawn, limits=fast_limits(max_in_flight=16, heartbeat_timeout=30.0))
+    try:
+        session.start()
+        with pytest.raises(SessionError):
+            session.submit("x").wait(8)
+        assert not session.alive
+    finally:
+        session.close(grace=0.3)
+
+
+def test_requests_are_finished_even_when_the_kill_itself_fails(make_session, monkeypatch):
+    session = make_session()
+    session.start()
+    handle = session.submit("sleep", {"seconds": 30})
+
+    def broken(process):
+        raise RuntimeError("kill broke")
+
+    monkeypatch.setattr(session, "_kill_tree", broken)
+    with pytest.raises(RuntimeError):
+        session._fail(ProtocolViolation("worker broke the contract"), kill=True)
+    with pytest.raises(ProtocolViolation):
+        handle.wait(2)
+
+
+def test_start_reports_a_session_that_ended_during_the_handshake(tmp_path):
+    session = hostile_session(tmp_path, "time.sleep(30)\n")
+
+    class EndsAfterHello(threading.Event):
+        def wait(self, timeout=None):
+            result = super().wait(timeout)
+            session._fail(SessionClosed("closed meanwhile"), kill=True)
+            return result
+
+    session._hello = EndsAfterHello()
+    try:
+        with pytest.raises(HandshakeError):
+            session.start()
+    finally:
+        session.close(grace=0.3)
+
+
+def test_a_hello_landing_as_the_handshake_times_out_is_not_killed(tmp_path):
+    session = hostile_session(tmp_path, "time.sleep(30)\n")
+
+    class TimesOutAfterHello(threading.Event):
+        def wait(self, timeout=None):
+            super().wait(timeout)
+            return False
+
+    session._hello = TimesOutAfterHello()
+    try:
+        assert session.start() is session.welcome
+        assert session.alive
+    finally:
+        session.close(grace=0.3)
+
+
+def test_an_outbox_that_drained_after_it_was_judged_full_does_not_end_the_session(make_session, monkeypatch):
+    session = make_session()
+    session.start()
+    real_put = session._put
+    judged = []
+
+    def full_once(data):
+        if not judged:
+            judged.append(True)
+            return session_module._FULL
+        return real_put(data)
+
+    monkeypatch.setattr(session, "_put", full_once)
+    assert session._send_quietly({"t": frames.CANCEL, "id": 999}) is True
+    assert session.alive
+    judged.clear()
+    with pytest.raises(SessionBusy):
+        session.submit("echo")
+    assert session.alive
+    assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+def test_a_queued_host_call_does_not_start_once_the_session_is_closed(make_session):
+    ran = []
+    session = make_session(host_calls={"h": lambda call: ran.append(call.name) or {}})
+    session.start()
+    session._call_queues[7] = deque([{"t": "call", "cid": 1, "name": "h", "params": {}, "id": 7}])
+    session._call_pending = 1
+    session._closed = True
+    session._call_worker(7)
+    assert ran == []
+
+
+# --------------------------------------------------- worker channel wake paths
+
+
+class ChannelHarness:
+    """A WorkerChannel on real pipes, with the test acting as the host."""
+
+    def __init__(self, handler, **kwargs):
+        to_worker_r, to_worker_w = os.pipe()
+        from_worker_r, from_worker_w = os.pipe()
+        self.channel = worker_channel.WorkerChannel(
+            handler, kinds=[{"kind": "translator", "major": 1, "minor": 0}],
+            stdin=os.fdopen(to_worker_r, "rb", buffering=0), stdout=os.fdopen(from_worker_w, "wb"),
+            redirect_stdout=False, **kwargs)
+        self.to_worker = os.fdopen(to_worker_w, "wb")
+        self.host_out = frames.FrameWriter(self.to_worker)
+        self.from_worker = os.fdopen(from_worker_r, "rb")
+        self.messages = []
+        self.status = []
+        self.thread = threading.Thread(target=lambda: self.status.append(self.channel.run()), daemon=True)
+
+    def start(self):
+        self.host_out.write_control({
+            "t": "welcome", "protocol": {"major": 2, "minor": 0}, "kind": None,
+            "limits": {"heartbeat_interval_ms": 50}, "session": "test"})
+        self.thread.start()
+        collector = threading.Thread(target=self._collect, daemon=True)
+        collector.start()
+        assert wait_until(lambda: any(m["t"] == "hello" for m in self.messages))
+
+    def _collect(self):
+        reader = frames.FrameReader(self.from_worker)
+        try:
+            while True:
+                frame = reader.read_frame()
+                if frame is None:
+                    return
+                if frame[0] == frames.FRAME_CONTROL:
+                    self.messages.append(frames.decode_control(frame[1], "worker"))
+        except (OSError, ValueError, frames.FrameError):
+            return
+
+    def hang_up_input(self):
+        self.to_worker.close()
+
+    def stop_reading_output(self):
+        self.from_worker.close()
+
+    def finish(self):
+        for closer in (self.to_worker.close,):
+            try:
+                closer()
+            except OSError:
+                pass
+        self.thread.join(10)
+        try:
+            self.channel._writer._stream.close()
+        except OSError:
+            pass
+
+
+def test_run_returns_when_the_output_fails_while_the_host_still_holds_the_input():
+    harness = ChannelHarness(lambda operation: {}, heartbeat_interval=0.05)
+    harness.start()
+    try:
+        harness.stop_reading_output()
+        harness.thread.join(5)
+        assert not harness.thread.is_alive()
+    finally:
+        harness.finish()
+
+
+def test_a_call_made_after_the_host_hung_up_fails_at_once():
+    gate = threading.Event()
+    outcome = {}
+
+    def handler(operation):
+        gate.wait(5)
+        started = time.monotonic()
+        try:
+            operation.call("usage", {}, timeout=30, cancellable=False)
+        except worker_channel.ChannelClosed:
+            outcome["waited"] = time.monotonic() - started
+        return {}
+
+    harness = ChannelHarness(handler, wait_grace=4.0)
+    harness.start()
+    try:
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}})
+        assert wait_until(lambda: 1 in harness.channel._operations)
+        harness.hang_up_input()
+        assert wait_until(lambda: harness.channel._ended.is_set())
+        time.sleep(0.3)
+        gate.set()
+        assert wait_until(lambda: "waited" in outcome, timeout=8)
+        assert outcome["waited"] < 1.5
+    finally:
+        gate.set()
+        harness.finish()
+
+
+def test_an_operation_that_cannot_get_a_thread_is_answered_with_an_error(monkeypatch):
+    harness = ChannelHarness(lambda operation: {})
+    harness.start()
+    real_start = threading.Thread.start
+
+    def start(self):
+        if getattr(self, "_target", None) == harness.channel._run_operation:
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    try:
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}})
+        assert wait_until(lambda: any(m["t"] == "res" for m in harness.messages))
+        reply = next(m for m in harness.messages if m["t"] == "res")
+        assert reply["id"] == 1 and reply["ok"] is False
+        assert reply["error"]["code"] == frames.Codes.PLUGIN_ERROR
+        assert 1 not in harness.channel._operations
+    finally:
+        monkeypatch.undo()
+        harness.finish()

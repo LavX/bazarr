@@ -156,6 +156,8 @@ class WorkerChannel:
         self._closed = threading.Event()
         self._stopping = threading.Event()
         self._ended = threading.Event()
+        # Set once no ack can arrive any more; a call made after that must not wait.
+        self._acks_closed = False
         self._hb_seq = 0
         self.session = None
         self.protocol = None
@@ -203,6 +205,8 @@ class WorkerChannel:
             raise OperationCancelled("cancelled")
         slot = {"event": threading.Event()}
         with self._lock:
+            if self._acks_closed or self._closed.is_set():
+                raise ChannelClosed("channel closed before %s was sent" % name)
             cid = self._next_cid
             self._next_cid += 1
             self._pending_calls[cid] = slot
@@ -270,6 +274,9 @@ class WorkerChannel:
             self.exit_status = 3
         except (OSError, ValueError):
             pass
+        except Exception:
+            # Whatever else ends the reader ends the worker, with a failure status.
+            self.exit_status = 3
         finally:
             self._ended.set()
             self._close_acks()
@@ -356,10 +363,16 @@ class WorkerChannel:
             self._respond_error(req_id, OperationError(busy, "request refused"))
             return
         thread = threading.Thread(target=self._run_operation, args=(operation,), daemon=True)
+        try:
+            thread.start()
+        except Exception:
+            # No thread, no reply: tell the host now instead of leaving it waiting.
+            self._release(operation)
+            self._respond_error(req_id, OperationError(Codes.PLUGIN_ERROR, "the operation could not be started"))
+            return
         with self._lock:
             self._threads = [t for t in self._threads if t.is_alive()]
             self._threads.append(thread)
-        thread.start()
 
     def _release(self, operation):
         with self._lock:
@@ -495,12 +508,15 @@ class WorkerChannel:
     def _close_acks(self):
         """The host side is gone: no ack will come, so waiting calls give up."""
         with self._lock:
+            self._acks_closed = True
             slots = list(self._pending_calls.values())
         for slot in slots:
             slot["event"].set()
 
     def _close(self):
         self._closed.set()
+        # The channel can no longer write: run() has nothing left to wait for.
+        self._ended.set()
         with self._lock:
             slots = list(self._pending_calls.values())
         for slot in slots:

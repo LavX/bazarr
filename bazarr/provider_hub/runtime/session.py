@@ -289,8 +289,7 @@ class WorkerSession:
 
     @property
     def rss_kb(self):
-        heartbeat = self.last_heartbeat or {}
-        return heartbeat.get("rss_kb")
+        return (self.last_heartbeat or {}).get("rss_kb")
 
     def start(self) -> Welcome:
         """Spawn the worker and run the handshake. Raises ``HandshakeError``."""
@@ -330,7 +329,16 @@ class WorkerSession:
         if self._hello.wait(self.limits.handshake_timeout):
             error = self._handshake_error
         else:
-            error = HandshakeError("worker sent no hello within %.1fs" % self.limits.handshake_timeout)
+            late = HandshakeError("worker sent no hello within %.1fs" % self.limits.handshake_timeout)
+            # The hello may land between the timeout and here: end the session
+            # only if it still has not, under the lock.
+            self._fail(late, kill=True, still=lambda: not self._hello.is_set())
+            error = late if self._failure is late else self._handshake_error
+        if error is None:
+            with self._lock:
+                if self._closed:
+                    # Ended between the hello and now (the worker left, or close() ran).
+                    error = HandshakeError("session ended during the handshake")
         if error is not None:
             self._fail(error, kill=True)
             raise error
@@ -388,11 +396,15 @@ class WorkerSession:
             # The request becomes visible to the watchdog and to cancel only
             # together with its frame in the outbox, so a cancel can never be
             # queued ahead of the request it cancels.
-            status = self._put(frames.pack_control(message))
+            data = frames.pack_control(message)
+            status = self._put(data)
             if status == _QUEUED:
                 self._requests[req_id] = request
         if status == _FULL:
-            self._fail(SessionError("worker is not reading its input", code=Codes.WRITE_TIMEOUT), kill=True)
+            self._end_if_still_full(len(data))
+            if not self._closed:
+                # The writer caught up while the full outbox was being judged.
+                raise SessionBusy("worker input is backed up; nothing was sent")
         if status != _QUEUED:
             raise self._failure or SessionClosed("session is not running")
         return RequestHandle(self, request)
@@ -401,12 +413,15 @@ class WorkerSession:
         """Submit and wait. ``timeout`` is the deadline for the whole request."""
         return self.submit(op, params, timeout=timeout, **kwargs).wait()
 
-    def _cancel(self, request, reason):
+    def _cancel(self, request, reason, timed_out=False):
         with self._lock:
-            if request.done.is_set() or request.cancel_sent_at is not None:
+            if (request.done.is_set() or request.cancel_sent_at is not None
+                    or self._requests.get(request.id) is not request):
                 return
             request.cancel_sent_at = time.monotonic()
             request.cancel_reason = reason
+            if timed_out:
+                request.timed_out = True
         self._send_quietly({"t": frames.CANCEL, "id": request.id, "reason": reason})
 
     # ----------------------------------------------------------------- reading
@@ -485,7 +500,7 @@ class WorkerSession:
         # End of stream, or the pipe broke.
         exit_code = self._reap_exit_code()
         if not welcomed:
-            self._handshake_error = HandshakeError("worker exited before hello (exit code %s)" % exit_code)
+            self._handshake_error = HandshakeError(self._public("worker exited before hello (exit code %s)" % exit_code))
             self._hello.set()
             return
         if self._bye.is_set() or self._closed:
@@ -493,7 +508,8 @@ class WorkerSession:
             # the stream closed, and anything it forked has to go with it.
             self._fail(SessionClosed("worker exited"), kill=True)
         else:
-            self._fail(WorkerExited("worker exited (exit code %s)" % exit_code, exit_code=exit_code), kill=True)
+            self._fail(WorkerExited(self._public("worker exited (exit code %s)" % exit_code), exit_code=exit_code),
+                       kill=True)
 
     def _on_hello(self, hello):
         protocol = frames.negotiate_protocol(hello["protocols"])
@@ -539,14 +555,14 @@ class WorkerSession:
         """Handle one control message. True means the reader should stop."""
         kind = message["t"]
         if kind == frames.HB:
-            self.last_heartbeat = message
+            self.last_heartbeat = self._redact_obj(message)
         elif kind == frames.PROGRESS:
             request = self._get(message["id"])
             if request is not None and request.on_progress is not None:
                 try:
                     request.on_progress(self._redact_obj(message))
-                except Exception:
-                    logger.debug("progress callback failed", exc_info=True)
+                except Exception as error:
+                    self._log_callback_failure("progress", error)
         elif kind == frames.RES:
             self._on_result(message)
         elif kind == frames.CALL:
@@ -578,27 +594,45 @@ class WorkerSession:
         return True
 
     def _on_result(self, message):
+        req_id = message["id"]
         with self._lock:
-            request = self._requests.pop(message["id"], None)
+            request = self._requests.get(req_id)
         if request is None:
             # The id is worker-supplied and may echo a secret: name only its type.
             logger.debug("%s: result for an unknown request ignored (id is %s)",
                          self.name, type(message["id"]).__name__)
             return
+        # The reply is judged while the request is still registered, so anything
+        # that goes wrong here still reaches the session's failure path, which
+        # finishes every registered request. Only this thread adds data to it.
+        outcome, error, cancelled = self._judge_result(request, message)
+        with self._lock:
+            if self._requests.get(req_id) is not request:
+                # The session ended meanwhile and has finished it.
+                return
+            del self._requests[req_id]
+            # Checked at the point of acceptance, against the clock: the
+            # watchdog only sets timed_out on its next tick.
+            expired = request.timed_out or (
+                request.deadline is not None and time.monotonic() >= request.deadline)
+            if cancelled:
+                error = (RequestTimeout("request exceeded its deadline") if expired
+                         else RequestCancelled(self._public(request.cancel_reason or "cancelled")))
+            elif error is None and expired:
+                outcome = None
+                error = RequestTimeout("request exceeded its deadline")
+            self._finish(request, outcome=outcome, error=error)
+
+    def _judge_result(self, request, message):
+        """What a reply means: ``(outcome, error, cancelled)``. Changes no session state."""
         if request.overflow:
-            self._finish(request, error=ResultTooLarge(
-                "result exceeded %d bytes" % request.max_result_bytes))
-            return
+            return None, ResultTooLarge("result exceeded %d bytes" % request.max_result_bytes), False
         if not message["ok"]:
             error = message["error"]
             code = self._safe_code(error.get("code"))
-            if code == Codes.CANCELLED and request.timed_out:
-                self._finish(request, error=RequestTimeout("request exceeded its deadline"))
-            elif code == Codes.CANCELLED:
-                self._finish(request, error=RequestCancelled(request.cancel_reason or "cancelled"))
-            else:
-                self._finish(request, error=self._failed(error, code, request))
-            return
+            if code == Codes.CANCELLED:
+                return None, None, True
+            return None, self._failed(error, code, request), False
         data = b"".join(request.chunks)
         declared = message.get("bytes")
         problem = None
@@ -615,21 +649,19 @@ class WorkerSession:
         elif data and message.get("sha256") is None:
             problem = "chunked result without a checksum"
         if problem:
-            self._finish(request, error=ProtocolViolation(problem))
-            return
-        if request.timed_out:
-            self._finish(request, error=RequestTimeout("request exceeded its deadline"))
-            return
-        self._finish(request, outcome=RequestResult(message.get("result") or {}, data))
+            # The counts are worker-supplied numbers and can spell a secret.
+            return None, ProtocolViolation(self._public(problem)), False
+        return RequestResult(message.get("result") or {}, data), None, False
 
     def _failed(self, error, code, request):
         def clean(value):
             return self._redact(value) if isinstance(value, str) else None
 
-        retry_after = error.get("retry_after")
+        retry_after = self._redact_obj(error.get("retry_after"))
         if (not isinstance(retry_after, (int, float)) or isinstance(retry_after, bool)
                 or retry_after != retry_after or retry_after in (float("inf"), float("-inf"))):
             retry_after = None
+        errno = self._redact_obj(error.get("errno"))
         return RequestFailed(
             clean(error.get("message")) or code,
             code=code,
@@ -637,7 +669,7 @@ class WorkerSession:
             retry_after=retry_after,
             class_name=clean(error.get("class_name")),
             traceback=clean(error.get("traceback")),
-            errno=error.get("errno") if isinstance(error.get("errno"), int) else None,
+            errno=errno if isinstance(errno, int) and not isinstance(errno, bool) else None,
         )
 
     def _finish(self, request, outcome=None, error=None):
@@ -684,6 +716,10 @@ class WorkerSession:
         try:
             while not self._stop.is_set():
                 with self._lock:
+                    if self._closed:
+                        # Ended since the check above: a handler must not start now.
+                        clean = True
+                        return
                     pending = self._call_queues.get(key)
                     if not pending:
                         self._call_queues.pop(key, None)
@@ -749,45 +785,52 @@ class WorkerSession:
     # --------------------------------------------------------------- watchdog
 
     def _watchdog(self):
+        while not self._stop.wait(self.limits.tick):
+            try:
+                self._tick()
+            except Exception as error:
+                # A dead watchdog would leave every deadline and heartbeat unenforced.
+                logger.error("%s: watchdog failed: %s", self.name, type(error).__name__)
+                self._fail(SessionError("watchdog failed (%s)" % type(error).__name__), kill=True)
+            if self._closed:
+                return
+
+    def _tick(self):
         limits = self.limits
-        while not self._stop.wait(limits.tick):
-            now = time.monotonic()
-            if now - self.last_frame_at > limits.heartbeat_timeout:
-                self._fail(HeartbeatTimeout(
-                    "no frame from the worker for %.1fs" % (now - self.last_frame_at)), kill=True,
-                    still=lambda: time.monotonic() - self.last_frame_at > limits.heartbeat_timeout)
-                if self._closed:
-                    return
+        now = time.monotonic()
+        if now - self.last_frame_at > limits.heartbeat_timeout:
+            self._fail(HeartbeatTimeout(
+                "no frame from the worker for %.1fs" % (now - self.last_frame_at)), kill=True,
+                still=lambda: time.monotonic() - self.last_frame_at > limits.heartbeat_timeout)
+            return
+        started = self._write_started
+        if started is not None and now - started > limits.write_timeout:
+            self._fail(SessionError(
+                "worker has not read its input for %.1fs" % (now - started),
+                code=Codes.WRITE_TIMEOUT), kill=True,
+                still=lambda: self._write_started == started)
+            return
+        with self._lock:
+            pending = list(self._requests.values())
+        for request in pending:
+            if request.done.is_set():
                 continue
-            started = self._write_started
-            if started is not None and now - started > limits.write_timeout:
-                self._fail(SessionError(
-                    "worker has not read its input for %.1fs" % (now - started),
-                    code=Codes.WRITE_TIMEOUT), kill=True,
-                    still=lambda: self._write_started == started)
-                if self._closed:
-                    return
-                continue
-            with self._lock:
-                pending = list(self._requests.values())
-            for request in pending:
-                if request.done.is_set():
-                    continue
-                if request.cancel_sent_at is not None:
-                    if now - request.cancel_sent_at > limits.cancel_grace:
-                        # The worker ignored the cancel. Only ending it ends the work.
-                        if request.overflow:
-                            error = ResultTooLarge("result exceeded %d bytes" % request.max_result_bytes)
-                        elif request.timed_out:
-                            error = RequestTimeout("request exceeded its deadline")
-                        else:
-                            error = RequestCancelled(request.cancel_reason or "cancelled")
-                        self._fail(error, kill=True, only=request)
-                        if self._closed:
-                            return
-                elif request.deadline is not None and now >= request.deadline:
-                    request.timed_out = True
-                    self._cancel(request, Codes.TIMEOUT)
+            if request.cancel_sent_at is not None:
+                if now - request.cancel_sent_at > limits.cancel_grace:
+                    # The worker ignored the cancel. Only ending it ends the work.
+                    if request.overflow:
+                        error = ResultTooLarge("result exceeded %d bytes" % request.max_result_bytes)
+                    elif request.timed_out:
+                        error = RequestTimeout("request exceeded its deadline")
+                    else:
+                        error = RequestCancelled(self._public(request.cancel_reason or "cancelled"))
+                    self._fail(error, kill=True, only=request)
+                    if self._closed:
+                        return
+            elif request.deadline is not None and now >= request.deadline:
+                # Flag and cancel together, under the lock, and only while the
+                # request is still waiting for its reply.
+                self._cancel(request, Codes.TIMEOUT, timed_out=True)
 
     # ------------------------------------------------------------- lifecycle
 
@@ -811,10 +854,26 @@ class WorkerSession:
         ``FrameTooLarge`` for a message over the control cap. A full outbox
         means the worker stopped reading: the group is killed.
         """
-        status = self._put(frames.pack_control(message))
-        if status == _FULL:
-            self._fail(SessionError("worker is not reading its input", code=Codes.WRITE_TIMEOUT), kill=True)
-        return status == _QUEUED
+        data = frames.pack_control(message)
+        for _ in range(3):
+            status = self._put(data)
+            if status != _FULL:
+                return status == _QUEUED
+            self._end_if_still_full(len(data))
+            if self._closed:
+                return False
+        # Judged full three times in a row: the worker is not reading.
+        self._fail(SessionError("worker is not reading its input", code=Codes.WRITE_TIMEOUT), kill=True)
+        return False
+
+    def _outbox_full(self, size):
+        return (self._outbox.qsize() >= self.limits.max_queued_frames
+                or self._outbox_bytes + size > self.limits.max_queued_bytes)
+
+    def _end_if_still_full(self, size):
+        """End the session for a full outbox, unless the writer drained it since it was judged full."""
+        self._fail(SessionError("worker is not reading its input", code=Codes.WRITE_TIMEOUT), kill=True,
+                   still=lambda: self._outbox_full(size))
 
     def _put(self, data):
         """Put one packed frame in the outbox. Never blocks, never ends the session.
@@ -825,8 +884,7 @@ class WorkerSession:
         with self._lock:
             if self._closed:
                 return _CLOSED
-            if (self._outbox.qsize() >= self.limits.max_queued_frames
-                    or self._outbox_bytes + len(data) > self.limits.max_queued_bytes):
+            if self._outbox_full(len(data)):
                 return _FULL
             self._outbox_bytes += len(data)
             self._outbox.put_nowait(data)
@@ -854,7 +912,12 @@ class WorkerSession:
                     stream.flush()
                 except (OSError, ValueError) as error:
                     self._write_started = None
-                    self._fail(WorkerExited("worker pipe closed: %s" % error, exit_code=self._poll()), kill=True)
+                    self._fail(WorkerExited("worker pipe closed: %s" % self._describe(error), exit_code=self._poll()),
+                               kill=True)
+                    return
+                except Exception as error:
+                    self._write_started = None
+                    self._fail(SessionError("writer failed (%s)" % type(error).__name__), kill=True)
                     return
                 self._write_started = None
         finally:
@@ -866,8 +929,13 @@ class WorkerSession:
             return
         try:
             callback(name, payload)
-        except Exception:
-            logger.debug("event callback failed", exc_info=True)
+        except Exception as error:
+            self._log_callback_failure("event", error)
+
+    def _log_callback_failure(self, what, error):
+        # Redacted and without the raw exception: its text or traceback may carry a secret.
+        logger.debug("%s: %s callback failed: %s: %s", self.name, what, type(error).__name__,
+                     self._describe(error))
 
     def _fail(self, error, kill, only=None, still=None):
         """End the session with ``error``; ``only`` names the request that caused it.
@@ -897,15 +965,18 @@ class WorkerSession:
             self._call_queues.clear()
             self._call_pending = 0
         process = self.process
-        if kill and process is not None:
-            self._kill_tree(process)
-        for request in pending:
-            if request.done.is_set():
-                continue
-            if only is not None and request is not only:
-                self._finish(request, error=_as_session_error(error))
-            else:
-                self._finish(request, error=error)
+        try:
+            if kill and process is not None:
+                self._kill_tree(process)
+        finally:
+            # Whatever the kill does, nobody waits on a request that was dropped.
+            for request in pending:
+                if request.done.is_set():
+                    continue
+                if only is not None and request is not only:
+                    self._finish(request, error=_as_session_error(error))
+                else:
+                    self._finish(request, error=error)
 
     def _kill_tree(self, process):
         if process.poll() is None and not _signal_group(process, _SIGKILL):
@@ -1039,12 +1110,22 @@ class WorkerSession:
         return code if _CODE_SHAPE.fullmatch(code) else Codes.PLUGIN_ERROR
 
     def _redact_obj(self, value):
+        """A worker-supplied JSON value with every secret taken out.
+
+        Strings and keys are redacted. A number whose digits contain a secret
+        becomes ``None``: a worker can spell a numeric secret as an int.
+        """
         if isinstance(value, str):
             return self._redact(value)
         if isinstance(value, list):
             return [self._redact_obj(item) for item in value]
         if isinstance(value, dict):
-            return {key: self._redact_obj(item) for key, item in value.items()}
+            return {(self._redact(key) if isinstance(key, str) else key): self._redact_obj(item)
+                    for key, item in value.items()}
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            text = str(value)
+            if any(secret in text for secret in self._secrets_snapshot()):
+                return None
         return value
 
 
