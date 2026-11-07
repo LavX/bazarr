@@ -197,6 +197,50 @@ def test_policy_refuses_nested_writable_grants(tmp_path):
     SandboxPolicy.for_interpreter(sys.executable, read_write=[tmp_path / "rw", other])
 
 
+@pytest.mark.parametrize("sub_first", [True, False])
+def test_overlapping_writable_roots_are_refused_before_any_link_is_followed(tmp_path, sub_first):
+    root = tmp_path / "root"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (root / "sub").symlink_to(elsewhere)
+    grants = [root / "sub", root] if sub_first else [root, root / "sub"]
+    with pytest.raises(PolicyError, match="nested"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=grants)
+    # The same overlap is refused when sub is a plain directory too.
+    (root / "sub").unlink()
+    (root / "sub").mkdir()
+    with pytest.raises(PolicyError, match="nested"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=grants)
+    # A repeated root is the same grant, not an overlap.
+    policy = SandboxPolicy.for_interpreter(sys.executable, read_write=[root, root])
+    assert policy.read_write == (str(root),)
+
+
+@pytest.mark.parametrize("alias_first", [True, False])
+def test_a_writable_root_whose_link_passes_through_another_root_is_refused(tmp_path, alias_first):
+    root = tmp_path / "root"
+    (root / "dir").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(root / "dir")
+    grants = [alias, root] if alias_first else [root, alias]
+    with pytest.raises(PolicyError, match="through a symlink"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=grants)
+    # A link to a directory that no other root touches is fine.
+    free = tmp_path / "free"
+    free.mkdir()
+    (tmp_path / "free-link").symlink_to(free)
+    other = tmp_path / "other"
+    other.mkdir()
+    policy = SandboxPolicy.for_interpreter(sys.executable, read_write=[tmp_path / "free-link", other])
+    assert set(policy.read_write) == {str(free), str(other)}
+    # Two names for one directory are refused as well.
+    twin = tmp_path / "twin"
+    twin.symlink_to(other)
+    with pytest.raises(PolicyError, match="through a symlink"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=[twin, other])
+
+
 def test_policy_requires_existing_writable_directories(tmp_path):
     with pytest.raises(PolicyError, match="does not exist"):
         SandboxPolicy.for_interpreter(sys.executable, read_write=[tmp_path / "missing"])

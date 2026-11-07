@@ -318,6 +318,32 @@ def _resolve_grants(
     return result
 
 
+def _check_writable_roots(items: Iterable[str | os.PathLike]) -> tuple[str, ...]:
+    """Vet the writable grants as given, before anything is resolved.
+
+    Resolution trusts the first root a path falls under, so two roots that
+    overlap as written (``root/sub`` and ``root``, in either order) would let
+    a worker repoint ``sub`` and have the next build grant the new target. So
+    no root may sit inside another one lexically, and no root's own symlink
+    chain may pass through another root, by its written or its resolved form:
+    that is a link a worker can repoint. Returns the normalized roots with
+    exact repeats dropped.
+    """
+    roots = tuple(dict.fromkeys(os.path.normpath(_abs(g)) for g in items))
+    for outer in roots:
+        for inner in roots:
+            if inner != outer and inner.startswith(outer.rstrip("/") + "/"):
+                raise PolicyError("writable grant %s is nested inside writable grant %s" % (inner, outer))
+    for root in roots:
+        others: list[str] = []
+        for other in roots:
+            if other != root:
+                others.extend((other, os.path.realpath(other)))
+        if others and _trace(root, others)[1]:
+            raise PolicyError("writable grant %s reaches another writable grant through a symlink" % root)
+    return roots
+
+
 def interpreter_read_paths(
     interpreter: str | os.PathLike,
     writable: Iterable[str | os.PathLike] = (),
@@ -432,7 +458,7 @@ class SandboxPolicy:
                 raise PolicyError("reserved ports cannot be allowed: %s" % sorted(clash))
             ports = frozenset(values)
         read_only = tuple(read_only)
-        read_write = tuple(read_write)
+        read_write = _check_writable_roots(read_write)
         rw_items = _resolve_grants(read_write, read_write, required=True)
         for path, _ident, mode in rw_items:
             if not stat_module.S_ISDIR(mode):
