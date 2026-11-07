@@ -2340,20 +2340,20 @@ def test_a_launcher_that_exited_on_its_own_is_never_signalled_by_pid(tmp_path, m
     assert all(returncode is None for _sig, returncode in sent), sent
 
 
-def test_the_launch_closes_every_descriptor_when_a_pipe_cannot_be_made(tmp_path, monkeypatch):
+def test_the_launch_closes_every_descriptor_when_a_channel_cannot_be_made(tmp_path, monkeypatch):
     spec = make_spec(tmp_path, "pass")
     opened = []
-    real_pipe = os.pipe
+    real_pair = spawn._socket_pair
     real_memfd = getattr(os, "memfd_create", None)
 
-    def failing_second_pipe():
-        if len([fd for fd in opened if fd[0] == "pipe"]) >= 1:
+    def failing_second_pair():
+        if len([fd for fd in opened if fd[0] == "pair"]) >= 1:
             raise OSError(errno.EMFILE, "Too many open files")
-        pair = real_pipe()
-        opened.append(("pipe", pair))
+        pair = real_pair()
+        opened.append(("pair", pair))
         return pair
 
-    monkeypatch.setattr(os, "pipe", failing_second_pipe)
+    monkeypatch.setattr(spawn, "_socket_pair", failing_second_pair)
     if real_memfd is not None:
 
         def recording_memfd(*args, **kwargs):
@@ -3781,3 +3781,61 @@ def test_a_status_stream_that_overflows_is_not_trusted(tmp_path):
     finally:
         os.close(write_fd)
         process.stop(0.5)
+
+
+@linux_only
+def test_a_worker_cannot_reopen_the_hosts_channels_to_the_launcher(mode, tmp_path):
+    """The host's ends of the status and lifeline channels (and the anchor's) cannot be reopened through /proc."""
+    script = """
+        import json, os, time
+        host = int(os.environ["BAZARR_TEST_HOST_PID"])
+        path = os.path.join(os.getcwd(), "fds.json")
+        deadline = time.monotonic() + 20
+        while not os.path.exists(path) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.05)
+        wanted = json.load(open(path))
+        result = {}
+        for name, fd in wanted.items():
+            try:
+                os.close(os.open("/proc/%d/fd/%d" % (host, fd), os.O_WRONLY | os.O_NONBLOCK))
+                result[name] = "opened"
+            except OSError as exc:
+                result[name] = exc.errno
+        print(json.dumps(result))
+    """
+    spec = make_spec(tmp_path, script, env_extra={"BAZARR_TEST_HOST_PID": str(os.getpid())})
+    process = spawn_worker(spec, probe=mode)
+    try:
+        wanted = {"status": process._fds["status"], "lifeline": process._fds["lifeline"]}
+        anchor = getattr(process, "_anchor", None)
+        if anchor is not None and anchor.stdin is not None:
+            wanted["anchor"] = anchor.stdin.fileno()
+        (tmp_path / "rw" / "fds.json").write_text(json.dumps(wanted))
+        out, err = process.communicate(timeout=30)
+        assert process.returncode == 0, err
+    finally:
+        process.stop(0.5)
+    seen = json.loads(out)
+    assert set(seen) == set(wanted)
+    # ENXIO: a socket cannot be opened by path. Any refusal is as good as that;
+    # a successful open is the failure.
+    assert all(value != "opened" for value in seen.values()), seen
+
+
+@linux_only
+def test_the_anchor_and_launcher_channels_are_sockets(tmp_path):
+    process = spawn_worker(make_spec(tmp_path, "import time; time.sleep(30)"), probe=DECLARED)
+    try:
+        for name in ("status", "lifeline"):
+            assert os.path.islink("/proc/self/fd/%d" % process._fds[name])
+            assert os.readlink("/proc/self/fd/%d" % process._fds[name]).startswith("socket:")
+    finally:
+        process.stop(0.5)
+    plain = spawn._start_plain([sys.executable, "-c", "pass"], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if plain._anchor is not None:
+            assert os.readlink("/proc/self/fd/%d" % plain._anchor.stdin.fileno()).startswith("socket:")
+    finally:
+        plain.stop(0.5)

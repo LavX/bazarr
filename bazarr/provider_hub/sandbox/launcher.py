@@ -11,10 +11,12 @@ one thread, which makes the single ``fork`` below safe and lets
 What happens, in order:
 
 1. Read the JSON spec from ``spec_fd`` (a memfd or temp file). The host keeps
-   the write end of the ``lifeline_fd`` pipe; end-of-file there means the host
-   died. ``status_fd`` is the write end of a pipe the host reads: the launcher
-   puts one JSON line on it when the worker could not be started, and nothing
-   otherwise.
+   the other end of the ``lifeline_fd`` socket pair; end-of-file there means
+   the host died. ``status_fd`` is one end of a socket pair the host reads: the
+   launcher puts one JSON line on it when the worker could not be started, and
+   nothing otherwise. Both are sockets because a same-user worker can reopen
+   the host's end of a pipe through ``/proc/<host>/fd``, and cannot do that to
+   a socket.
 2. Become a child subreaper, then fork once. The launcher stays behind as the
    reaper. When the worker exits, when the host dies (lifeline EOF) or on
    SIGTERM, every descendant is killed, ``setsid`` children included. The tree

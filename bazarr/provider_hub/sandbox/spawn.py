@@ -486,9 +486,15 @@ def _start_anchor() -> "subprocess.Popen | None":
     if not hasattr(os, "killpg") or sys.version_info < (3, 11) or getattr(sys, "frozen", False):
         return None
     try:
-        return subprocess.Popen(
+        # The anchor reads a socket, not a pipe, so a worker cannot reopen the
+        # host's end through /proc and keep the anchor from ever seeing the host go.
+        host_end, anchor_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    try:
+        anchor = subprocess.Popen(
             [sys.executable, "-I", "-S", "-B", "-c", _ANCHOR_SCRIPT],
-            stdin=subprocess.PIPE,
+            stdin=anchor_end.fileno(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env={},
@@ -496,7 +502,12 @@ def _start_anchor() -> "subprocess.Popen | None":
             process_group=0,
         )
     except OSError:
+        host_end.close()
         return None
+    finally:
+        anchor_end.close()
+    anchor.stdin = os.fdopen(host_end.detach(), "wb", buffering=0)
+    return anchor
 
 
 def _start_plain(command: list, **kwargs: Any) -> "WorkerProcess":
@@ -925,6 +936,12 @@ class LauncherProcess(WorkerProcess):
         return result
 
 
+def _socket_pair() -> "tuple[int, int]":
+    """Two connected stream sockets as plain descriptors (close-on-exec until passed on)."""
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    return first.detach(), second.detach()
+
+
 def _spec_fd(data: bytes) -> int:
     """The launch spec in an anonymous file: no pipe quota to block on."""
     if hasattr(os, "memfd_create"):
@@ -956,11 +973,14 @@ def _start(
     spec_fd = life_r = life_w = status_r = status_w = None
     started = False
     try:
-        # Every descriptor is closed on any failure, including the second
-        # os.pipe() running out of descriptors.
+        # Every descriptor is closed on any failure, including a later
+        # socketpair running out of descriptors.
         spec_fd = _spec_fd(data)
-        life_r, life_w = os.pipe()
-        status_r, status_w = os.pipe()
+        # Sockets, not pipes: a same-user worker can reopen the host's end of a
+        # pipe through /proc/<host>/fd/<n> and write into it (or hold the
+        # lifeline open), but opening a socket that way fails.
+        life_w, life_r = _socket_pair()
+        status_r, status_w = _socket_pair()
         os.set_blocking(status_r, False)
         # Plain Popen, no preexec_fn. The launcher gets an empty environment:
         # nothing from the host's reaches it, and so nothing reaches the worker
