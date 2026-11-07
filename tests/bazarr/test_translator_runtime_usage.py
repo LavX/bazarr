@@ -691,7 +691,6 @@ def test_a_call_that_waited_across_midnight_is_charged_to_the_new_month(session,
 
 def test_a_budget_asked_for_after_a_wait_across_midnight_is_made_in_the_new_month(session, clock):
     limits = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
-    ledger = UsageLedger(session, clock=clock)
     clock.moment = datetime(2026, 11, 30, 23, 59, 59)
     budget = _while_another_thread_holds_the_lock(
         session, clock, datetime(2026, 12, 1, 0, 0, 1),
