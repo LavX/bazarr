@@ -40,6 +40,7 @@ Operations:
                    request: ``pad`` characters, the secret, ``tail`` more.
 ``parallel_calls``  makes the host calls named in ``names``, each from its own thread.
 ``list_result``     returns a JSON array instead of an object.
+``unencodable_result``  returns a result the strict encoder refuses (``kind``: deep, duplicate_keys, surrogate).
 ``nan_result``      returns a result that cannot be encoded as JSON.
 ``bad_str``        raises an exception that cannot be turned into text.
 ``raw_error``      answers with an error carrying the secret, uncleaned.
@@ -159,6 +160,20 @@ def _translate(operation, params):
         os._exit(9)
     operation.call("usage", {"units": len(lines), "target": target})
     return {"lines": out, "target": target, "attempt": knobs["attempt"]}
+
+
+def _unencodable(kind):
+    """A result the host's decoder would refuse, of the named kind."""
+    if kind == "deep":
+        value = "bottom"
+        for _ in range(frames.MAX_JSON_DEPTH + 1):
+            value = [value]
+        return {"deep": value}
+    if kind == "duplicate_keys":
+        return {"x": {1: "a", "1": "b"}}
+    if kind == "surrogate":
+        return {"x": "\ud800"}
+    raise ValueError(kind)
 
 
 def _handle(operation):
@@ -290,6 +305,8 @@ def _handle(operation):
         for thread in threads:
             thread.join()
         return {"results": results}
+    if name == "unencodable_result":
+        return _unencodable(params["kind"])
     if name == "list_result":
         return [1, 2, 3]
     if name == "nan_result":

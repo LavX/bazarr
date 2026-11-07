@@ -252,6 +252,140 @@ def test_a_worker_reply_with_a_non_finite_result_fails_the_session(tmp_path):
         session.close(grace=0.3)
 
 
+def _deep(levels):
+    value = "bottom"
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize("value, error", [
+    (_deep(frames.MAX_JSON_DEPTH + 1), frames.UnencodableFrame),
+    ({1: "a", "1": "b"}, TypeError),
+    ({1: "a"}, TypeError),
+    ({None: 1}, TypeError),
+    ({(1, 2): 1}, TypeError),
+    ({"x": float("nan")}, ValueError),
+    ({"x": [float("inf")]}, ValueError),
+    ({"x": float("-inf")}, ValueError),
+    ({"x": "\ud800"}, frames.UnencodableFrame),
+    ({"\udc00": 1}, frames.UnencodableFrame),
+    ({"x": object()}, TypeError),
+    ({"x": {1, 2}}, TypeError),
+    ({"x": b"bytes"}, TypeError),
+])
+def test_the_encoder_refuses_what_the_decoder_refuses(value, error):
+    with pytest.raises(error):
+        frames.encode_control({"t": "hb", "seq": 1, "extra": value})
+    with pytest.raises(error):
+        frames.pack_control({"t": "hb", "seq": 1, "extra": value})
+
+
+def test_a_circular_message_is_refused_not_looped_on():
+    loop = {}
+    loop["self"] = loop
+    with pytest.raises(frames.UnencodableFrame):
+        frames.encode_control({"t": "hb", "seq": 1, "extra": loop})
+
+
+def _random_value(rng, depth):
+    kind = rng.randrange(14 if depth < 110 else 8)
+    if kind == 0:
+        return None
+    if kind == 1:
+        return rng.choice([True, False])
+    if kind == 2:
+        return rng.randrange(-10**6, 10**6)
+    if kind == 3:
+        return rng.choice([0.5, -2.25, 1e300, float("nan"), float("inf"), float("-inf"), -0.0])
+    if kind in (4, 5):
+        return rng.choice(["", "a", "caf\u00e9", "\U0001f600", "\ud800", "\udfff", "line\nbreak", "\x00"])
+    if kind == 6:
+        return rng.choice([b"x", object(), {1, 2}])
+    if kind == 7:
+        return rng.randrange(10)
+    if kind in (8, 9):
+        return [_random_value(rng, depth + 1) for _ in range(rng.randrange(0, 4))]
+    if kind == 10:
+        return tuple(_random_value(rng, depth + 1) for _ in range(rng.randrange(0, 3)))
+    if kind == 11:
+        # A long chain, so nesting runs past the limit now and then.
+        value = _random_value(rng, depth + 1)
+        for _ in range(rng.choice([0, 0, 0, 40, 99, 100, 101, 120])):
+            value = [value]
+        return value
+    keys = [rng.choice(["a", "b", "1", "x\u00e9", 1, 2, True, None, 1.5, "\ud800", ("t",)])
+            for _ in range(rng.randrange(0, 4))]
+    return {key: _random_value(rng, depth + 1) for key in keys}
+
+
+def _as_json_value(value):
+    if isinstance(value, (list, tuple)):
+        return [_as_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _as_json_value(item) for key, item in value.items()}
+    return value
+
+
+def test_anything_the_encoder_accepts_the_decoder_accepts_and_reads_back_equal():
+    import random
+
+    rng = random.Random(20260507)
+    accepted = refused = 0
+    for _ in range(6000):
+        extra = _random_value(rng, 0)
+        message = {"t": "hb", "seq": 1, "extra": extra}
+        try:
+            body = frames.encode_control(message)
+        except (ValueError, TypeError):
+            refused += 1
+            continue
+        accepted += 1
+        decoded = frames.decode_control(body, "worker")
+        assert decoded == _as_json_value(message)
+        # And what the decoder accepts, the encoder accepts again.
+        assert frames.encode_control(decoded) == body
+    # The generator reaches both outcomes in volume.
+    assert accepted > 500 and refused > 500
+
+
+def test_a_plugin_result_the_peer_would_refuse_fails_that_request_only(session):
+    for kind in ("deep", "duplicate_keys", "surrogate"):
+        with pytest.raises(RequestFailed) as caught:
+            session.request("unencodable_result", {"kind": kind}, timeout=5)
+        assert caught.value.code == frames.Codes.PLUGIN_ERROR
+        assert session.alive
+    assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
+
+
+@pytest.mark.parametrize("kind", ["deep", "duplicate_keys", "surrogate"])
+def test_a_host_call_result_the_worker_would_refuse_fails_that_call_only(make_session, kind):
+    results = {
+        "deep": {"deep": _deep(frames.MAX_JSON_DEPTH + 1)},
+        "duplicate_keys": {"x": {1: "a", "1": "b"}},
+        "surrogate": {"x": "\ud800"},
+    }
+    session = make_session(host_calls={"bad": lambda call: results[kind], "good": lambda call: {"ok": 1}})
+    session.start()
+    with pytest.raises(RequestFailed) as caught:
+        session.request("call", {"name": "bad"}, timeout=5)
+    assert caught.value.code == frames.Codes.HOST_CALL_FAILED
+    assert session.alive
+    assert session.request("call", {"name": "good"}, timeout=5).result["ack"] == {"ok": 1}
+
+
+@pytest.mark.parametrize("params", [
+    {"deep": _deep(frames.MAX_JSON_DEPTH + 1)}, {1: "a", "1": "b"}, {"x": "\ud800"}])
+def test_params_the_worker_would_refuse_are_refused_before_sending(make_session, params):
+    session = make_session({"max_in_flight": 1})
+    session.start()
+    with pytest.raises((ValueError, TypeError)):
+        session.submit("echo", params)
+    assert session.in_flight == 0
+    assert session.alive
+    assert session.request("echo", {"fine": True}, timeout=5).result["echo"] == {"fine": True}
+
+
 def test_writer_refuses_a_message_over_the_cap():
     writer = frames.FrameWriter(io.BytesIO(), {frames.FRAME_CONTROL: 32, frames.FRAME_DATA: 64})
     with pytest.raises(frames.FrameTooLarge):

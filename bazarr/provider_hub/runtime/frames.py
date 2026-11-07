@@ -289,6 +289,8 @@ def pack_control(message, cap=MAX_CONTROL_BYTES):
 
 
 def encode_control(message):
+    """Serialise one control message, refusing exactly what ``decode_control`` refuses."""
+    _check_tree(message, True)
     return json.dumps(message, separators=(",", ":"), allow_nan=False, ensure_ascii=False).encode("utf-8")
 
 
@@ -478,8 +480,26 @@ def _no_duplicates(pairs):
     return result
 
 
-def _check_tree(value):
-    """Refuse a tree nested past ``MAX_JSON_DEPTH`` or holding text that is not valid Unicode."""
+class UnencodableFrame(ValueError):
+    """A message the sender built that the receiver's decoder would refuse.
+
+    It is the sender's own fault and fails the one request or call that built
+    it; it never reaches the wire, so it cannot end a session.
+    """
+
+
+def _check_tree(value, outbound):
+    """The one set of rules for what a control frame may hold, applied both ways.
+
+    Nesting no deeper than ``MAX_JSON_DEPTH``, text that is valid Unicode (no
+    lone surrogates), finite numbers and unique object keys. Parsed input
+    (``outbound`` false) fails as ``MalformedFrame``. A message about to be
+    sent also has to be plain JSON data with text keys, because the encoder
+    would otherwise turn ``{1: "a", "1": "b"}`` into an object with two ``"1"``
+    keys; it fails as ``UnencodableFrame`` (``TypeError`` for a type JSON has
+    no form for).
+    """
+    problem = UnencodableFrame if outbound else MalformedFrame
     stack = [(value, 1)]
     while stack:
         node, depth = stack.pop()
@@ -487,17 +507,27 @@ def _check_tree(value):
             try:
                 node.encode("utf-8")
             except UnicodeEncodeError:
-                # A lone surrogate escape (\ud800): it could never be sent on again.
-                raise MalformedFrame("control frame holds text that is not valid Unicode") from None
+                # A lone surrogate (\ud800): the receiver could never read it back.
+                raise problem("control frame holds text that is not valid Unicode") from None
+            continue
+        if node is None or isinstance(node, (bool, int)):
+            continue
+        if isinstance(node, float):
+            if node != node or node in (float("inf"), float("-inf")):
+                raise problem("control frame holds a number that is not finite")
             continue
         if isinstance(node, dict):
+            if outbound and not all(isinstance(key, str) for key in node):
+                raise TypeError("control message object keys must be text")
             children = list(node.keys()) + list(node.values())
-        elif isinstance(node, list):
+        elif isinstance(node, (list, tuple)) and (outbound or isinstance(node, list)):
             children = node
+        elif outbound:
+            raise TypeError("%s is not JSON serializable" % type(node).__name__)
         else:
             continue
         if depth > MAX_JSON_DEPTH:
-            raise MalformedFrame("control frame is nested too deeply")
+            raise problem("control frame is nested too deeply")
         stack.extend((child, depth + 1) for child in children)
 
 
@@ -510,7 +540,7 @@ def decode_control(body, sender):
     except (UnicodeDecodeError, ValueError, RecursionError) as error:
         # RecursionError: JSON nested deeper than the interpreter allows.
         raise MalformedFrame("control frame is not valid JSON") from error
-    _check_tree(message)
+    _check_tree(message, False)
     return validate_message(message, sender)
 
 
