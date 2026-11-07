@@ -271,18 +271,44 @@ def _resolve_grants(
     return result
 
 
-def interpreter_read_paths(interpreter: str | os.PathLike) -> tuple[str, ...]:
+def _inside_any(path: str, roots: Iterable[str]) -> bool:
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def interpreter_read_paths(
+    interpreter: str | os.PathLike,
+    writable: Iterable[str | os.PathLike] = (),
+) -> tuple[str, ...]:
     """Directories a worker interpreter needs to start and import its stdlib.
 
     A virtual environment root, the prefix its ``pyvenv.cfg`` points at, and the
     prefix of the resolved interpreter. A prefix of ``/`` is never granted.
+
+    A worker can rewrite anything inside a writable grant: a ``pyvenv.cfg`` or
+    an interpreter symlink there could name any directory the host user can
+    read, and the next policy build would grant it. So neither the symlink
+    chain of an interpreter, nor a ``pyvenv.cfg``, that sits inside a writable
+    grant is ever consulted. The base interpreter's prefixes then come from the
+    host's own ``sys.base_prefix`` and ``sys.base_exec_prefix``, which a worker
+    cannot touch.
     """
+    roots: list[str] = []
+    for item in writable:
+        lexical = os.path.normpath(_abs(item))
+        roots.extend((lexical, os.path.realpath(lexical)))
     exe = Path(_abs(interpreter))
-    found: list[Path] = []
-    for candidate in (exe, Path(os.path.realpath(exe))):
+    found: list[Path] = [exe.parent.parent]
+    if _inside_any(str(exe), roots) or _inside_any(os.path.realpath(exe.parent), roots):
+        found.extend(Path(p) for p in (sys.base_prefix, sys.base_exec_prefix))
+        candidates: list[Path] = []
+    else:
+        candidates = [exe, Path(os.path.realpath(exe))]
+    for candidate in candidates:
         prefix = candidate.parent.parent
         found.append(prefix)
         cfg = prefix / "pyvenv.cfg"
+        if _inside_any(str(cfg), roots) or _inside_any(os.path.realpath(cfg), roots):
+            continue
         try:
             for line in cfg.read_text(encoding="utf-8").splitlines():
                 key, _, value = line.partition("=")
@@ -290,7 +316,7 @@ def interpreter_read_paths(interpreter: str | os.PathLike) -> tuple[str, ...]:
                     found.append(Path(value.strip()).parent)
         except OSError:
             pass
-    return tuple(str(p) for p in found if str(p) != "/" and p.is_absolute())
+    return tuple(dict.fromkeys(str(p) for p in found if str(p) != "/" and p.is_absolute()))
 
 
 @dataclass(frozen=True)
@@ -358,7 +384,7 @@ class SandboxPolicy:
         for path, _ident, mode in rw_items:
             if not stat_module.S_ISDIR(mode):
                 raise PolicyError("read-write path is not an existing directory: %s" % path)
-        ro_items = _resolve_grants((*SYSTEM_READ_PATHS, *interpreter_read_paths(interpreter), *read_only), read_write)
+        ro_items = _resolve_grants((*SYSTEM_READ_PATHS, *interpreter_read_paths(interpreter, read_write), *read_only), read_write)
         device_items = _resolve_grants(DEVICE_PATHS, read_write)
         unix_items = _resolve_grants(RESOLVE_UNIX_PATHS, read_write)
         every = [*ro_items, *rw_items, *device_items, *unix_items]
