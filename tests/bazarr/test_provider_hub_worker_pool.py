@@ -1466,3 +1466,44 @@ def test_a_launcher_that_exited_cleanly_releases_the_slot(make_pool):
     pool.stop("a")
     assert pool.state("a") is WorkerState.STOPPED
     assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0
+
+
+# ------------------------------------------------ capacity follows teardown, not failure
+
+
+def test_a_dead_worker_still_counts_until_its_teardown_is_done(make_pool):
+    import threading
+
+    release = threading.Event()
+    runtimes = []
+
+    class SlowRuntime(StubProcessRuntime):
+        @property
+        def alive(self):
+            return self.started and self.alive_flag
+
+        def close(self, grace=5.0):
+            release.wait(10)
+            self.process.returncode = 0
+            super().close(grace)
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtimes.append(SlowRuntime())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(max_resident=1, acquire_timeout=0.5), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    pool.register(WorkerDefinition("b", kind="daemon", runtime=factory))
+    pool.warm("a")
+    # The session failed; its process is not confirmed gone yet.
+    runtimes[0].alive_flag = False
+    pool.sweep()
+    assert pool.state("a") is not WorkerState.READY
+    assert pool.status()["processes"] == 1
+    with pytest.raises(PoolUnavailable) as full:
+        pool.warm("b")
+    assert full.value.code == "pool_full"
+    release.set()
+    assert wait_until(lambda: pool.status()["processes"] == 0)
+    pool.warm("b")
+    assert pool.state("b") is WorkerState.READY

@@ -1591,14 +1591,16 @@ class WorkerPool:
         """Schedule ending a session. Runs in ``_flush``, outside the lock.
 
         Modes: ``stop`` and ``close`` ask politely first; ``kill`` does not;
-        ``reap`` tidies a worker that is already dead. All but ``reap`` count
-        toward the process cap until they finish.
+        ``reap`` tidies a worker whose session already failed. Every one counts
+        toward the process cap from the moment it is queued, in the same step
+        that takes the slot off its entry, until its teardown is confirmed (or
+        it moves to the stuck list): a session that failed may still have a
+        process, and a launcher that has not finished its cleanup still has a tree.
         """
         if slot.closing:
             return
         slot.closing = True
-        if mode != "reap":
-            self._closing += 1
+        self._closing += 1
         self._closes.append((slot, entry, mode, self.limits.close_grace if grace is None else grace))
 
     def _live_pid(self, session):
@@ -1733,8 +1735,7 @@ class WorkerPool:
                 gone = False
         finally:
             with self._cond:
-                if mode != "reap":
-                    self._closing = max(0, self._closing - 1)
+                self._closing = max(0, self._closing - 1)
                 if not gone:
                     # Its process is still there: it keeps its place in the process
                     # cap, and its entry stays stopping, until a later pass ends it.
