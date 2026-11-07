@@ -236,6 +236,33 @@ def test_policy_refuses_grants_a_worker_could_redirect(tmp_path):
     SandboxPolicy.for_interpreter(sys.executable, read_write=[parent_link / "outside"])
 
 
+def test_a_worker_cannot_widen_grants_by_editing_its_venv(tmp_path):
+    import venv
+
+    rw = tmp_path / "rw"
+    rw.mkdir()
+    venv.create(rw / "env", with_pip=False, symlinks=True)
+    interpreter = rw / "env" / "bin" / "python"
+    before = SandboxPolicy.for_interpreter(interpreter, read_write=[rw])
+    secret = tmp_path / "secret"
+    (secret / "bin").mkdir(parents=True)
+    (secret / "bin" / "python").write_text("")
+    cfg = rw / "env" / "pyvenv.cfg"
+    cfg.write_text("home = %s\ninclude-system-site-packages = false\n" % (secret / "bin"))
+    tampered_cfg = SandboxPolicy.for_interpreter(interpreter, read_write=[rw])
+    interpreter.unlink()
+    interpreter.symlink_to(secret / "bin" / "python")
+    tampered_link = SandboxPolicy.for_interpreter(interpreter, read_write=[rw])
+    for policy in (tampered_cfg, tampered_link):
+        assert policy.read_only == before.read_only
+        assert not any(str(secret) in p for p in (*policy.read_only, *policy.read_write))
+    # The same file read from a venv outside every writable grant is still honored.
+    outside = tmp_path / "outside"
+    venv.create(outside, with_pip=False, symlinks=True)
+    assert policy_module.interpreter_read_paths(outside / "bin" / "python")
+    assert str(secret) not in " ".join(policy_module.interpreter_read_paths(interpreter, [rw]))
+
+
 def test_clean_env_inherits_nothing(monkeypatch):
     monkeypatch.setenv("BAZARR_TEST_SECRET", "hunter2")
     env = clean_env(home="/data/home", tmpdir="/data/tmp", extra={"TZ": "UTC"})
@@ -1448,20 +1475,20 @@ def test_the_fallback_process_can_be_stopped(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("arch", sorted(seccomp.DENIED_SYSCALLS))
-def test_prlimit_may_not_set_a_limit_on_another_process(arch):
+def test_prlimit_may_only_query_and_setrlimit_is_denied(arch):
     program = seccomp.build_filter(arch)
     number = seccomp.PRLIMIT64[arch]
     eperm = seccomp.SECCOMP_RET_ERRNO | errno.EPERM
     allow = seccomp.SECCOMP_RET_ALLOW
     pointer = 0x7FFF00001000
-    assert run_bpf(program, arch, number, (0, 7, pointer, 0)) == allow  # the caller itself
-    assert run_bpf(program, arch, number, (1234, 7, 0, pointer)) == allow  # a query
+    assert run_bpf(program, arch, number, (0, 7, 0, pointer)) == allow  # query on the caller
+    assert run_bpf(program, arch, number, (1234, 7, 0, pointer)) == allow  # query on another process
+    assert run_bpf(program, arch, number, (0, 7, pointer, 0)) == eperm  # set on the caller
     assert run_bpf(program, arch, number, (1234, 7, pointer, 0)) == eperm
-    assert run_bpf(program, arch, number, (1234, 7, 1 << 32, 0)) == eperm  # high half only
-    assert run_bpf(program, arch, number, (1234, 7, pointer, pointer)) == eperm
-    # pid is an int: garbage above its low 32 bits still names pid 0.
-    assert run_bpf(program, arch, number, ((1 << 32), 7, pointer, 0)) == allow
-    assert run_bpf(program, arch, number, (1 << 32 | 5, 7, pointer, 0)) == eperm
+    assert run_bpf(program, arch, number, (0, 7, 1 << 32, 0)) == eperm  # high half only
+    assert run_bpf(program, arch, number, (0, 7, pointer, pointer)) == eperm
+    assert seccomp.DENIED_SYSCALLS[arch]["setrlimit"] in set(seccomp.DENIED_SYSCALLS[arch].values())
+    assert run_bpf(program, arch, seccomp.DENIED_SYSCALLS[arch]["setrlimit"], (7, pointer)) == eperm
 
 
 @pytest.mark.parametrize("arch", sorted(seccomp.DENIED_SYSCALLS))
@@ -1475,7 +1502,7 @@ def test_io_uring_is_denied_on_every_architecture(arch):
 
 @linux_only
 @pytest.mark.skipif(not seccomp.supported(), reason="no metadata filter for this architecture")
-def test_a_worker_cannot_set_limits_on_its_launcher(mode, tmp_path):
+def test_a_worker_cannot_set_any_resource_limit_but_can_read_them(mode, tmp_path):
     script = """
         import errno, json, os, resource
         out = {}
@@ -1485,8 +1512,12 @@ def test_a_worker_cannot_set_limits_on_its_launcher(mode, tmp_path):
                 fn(); out[name] = "allowed"
             except OSError as exc:
                 out[name] = errno.errorcode.get(exc.errno, exc.errno)
+            except ValueError:
+                # resource.setrlimit reports EPERM as a ValueError.
+                out[name] = "EPERM"
         attempt("set_other", lambda: resource.prlimit(parent, resource.RLIMIT_NOFILE, (0, 0)))
         attempt("query_other", lambda: resource.prlimit(parent, resource.RLIMIT_NOFILE))
+        attempt("get_self", lambda: resource.getrlimit(resource.RLIMIT_CORE))
         attempt("set_self", lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
         attempt("set_self_implicit", lambda: resource.prlimit(0, resource.RLIMIT_CORE, (0, 0)))
         attempt("set_self_by_pid", lambda: resource.prlimit(os.getpid(), resource.RLIMIT_CORE, (0, 0)))
@@ -1497,8 +1528,9 @@ def test_a_worker_cannot_set_limits_on_its_launcher(mode, tmp_path):
     assert json.loads(out) == {
         "set_other": "EPERM",
         "query_other": "allowed",
-        "set_self": "allowed",
-        "set_self_implicit": "allowed",
+        "get_self": "allowed",
+        "set_self": "EPERM",
+        "set_self_implicit": "EPERM",
         "set_self_by_pid": "EPERM",
     }
 

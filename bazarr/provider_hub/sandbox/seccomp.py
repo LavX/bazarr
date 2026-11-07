@@ -8,8 +8,10 @@ path argument of those calls, so they cannot be scoped to the worker's own
 directories: every one of them returns ``EPERM``, everywhere.
 
 Two further rules: ``io_uring`` is denied outright (it can perform the same
-metadata operations from inside the ring), and ``prlimit64`` may not set a
-limit on another process.
+metadata operations from inside the ring), and resource limits are frozen:
+``setrlimit`` is denied and ``prlimit64`` may only query (a NULL new limit).
+The launcher applies the limits before the filter goes on, so a worker holding
+``CAP_SYS_RESOURCE`` cannot raise its own or anyone else's.
 
 Consequences for workers, by design: no ``chmod``, ``chown``, ``utime``,
 ``setxattr`` or ``removexattr`` in any form. Files get their mode from the
@@ -64,9 +66,10 @@ _COMMON = {
     "io_uring_register": 427,
 }
 
-# prlimit64 is allowed except when it sets a limit on another process: a worker
-# could otherwise lower its launcher's open-file limit and blind the launcher's
-# /proc scan. Queries and calls on the caller itself (pid 0) stay allowed.
+# prlimit64 is allowed only as a query (new_limit is NULL). The launcher sets
+# its limits before the filter is installed, so a worker has no reason to set
+# any, and one with CAP_SYS_RESOURCE could otherwise raise a hard limit or
+# lower its launcher's open-file limit. setrlimit is denied outright.
 PRLIMIT64 = {AUDIT_ARCH_X86_64: 302, AUDIT_ARCH_AARCH64: 261}
 
 DENIED_SYSCALLS = {
@@ -88,6 +91,7 @@ DENIED_SYSCALLS = {
         "futimesat": 261,
         "fchmodat": 268,
         "utimensat": 280,
+        "setrlimit": 160,
         **_COMMON,
     },
     # The generic table has no path-based chmod, chown or utime(s): libc maps
@@ -104,6 +108,7 @@ DENIED_SYSCALLS = {
         "fchownat": 54,
         "fchown": 55,
         "utimensat": 88,
+        "setrlimit": 164,
         **_COMMON,
     },
 }
@@ -134,7 +139,7 @@ def build_filter(arch: int | None = None) -> bytes:
 
     Layout: arch check (a different arch kills the process), x32 check on
     x86-64, one compare per denied number returning ``EPERM``, the prlimit64
-    argument check, otherwise allow. Little-endian only (the halves of a 64-bit
+    new-limit check, otherwise allow. Little-endian only (the halves of a 64-bit
     argument are read at fixed offsets).
     """
     arch = arch if arch is not None else native_audit_arch()
@@ -159,11 +164,8 @@ def build_filter(arch: int | None = None) -> bytes:
     for number in numbers:
         emit(_BPF_JEQ_K, "deny", 0, number)
     emit(_BPF_JEQ_K, 0, "allow", PRLIMIT64[arch])
-    # prlimit64(pid, resource, new_limit, old_limit): allowed when pid is 0
-    # (the caller) or new_limit is NULL (a query). pid is an int, so only its
-    # low half counts; new_limit is a pointer, so both halves must be zero.
-    emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 0)
-    emit(_BPF_JEQ_K, "allow", 0, 0)
+    # prlimit64(pid, resource, new_limit, old_limit): a query when new_limit is
+    # NULL. new_limit is a pointer, so both halves must be zero.
     emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 2)
     emit(_BPF_JEQ_K, 0, "deny", 0)
     emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 2 + 4)
