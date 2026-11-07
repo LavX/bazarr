@@ -7,6 +7,10 @@ would lock the host out of its own configuration. Seccomp cannot inspect the
 path argument of those calls, so they cannot be scoped to the worker's own
 directories: every one of them returns ``EPERM``, everywhere.
 
+Two further rules: ``io_uring`` is denied outright (it can perform the same
+metadata operations from inside the ring), and ``prlimit64`` may not set a
+limit on another process.
+
 Consequences for workers, by design: no ``chmod``, ``chown``, ``utime``,
 ``setxattr`` or ``removexattr`` in any form. Files get their mode from the
 umask when they are created (077 under the launcher). ``shutil.copy2``,
@@ -41,17 +45,29 @@ SECCOMP_RET_KILL_PROCESS = 0x80000000
 
 X32_SYSCALL_BIT = 0x40000000
 
+# Offset of seccomp_data.args[0]; each argument is 64 bits, low half first.
+_ARG_OFFSET = 16
+
 _BPF_LD_W_ABS = 0x20
 _BPF_JEQ_K = 0x15
 _BPF_JSET_K = 0x45
 _BPF_RET_K = 0x06
 
-# Same on both architectures.
+# Same on both architectures. io_uring can issue the same metadata operations
+# (IORING_OP_SETXATTR and friends) without going through the syscalls above.
 _COMMON = {
     "fchmodat2": 452,
     "setxattrat": 463,
     "removexattrat": 466,
+    "io_uring_setup": 425,
+    "io_uring_enter": 426,
+    "io_uring_register": 427,
 }
+
+# prlimit64 is allowed except when it sets a limit on another process: a worker
+# could otherwise lower its launcher's open-file limit and blind the launcher's
+# /proc scan. Queries and calls on the caller itself (pid 0) stay allowed.
+PRLIMIT64 = {AUDIT_ARCH_X86_64: 302, AUDIT_ARCH_AARCH64: 261}
 
 DENIED_SYSCALLS = {
     AUDIT_ARCH_X86_64: {
@@ -95,7 +111,7 @@ DENIED_SYSCALLS = {
 
 def native_audit_arch() -> int | None:
     """The audit arch of this interpreter, or ``None`` when no filter exists for it."""
-    if not sys.platform.startswith("linux") or struct.calcsize("P") != 8:
+    if not sys.platform.startswith("linux") or struct.calcsize("P") != 8 or sys.byteorder != "little":
         return None
     machine = platform.machine().lower()
     if machine in ("x86_64", "amd64"):
@@ -117,37 +133,59 @@ def build_filter(arch: int | None = None) -> bytes:
     """Classic BPF program for ``arch`` (default: this interpreter's).
 
     Layout: arch check (a different arch kills the process), x32 check on
-    x86-64, one compare per denied number returning ``EPERM``, otherwise allow.
+    x86-64, one compare per denied number returning ``EPERM``, the prlimit64
+    argument check, otherwise allow. Little-endian only (the halves of a 64-bit
+    argument are read at fixed offsets).
     """
     arch = arch if arch is not None else native_audit_arch()
     if arch not in DENIED_SYSCALLS:
         raise ValueError("no seccomp filter for audit arch %#x" % (arch or 0))
     numbers = sorted(set(DENIED_SYSCALLS[arch].values()))
-    x32 = arch == AUDIT_ARCH_X86_64
 
-    head = 4 if x32 else 3  # arch load, arch jump, nr load, [x32 jump]
-    allow_at = head + len(numbers)
-    deny_at = allow_at + 1
-    kill_at = allow_at + 2
+    program: list[list] = []  # [code, jt, jf, k]; jt and jf are ints or label names
+    labels: dict[str, int] = {}
 
-    def rel(from_index: int, to_index: int) -> int:
-        return to_index - from_index - 1
+    def emit(code, jt, jf, k):
+        program.append([code, jt, jf, k])
 
-    program = [
-        _insn(_BPF_LD_W_ABS, 0, 0, 4),  # seccomp_data.arch
-        _insn(_BPF_JEQ_K, 0, rel(1, kill_at), arch),
-        _insn(_BPF_LD_W_ABS, 0, 0, 0),  # seccomp_data.nr
-    ]
-    if x32:
-        program.append(_insn(_BPF_JSET_K, rel(3, kill_at), 0, X32_SYSCALL_BIT))
-    for offset, number in enumerate(numbers):
-        index = head + offset
-        program.append(_insn(_BPF_JEQ_K, rel(index, deny_at), 0, number))
-    program.append(_insn(_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW))
-    program.append(_insn(_BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM))
-    program.append(_insn(_BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS))
-    assert len(program) == kill_at + 1
-    return b"".join(program)
+    def label(name):
+        labels[name] = len(program)
+
+    emit(_BPF_LD_W_ABS, 0, 0, 4)  # seccomp_data.arch
+    emit(_BPF_JEQ_K, 0, "kill", arch)
+    emit(_BPF_LD_W_ABS, 0, 0, 0)  # seccomp_data.nr
+    if arch == AUDIT_ARCH_X86_64:
+        emit(_BPF_JSET_K, "kill", 0, X32_SYSCALL_BIT)
+    for number in numbers:
+        emit(_BPF_JEQ_K, "deny", 0, number)
+    emit(_BPF_JEQ_K, 0, "allow", PRLIMIT64[arch])
+    # prlimit64(pid, resource, new_limit, old_limit): allowed when pid is 0
+    # (the caller) or new_limit is NULL (a query). pid is an int, so only its
+    # low half counts; new_limit is a pointer, so both halves must be zero.
+    emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 0)
+    emit(_BPF_JEQ_K, "allow", 0, 0)
+    emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 2)
+    emit(_BPF_JEQ_K, 0, "deny", 0)
+    emit(_BPF_LD_W_ABS, 0, 0, _ARG_OFFSET + 8 * 2 + 4)
+    emit(_BPF_JEQ_K, "allow", "deny", 0)
+    label("allow")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW)
+    label("deny")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM)
+    label("kill")
+    emit(_BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS)
+
+    out = []
+    for index, (code, jt, jf, k) in enumerate(program):
+        resolved = []
+        for target in (jt, jf):
+            if isinstance(target, str):
+                target = labels[target] - index - 1
+            if not 0 <= target <= 255:
+                raise ValueError("jump out of range in the seccomp program")
+            resolved.append(target)
+        out.append(_insn(code, resolved[0], resolved[1], k))
+    return b"".join(out)
 
 
 class SockFprog(ctypes.Structure):

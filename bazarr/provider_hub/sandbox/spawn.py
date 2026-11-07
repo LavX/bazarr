@@ -157,7 +157,7 @@ def sandbox_status(probe: SandboxProbe | None = None) -> dict[str, Any]:
 
 
 _CANARY_SCRIPT = """
-import json, os, socket, sys
+import ctypes, errno, json, os, socket, sys
 base, allowed, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
 out = {}
 def attempt(name, fn):
@@ -189,6 +189,11 @@ def utime_outside():
     os.utime(os.path.join(base, "canary.txt"), None)
 def setxattr_outside():
     os.setxattr(os.path.join(base, "canary.txt"), "user.bazarr", b"1")
+def io_uring_setup():
+    libc = ctypes.CDLL(None, use_errno=True)
+    ctypes.set_errno(0)
+    if libc.syscall(425, 0, 0) < 0 and ctypes.get_errno() == errno.EPERM:
+        raise PermissionError(errno.EPERM, "denied")
 def connect():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -205,10 +210,24 @@ attempt("chmod_inside", chmod_inside)
 attempt("chown_outside", chown_outside)
 attempt("utime_outside", utime_outside)
 attempt("setxattr_outside", setxattr_outside)
+attempt("io_uring_setup", io_uring_setup)
 attempt("connect", connect)
 attempt("signal", lambda: os.kill(os.getppid(), 0))
 print(json.dumps(out))
 """
+
+# Every canary attempt that must come back denied for the host to count as sandboxed.
+_CANARY_REQUIRED_DENIED = (
+    "read_outside",
+    "write_outside",
+    "truncate_outside",
+    "chmod_outside",
+    "chmod_inside",
+    "chown_outside",
+    "utime_outside",
+    "setxattr_outside",
+    "io_uring_setup",
+)
 
 _probe_lock = threading.Lock()
 _probe_cache: SandboxProbe | None = None
@@ -290,9 +309,9 @@ def _run_probe(python: str) -> SandboxProbe:
             detail = failure.message if failure else (err.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"])[0]
             return SandboxProbe(abi=abi, verified=False, reason="canary could not run: %s" % detail)
         result = json.loads(out.decode("utf-8").strip().splitlines()[-1])
-        denied = ("read_outside", "write_outside", "truncate_outside", "chmod_outside", "chmod_inside",
-                  "chown_outside", "utime_outside", "setxattr_outside")
-        verified = result.get("write_inside") == "allowed" and all(result.get(k) == "denied" for k in denied)
+        verified = result.get("write_inside") == "allowed" and all(
+            result.get(k) == "denied" for k in _CANARY_REQUIRED_DENIED
+        )
         if verified and Path(base, "trunc.txt").read_text(encoding="utf-8") != "keep me":
             verified = False
         if not verified:

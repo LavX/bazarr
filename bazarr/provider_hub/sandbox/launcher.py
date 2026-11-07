@@ -232,13 +232,23 @@ def _child(spec, landlock, seccomp, parent_pid, close_fds, report_fd):
     os._exit(code)
 
 
+class EnumerationError(Exception):
+    """The process tree could not be listed. Never the same thing as "empty"."""
+
+
 def _children_map():
-    """Map pid to ppid for every process we can see in /proc."""
+    """Map pid to ppid for every process visible in /proc.
+
+    A process that exits while it is being read is normal and skipped. Any
+    other failure (out of file descriptors, /proc missing or unreadable) raises
+    ``EnumerationError``: a scan that silently saw nothing would let detached
+    children outlive their worker. Our own entry must be in the result.
+    """
     result = {}
     try:
         names = os.listdir("/proc")
-    except OSError:
-        return result
+    except OSError as exc:
+        raise EnumerationError("cannot list /proc: %s" % exc)
     for name in names:
         if not name.isdigit():
             continue
@@ -246,9 +256,15 @@ def _children_map():
             with open("/proc/%s/stat" % name, "rb") as handle:
                 data = handle.read().decode("utf-8", "replace")
             ppid = int(data.rsplit(")", 1)[1].split()[1])
-        except (OSError, ValueError, IndexError):
+        except (FileNotFoundError, ProcessLookupError):
             continue
+        except OSError as exc:
+            raise EnumerationError("cannot read /proc/%s/stat: %s" % (name, exc))
+        except (ValueError, IndexError):
+            raise EnumerationError("unreadable /proc/%s/stat" % name)
         result[int(name)] = ppid
+    if os.getpid() not in result:
+        raise EnumerationError("the launcher is missing from /proc")
     return result
 
 
@@ -265,8 +281,35 @@ def _descendants(root):
     return found
 
 
+def _emergency_kill(reason):
+    """Last resort when the tree cannot be listed: kill the whole process group.
+
+    The launcher leads its own group and session (the host starts it with
+    ``start_new_session``), so this reaches everything that did not leave it
+    and also ends the launcher, which then reports the reason. A descendant that
+    called ``setsid`` is out of reach without a listing; that is the cost of
+    failing safe, and the reason says so.
+    """
+    _report("sandbox", "launcher could not list its process tree (%s); killed its process group" % reason)
+    _say("cannot list the process tree (%s); killing the process group" % reason)
+    # Only when it really leads the group: a launcher run by hand inside a
+    # shell's group must not take the shell down. The worker has a parent-death
+    # signal, so it still dies when this process exits.
+    if os.getpgrp() == os.getpid():
+        try:
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+        except OSError:
+            pass
+    os._exit(EXIT_SANDBOX_FAILED)
+
+
 def _kill_descendants(sig=signal.SIGKILL):
-    for pid in _descendants(os.getpid()):
+    try:
+        pids = _descendants(os.getpid())
+    except EnumerationError as exc:
+        _emergency_kill(exc)
+        return
+    for pid in pids:
         try:
             os.kill(pid, sig)
         except OSError:
@@ -346,7 +389,11 @@ def _supervise(main_pid, wake_r, lifeline_fd, grace):
 def _cleanup_tree():
     """The worker is gone: kill whatever it left behind and reap it."""
     for _ in range(100):
-        left = _descendants(os.getpid())
+        try:
+            left = _descendants(os.getpid())
+        except EnumerationError as exc:
+            _emergency_kill(exc)
+            return
         if not left:
             break
         _kill_descendants()
@@ -359,7 +406,11 @@ def _cleanup_tree():
         except ChildProcessError:
             return
         if pid == 0:
-            if not _descendants(os.getpid()):
+            try:
+                if not _descendants(os.getpid()):
+                    return
+            except EnumerationError as exc:
+                _emergency_kill(exc)
                 return
             time.sleep(0.02)
 
@@ -405,6 +456,15 @@ def main(argv):
     except Exception as exc:
         _say("launcher setup failed: %s" % exc)
         _report("sandbox", "launcher setup failed: %s" % exc)
+        return EXIT_SANDBOX_FAILED
+
+    # A launcher that cannot see its own tree cannot clean it up: refuse to
+    # start rather than run a worker it could not stop.
+    try:
+        _children_map()
+    except EnumerationError as exc:
+        _say("cannot list processes: %s" % exc)
+        _report("sandbox", "cannot list processes: %s" % exc)
         return EXIT_SANDBOX_FAILED
 
     wake_r, wake_w = os.pipe()

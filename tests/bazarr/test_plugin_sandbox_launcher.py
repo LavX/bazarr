@@ -5,6 +5,12 @@ Pure policy and mask tests run everywhere. Tests that need the kernel's
 Landlock skip with a reason where it is missing or too old; tests that only
 exercise the launcher's limits, environment and process handling also run in
 the "declared" mode on any Linux host.
+
+Set BAZARR_REQUIRE_SANDBOX_TESTS=1 to turn "this host cannot enforce a sandbox"
+from a skip into a failure. CI sets it for this file (GitHub's Ubuntu runners
+have Landlock), so a regression that makes the probe report "not enforced"
+cannot hide behind skipped tests. Skips for a kernel ABI that is simply too old
+for one specific test (need_abi) stay skips.
 """
 import errno
 import gc
@@ -45,14 +51,23 @@ linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="la
 DECLARED = SandboxProbe(abi=0, verified=False, reason="test: no Landlock")
 
 
+def cannot_enforce(reason, require=None):
+    """Skip, or fail when the run insists on a working sandbox."""
+    if require is None:
+        require = os.environ.get("BAZARR_REQUIRE_SANDBOX_TESTS") == "1"
+    if require:
+        pytest.fail("BAZARR_REQUIRE_SANDBOX_TESTS=1 but the sandbox is not enforced: %s" % reason, pytrace=False)
+    pytest.skip(reason)
+
+
 @pytest.fixture(scope="module")
 def live():
     """The real probe of this machine, skipping where Landlock is unusable."""
     if not sys.platform.startswith("linux"):
-        pytest.skip("not Linux")
+        cannot_enforce("not Linux")
     probe = probe_sandbox(refresh=True)
     if not probe.enforced:
-        pytest.skip("Landlock not enforceable here: %s" % probe.reason)
+        cannot_enforce("Landlock not enforceable here: %s" % probe.reason)
     return probe
 
 
@@ -1109,10 +1124,14 @@ def test_the_status_payload_carries_the_sandbox_state(monkeypatch):
 # --- Metadata filter ---------------------------------------------------------
 
 
-def run_bpf(program, arch, number):
+def run_bpf(program, arch, number, args=()):
     """Evaluate a classic BPF program on a synthetic seccomp_data."""
     insns = [struct.unpack_from("=HBBI", program, offset) for offset in range(0, len(program), 8)]
     data = {0: number, 4: arch}
+    for index in range(6):
+        value = args[index] if index < len(args) else 0
+        data[16 + 8 * index] = value & 0xFFFFFFFF
+        data[20 + 8 * index] = value >> 32
     pc = acc = 0
     for _ in range(1000):
         code, jt, jf, k = insns[pc]
@@ -1301,7 +1320,7 @@ def test_a_canary_that_can_truncate_or_chmod_is_not_verified(monkeypatch):
     good = {
         "read_outside": "denied", "write_outside": "denied", "write_inside": "allowed", "truncate_outside": "denied",
         "chmod_outside": "denied", "chmod_inside": "denied", "chown_outside": "denied", "utime_outside": "denied",
-        "setxattr_outside": "denied",
+        "setxattr_outside": "denied", "io_uring_setup": "denied",
     }
 
     class Fake:
@@ -1318,7 +1337,7 @@ def test_a_canary_that_can_truncate_or_chmod_is_not_verified(monkeypatch):
 
     monkeypatch.setattr(spawn, "_start", lambda *a, **k: Fake(good))
     assert spawn._run_probe(sys.executable).enforced
-    for key in ("truncate_outside", "chmod_outside", "chmod_inside", "chown_outside", "utime_outside", "setxattr_outside"):
+    for key in ("truncate_outside", "chmod_outside", "chmod_inside", "chown_outside", "utime_outside", "setxattr_outside", "io_uring_setup"):
         monkeypatch.setattr(spawn, "_start", lambda *a, _k=key, **k: Fake({**good, _k: "allowed"}))
         assert not spawn._run_probe(sys.executable).enforced, key
 
@@ -1423,3 +1442,243 @@ def test_the_fallback_process_can_be_stopped(tmp_path, monkeypatch):
     process = spawn_worker(make_spec(tmp_path, "import time; time.sleep(300)"), probe=DECLARED)
     process.stop(0.5)
     assert process.poll() is not None
+
+
+# --- prlimit64 and io_uring --------------------------------------------------
+
+
+@pytest.mark.parametrize("arch", sorted(seccomp.DENIED_SYSCALLS))
+def test_prlimit_may_not_set_a_limit_on_another_process(arch):
+    program = seccomp.build_filter(arch)
+    number = seccomp.PRLIMIT64[arch]
+    eperm = seccomp.SECCOMP_RET_ERRNO | errno.EPERM
+    allow = seccomp.SECCOMP_RET_ALLOW
+    pointer = 0x7FFF00001000
+    assert run_bpf(program, arch, number, (0, 7, pointer, 0)) == allow  # the caller itself
+    assert run_bpf(program, arch, number, (1234, 7, 0, pointer)) == allow  # a query
+    assert run_bpf(program, arch, number, (1234, 7, pointer, 0)) == eperm
+    assert run_bpf(program, arch, number, (1234, 7, 1 << 32, 0)) == eperm  # high half only
+    assert run_bpf(program, arch, number, (1234, 7, pointer, pointer)) == eperm
+    # pid is an int: garbage above its low 32 bits still names pid 0.
+    assert run_bpf(program, arch, number, ((1 << 32), 7, pointer, 0)) == allow
+    assert run_bpf(program, arch, number, (1 << 32 | 5, 7, pointer, 0)) == eperm
+
+
+@pytest.mark.parametrize("arch", sorted(seccomp.DENIED_SYSCALLS))
+def test_io_uring_is_denied_on_every_architecture(arch):
+    names = seccomp.DENIED_SYSCALLS[arch]
+    assert {"io_uring_setup", "io_uring_enter", "io_uring_register"} <= set(names)
+    program = seccomp.build_filter(arch)
+    for number in (425, 426, 427):
+        assert run_bpf(program, arch, number) == seccomp.SECCOMP_RET_ERRNO | errno.EPERM
+
+
+@linux_only
+@pytest.mark.skipif(not seccomp.supported(), reason="no metadata filter for this architecture")
+def test_a_worker_cannot_set_limits_on_its_launcher(mode, tmp_path):
+    script = """
+        import errno, json, os, resource
+        out = {}
+        parent = os.getppid()
+        def attempt(name, fn):
+            try:
+                fn(); out[name] = "allowed"
+            except OSError as exc:
+                out[name] = errno.errorcode.get(exc.errno, exc.errno)
+        attempt("set_other", lambda: resource.prlimit(parent, resource.RLIMIT_NOFILE, (0, 0)))
+        attempt("query_other", lambda: resource.prlimit(parent, resource.RLIMIT_NOFILE))
+        attempt("set_self", lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
+        attempt("set_self_implicit", lambda: resource.prlimit(0, resource.RLIMIT_CORE, (0, 0)))
+        attempt("set_self_by_pid", lambda: resource.prlimit(os.getpid(), resource.RLIMIT_CORE, (0, 0)))
+        print(json.dumps(out))
+    """
+    rc, out, err = run(make_spec(tmp_path, script), mode)
+    assert rc == 0, err
+    assert json.loads(out) == {
+        "set_other": "EPERM",
+        "query_other": "allowed",
+        "set_self": "allowed",
+        "set_self_implicit": "allowed",
+        "set_self_by_pid": "EPERM",
+    }
+
+
+@linux_only
+@pytest.mark.skipif(not seccomp.supported(), reason="no metadata filter for this architecture")
+def test_io_uring_returns_eperm_inside_the_sandbox(mode, tmp_path):
+    script = """
+        import ctypes, errno, json
+        libc = ctypes.CDLL(None, use_errno=True)
+        out = {}
+        for name, number in (("setup", 425), ("enter", 426), ("register", 427)):
+            ctypes.set_errno(0)
+            result = libc.syscall(number, 0, 0, 0, 0, 0, 0)
+            out[name] = errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno()) if result < 0 else "allowed"
+        print(json.dumps(out))
+    """
+    rc, out, err = run(make_spec(tmp_path, script), mode)
+    assert rc == 0, err
+    assert json.loads(out) == {"setup": "EPERM", "enter": "EPERM", "register": "EPERM"}
+
+
+def test_the_canary_demands_io_uring_be_denied():
+    assert "io_uring_setup" in spawn._CANARY_SCRIPT
+    assert "io_uring_setup" in spawn._CANARY_REQUIRED_DENIED
+
+
+# --- A launcher that cannot see its tree fails safe ---------------------------
+
+
+def load_launcher():
+    spec = importlib.util.spec_from_file_location("launcher_failsafe", spawn.LAUNCHER_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@linux_only
+def test_an_unreadable_proc_is_an_error_never_an_empty_tree(monkeypatch):
+    launcher = load_launcher()
+    assert os.getpid() in launcher._children_map()
+
+    def no_listing(path):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(launcher.os, "listdir", no_listing)
+    with pytest.raises(launcher.EnumerationError):
+        launcher._children_map()
+    with pytest.raises(launcher.EnumerationError):
+        launcher._descendants(os.getpid())
+    monkeypatch.undo()
+
+    monkeypatch.setattr(launcher.os, "listdir", lambda path: [])
+    with pytest.raises(launcher.EnumerationError, match="missing"):
+        launcher._children_map()
+    monkeypatch.undo()
+
+    real_open = open
+
+    def out_of_descriptors(path, *args, **kwargs):
+        if str(path).startswith("/proc/") and str(path).endswith("/stat"):
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", out_of_descriptors)
+    with pytest.raises(launcher.EnumerationError):
+        launcher._children_map()
+
+
+@linux_only
+def test_cleanup_falls_back_to_killing_the_group_when_the_scan_fails(monkeypatch):
+    launcher = load_launcher()
+    reasons = []
+
+    def broken(root):
+        raise launcher.EnumerationError("no descriptors")
+
+    monkeypatch.setattr(launcher, "_descendants", broken)
+    monkeypatch.setattr(launcher, "_emergency_kill", lambda reason: reasons.append(str(reason)))
+    launcher._kill_descendants()
+    launcher._cleanup_tree()
+    assert reasons == ["no descriptors", "no descriptors"]
+
+
+@linux_only
+def test_the_emergency_kill_ends_the_whole_group_and_reports_why(tmp_path):
+    status_r, status_w = os.pipe()
+    code = textwrap.dedent(
+        """
+        import importlib.util, os, subprocess, sys, time
+        spec = importlib.util.spec_from_file_location("l", %r)
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        launcher._STATUS_FD = %d
+        sleeper = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(300)"])
+        print(sleeper.pid, flush=True)
+        launcher._emergency_kill("test")
+        """
+    ) % (str(spawn.LAUNCHER_PATH), status_w)
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-c", code], stdout=subprocess.PIPE, start_new_session=True, pass_fds=(status_w,)
+    )
+    os.close(status_w)
+    try:
+        sleeper = int(process.stdout.readline())
+        assert process.wait(timeout=20) == -9
+        assert wait_dead(sleeper), "a member of the process group survived"
+        record = json.loads(os.read(status_r, 4096).decode())
+        assert record["kind"] == "sandbox" and "process tree" in record["message"]
+    finally:
+        os.close(status_r)
+        try:
+            os.killpg(process.pid, 9)
+        except OSError:
+            pass
+
+
+# --- Platforms without O_PATH ---------------------------------------------------
+
+
+def test_policy_and_declared_launch_work_without_descriptor_walks(tmp_path, monkeypatch):
+    # macOS and Windows have no os.O_PATH: building a policy and starting a
+    # declared worker must not touch it.
+    monkeypatch.delattr(os, "O_PATH", raising=False)
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    rw = tmp_path / "data"
+    (rw / "sub").mkdir(parents=True)
+    policy = SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[rw / "sub"])
+    real_rw = os.path.realpath(rw)
+    assert policy.read_write == (real_rw,)
+    assert os.path.join(real_rw, "sub") in policy.read_only
+    spec = RuntimeSpec(
+        interpreter=sys.executable,
+        args=("-I", "-c", "print('ran')"),
+        cwd=str(rw),
+        env=clean_env(),
+        policy=policy,
+    )
+    process = spawn_worker(spec, probe=DECLARED)
+    out, err = process.communicate(timeout=30)
+    assert out.decode().strip() == "ran" and process.enforcement == "declared", err
+
+
+def test_path_checks_still_refuse_links_in_a_writable_tree_without_descriptors(tmp_path, monkeypatch):
+    monkeypatch.delattr(os, "O_PATH", raising=False)
+    rw = tmp_path / "data"
+    rw.mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    (rw / "link").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(PolicyError, match="symlink"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[rw / "link"])
+
+
+def test_the_descriptor_walk_is_used_on_linux(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(policy_module, "_walk_hook", seen.append)
+    (tmp_path / "rw" / "a").mkdir(parents=True)
+    SandboxPolicy.for_interpreter(sys.executable, read_write=[tmp_path / "rw"], read_only=[tmp_path / "rw" / "a"])
+    assert policy_module._use_descriptors() == (sys.platform.startswith("linux") and hasattr(os, "O_PATH"))
+    if policy_module._use_descriptors():
+        assert seen
+
+
+# --- Requiring a working sandbox --------------------------------------------------
+
+
+def test_the_require_flag_turns_a_skip_into_a_failure():
+    with pytest.raises(pytest.skip.Exception):
+        cannot_enforce("no Landlock", require=False)
+    with pytest.raises(pytest.fail.Exception, match="BAZARR_REQUIRE_SANDBOX_TESTS"):
+        cannot_enforce("no Landlock", require=True)
+
+
+def test_the_require_flag_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("BAZARR_REQUIRE_SANDBOX_TESTS", "1")
+    with pytest.raises(pytest.fail.Exception):
+        cannot_enforce("no Landlock")
+    monkeypatch.setenv("BAZARR_REQUIRE_SANDBOX_TESTS", "0")
+    with pytest.raises(pytest.skip.Exception):
+        cannot_enforce("no Landlock")
+    monkeypatch.delenv("BAZARR_REQUIRE_SANDBOX_TESTS")
+    with pytest.raises(pytest.skip.Exception):
+        cannot_enforce("no Landlock")

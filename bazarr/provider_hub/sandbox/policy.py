@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat as stat_module
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -119,7 +121,7 @@ def _abs(path: str | os.PathLike) -> str:
     if not os.path.isabs(text):
         raise PolicyError("sandbox paths must be absolute: %r" % text)
     # Collapsing ".." lexically is wrong across symlinks, so it is not allowed.
-    if ".." in text.split("/"):
+    if ".." in re.split(r"[\\/]", text):
         raise PolicyError("sandbox paths cannot contain '..': %r" % text)
     return os.path.normpath(text)
 
@@ -137,6 +139,22 @@ def _canonical(paths: Iterable[str | os.PathLike]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _use_descriptors() -> bool:
+    """Whether grants can be walked with descriptors, which only Linux can do.
+
+    ``O_PATH`` does not exist on macOS or Windows. There the sandbox is not
+    enforced anyway (the launcher is Linux only), so policy construction falls
+    back to plain path checks and a declared launch still works. Enforced
+    launches are always on Linux and always use the descriptor walk.
+    """
+    return (
+        sys.platform.startswith("linux")
+        and hasattr(os, "O_PATH")
+        and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+    )
+
+
 # Called after each directory step of a walk, with the path reached so far.
 # Tests use it to swap a directory mid-walk; production leaves it unset.
 _walk_hook = None
@@ -151,8 +169,11 @@ def _walk_below(root_real: str, parts: Sequence[str], root_lexical: str) -> tupl
     one, so a worker that swaps a directory for a link while this runs either
     gets refused or is held to the object the walk already holds. Returns
     ``(st_dev, st_ino, st_mode)`` of the final object read from its own
-    descriptor, or ``None`` when something on the way is missing.
+    descriptor, or ``None`` when something on the way is missing. Where
+    descriptors are not available the same checks are made on paths.
     """
+    if not _use_descriptors():
+        return _walk_by_path(root_real, parts, root_lexical)
     try:
         fd = os.open(root_real, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
     except (FileNotFoundError, NotADirectoryError):
@@ -178,6 +199,20 @@ def _walk_below(root_real: str, parts: Sequence[str], root_lexical: str) -> tupl
         return info.st_dev, info.st_ino, info.st_mode
     finally:
         os.close(fd)
+
+
+def _walk_by_path(root_real: str, parts: Sequence[str], root_lexical: str) -> tuple[int, int, int] | None:
+    """Portable stand-in for ``_walk_below``: no descriptors, so no race protection."""
+    current = root_real
+    try:
+        for part in parts:
+            current = os.path.join(current, part)
+            if os.path.islink(current):
+                raise PolicyError("%s is a symlink inside the writable tree %s" % (current, root_lexical))
+        info = os.stat(current)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return info.st_dev, info.st_ino, info.st_mode
 
 
 def _resolve_grants(
