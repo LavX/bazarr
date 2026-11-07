@@ -314,17 +314,25 @@ class WorkerSession:
                     start_new_session=True,
                 )
             self.process = process
-        handshake_caps = {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES}
-        self._reader = frames.FrameReader(process.stdout, handshake_caps)
+        started = []
+        try:
+            return self._run_handshake(process, started)
+        except BaseException as error:
+            # Whatever failed after the spawn, nothing it acquired may outlive
+            # this call: the process, the threads that did start, and the pipes
+            # no thread was started to own.
+            self._abort_start(process, started, error)
+            raise
+
+    def _run_handshake(self, process, started):
+        self._reader = frames.FrameReader(process.stdout, {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES})
         self.last_frame_at = time.monotonic()
         for target, label in (
             (self._read_loop, "reader"),
             (self._drain_stderr, "stderr"),
             (self._write_loop, "writer"),
         ):
-            thread = threading.Thread(target=target, name="%s-%s" % (self.name, label), daemon=True)
-            thread.start()
-            self._threads.append(thread)
+            self._start_thread(target, label, started)
 
         if self._hello.wait(self.limits.handshake_timeout):
             error = self._handshake_error
@@ -342,18 +350,47 @@ class WorkerSession:
         if error is not None:
             self._fail(error, kill=True)
             raise error
-        watchdog = threading.Thread(target=self._watchdog, name="%s-watchdog" % self.name, daemon=True)
-        watchdog.start()
-        self._threads.append(watchdog)
+        self._start_thread(self._watchdog, "watchdog", started)
         return self.welcome
+
+    def _start_thread(self, target, label, started):
+        thread = threading.Thread(target=target, name="%s-%s" % (self.name, label), daemon=True)
+        thread.start()
+        started.append(label)
+        with self._lock:
+            self._threads.append(thread)
+
+    def _abort_start(self, process, started, error):
+        """Undo a start() that failed after the spawn. Never raises."""
+        try:
+            self._fail(error if isinstance(error, SessionError) else SessionClosed("session could not start"),
+                       kill=True)
+        except Exception:
+            pass
+        self._stop.set()
+        # Every stream is closed by the thread that reads or writes it; one whose
+        # thread never started has no owner, so it is closed here.
+        owners = (("reader", process.stdout), ("stderr", process.stderr), ("writer", process.stdin))
+        for label, stream in owners:
+            if label not in started:
+                self._close_stream(stream)
+        self._join_threads(timeout=2.0)
+        try:
+            self._kill_tree(process)
+        except Exception:
+            pass
+
+    def _join_threads(self, timeout):
+        with self._lock:
+            threads = list(self._threads)
+        for thread in threads:
+            if thread is not threading.current_thread():
+                thread.join(timeout=timeout)
 
     # --------------------------------------------------------------- requests
 
     def submit(self, op, params=None, *, timeout=None, max_result_bytes=None, secrets=None, on_progress=None):
         """Send a request and return its handle. Raises ``SessionBusy`` at the limit."""
-        limit = self.limits.max_in_flight
-        if self.welcome is not None:
-            limit = min(limit, self.welcome.max_in_flight)
         cap = self.limits.max_result_bytes if max_result_bytes is None else min(
             int(max_result_bytes), self.limits.max_result_bytes)
         # Encoded before anything is registered: params that cannot be sent
@@ -367,6 +404,7 @@ class WorkerSession:
         with self._lock:
             if self._closed or self.welcome is None:
                 raise self._failure or SessionClosed("session is not running")
+            limit = min(self.limits.max_in_flight, self.welcome.max_in_flight)
             if len(self._requests) >= limit:
                 raise SessionBusy("worker has %d requests in flight" % len(self._requests))
             req_id = self._next_id
@@ -536,14 +574,26 @@ class WorkerSession:
             "limits": limits,
             "session": "%s-%d" % (self.name, os.getpid()),
         }
-        self.welcome = Welcome(
+        negotiated = Welcome(
             protocol=protocol,
             kind=kind,
             worker=hello.get("worker") or {},
             max_in_flight=hello.get("max_in_flight") or self.limits.max_in_flight,
             pid=hello.get("pid"),
         )
-        self._enqueue(welcome)
+        data = frames.pack_control(welcome)
+        # The welcome is queued and the negotiated state published in one locked
+        # step, and only if the welcome was queued: submit() reads that state
+        # under the same lock, so no request frame can be queued ahead of the
+        # welcome, and nothing looks negotiated when the worker was never told.
+        with self._lock:
+            status = _CLOSED if self._closed else self._put(data)
+            if status == _QUEUED:
+                self.welcome = negotiated
+        if status == _FULL:
+            self._end_if_still_full(len(data))
+        if status != _QUEUED:
+            self._handshake_error = HandshakeError("session ended during the handshake")
         self._hello.set()
 
     def _reject(self, code, message):
@@ -708,8 +758,19 @@ class WorkerSession:
         elif refused is not None:
             self._send_quietly({"t": frames.ACK, "cid": message["cid"], "ok": False, "error": refused})
         elif start:
-            threading.Thread(target=self._call_worker, args=(key,), daemon=True,
-                             name="%s-calls-%s" % (self.name, key)).start()
+            try:
+                threading.Thread(target=self._call_worker, args=(key,), daemon=True,
+                                 name="%s-calls-%s" % (self.name, key)).start()
+            except Exception:
+                # No thread, so nothing will ever answer: give back the slot and
+                # the queue, and tell the worker now.
+                with self._lock:
+                    dropped = self._call_queues.pop(key, None)
+                    if not self._stop.is_set():
+                        self._call_pending = max(0, self._call_pending - len(dropped or ()))
+                self._send_quietly({"t": frames.ACK, "cid": message["cid"], "ok": False,
+                                    "error": frames.error_object(Codes.HOST_CALL_FAILED,
+                                                                 "the host could not start the call")})
 
     def _call_worker(self, key):
         clean = False
@@ -1002,13 +1063,17 @@ class WorkerSession:
         with self._lock:
             process = self.process
             already = self._closed
+            handshaken = self.welcome is not None
             if process is None and not already:
                 # Never started: mark it closed under the same lock start() takes,
                 # so a start racing this call cannot spawn a worker nobody ends.
                 self._closed = True
                 self._failure = SessionClosed("session closed")
                 already = True
-        if not already and process is not None and process.poll() is None:
+        # Before the welcome the worker is not in the conversation yet, and a
+        # shutdown frame ahead of the welcome would be a frame it cannot place:
+        # that worker is simply ended below.
+        if not already and process is not None and handshaken and process.poll() is None:
             self._send_quietly({"t": frames.SHUTDOWN, "grace_ms": int(grace * 1000)})
             try:
                 process.wait(timeout=grace)
@@ -1027,9 +1092,7 @@ class WorkerSession:
             # The reader may have closed the session first on a clean exit;
             # anything the worker forked still has to go.
             self._kill_tree(process)
-        for thread in self._threads:
-            if thread is not threading.current_thread():
-                thread.join(timeout=2.0)
+        self._join_threads(timeout=2.0)
 
     # ----------------------------------------------------------------- stderr
 

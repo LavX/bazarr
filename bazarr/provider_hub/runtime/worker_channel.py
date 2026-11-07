@@ -145,7 +145,11 @@ class WorkerChannel:
         self._reader = frames.FrameReader(stdin, {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES})
         self._writer = frames.FrameWriter(stdout)
         self._lock = threading.Lock()
+        # Operations whose handler is running; these are what the in-flight cap counts.
         self._operations = {}
+        # Operations whose handler returned and whose reply is being written.
+        # They no longer hold a slot, but a cancel must still find them.
+        self._transmitting = {}
         # Every secret value the host has sent this worker, whichever request
         # carried it. A plugin may keep a secret past its request, so an error
         # reply is scrubbed with all of them, not only its own request's.
@@ -169,7 +173,11 @@ class WorkerChannel:
         # Unbuffered: the reader thread may still be blocked in a read when the
         # process exits, and a raw file has no lock for that thread to hold.
         stdin = os.fdopen(os.dup(0), "rb", buffering=0)
-        stdout = os.fdopen(os.dup(1), "wb")
+        try:
+            stdout = os.fdopen(os.dup(1), "wb")
+        except BaseException:
+            stdin.close()
+            raise
         if redirect:
             try:
                 sys.stdout.flush()
@@ -252,10 +260,19 @@ class WorkerChannel:
         except (OSError, ValueError):
             return 3
         heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True)
-        heartbeat.start()
-        # Frames are read on their own thread for the whole life of the channel,
-        # so acks keep arriving while operations drain after a shutdown.
-        threading.Thread(target=self._read_loop, daemon=True).start()
+        try:
+            heartbeat.start()
+            # Frames are read on their own thread for the whole life of the channel,
+            # so acks keep arriving while operations drain after a shutdown.
+            threading.Thread(target=self._read_loop, daemon=True).start()
+        except Exception:
+            # A thread could not start: the worker cannot serve. Stop what did
+            # start and report failure rather than run half a channel.
+            self._close()
+            self._close_acks()
+            if heartbeat.is_alive():
+                heartbeat.join(timeout=2.0)
+            return 3
         self._ended.wait()
         self._drain()
         return self.exit_status
@@ -319,7 +336,7 @@ class WorkerChannel:
             self._start_operation(message)
         elif kind == frames.CANCEL:
             with self._lock:
-                operation = self._operations.get(message["id"])
+                operation = self._operations.get(message["id"]) or self._transmitting.get(message["id"])
             if operation is not None:
                 operation.cancel_reason = message.get("reason")
                 operation.cancelled.set()
@@ -351,7 +368,7 @@ class WorkerChannel:
             self._respond_error(req_id, OperationError(Codes.SHUTTING_DOWN, "worker is shutting down"))
             return
         with self._lock:
-            if req_id in self._operations:
+            if req_id in self._operations or req_id in self._transmitting:
                 busy = Codes.INVALID_REQUEST
             elif len(self._operations) >= self._max_in_flight:
                 busy = Codes.BUSY
@@ -367,7 +384,7 @@ class WorkerChannel:
             thread.start()
         except Exception:
             # No thread, no reply: tell the host now instead of leaving it waiting.
-            self._release(operation)
+            self._forget(operation)
             self._respond_error(req_id, OperationError(Codes.PLUGIN_ERROR, "the operation could not be started"))
             return
         with self._lock:
@@ -375,7 +392,14 @@ class WorkerChannel:
             self._threads.append(thread)
 
     def _release(self, operation):
+        """Free the operation's slot. It stays findable by a cancel until ``_forget``."""
         with self._lock:
+            if self._operations.pop(operation.id, None) is not None:
+                self._transmitting[operation.id] = operation
+
+    def _forget(self, operation):
+        with self._lock:
+            self._transmitting.pop(operation.id, None)
             self._operations.pop(operation.id, None)
 
     def _run_operation(self, operation):
@@ -402,18 +426,28 @@ class WorkerChannel:
             # The slot is free before the reply goes out: the host may send the
             # next request the moment it reads this reply.
             self._release(operation)
-        if reply is None:
-            return
         try:
-            if reply[0] == "ok":
-                try:
-                    self._respond_ok(operation, reply[1], reply[2])
-                except ChannelClosed:
-                    raise
-                except Exception as error:
-                    self._respond_error(operation.id, error)
-            else:
-                self._respond_error(operation.id, reply[1])
+            if reply is not None:
+                self._reply(operation, reply)
+        finally:
+            # Findable by a cancel until the terminal reply is written.
+            self._forget(operation)
+
+    def _reply(self, operation, reply):
+        try:
+            try:
+                if reply[0] == "ok":
+                    try:
+                        self._respond_ok(operation, reply[1], reply[2])
+                    except (ChannelClosed, OperationCancelled):
+                        raise
+                    except Exception as error:
+                        self._respond_error(operation.id, error)
+                else:
+                    self._respond_error(operation.id, reply[1])
+            except OperationCancelled:
+                # Cancelled while the result was being sent: stop, and say so.
+                self._respond_error(operation.id, OperationError(Codes.CANCELLED, "cancelled"))
         except ChannelClosed:
             pass
 
@@ -425,7 +459,8 @@ class WorkerChannel:
             raise OperationError(Codes.RESULT_TOO_LARGE, "result is %d bytes, the request allows %d" % (len(data), cap))
         message = {"t": frames.RES, "id": operation.id, "ok": True, "result": result}
         if data:
-            chunks, total = self._writer.write_data(operation.id, data)
+            # A cancel is honoured between chunks, not only before the transfer.
+            chunks, total = self._writer.write_data(operation.id, data, before_chunk=operation.check_cancelled)
             message.update({"chunks": chunks, "bytes": total, "sha256": hashlib.sha256(data).hexdigest()})
         self._send(message)
 
@@ -490,7 +525,7 @@ class WorkerChannel:
         settles usage after its cancel is not left waiting.
         """
         with self._lock:
-            running = list(self._operations.values())
+            running = list(self._operations.values()) + list(self._transmitting.values())
             threads = list(self._threads)
         for operation in running:
             operation.cancel_reason = "shutdown"

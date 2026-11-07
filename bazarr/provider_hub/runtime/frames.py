@@ -252,13 +252,19 @@ class FrameWriter:
             raise FrameTooLarge("control message of %d bytes exceeds the %d byte cap" % (len(body), cap))
         self._write(FRAME_CONTROL, body)
 
-    def write_data(self, op_id, data, chunk_size=DEFAULT_CHUNK_BYTES):
-        """Send ``data`` as chunks. Returns ``(chunk_count, total_bytes)``."""
+    def write_data(self, op_id, data, chunk_size=DEFAULT_CHUNK_BYTES, before_chunk=None):
+        """Send ``data`` as chunks. Returns ``(chunk_count, total_bytes)``.
+
+        ``before_chunk``, when given, is called ahead of every chunk and may
+        raise to stop the transfer; chunks already written stay written.
+        """
         cap = self.caps[FRAME_DATA] - DATA_PREFIX.size
         size = max(1, min(int(chunk_size), cap))
         view = memoryview(data)
         count = 0
         for start in range(0, len(view), size):
+            if before_chunk is not None:
+                before_chunk()
             self._write(FRAME_DATA, DATA_PREFIX.pack(op_id) + bytes(view[start:start + size]))
             count += 1
         return count, len(view)

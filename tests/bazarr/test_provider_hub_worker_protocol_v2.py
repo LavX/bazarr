@@ -47,6 +47,21 @@ def fast_limits(**overrides):
     return SessionLimits(**values)
 
 
+@pytest.fixture(autouse=True)
+def no_protocol_threads_left_behind():
+    """Every thread a test starts must be gone once the test and its fixtures end."""
+    before = set(threading.enumerate())
+    yield
+    leaked = []
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        leaked = [t for t in threading.enumerate() if t not in before and t.is_alive()]
+        if not leaked:
+            break
+        time.sleep(0.05)
+    assert not leaked, "threads still alive after the test: %s" % [t.name for t in leaked]
+
+
 @pytest.fixture
 def make_session():
     sessions = []
@@ -1836,7 +1851,11 @@ def test_a_queued_host_call_does_not_start_once_the_session_is_closed(make_sessi
     session._call_queues[7] = deque([{"t": "call", "cid": 1, "name": "h", "params": {}, "id": 7}])
     session._call_pending = 1
     session._closed = True
-    session._call_worker(7)
+    try:
+        session._call_worker(7)
+    finally:
+        # Put it back so the fixture's close() runs the real shutdown path.
+        session._closed = False
     assert ran == []
 
 
@@ -1958,6 +1977,266 @@ def test_an_operation_that_cannot_get_a_thread_is_answered_with_an_error(monkeyp
         assert reply["id"] == 1 and reply["ok"] is False
         assert reply["error"]["code"] == frames.Codes.PLUGIN_ERROR
         assert 1 not in harness.channel._operations
+    finally:
+        monkeypatch.undo()
+        harness.finish()
+
+
+# ------------------------------------------ handshake order and operation lifetime
+
+
+def recording_outbox(session):
+    """The frame types the session queues for its worker, in order."""
+    queued = []
+    real_put = session._outbox.put_nowait
+
+    def record(data):
+        queued.append(json.loads(data[frames.HEADER.size:])["t"])
+        real_put(data)
+
+    session._outbox.put_nowait = record
+    return queued
+
+
+def test_a_request_cannot_be_queued_ahead_of_the_welcome(make_session):
+    session = make_session()
+    queued = recording_outbox(session)
+    real_put = session._put
+    in_welcome = threading.Event()
+
+    def slow_welcome(data):
+        if json.loads(data[frames.HEADER.size:])["t"] == frames.WELCOME:
+            in_welcome.set()
+            time.sleep(0.4)
+        return real_put(data)
+
+    session._put = slow_welcome
+    starter = threading.Thread(target=session.start, daemon=True)
+    starter.start()
+    submitted = []
+
+    def submit_when_possible():
+        assert in_welcome.wait(5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                submitted.append(session.submit("echo"))
+                return
+            except SessionError:
+                time.sleep(0.01)
+
+    submitter = threading.Thread(target=submit_when_possible, daemon=True)
+    submitter.start()
+    submitter.join(10)
+    starter.join(10)
+    assert submitted
+    assert submitted[0].wait(5).result["echo"] == {}
+    assert queued[:2] == [frames.WELCOME, frames.REQ]
+
+
+def test_nothing_is_published_when_the_welcome_could_not_be_queued(make_session):
+    session = make_session()
+    real_put = session._put
+
+    def refuse_welcome(data):
+        if json.loads(data[frames.HEADER.size:])["t"] == frames.WELCOME:
+            return session_module._FULL
+        return real_put(data)
+
+    session._put = refuse_welcome
+    with pytest.raises(HandshakeError):
+        session.start()
+    assert session.welcome is None
+    assert not session.alive
+
+
+def test_close_during_the_handshake_queues_no_frame_ahead_of_the_welcome(tmp_path):
+    script = tmp_path / "silent.py"
+    script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    session = WorkerSession([sys.executable, "-B", str(script)], limits=fast_limits(handshake_timeout=20.0))
+    queued = recording_outbox(session)
+    outcome = []
+
+    def run_start():
+        try:
+            session.start()
+        except Exception as error:
+            outcome.append(error)
+
+    starter = threading.Thread(target=run_start, daemon=True)
+    starter.start()
+    assert wait_until(lambda: session.process is not None)
+    began = time.monotonic()
+    session.close(grace=5.0)
+    starter.join(10)
+    assert time.monotonic() - began < 4.0
+    assert queued == []
+    assert outcome and isinstance(outcome[0], HandshakeError)
+
+
+class _ChunkedWorker:
+    """A WorkerChannel whose big result takes a while to stream, one chunk at a time."""
+
+    def __init__(self, **kwargs):
+        self.written = []
+        self.first_chunk = threading.Event()
+        data = b"x" * (frames.DEFAULT_CHUNK_BYTES * 6)
+
+        def handler(operation):
+            if operation.op == "big":
+                return worker_channel.OperationResult({"size": len(data)}, data)
+            return {}
+
+        self.harness = ChannelHarness(handler, **kwargs)
+        writer = self.harness.channel._writer
+        real_write = writer._write
+
+        def slow_write(ftype, body):
+            if ftype == frames.FRAME_DATA:
+                self.written.append(len(body))
+                self.first_chunk.set()
+                time.sleep(0.3)
+            return real_write(ftype, body)
+
+        writer._write = slow_write
+
+
+def test_a_cancel_stops_a_result_that_is_being_streamed():
+    worker = _ChunkedWorker()
+    harness = worker.harness
+    harness.start()
+    try:
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "big", "params": {}})
+        assert worker.first_chunk.wait(5)
+        # The handler is done: the slot is free, but a cancel must still find the operation.
+        assert 1 not in harness.channel._operations
+        assert 1 in harness.channel._transmitting
+        harness.host_out.write_control({"t": "cancel", "id": 1, "reason": "enough"})
+        assert wait_until(lambda: any(m["t"] == "res" for m in harness.messages), timeout=8)
+        reply = next(m for m in harness.messages if m["t"] == "res")
+        assert reply["ok"] is False and reply["error"]["code"] == frames.Codes.CANCELLED
+        assert len(worker.written) < 6
+        assert wait_until(lambda: not harness.channel._transmitting)
+        assert not harness.channel._operations
+    finally:
+        harness.finish()
+
+
+def test_a_slot_is_free_for_the_next_request_while_a_result_streams():
+    worker = _ChunkedWorker(max_in_flight=1)
+    harness = worker.harness
+    harness.start()
+    try:
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "big", "params": {}})
+        assert worker.first_chunk.wait(5)
+        harness.host_out.write_control({"t": "req", "id": 2, "op": "quick", "params": {}})
+        assert wait_until(lambda: any(m["t"] == "res" and m["id"] == 2 for m in harness.messages), timeout=8)
+        second = next(m for m in harness.messages if m["t"] == "res" and m["id"] == 2)
+        assert second["ok"] is True
+        # A reused id is still refused while the first one is on the wire.
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "quick", "params": {}})
+        assert wait_until(
+            lambda: any(m["t"] == "res" and m["id"] == 1 and not m["ok"] for m in harness.messages), timeout=8)
+        refused = next(m for m in harness.messages if m["t"] == "res" and m["id"] == 1 and not m["ok"])
+        assert refused["error"]["code"] == frames.Codes.INVALID_REQUEST
+    finally:
+        harness.finish()
+
+
+def test_a_session_cancels_a_streaming_result_inside_the_grace():
+    session = WorkerSession(
+        fake_worker_command(), env=fake_worker_env(), kind="translator",
+        limits=fast_limits(cancel_grace=1.0))
+    session.start()
+    try:
+        handle = session.submit("chunks", {"size": frames.DEFAULT_CHUNK_BYTES * 3}, timeout=0)
+        with pytest.raises(RequestTimeout):
+            handle.wait(8)
+        assert session.alive
+        assert session.request("echo", timeout=5).result["echo"] == {}
+    finally:
+        session.close(grace=1.0)
+
+
+# ---------------------------------------------------- partial start and teardown
+
+
+@pytest.mark.parametrize("label", ["reader", "stderr", "writer", "watchdog"])
+def test_a_thread_that_cannot_start_leaves_nothing_behind(make_session, monkeypatch, label):
+    session = make_session()
+    real_start = threading.Thread.start
+
+    def start(self):
+        if self.name == "worker-%s" % label:
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    with pytest.raises(RuntimeError):
+        session.start()
+    monkeypatch.undo()
+    process = session.process
+    assert process.poll() is not None
+    assert not pid_alive(process.pid)
+    assert not session.alive
+    assert process.stdin.closed and process.stdout.closed and process.stderr.closed
+    assert wait_until(lambda: not [t for t in threading.enumerate() if t.name.startswith("worker-")])
+
+
+def test_a_reader_that_cannot_be_built_leaves_nothing_behind(make_session, monkeypatch):
+    session = make_session()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("reader broke")
+
+    monkeypatch.setattr(frames, "FrameReader", broken)
+    with pytest.raises(RuntimeError):
+        session.start()
+    monkeypatch.undo()
+    process = session.process
+    assert process.poll() is not None
+    assert process.stdin.closed and process.stdout.closed and process.stderr.closed
+    assert not session.alive
+
+
+def test_a_host_call_whose_thread_cannot_start_is_answered_and_gives_its_slot_back(make_session, monkeypatch):
+    session = make_session(host_calls={"h": lambda call: {}})
+    session.start()
+    real_start = threading.Thread.start
+
+    def start(self):
+        if "-calls-" in self.name:
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    with pytest.raises(RequestFailed) as caught:
+        session.request("call", {"name": "h"}, timeout=5)
+    monkeypatch.undo()
+    assert caught.value.code == frames.Codes.HOST_CALL_FAILED
+    assert session.alive
+    assert session._call_pending == 0 and not session._call_queues
+    assert session.request("call", {"name": "h"}, timeout=5).result["ack"] == {}
+
+
+def test_a_channel_whose_reader_thread_cannot_start_stops_its_heartbeat(monkeypatch):
+    harness = ChannelHarness(lambda operation: {}, heartbeat_interval=0.05)
+    real_start = threading.Thread.start
+
+    def start(self):
+        if getattr(self, "_target", None) == harness.channel._read_loop:
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    harness.host_out.write_control({
+        "t": "welcome", "protocol": {"major": 2, "minor": 0}, "kind": None,
+        "limits": {"heartbeat_interval_ms": 50}, "session": "test"})
+    harness.thread.start()
+    try:
+        harness.thread.join(5)
+        assert harness.status == [3]
+        assert harness.channel._closed.is_set()
     finally:
         monkeypatch.undo()
         harness.finish()
