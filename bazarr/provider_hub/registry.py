@@ -390,8 +390,11 @@ def retire_provider_instances(provider_id: str) -> list[threading.Thread]:
     drain threads.
     """
     try:
-        from subliminal_patch.core import live_provider_pools
+        from subliminal_patch.core import bump_provider_generation, live_provider_pools
 
+        # First, so a pool that is building an instance of the old class right
+        # now sees the change before it stores it, and builds again.
+        bump_provider_generation(provider_id)
         pools = live_provider_pools()
     except Exception:
         return []

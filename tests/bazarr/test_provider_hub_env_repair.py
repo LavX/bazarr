@@ -426,3 +426,48 @@ def test_the_install_worker_check_runs_inside_the_remaining_install_budget(hub, 
     stage_install(manifest, install_timeout=3)
 
     assert len(seen) == 1 and 0 < seen[0] <= 3
+
+
+def test_an_instance_under_construction_while_its_provider_is_replaced_is_not_stored(
+    hub, tmp_path, hub_registry
+):
+    from provider_hub.registry import HubProxyProvider, retire_provider_instances
+    from subliminal_patch.core import SZProviderPool
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    terminated = []
+
+    class OldClass(HubProxyProvider):
+        provider_name = "examplehub"
+        python_path = "/hub/shared_envs/old/bin/python"
+
+        def __init__(self, **config):
+            super().__init__(**config)
+            entered.set()
+            proceed.wait(10)
+
+        def terminate(self):
+            terminated.append(self)
+
+    class NewClass(HubProxyProvider):
+        provider_name = "examplehub"
+        python_path = "/hub/shared_envs/new/bin/python"
+
+    hub_registry.register("examplehub", OldClass)
+    pool = SZProviderPool(providers=["examplehub"], provider_configs={})
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(provider=pool["examplehub"]))
+    worker.start()
+    assert entered.wait(10)
+
+    # The repair registers the new class and retires the pooled instances while
+    # the old class is still being constructed.
+    hub_registry.register("examplehub", NewClass)
+    retire_provider_instances("examplehub")
+    proceed.set()
+    worker.join(10)
+
+    assert type(result["provider"]) is NewClass
+    assert pool.initialized_providers["examplehub"] is result["provider"]
+    assert [type(item) for item in terminated] == [OldClass]

@@ -303,16 +303,13 @@ class _ProviderConfigs(dict):
             self._pool.retire_provider(key)
 
             try:
-                provider = provider_registry[key](**registered_val)  # type: ignore
-                provider.initialize()
+                self._pool._build_and_install(key, lambda: registered_val)
             except Exception as error:
                 # Nothing is installed. The pool initializes on next access, so
                 # a provider that is merely unreachable right now comes back on
                 # its own, with the new config rather than the one the user
                 # just changed away from.
                 self._pool._notify_throttle(key, error)
-            else:
-                self._pool._install_provider(key, provider)
 
         if updated:
             logger.debug("Providers with config updates: %s", updated)
@@ -577,6 +574,23 @@ def live_provider_pools():
     return list(_LIVE_POOLS)
 
 
+# Bumped when what a provider name runs on is replaced. A pool that was building
+# an instance while it happened sees the number change before it stores the
+# instance, and builds again from the registry.
+_PROVIDER_GENERATIONS = {}
+_PROVIDER_GENERATIONS_LOCK = threading.Lock()
+
+
+def provider_generation(name):
+    with _PROVIDER_GENERATIONS_LOCK:
+        return _PROVIDER_GENERATIONS.get(name, 0)
+
+
+def bump_provider_generation(name):
+    with _PROVIDER_GENERATIONS_LOCK:
+        _PROVIDER_GENERATIONS[name] = _PROVIDER_GENERATIONS.get(name, 0) + 1
+
+
 class SZProviderPool(ProviderPool):
     @staticmethod
     def _dedupe_provider_names(providers):
@@ -586,6 +600,11 @@ class SZProviderPool(ProviderPool):
                  pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None,
                  adoption_gate=None, throttle_announce=None):
         _LIVE_POOLS.add(self)
+
+        #: Held while an instance is stored or detached, so a built instance is
+        #: either seen by a detach that follows or checked against a replacement
+        #: that came first.
+        self._store_lock = threading.RLock()
 
         #: Name of providers to use
         self.providers = self._dedupe_provider_names(providers)
@@ -726,18 +745,41 @@ class SZProviderPool(ProviderPool):
         self.adopt_provider(name)
         if name not in self.initialized_providers:
             logger.info('Initializing provider %s', name)
-            provider = provider_registry[name](**self.provider_configs.get(name, {}))
-            provider.initialize()
-            self._install_provider(name, provider)
+            self._build_and_install(name, lambda: self.provider_configs.get(name, {}))
 
         return self.initialized_providers[name]
 
-    def _install_provider(self, name, provider):
+    def _build_and_install(self, name, config):
+        """Build an instance of the registered class and store it.
+
+        If the provider was replaced while the instance was being built (a
+        repaired environment), the instance belongs to the old class: it is
+        dropped and a new one is built from the registry as it is now.
+        """
+        while True:
+            generation = provider_generation(name)
+            provider = provider_registry[name](**config())
+            provider.initialize()
+            if self._install_provider(name, provider, generation):
+                return provider
+            logger.info('Provider %s was replaced while it was being initialized; building it again', name)
+            try:
+                provider.terminate()
+            except Exception:
+                logger.exception('Provider %r terminated unexpectedly', name)
+
+    def _install_provider(self, name, provider, generation=None):
         """Store an instance this pool built, with the pool's admission check
         attached, so a provider rebuilt by a settings save is gated like the
-        one it replaced."""
-        provider.admit = partial(self._admits, name)
-        self.initialized_providers[name] = provider
+        one it replaced. With ``generation``, nothing is stored when the
+        provider was replaced since that number was read; the answer says
+        whether it was stored."""
+        with self._store_lock:
+            if generation is not None and provider_generation(name) != generation:
+                return False
+            provider.admit = partial(self._admits, name)
+            self.initialized_providers[name] = provider
+            return True
 
     def _admits(self, name):
         """Whether this pool may call the provider now: not discarded here,
@@ -828,7 +870,8 @@ class SZProviderPool(ProviderPool):
         instance, which may be serving a request. The pool builds a fresh one
         from the registry the next time the name is used.
         """
-        return self.initialized_providers.pop(name, None)
+        with self._store_lock:
+            return self.initialized_providers.pop(name, None)
 
     def __delitem__(self, name):
         if name not in self.initialized_providers:
