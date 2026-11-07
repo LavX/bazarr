@@ -87,7 +87,8 @@ function deriveCta(
   if (
     installed.active_version &&
     installed.active_version !== entry.version &&
-    !entry.blocked_reason
+    !entry.blocked_reason &&
+    entry.origin !== "bundled"
   ) {
     return "update";
   }
