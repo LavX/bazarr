@@ -2572,8 +2572,14 @@ def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, A
     return result
 
 
-def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeout: float = 10.0) -> None:
+def _verify_bundle_for_run(manifest, bundle_path: Path) -> None:
+    """The check every run of a plugin's code starts with: the caches go, then the tree must match its manifest."""
     _remove_bundle_runtime_artifacts(bundle_path)
+    verify_bundle_tree(manifest, bundle_path)
+
+
+def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeout: float = 10.0) -> None:
+    _verify_bundle_for_run(manifest, bundle_path)
     runner = Path(__file__).with_name("worker_runner.py")
     # The environment is held for as long as the worker may run, which can be
     # past this call when the stop leaves something running.
@@ -3251,7 +3257,9 @@ def reconcile_plugin_environments() -> dict[str, list[str]]:
             built_in_provider_ids=_validation_built_in_provider_ids(raw, bool(row.get("trusted", False))),
         )
 
-    return env_registry.reconcile_environments(validate=validate, probe=_smoke_validate_worker)
+    return env_registry.reconcile_environments(
+        validate=validate, probe=_smoke_validate_worker, verify_bundle=_verify_bundle_for_run
+    )
 
 
 def repair_installation_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
@@ -3305,6 +3313,12 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
                     manifest_data, bool(row.get("trusted", False))
                 ),
             )
+            try:
+                _verify_bundle_for_run(validated, bundle_path)
+            except Exception:
+                # Modified or foreign code is not run, and nothing is built for it.
+                env_registry.mark_needs_repair(provider_id)
+                raise
             step("Rebuilding the plugin's dependencies")
             env_path = PluginEnvironment(provider_hub_dir()).install(validated, rebuild=True)
             python_path = python_executable(env_path)

@@ -280,7 +280,11 @@ class ProviderWorkerClient:
         cwd: str | os.PathLike[str] | None = None,
         env: dict[str, str] | None = None,
         provider_id: str | None = None,
+        before_start=None,
     ):
+        # Called before every start of the worker process, the first one and each
+        # respawn: whatever it raises keeps the process from starting.
+        self._before_start = before_start
         self.command = command
         self.cwd = str(cwd) if cwd else None
         self.env = env
@@ -315,6 +319,10 @@ class ProviderWorkerClient:
                 # The previous worker is gone but not collected: end what it
                 # left running before its slot is reused.
                 self._kill_tree(self.process, 5.0)
+
+        before_start = getattr(self, "_before_start", None)
+        if before_start is not None:
+            before_start()
 
         env = {
             "PATH": os.environ.get("PATH", ""),

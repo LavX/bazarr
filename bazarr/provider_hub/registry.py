@@ -14,6 +14,7 @@ from subliminal.video import Episode, Movie
 from subliminal_patch.extensions import provider_registry
 from subliminal_patch.providers import Provider
 
+from .bundle import verify_bundle_tree
 from .manifest import ManifestValidationError, validate_manifest
 from .migration import (
     MIGRATED_BUILT_IN_PROVIDER_IDS,
@@ -244,8 +245,30 @@ class HubProxyProvider(Provider):
                     "BAZARR_PROVIDER_HUB_MANIFEST": manifest_json,
                 },
                 provider_id=self.provider_name,
+                before_start=self._verify_bundle_before_start,
             )
             return self.worker_client
+
+    def _verify_bundle_before_start(self) -> None:
+        """Every process the proxy starts runs code that still matches its manifest.
+
+        Runs before the first start and before each respawn. A bundle that no
+        longer matches flags the installation for repair and starts nothing.
+        """
+        manifest = getattr(self.__class__, "manifest", None)
+        bundle_path = getattr(self.__class__, "bundle_path", None)
+        if manifest is None or not bundle_path:
+            return
+        try:
+            verify_bundle_tree(manifest, bundle_path)
+        except Exception as error:
+            try:
+                from .env_registry import mark_needs_repair
+
+                mark_needs_repair(self.provider_name)
+            except Exception:
+                logger.exception("Provider Hub: could not flag %s for repair", self.provider_name)
+            raise WorkerError(f"the bundle of {self.provider_name} does not match its manifest: {error}") from error
 
     def _request_timeout(self):
         # The host deadline must never fire before the worker's own per-operation

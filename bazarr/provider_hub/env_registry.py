@@ -167,6 +167,7 @@ def reconcile_environments(
     validate: Callable[[dict[str, Any], bool], Any],
     probe: Callable[[Any, Path, Path], None],
     root: str | Path | None = None,
+    verify_bundle: Callable[[Any, Path], None] | None = None,
 ) -> dict[str, list[str]]:
     """Adopt the environments installations already use. Boot-safe: no pip, no network.
 
@@ -250,6 +251,15 @@ def reconcile_environments(
             bundle = validated_bundle_path(root, row["active_path"])
             if bundle is None:
                 continue
+            if verify_bundle is not None:
+                try:
+                    verify_bundle(manifest, bundle)
+                except Exception:
+                    # Modified code is not run for the probe; the installation is flagged, nothing else changes.
+                    logger.warning("Provider Hub: the bundle of %s does not match its manifest", provider_id, exc_info=True)
+                    flags.append(provider_id)
+                    summary["needs_repair"].append(provider_id)
+                    continue
             try:
                 probe(manifest, bundle, shared_python)
             except Exception as error:

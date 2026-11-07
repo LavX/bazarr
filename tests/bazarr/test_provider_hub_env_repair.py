@@ -1625,3 +1625,111 @@ def test_cleanup_skips_an_environment_a_detached_process_still_uses_until_it_exi
         if child.poll() is None:
             child.kill()
             child.wait(10)
+
+
+def _bundle_with(hub, content=b"class ExampleProvider: pass\n"):
+    bundle = hub / "bundles" / "examplehub" / "1.0.0" / "c"
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "provider.py").write_bytes(content)
+    return bundle
+
+
+@pytest.mark.parametrize("damage", ["changed", "symlinked"])
+def test_repair_runs_no_plugin_code_from_a_bundle_that_does_not_match_its_manifest(hub, tmp_path, monkeypatch, damage):
+    from provider_hub.service import repair_installation_environment
+
+    old = _env(hub / "shared_envs" / "old")
+    bundle = _bundle_with(hub)
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, old / "bin" / "python")}
+    save_state(state)
+    built = _patch_environment(monkeypatch)
+    probed = []
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda *args: probed.append(args))
+    provider = bundle / "provider.py"
+    if damage == "changed":
+        provider.write_bytes(b"class ExampleProvider: ran_something_else = True\n")
+    else:
+        elsewhere = tmp_path / "elsewhere.py"
+        elsewhere.write_bytes(b"class ExampleProvider: pass\n")
+        provider.unlink()
+        provider.symlink_to(elsewhere)
+
+    with pytest.raises(Exception):
+        repair_installation_environment("examplehub")
+
+    row = load_state()["installations"]["examplehub"]
+    assert row["needs_repair"] is True
+    assert row["python_path"] == str(old / "bin" / "python")
+    assert built == [] and probed == []
+    assert not (hub / "shared_envs" / "rebuilt").exists()
+
+
+@pytest.mark.parametrize("damage", ["changed", "symlinked"])
+def test_boot_reconcile_runs_no_plugin_code_from_a_bundle_that_does_not_match_its_manifest(hub, tmp_path, damage):
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.service import _verify_bundle_for_run
+
+    first = _env(hub / "envs" / "alpha" / "1.0.0" / "fp1")
+    second = _env(hub / "envs" / "beta" / "1.0.0" / "fp2")
+    for env in (first, second):
+        (env / "pyvenv.cfg").write_text(
+            f"home = /usr/bin\nversion = {sys.version_info.major}.{sys.version_info.minor}.0\n", encoding="utf-8"
+        )
+    bundle = _bundle_with(hub)
+    rows = []
+    for provider_id, env in (("alpha", first), ("beta", second)):
+        row = _active_row(bundle, env / "bin" / "python")
+        row["provider_id"] = provider_id
+        rows.append(row)
+    state = load_state()
+    state["installations"] = {row["provider_id"]: row for row in rows}
+    save_state(state)
+    provider = bundle / "provider.py"
+    if damage == "changed":
+        provider.write_bytes(b"class ExampleProvider: ran_something_else = True\n")
+    else:
+        elsewhere = tmp_path / "elsewhere.py"
+        elsewhere.write_bytes(b"class ExampleProvider: pass\n")
+        provider.unlink()
+        provider.symlink_to(elsewhere)
+    probed = []
+
+    def validate(row, staged):
+        return validate_manifest(row["manifest"], built_in_provider_ids=set())
+
+    summary = env_registry.reconcile_environments(
+        validate=validate, probe=lambda *args: probed.append(args), verify_bundle=_verify_bundle_for_run
+    )
+
+    assert probed == []
+    assert summary["repointed"] == []
+    assert "beta" in summary["needs_repair"]
+    assert load_state()["installations"]["beta"]["needs_repair"] is True
+    assert load_state()["installations"]["beta"]["python_path"] == str(second / "bin" / "python")
+
+
+def test_a_pooled_worker_starts_only_from_a_bundle_that_matches_its_manifest(hub, hub_registry, monkeypatch):
+    from provider_hub.registry import register_active_provider_classes
+    from provider_hub.state import active_installations
+    from subliminal_patch.core import SZProviderPool
+
+    old = _env(hub / "shared_envs" / "old")
+    bundle = _bundle_with(hub)
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, old / "bin" / "python")}
+    save_state(state)
+    assert register_active_provider_classes(active_installations()) == ["examplehub"]
+    spawned = _counting_popen(monkeypatch)
+    pool = SZProviderPool(providers=["examplehub"], provider_configs={})
+    proxy = pool["examplehub"]
+    # The code changes after the provider was registered and before its worker starts.
+    (bundle / "provider.py").write_bytes(b"class ExampleProvider: ran_something_else = True\n")
+
+    from provider_hub.worker import WorkerError
+
+    with pytest.raises(WorkerError, match="does not match its manifest"):
+        proxy._worker().request("search", {}, timeout=5)
+
+    assert spawned == []
+    assert load_state()["installations"]["examplehub"]["needs_repair"] is True
