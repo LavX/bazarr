@@ -2377,6 +2377,137 @@ def test_the_descriptor_walk_is_used_on_linux(tmp_path, monkeypatch):
         assert seen
 
 
+# --- TLS trust data: certificates yes, private keys no --------------------------
+
+
+def test_system_grants_name_certificates_never_a_whole_tls_tree():
+    grants = set(policy_module.SYSTEM_READ_PATHS)
+    assert not grants & {"/etc/ssl", "/etc/pki", "/etc/pki/tls", "/etc/pki/ca-trust", "/etc/ssl/private"}
+    for path in grants:
+        parts = Path(path).parts
+        assert "private" not in parts and "CA" not in parts, path
+        # Nothing may be an ancestor of a conventional private key directory.
+        for secret in ("/etc/ssl/private", "/etc/pki/tls/private", "/etc/pki/CA/private", "/etc/pki/nssdb"):
+            assert not (secret == path or secret.startswith(path.rstrip("/") + "/")), (path, secret)
+    # The files and directories TLS verification needs are still granted.
+    assert {"/etc/ssl/certs", "/etc/ssl/cert.pem", "/etc/pki/tls/certs", "/etc/pki/ca-trust/extracted"} <= grants
+
+
+def test_a_built_policy_grants_no_private_key_directory():
+    policy = SandboxPolicy.for_interpreter(sys.executable)
+    for granted in policy.read_only:
+        for secret in ("/etc/ssl/private", "/etc/pki/tls/private", "/etc/pki/CA/private"):
+            assert not (granted == secret or secret.startswith(granted.rstrip("/") + "/")), (granted, secret)
+
+
+@linux_only
+def test_a_worker_still_verifies_tls_and_cannot_read_other_tls_files(live, tmp_path):
+    import ssl
+    import threading
+
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl is not installed")
+    host_ctx = ssl.create_default_context()
+    host_ctx.load_default_certs()
+    host_count = len(host_ctx.get_ca_certs())
+    # World-readable files next to the CA bundle that the old whole-tree grant exposed.
+    wanted = (
+        "/etc/ssl/certs", "/etc/ssl/cert.pem", "/etc/ssl/openssl.cnf", "/etc/ssl/ct_log_list.cnf",
+        "/etc/pki/tls/certs", "/etc/pki/tls/cert.pem", "/etc/pki/tls/openssl.cnf", "/etc/pki/tls/ct_log_list.cnf",
+        "/etc/pki/ca-trust/extracted",
+    )
+
+    def covered(path):
+        real = os.path.realpath(path)
+        return any(path == g or path.startswith(g + "/") or real == os.path.realpath(g) or real.startswith(os.path.realpath(g) + "/") for g in wanted)
+
+    siblings = []
+    for base in ("/etc/ssl", "/etc/pki"):
+        for found in sorted(Path(base).rglob("*"))[:4000]:
+            name = str(found)
+            if found.is_file() and (found.stat().st_mode & 0o004) and not covered(name):
+                siblings.append(name)
+    siblings = siblings[:5]
+
+    certs = tmp_path / "certs"
+    certs.mkdir()
+    ca_key, ca_crt, key, csr, crt = (str(certs / n) for n in ("ca.key", "ca.crt", "srv.key", "srv.csr", "srv.crt"))
+    ext = certs / "ext.cnf"
+    ext.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+    for args in (
+        ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", ca_key, "-out", ca_crt, "-subj", "/CN=test-ca", "-days", "2"],
+        ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", csr, "-subj", "/CN=localhost"],
+        ["x509", "-req", "-in", csr, "-CA", ca_crt, "-CAkey", ca_key, "-CAcreateserial", "-out", crt, "-days", "2", "-extfile", str(ext)],
+    ):
+        subprocess.run([openssl, *args], check=True, capture_output=True)
+
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(crt, key)
+    import socket
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(2)
+
+    def serve():
+        for _ in range(2):
+            try:
+                conn, _addr = listener.accept()
+                with server_ctx.wrap_socket(conn, server_side=True) as tls:
+                    tls.recv(1)
+                    tls.sendall(b"hello")
+            except (OSError, ssl.SSLError):
+                pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    script = """
+        import errno, json, socket, ssl
+        out = {}
+        paths = ssl.get_default_verify_paths()
+        ctx = ssl.create_default_context()
+        ctx.load_default_certs()
+        out["default_cas"] = len(ctx.get_ca_certs())
+        for name, value in (("cafile", paths.cafile or paths.openssl_cafile), ("capath", paths.capath or paths.openssl_capath)):
+            try:
+                if value:
+                    open(value, "rb").read(1) if name == "cafile" else __import__("os").listdir(value)
+                out[name] = "readable"
+            except FileNotFoundError:
+                out[name] = "absent"
+            except OSError as exc:
+                out[name] = errno.errorcode.get(exc.errno, exc.errno)
+        verify = ssl.create_default_context(cafile=%(ca)r)
+        verify.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        with socket.create_connection(("127.0.0.1", %(port)d), timeout=10) as raw:
+            with verify.wrap_socket(raw, server_hostname="localhost") as tls:
+                tls.send(b"x")
+                out["tls"] = tls.recv(5).decode()
+        denied = {}
+        for sibling in %(siblings)r:
+            try:
+                open(sibling, "rb").read(1)
+                denied[sibling] = "readable"
+            except OSError as exc:
+                denied[sibling] = errno.errorcode.get(exc.errno, exc.errno)
+        out["siblings"] = denied
+        print(json.dumps(out))
+    """ % {"ca": ca_crt, "port": listener.getsockname()[1], "siblings": siblings}
+    try:
+        rc, out, err = run(make_spec(tmp_path, script, ro=(certs,), ports=[listener.getsockname()[1]]), live)
+    finally:
+        listener.close()
+    assert rc == 0, err
+    result = json.loads(out)
+    assert result["tls"] == "hello"
+    assert result["cafile"] in ("readable", "absent"), result
+    assert result["capath"] in ("readable", "absent"), result
+    assert result["default_cas"] == host_count, result
+    for path, state in result["siblings"].items():
+        assert state == "EACCES", (path, state)
+
+
 # --- Requiring a working sandbox --------------------------------------------------
 
 

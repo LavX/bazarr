@@ -19,6 +19,12 @@ from typing import Iterable, Mapping, Sequence
 # loader, system libraries, the standard library of a system interpreter, the
 # CA bundle, name resolution, time zone and locale data. Symlinks (for example
 # /etc/resolv.conf on systemd hosts) are followed and their targets added.
+#
+# TLS trust data is granted by file and by certificate directory, never as the
+# whole of /etc/ssl or /etc/pki: those also hold private keys (/etc/ssl/private,
+# /etc/pki/tls/private, /etc/pki/CA/private), and a worker running as root can
+# read root-only files. Only public certificates and the OpenSSL configuration
+# files are listed; a path that does not exist on a host is skipped.
 SYSTEM_READ_PATHS: tuple[str, ...] = (
     "/usr",
     "/bin",
@@ -29,9 +35,18 @@ SYSTEM_READ_PATHS: tuple[str, ...] = (
     "/etc/ld.so.cache",
     "/etc/ld.so.conf",
     "/etc/ld.so.conf.d",
-    "/etc/ssl",
+    "/etc/ssl/certs",
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/openssl.cnf",
+    "/etc/ssl/ct_log_list.cnf",
     "/etc/ca-certificates",
-    "/etc/pki",
+    "/etc/ca-certificates.conf",
+    "/etc/pki/tls/certs",
+    "/etc/pki/tls/cert.pem",
+    "/etc/pki/tls/openssl.cnf",
+    "/etc/pki/tls/ct_log_list.cnf",
+    "/etc/pki/ca-trust/extracted",
+    "/etc/crypto-policies/back-ends",
     "/etc/resolv.conf",
     "/etc/hosts",
     "/etc/nsswitch.conf",
