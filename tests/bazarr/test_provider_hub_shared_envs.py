@@ -1070,3 +1070,74 @@ def test_a_directory_link_inside_the_environment_cannot_carry_the_interpreter_ou
     # The plain layout is untouched.
     plain = _plain_env(hub / "shared_envs" / "plain")
     assert interpreter_inside_hub(hub, plain / "bin" / "python") is True
+
+
+def test_a_dotdot_after_a_directory_link_cannot_make_an_outside_interpreter_look_inside(hub, tmp_path):
+    from provider_hub.venv import interpreter_inside_hub, path_inside_hub, validated_interpreter
+
+    outside = tmp_path / "elsewhere"
+    victim = _plain_env(outside / "victim")
+    (outside / "sub").mkdir()
+    (hub / "shared_envs").mkdir()
+    (hub / "shared_envs" / "link").symlink_to(outside / "sub", target_is_directory=True)
+
+    # <hub>/shared_envs/link/../victim reads as <hub>/shared_envs/victim once collapsed, but the system
+    # steps into link first, so it runs the outside environment.
+    stored = f"{hub}/shared_envs/link/../victim"
+    assert path_inside_hub(hub, stored) is False
+    assert interpreter_inside_hub(hub, f"{stored}/bin/python") is False
+    assert validated_interpreter(hub, f"{stored}/bin/python") is None
+
+    # The same inside an interpreter's own symlink target.
+    env = hub / "shared_envs" / "fp"
+    (env / "bin").mkdir(parents=True)
+    (env / "linked").symlink_to(outside / "sub", target_is_directory=True)
+    (env / "bin" / "python").symlink_to("../linked/../victim/bin/python")
+    assert interpreter_inside_hub(hub, env / "bin" / "python") is False
+    assert (victim / "bin" / "python").exists()
+
+    # Any `..` in a link is refused, even one that stays inside the environment.
+    plain = hub / "shared_envs" / "plain"
+    (plain / "bin").mkdir(parents=True)
+    (plain / "real").mkdir()
+    (plain / "real" / "python").write_text("", encoding="utf-8")
+    (plain / "bin" / "python").symlink_to("../real/python")
+    assert interpreter_inside_hub(hub, plain / "bin" / "python") is False
+
+
+def test_a_stored_interpreter_with_dotdot_is_never_run_by_the_test_reconcile_or_cleanup(hub, tmp_path, monkeypatch, no_subprocess):
+    from provider_hub import service
+    from provider_hub.registry import register_active_provider_classes
+    from provider_hub.state import active_installations
+    from test_provider_hub import _manifest as plugin_manifest
+
+    outside = tmp_path / "elsewhere"
+    victim = _plain_env(outside / "victim")
+    (outside / "sub").mkdir()
+    (hub / "shared_envs").mkdir()
+    (hub / "shared_envs" / "link").symlink_to(outside / "sub", target_is_directory=True)
+    stored = f"{hub}/shared_envs/link/../victim/bin/python"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    row = {
+        "provider_id": "examplehub", "name": "Example", "active_version": "1.0.0", "active_path": str(bundle),
+        "python_path": stored, "state": "active", "pending_restart": False,
+        "manifest": plugin_manifest(dependencies={"requirements": []}), "config": {}, "last_error": None,
+    }
+    state = load_state()
+    state["installations"] = {"examplehub": row}
+    state["plugin_envs"] = {"fp": {"path": f"{hub}/shared_envs/link/../victim"}}
+    save_state(state)
+
+    def never(*args, **kwargs):
+        raise AssertionError("an interpreter reached through .. was run")
+
+    monkeypatch.setattr(service, "ProviderWorkerClient", never)
+    result = service.test_provider_connection("examplehub")
+    assert result["ok"] is False and "hub's environments" in result["message"]
+    assert register_active_provider_classes(active_installations()) == []
+
+    summary = env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+    assert summary["adopted"] == [] and summary["repointed"] == []
+    assert env_registry.cleanup_environments(hub) == []
+    assert (victim / "bin" / "python").exists()

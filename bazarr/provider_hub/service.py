@@ -54,8 +54,8 @@ from .state import (
 )
 from . import env_registry
 from .venv import (
-    _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, interpreter_inside_hub, pin_scope, python_executable,
-    release_pins,
+    _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
+    release_pins, validated_interpreter,
 )
 from .worker import ProviderWorkerClient, release_when_gone, worker_command
 
@@ -2168,7 +2168,8 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 raise ProviderHubInstallError("active bundle path is missing")
             if not python_path:
                 raise ProviderHubInstallError("provider Python path is missing")
-            if not interpreter_inside_hub(provider_hub_dir(), python_path):
+            interpreter = validated_interpreter(provider_hub_dir(), python_path)
+            if interpreter is None:
                 raise ProviderHubInstallError("provider Python path is not one of the hub's environments")
 
             trusted = bool(provider.get("trusted", False))
@@ -2185,7 +2186,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
 
             runner = Path(__file__).with_name("worker_runner.py")
             client = ProviderWorkerClient(
-                worker_command(python_path, runner),
+                worker_command(interpreter, runner),
                 cwd=bundle_path,
                 env={
                     "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
@@ -3160,12 +3161,13 @@ def activate_staged_installations() -> list[str]:
                 staged_python_path = installation.get("staged_python_path")
                 if not staged_path or not staged_python_path:
                     raise ProviderHubInstallError("staged bundle or python path is missing")
-                if not interpreter_inside_hub(provider_hub_dir(), staged_python_path):
+                staged_interpreter = validated_interpreter(provider_hub_dir(), staged_python_path)
+                if staged_interpreter is None:
                     raise ProviderHubInstallError("staged python path is not one of the hub's environments")
                 staged_bundle_path = Path(staged_path)
                 _remove_bundle_runtime_artifacts(staged_bundle_path)
                 verify_bundle_tree(manifest, staged_bundle_path)
-                _smoke_validate_worker(manifest, staged_bundle_path, Path(staged_python_path))
+                _smoke_validate_worker(manifest, staged_bundle_path, staged_interpreter)
             except Exception as error:
                 installation["last_error"] = refusal_text(error)
                 _abandon_staged_catalog_list(installation)

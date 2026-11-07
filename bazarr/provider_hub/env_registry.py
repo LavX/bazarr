@@ -33,8 +33,8 @@ from .state import (
     corrupt_copies, provider_hub_dir, load_state, load_state_strict, mutate_state, mutate_state_checked, read_state_document,
 )
 from .venv import (
-    SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, interpreter_inside_hub, is_pinned, path_inside_hub, path_key,
-    pinned_paths, python_executable,
+    SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, has_parent_reference, is_pinned, path_key, pinned_paths,
+    python_executable, validated_hub_path, validated_interpreter,
 )
 
 logger = logging.getLogger(__name__)
@@ -154,10 +154,11 @@ def _recorded_dir(envs: dict[str, Any], fingerprint: str, root: Path) -> Path | 
     """The recorded environment for a dependency set, only if it is the hub's own and has an interpreter."""
     entry = envs.get(fingerprint)
     if isinstance(entry, dict) and isinstance(entry.get("path"), str):
-        recorded = Path(entry["path"])
-        if path_inside_hub(root, recorded) and interpreter_inside_hub(root, python_executable(recorded)) \
-                and python_executable(recorded).exists():
-            return recorded
+        recorded = validated_hub_path(root, entry["path"])
+        if recorded is not None and python_executable(recorded).exists():
+            interpreter = validated_interpreter(root, python_executable(recorded))
+            if interpreter is not None:
+                return interpreter.parent.parent
     return None
 
 
@@ -221,7 +222,8 @@ def reconcile_environments(
             except Exception:
                 continue
             fingerprint = environment_fingerprint(manifest)
-            if not interpreter_inside_hub(root, python_path):
+            interpreter = validated_interpreter(root, python_path)
+            if interpreter is None:
                 # An interpreter outside the hub's own environments, or reached
                 # through a symlink, is neither adopted nor probed nor pointed at.
                 logger.warning(
@@ -229,7 +231,7 @@ def reconcile_environments(
                     provider_id, python_path,
                 )
                 continue
-            env_dir = Path(env_dir_of(python_path))
+            env_dir = Path(env_dir_of(interpreter))
             recorded = _recorded_dir(envs, fingerprint, root)
             if recorded is None:
                 if _adoptable(env_dir, manifest):
@@ -322,6 +324,8 @@ def _hub_relative(root: str | Path, target: str | Path) -> tuple[Path, tuple[str
     never make it look like it is inside the hub. The caller then walks the
     parts with ``lstat``.
     """
+    if has_parent_reference(target):
+        return None
     hub = Path(path_key(root))
     candidate = Path(os.path.abspath(target))
     for base in (Path(os.path.abspath(root)), hub):

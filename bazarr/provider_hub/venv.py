@@ -208,15 +208,27 @@ def _passes_pip_check(env_path: Path, deadline: float | None = None, provider_id
     return True
 
 
-def path_inside_hub(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> bool:
-    """Whether ``path`` is below the hub's own ``shared_envs`` or ``envs``, by real directories only.
+def has_parent_reference(path: str | os.PathLike[str]) -> bool:
+    """Whether the path, as written, has a ``..`` component.
 
-    The comparison is against the hub itself, not against whatever the
-    container directories resolve to, and a symlink anywhere on the way down
-    fails it: a ``shared_envs`` that points outside the hub must not make
-    outside paths look like the hub's own. Every place that runs an interpreter
-    from a path read out of the state asks this first.
+    Checked on the raw spelling, before any normalisation: collapsing ``a/link/..``
+    to ``a`` hides the directory the operating system will actually step into.
     """
+    return any(part == ".." for part in Path(path).parts)
+
+
+def validated_hub_path(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> Path | None:
+    """``path`` as an absolute path, if it is below the hub's own ``shared_envs`` or ``envs`` by real directories only.
+
+    The path that comes back is the one to use: the check and whoever runs
+    something from it never look at different spellings. A ``..`` anywhere in the
+    raw path refuses it. The comparison is against the hub itself, not against
+    whatever the container directories resolve to, and a symlink anywhere on the
+    way down fails it: a ``shared_envs`` that points outside the hub must not make
+    outside paths look like the hub's own.
+    """
+    if has_parent_reference(path):
+        return None
     candidate = Path(os.path.abspath(path))
     hub = Path(path_key(root))
     for base in (Path(os.path.abspath(root)), hub):
@@ -226,9 +238,9 @@ def path_inside_hub(root: str | os.PathLike[str], path: str | os.PathLike[str]) 
             continue
         break
     else:
-        return False
+        return None
     if len(parts) < 2 or parts[0] not in (SHARED_ENV_DIR, "envs"):
-        return False
+        return None
     current = hub
     for part in parts:
         current = current / part
@@ -237,10 +249,14 @@ def path_inside_hub(root: str | os.PathLike[str], path: str | os.PathLike[str]) 
         except FileNotFoundError:
             break
         except OSError:
-            return False
+            return None
         if stat.S_ISLNK(mode):
-            return False
-    return True
+            return None
+    return candidate
+
+
+def path_inside_hub(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> bool:
+    return validated_hub_path(root, path) is not None
 
 
 def _link_target_trusted(env_dir: Path, python_path: Path) -> bool:
@@ -293,36 +309,46 @@ def _link_target_trusted(env_dir: Path, python_path: Path) -> bool:
             return False
         if not os.path.islink(current):
             return True
-        target = Path(os.path.abspath(os.path.join(os.path.dirname(current), os.readlink(current))))
+        link = os.readlink(current)
+        if has_parent_reference(link):
+            return False
+        target = Path(os.path.abspath(os.path.join(os.path.dirname(current), link)))
         if not trusted(target):
             return False
         current = target
     return False
 
 
-def interpreter_inside_hub(root: str | os.PathLike[str], python_path: str | os.PathLike[str]) -> bool:
-    """Whether an interpreter path from the state is one the hub built and may run.
+def validated_interpreter(root: str | os.PathLike[str], python_path: str | os.PathLike[str]) -> Path | None:
+    """The interpreter path to run, if it is one the hub built and may run; otherwise None.
 
-    The environment directory must be the hub's own (see ``path_inside_hub``),
+    The environment directory must be the hub's own (see ``validated_hub_path``),
     its ``bin`` or ``Scripts`` directory must be a real directory inside it, not
     a symlink, and the interpreter must be a file there, or a symlink that stays
     inside the environment or leads to the host's own Python tree, as the
-    ``python -> python3.x`` links of a normal venv do. Every place that runs an
-    interpreter named by the state asks this first.
+    ``python -> python3.x`` links of a normal venv do. No ``..`` may appear in the
+    path or in any link on the way. Whatever runs the interpreter uses the path
+    returned here, never the string it was given.
     """
+    if has_parent_reference(python_path):
+        return None
     interpreter = Path(os.path.abspath(python_path))
     env_dir = interpreter.parent.parent
-    if not path_inside_hub(root, env_dir):
-        return False
+    if validated_hub_path(root, env_dir) is None:
+        return None
     try:
         if not stat.S_ISDIR(os.lstat(interpreter.parent).st_mode):
-            return False
+            return None
     except FileNotFoundError:
         # Nothing there to run; whoever uses the path finds that out itself.
-        return True
+        return interpreter
     except OSError:
-        return False
-    return _link_target_trusted(env_dir, interpreter)
+        return None
+    return interpreter if _link_target_trusted(env_dir, interpreter) else None
+
+
+def interpreter_inside_hub(root: str | os.PathLike[str], python_path: str | os.PathLike[str]) -> bool:
+    return validated_interpreter(root, python_path) is not None
 
 
 class PluginEnvironment:
@@ -356,8 +382,7 @@ class PluginEnvironment:
         entry = (load_state().get("plugin_envs") or {}).get(self._fingerprint(manifest))
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             return None
-        candidate = Path(entry["path"])
-        return candidate if self._inside_hub(candidate) else None
+        return validated_hub_path(self.root, entry["path"])
 
     def _fresh_path(self, manifest: ValidatedManifest) -> Path:
         return self.root / SHARED_ENV_DIR / f"{self._fingerprint(manifest)}-{uuid.uuid4().hex[:8]}"
@@ -405,11 +430,10 @@ class PluginEnvironment:
             reusable = self._recorded_path(manifest)
             if reusable is None and self._inside_hub(canonical) and self._is_complete(canonical):
                 reusable = canonical
-            if reusable is not None and python_executable(reusable).exists() and not interpreter_inside_hub(
-                self.root, python_executable(reusable)
-            ):
+            if reusable is not None and python_executable(reusable).exists():
                 # An interpreter that leads outside the hub is never reused or run for the check.
-                reusable = None
+                checked = validated_interpreter(self.root, python_executable(reusable))
+                reusable = checked.parent.parent if checked is not None else None
             if reusable is not None:
                 _pin(reusable)
             canonical_free = not os.path.lexists(canonical)
