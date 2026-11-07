@@ -22,6 +22,7 @@ type Connected = {
   buildCommit?: string;
   buildDate?: string;
   packageVersion?: string;
+  sandbox?: System.SandboxStatus;
 };
 
 function statusWith({
@@ -32,6 +33,7 @@ function statusWith({
   buildCommit = "",
   buildDate = "",
   packageVersion = "",
+  sandbox,
 }: Connected) {
   const instances = [
     ...(sonarr ? [sonarrDefault] : []),
@@ -49,6 +51,7 @@ function statusWith({
           build_date: buildDate,
           package_version: packageVersion,
           ...(mediaServers ? { media_servers: mediaServers } : {}),
+          ...(sandbox ? { sandbox } : {}),
         },
       }),
     ),
@@ -338,6 +341,63 @@ describe("System Status", () => {
     expect(
       await screen.findByText("Bazarr+ v2.7.0 by LavX"),
     ).toBeInTheDocument();
+  });
+
+  it("states a host without a sandbox as a plain fact", async () => {
+    statusWith({
+      sandbox: {
+        abi: 0,
+        enforced: false,
+        filesystem: "declared",
+        network: "declared",
+        signal_scope: "declared",
+        label: "Not sandboxed on this host",
+        reason: "kernel has no Landlock (ENOSYS)",
+        limitations: [],
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Plugin Worker Sandbox", undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Not sandboxed on this host"),
+    ).toBeInTheDocument();
+  });
+
+  it("names the Landlock level when a sandbox is enforced", async () => {
+    statusWith({
+      sandbox: {
+        abi: 6,
+        enforced: true,
+        filesystem: "enforced",
+        network: "enforced",
+        signal_scope: "enforced",
+        label: "Sandboxed",
+        reason: "",
+        limitations: [],
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Sandboxed (Landlock ABI 6)", undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves the sandbox row out when the endpoint does not report one", async () => {
+    statusWith({});
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Bazarr Version", undefined, { timeout: 8000 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Plugin Worker Sandbox")).toBeNull();
   });
 
   it("shows no build row for a source checkout", async () => {

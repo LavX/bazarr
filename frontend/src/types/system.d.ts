@@ -143,6 +143,22 @@ declare namespace System {
      * tolerate undefined.
      */
     ai_translator_configured?: boolean;
+    /**
+     * What confines plugin workers on this host. Absent on responses from
+     * before the field existed, so every reader must tolerate undefined.
+     */
+    sandbox?: System.SandboxStatus;
+  }
+
+  interface SandboxStatus {
+    abi: number;
+    enforced: boolean;
+    filesystem: "enforced" | "declared";
+    network: "enforced" | "declared";
+    signal_scope: "enforced" | "declared";
+    label: string;
+    reason: string;
+    limitations: string[];
   }
 
   interface TranslationAvailability {

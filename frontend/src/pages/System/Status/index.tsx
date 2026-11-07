@@ -126,6 +126,14 @@ function mediaServerTitle(
     : `${label} Version`;
 }
 
+function sandboxValue(sandbox: System.SandboxStatus): string {
+  // Neutral on purpose: a host without a sandbox is stated as a fact, never
+  // dressed up as protection.
+  return sandbox.enforced
+    ? `${sandbox.label} (Landlock ABI ${sandbox.abi})`
+    : sandbox.label;
+}
+
 function mediaServerValue(server: System.MediaServerStatus): string {
   if (server.state === "checking") {
     // No probe has answered yet. The page polls until one does.
@@ -330,6 +338,11 @@ const SystemStatusView: FunctionComponent = () => {
           ))}
           <Row title="Operating System">{status?.operating_system}</Row>
           <Row title="Python Version">{status?.python_version}</Row>
+          {status?.sandbox ? (
+            <Row title="Plugin Worker Sandbox">
+              {sandboxValue(status.sandbox)}
+            </Row>
+          ) : null}
           <Row title="Database Engine">{status?.database_engine}</Row>
           <Row title="Database Version">{status?.database_migration}</Row>
           <Row title="Bazarr Directory">{status?.bazarr_directory}</Row>

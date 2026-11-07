@@ -97,6 +97,15 @@ class SystemStatus(Resource):
         system_status.update({'timezone': timezone})
         system_status.update({'cpu_cores': os.cpu_count()})
 
+        # What confines plugin workers on this host. Answered from the cached
+        # boot probe; a host that cannot answer reports nothing rather than
+        # failing the page. "declared" is never shown as protection.
+        try:
+            from provider_hub.sandbox import sandbox_status
+            system_status.update({'sandbox': sandbox_status()})
+        except Exception:
+            logging.debug('BAZARR cannot collect the worker sandbox status')
+
         try:
             from compat import compat_active
             system_status.update({'compat_active': compat_active})

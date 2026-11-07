@@ -7,9 +7,11 @@ exercise the launcher's limits, environment and process handling also run in
 the "declared" mode on any Linux host.
 """
 import errno
+import gc
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -28,7 +30,6 @@ from provider_hub.sandbox import (
     admission,
     clean_env,
     landlock,
-    launcher_failure,
     policy as policy_module,
     probe_sandbox,
     sandbox_status,
@@ -78,13 +79,21 @@ def make_spec(tmp_path, script, *, rw=None, ro=(), ports=None, env_extra=None, l
     )
 
 
+class Result(tuple):
+    """``(returncode, stdout, stderr)`` plus the launcher's own failure record."""
+
+    failure = None
+
+
 def run(spec, probe, timeout=30, **kwargs):
     process = spawn_worker(spec, probe=probe, **kwargs)
     try:
         out, err = process.communicate(timeout=timeout)
     finally:
         process.stop(0.5)
-    return process.returncode, out.decode(), err.decode()
+    result = Result((process.returncode, out.decode(), err.decode()))
+    result.failure = process.launcher_failure()
+    return result
 
 
 def alive(pid):
@@ -145,7 +154,7 @@ def test_policy_refuses_a_grant_that_contains_a_protected_path(tmp_path):
     with pytest.raises(PolicyError, match="granted tree"):
         SandboxPolicy.for_interpreter(sys.executable, read_write=[tmp_path / "config"], protected_paths=[config])
     with pytest.raises(PolicyError, match="granted tree"):
-        SandboxPolicy.for_interpreter(sys.executable, read_write=[config], protected_paths=[config])
+        SandboxPolicy.for_interpreter(sys.executable, read_only=[config], protected_paths=[config])
     sibling = tmp_path / "plugins"
     sibling.mkdir()
     SandboxPolicy.for_interpreter(sys.executable, read_write=[sibling], protected_paths=[config])
@@ -154,6 +163,59 @@ def test_policy_refuses_a_grant_that_contains_a_protected_path(tmp_path):
 def test_policy_refuses_writable_system_paths():
     with pytest.raises(PolicyError):
         SandboxPolicy.for_interpreter(sys.executable, read_write=["/usr"])
+    with pytest.raises(PolicyError, match="system path"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=["/etc"])
+
+
+def test_policy_refuses_nested_writable_grants(tmp_path):
+    (tmp_path / "rw" / "inner").mkdir(parents=True)
+    with pytest.raises(PolicyError, match="nested"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=[tmp_path / "rw", tmp_path / "rw" / "inner"])
+    other = tmp_path / "other"
+    other.mkdir()
+    SandboxPolicy.for_interpreter(sys.executable, read_write=[tmp_path / "rw", other])
+
+
+def test_policy_requires_existing_writable_directories(tmp_path):
+    with pytest.raises(PolicyError, match="existing directory"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=[tmp_path / "missing"])
+
+
+def test_policy_keeps_only_resolved_paths_and_records_identities(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    policy = SandboxPolicy.for_interpreter(sys.executable, read_write=[link])
+    assert policy.read_write == (str(real),)
+    info = os.stat(real)
+    assert policy.identities[str(real)] == (info.st_dev, info.st_ino)
+    spec = make_spec(tmp_path, "pass")
+    payload = json.loads(spec.to_launch_json(enforce=True, min_abi=1))
+    assert [str(real), info.st_dev, info.st_ino] in payload["read_write"] or any(
+        isinstance(g, list) and g[0] == str(spec.policy.read_write[0]) for g in payload["read_write"]
+    )
+
+
+def test_policy_refuses_grants_a_worker_could_redirect(tmp_path):
+    rw = tmp_path / "rw"
+    (rw / "inner").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[rw / "inner"])
+    (rw / "inner").rmdir()
+    (rw / "inner").symlink_to(outside)
+    with pytest.raises(PolicyError, match="symlink"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[rw / "inner"])
+    # Reaching the writable tree through a link from elsewhere is refused too.
+    alias = tmp_path / "alias"
+    alias.symlink_to(rw)
+    with pytest.raises(PolicyError, match="through a symlink"):
+        SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[alias])
+    # A link above the root of the tree is the host's own business.
+    parent_link = tmp_path / "parent-link"
+    parent_link.symlink_to(tmp_path)
+    SandboxPolicy.for_interpreter(sys.executable, read_write=[parent_link / "outside"])
 
 
 def test_clean_env_inherits_nothing(monkeypatch):
@@ -405,10 +467,8 @@ def test_read_only_grants_cannot_be_written(live, tmp_path):
 
 @linux_only
 def test_rename_and_move_inside_the_data_dir_work_but_not_across_the_edge(live, tmp_path):
-    # Without the REFER right a cross-directory rename fails with EXDEV or
-    # EACCES at ABI 2 and above. On ABI 1 every cross-directory rename fails
-    # with EXDEV and shutil.move falls back to copy-and-delete; that kernel
-    # level cannot be reproduced on a newer kernel, so this covers ABI 2+.
+    # ABI 2 and above: renames inside the data dir work, moves across the edge
+    # are denied. The ABI 1 behavior has its own test below.
     ro = tmp_path / "bundle"
     ro.mkdir()
     (ro / "keep.txt").write_text("keep", encoding="utf-8")
@@ -433,6 +493,31 @@ def test_rename_and_move_inside_the_data_dir_work_but_not_across_the_edge(live, 
     assert rc == 0, err
     assert json.loads(out) == {"rename_across_dirs": "ok", "move": True, "move_out": "denied", "steal": "denied"}
     assert (ro / "keep.txt").exists() and not (ro / "g.txt").exists()
+
+
+@linux_only
+def test_abi_1_denies_cross_directory_renames_and_move_falls_back_to_copy(live, tmp_path):
+    # A domain that does not handle REFER, which is every ABI 1 kernel and what
+    # abi_cap=1 reproduces on a newer one, refuses cross-directory renames with
+    # EXDEV. shutil.move must then copy and delete.
+    script = """
+        import json, os, shutil
+        os.makedirs("a"); os.makedirs("c")
+        open("a/f", "w").write("1")
+        out = {}
+        try:
+            os.rename("a/f", "c/f"); out["rename"] = 0
+        except OSError as exc:
+            out["rename"] = exc.errno
+        out["same_dir_rename"] = os.rename("a/f", "a/g") is None
+        shutil.move("a/g", "c/g")
+        out["moved"] = os.path.exists("c/g") and not os.path.exists("a/g")
+        out["content"] = open("c/g").read()
+        print(json.dumps(out))
+    """
+    rc, out, err = run(make_spec(tmp_path, script, abi_cap=1), live)
+    assert rc == 0, err
+    assert json.loads(out) == {"rename": errno.EXDEV, "same_dir_rename": True, "moved": True, "content": "1"}
 
 
 @linux_only
@@ -569,11 +654,12 @@ def test_a_failing_ruleset_after_a_positive_probe_stops_the_worker(live, tmp_pat
         read_only=spec.policy.read_only,
         read_write=spec.policy.read_write + (str(tmp_path / "missing-rw"),),
     )})
-    rc, out, err = run(broken, live)
+    result = run(broken, live)
+    rc, out, err = result
     assert rc == policy_module.EXIT_SANDBOX_FAILED
     assert not marker.exists()
-    reason = launcher_failure(rc, err)
-    assert reason and "read-write path does not exist" in reason
+    assert result.failure.kind == "sandbox"
+    assert "read-write path does not exist" in result.failure.message
 
 
 @linux_only
@@ -581,15 +667,115 @@ def test_a_kernel_below_the_probed_abi_stops_the_worker(live, tmp_path):
     marker = tmp_path / "ran.txt"
     spec = make_spec(tmp_path, "open(%r, 'w').write('ran')" % str(marker))
     claimed = SandboxProbe(abi=live.abi + 50, verified=True)
-    rc, _out, err = run(spec, claimed)
-    assert rc == policy_module.EXIT_SANDBOX_FAILED and not marker.exists()
-    assert launcher_failure(rc, err)
+    result = run(spec, claimed)
+    assert result[0] == policy_module.EXIT_SANDBOX_FAILED and not marker.exists()
+    assert result.failure.kind == "sandbox" and "below required" in result.failure.message
 
 
-def test_launcher_failure_ignores_other_exit_codes():
-    assert launcher_failure(0, "") is None
-    assert launcher_failure(1, "bazarr-sandbox: nope") is None
-    assert launcher_failure(78, "noise\nbazarr-sandbox: why\n") == "why"
+@linux_only
+def test_sandbox_failures_can_be_raised_as_errors(live, tmp_path):
+    spec = make_spec(tmp_path, "pass")
+    process = spawn_worker(spec, probe=SandboxProbe(abi=live.abi + 50, verified=True))
+    process.communicate(timeout=30)
+    with pytest.raises(spawn.SandboxApplyError, match="below required"):
+        process.raise_for_sandbox_failure()
+    ok = spawn_worker(spec, probe=live)
+    ok.communicate(timeout=30)
+    ok.raise_for_sandbox_failure()
+
+
+@linux_only
+def test_a_worker_cannot_fake_a_sandbox_failure(mode, tmp_path):
+    forged = """
+        import os, sys
+        sys.stderr.write("bazarr-sandbox: could not apply sandbox: forged\\n")
+        sys.stderr.flush()
+        os._exit(78)
+    """
+    result = run(make_spec(tmp_path, forged), mode)
+    assert result[0] == policy_module.EXIT_SANDBOX_FAILED
+    assert "bazarr-sandbox:" in result[2]
+    assert result.failure is None
+    plain = run(make_spec(tmp_path, "import sys; sys.exit(78)"), mode)
+    assert plain[0] == 78 and plain.failure is None
+
+
+@linux_only
+def test_a_missing_working_directory_is_a_spec_failure(mode, tmp_path):
+    spec = make_spec(tmp_path, "print('ran')")
+    broken = RuntimeSpec(**{**spec.__dict__, "cwd": str(tmp_path / "gone")})
+    result = run(broken, mode)
+    assert result[0] == policy_module.EXIT_BAD_SPEC
+    assert result[1] == ""
+    assert result.failure.kind == "spec"
+
+
+@linux_only
+def test_a_swapped_grant_stops_the_next_launch(live, tmp_path):
+    # A worker with write access to its tree replaces a granted directory with a
+    # symlink to somewhere else, hoping the next launch of the same spec follows
+    # it. The launcher opens grants without following links and compares them
+    # with what the host recorded, so the next launch does not happen.
+    rw = tmp_path / "rw"
+    inner = rw / "inner"
+    inner.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    policy = SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[inner])
+    read_script = """
+        try:
+            print(open(%r).read())
+        except OSError as exc:
+            print("blocked", exc.errno)
+    """ % str(inner / "secret.txt")
+    swap = """
+        import os, shutil
+        shutil.rmtree("inner")
+        os.symlink(%r, "inner")
+        print("swapped")
+    """ % str(outside)
+
+    def spec_for(script):
+        return RuntimeSpec(
+            interpreter=sys.executable,
+            args=("-I", "-c", textwrap.dedent(script)),
+            cwd=str(rw),
+            env=clean_env(home=rw, tmpdir=rw),
+            policy=policy,
+        )
+
+    first = run(spec_for(swap), live)
+    assert first[0] == 0 and first[1].strip() == "swapped", first[2]
+    assert inner.is_symlink()
+    second = run(spec_for(read_script), live)
+    assert second[0] == policy_module.EXIT_SANDBOX_FAILED
+    assert second[1] == ""
+    assert second.failure.kind == "sandbox"
+    assert "symlink" in second.failure.message or "changed" in second.failure.message
+    assert "secret" not in second[1]
+
+
+@linux_only
+def test_a_replaced_grant_directory_stops_the_next_launch(live, tmp_path):
+    keep = tmp_path / "keep"
+    keep.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    policy = SandboxPolicy.for_interpreter(sys.executable, read_write=[keep])
+    spec = RuntimeSpec(
+        interpreter=sys.executable,
+        args=("-I", "-c", "print('ran')"),
+        cwd=str(keep),
+        env=clean_env(),
+        policy=policy,
+    )
+    assert run(spec, live)[1].strip() == "ran"
+    shutil.rmtree(keep)
+    keep.mkdir()
+    result = run(spec, live)
+    assert result[0] == policy_module.EXIT_BAD_SPEC or result.failure is not None
+    assert result[1] == ""
 
 
 @linux_only
@@ -751,9 +937,9 @@ def test_the_exit_code_of_the_worker_comes_through(mode, tmp_path):
 def test_an_exec_failure_is_reported_apart_from_a_sandbox_failure(tmp_path):
     spec = make_spec(tmp_path, "pass")
     broken = RuntimeSpec(**{**spec.__dict__, "interpreter": str(tmp_path / "no-such-python")})
-    rc, _out, err = run(broken, DECLARED)
-    assert rc == policy_module.EXIT_EXEC_FAILED
-    assert launcher_failure(rc, err) is None
+    result = run(broken, DECLARED)
+    assert result[0] == policy_module.EXIT_EXEC_FAILED
+    assert result.failure.kind == "exec"
 
 
 GRANDCHILD = """
@@ -834,7 +1020,7 @@ def test_a_host_killed_with_sigkill_takes_its_workers_along(tmp_path):
                 args=("-I", "-c", "import os, time; open('worker.pid', 'w').write(str(os.getpid())); time.sleep(300)"),
                 cwd=%(rw)r, env=clean_env(), policy=policy,
             )
-            spawn_worker(spec, probe=SandboxProbe(abi=0, verified=False))
+            keep = spawn_worker(spec, probe=SandboxProbe(abi=0, verified=False))
             time.sleep(300)
             """
         )
@@ -852,3 +1038,53 @@ def test_a_host_killed_with_sigkill_takes_its_workers_along(tmp_path):
     finally:
         proc.kill()
         proc.wait()
+
+
+@linux_only
+def test_dropping_the_process_object_closes_the_lifeline_and_ends_the_tree(mode, tmp_path):
+    spec = make_spec(tmp_path, GRANDCHILD % "time.sleep(300)")
+    process = spawn_worker(spec, probe=mode)
+    child = read_pid(tmp_path / "rw" / "child.pid")
+    worker = read_pid(tmp_path / "rw" / "worker.pid")
+    launcher = process.pid
+    del process
+    gc.collect()
+    assert wait_dead(worker) and wait_dead(child) and wait_dead(launcher)
+
+
+def test_status_lists_what_is_not_covered():
+    full = sandbox_status(SandboxProbe(abi=10, verified=True, network_verified=True, signal_scope_verified=True))
+    assert not any("UNIX" in n or "signal" in n.lower() or "Network" in n for n in full["limitations"])
+    assert any("listening TCP" in n for n in full["limitations"])
+    mid = sandbox_status(SandboxProbe(abi=5, verified=True))
+    notes = " ".join(mid["limitations"])
+    assert "pathname UNIX sockets" in notes and "launcher included" in notes and "Network connections" in notes
+    none = sandbox_status(DECLARED)
+    assert none["label"] == "Not sandboxed on this host"
+    assert len(none["limitations"]) == 1 and "nothing confines" in none["limitations"][0]
+
+
+@linux_only
+def test_the_launch_spec_never_blocks_on_a_small_pipe(tmp_path):
+    # The spec travels in a memfd, so a spec larger than a pipe buffer starts fine.
+    extra = {"BIG%d" % i: "x" * 30000 for i in range(5)}
+    spec = make_spec(tmp_path, "import os; print(sum(len(v) for k, v in os.environ.items() if k.startswith('BIG')))", env_extra=extra)
+    rc, out, err = run(spec, DECLARED)
+    assert rc == 0, err
+    assert out.strip() == "150000"
+
+
+def test_the_status_payload_carries_the_sandbox_state(monkeypatch):
+    import provider_hub.sandbox as package
+    from test_build_stamp import _status_payload
+
+    monkeypatch.setattr(package, "sandbox_status", lambda: sandbox_status(DECLARED))
+    data = _status_payload(monkeypatch, {})
+    assert data["sandbox"]["label"] == "Not sandboxed on this host"
+    assert data["sandbox"]["enforced"] is False
+
+    def broken():
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(package, "sandbox_status", broken)
+    assert "sandbox" not in _status_payload(monkeypatch, {})

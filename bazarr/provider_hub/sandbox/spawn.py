@@ -18,14 +18,13 @@ import subprocess
 import sys
 import tempfile
 import threading
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import landlock
 from .policy import (
-    EXIT_SANDBOX_FAILED,
-    MESSAGE_PREFIX,
     PolicyError,
     RuntimeSpec,
     SandboxPolicy,
@@ -44,7 +43,7 @@ __all__ = [
     "reset_probe_cache",
     "sandbox_status",
     "spawn_worker",
-    "launcher_failure",
+    "LauncherFailure",
 ]
 
 
@@ -52,8 +51,22 @@ class SandboxApplyError(RuntimeError):
     """The probe said the sandbox works, yet the ruleset failed to apply.
 
     The worker did not run. Callers treat this as a failed start, never as a
-    reason to retry without the sandbox.
+    reason to retry without the sandbox. Raised by
+    ``LauncherProcess.raise_for_sandbox_failure``.
     """
+
+
+@dataclass(frozen=True)
+class LauncherFailure:
+    """Why the launcher could not start a worker, as the launcher itself says.
+
+    ``kind`` is ``"sandbox"`` (ruleset or limits could not be applied),
+    ``"spec"`` (bad spec or working directory) or ``"exec"`` (the interpreter
+    could not be executed).
+    """
+
+    kind: str
+    message: str
 
 
 @dataclass(frozen=True)
@@ -81,6 +94,26 @@ class SandboxProbe:
         return self.enforced and self.abi >= 6 and self.signal_scope_verified
 
 
+def sandbox_limitations(probe: SandboxProbe) -> list[str]:
+    """Plain statements of what the sandbox does not cover on this host."""
+    if not probe.enforced:
+        return [
+            "Workers run with resource limits and a clean environment, but nothing confines "
+            "their files, network or signals."
+        ]
+    notes = []
+    if probe.abi < 4 or not probe.network_enforced:
+        notes.append("Network connections are not restricted.")
+    if probe.abi < 9:
+        notes.append("Connections to pathname UNIX sockets (a Docker socket, for example) are not restricted.")
+    if probe.abi < 6:
+        notes.append("A worker can signal processes outside its sandbox, its launcher included.")
+    notes.append("A listening TCP socket that was never bound gets a port without a bind check.")
+    notes.append("UDP and DNS are not restricted.")
+    notes.append("The number of processes is not limited.")
+    return notes
+
+
 def sandbox_status(probe: SandboxProbe | None = None) -> dict[str, Any]:
     """Status payload for System > Status and plugin cards.
 
@@ -96,6 +129,7 @@ def sandbox_status(probe: SandboxProbe | None = None) -> dict[str, Any]:
         "signal_scope": "enforced" if probe.signal_scope_enforced else "declared",
         "label": "Sandboxed" if probe.enforced else "Not sandboxed on this host",
         "reason": probe.reason,
+        "limitations": sandbox_limitations(probe),
     }
 
 
@@ -202,8 +236,9 @@ def _run_probe(python: str) -> SandboxProbe:
         finally:
             process.stop(0.5)
         if process.returncode != 0:
-            detail = err.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"]
-            return SandboxProbe(abi=abi, verified=False, reason="canary could not run: %s" % detail[0])
+            failure = process.launcher_failure()
+            detail = failure.message if failure else (err.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"])[0]
+            return SandboxProbe(abi=abi, verified=False, reason="canary could not run: %s" % detail)
         result = json.loads(out.decode("utf-8").strip().splitlines()[-1])
         verified = (
             result.get("read_outside") == "denied"
@@ -227,27 +262,85 @@ def _run_probe(python: str) -> SandboxProbe:
         shutil.rmtree(base, ignore_errors=True)
 
 
-class LauncherProcess(subprocess.Popen):
-    """The launcher process. Its subtree is the worker.
-
-    Holds the write end of the lifeline pipe: when this object is closed or
-    garbage collected, or the host dies, the launcher sees end-of-file and
-    kills the whole worker tree.
-    """
-
-    enforcement: str = "declared"
-
-    def __init__(self, *args, lifeline: int | None = None, **kwargs):
-        self._lifeline = lifeline
-        super().__init__(*args, **kwargs)
-
-    def close_lifeline(self) -> None:
-        fd, self._lifeline = self._lifeline, None
+def _close_fds(holder: dict) -> None:
+    for key in ("lifeline", "status"):
+        fd = holder.get(key)
+        holder[key] = None
         if fd is not None:
             try:
                 os.close(fd)
             except OSError:
                 pass
+
+
+class LauncherProcess(subprocess.Popen):
+    """The launcher process. Its subtree is the worker.
+
+    Holds the write end of the lifeline pipe: when this object is closed or
+    garbage collected (a finalizer closes it), when the interpreter exits, or
+    when the host dies, the launcher sees end-of-file and kills the whole
+    worker tree.
+    """
+
+    enforcement: str = "declared"
+
+    def __init__(self, *args, lifeline: int | None = None, status: int | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set only after the child started, so a failed start leaves both fds
+        # to the caller. The finalizer holds the dict, not self.
+        self._fds = {"lifeline": lifeline, "status": status}
+        self._failure: LauncherFailure | None = None
+        self._status_text = b""
+        weakref.finalize(self, _close_fds, self._fds)
+
+    def __del__(self, *args, **kwargs):
+        # Popen.__del__ parks a still-running child on a module list, which
+        # resurrects this object, so a weakref finalizer alone would never run.
+        # Close the lifeline first: the launcher then ends the worker tree.
+        fds = getattr(self, "_fds", None)
+        if fds is not None:
+            _close_fds(fds)
+        super().__del__(*args, **kwargs)
+
+    def close_lifeline(self) -> None:
+        fd, self._fds["lifeline"] = self._fds.get("lifeline"), None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def launcher_failure(self) -> LauncherFailure | None:
+        """The launcher's own report that the worker could not be started.
+
+        Authoritative: it comes over a pipe only the launcher writes to. A
+        worker that exits 78, or prints a line that looks like a launcher
+        message, does not produce one. Exact once the process has exited.
+        """
+        fd = self._fds.get("status")
+        if self._failure is None and fd is not None:
+            try:
+                while True:
+                    chunk = os.read(fd, 4096)
+                    if not chunk:
+                        break
+                    self._status_text += chunk
+            except (BlockingIOError, OSError):
+                pass
+            for line in self._status_text.decode("utf-8", "replace").splitlines():
+                try:
+                    record = json.loads(line)
+                    self._failure = LauncherFailure(str(record["kind"]), str(record.get("message", "")))
+                    break
+                except (ValueError, KeyError, TypeError):
+                    continue
+        return self._failure
+
+    def raise_for_sandbox_failure(self) -> None:
+        """Raise ``SandboxApplyError`` when the ruleset or limits could not be applied."""
+        failure = self.launcher_failure()
+        if failure is not None and failure.kind == "sandbox":
+            raise SandboxApplyError(failure.message)
 
     def stop(self, grace: float = 3.0) -> None:
         """SIGTERM the launcher, which stops the tree; SIGKILL the group after ``grace``.
@@ -279,46 +372,52 @@ class LauncherProcess(subprocess.Popen):
         return result
 
 
-def launcher_failure(returncode: int | None, stderr_text: str = "") -> str | None:
-    """Reason text when a launcher exit means the sandbox failed, else ``None``."""
-    if returncode != EXIT_SANDBOX_FAILED:
-        return None
-    for line in reversed(stderr_text.splitlines()):
-        if line.startswith(MESSAGE_PREFIX):
-            return line[len(MESSAGE_PREFIX):]
-    return "the sandbox could not be applied"
+def _spec_fd(data: bytes) -> int:
+    """The launch spec in an anonymous file: no pipe quota to block on."""
+    if hasattr(os, "memfd_create"):
+        fd = os.memfd_create("bazarr-launch-spec")
+    else:  # pragma: no cover - memfd exists on every Linux Python we run
+        handle = tempfile.TemporaryFile()
+        fd = os.dup(handle.fileno())
+        handle.close()
+    try:
+        os.write(fd, data)
+        os.lseek(fd, 0, os.SEEK_SET)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _start(spec: RuntimeSpec, *, enforce: bool, min_abi: int, launcher_python: str | None = None, **popen_kwargs) -> LauncherProcess:
     data = spec.to_launch_json(enforce=enforce, min_abi=min_abi)
     python = launcher_python or sys.executable
-    spec_r, spec_w = os.pipe()
+    spec_fd = _spec_fd(data)
     life_r, life_w = os.pipe()
+    status_r, status_w = os.pipe()
+    os.set_blocking(status_r, False)
     try:
-        os.write(spec_w, data)
-        os.close(spec_w)
-        spec_w = -1
         # Plain Popen, no preexec_fn. The launcher gets an empty environment:
         # nothing from the host's reaches it, and so nothing reaches the worker
         # except what the spec lists.
         process = LauncherProcess(
-            [python, "-I", "-S", "-B", str(LAUNCHER_PATH), str(spec_r), str(life_r)],
+            [python, "-I", "-S", "-B", str(LAUNCHER_PATH), str(spec_fd), str(life_r), str(status_w)],
             lifeline=life_w,
+            status=status_r,
             env={},
             close_fds=True,
-            pass_fds=(spec_r, life_r),
+            pass_fds=(spec_fd, life_r, status_w),
             start_new_session=True,
             **popen_kwargs,
         )
-        life_w = -1
     except BaseException:
-        for fd in (spec_w, life_w):
-            if fd >= 0:
-                os.close(fd)
+        os.close(life_w)
+        os.close(status_r)
         raise
     finally:
-        os.close(spec_r)
+        os.close(spec_fd)
         os.close(life_r)
+        os.close(status_w)
     process.enforcement = "enforced" if enforce else "declared"
     return process
 
@@ -339,8 +438,10 @@ def spawn_worker(
     This is what the worker spawner calls. The decision follows the probe:
 
     * Probe positive: the ruleset is mandatory. If it cannot be applied the
-      launcher exits with code 78 and the worker never runs (fail closed; see
-      ``launcher_failure``). There is no silent downgrade.
+      launcher exits with code 78 and the worker never runs (fail closed;
+      ``process.launcher_failure()`` carries the reason and
+      ``process.raise_for_sandbox_failure()`` raises ``SandboxApplyError``).
+      There is no silent downgrade.
     * Probe negative: the worker runs with limits and a clean environment but
       without a ruleset, ``process.enforcement == "declared"``. With
       ``require_sandbox=True`` this raises ``SandboxRefused`` instead.

@@ -13,7 +13,9 @@ ABI   Enforced here
 ====  =========================================================================
 1     Filesystem rules (read, write, execute, create, remove)
 2     Adds REFER: cross-directory rename and link are denied unless granted.
-      Kernels at ABI 1 deny every cross-directory rename with EXDEV.
+      A domain that does not handle REFER (ABI 1, or ``abi_cap=1``) denies
+      every cross-directory rename and link with EXDEV; ``shutil.move`` then
+      falls back to copy and delete.
 3     Adds TRUNCATE
 4     TCP connect and bind rules (only when a port set is given)
 5     Adds IOCTL_DEV on device files
@@ -23,6 +25,20 @@ ABI   Enforced here
       unless granted
 10    Nothing extra (UDP rules are left unhandled on purpose: DNS stays open)
 ====  =========================================================================
+
+Known gaps, reported by ``sandbox_status`` so nobody reads them as protection:
+
+* ABI 4 to 8: connecting to a pathname UNIX socket (for example a Docker
+  socket) outside the domain is not restricted. ABI 9 closes this.
+* Below ABI 6 a worker can signal processes outside its domain, its own
+  launcher included. Killing the launcher leaves ``setsid`` grandchildren
+  behind until a boot sweep (not part of this module) removes them.
+* ``listen()`` on a TCP socket that was never bound auto-binds an ephemeral
+  port without a bind check. Landlock offers no right for it at any ABI.
+* UDP is not restricted (DNS must keep working).
+
+Grants are opened without following symlinks and, when the policy recorded
+one, compared against the device and inode seen at build time.
 
 Every handled right is masked down to the running kernel's ABI, so a ruleset is
 never rejected for asking for a right the kernel does not know.
@@ -35,7 +51,7 @@ import os
 import stat as stat_module
 import sys
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Union
 
 SYS_LANDLOCK_CREATE_RULESET = 444
 SYS_LANDLOCK_ADD_RULE = 445
@@ -108,6 +124,11 @@ _FS_BY_ABI = (
 )
 _NET_BY_ABI = ((4, NET_BIND_TCP | NET_CONNECT_TCP),)
 _SCOPE_BY_ABI = ((6, SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL),)
+
+# A grant is a path, or ``(path, st_dev, st_ino)`` captured when the policy was
+# built. With an identity the object opened at launch must be that same object.
+Grant = Union[str, tuple]
+
 
 class LandlockError(OSError):
     """A Landlock syscall failed while building or applying a ruleset."""
@@ -267,21 +288,77 @@ def _fail(what: str, err: int) -> LandlockError:
     return LandlockError(err, "%s failed: %s" % (what, os.strerror(err)))
 
 
-def _add_path_rule(ruleset_fd: int, path: str, rights: int, handled_fs: int) -> bool:
-    """Add one path-beneath rule. Returns False when the path does not exist."""
+def _split_grant(grant):
+    if isinstance(grant, (tuple, list)):
+        path = grant[0]
+        dev = grant[1] if len(grant) > 1 else None
+        ino = grant[2] if len(grant) > 2 else None
+        return path, dev, ino
+    return grant, None, None
+
+
+def _open_grant(path: str, dev, ino) -> int | None:
+    """Open a grant without following a symlink in its last component.
+
+    Returns ``None`` when the path does not exist. Raises ``LandlockError`` when
+    the object is a symlink, is not the object the policy was built from (same
+    device and inode), or, with no recorded identity, is not where its own
+    resolved path says it is. A worker with write access to a tree can replace a
+    directory in it with a symlink between two launches; following that link
+    would widen the grant to wherever it points.
+    """
+    # /proc/self is itself a symlink that the launcher's child must follow: it
+    # names the child's own entry and is never resolved by the host.
+    if path == "/proc/self" or path.startswith("/proc/self/"):
+        try:
+            return os.open(path, os.O_PATH | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return None
     try:
-        mode = os.stat(path).st_mode
+        fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
-        return False
+        return None
     except NotADirectoryError:
-        return False
-    allowed = rights & handled_fs
-    if not stat_module.S_ISDIR(mode):
-        allowed &= FILE_RIGHTS
-    if not allowed:
-        return True
-    fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise LandlockError(errno.ELOOP, "grant is a symlink: %s" % path) from exc
+        raise
     try:
+        info = os.fstat(fd)
+        if stat_module.S_ISLNK(info.st_mode):
+            raise LandlockError(errno.ELOOP, "grant is a symlink: %s" % path)
+        if dev is not None and ino is not None:
+            if (info.st_dev, info.st_ino) != (int(dev), int(ino)):
+                raise LandlockError(errno.ESTALE, "grant changed since the policy was built: %s" % path)
+        else:
+            try:
+                actual = os.readlink("/proc/self/fd/%d" % fd)
+            except OSError:
+                actual = path
+            if actual != path and actual != path + " (deleted)":
+                raise LandlockError(errno.ESTALE, "grant is not at its resolved path: %s is %s" % (path, actual))
+            if actual != path:
+                raise LandlockError(errno.ESTALE, "grant was deleted: %s" % path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _add_path_rule(ruleset_fd: int, grant: Grant, rights: int, handled_fs: int) -> bool:
+    """Add one path-beneath rule. Returns False when the path does not exist."""
+    path, dev, ino = _split_grant(grant)
+    fd = _open_grant(path, dev, ino)
+    if fd is None:
+        return False
+    try:
+        mode = os.fstat(fd).st_mode
+        allowed = rights & handled_fs
+        if not stat_module.S_ISDIR(mode):
+            allowed &= FILE_RIGHTS
+        if not allowed:
+            return True
         attr = PathBeneathAttr(allowed, fd)
         result, err = _syscall(
             SYS_LANDLOCK_ADD_RULE,
@@ -312,10 +389,10 @@ def _add_port_rule(ruleset_fd: int, port: int) -> None:
 
 def apply_ruleset(
     *,
-    read_only: Iterable[str] = (),
-    read_write: Iterable[str] = (),
-    devices: Iterable[str] = (),
-    resolve_unix: Iterable[str] = (),
+    read_only: Iterable[Grant] = (),
+    read_write: Iterable[Grant] = (),
+    devices: Iterable[Grant] = (),
+    resolve_unix: Iterable[Grant] = (),
     connect_ports: Iterable[int] | None = None,
     abi_cap: int | None = None,
     min_abi: int = 1,
@@ -358,13 +435,21 @@ def apply_ruleset(
 
     skipped: list[str] = []
     try:
-        skipped.extend(p for p in read_only if not _add_path_rule(ruleset_fd, p, RIGHTS_READ_ONLY, handled_fs))
-        skipped.extend(p for p in devices if not _add_path_rule(ruleset_fd, p, RIGHTS_DEVICE, handled_fs))
+        skipped.extend(
+            _split_grant(g)[0] for g in read_only if not _add_path_rule(ruleset_fd, g, RIGHTS_READ_ONLY, handled_fs)
+        )
+        skipped.extend(
+            _split_grant(g)[0] for g in devices if not _add_path_rule(ruleset_fd, g, RIGHTS_DEVICE, handled_fs)
+        )
         if handled_fs & FS_RESOLVE_UNIX:
-            skipped.extend(p for p in resolve_unix if not _add_path_rule(ruleset_fd, p, RIGHTS_RESOLVE_UNIX, handled_fs))
-        for path in read_write:
-            if not _add_path_rule(ruleset_fd, path, RIGHTS_READ_WRITE, handled_fs):
-                raise LandlockError(errno.ENOENT, "read-write path does not exist: %s" % path)
+            skipped.extend(
+                _split_grant(g)[0]
+                for g in resolve_unix
+                if not _add_path_rule(ruleset_fd, g, RIGHTS_RESOLVE_UNIX, handled_fs)
+            )
+        for grant in read_write:
+            if not _add_path_rule(ruleset_fd, grant, RIGHTS_READ_WRITE, handled_fs):
+                raise LandlockError(errno.ENOENT, "read-write path does not exist: %s" % _split_grant(grant)[0])
         if handled_net:
             for port in ports or ():
                 _add_port_rule(ruleset_fd, port)

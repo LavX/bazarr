@@ -71,9 +71,9 @@ EXIT_SANDBOX_FAILED = 78
 EXIT_EXEC_FAILED = 127
 MESSAGE_PREFIX = "bazarr-sandbox: "
 
-# Largest spec the host will hand to the launcher: it travels through a pipe
-# that is written before the launcher starts, so it must fit the pipe buffer.
-MAX_SPEC_BYTES = 48 * 1024
+# Largest spec the host will hand to the launcher. It travels in a memfd, so
+# the pipe quota does not matter; the cap only keeps a runaway policy out.
+MAX_SPEC_BYTES = 256 * 1024
 
 
 class PolicyError(ValueError):
@@ -120,18 +120,65 @@ def _abs(path: str | os.PathLike) -> str:
     return os.path.normpath(text)
 
 
-def _with_real(paths: Iterable[str | os.PathLike]) -> tuple[str, ...]:
-    """Normalize, add the symlink-resolved twin, drop duplicates, keep order."""
+def _is_proc_self(path: str) -> bool:
+    return path == "/proc/self" or path.startswith("/proc/self/")
+
+
+def _canonical(paths: Iterable[str | os.PathLike]) -> tuple[str, ...]:
+    """Absolute, symlink-resolved, de-duplicated, order kept.
+
+    Only the resolved form is kept, never the symlink that led to it: the
+    launcher opens every grant without following symlinks and compares it with
+    what was resolved here. ``/proc/self`` stays symbolic, because the launcher's
+    child resolves it and resolving it here would grant the host's own entry.
+    """
     seen: dict[str, None] = {}
     for item in paths:
         path = _abs(item)
-        seen.setdefault(path, None)
-        # /proc/self must stay symbolic: it is resolved by the launcher's child,
-        # and resolving it here would grant the host's own /proc entry.
-        if path == "/proc/self" or path.startswith("/proc/self/"):
-            continue
-        seen.setdefault(os.path.realpath(path), None)
+        seen.setdefault(path if _is_proc_self(path) else os.path.realpath(path), None)
     return tuple(seen)
+
+
+def _existing(paths: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(p for p in paths if _is_proc_self(p) or os.path.lexists(p))
+
+
+def _identities(paths: Iterable[str]) -> dict[str, tuple[int, int]]:
+    result: dict[str, tuple[int, int]] = {}
+    for path in paths:
+        if _is_proc_self(path):
+            continue
+        try:
+            info = os.stat(path)
+        except OSError:
+            continue
+        result[path] = (info.st_dev, info.st_ino)
+    return result
+
+
+def _reject_links_in_writable_trees(given: Iterable[str | os.PathLike], writable_given: Iterable[str | os.PathLike]) -> None:
+    """Refuse grants a worker could redirect by swapping a link into its own tree.
+
+    A grant that resolves into a writable tree must be spelled as a path under
+    that tree with no symlink below the tree's root. Links above the root (a
+    ``/config`` that points at another disk) are the host's business and fine.
+    """
+    roots = [os.path.normpath(_abs(g)) for g in writable_given]
+    real_roots = [os.path.realpath(r) for r in roots]
+    for item in given:
+        lexical = os.path.normpath(_abs(item))
+        if _is_proc_self(lexical):
+            continue
+        real = os.path.realpath(lexical)
+        for root, real_root in zip(roots, real_roots):
+            if lexical == root or lexical.startswith(root.rstrip("/") + "/"):
+                current = root
+                for part in Path(lexical).relative_to(root).parts:
+                    current = os.path.join(current, part)
+                    if os.path.islink(current):
+                        raise PolicyError("%s is a symlink inside the writable tree %s" % (current, root))
+            elif real == real_root or real.startswith(real_root.rstrip("/") + "/"):
+                raise PolicyError("%s reaches the writable tree %s through a symlink" % (lexical, root))
 
 
 def interpreter_read_paths(interpreter: str | os.PathLike) -> tuple[str, ...]:
@@ -158,6 +205,16 @@ def interpreter_read_paths(interpreter: str | os.PathLike) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class SandboxPolicy:
+    """Paths and ports a worker may use.
+
+    Build one with ``for_interpreter`` right before starting the worker: it
+    records the device and inode of every granted object, and the launcher
+    refuses to start (exit 78) if a grant is by then a symlink or a different
+    object, which is what a worker that can write inside its own tree would
+    need in order to widen its next launch. A policy that outlives a directory
+    being deleted and recreated must be rebuilt.
+    """
+
     read_only: tuple[str, ...]
     read_write: tuple[str, ...]
     devices: tuple[str, ...] = DEVICE_PATHS
@@ -167,6 +224,9 @@ class SandboxPolicy:
     connect_ports: frozenset[int] | None = None
     # Highest Landlock ABI to use, for diagnostics and compatibility pinning.
     abi_cap: int | None = None
+    # (device, inode) of each grant when the policy was built. A grant without
+    # an entry is checked against its own resolved path at launch instead.
+    identities: Mapping[str, tuple[int, int]] = field(default_factory=dict)
 
     @classmethod
     def for_interpreter(
@@ -187,7 +247,8 @@ class SandboxPolicy:
         sit inside any granted tree: Landlock cannot carve a hole out of a
         granted directory, so an overlap is refused up front.
         ``reserved_ports`` (Bazarr+'s own port, a front's port) can never be in
-        the connect set.
+        the connect set. Read-write paths must exist and must not nest inside
+        one another.
         """
         ports: frozenset[int] | None = None
         if connect_ports is not None:
@@ -201,11 +262,24 @@ class SandboxPolicy:
             if clash:
                 raise PolicyError("reserved ports cannot be allowed: %s" % sorted(clash))
             ports = frozenset(values)
+        read_only = tuple(read_only)
+        read_write = tuple(read_write)
+        _reject_links_in_writable_trees((*read_only, *read_write), read_write)
+        rw = _canonical(read_write)
+        for path in rw:
+            if not os.path.isdir(path):
+                raise PolicyError("read-write path is not an existing directory: %s" % path)
+        ro = _existing(_canonical((*SYSTEM_READ_PATHS, *interpreter_read_paths(interpreter), *read_only)))
+        devices = _existing(_canonical(DEVICE_PATHS))
+        resolve_unix = _existing(_canonical(RESOLVE_UNIX_PATHS))
         policy = cls(
-            read_only=_with_real((*SYSTEM_READ_PATHS, *interpreter_read_paths(interpreter), *read_only)),
-            read_write=_with_real(read_write),
+            read_only=ro,
+            read_write=rw,
+            devices=devices,
+            resolve_unix=resolve_unix,
             connect_ports=ports,
             abi_cap=abi_cap,
+            identities=_identities((*ro, *rw, *devices, *resolve_unix)),
         )
         policy.validate(protected_paths)
         return policy
@@ -215,13 +289,26 @@ class SandboxPolicy:
         if "/" in granted:
             raise PolicyError("the filesystem root cannot be granted")
         for item in protected_paths:
-            for form in _with_real([item]):
+            forms = {_abs(item), os.path.realpath(_abs(item))}
+            for form in forms:
                 for root in granted:
                     if form == root or form.startswith(root.rstrip("/") + "/"):
                         raise PolicyError("%s lies inside the granted tree %s" % (form, root))
-        overlap = set(self.read_write) & set(SYSTEM_READ_PATHS)
-        if overlap:
-            raise PolicyError("system paths cannot be writable: %s" % sorted(overlap))
+        for outer in self.read_write:
+            for inner in self.read_write:
+                if inner != outer and inner.startswith(outer.rstrip("/") + "/"):
+                    raise PolicyError("writable grant %s is nested inside writable grant %s" % (inner, outer))
+        # No system path may be writable, whether granted itself or reached
+        # through a larger writable tree such as /etc.
+        for system in _canonical(SYSTEM_READ_PATHS):
+            for writable in self.read_write:
+                if system == writable or system.startswith(writable.rstrip("/") + "/"):
+                    raise PolicyError("system path %s would become writable through %s" % (system, writable))
+
+    def grant(self, path: str) -> str | list:
+        """A path for the launch spec, with its recorded identity when it has one."""
+        identity = self.identities.get(path)
+        return [path, identity[0], identity[1]] if identity else path
 
 
 @dataclass(frozen=True)
@@ -245,10 +332,10 @@ class RuntimeSpec:
             "mode": "enforce" if enforce else "declared",
             "min_abi": int(min_abi),
             "abi_cap": self.policy.abi_cap,
-            "read_only": list(self.policy.read_only),
-            "read_write": list(self.policy.read_write),
-            "devices": list(self.policy.devices),
-            "resolve_unix": list(self.policy.resolve_unix),
+            "read_only": [self.policy.grant(p) for p in self.policy.read_only],
+            "read_write": [self.policy.grant(p) for p in self.policy.read_write],
+            "devices": [self.policy.grant(p) for p in self.policy.devices],
+            "resolve_unix": [self.policy.grant(p) for p in self.policy.resolve_unix],
             "connect_ports": None if self.policy.connect_ports is None else sorted(self.policy.connect_ports),
             "limits": self.limits.to_dict(),
             "term_grace": float(self.term_grace),

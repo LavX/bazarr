@@ -17,17 +17,19 @@ from .policy import (
 )
 from .spawn import (
     LauncherProcess,
+    LauncherFailure,
     SandboxApplyError,
     SandboxProbe,
-    launcher_failure,
     probe_sandbox,
     reset_probe_cache,
+    sandbox_limitations,
     sandbox_status,
     spawn_worker,
 )
 
 __all__ = [
     "Admission",
+    "LauncherFailure",
     "LauncherProcess",
     "Limits",
     "PolicyError",
@@ -38,9 +40,9 @@ __all__ = [
     "SandboxRefused",
     "admission",
     "clean_env",
-    "launcher_failure",
     "probe_sandbox",
     "reset_probe_cache",
+    "sandbox_limitations",
     "sandbox_status",
     "spawn_worker",
 ]

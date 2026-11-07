@@ -2,7 +2,7 @@
 """Sandbox launcher: runs a worker with limits and a Landlock ruleset.
 
 The host starts this file with ``subprocess.Popen([python, "-I", "-S", "-B",
-launcher.py, spec_fd, lifeline_fd])``. It is deliberately standard library
+launcher.py, spec_fd, lifeline_fd, status_fd])``. It is deliberately standard library
 only: no Bazarr+ import, no third-party package, no ``site`` processing (so no
 ``.pth`` hook can run before the ruleset is applied). The fresh interpreter has
 one thread, which makes the single ``fork`` below safe and lets
@@ -10,8 +10,11 @@ one thread, which makes the single ``fork`` below safe and lets
 
 What happens, in order:
 
-1. Read the JSON spec from ``spec_fd``. The host keeps the write end of the
-   ``lifeline_fd`` pipe; end-of-file there means the host died.
+1. Read the JSON spec from ``spec_fd`` (a memfd or temp file). The host keeps
+   the write end of the ``lifeline_fd`` pipe; end-of-file there means the host
+   died. ``status_fd`` is the write end of a pipe the host reads: the launcher
+   puts one JSON line on it when the worker could not be started, and nothing
+   otherwise.
 2. Become a child subreaper, then fork once. The launcher stays behind as the
    reaper. When the worker exits, when the host dies (lifeline EOF) or on
    SIGTERM, every descendant is killed, ``setsid`` children included.
@@ -21,9 +24,14 @@ What happens, in order:
    interpreter with exactly the environment in the spec.
 
 Exit codes: the worker's own code (128 + signal when it was killed by one);
-64 for a bad spec; 78 when the sandbox could not be applied (the worker never
-ran); 127 when ``execve`` failed. A line starting with ``bazarr-sandbox:`` on
-stderr says why.
+64 for a bad spec or working directory; 78 when the sandbox could not be
+applied (the worker never ran); 127 when ``execve`` failed. The exit code alone
+proves nothing, since a worker can exit with any code and print any line: the
+authoritative record is the JSON line on ``status_fd``, written by the launcher
+(``{"kind": "spec" | "sandbox" | "exec", "message": "..."}``). The child reports
+over a close-on-exec pipe that the worker never inherits and that closes
+silently when ``execve`` succeeds. A line starting with ``bazarr-sandbox:`` on
+stderr repeats the reason for logs.
 
 Spec layout (JSON object)::
 
@@ -60,6 +68,20 @@ MESSAGE_PREFIX = "bazarr-sandbox: "
 MAX_SPEC_BYTES = 1 << 20
 DEFAULT_TERM_GRACE = 3.0
 _TERMINATING = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+_STATUS_FD = None
+
+
+def _report(kind, message):
+    """Tell the host why the worker could not be started."""
+    if _STATUS_FD is None:
+        return
+    line = json.dumps({"kind": kind, "message": str(message)[:2000]}) + "\n"
+    try:
+        os.write(_STATUS_FD, line.encode("utf-8", "replace"))
+    except OSError:
+        pass
 
 
 def _say(message):
@@ -141,8 +163,13 @@ def _apply_limits(limits):
             _say("oom_score_adj not applied: %s" % exc)
 
 
-def _child(spec, landlock, parent_pid, close_fds):
-    """Runs in the forked child. Never returns."""
+def _child(spec, landlock, parent_pid, close_fds, report_fd):
+    """Runs in the forked child. Never returns.
+
+    ``report_fd`` is a close-on-exec pipe: whatever is written there is a
+    failure record, and a clean ``execve`` closes it without a byte.
+    """
+    kind = "sandbox"
     code = EXIT_SANDBOX_FAILED
     try:
         for sig in (*_TERMINATING, signal.SIGCHLD):
@@ -158,7 +185,9 @@ def _child(spec, landlock, parent_pid, close_fds):
             os._exit(EXIT_SANDBOX_FAILED)
         _apply_limits(spec.get("limits") or {})
         landlock.prctl(landlock.PR_SET_NO_NEW_PRIVS, 1)
+        kind, code = "spec", EXIT_BAD_SPEC
         os.chdir(spec["cwd"])
+        kind, code = "sandbox", EXIT_SANDBOX_FAILED
         if spec.get("mode", "enforce") == "enforce":
             landlock.apply_ruleset(
                 read_only=spec.get("read_only", ()),
@@ -169,11 +198,20 @@ def _child(spec, landlock, parent_pid, close_fds):
                 abi_cap=spec.get("abi_cap"),
                 min_abi=int(spec.get("min_abi", 1)),
             )
-        code = EXIT_EXEC_FAILED
+        kind, code = "exec", EXIT_EXEC_FAILED
         interpreter = spec["interpreter"]
         os.execve(interpreter, [interpreter] + spec["args"], spec["env"])
     except BaseException as exc:
-        _say("%s: %s" % (("exec failed" if code == EXIT_EXEC_FAILED else "could not apply sandbox"), exc))
+        message = {
+            "spec": "bad working directory: %s",
+            "sandbox": "could not apply sandbox: %s",
+            "exec": "exec failed: %s",
+        }[kind] % exc
+        _say(message)
+        try:
+            os.write(report_fd, json.dumps({"kind": kind, "message": message[:2000]}).encode("utf-8", "replace"))
+        except OSError:
+            pass
     os._exit(code)
 
 
@@ -309,23 +347,46 @@ def _cleanup_tree():
             time.sleep(0.02)
 
 
+def _forward_child_report(report_r):
+    """Pass the child's failure record, if it left one, on to the host."""
+    chunks = []
+    try:
+        while True:
+            data = os.read(report_r, 4096)
+            if not data:
+                break
+            chunks.append(data)
+    except OSError:
+        pass
+    if chunks:
+        try:
+            record = json.loads(b"".join(chunks).decode("utf-8", "replace"))
+            _report(record.get("kind", "sandbox"), record.get("message", ""))
+        except ValueError:
+            _report("sandbox", "worker start failed")
+
+
 def main(argv):
+    global _STATUS_FD
     try:
         spec_fd = int(argv[1])
         lifeline_fd = int(argv[2])
+        _STATUS_FD = int(argv[3])
     except (IndexError, ValueError):
-        _say("usage: launcher.py SPEC_FD LIFELINE_FD")
+        _say("usage: launcher.py SPEC_FD LIFELINE_FD STATUS_FD")
         return EXIT_BAD_SPEC
     try:
         spec = _read_spec(spec_fd)
     except (OSError, ValueError) as exc:
         _say("bad spec: %s" % exc)
+        _report("spec", "bad spec: %s" % exc)
         return EXIT_BAD_SPEC
     try:
         landlock = _load_landlock()
         landlock.prctl(landlock.PR_SET_CHILD_SUBREAPER, 1)
     except Exception as exc:
         _say("launcher setup failed: %s" % exc)
+        _report("sandbox", "launcher setup failed: %s" % exc)
         return EXIT_SANDBOX_FAILED
 
     wake_r, wake_w = os.pipe()
@@ -335,13 +396,17 @@ def main(argv):
     for sig in (*_TERMINATING, signal.SIGCHLD):
         signal.signal(sig, lambda _s, _f: None)
 
+    # Close-on-exec by default (os.pipe): the write end vanishes on a good execve.
+    report_r, report_w = os.pipe()
     parent_pid = os.getpid()
     # One thread here, so this fork is safe. The host never forks itself.
     pid = os.fork()
     if pid == 0:
-        _child(spec, landlock, parent_pid, (lifeline_fd, wake_r, wake_w))
+        _child(spec, landlock, parent_pid, (lifeline_fd, wake_r, wake_w, report_r, _STATUS_FD), report_w)
+    os.close(report_w)
     try:
         status = _supervise(pid, wake_r, lifeline_fd, float(spec.get("term_grace", DEFAULT_TERM_GRACE)))
+        _forward_child_report(report_r)
         _cleanup_tree()
     except BaseException:
         try:
