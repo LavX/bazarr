@@ -365,6 +365,30 @@ def test_the_package_lists_the_typed_api_beside_the_history_routes():
     assert "Translation" in {namespace.name for namespace in api_ns_list_translation}
 
 
+def test_a_boot_with_the_switch_on_registers_the_typed_api_and_one_with_it_off_does_not():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    bazarr = str(Path(__file__).parents[2] / "bazarr")
+
+    def names_registered(switch):
+        code = ("from app.config import settings; "
+                f"settings.translator.runtime_v2 = {switch}; "
+                "import api; "
+                "print(sorted({namespace.name for group in api.api_ns_list for namespace in "
+                "(group if isinstance(group, (list, tuple)) else [group])}))")
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300,
+                                cwd=bazarr, env={**os.environ, "NO_CLI": "true",
+                                                 "PYTHONPATH": os.pathsep.join([bazarr, *sys.path])})
+        assert result.returncode == 0, result.stderr[-2000:]
+        return result.stdout.strip().splitlines()[-1]
+
+    assert "'Translation'" in names_registered(True)
+    assert "'Translation'" not in names_registered(False)
+
+
 # ------------------------------------------------------------ review fixes
 
 def _strict_json(text):

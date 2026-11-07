@@ -94,9 +94,7 @@ def test_a_boot_builds_no_translator_tables(monkeypatch, tmp_path, fresh_table_c
         database.init_db()
         names = set(sa.inspect(engine).get_table_names())
         assert "table_shows" in names  # the rest of the schema is still built
-        assert not names & {"translator_engine_instances", "translator_connections", "translator_secrets"}
-        assert not names & {"translation_history", "translation_history_connections", "translation_usage",
-                            "translation_budgets"}
+        assert not names & database.MIGRATION_ONLY_TABLES
 
         # With the switch on and the tables still missing, the runtime stays off.
         monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: True)
