@@ -108,6 +108,19 @@ def pid_alive(pid):
         return False
 
 
+def submit_running(session, params, **kwargs):
+    """Submit a ``sleep`` request and return its handle once the worker says it is running."""
+    started = threading.Event()
+
+    def on_progress(message):
+        if message.get("message") == "started":
+            started.set()
+
+    handle = session.submit("sleep", {**params, "announce": True}, on_progress=on_progress, **kwargs)
+    assert started.wait(8), "the worker never started the request"
+    return handle
+
+
 def wait_until(predicate, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -429,8 +442,7 @@ def test_a_request_the_worker_would_reject_is_refused_locally_and_others_survive
 
 
 def test_a_cancel_with_a_reason_that_is_not_text_still_cancels(session):
-    handle = session.submit("sleep", {"seconds": 30})
-    time.sleep(0.3)
+    handle = submit_running(session, {"seconds": 30})
     process = session.process
     handle.cancel(reason=5)
     with pytest.raises(RequestCancelled):
@@ -455,8 +467,7 @@ def test_a_cancel_reason_that_cannot_be_sent_as_given_still_cancels(make_session
     session = make_session(limits=fast_limits(cancel_grace=20.0))
     session.start()
     process = session.process
-    handle = session.submit("sleep", {"seconds": 30})
-    time.sleep(0.3)
+    handle = submit_running(session, {"seconds": 30})
     started = time.monotonic()
     handle.cancel(reason)
     with pytest.raises(RequestCancelled):
@@ -473,8 +484,7 @@ def test_a_secret_crossing_the_cancel_reason_limit_leaks_no_prefix(make_session,
     sent = []
     real = session._enqueue_packed
     session._enqueue_packed = lambda data: sent.append(data) or real(data)
-    handle = session.submit("sleep", {"seconds": 30}, secrets={"key": SECRET})
-    time.sleep(0.3)
+    handle = submit_running(session, {"seconds": 30}, secrets={"key": SECRET})
     # The secret starts `pad` characters in, so the 200 character cut lands inside it.
     handle.cancel("p" * pad + SECRET + " and a tail")
     with pytest.raises(RequestCancelled) as caught:
@@ -905,8 +915,7 @@ def test_failed_translation_reports_retry_hints(make_session):
 
 
 def test_mid_request_cancel_stops_the_operation_and_keeps_the_worker(session):
-    handle = session.submit("sleep", {"seconds": 30})
-    time.sleep(0.2)
+    handle = submit_running(session, {"seconds": 30})
     started = time.monotonic()
     handle.cancel("user")
     with pytest.raises(RequestCancelled):
@@ -934,8 +943,7 @@ def test_deadline_expiry_cancels_and_reports_a_timeout(session):
 
 
 def test_a_worker_that_ignores_cancel_is_killed_after_the_grace(session):
-    handle = session.submit("sleep", {"seconds": 30, "ignore_cancel": True})
-    time.sleep(0.2)
+    handle = submit_running(session, {"seconds": 30, "ignore_cancel": True})
     process = session.process
     handle.cancel()
     with pytest.raises(RequestCancelled):
@@ -949,9 +957,8 @@ def test_a_worker_that_ignores_cancel_is_killed_after_the_grace(session):
 def test_a_reply_landing_before_the_kill_spares_the_session(make_session):
     session = make_session()
     session.start()
-    neighbour = session.submit("sleep", {"seconds": 1.5})
-    stuck = session.submit("sleep", {"seconds": 30, "ignore_cancel": True})
-    time.sleep(0.2)
+    neighbour = submit_running(session, {"seconds": 1.5})
+    stuck = submit_running(session, {"seconds": 30, "ignore_cancel": True})
     process = session.process
     real_fail = session._fail
     interleaved = []
@@ -1070,8 +1077,7 @@ def test_worker_exits_when_the_host_pipe_closes(session):
 
 
 def test_close_while_a_request_runs_fails_it(session):
-    handle = session.submit("sleep", {"seconds": 30})
-    time.sleep(0.2)
+    handle = submit_running(session, {"seconds": 30})
     threading.Thread(target=session.close, kwargs={"grace": 2.0}, daemon=True).start()
     with pytest.raises((SessionClosed, RequestCancelled)):
         handle.wait(8)
@@ -1159,31 +1165,34 @@ def test_close_ends_a_worker_that_will_not_read_its_shutdown(tmp_path):
 
 def test_close_sends_sigterm_before_sigkill(tmp_path):
     marker = tmp_path / "terminated"
+    ready = tmp_path / "ready"
     body = """
     def on_term(signum, frame):
         open(%r, "w").write("term")
     signal.signal(signal.SIGTERM, on_term)
+    open(%r, "w").write("ready")
     while True:
         out.write_control({"t": "hb", "seq": 1})
         time.sleep(0.05)
-    """ % str(marker)
+    """ % (str(marker), str(ready))
     session = hostile_session(tmp_path, body)
     session.start()
     process = session.process
-    time.sleep(0.3)
+    # The handler is installed once the script says so.
+    assert wait_until(ready.exists, timeout=8)
     session.close(grace=0.3)
     assert marker.exists()
     assert process.poll() is not None
 
 
 def test_deeply_nested_json_fails_the_session_instead_of_the_reader_thread(tmp_path):
-    body = """
-    time.sleep(0.2)
+    body = with_reader("""
+    next_request()
     payload = b"[" * 500000
     sys.stdout.buffer.write(frames.HEADER.pack(frames.FRAME_CONTROL, len(payload)) + payload)
     sys.stdout.buffer.flush()
     time.sleep(30)
-    """
+    """)
     session = hostile_session(tmp_path, body)
     try:
         session.start()
@@ -1239,14 +1248,17 @@ def test_flooding_host_calls_kills_the_worker(tmp_path):
 def test_a_slow_host_call_does_not_stall_another_requests_calls(make_session):
     release = threading.Event()
 
+    entered = threading.Event()
+
     def slow(call):
+        entered.set()
         release.wait(5)
         return {"slow": True}
 
     session = make_session(host_calls={"slow": slow, "quick": lambda call: {"quick": True}})
     session.start()
     slow_handle = session.submit("call", {"name": "slow"})
-    time.sleep(0.2)
+    assert entered.wait(5)
     started = time.monotonic()
     assert session.request("call", {"name": "quick"}, timeout=5).result["ack"] == {"quick": True}
     assert time.monotonic() - started < 1.5
@@ -1271,10 +1283,21 @@ def test_calls_of_one_request_are_serialized_even_when_sent_back_to_back(make_se
 
     session = make_session(host_calls={"first": first, "second": second})
     session.start()
+    received = []
+    real_on_call = session._on_call
+
+    def counting(message):
+        real_on_call(message)
+        received.append(message["name"])
+
+    session._on_call = counting
     handle = session.submit("parallel_calls", {"names": ["first", "second"]}, timeout=10)
+    # The host has taken in both calls (the worker sends the second only after the
+    # first is on the wire), and the first handler is still running.
+    assert wait_until(lambda: received == ["first", "second"])
     assert wait_until(lambda: "first start" in log)
-    time.sleep(0.5)
-    # The second call reached the host while the first handler still ran, and waited.
+    # The second call is queued behind the first, not run.
+    assert len(session._call_queues[handle._request.id]) == 1
     assert log == ["first start"]
     release.set()
     handle.wait(5)
@@ -1734,11 +1757,17 @@ def test_an_unprintable_error_still_gets_a_terminal_reply(session):
 
 def test_cancel_interrupts_the_wait_for_a_host_call_ack(make_session):
     release = threading.Event()
-    session = make_session(host_calls={"slow": lambda call: release.wait(10) and {}})
+    entered = threading.Event()
+
+    def slow(call):
+        entered.set()
+        return release.wait(10) and {}
+
+    session = make_session(host_calls={"slow": slow})
     session.start()
     try:
         handle = session.submit("call", {"name": "slow"})
-        time.sleep(0.2)
+        assert entered.wait(5)
         started = time.monotonic()
         handle.cancel("user")
         with pytest.raises(RequestCancelled):
@@ -2356,7 +2385,8 @@ def test_a_call_pipelined_behind_a_rejected_hello_never_runs(tmp_path):
         with pytest.raises(HandshakeError) as caught:
             session.start()
         assert caught.value.code == frames.Codes.VERSION_MISMATCH
-        time.sleep(0.5)
+        # The reader is finished (start() joined it): any handler thread would exist by now.
+        assert wait_until(lambda: not [t for t in threading.enumerate() if "-calls-" in t.name])
         assert ran == []
         assert session._call_pending == 0 and not session._call_queues
     finally:
@@ -2454,7 +2484,7 @@ def test_a_call_made_after_the_host_hung_up_fails_at_once():
         assert wait_until(lambda: 1 in harness.channel._operations)
         harness.hang_up_input()
         assert wait_until(lambda: harness.channel._ended.is_set())
-        time.sleep(0.3)
+        assert wait_until(lambda: harness.channel._acks_closed)
         gate.set()
         assert wait_until(lambda: "waited" in outcome, timeout=8)
         assert outcome["waited"] < 1.5

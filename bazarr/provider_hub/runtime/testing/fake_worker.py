@@ -9,7 +9,8 @@ set by the ``BAZARR_FAKE_WORKER`` environment variable (a JSON object, see
 Operations:
 
 ``echo``           returns the params.
-``sleep``          waits ``seconds``, cancellable unless ``ignore_cancel``.
+``sleep``          waits ``seconds``, cancellable unless ``ignore_cancel``;
+                   with ``announce`` it sends a "started" progress message first.
 ``progress``       sends ``steps`` progress messages, then returns.
 ``chunks``         returns ``size`` bytes of data (``overshoot`` sends them
                    without honoring the request's limit; ``pause_file`` is
@@ -96,6 +97,9 @@ def fake_worker_env(**config):
 
 def _sleep(operation, params):
     seconds = float(params.get("seconds", 1.0))
+    if params.get("announce"):
+        # Lets the host know the operation is running before it acts on it.
+        operation.progress(message="started")
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if operation.cancelled.wait(0.01) and not params.get("ignore_cancel"):
@@ -301,12 +305,28 @@ def _handle(operation):
         def run_call(index, call_name):
             results[index] = operation.call(call_name, {})
 
+        # Each call is started only once the one before it is on the wire, so the
+        # host sees them in the order given without any sleeping.
+        written = threading.Condition()
+        sent = [0]
+        channel = operation._channel
+        real_send = channel._send
+
+        def counting_send(message):
+            real_send(message)
+            if message.get("t") == frames.CALL:
+                with written:
+                    sent[0] += 1
+                    written.notify_all()
+
+        channel._send = counting_send
         threads = []
         for index, call_name in enumerate(params["names"]):
             thread = threading.Thread(target=run_call, args=(index, call_name))
             thread.start()
             threads.append(thread)
-            time.sleep(0.1)
+            with written:
+                written.wait_for(lambda: sent[0] > index, timeout=10)
         for thread in threads:
             thread.join()
         return {"results": results}
