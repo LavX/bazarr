@@ -2,7 +2,8 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
-import { customRender, screen, waitFor, within } from "@/tests";
+import queryClient from "@/apis/queries";
+import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type {
   TranslationConnection,
@@ -489,6 +490,124 @@ describe("Settings > Translation", () => {
         screen.queryByText(/Your changes are kept/),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("sends the revision the draft was loaded from, even after the list refreshed", async () => {
+    let revision = 3;
+    let loads = 0;
+    const sent: Array<{ expected_revision?: number }> = [];
+    server.use(
+      http.get("/api/translation/state", () => {
+        loads += 1;
+        return HttpResponse.json({
+          ...state,
+          instances: [second, engine({ revision })],
+        });
+      }),
+      http.patch("/api/translation/connections/:id", ({ params }) =>
+        HttpResponse.json({ connection: connection(Number(params.id)) }),
+      ),
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        const body = (await request.json()) as { expected_revision?: number };
+        sent.push(body);
+        if (body.expected_revision !== revision) {
+          return HttpResponse.json(
+            {
+              error: "stale_revision",
+              message: "The engine settings changed since they were loaded.",
+              revision,
+            },
+            { status: 409 },
+          );
+        }
+        revision += 1;
+        return HttpResponse.json({ engine: engine({ revision }), notices: [] });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    const credit = screen.getByLabelText("Credit line");
+    await user.clear(credit);
+    await user.type(credit, "Mine");
+    // Another tab saves, then something on this page refreshes the list: the engine prop now says 4.
+    revision = 4;
+    await user.click(screen.getByLabelText("Use OpenAI compatible, model-1"));
+    await waitFor(() => expect(loads).toBe(2));
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    await user.click(
+      screen.getByRole("button", { name: "Save engine settings" }),
+    );
+    // The draft still belongs to revision 3, so the save is refused instead of overwriting revision 4.
+    expect(
+      await screen.findByText(/changed since they were loaded/),
+    ).toBeVisible();
+    expect(sent.map((body) => body.expected_revision)).toEqual([3]);
+    expect(screen.getByLabelText("Credit line")).toHaveValue("Mine");
+    // Saving again after seeing the conflict is the choice to overwrite.
+    await user.click(
+      screen.getByRole("button", { name: "Save engine settings" }),
+    );
+    await waitFor(() => expect(sent.at(-1)?.expected_revision).toBe(4));
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/Your changes are kept/),
+      ).not.toBeInTheDocument(),
+    );
+    // A saved draft is at the saved revision, so the next edit saves without a conflict.
+    await user.type(screen.getByLabelText("Credit line"), "!");
+    await user.click(
+      screen.getByRole("button", { name: "Save engine settings" }),
+    );
+    await waitFor(() => expect(sent.at(-1)?.expected_revision).toBe(5));
+  });
+
+  it("keeps a back end draft at the revision it opened with when the list refreshes", async () => {
+    const sent: Array<{ expected_revision?: number }> = [];
+    server.use(
+      http.patch("/api/translation/connections/:id", async ({ request }) => {
+        const body = (await request.json()) as { expected_revision?: number };
+        sent.push(body);
+        return HttpResponse.json(
+          {
+            error: "stale_revision",
+            message: "The back end changed since it was loaded.",
+            revision: 2,
+          },
+          { status: 409 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    const dialog = await screen.findByRole("dialog", { name: "Edit back end" });
+    const url = within(dialog).getByLabelText("Base URL");
+    await user.clear(url);
+    await user.type(url, "http://other:9/v1");
+    // Another tab saved this back end and the list refreshed under the open editor.
+    state = {
+      ...state,
+      instances: [
+        second,
+        engine({
+          connections: [connection(1, { revision: 2 }), connection(2)],
+        }),
+      ],
+    };
+    await act(async () => {
+      await queryClient.invalidateQueries();
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save back end" }),
+    );
+    expect(
+      await within(dialog).findByText(/changed since it was loaded/),
+    ).toBeVisible();
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save back end" }),
+    );
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent.map((body) => body.expected_revision)).toEqual([1, 2]);
   });
 
   it("clears a single stored secret on request and says it is pending", async () => {

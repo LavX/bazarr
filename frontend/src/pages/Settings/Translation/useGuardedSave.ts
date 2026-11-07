@@ -7,9 +7,13 @@ import { readRefusal } from "@/apis/hooks/translation";
  * request for consent holds the save until the user answers.
  *
  * `send(accepted)` makes the request, with the addresses the user has already
- * accepted for it.
+ * accepted for it. `onStale` runs when the request is refused because the row
+ * changed since the form loaded it.
  */
-export function useGuardedSave(send: (accepted: string[]) => Promise<unknown>) {
+export function useGuardedSave(
+  send: (accepted: string[]) => Promise<unknown>,
+  onStale?: () => void,
+) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState("");
   const [asking, setAsking] = useState<string[]>([]);
@@ -34,6 +38,9 @@ export function useGuardedSave(send: (accepted: string[]) => Promise<unknown>) {
         setFieldErrors(refusal.fieldErrors);
         setMessage(refusal.message);
         setStale(refusal.code === "stale_revision");
+        if (refusal.code === "stale_revision") {
+          onStale?.();
+        }
       } else {
         setAsking([]);
         setMessage("The request failed. Try again.");

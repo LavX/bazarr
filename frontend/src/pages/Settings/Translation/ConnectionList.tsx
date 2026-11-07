@@ -33,7 +33,8 @@ const connectionName = (
 const ConnectionList: FunctionComponent<{ engine: TranslationEngine }> = ({
   engine,
 }) => {
-  // The editor follows the connection by id, so it always holds the current revision.
+  // The editor finds its connection by id, so removing it closes the editor. The editor keeps the
+  // revision it opened with: a refreshed list does not move its draft on to a newer revision.
   const [editingId, setEditingId] = useState<number | null>(null);
   const editing =
     engine.connections.find((item) => item.id === editingId) ?? null;

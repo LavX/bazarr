@@ -19,6 +19,7 @@ import type {
   TranslationEngine,
 } from "@/types/translation";
 import ConsentModal from "./ConsentModal";
+import { useDraftRevision } from "./useDraftRevision";
 import { useGuardedSave } from "./useGuardedSave";
 
 export interface ConnectionEditorProps {
@@ -48,6 +49,8 @@ const ConnectionEditor: FunctionComponent<ConnectionEditorProps> = ({
   const [cleared, setCleared] = useState<string[]>([]);
   const create = useCreateConnection();
   const update = useUpdateConnection();
+  // The draft above was loaded from this revision; a refreshed prop does not change it.
+  const revision = useDraftRevision(connection?.revision ?? 0);
 
   // The draft the model list is asked for: what is typed, never a secret.
   const draft = useMemo(() => {
@@ -68,25 +71,27 @@ const ConnectionEditor: FunctionComponent<ConnectionEditorProps> = ({
     backendType !== "",
   );
 
-  const form = useGuardedSave((accepted) =>
-    connection
-      ? update.mutateAsync({
-          id: connection.id,
-          body: {
-            expected_revision: connection.revision,
-            values,
-            clear_secrets: cleared,
-            accept_destinations: accepted,
-          },
-        })
-      : create.mutateAsync({
-          instanceId: engine.id,
-          body: {
-            backend_type: backendType,
-            values,
-            accept_destinations: accepted,
-          },
-        }),
+  const form = useGuardedSave(
+    (accepted) =>
+      connection
+        ? update.mutateAsync({
+            id: connection.id,
+            body: {
+              expected_revision: revision.forSave(),
+              values,
+              clear_secrets: cleared,
+              accept_destinations: accepted,
+            },
+          })
+        : create.mutateAsync({
+            instanceId: engine.id,
+            body: {
+              backend_type: backendType,
+              values,
+              accept_destinations: accepted,
+            },
+          }),
+    revision.conflicted,
   );
 
   const save = async () => {

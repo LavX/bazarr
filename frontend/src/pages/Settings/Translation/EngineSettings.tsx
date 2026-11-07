@@ -9,13 +9,14 @@ import {
 } from "@/components/plugin-settings";
 import type { TranslationEngine } from "@/types/translation";
 import ConsentModal from "./ConsentModal";
+import { useDraftRevision } from "./useDraftRevision";
 import { useGuardedSave } from "./useGuardedSave";
 
 /**
  * The engine's own settings, drawn from its manifest. Connections have their
- * own form. The form keeps what was typed when a save is refused, and takes the
- * current revision from the engine it is given, so after a conflict the user
- * sees the refusal and a second save goes through.
+ * own form. The draft keeps the revision it was loaded from, so a save made
+ * after another tab's save is refused. The form keeps what was typed when that
+ * happens, and a second save then overwrites on purpose.
  */
 const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
   engine,
@@ -26,11 +27,12 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
   );
   const [cleared, setCleared] = useState<string[]>([]);
   const mutation = useSaveEngine();
+  const revision = useDraftRevision(engine.revision);
   const form = useGuardedSave(async (accepted) => {
     const saved = await mutation.mutateAsync({
       id: engine.id,
       body: {
-        expected_revision: engine.revision,
+        expected_revision: revision.forSave(),
         values,
         clear_secrets: cleared,
         accept_destinations: accepted,
@@ -39,8 +41,9 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
     // Typed secrets leave the form once they are saved; the rest follows the server.
     setValues(initialValues(fields, saved.engine.values));
     setCleared([]);
+    revision.reload(saved.engine.revision);
     return saved;
-  });
+  }, revision.conflicted);
 
   return (
     <Stack>
