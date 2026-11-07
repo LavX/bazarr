@@ -143,6 +143,7 @@ class Codes:
     HEARTBEAT_TIMEOUT = "heartbeat_timeout"
     WRITE_TIMEOUT = "write_timeout"
     RECYCLE_REQUIRED = "recycle_required"
+    SHUTTING_DOWN = "shutting_down"
     WORKER_EXITED = "worker_exited"
     SESSION_CLOSED = "session_closed"
     SANDBOX_BLOCKED = "sandbox_blocked"
@@ -175,6 +176,12 @@ class MalformedFrame(FrameError):
     def __init__(self, message, *, code=None, type_byte=None):
         super().__init__(message, code=code)
         self.type_byte = type_byte
+
+
+def shown(value, limit=64):
+    """A worker-supplied value, bounded and quoted, for use in an error message."""
+    text = value if isinstance(value, str) else repr(value)
+    return repr(text[:limit]) + ("..." if len(text) > limit else "")
 
 
 def default_caps():
@@ -236,6 +243,12 @@ class FrameWriter:
         header = HEADER.pack(ftype, len(body))
         with self._lock:
             self._stream.write(header + body)
+            self._stream.flush()
+
+    def write_packed(self, data):
+        """Write a frame already built by ``pack_control``."""
+        with self._lock:
+            self._stream.write(data)
             self._stream.flush()
 
     def write_control(self, message):
@@ -362,7 +375,7 @@ def validate_message(message, sender):
         raise MalformedFrame("control message has no type")
     allowed = FROM_WORKER if sender == "worker" else FROM_HOST
     if name not in allowed:
-        raise MalformedFrame("%s is not a message a %s may send" % (name, sender))
+        raise MalformedFrame("%s is not a message a %s may send" % (shown(name), sender))
     for key, check in _REQUIRED[name].items():
         if key not in message or not check(message[key]):
             raise MalformedFrame("%s message has a missing or invalid %r" % (name, key))

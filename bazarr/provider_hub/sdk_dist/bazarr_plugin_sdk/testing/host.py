@@ -307,11 +307,13 @@ class LoopbackHost(Host):
 
         to_worker_r, to_worker_w = os.pipe()
         from_worker_r, from_worker_w = os.pipe()
+        # Unbuffered: a reader thread may be blocked in a read when a file is closed, and a
+        # buffered file would make the close wait for it.
         self._files = [
-            os.fdopen(to_worker_r, "rb"),
-            os.fdopen(to_worker_w, "wb"),
-            os.fdopen(from_worker_r, "rb"),
-            os.fdopen(from_worker_w, "wb"),
+            os.fdopen(to_worker_r, "rb", buffering=0),
+            os.fdopen(to_worker_w, "wb", buffering=0),
+            os.fdopen(from_worker_r, "rb", buffering=0),
+            os.fdopen(from_worker_w, "wb", buffering=0),
         ]
         plugin, spec = build_plugin(plugin_class)
         self.worker = PluginWorker(
@@ -334,16 +336,20 @@ class LoopbackHost(Host):
 
     def close(self, timeout: float = 5.0) -> int | None:
         self.shutdown()
+        # The host's write end first: it gives the worker's reader thread its end of input.
+        self._close_file(1)
         self._worker_thread.join(timeout)
-        # The worker's ends first: that gives the host's reader its end of stream.
-        for index in (3, 0, 1, 2):
-            if index == 1:
-                self._thread.join(timeout)
-            try:
-                self._files[index].close()
-            except OSError:
-                pass
+        self._close_file(3)
+        self._thread.join(timeout)
+        self._close_file(0)
+        self._close_file(2)
         return self.exit_code
+
+    def _close_file(self, index: int) -> None:
+        try:
+            self._files[index].close()
+        except OSError:
+            pass
 
     def __enter__(self) -> "LoopbackHost":
         self.wait_ready()
