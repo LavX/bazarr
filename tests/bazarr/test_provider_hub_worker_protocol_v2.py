@@ -3905,3 +3905,21 @@ def test_a_stray_thread_cannot_act_for_an_operation_that_has_returned():
         assert [m["t"] for m in harness.messages if m["t"] in ("progress", "call", "sandbox_blocked")] == []
     finally:
         harness.finish()
+
+
+def test_a_group_found_gone_after_the_session_ended_it_is_not_reported_lost(monkeypatch):
+    """Our own reap makes the leader vanish; only a reap by somebody else loses the group."""
+    session = WorkerSession(["worker"])
+    process = _ReapingProcess()
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
+    state = {"now": session_module._RUNNING}
+    monkeypatch.setattr(session_module, "_probe", lambda proc: state["now"])
+    session._end_group(process)
+    assert session._group_ended
+    # The session's own reap: the leader is not there any more.
+    state["now"] = session_module._GONE
+    session._exited(process)
+    assert not session._group_lost
+    fresh = WorkerSession(["worker"])
+    fresh._exited(process)
+    assert fresh._group_lost

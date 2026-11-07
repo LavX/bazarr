@@ -1069,7 +1069,11 @@ class WorkerSession:
         state = _probe(process)
         if state == _GONE:
             with self._group_lock:
-                self._group_lost = True
+                # Our own reap makes the leader vanish too, but only after the
+                # group was ended; a leader that vanishes before that was
+                # reaped by somebody else.
+                if not self._group_ended:
+                    self._group_lost = True
         return state != _RUNNING
 
     def _ours(self, process):
