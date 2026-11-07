@@ -297,17 +297,18 @@ def test_removing_the_last_installation_frees_its_environment(hub, tmp_path):
 
 
 class _BusyWorker:
-    """A worker client that is serving a request until ``finish`` is set."""
+    """A worker client whose stop() returns at once, as a stop does when nothing
+    is queued ahead of it. It records how many calls the proxy still had admitted
+    when the stop arrived, so an early stop cannot hide behind a fake that waits."""
 
     def __init__(self, python_path):
         self.command = [str(python_path), "-I", "-B", "runner.py"]
         self.process = None
-        self.finish = threading.Event()
-        self.stopped = threading.Event()
+        self.owner = None
+        self.stop_calls = []
 
     def stop(self):
-        self.finish.wait(10)
-        self.stopped.set()
+        self.stop_calls.append(getattr(self.owner, "_active_operations", None))
 
 
 @pytest.fixture
@@ -345,8 +346,20 @@ def test_repair_replaces_the_cached_worker_and_keeps_the_old_environment_until_i
     pool = SZProviderPool(providers=["examplehub"], provider_configs={})
     stale = pool["examplehub"]
     busy = _BusyWorker(old / "bin" / "python")
+    busy.owner = stale
     stale.worker_client = busy
     assert stale.python_path == str(old / "bin" / "python")
+    serving = threading.Event()
+    finish = threading.Event()
+
+    def serve():
+        with stale._operation():
+            serving.set()
+            finish.wait(10)
+
+    server = threading.Thread(target=serve)
+    server.start()
+    assert serving.wait(10)
 
     repair_installation_environment("examplehub")
 
@@ -360,9 +373,11 @@ def test_repair_replaces_the_cached_worker_and_keeps_the_old_environment_until_i
     assert old.exists()
     assert env_registry.cleanup_environments(hub) == []
     assert (old / "bin" / "python").exists()
+    time.sleep(0.3)
+    assert busy.stop_calls == []
 
-    busy.finish.set()
-    assert busy.stopped.wait(10)
+    finish.set()
+    server.join(10)
     # The release follows the stop by a moment, on the drain thread.
     removed = []
     deadline = time.monotonic() + 10
@@ -371,6 +386,7 @@ def test_repair_replaces_the_cached_worker_and_keeps_the_old_environment_until_i
         time.sleep(0.05)
     assert removed == [str(old)]
     assert not old.exists()
+    assert busy.stop_calls and all(count == 0 for count in busy.stop_calls)
 
 
 def test_a_stop_pressed_during_the_repair_probe_ends_the_repair_before_the_repoint(hub, tmp_path, monkeypatch):
@@ -540,17 +556,19 @@ def test_an_admitted_call_holds_the_old_environment_until_it_ends(hub, hub_regis
     save_state(state)
     pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
     stale.worker_client = _BusyWorker(old / "bin" / "python")
-    stale.worker_client.finish.set()
+    stale.worker_client.owner = stale
 
     with stale._operation():
-        for drain in retire_provider_instances("examplehub"):
-            drain.join(10)
-        # The drain is over and released its own hold; the call still runs.
+        drains = retire_provider_instances("examplehub")
+        # The drain waits for the call; the call holds the environment itself.
         assert env_registry.cleanup_environments(hub) == []
         assert (old / "bin" / "python").exists()
+        assert stale.worker_client.stop_calls == []
 
     # The last call of a retired proxy stops the worker it may have started, then frees the environment.
-    assert stale.worker_client.stopped.is_set()
+    for drain in drains:
+        drain.join(10)
+    assert stale.worker_client.stop_calls and all(count == 0 for count in stale.worker_client.stop_calls)
     assert env_registry.cleanup_environments(hub) == [str(old)]
 
 

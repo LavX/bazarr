@@ -6,6 +6,7 @@ import logging
 import json
 import sys
 import threading
+import time
 
 from pathlib import Path
 
@@ -80,6 +81,8 @@ def _global_worker_timeout():
 # Guards the retired mark and the operation count of every proxy. The sections
 # are a few assignments, so one lock for all of them is enough.
 _PROXY_LOCK = threading.Lock()
+# Signalled each time an admitted operation ends, for the drain that waits on them.
+_PROXY_OPERATIONS_ENDED = threading.Condition(_PROXY_LOCK)
 
 
 class HubProxyProvider(Provider):
@@ -138,6 +141,7 @@ class HubProxyProvider(Provider):
             with _PROXY_LOCK:
                 self._active_operations -= 1
                 last_of_retired = self._retired and self._active_operations == 0
+                _PROXY_OPERATIONS_ENDED.notify_all()
             try:
                 if last_of_retired and self.worker_client:
                     self.worker_client.stop()
@@ -415,9 +419,34 @@ def _instance_environment(instance) -> str | None:
     return env_dir_of(python_path) if python_path else None
 
 
-def _drain_instance(instance, release) -> None:
-    """Let the instance finish what it is serving, stop its worker, then free its environment."""
+def _wait_for_operations(instance) -> None:
+    """Block until every call admitted before the retirement has ended, within its own timeout."""
     try:
+        limit = float(instance._request_timeout()) + _HOST_TIMEOUT_MARGIN_SECONDS
+    except Exception:
+        limit = _MAX_WORKER_REQUEST_TIMEOUT + _HOST_TIMEOUT_MARGIN_SECONDS
+    deadline = time.monotonic() + limit
+    with _PROXY_OPERATIONS_ENDED:
+        while getattr(instance, "_active_operations", 0) > 0:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                logger.warning(
+                    "Provider Hub: a replaced %s still has a call running after %.0fs; stopping its worker anyway",
+                    getattr(instance, "provider_name", "?"), limit,
+                )
+                return
+            _PROXY_OPERATIONS_ENDED.wait(left)
+
+
+def _drain_instance(instance, release) -> None:
+    """Let the instance finish what it was admitted for, stop its worker, then free its environment.
+
+    A call admitted before the retirement may still be on its way to the worker,
+    or between the two requests of a download. Stopping first would fail it as
+    busy or cut it between them, so the stop waits for those calls.
+    """
+    try:
+        _wait_for_operations(instance)
         instance.terminate()
     except Exception:
         logger.exception("Provider Hub: could not stop a replaced worker for %s", getattr(instance, "provider_name", "?"))
