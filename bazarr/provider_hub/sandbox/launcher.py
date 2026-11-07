@@ -707,7 +707,9 @@ def main(argv):
         spec_fd = int(argv[1])
         lifeline_fd = int(argv[2])
         _STATUS_FD = int(argv[3])
-    except (IndexError, ValueError):
+        # A writer that blocks on a full pipe would keep the launcher from exiting.
+        os.set_blocking(_STATUS_FD, False)
+    except (IndexError, ValueError, OSError):
         _say("usage: launcher.py SPEC_FD LIFELINE_FD STATUS_FD")
         return EXIT_BAD_SPEC
     try:
@@ -722,6 +724,15 @@ def main(argv):
         seccomp = _load_sibling("seccomp")
         capabilities = _load_sibling("capabilities")
         landlock.prctl(landlock.PR_SET_CHILD_SUBREAPER, 1)
+        # The status pipe is the launcher's word to the host. A non-dumpable
+        # process is closed to its own user's other processes: /proc/<pid>/fd
+        # and the descriptors in it, the pipe included, cannot be opened by the
+        # worker, however it finds the number. The worker, which is exec'd
+        # afterwards, is dumpable again as exec always makes it. Verified, not
+        # assumed: a launcher that cannot close itself off refuses to start.
+        landlock.prctl(landlock.PR_SET_DUMPABLE, 0)
+        if landlock.prctl(landlock.PR_GET_DUMPABLE) != 0:
+            raise OSError("the launcher could not make itself non-dumpable")
     except Exception as exc:
         _say("launcher setup failed: %s" % exc)
         _report("sandbox", "launcher setup failed: %s" % exc)

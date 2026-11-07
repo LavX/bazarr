@@ -86,6 +86,13 @@ MIN_ENFORCED_ABI = 3
 # this long (on top of the launcher's term_grace) before it kills the group.
 LAUNCHER_CLEANUP_SECONDS = 10.0
 
+# What the host keeps of a launcher's status pipe, and the most it reads in one
+# call. The launcher writes a few short lines; anything past this is not the
+# launcher (the pipe is closed to the worker, but the host does not rely on
+# that for its own bounds) and makes the whole stream untrusted.
+STATUS_LIMIT = 16 * 1024
+STATUS_READ_PER_CALL = 64 * 1024
+
 # Flipped when the worker spawner starts plugin workers through this launcher.
 # Until then the probe describes what the host could do, not what workers get.
 WORKERS_SANDBOXED = False
@@ -780,6 +787,7 @@ class LauncherProcess(WorkerProcess):
         self._fds = {"lifeline": lifeline, "status": status}
         self._failure: LauncherFailure | None = None
         self._status_text = b""
+        self._status_untrusted = False
         # The launcher's own grace for the worker; set by ``_start``.
         self.term_grace = 3.0
         weakref.finalize(self, _close_fds, self._fds)
@@ -807,11 +815,18 @@ class LauncherProcess(WorkerProcess):
         if fd is None:
             return
         with self._own_lock:
+            left = STATUS_READ_PER_CALL
             try:
-                while True:
-                    chunk = os.read(fd, 4096)
+                while left > 0:
+                    chunk = os.read(fd, min(4096, left))
                     if not chunk:
                         break
+                    left -= len(chunk)
+                    if self._status_untrusted or len(self._status_text) + len(chunk) > STATUS_LIMIT:
+                        # Overflow: keep what came before, drop the rest, and
+                        # believe nothing in this stream about the cleanup.
+                        self._status_untrusted = True
+                        continue
                     self._status_text += chunk
             except (BlockingIOError, OSError):
                 pass
@@ -838,10 +853,13 @@ class LauncherProcess(WorkerProcess):
         """How the launcher says its tree cleanup ended: ``"complete"``, ``"survivors"`` or None.
 
         None means it wrote no cleanup record (it was killed, or it is still
-        running), which nobody may read as a clean tree. The last record wins.
+        running) or its status stream overflowed, which nobody may read as a
+        clean tree. The last record wins.
         Exact once the process has exited.
         """
         self._read_status()
+        if self._status_untrusted:
+            return None
         state = None
         for line in self._status_text.decode("utf-8", "replace").splitlines():
             try:

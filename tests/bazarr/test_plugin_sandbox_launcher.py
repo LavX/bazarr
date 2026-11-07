@@ -3697,3 +3697,82 @@ def test_the_anchor_is_not_reaped_while_a_group_signal_is_being_sent(monkeypatch
     finally:
         monkeypatch.undo()
         plain.stop(0.5)
+
+
+@linux_only
+def test_a_worker_cannot_open_the_launchers_status_pipe_through_proc(mode, tmp_path):
+    """The launcher's descriptors, the status pipe among them, are closed to its own user's processes."""
+    script = """
+        import json, os
+        ppid = os.getppid()
+        cmdline = None
+        try:
+            cmdline = open("/proc/%d/cmdline" % ppid, "rb").read().split(b"\\0")
+        except OSError:
+            pass
+        status_fd = int(cmdline[-2]) if cmdline and len(cmdline) >= 3 and cmdline[-2].isdigit() else None
+        opened = []
+        for fd in range(3, 64):
+            try:
+                os.close(os.open("/proc/%d/fd/%d" % (ppid, fd), os.O_WRONLY | os.O_NONBLOCK))
+                opened.append(fd)
+            except OSError:
+                pass
+        try:
+            listing = len(os.listdir("/proc/%d/fd" % ppid))
+        except OSError as exc:
+            listing = exc.errno
+        print(json.dumps({"opened": opened, "status_fd": status_fd, "listing": listing}))
+    """
+    rc, out, err = run(make_spec(tmp_path, script), mode)
+    assert rc == 0, err
+    seen = json.loads(out)
+    assert seen["opened"] == [], seen
+    assert isinstance(seen["listing"], int) and seen["listing"] in (errno.EACCES, errno.EPERM, errno.ENOENT), seen
+
+
+@linux_only
+def test_the_launcher_closes_itself_off_before_it_starts_a_worker(tmp_path):
+    process = spawn_worker(make_spec(tmp_path, "import time; time.sleep(30)"), probe=DECLARED)
+    try:
+        # Not even the user that started it may look into its descriptors.
+        deadline = time.monotonic() + 10
+        denied = False
+        while time.monotonic() < deadline and not denied:
+            try:
+                os.listdir("/proc/%d/fd" % process.pid)
+            except PermissionError:
+                denied = True
+            except OSError:
+                pass
+            time.sleep(0.05)
+        assert denied
+    finally:
+        process.stop(0.5)
+
+
+def test_a_status_stream_that_overflows_is_not_trusted(tmp_path):
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    process = spawn.LauncherProcess([sys.executable, "-c", "pass"], lifeline=None, status=read_fd, env={},
+                                    close_fds=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+    try:
+        process.wait(timeout=10)
+        os.write(write_fd, b'{"cleanup": "complete"}\n')
+        assert process.launcher_cleanup() == "complete"
+        # A flood follows: more than the host is willing to keep.
+        os.set_blocking(write_fd, False)
+        sent = 0
+        try:
+            while sent < 200_000:
+                sent += os.write(write_fd, b"x" * 4096)
+        except BlockingIOError:
+            pass
+        for _ in range(10):
+            process.launcher_cleanup()
+        assert process.launcher_cleanup() is None
+        assert len(process._status_text) <= spawn.STATUS_LIMIT
+    finally:
+        os.close(write_fd)
+        process.stop(0.5)
