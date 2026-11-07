@@ -37,10 +37,20 @@ export function isVisible(field: PluginField, values: PluginValues): boolean {
   return true;
 }
 
+// What the API treats as "not set": it drops these on save, so the field's default applies again. A toggle
+// is the one type that keeps them, because off is a value.
+const isUnset = (value: PluginValue | undefined) =>
+  value === null ||
+  value === undefined ||
+  value === "" ||
+  (Array.isArray(value) && value.length === 0);
+
 /**
- * The values with every unset field's default filled in, for display and conditions. A field emptied
- * to null is unset: the input shows its default and the API applies it, so a condition reads the
- * default too. The form's own values keep the null, which is what resets the field on save.
+ * The values with every unset field's default filled in, for display and conditions. It applies the
+ * rule the API applies on save: null, an empty string and an empty list are no value, so the default
+ * stands (and a toggle keeps its value, whatever it is). A condition therefore sees what the saved
+ * form will hold. The form's own values are not changed: they keep the empty entry, which is what
+ * resets the field on save.
  */
 export function withDefaults(
   fields: PluginField[],
@@ -52,8 +62,11 @@ export function withDefaults(
       out[field.key] = field.default;
     }
   }
+  const toggles = new Set(
+    fields.filter((field) => field.type === "toggle").map((f) => f.key),
+  );
   for (const [key, value] of Object.entries(values)) {
-    if (value !== null && value !== undefined) {
+    if (toggles.has(key) ? value !== undefined : !isUnset(value)) {
       out[key] = value;
     }
   }

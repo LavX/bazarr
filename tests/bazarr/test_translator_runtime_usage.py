@@ -516,12 +516,120 @@ def test_settling_in_a_new_month_applies_the_job_cap_before_the_budget_has_rolle
     assert result.job_cost == usd(5.0) and result.over_budget is True
 
 
+def test_an_old_month_refund_does_not_cancel_a_job_whose_allowance_was_already_trimmed(session, clock):
+    wide = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger = UsageLedger(session, clock=clock)
+    ledger.reserve_job_budget("job", wide)
+    assert _call(ledger, "job", "c1", 10.0, wide).admitted  # November: the whole budget is out on one call
+    clock.moment = datetime(2026, 12, 1)
+    lowered = CostLimits.from_dollars(month_cap=100.0, job_cap=1.0)
+    # The job asks again in December: the budget rolls and is held to the $1 cap.
+    assert ledger.reserve_job_budget("job", lowered).amount == 0
+    result = _settle(ledger, "job", "c1", 1.0, limits=lowered)
+    # It spent exactly the $1 it may spend: nothing to cancel, and nothing left to hold.
+    assert result.job_cost == usd(1.0) and result.over_budget is False
+    assert ledger.job_hold("job") == 0
+
+
+def test_an_old_month_settlement_that_really_overspends_still_asks_for_a_cancel(session, clock):
+    wide = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger = UsageLedger(session, clock=clock)
+    ledger.reserve_job_budget("job", wide)
+    assert _call(ledger, "job", "c1", 5.0, wide).admitted
+    clock.moment = datetime(2026, 12, 1)
+    ledger.roll_month(wide)
+    result = _settle(ledger, "job", "c1", 20.0, limits=wide)  # it cost four times what it reserved
+    assert result.job_cost == usd(20.0) and result.over_budget is True
+
+
 def test_a_budget_within_the_caps_is_left_alone(ledger):
     limits = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
     ledger.reserve_job_budget("job", limits)
     assert _call(ledger, "job", "c1", 4.0, limits).admitted
     assert ledger.job_hold("job") == usd(6.0)
     assert _settle(ledger, "job", "c1", 4.0, limits=limits).over_budget is False
+
+
+# ------------------------------------------------------------ invariants under random use
+
+MONTHS = ("2026-11", "2026-12")
+
+
+@pytest.mark.parametrize("seed", [*range(24), 324])  # 324 found a cancel after the job cap was lifted
+def test_random_use_over_two_months_and_two_jobs_keeps_the_ledger_invariants(session, clock, seed):
+    """Reserve, call, settle, change the caps, change the month, roll and release, in a seeded random order.
+
+    After every step: no hold is negative; a step never leaves a month further over its cap than it found
+    it (only a call that cost more than it reserved can spend beyond a cap); and a settlement asks for a
+    cancel only when the job's cost is over the job cap in force or the job really overspent a reservation.
+    """
+    import random
+
+    rng = random.Random(seed)
+    ledger = UsageLedger(session, clock=clock)
+    jobs = ("a", "b")
+    month_caps = (None, usd(4), usd(8), usd(20))
+    job_caps = (None, usd(1), usd(3), usd(6))
+    limits = CostLimits(month_cap=usd(8), job_cap=usd(6), translation_limit=2)
+    open_calls = []  # (job, call_id, worst case in micros)
+    overspent = set()
+    counter = 0
+    trace = []
+
+    def state():
+        """Each job's budget row (month, amount) and cost, for the failure message."""
+        def row(job):
+            budget = ledger._budget_row(job)
+            return None if budget is None else (budget.month, budget.budget_micros, budget.state)
+        return [(job, row(job), ledger.job_cost(job)) for job in jobs]
+
+    def committed():
+        return {month: ledger.month_committed(month) for month in MONTHS}
+
+    for step in range(36):
+        op = rng.choice(["budget", "call", "call", "settle", "settle", "caps", "month", "roll", "release"])
+        before = committed()
+        overspend_now = False
+        where = f"seed {seed} step {step} op {op} limits {limits}"
+        trace.append(f"{where} {state()}")
+        if op == "budget":
+            ledger.reserve_job_budget(rng.choice(jobs), limits)
+        elif op == "call":
+            job, counter = rng.choice(jobs), counter + 1
+            worst = rng.choice([0, usd(0.5), usd(1), usd(2), usd(5)])
+            result = ledger.reserve_call(job, f"c{counter}", worst_case_micros=worst, limits=limits)
+            if result.admitted:
+                open_calls.append((job, f"c{counter}", worst))
+                if worst and limits.job_cap is not None:
+                    assert ledger.job_cost(job) <= max(limits.job_cap, 0), where
+        elif op == "settle" and open_calls:
+            job, call_id, worst = open_calls.pop(rng.randrange(len(open_calls)))
+            actual = rng.choice([0, worst // 2, worst, worst, worst + usd(1)])
+            overspend_now = actual > worst
+            if overspend_now:
+                overspent.add(job)
+            use = limits if rng.random() < 0.7 else None
+            result = ledger.settle_call(job, call_id, input_tokens=1, output_tokens=1, actual_micros=actual,
+                                        limits=use)
+            if result.over_budget:
+                over_the_cap = use is not None and use.job_cap is not None and result.job_cost > use.job_cap
+                assert job in overspent or over_the_cap, f"cancelled for no reason {result} {job} {call_id} {worst} {actual}\n" + "\n".join(trace)
+        elif op == "caps":
+            limits = CostLimits(month_cap=rng.choice(month_caps), job_cap=rng.choice(job_caps),
+                                translation_limit=2)
+        elif op == "month":
+            clock.moment = datetime(2026, 12, 1)
+        elif op == "roll":
+            ledger.roll_month(limits)
+        elif op == "release":
+            ledger.release_stale([job for job in jobs if rng.random() < 0.5])
+        after = committed()
+        for month in MONTHS:
+            if limits.month_cap is not None and after[month] > limits.month_cap and not overspend_now:
+                assert after[month] <= before[month], f"{where}: {month} went from {before[month]} to {after[month]}"
+        for job in jobs:
+            hold = ledger.job_hold(job)
+            assert hold is None or hold >= 0, f"{where}: hold of {job} is {hold}"
 
 
 # ------------------------------------------------------------ lock order

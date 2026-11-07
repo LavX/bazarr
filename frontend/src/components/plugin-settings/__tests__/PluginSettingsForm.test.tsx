@@ -227,6 +227,48 @@ describe("plugin settings fields", () => {
     );
   });
 
+  it("hides and shows a dependent field as a controlling text field is typed and cleared", async () => {
+    const user = userEvent.setup();
+    const seen = vi.fn();
+    const fields: PluginField[] = [
+      { key: "mode", type: "text", label: "Mode", default: "auto" },
+      {
+        key: "extra",
+        type: "text",
+        label: "Extra",
+        required: true,
+        show_if: { key: "mode", equals: "auto" },
+      },
+    ];
+    customRender(<Harness fields={fields} onValues={seen} />);
+    const mode = screen.getByLabelText("Mode");
+    expect(screen.getByLabelText(/Extra/)).toBeVisible();
+    await user.clear(mode);
+    await user.type(mode, "m");
+    expect(screen.queryByLabelText(/Extra/)).not.toBeInTheDocument();
+    // Emptied, the box is "no value": the API applies the default "auto", so Extra applies again.
+    await user.clear(mode);
+    expect(screen.getByLabelText(/Extra/)).toBeVisible();
+    expect(seen).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: "" }),
+    );
+  });
+
+  it("applies the server's empty-value rules to every type when conditions are read", () => {
+    const fields: PluginField[] = [
+      { key: "name", type: "text", default: "d" },
+      { key: "tags", type: "list", default: ["x"] },
+      { key: "size", type: "integer", default: 5 },
+      { key: "flag", type: "toggle", default: true },
+    ];
+    expect(
+      withDefaults(fields, { name: "", tags: [], size: null, flag: false }),
+    ).toEqual({ name: "d", tags: ["x"], size: 5, flag: false });
+    expect(
+      withDefaults(fields, { name: "n", tags: ["t"], size: 0, flag: true }),
+    ).toEqual({ name: "n", tags: ["t"], size: 0, flag: true });
+  });
+
   it("stops typing at the declared length", async () => {
     const user = userEvent.setup();
     customRender(<Harness />);
