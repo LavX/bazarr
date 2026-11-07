@@ -587,3 +587,52 @@ def test_signalrcore_stop_wakes_long_reconnect_wait():
     finally:
         transport.stop()
         reconnect_thread.join(timeout=5)
+
+
+def _built_reconnection_handler():
+    connection = build_signalr_connection(
+        "http://example.invalid/signalr/messages?access_token=test",
+        {"User-Agent": "Bazarr-Test"},
+    )
+    return connection.kwargs["reconnection_handler"]
+
+
+def test_signalr_connection_builder_uses_bounded_reconnect_backoff():
+    handler = _built_reconnection_handler()
+
+    waits = [handler.next() for _ in range(8)]
+
+    assert waits == [5, 10, 15, 30, 30, 30, 30, 30]
+    handler.reset()
+    assert handler.next() == 5
+    assert handler.sleep_time == 30
+
+
+def test_signalrcore_reconnect_keeps_retrying_an_arr_that_stays_down_within_the_ceiling():
+    patch_signalrcore_stop()
+    transport = _make_reconnecting_transport()
+    transport.reconnection_handler = _built_reconnection_handler()
+    waits = []
+
+    class RecordingWakeup:
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            if len(waits) >= 6:
+                transport.manually_closing = True
+            return False
+
+        def set(self):
+            pass
+
+    transport._bazarr_retry_wakeup = RecordingWakeup()
+    transport.negotiate = MagicMock(side_effect=OSError("connection refused"))
+
+    try:
+        transport.handle_reconnect()
+    finally:
+        transport.stop()
+
+    # The first attempt fails inside handle_reconnect, then the deferred loop
+    # backs off: 5, 10, 15, then holds at 30 instead of waiting minutes.
+    assert waits == [5, 10, 15, 30, 30, 30]
+    assert transport.negotiate.call_count == 6

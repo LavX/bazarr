@@ -3,6 +3,36 @@ import threading
 import time
 
 
+# Seconds to wait before each reconnect attempt. The last value repeats, so an
+# arr that stays down is retried every 30s without hammering it, while one that
+# comes back is picked up within seconds.
+RECONNECT_INTERVALS = (5, 10, 15, 30)
+
+
+def _make_reconnection_handler(intervals=RECONNECT_INTERVALS):
+    from signalrcore.transport.reconnection import ReconnectionHandler
+
+    class BackoffReconnectionHandler(ReconnectionHandler):
+        """Bounded backoff that never gives up.
+
+        ``sleep_time`` is the ceiling. The reconnect loops use it as the longest
+        a new socket may take to finish its handshake before it is abandoned.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.intervals = tuple(intervals)
+            self.sleep_time = self.intervals[-1]
+
+        def next(self):
+            self.reconnecting = True
+            index = min(self.attempt_number, len(self.intervals) - 1)
+            self.attempt_number += 1
+            return self.intervals[index]
+
+    return BackoffReconnectionHandler()
+
+
 def _bazarr_retry_wakeup(self):
     return self.__dict__.setdefault("_bazarr_retry_wakeup", threading.Event())
 
@@ -176,7 +206,7 @@ def build_signalr_connection(url, headers):
     from signalrcore.hub_connection_builder import HubConnectionBuilder
     from signalrcore.protocol.json_hub_protocol import JsonHubProtocol
 
-    return HubConnectionBuilder() \
+    builder = HubConnectionBuilder() \
         .with_url(url,
                   options={
                       "verify_ssl": False,
@@ -186,6 +216,9 @@ def build_signalr_connection(url, headers):
         .with_automatic_reconnect({
             "type": "raw",
             "keep_alive_interval": 5,
-            "reconnect_interval": 180,
             "max_attempts": None
-        }).build()
+        })
+    # The stock raw handler waits one fixed interval between attempts, which
+    # left the feed down for minutes after the arr was back.
+    builder.reconnection_handler = _make_reconnection_handler()
+    return builder.build()
