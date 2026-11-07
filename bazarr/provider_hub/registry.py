@@ -200,6 +200,13 @@ class HubProxyProvider(Provider):
         return isinstance(video, cls.video_types)
 
     def _worker(self):
+        if self._stopping:
+            # Its worker is being or has been stopped for good: nothing on this
+            # proxy may start another. The caller asks the pool for the current
+            # instance.
+            from subliminal_patch.core import ProviderRetiredError
+
+            raise ProviderRetiredError(self.provider_name)
         if self.worker_client:
             return self.worker_client
         bundle_path = getattr(self.__class__, "bundle_path", None)
@@ -440,22 +447,31 @@ def _instance_environment(instance) -> str | None:
 
 
 def _wait_for_operations(instance) -> None:
-    """Block until every call admitted before the retirement has ended, within its own timeout."""
+    """Block until every call admitted before the retirement has ended.
+
+    There is no point at which it gives up: a call that outlives its expected
+    time is logged once and still waited for, because stopping the worker under
+    it, or releasing the environment it runs from, would cut a call that is still
+    legitimately working (a download is a search-queue wait, a download and an
+    archive selection in one operation).
+    """
     try:
         limit = float(instance._request_timeout()) + _HOST_TIMEOUT_MARGIN_SECONDS
     except Exception:
         limit = _MAX_WORKER_REQUEST_TIMEOUT + _HOST_TIMEOUT_MARGIN_SECONDS
     deadline = time.monotonic() + limit
+    warned = False
     with _PROXY_OPERATIONS_ENDED:
         while getattr(instance, "_active_operations", 0) > 0:
             left = deadline - time.monotonic()
-            if left <= 0:
+            if left <= 0 and not warned:
+                warned = True
                 logger.warning(
-                    "Provider Hub: a replaced %s still has a call running after %.0fs; stopping its worker anyway",
+                    "Provider Hub: a replaced %s still has a call running after %.0fs; "
+                    "its worker and environment are kept until it ends",
                     getattr(instance, "provider_name", "?"), limit,
                 )
-                return
-            _PROXY_OPERATIONS_ENDED.wait(left)
+            _PROXY_OPERATIONS_ENDED.wait(None if warned else max(left, 0.0))
 
 
 def _drain_instance(instance, release) -> None:

@@ -633,6 +633,11 @@ class ProviderWorkerClient:
             # outside it, the sweep can acquire the lock after start() returns,
             # read the old timestamp, and kill the worker this request is
             # about to write to.
+            if getattr(self, "_closed", False) and op != "shutdown":
+                # Once stopped, a client starts nothing: a request that was
+                # already on its way (an archive member selection inside a
+                # download) fails instead of respawning the worker.
+                raise WorkerError("worker client is stopped")
             if op == "shutdown" and not (self.process is not None and self.process.poll() is None):
                 # Stopping a worker never starts one: a process that ended
                 # between the caller's check and this request has nothing left

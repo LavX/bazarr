@@ -986,3 +986,74 @@ def test_the_last_call_and_the_drain_stop_a_retired_worker_once(hub, hub_registr
     assert len(spawned) == 1
     assert spawned[0].poll() is not None
     assert env_registry.cleanup_environments(hub) == [str(old)]
+
+
+def test_an_archive_selection_after_the_drain_deadline_still_runs_on_the_live_worker(hub, hub_registry, monkeypatch):
+    import sys
+
+    from provider_hub import registry
+    from provider_hub.registry import retire_provider_instances
+    from provider_hub.worker import ProviderWorkerClient
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    state = load_state()
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    # The expected time of a call is almost nothing, so the deadline passes at once.
+    monkeypatch.setattr(registry, "_HOST_TIMEOUT_MARGIN_SECONDS", 0.05)
+    monkeypatch.setattr(stale, "_request_timeout", lambda: 0.05)
+    spawned = _counting_popen(monkeypatch)
+    # The old environment's interpreter is a real executable that speaks the worker protocol.
+    interpreter = old / "bin" / "python"
+    interpreter.write_text(f"#!{sys.executable}\n{WORKER_SCRIPT}", encoding="utf-8")
+    interpreter.chmod(0o755)
+    client = ProviderWorkerClient([str(interpreter)])
+    stale.worker_client = client
+
+    with stale._operation():
+        client.request("search", {}, timeout=10)
+        drains = retire_provider_instances("examplehub")
+        time.sleep(0.5)
+        # Past the deadline: the call is still running, so its worker and environment are untouched.
+        assert spawned[0].poll() is None
+        assert env_registry.cleanup_environments(hub) == []
+        # The archive selection of the same download still reaches the one live worker.
+        stale._worker().select_archive_member({"members": []}, timeout=10)
+        assert len(spawned) == 1
+    for drain in drains:
+        drain.join(15)
+
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
+    assert env_registry.cleanup_environments(hub) == [str(old)]
+
+
+def test_no_request_starts_a_worker_after_the_proxy_is_stopped(hub, hub_registry, monkeypatch):
+    import sys
+
+    from provider_hub.worker import ProviderWorkerClient, WorkerError
+    from subliminal_patch.core import ProviderRetiredError
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    spawned = _counting_popen(monkeypatch)
+    client = ProviderWorkerClient([sys.executable, "-c", WORKER_SCRIPT])
+    stale.worker_client = client
+    client.request("search", {}, timeout=10)
+    stale.retire()
+    stale._shutdown_worker()
+    assert spawned[0].poll() is not None
+
+    # The proxy refuses to hand its client out, and the client refuses an ungated request on its own.
+    with pytest.raises(ProviderRetiredError):
+        stale._worker()
+    with pytest.raises(WorkerError):
+        client.select_archive_member({"members": []}, timeout=2)
+    with pytest.raises(WorkerError):
+        client.request("search", {}, timeout=2)
+    assert len(spawned) == 1
