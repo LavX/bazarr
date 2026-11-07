@@ -1,0 +1,668 @@
+import io
+import json
+import os
+import struct
+import sys
+import textwrap
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from provider_hub.runtime import frames
+from provider_hub.runtime.errors import (
+    HandshakeError,
+    HeartbeatTimeout,
+    HostCallError,
+    ProtocolViolation,
+    RequestCancelled,
+    RequestFailed,
+    RequestTimeout,
+    ResultTooLarge,
+    SessionBusy,
+    SessionClosed,
+    WorkerExited,
+)
+from provider_hub.runtime.session import SessionLimits, WorkerSession
+from provider_hub.runtime.testing.fake_worker import fake_worker_command, fake_worker_env
+
+REPO = Path(__file__).parents[2]
+
+
+def fast_limits(**overrides):
+    values = dict(
+        handshake_timeout=10.0,
+        heartbeat_interval=0.1,
+        heartbeat_timeout=0.8,
+        cancel_grace=0.4,
+        kill_grace=3.0,
+        tick=0.02,
+    )
+    values.update(overrides)
+    return SessionLimits(**values)
+
+
+@pytest.fixture
+def make_session():
+    sessions = []
+
+    def make(config=None, **kwargs):
+        kwargs.setdefault("kind", "translator")
+        kwargs.setdefault("limits", fast_limits())
+        session = WorkerSession(fake_worker_command(), env=fake_worker_env(**(config or {})), **kwargs)
+        sessions.append(session)
+        return session
+
+    yield make
+    for session in sessions:
+        session.close(grace=1.0)
+
+
+@pytest.fixture
+def session(make_session):
+    started = make_session()
+    started.start()
+    return started
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A zombie still answers signal 0; the session reaps its own child, a
+    # forked grandchild is reparented and reaped by init.
+    try:
+        with open("/proc/%d/stat" % pid) as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def wait_until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+# --------------------------------------------------------------------- framing
+
+
+def roundtrip(*writes):
+    stream = io.BytesIO()
+    writer = frames.FrameWriter(stream)
+    for write in writes:
+        write(writer)
+    stream.seek(0)
+    return frames.FrameReader(stream)
+
+
+def test_control_and_data_frames_round_trip():
+    reader = roundtrip(
+        lambda w: w.write_control({"t": "hb", "seq": 1}),
+        lambda w: w.write_data(7, b"abcdef", chunk_size=4),
+    )
+    ftype, body = reader.read_frame()
+    assert ftype == frames.FRAME_CONTROL
+    assert frames.decode_control(body, "worker") == {"t": "hb", "seq": 1}
+    chunks = []
+    for _ in range(2):
+        ftype, body = reader.read_frame()
+        assert ftype == frames.FRAME_DATA
+        chunks.append(frames.split_data(body))
+    assert chunks == [(7, b"abcd"), (7, b"ef")]
+    assert reader.read_frame() is None
+
+
+def test_oversized_length_prefix_is_refused_before_the_body_is_read():
+    class Stream:
+        def __init__(self):
+            self.data = frames.HEADER.pack(frames.FRAME_CONTROL, 0x7FFFFFFF)
+            self.asked = []
+
+        def read(self, size):
+            self.asked.append(size)
+            chunk, self.data = self.data[:size], self.data[size:]
+            return chunk
+
+    stream = Stream()
+    with pytest.raises(frames.FrameTooLarge):
+        frames.FrameReader(stream).read_frame()
+    # Header only: never a read anywhere near the claimed length.
+    assert max(stream.asked) <= frames.HEADER.size
+
+
+def test_caps_are_per_type_and_handshake_cap_is_small():
+    big = b"x" * (frames.HANDSHAKE_CONTROL_BYTES + 1)
+    header = frames.HEADER.pack(frames.FRAME_CONTROL, len(big))
+    reader = frames.FrameReader(io.BytesIO(header + big), {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES})
+    with pytest.raises(frames.FrameTooLarge):
+        reader.read_frame()
+    data = frames.HEADER.pack(frames.FRAME_DATA, frames.MAX_DATA_BYTES + 1)
+    with pytest.raises(frames.FrameTooLarge):
+        frames.FrameReader(io.BytesIO(data)).read_frame()
+
+
+def test_unknown_type_truncation_and_legacy_first_byte():
+    with pytest.raises(frames.MalformedFrame) as unknown:
+        frames.FrameReader(io.BytesIO(b"\x09\x00\x00\x00\x00")).read_frame()
+    assert unknown.value.code == frames.Codes.PROTOCOL_ERROR
+    with pytest.raises(frames.MalformedFrame) as legacy:
+        frames.FrameReader(io.BytesIO(b'{"abi":"bazarr.provider-worker.v1"}\n')).read_frame()
+    assert legacy.value.code == frames.Codes.LEGACY_PROTOCOL
+    with pytest.raises(frames.MalformedFrame):
+        frames.FrameReader(io.BytesIO(frames.HEADER.pack(frames.FRAME_CONTROL, 10) + b"abc")).read_frame()
+
+
+def test_writer_refuses_a_message_over_the_cap():
+    writer = frames.FrameWriter(io.BytesIO(), {frames.FRAME_CONTROL: 32, frames.FRAME_DATA: 64})
+    with pytest.raises(frames.FrameTooLarge):
+        writer.write_control({"t": "hb", "seq": 1, "pad": "x" * 100})
+
+
+@pytest.mark.parametrize(
+    "message, sender",
+    [
+        ({"t": "req", "id": 1, "op": "x", "params": {}}, "worker"),  # wrong direction
+        ({"t": "res", "id": True, "ok": True}, "worker"),  # bool is not an id
+        ({"t": "res", "id": 1, "ok": False}, "worker"),  # failure without error
+        ({"t": "hb"}, "worker"),
+        ({"t": "nope"}, "worker"),
+        ({"t": "call", "cid": 1, "name": "reserve", "params": []}, "worker"),
+        ({"t": "ack", "cid": 1, "ok": False}, "host"),
+        ([], "host"),
+    ],
+)
+def test_validate_message_rejects_schema_breaks(message, sender):
+    with pytest.raises(frames.MalformedFrame):
+        frames.validate_message(message, sender)
+
+
+def test_validate_message_allows_unknown_extra_keys():
+    message = {"t": "hb", "seq": 3, "added_in_a_later_minor": 1}
+    assert frames.validate_message(message, "worker") is message
+
+
+def test_decode_control_rejects_bad_json():
+    with pytest.raises(frames.MalformedFrame):
+        frames.decode_control(b"{nope", "worker")
+
+
+def test_protocol_negotiation_picks_highest_shared_major_and_lower_minor():
+    assert frames.negotiate_protocol([{"major": 2, "minor": 5}]) == (2, 0)
+    assert frames.negotiate_protocol([{"major": 3, "minor": 0}, {"major": 2, "minor": 0}]) == (2, 0)
+    assert frames.negotiate_protocol([{"major": 3, "minor": 0}]) is None
+    assert frames.negotiate_protocol([{"major": 3, "minor": 1}, {"major": 2, "minor": 4}], {2: 9, 3: 0}) == (3, 0)
+    assert frames.negotiate_protocol([{"major": "2"}, "junk", {"major": True}]) is None
+
+
+def test_kind_negotiation_serves_an_older_major():
+    offered = [{"kind": "translator", "major": 1, "minor": 3}, {"kind": "ocr", "major": 2, "minor": 0}]
+    assert frames.negotiate_kind(offered, "translator", [(2, 0), (1, 1)]) == {
+        "kind": "translator", "major": 1, "minor": 1}
+    assert frames.negotiate_kind(offered, "translator", [(2, 0)]) is None
+    both = offered + [{"kind": "translator", "major": 2, "minor": 0}]
+    assert frames.negotiate_kind(both, "translator", [(2, 0), (1, 1)])["major"] == 2
+
+
+def test_wire_version_defaults_to_v1():
+    assert frames.wire_version(None) == 1
+    assert frames.wire_version(frames.V1_ABI) == 1
+    assert frames.wire_version(frames.V2_ABI) == 2
+    with pytest.raises(ValueError):
+        frames.wire_version("bazarr.worker-protocol.v9")
+
+
+# ------------------------------------------------------------------- handshake
+
+
+def test_handshake_settles_protocol_kind_and_limits(make_session):
+    session = make_session()
+    welcome = session.start()
+    assert welcome.protocol == (2, 0)
+    assert welcome.kind == {"kind": "translator", "major": 1, "minor": 0}
+    assert welcome.worker["name"] == "fake-worker"
+    assert welcome.pid == session.process.pid
+    assert session.alive
+
+
+def test_old_kind_major_is_served(make_session):
+    session = make_session(
+        {"kinds": [{"kind": "translator", "major": 1, "minor": 2}]},
+        kind_versions=((2, 0), (1, 5)),
+    )
+    assert session.start().kind == {"kind": "translator", "major": 1, "minor": 2}
+
+
+def test_newer_worker_minor_negotiates_down(make_session):
+    session = make_session({"protocols": [{"major": 2, "minor": 7}]})
+    assert session.start().protocol == (2, 0)
+
+
+def test_protocol_major_mismatch_is_refused_and_the_worker_ends(make_session):
+    session = make_session({"protocols": [{"major": 3, "minor": 0}]})
+    with pytest.raises(HandshakeError) as caught:
+        session.start()
+    assert caught.value.code == frames.Codes.VERSION_MISMATCH
+    assert wait_until(lambda: session.process.poll() is not None)
+
+
+def test_kind_mismatch_is_refused(make_session):
+    session = make_session({"kinds": [{"kind": "translator", "major": 3, "minor": 0}]})
+    with pytest.raises(HandshakeError) as caught:
+        session.start()
+    assert caught.value.code == frames.Codes.VERSION_MISMATCH
+
+
+def test_worker_that_never_speaks_fails_the_handshake_quickly(make_session):
+    session = make_session({"no_hello": True}, limits=fast_limits(handshake_timeout=0.4))
+    started = time.monotonic()
+    with pytest.raises(HandshakeError):
+        session.start()
+    assert time.monotonic() - started < 5
+    assert wait_until(lambda: session.process.poll() is not None)
+
+
+# ------------------------------------------------------------ v1 compatibility
+
+
+@pytest.fixture
+def v1_worker(tmp_path):
+    from provider_hub.worker import ProviderWorkerClient, worker_command
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "provider.py").write_text(
+        textwrap.dedent(
+            """
+            class Provider:
+                def search(self, video, languages, config):
+                    return [{"id": "c1", "video": video}]
+            """
+        ),
+        encoding="utf-8",
+    )
+    runner = REPO / "bazarr/provider_hub/worker_runner.py"
+    env = {
+        "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle),
+        "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps({"entry_module": "provider", "entry_class": "Provider"}),
+    }
+    client = ProviderWorkerClient(worker_command(sys.executable, runner), cwd=bundle, env=env)
+    yield client, runner, env
+    client.stop()
+
+
+def test_v1_provider_worker_still_speaks_the_line_protocol(v1_worker):
+    client, _runner, _env = v1_worker
+    assert client.request("health", {}).payload == {"initialized": True}
+    result = client.request("search", {"video": {"name": "a"}, "languages": [], "config": {}})
+    assert result.payload["candidates"][0]["id"] == "c1"
+
+
+def test_v1_runner_under_a_v2_session_fails_the_handshake_cleanly(v1_worker):
+    _client, runner, env = v1_worker
+    session = WorkerSession(
+        [sys.executable, "-I", "-B", str(runner)], env=env, limits=fast_limits(handshake_timeout=0.5))
+    try:
+        with pytest.raises(HandshakeError):
+            session.start()
+    finally:
+        session.close(grace=1.0)
+
+
+def test_a_worker_replying_in_v1_lines_is_named_as_legacy(tmp_path):
+    script = tmp_path / "legacy.py"
+    script.write_text(
+        'import sys, time\nsys.stdout.write(\'{"abi":"bazarr.provider-worker.v1"}\\n\')\n'
+        "sys.stdout.flush()\ntime.sleep(30)\n",
+        encoding="utf-8",
+    )
+    session = WorkerSession([sys.executable, "-B", str(script)], limits=fast_limits())
+    try:
+        with pytest.raises(HandshakeError) as caught:
+            session.start()
+        assert caught.value.code == frames.Codes.LEGACY_PROTOCOL
+    finally:
+        session.close(grace=1.0)
+
+
+def test_v1_module_surface_is_unchanged():
+    from provider_hub import WORKER_ABI_VERSION
+
+    assert WORKER_ABI_VERSION == frames.V1_ABI == "bazarr.provider-worker.v1"
+    runner = (REPO / "bazarr/provider_hub/worker_runner.py").read_text(encoding="utf-8")
+    assert "runtime" not in runner
+
+
+# ------------------------------------------------------ requests and routing
+
+
+def test_request_returns_the_result(session):
+    outcome = session.request("echo", {"a": 1}, timeout=10)
+    assert outcome.result["echo"] == {"a": 1}
+    assert outcome.data == b""
+    assert session.in_flight == 0
+
+
+def test_replies_route_to_their_own_request_id(session):
+    slow = session.submit("sleep", {"seconds": 0.6})
+    mid = session.submit("echo", {"which": "mid"})
+    fast = session.submit("echo", {"which": "fast"})
+    assert len({slow.id, mid.id, fast.id}) == 3
+    assert fast.wait(5).result["echo"] == {"which": "fast"}
+    assert mid.wait(5).result["echo"] == {"which": "mid"}
+    assert not slow.done()
+    assert slow.wait(5).result == {"slept": 0.6}
+
+
+def test_unknown_operation_is_a_coded_failure(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("nonsense", timeout=5)
+    assert caught.value.code == "unknown_op"
+    assert session.alive
+
+
+def test_plugin_exception_carries_class_and_traceback(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("raise", {"message": "kaboom"}, timeout=5)
+    assert caught.value.code == frames.Codes.PLUGIN_ERROR
+    assert caught.value.class_name == "ValueError"
+    assert "kaboom" in str(caught.value)
+    assert "ValueError" in caught.value.traceback
+
+
+def test_progress_messages_stream_to_the_callback(session):
+    seen = []
+    handle = session.submit("progress", {"steps": 4}, on_progress=seen.append)
+    handle.wait(5)
+    assert [m["message"] for m in seen] == ["step 1", "step 2", "step 3", "step 4"]
+    assert seen[-1]["fraction"] == 1.0
+
+
+def test_chunked_result_is_reassembled_and_checked(session):
+    outcome = session.request("chunks", {"size": 700_000}, timeout=10)
+    assert len(outcome.data) == 700_000
+    assert outcome.data[:16] == b"0123456789abcdef"
+    assert outcome.result == {"size": 700_000}
+
+
+def test_honest_worker_refuses_a_result_over_the_request_bound(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("chunks", {"size": 500_000}, max_result_bytes=100_000, timeout=10)
+    assert caught.value.code == frames.Codes.RESULT_TOO_LARGE
+    assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+def test_result_bound_by_the_request_is_enforced_and_the_session_survives(session):
+    with pytest.raises(ResultTooLarge):
+        session.request("chunks", {"size": 500_000, "overshoot": True}, max_result_bytes=100_000, timeout=10)
+    assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
+
+
+def test_in_flight_limit_refuses_without_sending(make_session):
+    session = make_session({"max_in_flight": 2})
+    session.start()
+    first = session.submit("sleep", {"seconds": 0.5})
+    second = session.submit("sleep", {"seconds": 0.5})
+    with pytest.raises(SessionBusy):
+        session.submit("echo")
+    first.wait(5)
+    second.wait(5)
+    assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+def test_secrets_reach_the_worker_and_are_scrubbed_from_stderr(make_session):
+    lines = []
+    session = make_session(on_stderr=lines.append)
+    session.start()
+    secret = "s3cr3t-token-value"
+    outcome = session.request("leak", secrets={"token": secret}, timeout=5)
+    assert outcome.result == {"leaked": 1}
+    assert wait_until(lambda: any("leaked" in line for line in lines))
+    assert not any(secret in line for line in lines)
+
+
+def test_stdout_noise_cannot_corrupt_frames(make_session):
+    lines = []
+    session = make_session(on_stderr=lines.append)
+    session.start()
+    assert session.request("spam", {"lines": 300}, timeout=10).result == {"spammed": True}
+    assert session.request("echo", timeout=5).result["echo"] == {}
+    assert session.alive
+    # print() and a raw write to fd 1 land on stderr, rate limited.
+    assert wait_until(lambda: any("stdout noise" in line for line in lines))
+
+
+# ------------------------------------------------------------------ host calls
+
+
+def test_worker_calls_are_answered_in_order_before_the_worker_continues(make_session):
+    log = []
+
+    def reserve(call):
+        log.append(("reserve", call.params, call.request_id))
+        return {"reservation": "r1"}
+
+    def checkpoint(call):
+        log.append(("checkpoint", call.params["done"]))
+        return {}
+
+    def usage(call):
+        log.append(("usage", call.params["units"]))
+        return None
+
+    session = make_session(host_calls={"reserve": reserve, "checkpoint": checkpoint, "usage": usage})
+    session.start()
+    handle = session.submit("translate", {"lines": ["a", "b", "c"], "target": "hu", "batch": 2}, timeout=10)
+    outcome = handle.wait(10)
+    assert outcome.result["lines"] == ["[hu] a", "[hu] b", "[hu] c"]
+    assert log == [
+        ("reserve", {"units": 3, "target": "hu"}, handle.id),
+        ("checkpoint", 2),
+        ("checkpoint", 3),
+        ("usage", 3),
+    ]
+
+
+def test_host_call_handler_error_becomes_a_coded_failure(make_session):
+    def reserve(call):
+        raise HostCallError("budget_exhausted", "month cap reached")
+
+    session = make_session(host_calls={"reserve": reserve})
+    session.start()
+    with pytest.raises(RequestFailed) as caught:
+        session.request("translate", {"lines": ["a"]}, timeout=10)
+    assert caught.value.code == "budget_exhausted"
+    assert session.alive
+
+
+def test_unknown_host_call_and_crashing_handler_are_acked_as_errors(make_session):
+    def boom(call):
+        raise RuntimeError("db is down")
+
+    session = make_session(host_calls={"boom": boom})
+    session.start()
+    with pytest.raises(RequestFailed) as unknown:
+        session.request("call", {"name": "missing"}, timeout=5)
+    assert unknown.value.code == frames.Codes.UNKNOWN_CALL
+    with pytest.raises(RequestFailed) as crashed:
+        session.request("call", {"name": "boom"}, timeout=5)
+    assert crashed.value.code == frames.Codes.HOST_CALL_FAILED
+    assert session.alive
+
+
+def test_host_call_registered_after_start_is_used(session):
+    session.register_host_call("lookup", lambda call: {"echo": call.params})
+    outcome = session.request("call", {"name": "lookup", "params": {"k": 1}}, timeout=5)
+    assert outcome.result["ack"] == {"echo": {"k": 1}}
+
+
+def test_failed_translation_reports_retry_hints(make_session):
+    session = make_session(host_calls={"reserve": lambda c: {}, "checkpoint": lambda c: {}, "usage": lambda c: {}})
+    session.start()
+    fail = {"code": "rate_limited", "message": "slow down", "retryable": True, "retry_after": 12}
+    with pytest.raises(RequestFailed) as caught:
+        session.request("translate", {"lines": ["a", "b"], "fail": fail}, timeout=10)
+    assert caught.value.code == "rate_limited"
+    assert caught.value.retryable is True
+    assert caught.value.retry_after == 12
+
+
+# ---------------------------------------------------------------------- cancel
+
+
+def test_mid_request_cancel_stops_the_operation_and_keeps_the_worker(session):
+    handle = session.submit("sleep", {"seconds": 30})
+    time.sleep(0.2)
+    started = time.monotonic()
+    handle.cancel("user")
+    with pytest.raises(RequestCancelled):
+        handle.wait(5)
+    assert time.monotonic() - started < 2
+    assert session.alive
+    assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+def test_cancel_reaches_a_request_while_another_runs(session):
+    keep = session.submit("sleep", {"seconds": 0.8})
+    drop = session.submit("sleep", {"seconds": 30})
+    drop.cancel()
+    with pytest.raises(RequestCancelled):
+        drop.wait(5)
+    assert keep.wait(5).result == {"slept": 0.8}
+
+
+def test_deadline_expiry_cancels_and_reports_a_timeout(session):
+    started = time.monotonic()
+    with pytest.raises(RequestTimeout):
+        session.request("sleep", {"seconds": 30}, timeout=0.3)
+    assert time.monotonic() - started < 3
+    assert session.alive
+
+
+def test_a_worker_that_ignores_cancel_is_killed_after_the_grace(session):
+    handle = session.submit("sleep", {"seconds": 30, "ignore_cancel": True})
+    time.sleep(0.2)
+    process = session.process
+    handle.cancel()
+    with pytest.raises(RequestCancelled):
+        handle.wait(5)
+    assert wait_until(lambda: process.poll() is not None)
+    assert not session.alive
+    with pytest.raises(SessionClosed):
+        session.submit("echo")
+
+
+def test_cancelling_a_finished_request_is_a_no_op(session):
+    handle = session.submit("echo")
+    handle.wait(5)
+    handle.cancel()
+    assert session.alive
+
+
+# ------------------------------------------------------------------- heartbeat
+
+
+def test_heartbeats_arrive_and_carry_memory(session):
+    assert wait_until(lambda: session.last_heartbeat is not None)
+    assert session.last_heartbeat["seq"] >= 1
+    assert session.rss_kb is None or session.rss_kb > 0
+
+
+def test_a_silent_worker_is_killed_when_the_heartbeat_deadline_passes(make_session):
+    session = make_session({"silent": True}, limits=fast_limits(heartbeat_timeout=0.5))
+    session.start()
+    handle = session.submit("sleep", {"seconds": 30})
+    process = session.process
+    with pytest.raises(HeartbeatTimeout):
+        handle.wait(5)
+    assert wait_until(lambda: process.poll() is not None)
+
+
+def test_a_busy_but_beating_worker_is_not_killed(session):
+    assert session.request("sleep", {"seconds": 1.5}, timeout=10).result == {"slept": 1.5}
+    assert session.alive
+
+
+# ---------------------------------------------------- failures and tear-down
+
+
+def test_oversized_frame_from_the_worker_kills_it(session):
+    process = session.process
+    with pytest.raises(ProtocolViolation) as caught:
+        session.request("oversize_frame", timeout=10)
+    assert caught.value.code == frames.Codes.FRAME_TOO_LARGE
+    assert wait_until(lambda: process.poll() is not None)
+
+
+def test_malformed_frame_from_the_worker_kills_it(session):
+    process = session.process
+    with pytest.raises(ProtocolViolation):
+        session.request("bad_frame", timeout=10)
+    assert wait_until(lambda: process.poll() is not None)
+
+
+def test_worker_exit_mid_request_fails_every_request_in_flight(session):
+    other = session.submit("sleep", {"seconds": 30})
+    with pytest.raises(WorkerExited) as caught:
+        session.request("exit", {"code": 7}, timeout=10)
+    assert caught.value.exit_code == 7
+    with pytest.raises(WorkerExited):
+        other.wait(5)
+
+
+def test_sandbox_blocked_is_reported_as_an_event_and_an_error(make_session):
+    events = []
+    session = make_session(on_event=lambda name, payload: events.append((name, payload)))
+    session.start()
+    with pytest.raises(RequestFailed) as caught:
+        session.request("blocked", {"target": "198.51.100.4:25"}, timeout=5)
+    assert caught.value.code == frames.Codes.SANDBOX_BLOCKED
+    assert wait_until(lambda: events)
+    name, payload = events[0]
+    assert name == "sandbox_blocked"
+    assert payload["target"] == "198.51.100.4:25"
+    assert payload["errno"] == 13
+
+
+def test_close_stops_the_worker_cleanly_and_ends_its_process_group(session):
+    child = session.request("fork", timeout=5).result["child"]
+    assert pid_alive(child)
+    process = session.process
+    session.close(grace=3.0)
+    assert process.poll() == 0
+    assert wait_until(lambda: not pid_alive(child))
+    session.close()  # idempotent
+
+
+def test_fatal_failure_kills_forked_children_in_the_same_group(session):
+    child = session.request("fork", timeout=5).result["child"]
+    with pytest.raises(WorkerExited):
+        session.request("exit", timeout=5)
+    assert wait_until(lambda: not pid_alive(child))
+
+
+def test_worker_exits_when_the_host_pipe_closes(session):
+    process = session.process
+    process.stdin.close()
+    assert wait_until(lambda: process.poll() is not None, timeout=8)
+
+
+def test_close_while_a_request_runs_fails_it(session):
+    handle = session.submit("sleep", {"seconds": 30})
+    time.sleep(0.2)
+    threading.Thread(target=session.close, kwargs={"grace": 2.0}, daemon=True).start()
+    with pytest.raises((SessionClosed, RequestCancelled)):
+        handle.wait(8)
+
+
+def test_fake_worker_settings_are_validated():
+    with pytest.raises(ValueError):
+        fake_worker_env(nonsense=1)
+    assert struct.calcsize(">BI") == frames.HEADER.size
