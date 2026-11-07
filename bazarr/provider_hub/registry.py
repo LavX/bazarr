@@ -437,6 +437,58 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
     return type(f"{manifest.provider_id.title().replace('_', '')}HubProvider", (HubProxyProvider,), attrs)
 
 
+# Providers an installation exists for but whose class could not be registered the
+# last time they were tried: a manifest or interpreter or bundle that was refused.
+# Startup must not read "not registered" as "gone" for these: their ids stay in
+# the provider lists and their settings stay where they are, until a repair or
+# an operator settles it.
+_REGISTRATION_INCOMPLETE: set[str] = set()
+_REGISTRATION_INCOMPLETE_LOCK = threading.Lock()
+
+
+def registration_incomplete() -> frozenset[str]:
+    with _REGISTRATION_INCOMPLETE_LOCK:
+        return frozenset(_REGISTRATION_INCOMPLETE)
+
+
+def _note_registration(provider_id: str, complete: bool) -> None:
+    with _REGISTRATION_INCOMPLETE_LOCK:
+        if complete:
+            _REGISTRATION_INCOMPLETE.discard(provider_id)
+        else:
+            _REGISTRATION_INCOMPLETE.add(provider_id)
+
+
+def settings_cleanup_plan(
+    existing_providers,
+    enabled_providers,
+    disabled_providers,
+    retired_provider_ids,
+    has_section,
+    incomplete=None,
+):
+    """What startup may drop from the settings, given what registered.
+
+    Returns ``(enabled, disabled, stale_sections)``. A provider whose
+    registration was refused (``incomplete``) keeps its id in both lists and its
+    settings section: a refusal can be temporary, and the section holds its
+    credentials. ``incomplete=None`` means the set could not be determined, which
+    drops nothing at all.
+    """
+    if incomplete is None:
+        return list(enabled_providers), list(disabled_providers), []
+    keep = set(existing_providers) | set(incomplete)
+    stale = sorted(
+        provider_id for provider_id in retired_provider_ids
+        if provider_id not in existing_providers and provider_id not in incomplete and has_section(provider_id)
+    )
+    return (
+        [item for item in enabled_providers if item in keep],
+        [item for item in disabled_providers if item in keep],
+        stale,
+    )
+
+
 def register_active_provider_classes(installations=None) -> list[str]:
     registered = []
     # Always treat migrated built-in ids as built-in for the shadow gate, even once a
@@ -473,6 +525,7 @@ def register_active_provider_classes(installations=None) -> list[str]:
             )
         except ManifestValidationError:
             logger.exception("Skipping invalid Provider Hub manifest for %s", provider_id)
+            _note_registration(provider_id, False)
             continue
 
         try:
@@ -483,6 +536,7 @@ def register_active_provider_classes(installations=None) -> list[str]:
             # than be left deleted (provider_registry.register overwrites in place, so
             # no explicit delete is needed on the success path).
             logger.exception("Skipping Provider Hub provider %s because its proxy class could not be built", provider_id)
+            _note_registration(provider_id, False)
             try:
                 # A path the hub did not build is something to repair, not to run.
                 from .env_registry import mark_needs_repair
@@ -492,6 +546,7 @@ def register_active_provider_classes(installations=None) -> list[str]:
                 logger.exception("Provider Hub: could not flag %s for repair", provider_id)
             continue
         provider_registry.register(manifest.provider_id, provider_cls)
+        _note_registration(provider_id, True)
         _REGISTERED_PROVIDER_HUB_IDS.add(manifest.provider_id)
         registered.append(manifest.provider_id)
 

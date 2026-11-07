@@ -188,9 +188,24 @@ except Exception:  # pragma: no cover - hub failures must not prevent startup
 existing_providers = provider_registry.names()
 enabled_providers = settings.general.enabled_providers
 disabled_providers = list(getattr(settings.general, 'disabled_providers', None) or [])
+# The providers whose installation exists but whose registration was refused. They
+# are not "gone": nothing below may drop their ids or their settings. When the set
+# cannot be read, nothing is dropped at all.
+try:
+    from provider_hub.registry import registration_incomplete, settings_cleanup_plan
+    registration_incomplete_ids = registration_incomplete()
+except Exception:  # pragma: no cover - hub failures must not prevent startup
+    provider_hub_registration_ok = False
+    logging.exception("Unable to read which Provider Hub providers failed to register")
 if provider_hub_registration_ok:
-    settings.general.enabled_providers = [x for x in enabled_providers if x in existing_providers]
-    settings.general.disabled_providers = [x for x in disabled_providers if x in existing_providers]
+    if registration_incomplete_ids:
+        logging.warning("Provider Hub providers kept in the settings, their registration was refused: %s",
+                        ", ".join(sorted(registration_incomplete_ids)))
+    from provider_hub.migration import RETIRED_BUILT_IN_PROVIDER_IDS
+    settings.general.enabled_providers, settings.general.disabled_providers, stale_provider_sections = \
+        settings_cleanup_plan(existing_providers, enabled_providers, disabled_providers,
+                              RETIRED_BUILT_IN_PROVIDER_IDS, lambda provider_id: hasattr(settings, provider_id),
+                              registration_incomplete_ids)
 
     # Drop the config section a retired built-in provider left behind.
     #
@@ -206,11 +221,6 @@ if provider_hub_registration_ok:
     # Skipped for any retired id a trusted catalog plugin has adopted: Provider
     # Hub reads that plugin's credentials out of exactly this section, and the
     # registration above is what puts the id back in existing_providers.
-    from provider_hub.migration import RETIRED_BUILT_IN_PROVIDER_IDS
-    stale_provider_sections = sorted(
-        provider_id for provider_id in RETIRED_BUILT_IN_PROVIDER_IDS
-        if provider_id not in existing_providers and hasattr(settings, provider_id)
-    )
     for stale_provider_section in stale_provider_sections:
         remove_settings_section(stale_provider_section)
     if stale_provider_sections:

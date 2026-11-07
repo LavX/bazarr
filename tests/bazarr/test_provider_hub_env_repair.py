@@ -330,6 +330,7 @@ def hub_registry():
     provider_registry.providers.update(before)
     registry._REGISTERED_PROVIDER_HUB_IDS.clear()
     registry._REGISTERED_PROVIDER_HUB_IDS.update(ids)
+    registry._REGISTRATION_INCOMPLETE.clear()
 
 
 def test_repair_replaces_the_cached_worker_and_keeps_the_old_environment_until_it_exits(
@@ -1804,3 +1805,60 @@ def test_a_restored_environment_does_not_clear_the_flag_of_a_bundle_that_fails_i
     env_registry.reconcile_environments(validate=validate, probe=lambda *args: None, verify_bundle=_verify_bundle_for_run)
     row = load_state()["installations"]["examplehub"]
     assert "needs_repair" not in row and row["last_error"] is None
+
+
+def test_a_refused_environment_keeps_its_id_and_settings_through_startup_and_repair_restores_it(
+    hub, tmp_path, monkeypatch, hub_registry
+):
+    from provider_hub import registry
+    from provider_hub.migration import RETIRED_BUILT_IN_PROVIDER_IDS
+    from provider_hub.registry import register_active_provider_classes, registration_incomplete, settings_cleanup_plan
+    from provider_hub.service import repair_installation_environment
+    from provider_hub.state import active_installations
+
+    provider_id = "subdivx"
+    assert provider_id in RETIRED_BUILT_IN_PROVIDER_IDS
+    registry._REGISTRATION_INCOMPLETE.clear()
+    bundle = hub / "bundles" / provider_id / "1.0.0" / "c"
+    bundle.mkdir(parents=True)
+    (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
+    # The configuration was restored onto a host whose interpreter path is not one of the hub's.
+    foreign = _env(tmp_path / "elsewhere" / "env")
+    manifest = _manifest(provider_id=provider_id, dependencies={"requirements": []})
+    row = _active_row(bundle, foreign / "bin" / "python")
+    row.update({"provider_id": provider_id, "active_path": str(bundle), "manifest": manifest, "trusted": True})
+    state = load_state()
+    state["installations"] = {provider_id: row}
+    save_state(state)
+    ran = []
+    monkeypatch.setattr("provider_hub.worker.subprocess.Popen", lambda *a, **k: ran.append(a))
+
+    # Boot: the refused interpreter is not run, the id is reported as incomplete, and the row is flagged.
+    assert register_active_provider_classes(active_installations()) == []
+    assert registration_incomplete() == {provider_id}
+    assert load_state()["installations"][provider_id]["needs_repair"] is True
+    assert ran == []
+    enabled, disabled, stale = settings_cleanup_plan(
+        hub_registry.names(), [provider_id, "gone_for_good"], [provider_id], RETIRED_BUILT_IN_PROVIDER_IDS,
+        lambda name: True, registration_incomplete(),
+    )
+    assert enabled == [provider_id] and disabled == [provider_id]
+    assert provider_id not in stale
+    # When the failure set cannot be determined, nothing is dropped at all.
+    assert settings_cleanup_plan(
+        hub_registry.names(), ["gone_for_good"], ["gone_for_good"], RETIRED_BUILT_IN_PROVIDER_IDS, lambda name: True, None
+    ) == (["gone_for_good"], ["gone_for_good"], [])
+    # A retired id that did register, or is simply gone, is still cleaned up as before.
+    assert settings_cleanup_plan(
+        hub_registry.names(), ["gone_for_good"], [], RETIRED_BUILT_IN_PROVIDER_IDS, lambda name: True, frozenset()
+    )[2] == sorted(RETIRED_BUILT_IN_PROVIDER_IDS - set(hub_registry.names()))
+
+    # Repair afterwards builds a new environment and the provider registers again.
+    _patch_environment(monkeypatch)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    repair_installation_environment(provider_id)
+
+    assert registration_incomplete() == frozenset()
+    assert provider_id in hub_registry.names()
+    assert "needs_repair" not in load_state()["installations"][provider_id]
+    registry._REGISTRATION_INCOMPLETE.clear()
