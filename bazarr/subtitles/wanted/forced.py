@@ -205,7 +205,6 @@ class _Run:
         self.video = video
         self.throttled_at_start = throttled_at_start
         self.outcomes = {}
-        self.discarded_before_download = set()
 
     def collect(self, result):
         if result.provider != EXCLUDED_PROVIDER:
@@ -259,14 +258,16 @@ class _Run:
     def download_holds(self, candidates):
         """Reasons the download left a candidate unattempted: a skipped download, or a provider lost since the listing.
 
-        A provider lost to a credential problem is not a reason to wait, as in the listing.
+        A provider counts as lost when the pool has it discarded at any point of the run, not only during this
+        language's download: one that failed for an earlier language would otherwise have its later candidates
+        skipped without a trace. A provider lost to a credential problem is not a reason to wait, as in the listing.
         """
         holds = []
         for subtitle in candidates:
             skip_reason = getattr(subtitle, 'skip_reason', None)
             if skip_reason and not self._credential_blocked(subtitle.provider_name):
                 holds.append(f'{subtitle.provider_name}:{skip_reason}')
-        lost = self.pool.discarded_providers - self.discarded_before_download
+        lost = set(self.pool.discarded_providers)
         for name in sorted({subtitle.provider_name for subtitle in candidates}):
             if name not in lost and not provider_is_throttled(name):
                 continue
@@ -510,7 +511,6 @@ def _run(episode, *, profile_id, media_type, job_id, cancel, fallback_allowed):
         # low minimum score cannot start a transcription: only the gated fallback below tries them.
         language_candidates = [subtitle for subtitle in served if subtitle.provider_name != WHISPER_PROVIDER]
         fallback_candidates = [subtitle for subtitle in served if subtitle.provider_name == WHISPER_PROVIDER]
-        run.discarded_before_download = set(pool.discarded_providers)
         download_options = dict(min_score=int(min_score),
                                 hearing_impaired=hearing_impaired_for(language),
                                 use_original_format=original_format in (1, "1", "True", True))

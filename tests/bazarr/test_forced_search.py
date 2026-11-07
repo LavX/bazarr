@@ -350,6 +350,33 @@ def test_a_provider_discarded_during_the_download_holds_the_request(run):
     assert 'alpha:lost_during_download' in result.languages[0].reason
 
 
+def test_a_provider_discarded_for_an_earlier_language_holds_the_later_one(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    run.items = [_profile_language('en'), _profile_language('hu')]
+    run.candidates = [_candidate('alpha', 'eng'), _candidate('alpha', 'hun'), _candidate('whisperai', 'hun')]
+    run.outcomes = [_result('alpha', 'success'), _result('beta')]
+    calls = []
+
+    def behaviour(pool, candidates, language):
+        calls.append(language)
+        if len(calls) == 1:
+            # Discarded while fetching the first language, with no backoff recorded.
+            pool.discarded_providers.add('alpha')
+        return []
+
+    run.pool.behaviour = behaviour
+    run.pool.fallback = lambda candidates, language: [_candidate('whisperai', 'hun')]
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'open', 'hu': 'open'}
+    assert 'alpha:lost_during_download' in result.languages[1].reason
+    assert run.pool.fallbacks == []
+    assert run.not_found == []
+    assert not result.complete
+
+
 def test_a_provider_throttled_during_the_download_holds_the_request(run):
     candidate = _candidate('alpha')
     run.candidates = [candidate]
