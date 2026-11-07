@@ -19,6 +19,20 @@ user keyring. So are the calls that change the scheduling of other processes
 them, and a worker could otherwise niceness-starve or pin its launcher or the
 host.
 
+The default is to allow, so every call that reaches state outside the worker's
+own process tree, or that outlives it, is listed here unless the kernel already
+refuses it. System V IPC (``shm*``, ``sem*``, ``msg*``) and POSIX message
+queues (``mq_*``) are denied: the IPC namespace is the host's, so a worker could
+attach to or create segments, semaphores and queues the host or another service
+uses, and they outlive the process. Also denied: ``perf_event_open``, ``bpf``,
+``userfaultfd``, ``inotify_init*`` and ``fanotify_init`` (per-user instance
+limits are shared with the host), ``process_vm_readv``/``process_vm_writev``,
+``kcmp``, ``open_by_handle_at``, ``syslog`` (the kernel log), ``lsm_set_self_attr``
+and the mount family (``mount``, ``umount2``, ``pivot_root``, ``chroot``,
+``move_mount``, ``open_tree``, ``fsopen``, ``fsconfig``, ``fsmount``, ``fspick``,
+``mount_setattr``). Landlock or the dropped capabilities already refuse most of
+these; the filter makes that independent of the kernel configuration.
+
 Two further rules: ``io_uring`` is denied outright (it can perform the same
 metadata operations from inside the ring), and resource limits are frozen:
 ``setrlimit`` is denied and ``prlimit64`` may only query (a NULL new limit).
@@ -67,7 +81,8 @@ _BPF_JEQ_K = 0x15
 _BPF_JSET_K = 0x45
 _BPF_RET_K = 0x06
 
-# Same on both architectures. io_uring can issue the same metadata operations
+# Same on both architectures (the mount calls and lsm_set_self_attr are in the
+# generic numbering from 428 up). io_uring can issue the same metadata operations
 # (IORING_OP_SETXATTR and friends) without going through the syscalls above.
 _COMMON = {
     "fchmodat2": 452,
@@ -76,6 +91,15 @@ _COMMON = {
     "io_uring_setup": 425,
     "io_uring_enter": 426,
     "io_uring_register": 427,
+    "open_tree": 428,
+    "move_mount": 429,
+    "fsopen": 430,
+    "fsconfig": 431,
+    "fsmount": 432,
+    "fspick": 433,
+    "process_madvise": 440,
+    "mount_setattr": 442,
+    "lsm_set_self_attr": 460,
 }
 
 # prlimit64 is allowed only as a query (new_limit is NULL). The launcher sets
@@ -127,6 +151,39 @@ DENIED_SYSCALLS = {
         "keyctl": 250,
         "ioprio_set": 251,
         "sched_setattr": 314,
+        "shmget": 29,
+        "shmat": 30,
+        "shmctl": 31,
+        "semget": 64,
+        "semop": 65,
+        "semctl": 66,
+        "shmdt": 67,
+        "msgget": 68,
+        "msgsnd": 69,
+        "msgrcv": 70,
+        "msgctl": 71,
+        "semtimedop": 220,
+        "mq_open": 240,
+        "mq_unlink": 241,
+        "mq_timedsend": 242,
+        "mq_timedreceive": 243,
+        "mq_notify": 244,
+        "mq_getsetattr": 245,
+        "perf_event_open": 298,
+        "bpf": 321,
+        "userfaultfd": 323,
+        "inotify_init": 253,
+        "inotify_init1": 294,
+        "fanotify_init": 300,
+        "process_vm_readv": 310,
+        "process_vm_writev": 311,
+        "kcmp": 312,
+        "open_by_handle_at": 304,
+        "syslog": 103,
+        "mount": 165,
+        "umount2": 166,
+        "pivot_root": 155,
+        "chroot": 161,
         **_COMMON,
     },
     # The generic table has no path-based chmod, chown or utime(s): libc maps
@@ -153,6 +210,38 @@ DENIED_SYSCALLS = {
         "request_key": 218,
         "keyctl": 219,
         "sched_setattr": 274,
+        "shmget": 194,
+        "shmctl": 195,
+        "shmat": 196,
+        "shmdt": 197,
+        "semget": 190,
+        "semctl": 191,
+        "semtimedop": 192,
+        "semop": 193,
+        "msgget": 186,
+        "msgctl": 187,
+        "msgrcv": 188,
+        "msgsnd": 189,
+        "mq_open": 180,
+        "mq_unlink": 181,
+        "mq_timedsend": 182,
+        "mq_timedreceive": 183,
+        "mq_notify": 184,
+        "mq_getsetattr": 185,
+        "perf_event_open": 241,
+        "bpf": 280,
+        "userfaultfd": 282,
+        "inotify_init1": 26,
+        "fanotify_init": 262,
+        "process_vm_readv": 270,
+        "process_vm_writev": 271,
+        "kcmp": 272,
+        "open_by_handle_at": 265,
+        "syslog": 116,
+        "mount": 40,
+        "umount2": 39,
+        "pivot_root": 41,
+        "chroot": 51,
         **_COMMON,
     },
 }

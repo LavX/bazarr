@@ -2143,6 +2143,75 @@ def test_a_worker_cannot_reach_host_keyrings_attributes_or_scheduling(mode, tmp_
         assert result[name] == "allowed", (name, result)
 
 
+SHARED_STATE_CALLS = (
+    "shmget", "shmat", "shmctl", "shmdt", "semget", "semop", "semtimedop", "semctl",
+    "msgget", "msgsnd", "msgrcv", "msgctl",
+    "mq_open", "mq_unlink", "mq_timedsend", "mq_timedreceive", "mq_notify", "mq_getsetattr",
+    "perf_event_open", "bpf", "userfaultfd", "inotify_init1", "fanotify_init",
+    "process_vm_readv", "process_vm_writev", "kcmp", "open_by_handle_at", "syslog", "lsm_set_self_attr",
+    "mount", "umount2", "pivot_root", "chroot", "move_mount", "open_tree", "fsopen", "fsconfig", "fsmount", "fspick",
+    "mount_setattr",
+)
+
+
+@pytest.mark.parametrize("arch", sorted(seccomp.DENIED_SYSCALLS))
+def test_system_v_ipc_posix_queues_and_other_shared_state_calls_are_denied(arch):
+    names = seccomp.DENIED_SYSCALLS[arch]
+    assert set(SHARED_STATE_CALLS) <= set(names)
+    program = seccomp.build_filter(arch)
+    for name in SHARED_STATE_CALLS:
+        assert run_bpf(program, arch, names[name]) == seccomp.SECCOMP_RET_ERRNO | errno.EPERM, name
+    # Numbers must match the kernel tables (checked against ausyscall for both arches).
+    expected = {
+        seccomp.AUDIT_ARCH_X86_64: {"shmget": 29, "shmat": 30, "shmctl": 31, "shmdt": 67, "semget": 64, "semop": 65, "semctl": 66,
+                                    "semtimedop": 220, "msgget": 68, "msgsnd": 69, "msgrcv": 70, "msgctl": 71, "mq_open": 240,
+                                    "mq_getsetattr": 245, "bpf": 321, "perf_event_open": 298},
+        seccomp.AUDIT_ARCH_AARCH64: {"shmget": 194, "shmat": 196, "shmctl": 195, "shmdt": 197, "semget": 190, "semop": 193, "semctl": 191,
+                                     "semtimedop": 192, "msgget": 186, "msgsnd": 189, "msgrcv": 188, "msgctl": 187, "mq_open": 180,
+                                     "mq_getsetattr": 185, "bpf": 280, "perf_event_open": 241},
+    }[arch]
+    for name, number in expected.items():
+        assert names[name] == number, name
+
+
+@linux_only
+@pytest.mark.skipif(not seccomp.supported(), reason="no metadata filter for this architecture")
+def test_a_worker_cannot_reach_system_v_ipc_posix_queues_or_kernel_state(mode, tmp_path):
+    arch = seccomp.native_audit_arch()
+    numbers = {name: seccomp.DENIED_SYSCALLS[arch][name] for name in SHARED_STATE_CALLS}
+    script = """
+        import ctypes, errno, json
+        libc = ctypes.CDLL(None, use_errno=True)
+        numbers = %r
+        out = {}
+        IPC_CREAT, IPC_RMID = 0o1000, 0
+        def call(name, *args):
+            ctypes.set_errno(0)
+            result = libc.syscall(numbers[name], *[ctypes.c_long(a) for a in args])
+            return result, ctypes.get_errno()
+        for name in numbers:
+            args = (0, 0, 0, 0, 0, 0)
+            if name == "syslog":
+                args = (3, 0, 0)
+            result, err = call(name, *args)
+            out[name] = errno.errorcode.get(err, err) if result < 0 else "allowed"
+            if result >= 0 and name in ("inotify_init1", "fanotify_init", "userfaultfd", "open_tree", "fsopen", "fspick"):
+                import os
+                os.close(result)
+        # Calls that would create something if they were allowed.
+        for name, args in (("shmget", (0, 4096, 0o600 | IPC_CREAT)), ("msgget", (0, 0o600 | IPC_CREAT)), ("semget", (0, 1, 0o600 | IPC_CREAT))):
+            result, err = call(name, *args)
+            out["create_" + name] = errno.errorcode.get(err, err) if result < 0 else "allowed"
+            if result >= 0:
+                call({"shmget": "shmctl", "msgget": "msgctl", "semget": "semctl"}[name], result, 0 if name != "semget" else 0, IPC_RMID if name != "semget" else IPC_RMID)
+        print(json.dumps(out))
+    """ % (numbers,)
+    rc, out, err = run(make_spec(tmp_path, script), mode)
+    assert rc == 0, err
+    result = json.loads(out)
+    assert set(result.values()) == {"EPERM"}, result
+
+
 @linux_only
 def test_landlock_keeps_a_worker_from_tracing_or_reading_its_launcher(live, tmp_path):
     script = """

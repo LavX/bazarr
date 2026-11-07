@@ -22,7 +22,8 @@ What happens, in order:
    file-size limits, nice, ``oom_score_adj``, umask, ``no_new_privs``, a
    every Linux capability dropped (see ``capabilities.py``), a seccomp filter
    that denies chmod, chown, utime and xattr calls, file attribute ioctls,
-   keyrings and changes to the scheduling of other processes (see
+   keyrings, System V IPC, POSIX message queues, kernel-level introspection
+   and the mount family, and changes to the scheduling of other processes (see
    ``seccomp.py``), changes to the working directory, applies the ruleset and
    ``execve``s the worker
    interpreter with exactly the environment in the spec.
