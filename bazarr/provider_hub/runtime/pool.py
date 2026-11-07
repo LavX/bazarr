@@ -97,7 +97,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from ..sandbox import SandboxApplyError, SandboxRefused, spawn_worker
+from ..sandbox import LauncherProcess, SandboxApplyError, SandboxRefused, spawn_worker
 from .errors import HandshakeError, RequestError, SessionError
 from .frames import Codes, is_secrets
 from .session import HostCall, RequestHandle, RequestResult, SessionLimits, WorkerSession
@@ -803,6 +803,7 @@ class WorkerPool:
                 "max_resident": self._max_resident,
                 "resident": self._resident_count(),
                 "processes": self._process_count(),
+                "stuck": len(self._stuck),
                 "workers": workers,
             }
 
@@ -1607,12 +1608,15 @@ class WorkerPool:
         return process.pid
 
     def _confirmed_gone(self, slot) -> bool:
-        """Whether the worker's process is certainly gone.
+        """Whether the worker's process and everything it started are certainly gone.
 
         Never polls or signals: a leader the session or ``stop()`` has reaped
         reads as gone, one that is still unreaped does not, and a runtime with
-        no local process is gone once it says it is not alive. The pool holds on
-        to the worker's slot until this is true.
+        no local process is gone once it says it is not alive. A sandbox
+        launcher is more than its exit: it ends the worker's whole tree, and
+        only a launcher that left on its own without reporting a surviving
+        descendant says that worked (see ``_cleanup_confirmed``). The pool holds
+        on to the worker's slot until this is true.
         """
         session = slot.session
         if session is None:
@@ -1620,7 +1624,29 @@ class WorkerPool:
         process = session.process
         if process is None:
             return not session.alive
-        return process.returncode is not None
+        if process.returncode is None:
+            return False
+        return self._cleanup_confirmed(process)
+
+    @staticmethod
+    def _cleanup_confirmed(process) -> bool:
+        """A reaped launcher says its cleanup worked only if it exited by itself and reported no survivor.
+
+        The launcher exits non-zero after a failed cleanup (and says so over its
+        status pipe), and one that was killed from outside, as ``stop()`` does as
+        a last resort, never finished. Descendants that moved into new sessions
+        are out of reach of everything but that cleanup, so neither case may
+        release a worker's place in the pool.
+        """
+        if not isinstance(process, LauncherProcess):
+            return True
+        if process.returncode < 0:
+            return False
+        try:
+            failure = process.launcher_failure()
+        except Exception:
+            return False
+        return failure is None or "survived" not in failure.message
 
     def _end_process(self, slot, grace, again=False):
         """End a launcher or anchored worker's whole tree, once.
