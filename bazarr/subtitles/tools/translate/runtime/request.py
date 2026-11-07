@@ -56,9 +56,12 @@ _BAZARR_CODES: dict[str, tuple[str, str, str | None]] = {
     "por": ("pt-PT", "Portuguese (Portugal)", None),
     "ea": ("es-419", "Spanish (Latin America)", None),
     "spl": ("es-419", "Spanish (Latin America)", None),
+    # Engines take one Latin American Spanish, not a country, so es-MX and es-LA both go out as es-419. That
+    # follows how Bazarr treats "ea"; a profile that needs Mexican Spanish itself can name it by tag.
     "es-mx": ("es-419", "Spanish (Latin America)", None),
     "es-la": ("es-419", "Spanish (Latin America)", None),
-    # Montenegrin has no ISO 639-1 code; Bazarr lists it under the settings code "me".
+    # Montenegrin has no ISO 639-1 code; Bazarr lists it under the settings code "me". It goes out as the
+    # ISO 639-3 code "cnr", the only code the language has; an engine that lacks it will refuse the pair.
     "me": ("cnr", "Montenegrin", None),
     "cnr": ("cnr", "Montenegrin", None),
 }
@@ -85,7 +88,8 @@ _DEFAULT_SCRIPT = {
     **dict.fromkeys(("ar", "fa", "ur", "ps", "sd", "ug", "ckb", "ks"), "Arab"),
     **dict.fromkeys(("he", "yi"), "Hebr"),
     "dv": "Thaa", "syr": "Syrc",
-    **dict.fromkeys(("ru", "uk", "bg", "be", "sr", "mk", "kk", "ky", "tg", "mn", "tt", "ba", "ce", "cv", "os"),
+    # "sr" is left out on purpose: Serbian subtitles come in both scripts, so a bare "sr" states none.
+    **dict.fromkeys(("ru", "uk", "bg", "be", "mk", "kk", "ky", "tg", "mn", "tt", "ba", "ce", "cv", "os"),
                     "Cyrl"),
     "el": "Grek", "hy": "Armn", "ka": "Geor",
     **dict.fromkeys(("hi", "mr", "ne", "sa"), "Deva"),
@@ -94,6 +98,9 @@ _DEFAULT_SCRIPT = {
     "bo": "Tibt", "dz": "Tibt", "am": "Ethi", "ti": "Ethi", "ko": "Kore", "ja": "Jpan", "iu": "Cans",
     "chr": "Cher", "zh": "Hans",
 }
+
+# Regions where Chinese is written in Traditional script. The tag stays as given; only the script changes.
+_TRADITIONAL_REGIONS = frozenset({"TW", "HK", "MO"})
 
 _TAG = re.compile(r"^(?P<lang>[A-Za-z]{2,3})(?:-(?P<script>[A-Za-z]{4}))?(?:-(?P<region>[A-Za-z]{2}|[0-9]{3}))?$")
 
@@ -172,6 +179,8 @@ def normalize_language(code: str, name: str | None = None) -> LanguageSpec:
     region = match["region"].upper() if match["region"] else None
     tag = "-".join(part for part in (language, script, region) if part)
     effective_script = script or _DEFAULT_SCRIPT.get(language)
+    if language == "zh" and script is None and region in _TRADITIONAL_REGIONS:
+        effective_script = "Hant"
     return LanguageSpec(tag, name or _english_name(language), effective_script,
                         _is_rtl(language, effective_script), original)
 
