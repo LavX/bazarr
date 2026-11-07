@@ -182,7 +182,9 @@ const FieldRenderer: FunctionComponent<FieldRendererProps> = ({
           required={field.required}
           disabled={disabled}
           error={error}
-          onChange={(next) => set(typeof next === "number" ? next : undefined)}
+          // An emptied number goes out as null, which the API reads as "back to the default".
+          // Left undefined, JSON would drop the key and the stored override would stay.
+          onChange={(next) => set(typeof next === "number" ? next : null)}
         />
       );
     case "toggle":

@@ -93,6 +93,28 @@ describe("plugin settings fields", () => {
     expect(screen.queryByLabelText("Region")).not.toBeInTheDocument();
   });
 
+  it("sends null for an emptied number so the stored override is reset, not kept", async () => {
+    const user = userEvent.setup();
+    const seen = vi.fn();
+    customRender(
+      <Harness start={{ price_input_per_million: 40 }} onValues={seen} />,
+    );
+    const input = screen.getByLabelText("Input price");
+    await user.clear(input);
+    expect(seen).toHaveBeenLastCalledWith(
+      expect.objectContaining({ price_input_per_million: null }),
+    );
+    // JSON carries a null; it would have dropped an undefined.
+    expect(JSON.parse(JSON.stringify(seen.mock.lastCall?.[0]))).toHaveProperty(
+      "price_input_per_million",
+      null,
+    );
+    await user.type(input, "7");
+    expect(seen).toHaveBeenLastCalledWith(
+      expect.objectContaining({ price_input_per_million: 7 }),
+    );
+  });
+
   it("stops typing at the declared length", async () => {
     const user = userEvent.setup();
     customRender(<Harness />);
