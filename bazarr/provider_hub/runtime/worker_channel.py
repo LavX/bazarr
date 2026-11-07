@@ -105,8 +105,14 @@ class Operation:
         self.max_result_bytes = message.get("max_result_bytes")
         self.cancelled = threading.Event()
         self.cancel_reason = None
+        # Set once the handler has returned. The host forgets the request when
+        # it reads the reply, so anything a stray thread sends for it later is
+        # refused there; it is not sent at all.
+        self.finished = threading.Event()
 
     def progress(self, fraction=None, message=None, data=None):
+        if self.finished.is_set():
+            return
         payload = {"t": frames.PROGRESS, "id": self.id}
         if fraction is not None:
             payload["fraction"] = fraction
@@ -121,12 +127,17 @@ class Operation:
 
         While it waits, a cancel of this operation raises ``OperationCancelled``
         within a fraction of a second. Pass ``cancellable=False`` for a call
-        that must still go out after a cancel, such as settling usage.
+        that must still go out after a cancel, such as settling usage. Once the
+        handler has returned the request is over: the call fails at once.
         """
+        if self.finished.is_set():
+            raise HostCallFailed(Codes.INVALID_REQUEST, "the request has finished")
         return self._channel.call(name, params, request_id=self.id, timeout=timeout,
                                   cancelled=self.cancelled if cancellable else None)
 
     def sandbox_blocked(self, target, errno=None):
+        if self.finished.is_set():
+            return
         self._channel.sandbox_blocked(target, errno=errno, request_id=self.id)
 
     def check_cancelled(self):
@@ -407,6 +418,7 @@ class WorkerChannel:
 
     def _release(self, operation):
         """Free the operation's slot. It stays findable by a cancel until ``_forget``."""
+        operation.finished.set()
         with self._lock:
             if self._operations.pop(operation.id, None) is not None:
                 self._transmitting[operation.id] = operation

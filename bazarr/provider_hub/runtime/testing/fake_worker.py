@@ -188,6 +188,13 @@ def _handle(operation):
             operation._channel._send({"t": frames.RES, "id": operation.id, "ok": True, "result": {},
                                       "chunks": count, "bytes": total})
             return {}
+        if params.get("bad_sha"):
+            # Right byte and chunk counts, a checksum of other data.
+            count, total = operation._channel._writer.write_data(operation.id, pattern)
+            operation._channel._send({"t": frames.RES, "id": operation.id, "ok": True, "result": {},
+                                      "chunks": count, "bytes": total,
+                                      "sha256": hashlib.sha256(pattern + b"!").hexdigest()})
+            return {}
         if params.get("overshoot"):
             # A worker that sends more than the request allows.
             operation._channel._writer.write_data(operation.id, pattern)

@@ -996,6 +996,44 @@ def test_chunked_result_without_a_chunk_count_is_a_protocol_error(session):
     assert session.alive
 
 
+def test_chunked_result_with_the_right_counts_but_a_wrong_checksum_is_a_protocol_error(session):
+    with pytest.raises(ProtocolViolation) as caught:
+        session.request("chunks", {"size": 1000, "bad_sha": True}, timeout=5)
+    assert "checksum" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "reply, expected",
+    [
+        ('"bytes": 4, "chunks": 1', "declared 4 bytes"),
+        ('"bytes": 3, "chunks": 2', "declared 2 chunks"),
+        ('"chunks": 1', "without a byte count"),
+    ],
+)
+def test_result_data_that_disagrees_with_its_reply_is_a_protocol_error(tmp_path, reply, expected):
+    body = with_reader("""
+    rid = next_request()
+    out.write_data(rid, b"abc")
+    sha = __import__("hashlib").sha256(b"abc").hexdigest()
+    out.write_control({"t": "res", "id": rid, "ok": True, "result": {}, "sha256": sha, %s})
+    time.sleep(30)
+    """ % reply)
+    session = hostile_session(tmp_path, body)
+    try:
+        session.start()
+        with pytest.raises(ProtocolViolation) as caught:
+            session.submit("x").wait(8)
+    finally:
+        session.close(grace=0.3)
+    assert expected in str(caught.value)
+
+
+def test_a_data_frame_shorter_than_its_operation_id_is_malformed():
+    with pytest.raises(frames.MalformedFrame):
+        frames.split_data(b"\x00" * (frames.DATA_PREFIX.size - 1))
+    assert frames.split_data(frames.DATA_PREFIX.pack(7) + b"ab") == (7, b"ab")
+
+
 # -------------------------------------------------------- fake translator knobs
 
 
@@ -1857,6 +1895,61 @@ def test_a_queued_host_call_does_not_start_once_the_session_is_closed(make_sessi
         # Put it back so the fixture's close() runs the real shutdown path.
         session._closed = False
     assert ran == []
+
+
+def test_a_call_queued_behind_a_slow_one_is_refused_once_its_request_has_finished(tmp_path):
+    marker = tmp_path / "acks.json"
+    body = with_reader("""
+    rid = next_request()
+    out.write_control({"t": "call", "cid": 1, "id": rid, "name": "slow", "params": {}})
+    out.write_control({"t": "call", "cid": 2, "id": rid, "name": "checkpoint", "params": {}})
+    out.write_control({"t": "call", "cid": 3, "id": rid, "name": "checkpoint", "params": {}})
+    out.write_control({"t": "res", "id": rid, "ok": True, "result": {}})
+    acks = {}
+    while len(acks) < 3:
+        frame = inp.read_frame()
+        if frame is None:
+            sys.exit(0)
+        if frame[0] == frames.FRAME_CONTROL:
+            message = frames.decode_control(frame[1], "host")
+            if message["t"] == "ack":
+                acks[message["cid"]] = message
+    open(%r, "w").write(__import__("json").dumps(acks))
+    time.sleep(30)
+    """ % str(marker))
+    release = threading.Event()
+    started = threading.Event()
+    ran = []
+
+    def slow(call):
+        started.set()
+        release.wait(10)
+        return {"slow": True}
+
+    session = hostile_session(tmp_path, body)
+    session.register_host_call("slow", slow)
+    session.register_host_call("checkpoint", lambda call: ran.append(call.request_id) or {})
+    try:
+        session.start()
+        handle = session.submit("x")
+        assert started.wait(8)
+        # The terminal result arrives while the slow handler still runs.
+        assert handle.wait(8).result == {}
+        assert not ran
+        release.set()
+        assert wait_until(marker.exists, timeout=8)
+        acks = json.loads(marker.read_text())
+        assert acks["1"]["ok"] is True
+        for cid in ("2", "3"):
+            assert acks[cid]["ok"] is False
+            assert acks[cid]["error"]["code"] == frames.Codes.INVALID_REQUEST
+        assert ran == []
+        # Nothing stays counted against the cap and no queue is left behind.
+        assert wait_until(lambda: session._call_pending == 0 and not session._call_queues)
+        assert session.alive
+    finally:
+        release.set()
+        session.close(grace=0.3)
 
 
 # --------------------------------------------------- worker channel wake paths
@@ -2780,3 +2873,27 @@ def test_a_rejected_worker_receives_the_rejection_before_it_is_ended(tmp_path):
         assert message["t"] == frames.REJECT and message["code"] == frames.Codes.VERSION_MISMATCH
     finally:
         session.close(grace=0.3)
+
+
+def test_a_stray_thread_cannot_act_for_an_operation_that_has_returned():
+    leaked = []
+
+    def handler(operation):
+        leaked.append(operation)
+        return {}
+
+    harness = ChannelHarness(handler)
+    harness.start()
+    try:
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}})
+        assert wait_until(lambda: any(m["t"] == "res" for m in harness.messages))
+        operation = leaked[0]
+        operation.progress(message="late")
+        operation.sandbox_blocked("203.0.113.9:25")
+        with pytest.raises(worker_channel.HostCallFailed) as caught:
+            operation.call("checkpoint", {})
+        assert caught.value.code == frames.Codes.INVALID_REQUEST
+        time.sleep(0.3)
+        assert [m["t"] for m in harness.messages if m["t"] in ("progress", "call", "sandbox_blocked")] == []
+    finally:
+        harness.finish()

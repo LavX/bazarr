@@ -832,6 +832,17 @@ class WorkerSession:
                         clean = True
                         return
                     message = pending.popleft()
+                    # Judged under the lock, right before the handler would run: a
+                    # call queued behind a slow one may outlive its request, and
+                    # must not touch state that a retry of the request now owns.
+                    ended = key is not None and self._requests.get(key) is None
+                    if ended and not self._stop.is_set():
+                        self._call_pending = max(0, self._call_pending - 1)
+                if ended:
+                    self._send_quietly({"t": frames.ACK, "cid": message["cid"], "ok": False,
+                                        "error": frames.error_object(Codes.INVALID_REQUEST,
+                                                                     "call for a request that is not running")})
+                    continue
                 answer = self._answer_call(message)
                 # Counted until the handler is done: a handler that blocks keeps its
                 # slot, so a worker cannot stack blocked handler threads past the cap.
