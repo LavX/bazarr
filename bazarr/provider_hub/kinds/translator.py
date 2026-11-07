@@ -47,13 +47,21 @@ class TranslatorKind(Kind):
         return True
 
     def on_removed(self, plugin_id: str) -> bool:
+        """Let the engine pointers go of the plugin's instances. The instances themselves stay until the
+        removal is saved (``after_removed``), so a removal that fails part way loses no configuration."""
         try:
-            for notice in _store().remove_plugin(plugin_id).notices:
+            for notice in _store().release_plugin(plugin_id).notices:
                 logger.info("%s", notice.message)
         except Exception:
-            logger.exception("Could not remove the engine instances of translator %s", plugin_id)
+            logger.exception("Could not release the engine pointers of translator %s", plugin_id)
             return False
         return True
+
+    def after_removed(self, plugin_id: str) -> None:
+        try:
+            _store().delete_plugin_data(plugin_id)
+        except Exception:
+            logger.exception("Could not remove the engine instances of translator %s", plugin_id)
 
     def set_enabled(self, installation: dict[str, Any], enabled: bool) -> bool:
         installation["enabled"] = bool(enabled)

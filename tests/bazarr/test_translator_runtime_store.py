@@ -325,6 +325,35 @@ def test_uninstalling_a_plugin_removes_its_instances_and_resets_pointers(store, 
     assert pointers.get() == (None, None)
 
 
+@pytest.mark.parametrize("remove", ["instance", "plugin"])
+def test_a_removal_whose_pointer_write_fails_deletes_nothing(store, pointers, remove):
+    google = store.create_instance("google_translate")
+    store.add_connection(google.id, "openrouter", plugin_id="google_translate")
+    store.set_secret((INSTANCE, google.id), "token", KEY, destinations=frozenset())
+    store.set_engine(google.id)
+    pointers.writable = False  # config.yaml cannot be written
+    with pytest.raises(TranslatorStoreError):
+        if remove == "instance":
+            store.delete_instance(google.id)
+        else:
+            store.remove_plugin("google_translate")
+    pointers.writable = True
+    assert [row.id for row in store.list_instances("google_translate")] == [google.id]
+    assert len(store.list_connections(google.id)) == 1
+    assert "token" in store.secret_summary((INSTANCE, google.id), frozenset())
+    assert pointers.get() == (google.id, None)
+
+
+def test_releasing_a_plugin_resets_pointers_and_deletes_nothing_until_asked(store, pointers):
+    google = store.create_instance("google_translate")
+    store.set_engine(google.id)
+    change = store.release_plugin("google_translate")
+    assert {n.code for n in change.notices} == {"engine_reset"} and pointers.get() == (None, None)
+    assert [row.id for row in store.list_instances("google_translate")] == [google.id]
+    store.delete_plugin_data("google_translate")
+    assert store.list_instances("google_translate") == []
+
+
 def test_disabling_a_plugin_releases_the_pointers_but_keeps_its_instances(store, pointers):
     google = store.create_instance("google_translate")
     store.set_engine(google.id)

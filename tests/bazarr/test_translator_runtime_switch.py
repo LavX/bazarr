@@ -244,8 +244,11 @@ def test_kind_hooks_create_and_remove_the_engine_instance_and_reset_pointers(
 
     store.set_engine(instances[0].id)
     assert kind.on_removed("google_translate") is True
-    assert store.list_instances("google_translate") == []
+    # The pointers let go at once; the instance goes only once the removal has been saved.
     assert pointers.get() == (None, None)
+    assert len(store.list_instances("google_translate")) == 1
+    kind.after_removed("google_translate")
+    assert store.list_instances("google_translate") == []
 
 
 def test_kind_hooks_report_failure_instead_of_raising(monkeypatch, forget_translator_kind):
@@ -256,12 +259,14 @@ def test_kind_hooks_report_failure_instead_of_raising(monkeypatch, forget_transl
         raise RuntimeError("no tables")
 
     monkeypatch.setattr(store_module.TranslatorStore, "ensure_instance", broken)
-    monkeypatch.setattr(store_module.TranslatorStore, "remove_plugin", broken)
+    monkeypatch.setattr(store_module.TranslatorStore, "release_plugin", broken)
+    monkeypatch.setattr(store_module.TranslatorStore, "delete_plugin_data", broken)
     monkeypatch.setattr(store_module.TranslatorStore, "plugin_disabled", broken)
     monkeypatch.setitem(sys.modules, "app.database", SimpleNamespace(database=object()))
     kind = TranslatorKind()
     assert kind.on_installed("x") is False
     assert kind.on_removed("x") is False
+    kind.after_removed("x")  # logs, never raises: the removal is already saved
     assert kind.set_enabled({"provider_id": "x"}, False) is False
 
 

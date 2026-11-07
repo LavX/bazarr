@@ -412,11 +412,10 @@ class UsageLedger:
         the month has spent plus what jobs hold, so the hold shrinks by however far the month is over it
         (the other jobs' holds and the spending stay as they are). A budget already inside both is untouched.
         """
-        if row.month != month:
-            return
+        in_month = row.month == month
         if row.budget_micros is None:
             # A cap set after this job reserved with none: it holds a budget from now on.
-            if limits.month_cap is None and limits.job_cap is None:
+            if not in_month or (limits.month_cap is None and limits.job_cap is None):
                 return
             allowance, _status = self._allowance(row.job_id, limits, month, counted)
             budget = counted + (allowance or 0)
@@ -425,9 +424,11 @@ class UsageLedger:
             self._session.flush()
             return
         budget = row.budget_micros
+        # The job cap bounds the job's whole cost, whichever month its budget sits in.
         if limits.job_cap is not None:
             budget = min(budget, limits.job_cap)
-        if limits.month_cap is not None:
+        # The month cap bounds one month, so it applies to a budget that sits in that month.
+        if limits.month_cap is not None and in_month:
             stored_hold = max(0, row.budget_micros - counted)
             room = max(0, limits.month_cap - self._committed(month) + stored_hold)
             budget = min(budget, counted + min(max(0, budget - counted), room))

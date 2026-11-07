@@ -289,8 +289,17 @@ class TranslatorStore:
         return self.release_pointers({instance_id}, why="turned off")
 
     def delete_instance(self, instance_id: int) -> PointerChange:
-        """Remove an instance with its connections and every secret they own."""
+        """Remove an instance with its connections and every secret they own.
+
+        The pointers that named it are saved first. If that write fails nothing has been deleted, and if
+        the delete fails afterwards the only loss is a pointer that was reset anyway.
+        """
         self._require_instance(instance_id)
+        change = self.release_pointers({instance_id}, why="removed")
+        self._delete_instance_rows(instance_id)
+        return change
+
+    def _delete_instance_rows(self, instance_id: int) -> None:
         connection_ids = [row.id for row in self.list_connections(instance_id)]
         with write_transaction(self._session):
             for connection_id in connection_ids:
@@ -301,14 +310,22 @@ class TranslatorStore:
             self._session.execute(delete(TableTranslatorEngineInstance)
                                   .where(TableTranslatorEngineInstance.id == instance_id))
         self._session.expire_all()
-        return self.release_pointers({instance_id}, why="removed")
+
+    def release_plugin(self, plugin_id: str) -> PointerChange:
+        """The plugin is being uninstalled: the pointers that name one of its instances let go. Deletes nothing."""
+        ids = {instance.id for instance in self.list_instances(plugin_id)}
+        return self.release_pointers(ids, why="removed") if ids else PointerChange()
+
+    def delete_plugin_data(self, plugin_id: str) -> None:
+        """Delete every instance of the plugin with its connections and secrets. Call it once the removal is saved."""
+        for instance in self.list_instances(plugin_id):
+            self._delete_instance_rows(instance.id)
 
     def remove_plugin(self, plugin_id: str) -> PointerChange:
-        """The plugin was uninstalled: every instance of it goes, and the pointers that named one reset."""
-        merged = PointerChange()
-        for instance in self.list_instances(plugin_id):
-            merged.notices.extend(self.delete_instance(instance.id).notices)
-        return merged
+        """The plugin was uninstalled: the pointers that named an instance reset, then every instance goes."""
+        change = self.release_plugin(plugin_id)
+        self.delete_plugin_data(plugin_id)
+        return change
 
     def plugin_disabled(self, plugin_id: str) -> PointerChange:
         """The plugin was switched off. Its instances keep their own switches; the pointers let go of them."""

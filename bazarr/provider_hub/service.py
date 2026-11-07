@@ -3601,6 +3601,10 @@ def remove_installation(provider_id: str) -> bool:
             return False
         from . import runtime_status
         runtime_status.clear(provider_id)
+        try:
+            kind_hooks.after_removed(provider_id)
+        except Exception:
+            logging.getLogger(__name__).exception("Cleanup after the removal of %s failed", provider_id)
         if result == "removed_pending":
             job.update(message=f"Removed pending install of '{target_name}'")
             return True

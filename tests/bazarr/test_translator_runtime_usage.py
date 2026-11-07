@@ -506,6 +506,16 @@ def test_a_cap_set_after_an_uncapped_job_reserved_binds_it_when_it_asks_again_or
     assert _settle(ledger, "other", "c1", 4.0, limits=CostLimits.from_dollars(job_cap=2.0)).over_budget is True
 
 
+def test_settling_in_a_new_month_applies_the_job_cap_before_the_budget_has_rolled(ledger, clock):
+    wide = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger.reserve_job_budget("job", wide)
+    assert _call(ledger, "job", "c1", 5.0, wide).admitted
+    clock.moment = datetime(2026, 12, 1)  # the budget still sits in November: roll_month has not run
+    lowered = CostLimits.from_dollars(month_cap=100.0, job_cap=1.0)
+    result = _settle(ledger, "job", "c1", 5.0, limits=lowered)
+    assert result.job_cost == usd(5.0) and result.over_budget is True
+
+
 def test_a_budget_within_the_caps_is_left_alone(ledger):
     limits = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
     ledger.reserve_job_budget("job", limits)

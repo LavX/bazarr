@@ -58,6 +58,14 @@ class Kind:
         """This plugin was removed or its removal was staged. Same return rule."""
         return True
 
+    def after_removed(self, plugin_id: str) -> None:
+        """This plugin's removal has been saved. The place for cleanup that cannot be undone.
+
+        ``on_removed`` runs before the removal is saved and may be rolled back by a failure; anything
+        that deletes data belongs here instead. It cannot veto the removal, so it reports problems by
+        logging them.
+        """
+
     def set_enabled(self, installation: dict[str, Any], enabled: bool) -> bool:
         """Turn the plugin on or off. Same return rule."""
         installation["enabled"] = bool(enabled)
