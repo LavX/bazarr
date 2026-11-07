@@ -25,6 +25,8 @@ type Connected = {
   sandbox?: System.SandboxStatus;
 };
 
+const BAZARR_VERSION = "9.9.9-status-test";
+
 function statusWith({
   sonarr = false,
   radarr = false,
@@ -44,6 +46,9 @@ function statusWith({
     http.get("/api/system/status", () =>
       HttpResponse.json({
         data: {
+          // A value no other row shows, so a test can wait for the answer to
+          // land before it asserts that something is absent.
+          bazarr_version: BAZARR_VERSION,
           sonarr_version: sonarr ? "4.0.0" : "",
           radarr_version: radarr ? "5.0.0" : "",
           sportarr_version: sports ? "4.1.6" : "",
@@ -159,7 +164,7 @@ describe("System Status", () => {
     customRender(<SystemStatusView />);
 
     expect(
-      await screen.findByText("Bazarr Version", undefined, { timeout: 8000 }),
+      await screen.findByText(BAZARR_VERSION, undefined, { timeout: 8000 }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Sonarr Version")).toBeNull();
     expect(screen.queryByText("Radarr Version")).toBeNull();
@@ -311,7 +316,7 @@ describe("System Status", () => {
     customRender(<SystemStatusView />);
 
     expect(
-      await screen.findByText("Bazarr Version", undefined, { timeout: 8000 }),
+      await screen.findByText(BAZARR_VERSION, undefined, { timeout: 8000 }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Emby Version")).toBeNull();
     expect(screen.queryByText("Plex Version")).toBeNull();
@@ -401,7 +406,7 @@ describe("System Status", () => {
     customRender(<SystemStatusView />);
 
     expect(
-      await screen.findByText("Bazarr Version", undefined, { timeout: 8000 }),
+      await screen.findByText(BAZARR_VERSION, undefined, { timeout: 8000 }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Plugin Worker Sandbox")).toBeNull();
   });
@@ -415,7 +420,7 @@ describe("System Status", () => {
     customRender(<SystemStatusView />);
 
     expect(
-      await screen.findByText("Bazarr Version", undefined, { timeout: 8000 }),
+      await screen.findByText(BAZARR_VERSION, undefined, { timeout: 8000 }),
     ).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByText("Build")).toBeNull();
