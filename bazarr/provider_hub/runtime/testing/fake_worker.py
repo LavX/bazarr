@@ -31,7 +31,8 @@ Operations:
 ``oversize_frame`` writes a header that claims a huge control frame.
 ``bad_frame``      writes a control frame that is not valid JSON.
 ``fork``           starts a child that sleeps and returns its pid. It stays in
-                   the worker's process group unless ``detached`` is set.
+                   the worker's process group unless ``detached`` is set, and
+                   keeps the worker's output pipes with ``inherit``.
 ``leak``           writes the request's secret values to stderr.
 ``leak_error``     raises an exception whose message starts with the request's
                    secret, ``tail`` characters long after it. With ``part``
@@ -269,10 +270,13 @@ def _handle(operation):
         time.sleep(30)
         return {}
     if name == "fork":
+        # With ``inherit`` the child keeps the worker's stdout and stderr, which are
+        # the host's pipes: only its death lets the host's stderr reader finish.
+        quiet = {} if params.get("inherit") else {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         child = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(120)"],
             start_new_session=bool(params.get("detached")),
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, **quiet,
         )
         return {"child": child.pid}
     if name == "leak":

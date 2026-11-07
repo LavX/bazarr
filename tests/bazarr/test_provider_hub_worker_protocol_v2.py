@@ -2705,6 +2705,10 @@ def test_a_worker_reaped_by_someone_else_is_never_signalled(make_session, monkey
     session = make_session()
     session.start()
     process = session.process
+    # Hold the session's own reader back, so the outside reaper is the first to collect the worker.
+    go = threading.Event()
+    real_reap = session._reap_exit_code
+    session._reap_exit_code = lambda: go.wait(10) and real_reap()
     os.killpg(process.pid, signal.SIGKILL)
     if reaper == "popen":
         process.wait()
@@ -2714,6 +2718,7 @@ def test_a_worker_reaped_by_someone_else_is_never_signalled(make_session, monkey
         assert process.returncode is None
     calls = []
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    go.set()
     session.close(grace=0.5)
     session._kill_tree(process)
     session._fail(SessionClosed("again"), kill=True)
@@ -2725,10 +2730,11 @@ def test_a_worker_reaped_by_someone_else_is_never_signalled(make_session, monkey
 class _ReapingProcess:
     """A worker handle whose ``poll()`` collects the child, as ``Popen.poll`` does."""
 
-    pid = 4_000_001
     args = ["worker"]
 
     def __init__(self):
+        # A pid that exists (this process), so the fallback probe sees "maybe alive".
+        self.pid = os.getpid()
         self.returncode = None
         self.polled = 0
 
@@ -2763,6 +2769,39 @@ def test_the_group_is_signalled_before_any_poll_that_could_reap_the_leader(monke
     process.poll()
     session._kill_tree(process)
     assert len(calls) == 1
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+@pytest.mark.parametrize("ending", ["close", "worker-exits"])
+@pytest.mark.parametrize("how", ["no-waitid", "waitid-fails"])
+def test_a_surviving_descendant_is_killed_when_the_exit_is_found_without_waitid(make_session, monkeypatch, how, ending):
+    if how == "no-waitid":
+        monkeypatch.delattr(os, "waitid", raising=False)
+    else:
+        def failing(*args, **kwargs):
+            raise OSError(22, "invalid argument")
+
+        monkeypatch.setattr(os, "waitid", failing, raising=False)
+    session = make_session()
+    session.start()
+    process = session.process
+    child = session.request("fork", {"inherit": True}, timeout=5).result["child"]
+    assert pid_alive(child)
+    if ending == "close":
+        session.close(grace=2.0)
+    else:
+        # The worker dies by itself; its descendant outlives it.
+        with pytest.raises(WorkerExited):
+            session.request("exit", timeout=8)
+        session.close(grace=1.0)
+    # The leader stayed a zombie until the group was ended, so the group was ours to kill.
+    assert wait_until(lambda: not pid_alive(child), timeout=5)
+    assert process.returncode is not None
+    assert not session._group_lost
+    # Nothing is left blocked on the pipes the descendant held.
+    ours = list(session._threads)
+    assert ours
+    assert wait_until(lambda: not [t.name for t in ours if t.is_alive()]), [t.name for t in ours if t.is_alive()]
 
 
 def test_run_returns_and_its_threads_leave_while_a_write_is_blocked_on_a_full_pipe():

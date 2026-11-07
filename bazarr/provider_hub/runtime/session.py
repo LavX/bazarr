@@ -25,6 +25,7 @@ import queue
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -221,36 +222,52 @@ def _signal_group(process, sig):
 _RUNNING, _EXITED, _GONE = "running", "exited", "gone"
 
 
-def _probe(process, reap_ok=True):
+def _zombie_or_gone(pid):
+    """Without ``waitid``: ``running`` (maybe alive), ``exited`` (a zombie) or ``gone``, never reaping.
+
+    ``kill(pid, 0)`` succeeds on a zombie, so on Linux the state in
+    ``/proc/<pid>/stat`` says whether it is one. Elsewhere a zombie reads as
+    running: the caller then ends the group anyway at its deadline.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/%d/stat" % pid, "rb") as handle:
+                state = handle.read().rsplit(b")", 1)[1].split()[0]
+        except (OSError, IndexError):
+            state = None
+        if state in (b"Z", b"X"):
+            return _EXITED
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return _GONE
+    except OSError:
+        return _RUNNING
+    return _RUNNING
+
+
+def _probe(process):
     """What the worker is doing, without reaping it: ``running``, ``exited`` or ``gone``.
 
-    A reaped leader frees its pid, and with it the process group number: a
-    signal sent to that group afterwards could hit unrelated processes. So the
-    leader stays an unreaped zombie until its group has been dealt with, and
-    this looks at it with ``WNOWAIT`` instead of ``poll()``, which reaps.
-    ``gone`` means somebody else already collected it (``ECHILD``): the pid is
-    no longer ours.
-
-    Without ``WNOWAIT`` the only way to see an exit is ``poll()``, which reaps.
-    ``reap_ok=False`` (used before a signal) never does that: it reports
-    ``running``, meaning "not known to be gone", and the caller signals first.
+    Nothing may collect the leader until its group has been dealt with: a
+    zombie leader keeps its pid, and with it the group number, so signalling the
+    group before the reap is always safe and afterwards never. So this never
+    calls ``poll()``. It looks with ``waitid(WNOWAIT)``, or where that is
+    unavailable or fails, with the zombie check above. ``gone`` means somebody
+    else already collected the leader (``ECHILD``): the pid is no longer ours.
     """
     if process.returncode is not None:
         return _EXITED
     waitid = getattr(os, "waitid", None)
     flag = getattr(os, "WNOWAIT", None)
     if waitid is None or flag is None:
-        if not reap_ok:
-            return _RUNNING
-        return _EXITED if process.poll() is not None else _RUNNING
+        return _zombie_or_gone(process.pid)
     try:
         found = waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | flag)
     except ChildProcessError:
         return _GONE
     except OSError:
-        if not reap_ok:
-            return _RUNNING
-        return _EXITED if process.poll() is not None else _RUNNING
+        return _zombie_or_gone(process.pid)
     return _RUNNING if found is None else _EXITED
 
 
@@ -1046,7 +1063,7 @@ class WorkerSession:
         """
         if self._group_ended or self._group_lost or process.returncode is not None:
             return False
-        if _probe(process, reap_ok=False) == _GONE:
+        if _probe(process) == _GONE:
             self._group_lost = True
             return False
         # Whatever the probe did, a leader that is reaped now is not ours.
