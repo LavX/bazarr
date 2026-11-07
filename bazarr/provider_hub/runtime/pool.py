@@ -691,6 +691,7 @@ class WorkerPool:
         # Workers whose process could not be confirmed gone after a stop. They
         # keep counting toward the process cap, and the sweep ends them again.
         self._stuck: list = []
+        self._stuck_lock = threading.Lock()
         self._events: list[tuple[str, str, dict]] = []
         self._sampler: threading.Thread | None = None
         self._sampler_stop = threading.Event()
@@ -1722,6 +1723,15 @@ class WorkerPool:
 
     def _retry_stuck(self):
         """End again the workers that survived a stop, and release what they held once they are gone."""
+        # One pass at a time: two sweeps must not end the same process together.
+        if not self._stuck_lock.acquire(blocking=False):
+            return
+        try:
+            self._retry_stuck_locked()
+        finally:
+            self._stuck_lock.release()
+
+    def _retry_stuck_locked(self):
         with self._cond:
             items = list(self._stuck)
         for item in items:
@@ -1737,8 +1747,10 @@ class WorkerPool:
             if not gone:
                 continue
             with self._cond:
-                if item in self._stuck:
-                    self._stuck.remove(item)
+                # Whoever takes the item off the list is the one that releases what it held.
+                if item not in self._stuck:
+                    continue
+                self._stuck.remove(item)
                 if entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None:
                     self._set_state(entry, WorkerState.STOPPED, "stopped")
                 self._cond.notify_all()

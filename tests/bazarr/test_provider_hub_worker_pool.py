@@ -1343,3 +1343,41 @@ def test_a_draining_worker_that_fills_its_folder_is_killed(make_pool, tmp_path):
         slow.wait(10)
     assert killed.value.code == "folder_budget"
     assert wait_until(lambda: not pid_alive(first))
+
+
+def test_two_sweeps_release_a_stuck_one_off_permit_once(make_pool):
+    import threading
+
+    holder = []
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        holder.append(StubProcessRuntime())
+        return holder[-1]
+
+    pool = make_pool(fast_pool_limits(max_oneshot=1), use_clock=False)
+    pool.run_once(WorkerDefinition("draft", kind="daemon", runtime=factory), "echo")
+    assert len(pool._stuck) == 1
+    slot, entry, _release = pool._stuck[0]
+    released = []
+    pool._stuck[0] = (slot, entry, lambda: released.append(1))
+    holder[0].process.returncode = 0
+    # Both passes must have seen the process gone before either removes the item.
+    meeting = threading.Barrier(2)
+    real = pool._confirmed_gone
+
+    def meet(target):
+        answer = real(target)
+        try:
+            meeting.wait(timeout=1.0)
+        except threading.BrokenBarrierError:
+            pass
+        return answer
+
+    pool._confirmed_gone = meet
+    workers = [threading.Thread(target=pool._retry_stuck) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+    assert released == [1]
+    assert pool._stuck == []
