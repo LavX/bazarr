@@ -699,11 +699,14 @@ class SZProviderPool(ProviderPool):
         updated = providers != self.providers or ban_list != self.ban_list
         removed_providers = set(self.providers) - provider_names
 
-        logger.debug("Discarded providers: %s | New providers: %s", self.discarded_providers, providers)
-        self.discarded_providers.difference_update(provider_names)
-        logger.debug("Updated discarded providers: %s", self.discarded_providers)
-
-        removed_providers.update(self.discarded_providers)
+        # One step under the lock every discard takes, and the walk is over a
+        # snapshot: a search thread discarding a provider meanwhile waits for it
+        # instead of changing the set under the iteration.
+        with self._store_lock:
+            logger.debug("Discarded providers: %s | New providers: %s", self.discarded_providers, providers)
+            self.discarded_providers.difference_update(provider_names)
+            logger.debug("Updated discarded providers: %s", self.discarded_providers)
+            removed_providers.update(tuple(self.discarded_providers))
 
         logger.debug("Removed providers: %s", removed_providers)
 
@@ -804,6 +807,11 @@ class SZProviderPool(ProviderPool):
             return attempt(self[name])
         except ProviderRetiredError as error:
             raise ProviderBusyError(f"{name} was being replaced") from error
+
+    def _discard_provider(self, name):
+        """Mark a provider as discarded for this pool, under the lock ``update`` walks the set under."""
+        with self._store_lock:
+            self.discarded_providers.add(name)
 
     def _build_lock(self, name):
         with self._store_lock:
@@ -1000,7 +1008,7 @@ class SZProviderPool(ProviderPool):
 
         def discard():
             if discard_on_failure:
-                self.discarded_providers.add(provider)
+                self._discard_provider(provider)
 
         logger.debug("Languages requested: %r", languages)
 
@@ -1200,7 +1208,7 @@ class SZProviderPool(ProviderPool):
 
             if provider_subtitles is None:
                 logger.info('Discarding provider %s', name)
-                self.discarded_providers.add(name)
+                self._discard_provider(name)
                 continue
 
             # add the subtitles
@@ -1311,7 +1319,7 @@ class SZProviderPool(ProviderPool):
 
             if provider_subtitles is None:
                 logger.info('Discarding provider %s', name)
-                self.discarded_providers.add(name)
+                self._discard_provider(name)
                 continue
 
             if not provider_subtitles:
@@ -1483,7 +1491,7 @@ class SZProviderPool(ProviderPool):
                                              operation="download", announce=False):
                         recorded = True
                         recorded_error = e
-                    self.discarded_providers.add(subtitle.provider_name)
+                    self._discard_provider(subtitle.provider_name)
                     return False
 
                 finally:
@@ -1492,7 +1500,7 @@ class SZProviderPool(ProviderPool):
                     _outcome_recorded(invoked[-1] if invoked else initialized_provider)
 
                 if tries == DOWNLOAD_TRIES:
-                    self.discarded_providers.add(subtitle.provider_name)
+                    self._discard_provider(subtitle.provider_name)
                     # The one line already says the provider is out of rotation,
                     # and the discard itself is unchanged, so this stays below
                     # the default filter.
@@ -1867,7 +1875,7 @@ class SZAsyncProviderPool(SZProviderPool):
                 # discard provider that failed
                 if provider_subtitles is None:
                     logger.info('Discarding provider %s', provider)
-                    self.discarded_providers.add(provider)
+                    self._discard_provider(provider)
                     continue
 
                 # add subtitles

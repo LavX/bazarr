@@ -1441,3 +1441,33 @@ def test_a_config_change_during_construction_replaces_the_instance_built_with_th
     # Nothing is left to rebuild: a repeat of the same update changes nothing.
     pool.provider_configs.update({"alpha": {"token": "new"}})
     assert pool.initialized_providers["alpha"] is stored
+
+
+def test_a_provider_discarded_from_another_thread_during_update_waits_for_the_walk(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": _FakeProvider, "beta": _FakeProvider})
+    pool = core.SZProviderPool(["alpha", "beta"], {})
+    seen = {}
+
+    class DiscardedDuringTheWalk(set):
+        """A set that is mutated by a search thread while update() walks it."""
+
+        def __iter__(self):
+            seen["walked_under_the_pool_lock"] = pool._store_lock._is_owned()
+            late = threading.Thread(target=lambda: pool._discard_provider("beta"))
+            late.start()
+            late.join(0.3)
+            seen["late_discard_waited"] = late.is_alive()
+            seen["late"] = late
+            return iter(list(set.__iter__(self)))
+
+    pool.discarded_providers = DiscardedDuringTheWalk({"alpha"})
+
+    # alpha stays enabled, so it leaves the discarded set; the walk is over what is left.
+    pool.update(["alpha", "beta"], {}, [], {"must_contain": [], "must_not_contain": []})
+    seen["late"].join(5)
+
+    assert seen == {"walked_under_the_pool_lock": True, "late_discard_waited": True, "late": seen["late"]}
+    # The late discard landed after the walk, so the next update removes beta.
+    assert "beta" in pool.discarded_providers
