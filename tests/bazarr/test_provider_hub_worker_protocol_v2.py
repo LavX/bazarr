@@ -2240,3 +2240,164 @@ def test_a_channel_whose_reader_thread_cannot_start_stops_its_heartbeat(monkeypa
     finally:
         monkeypatch.undo()
         harness.finish()
+
+
+# --------------------------------------- secret contract and bounded worker fields
+
+BAD_SECRETS = [
+    pytest.param({"pin": 123456}, id="number"),
+    pytest.param({"pin": True}, id="bool"),
+    pytest.param({"pin": {"inner": "sk-nested"}}, id="nested-object"),
+    pytest.param({"pin": ["sk-listed"]}, id="list"),
+    pytest.param({"pin": ""}, id="empty"),
+    pytest.param({"pin": None}, id="null"),
+    pytest.param({"pin": b"sk-bytes"}, id="bytes"),
+    pytest.param({1: "sk-numbered-name"}, id="non-text-name"),
+    pytest.param(["sk-in-a-list"], id="not-a-mapping"),
+    pytest.param("sk-bare-text", id="bare-text"),
+]
+
+
+@pytest.mark.parametrize("secrets", BAD_SECRETS)
+def test_submit_refuses_secrets_that_are_not_a_flat_text_mapping(session, secrets):
+    with pytest.raises(ValueError, match="secrets must be"):
+        session.submit("echo", secrets=secrets)
+    # Nothing was sent or registered: no slot is held and the worker is fine.
+    assert not session._requests and not session._secret_values
+    assert session.request("echo", {"a": 1}, timeout=5).result
+
+
+@pytest.mark.parametrize("secrets", BAD_SECRETS)
+def test_frame_validation_refuses_secrets_that_are_not_a_flat_text_mapping(secrets):
+    message = {"t": frames.REQ, "id": 1, "op": "x", "params": {}, "secrets": secrets}
+    # The worker validates what it reads from the host with this same call.
+    with pytest.raises(frames.MalformedFrame):
+        frames.validate_message(message, "host")
+
+
+def test_frame_validation_accepts_flat_text_secrets_and_none():
+    for secrets in ({}, {"a": "x", "b": "line1\nline2"}, None):
+        message = {"t": frames.REQ, "id": 1, "op": "x", "params": {}, "secrets": secrets}
+        assert frames.decode_control(json.dumps(message).encode(), "host")["secrets"] == secrets
+
+
+def test_a_secret_that_is_not_text_never_reaches_the_worker_unredacted(session):
+    with pytest.raises(ValueError):
+        session.submit("raw_error", secrets={"pin": 123456})
+    with pytest.raises(RequestFailed) as caught:
+        session.request("raw_error", secrets={"pin": "123456"}, timeout=5)
+    assert "123456" not in str(caught.value) and "123456" not in caught.value.traceback
+
+
+OVERSIZED_ERROR = """
+rid = next_request()
+big = "m" * 100000
+out.write_control({"t": "res", "id": rid, "ok": False, "error": {
+    "code": "plugin_error",
+    "message": "m" * (%(message)d - 8) + SECRET + big,
+    "class_name": "C" * 100000,
+    "traceback": big + SECRET + "t" * 100000,
+}})
+time.sleep(30)
+"""
+
+
+def test_a_raw_oversized_error_reply_is_cut_after_redaction(tmp_path):
+    secret = "sk-oversize-0123456789"
+    body = with_reader("SECRET = %r" % secret + OVERSIZED_ERROR % {"message": session_module._MESSAGE_LIMIT})
+    session = hostile_session(tmp_path, body)
+    try:
+        session.start()
+        with pytest.raises(RequestFailed) as caught:
+            session.submit("x", secrets={"key": secret}).wait(8)
+        error = caught.value
+        assert len(str(error)) <= session_module._MESSAGE_LIMIT
+        assert len(error.class_name) <= session_module._CLASS_NAME_LIMIT
+        assert len(error.traceback) <= session_module._TRACEBACK_LIMIT
+        for text in (str(error), error.class_name, error.traceback):
+            assert secret not in text and secret[:8] not in text and secret[-8:] not in text
+    finally:
+        session.close(grace=0.3)
+
+
+def test_a_secret_straddling_the_cut_is_replaced_whole(tmp_path):
+    secret = "sk-straddle-0123456789"
+    cut = session_module._MESSAGE_LIMIT
+    body = with_reader("""
+    SECRET = %r
+    rid = next_request()
+    out.write_control({"t": "res", "id": rid, "ok": False, "error": {
+        "code": "plugin_error", "message": "m" * (%d - 5) + SECRET + "tail"}})
+    time.sleep(30)
+    """ % (secret, cut))
+    session = hostile_session(tmp_path, body)
+    try:
+        session.start()
+        with pytest.raises(RequestFailed) as caught:
+            session.submit("x", secrets={"key": secret}).wait(8)
+        text = str(caught.value)
+        assert len(text) <= cut
+        assert "sk-str" not in text and "0123456789" not in text
+    finally:
+        session.close(grace=0.3)
+
+
+def test_progress_heartbeat_and_sandbox_fields_are_bounded(tmp_path):
+    body = with_reader("""
+    rid = next_request()
+    big = "p" * 200000
+    deep = "bottom"
+    for _ in range(40):
+        deep = [deep]
+    out.write_control({"t": "hb", "seq": 1, "extra": big, big[:50000]: "k",
+                       "many": list(range(5000))})
+    out.write_control({"t": "sandbox_blocked", "target": big, "id": rid})
+    out.write_control({"t": "progress", "id": rid, "message": big, "data": {"deep": deep,
+                       "items": {str(i): i for i in range(5000)}}})
+    out.write_control({"t": "res", "id": rid, "ok": True, "result": {}})
+    time.sleep(30)
+    """)
+    events, seen = [], []
+    session = hostile_session(tmp_path, body)
+    session._on_event = lambda name, payload: events.append((name, payload))
+    try:
+        session.start()
+        session.submit("x", on_progress=seen.append).wait(8)
+        assert wait_until(lambda: session.last_heartbeat is not None, timeout=5)
+        beat = session.last_heartbeat
+        assert len(beat["extra"]) <= session_module._FIELD_LIMIT
+        assert len(beat["many"]) <= session_module._ITEM_LIMIT
+        assert all(len(key) <= session_module._FIELD_LIMIT for key in beat)
+        blocked = [payload for name, payload in events if name == "sandbox_blocked"]
+        assert blocked and len(blocked[0]["target"]) <= session_module._FIELD_LIMIT
+        progress = seen[0]
+        assert len(progress["message"]) <= session_module._FIELD_LIMIT
+        assert len(progress["data"]["items"]) <= session_module._ITEM_LIMIT
+        node, levels = progress["data"]["deep"], 0
+        while isinstance(node, list):
+            node, levels = node[0], levels + 1
+        assert node is None and levels < 40
+    finally:
+        session.close(grace=0.3)
+
+
+def test_the_hello_description_is_bounded(tmp_path):
+    script = tmp_path / "bighello.py"
+    script.write_text(textwrap.dedent("""
+        import sys, time
+        sys.path.insert(0, %r)
+        import frames
+        out = frames.FrameWriter(sys.stdout.buffer)
+        inp = frames.FrameReader(sys.stdin.buffer)
+        out.write_control({"t": "hello", "protocols": [{"major": 2, "minor": 0}], "kinds": [],
+                           "worker": {"name": "w" * 20000, "list": list(range(2000))}})
+        inp.read_frame()
+        time.sleep(30)
+    """) % str(RUNTIME_DIR), encoding="utf-8")
+    session = WorkerSession([sys.executable, "-B", str(script)], limits=fast_limits(heartbeat_timeout=30.0))
+    try:
+        welcome = session.start()
+        assert len(welcome.worker["name"]) <= session_module._FIELD_LIMIT
+        assert len(welcome.worker["list"]) <= session_module._ITEM_LIMIT
+    finally:
+        session.close(grace=0.3)

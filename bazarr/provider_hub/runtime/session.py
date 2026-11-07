@@ -55,6 +55,17 @@ logger = logging.getLogger(__name__)
 _SIGKILL = getattr(signal, "SIGKILL", None)
 _SIGTERM = getattr(signal, "SIGTERM", None)
 _STDERR_LINE_LIMIT = 2000
+# What the host keeps of worker-supplied text, applied after redaction (the
+# same bounds the worker applies to its own error fields).
+_MESSAGE_LIMIT = 4096
+_TRACEBACK_LIMIT = 8000
+_CLASS_NAME_LIMIT = 200
+_CALL_NAME_LIMIT = 200
+# Bounds for worker-supplied JSON the host hands on (progress, heartbeat,
+# sandbox reports, the hello description).
+_FIELD_LIMIT = 4096
+_ITEM_LIMIT = 256
+_DEPTH_LIMIT = 8
 _CODE_SHAPE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 # Read this much of a line before scrubbing, so a secret that straddles the
 # 2000 character display cut is replaced whole first.
@@ -128,7 +139,7 @@ class _Request:
         self.deadline = deadline
         self.max_result_bytes = max_result_bytes
         self.on_progress = on_progress
-        self.secrets = [str(v) for v in (secrets or {}).values() if isinstance(v, str) and v]
+        self.secrets = list((secrets or {}).values())
         self.chunks: list[bytes] = []
         self.received = 0
         self.overflow = False
@@ -399,6 +410,8 @@ class WorkerSession:
             timeout = float(timeout)
             if not math.isfinite(timeout) or timeout < 0:
                 raise ValueError("timeout must be a finite number of seconds, not negative")
+        if secrets is not None and not frames.is_secrets(secrets):
+            raise ValueError("secrets must be a flat mapping of text names to non-empty text values")
         frames.pack_control({"t": frames.REQ, "id": 0, "op": op, "params": params or {},
                              "max_result_bytes": cap, "secrets": secrets or {}})
         with self._lock:
@@ -577,7 +590,7 @@ class WorkerSession:
         negotiated = Welcome(
             protocol=protocol,
             kind=kind,
-            worker=hello.get("worker") or {},
+            worker=self._redact_obj(hello.get("worker")) or {},
             max_in_flight=hello.get("max_in_flight") or self.limits.max_in_flight,
             pid=hello.get("pid"),
         )
@@ -704,8 +717,12 @@ class WorkerSession:
         return RequestResult(message.get("result") or {}, data), None, False
 
     def _failed(self, error, code, request):
-        def clean(value):
-            return self._redact(value) if isinstance(value, str) else None
+        # Scrub first, then cut: a secret that straddles the cut is replaced whole.
+        def clean(value, limit, tail=False):
+            if not isinstance(value, str):
+                return None
+            text = self._redact(value)
+            return text[-limit:] if tail else text[:limit]
 
         retry_after = self._redact_obj(error.get("retry_after"))
         if (not isinstance(retry_after, (int, float)) or isinstance(retry_after, bool)
@@ -713,12 +730,12 @@ class WorkerSession:
             retry_after = None
         errno = self._redact_obj(error.get("errno"))
         return RequestFailed(
-            clean(error.get("message")) or code,
+            clean(error.get("message"), _MESSAGE_LIMIT) or code,
             code=code,
             retryable=error.get("retryable") is True,
             retry_after=retry_after,
-            class_name=clean(error.get("class_name")),
-            traceback=clean(error.get("traceback")),
+            class_name=clean(error.get("class_name"), _CLASS_NAME_LIMIT),
+            traceback=clean(error.get("traceback"), _TRACEBACK_LIMIT, tail=True),
             errno=errno if isinstance(errno, int) and not isinstance(errno, bool) else None,
         )
 
@@ -1172,19 +1189,23 @@ class WorkerSession:
         code = self._redact(value)
         return code if _CODE_SHAPE.fullmatch(code) else Codes.PLUGIN_ERROR
 
-    def _redact_obj(self, value):
-        """A worker-supplied JSON value with every secret taken out.
+    def _redact_obj(self, value, depth=0):
+        """A worker-supplied JSON value with every secret taken out, then bounded.
 
-        Strings and keys are redacted. A number whose digits contain a secret
-        becomes ``None``: a worker can spell a numeric secret as an int.
+        Strings and keys are redacted, then cut to ``_FIELD_LIMIT``. A number
+        whose digits contain a secret becomes ``None``: a worker can spell a
+        numeric secret as an int. A container keeps its first ``_ITEM_LIMIT``
+        entries, and anything nested deeper than ``_DEPTH_LIMIT`` becomes ``None``.
         """
         if isinstance(value, str):
-            return self._redact(value)
-        if isinstance(value, list):
-            return [self._redact_obj(item) for item in value]
-        if isinstance(value, dict):
-            return {(self._redact(key) if isinstance(key, str) else key): self._redact_obj(item)
-                    for key, item in value.items()}
+            return self._redact(value)[:_FIELD_LIMIT]
+        if isinstance(value, (list, dict)):
+            if depth >= _DEPTH_LIMIT:
+                return None
+            if isinstance(value, list):
+                return [self._redact_obj(item, depth + 1) for item in value[:_ITEM_LIMIT]]
+            return {(self._redact(key)[:_FIELD_LIMIT] if isinstance(key, str) else key): self._redact_obj(item, depth + 1)
+                    for key, item in list(value.items())[:_ITEM_LIMIT]}
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             text = str(value)
             if any(secret in text for secret in self._secrets_snapshot()):

@@ -353,13 +353,11 @@ class WorkerChannel:
         return False
 
     def _remember_secrets(self, message):
-        secrets = message.get("secrets")
-        if not isinstance(secrets, dict):
-            return
+        # Frame validation has already held this to a flat name -> non-empty text map.
+        secrets = message.get("secrets") or {}
         with self._lock:
             for value in secrets.values():
-                if isinstance(value, str) and value:
-                    self._secret_values.update(_secret_parts(value))
+                self._secret_values.update(_secret_parts(value))
 
     def _start_operation(self, message):
         req_id = message["id"]

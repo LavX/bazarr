@@ -318,6 +318,17 @@ def _is_list(value):
     return isinstance(value, list)
 
 
+def is_secrets(value):
+    """A flat mapping of text names to non-empty text values.
+
+    The only shape a request may carry as ``secrets``: every value is
+    registered for redaction as text, so a number, a nested object, an empty
+    string or bytes would travel unredacted.
+    """
+    return isinstance(value, dict) and all(
+        isinstance(name, str) and isinstance(item, str) and item for name, item in value.items())
+
+
 def _opt(check):
     def wrapped(value):
         return value is None or check(value)
@@ -344,7 +355,7 @@ _REQUIRED = {
 _OPTIONAL = {
     HELLO: {"max_in_flight": _is_int, "worker": _is_dict, "pid": _is_int},
     WELCOME: {"kind": _opt(_is_dict)},
-    REQ: {"deadline_ms": _opt(_is_int), "max_result_bytes": _opt(_is_int), "secrets": _opt(_is_dict)},
+    REQ: {"deadline_ms": _opt(_is_int), "max_result_bytes": _opt(_is_int), "secrets": _opt(is_secrets)},
     CANCEL: {"reason": _opt(_is_str)},
     PROGRESS: {"fraction": _opt(_is_num), "message": _opt(_is_str), "data": _opt(_is_dict)},
     CALL: {"id": _opt(_is_int)},
