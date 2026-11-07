@@ -84,13 +84,36 @@ _TERMINATING = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 _STATUS_FD = None
 
 
+# A pipe write of at most PIPE_BUF bytes is atomic and never blocks on a pipe
+# that is not already full, so a failure record is kept below it: the child
+# writes its record and exits before anybody reads, and a record that did not
+# fit would leave it blocked in write() with the launcher waiting for its exit.
+_RECORD_LIMIT = getattr(select, "PIPE_BUF", 512)
+
+
+def _record(kind, message, newline=True):
+    """One failure record as ASCII JSON, at most ``_RECORD_LIMIT`` bytes in all.
+
+    The size is measured after JSON escaping (a non-ASCII character becomes six
+    bytes, so a character count says little), newline included.
+    """
+    kind = str(kind)[:32]
+    text = str(message)[:2000]
+    extra = 1 if newline else 0
+    while True:
+        data = json.dumps({"kind": kind, "message": text}).encode("ascii")
+        if len(data) + extra <= _RECORD_LIMIT:
+            return data + (b"\n" if newline else b"")
+        shrunk = len(text) * (_RECORD_LIMIT - extra - 2) // len(data)
+        text = text[: max(0, min(shrunk, len(text) - 1))]
+
+
 def _report(kind, message):
     """Tell the host why the worker could not be started."""
     if _STATUS_FD is None:
         return
-    line = json.dumps({"kind": kind, "message": str(message)[:2000]}) + "\n"
     try:
-        os.write(_STATUS_FD, line.encode("utf-8", "replace"))
+        os.write(_STATUS_FD, _record(kind, message))
     except OSError:
         pass
 
@@ -245,7 +268,7 @@ def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_
         }[kind] % exc
         _say(message)
         try:
-            os.write(report_fd, json.dumps({"kind": kind, "message": message[:2000]}).encode("utf-8", "replace"))
+            os.write(report_fd, _record(kind, message, newline=False))
         except OSError:
             pass
     os._exit(code)
@@ -292,41 +315,26 @@ def _children_map():
     return result
 
 
-def _descendants(root):
-    parents = _children_map()
-    found = []
-    frontier = [root]
-    while frontier:
-        current = frontier.pop()
-        for pid, ppid in parents.items():
-            if ppid == current and pid not in found:
-                found.append(pid)
-                frontier.append(pid)
-    return found
+def _own_children():
+    """Pids of the launcher's own children, the only processes it may signal.
 
+    The launcher is a subreaper: every descendant whose parent died becomes its
+    child, and ``waitpid`` is the proof of an empty tree. A child that is not
+    reaped yet (running or zombie) keeps its pid reserved, so a pid from this
+    list is safe to signal until the next ``waitpid``; a pid of a grandchild is
+    not, because its own parent may reap it and the kernel may hand the number
+    to an unrelated process at any moment. Callers therefore reap, list and
+    signal with no wait in between, and repeat: killing a child hands its
+    children to the launcher, so the next pass sees them.
 
-def _tree_pids(root):
-    """Every descendant of ``root`` that can be named, by every means available.
-
-    The /proc scan can miss processes (``hidepid``, an undumpable descendant)
-    or fail outright. For the launcher itself the children list is added to it,
-    and when the scan fails that list alone is used: the launcher is a
-    subreaper, so a descendant that lost its parent is a direct child. This
-    raises ``EnumerationError`` only when the scan failed and the children list
-    is not available either, which is the one case where nothing can be named.
+    Read from the kernel's children list; where there is none, from a /proc
+    scan by parent id. Raises ``EnumerationError`` when neither can be used.
     """
-    failure = None
-    try:
-        found = _descendants(root)
-    except EnumerationError as exc:
-        found, failure = [], exc
-    if root == os.getpid():
-        children = _direct_children()
-        if children is not None:
-            return list(dict.fromkeys([*found, *children]))
-    if failure is not None:
-        raise failure
-    return found
+    children = _direct_children()
+    if children is not None:
+        return children
+    me = os.getpid()
+    return [pid for pid, ppid in _children_map().items() if ppid == me]
 
 
 def _proc_mount_options(mountinfo):
@@ -424,7 +432,11 @@ def _tree_tracking_error():
 
 
 def _kill_own_children():
-    """SIGSTOP, then SIGKILL, every child the launcher has. False when the list is unavailable."""
+    """SIGSTOP, then SIGKILL, every child the launcher has. False when the list is unavailable.
+
+    One listing serves both signals with no wait in between, so every pid in it
+    is still an unreaped child of this process when it is signalled.
+    """
     children = _direct_children()
     if children is None:
         return False
@@ -498,57 +510,66 @@ def _emergency_kill(reason):
     os._exit(EXIT_SANDBOX_FAILED)
 
 
-def _freeze_descendants(root):
-    """SIGSTOP the tree until a scan finds nobody new; return the final list.
+def _reap_all(main_pid=None):
+    """Reap every exited child. Returns ``(main child's status or None, children remain)``.
 
-    A stopped process cannot fork, so a worker that forks while the launcher
-    scans is outrun after a few passes instead of being chased forever. The
-    caller kills what this returns. The scan is ``_tree_pids``: it survives a
-    /proc that hides or refuses processes.
+    The launcher is a subreaper, so "no children" (``ECHILD``) proves the whole
+    tree is gone, however much of it ``/proc`` hid.
     """
-    seen = []
-    for _ in range(10):
-        pids = _tree_pids(root)
-        fresh = [pid for pid in pids if pid not in seen]
-        for pid in fresh:
-            try:
-                os.kill(pid, signal.SIGSTOP)
-            except OSError:
-                pass
-        seen.extend(fresh)
-        if not fresh:
-            break
-    return seen
-
-
-def _kill_descendants(sig=signal.SIGKILL):
-    try:
-        pids = _freeze_descendants(os.getpid()) if sig == signal.SIGKILL else _tree_pids(os.getpid())
-        if sig == signal.SIGKILL:
-            # Anything that appeared after the last freeze pass dies here too.
-            pids = list(dict.fromkeys([*pids, *_tree_pids(os.getpid())]))
-    except EnumerationError as exc:
-        _emergency_kill(exc)
-        return
-    for pid in pids:
-        try:
-            os.kill(pid, sig)
-        except OSError:
-            pass
-
-
-def _reap(main_pid):
-    """Reap every exited child. Returns the main child's status or None."""
     status = None
     while True:
         try:
             pid, st = os.waitpid(-1, os.WNOHANG)
         except ChildProcessError:
-            return status
+            return status, False
         if pid == 0:
-            return status
+            return status, True
         if pid == main_pid:
             status = st
+
+
+def _reap(main_pid):
+    """Reap every exited child. Returns the main child's status or None."""
+    return _reap_all(main_pid)[0]
+
+
+def _kill_tree(main_pid=None):
+    """SIGKILL the launcher's children until it has none. Returns ``(status, gone)``.
+
+    ``status`` is the wait status of ``main_pid`` when this call reaped it.
+    Each pass reaps first, so every pid in the list that follows is a child
+    this process has not waited for; it is signalled before the next wait, so
+    the number cannot belong to anyone else. Killing a child makes the
+    launcher the parent of its children, which the next pass then kills. A
+    SIGKILL pending also stops a fork that is in progress. ``gone`` is False
+    when the ceiling passed first with a child alive.
+    """
+    status = None
+    previous = None
+    end = time.monotonic() + CLEANUP_SECONDS
+    while True:
+        reaped, left = _reap_all(main_pid)
+        if reaped is not None:
+            status = reaped
+        if not left:
+            return status, True
+        if time.monotonic() >= end:
+            return status, False
+        try:
+            pids = _own_children()
+        except EnumerationError as exc:
+            _emergency_kill(exc)
+            return status, False
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if pids == previous:
+            # Nothing changed since the last pass (a child that takes a moment
+            # to die): do not spin.
+            time.sleep(0.01)
+        previous = pids
 
 
 def _exit_code(status):
@@ -580,6 +601,8 @@ def _supervise(main_pid, wake_r, lifeline_fd, grace):
                 if any(b in _TERMINATING for b in data) and deadline is None:
                     deadline = time.monotonic() + grace
                     try:
+                        # main_pid is only reaped by the waits below, and the
+                        # loop ends the moment one of them reaps it.
                         os.kill(main_pid, signal.SIGTERM)
                     except OSError:
                         pass
@@ -591,18 +614,16 @@ def _supervise(main_pid, wake_r, lifeline_fd, grace):
                 if not data:
                     host_alive = False
                     poller.unregister(lifeline_fd)
-                    _kill_descendants()
-                    try:
-                        os.kill(main_pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-        status = _reap(main_pid)
+                    # The worker is one of the children, so it dies with the rest.
+                    reaped, _gone = _kill_tree(main_pid)
+                    if reaped is not None:
+                        status = reaped
+        if status is None:
+            status = _reap(main_pid)
         if status is None and deadline is not None and time.monotonic() >= deadline:
-            _kill_descendants()
-            try:
-                os.kill(main_pid, signal.SIGKILL)
-            except OSError:
-                pass
+            reaped, _gone = _kill_tree(main_pid)
+            if reaped is not None:
+                status = reaped
             deadline = time.monotonic() + 60
     return status
 
@@ -611,19 +632,8 @@ CLEANUP_SECONDS = 7.0
 
 
 def _children_remain():
-    """Reap exited children; True while any child of the launcher is alive.
-
-    The launcher is a subreaper, so an orphaned descendant becomes its child
-    and every descendant has an ancestor that is. "No children" (``ECHILD``)
-    therefore proves the tree is gone, however much of it ``/proc`` hid.
-    """
-    while True:
-        try:
-            pid, _status = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return False
-        if pid == 0:
-            return True
+    """Reap exited children; True while any child of the launcher is alive."""
+    return _reap_all()[1]
 
 
 def _cleanup_tree():
@@ -636,22 +646,7 @@ def _cleanup_tree():
     ``False``, and the caller reports it: a launcher that exits quietly over a
     live descendant would hide exactly the leak this loop exists to prevent.
     """
-    end = time.monotonic() + CLEANUP_SECONDS
-    while time.monotonic() < end:
-        try:
-            left = _tree_pids(os.getpid())
-        except EnumerationError as exc:
-            _emergency_kill(exc)
-            return False
-        if not _children_remain() and not left:
-            return True
-        _kill_descendants()
-        time.sleep(0.02)
-    try:
-        return not _tree_pids(os.getpid()) and not _children_remain()
-    except EnumerationError as exc:
-        _emergency_kill(exc)
-        return False
+    return _kill_tree()[1]
 
 
 def _forward_child_report(report_r):
@@ -713,15 +708,27 @@ def main(argv):
         _report("sandbox", unsafe)
         return EXIT_SANDBOX_FAILED
 
-    wake_r, wake_w = os.pipe()
+    # Close-on-exec by default (os.pipe): the report's write end vanishes on a
+    # good execve. A table with no room left for them is a sandbox failure the
+    # host hears about, not a traceback, and nothing opened so far is leaked.
+    opened = []
+    try:
+        wake_r, wake_w = os.pipe()
+        opened += [wake_r, wake_w]
+        report_r, report_w = os.pipe()
+        opened += [report_r, report_w]
+    except OSError as exc:
+        for fd in opened:
+            os.close(fd)
+        _say("launcher could not create its pipes: %s" % exc)
+        _report("sandbox", "launcher could not create its pipes: %s" % exc)
+        return EXIT_SANDBOX_FAILED
     os.set_blocking(wake_r, False)
     os.set_blocking(wake_w, False)
     signal.set_wakeup_fd(wake_w, warn_on_full_buffer=False)
     for sig in (*_TERMINATING, signal.SIGCHLD):
         signal.signal(sig, lambda _s, _f: None)
 
-    # Close-on-exec by default (os.pipe): the write end vanishes on a good execve.
-    report_r, report_w = os.pipe()
     parent_pid = os.getpid()
     # One thread here, so this fork is safe. The host never forks itself.
     pid = os.fork()
@@ -736,12 +743,9 @@ def main(argv):
             _report("sandbox", "a descendant of the worker survived the launcher's cleanup")
             return EXIT_SANDBOX_FAILED
     except BaseException:
+        # No signal by the worker's pid here: it may be reaped already. It is
+        # one of the children, so the cleanup reaches it when it is not.
         try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-        try:
-            _kill_descendants()
             survived = not _cleanup_tree()
         except Exception:
             survived = True

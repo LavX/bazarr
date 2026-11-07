@@ -118,15 +118,47 @@ def run(spec, probe, timeout=30, **kwargs):
 
 
 def alive(pid):
+    """True while the process runs (a zombie does not count). Works without /proc."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
     try:
         with open("/proc/%d/stat" % pid) as handle:
             return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        if os.path.isdir("/proc/self"):
+            return False  # /proc exists and the process is gone
     except OSError:
-        return False
+        pass
+    # No /proc (macOS): ask ps for the state.
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def wait_exited_unreaped(process, seconds=10.0):
+    """Wait for the child to exit without letting the process object reap it."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+            assert process.returncode is None
+            return
+        time.sleep(0.05)
+    raise AssertionError("the process did not exit")
+
+
+def kill_leftover_sleepers(pids):
+    """Kill detached sleepers a test left on purpose. Only a pid still running a 300 s sleeper dies."""
+    for pid in pids:
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as handle:
+                command = handle.read()
+            if b"sleep(300)" in command:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def wait_dead(pid, seconds=5.0):
@@ -2094,6 +2126,7 @@ def test_the_fallback_stop_kills_children_of_a_worker_that_exits_on_sigterm(tmp_
     assert wait_dead(child), "a child outlived a worker that left promptly"
 
 
+@linux_only
 def test_the_fallback_stop_kills_children_of_a_worker_that_already_exited(tmp_path, monkeypatch):
     monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
     spec = make_spec(
@@ -2106,13 +2139,7 @@ def test_the_fallback_stop_kills_children_of_a_worker_that_already_exited(tmp_pa
     )
     process = spawn_worker(spec, probe=DECLARED)
     child = read_pid(tmp_path / "rw" / "child.pid")
-    # Wait for the leader to exit without letting the process object reap it.
-    end = time.monotonic() + 10
-    while time.monotonic() < end:
-        with open("/proc/%d/stat" % process.pid) as handle:
-            if handle.read().rsplit(")", 1)[1].split()[0] == "Z":
-                break
-        time.sleep(0.05)
+    wait_exited_unreaped(process)
     assert process.returncode is None and alive(child)
     process.stop(1.0)
     assert process.returncode == 0
@@ -2172,9 +2199,12 @@ def test_dropping_the_fallback_handle_ends_the_group(tmp_path, monkeypatch):
     process = spawn_worker(spec, probe=DECLARED)
     child = read_pid(tmp_path / "rw" / "child.pid")
     anchor = process._anchor
-    anchor.stdin.close()
-    assert wait_dead(child), "the anchor did not end its group when its pipe closed"
-    process.stop(0.5)
+    # Only the handle goes away: Popen.__del__ parks the still-running child on
+    # a module list, so the anchor's pipe has to be closed before that.
+    del process
+    gc.collect()
+    assert wait_dead(child), "the anchor did not end its group when the handle was dropped"
+    assert anchor.wait(timeout=10) is not None
 
 
 def test_without_an_anchor_a_reaped_leader_gets_no_group_signal(tmp_path, monkeypatch):
@@ -2186,6 +2216,137 @@ def test_without_an_anchor_a_reaped_leader_gets_no_group_signal(tmp_path, monkey
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
     process.stop(0.5)
     assert sent == []
+
+
+@linux_only
+def test_the_fallback_group_kill_never_names_a_reaped_leader(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    monkeypatch.setattr(spawn, "_start_anchor", lambda: None)
+    spec = make_spec(
+        tmp_path,
+        """
+        import subprocess, sys
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        open("child.pid", "w").write(str(child.pid))
+        """,
+    )
+    process = spawn_worker(spec, probe=DECLARED)
+    child = read_pid(tmp_path / "rw" / "child.pid")
+    wait_exited_unreaped(process)
+    real_killpg = os.killpg
+    seen = []
+
+    def checked(pgid, sig):
+        # Still this process's own, unreaped child: the number cannot be anyone else's.
+        try:
+            still_ours = os.waitid(os.P_PID, pgid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            still_ours = False
+        seen.append((pgid, still_ours))
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", checked)
+    process.stop(1.0)
+    assert seen == [(process.pid, True)], seen
+    assert process.returncode == 0 and wait_dead(child)
+
+
+@linux_only
+def test_the_fallback_stop_without_waitid_signals_only_a_worker_it_has_not_reaped(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    monkeypatch.setattr(spawn, "_start_anchor", lambda: None)
+    monkeypatch.delattr(os, "waitid")
+    real_killpg = os.killpg
+    seen = []
+
+    def checked(pgid, sig):
+        # The worker is a zombie or running here, never reaped: poll() would not find it gone.
+        seen.append(pgid)
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", checked)
+    # A worker that leaves on SIGTERM is reaped by the wait: no group signal at all.
+    quick = spawn_worker(
+        make_spec(tmp_path, "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *a: sys.exit(0)); print('up', flush=True); time.sleep(300)"),
+        probe=DECLARED,
+    )
+    assert quick.stdout.readline().strip() == b"up"
+    quick.stop(5.0)
+    assert quick.returncode == 0 and seen == []
+    # One that ignores SIGTERM outlives its grace: the group is signalled while the leader is unreaped.
+    stubborn = spawn_worker(
+        make_spec(tmp_path, "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('up', flush=True); time.sleep(300)"),
+        probe=DECLARED,
+    )
+    assert stubborn.stdout.readline().strip() == b"up"
+    stubborn.stop(0.3)
+    assert seen == [stubborn.pid] and stubborn.returncode is not None
+
+
+@linux_only
+def test_a_launcher_that_exited_on_its_own_is_never_signalled_by_pid(tmp_path, monkeypatch):
+    process = spawn_worker(make_spec(tmp_path, "print('done')"), probe=DECLARED)
+    wait_exited_unreaped(process)
+    real_kill = os.kill
+    sent = []
+
+    def recording(pid, sig):
+        if pid == process.pid:
+            sent.append((sig, process.returncode))
+        return real_kill(pid, sig)
+
+    monkeypatch.setattr(os, "kill", recording)
+    # The launcher exits between stop()'s own check and the signals it sends:
+    # the first poll still sees it running, the next one reaps it.
+    real_poll = process.poll
+    calls = []
+
+    def late_poll():
+        calls.append(1)
+        return None if len(calls) == 1 else real_poll()
+
+    monkeypatch.setattr(process, "poll", late_poll)
+    process.stop(1.0)
+    assert process.returncode == 0
+    # Popen.send_signal polls first. A raw os.kill would hit the reaped pid.
+    assert all(returncode is None for _sig, returncode in sent), sent
+
+
+def test_the_launch_closes_every_descriptor_when_a_pipe_cannot_be_made(tmp_path, monkeypatch):
+    spec = make_spec(tmp_path, "pass")
+    opened = []
+    real_pipe = os.pipe
+    real_memfd = getattr(os, "memfd_create", None)
+
+    def failing_second_pipe():
+        if len([fd for fd in opened if fd[0] == "pipe"]) >= 1:
+            raise OSError(errno.EMFILE, "Too many open files")
+        pair = real_pipe()
+        opened.append(("pipe", pair))
+        return pair
+
+    monkeypatch.setattr(os, "pipe", failing_second_pipe)
+    if real_memfd is not None:
+
+        def recording_memfd(*args, **kwargs):
+            fd = real_memfd(*args, **kwargs)
+            opened.append(("memfd", (fd,)))
+            return fd
+
+        monkeypatch.setattr(os, "memfd_create", recording_memfd)
+    with pytest.raises(OSError) as raised:
+        spawn._start(spec, enforce=False, min_abi=0, enforcement="declared")
+    assert raised.value.errno == errno.EMFILE
+    assert opened, "nothing was opened before the failure"
+    leaked = []
+    for _kind, fds in opened:
+        for fd in fds:
+            try:
+                os.fstat(fd)
+                leaked.append(fd)
+            except OSError:
+                pass
+    assert leaked == []
 
 
 def test_the_anchor_is_skipped_where_it_cannot_work(monkeypatch):
@@ -2508,7 +2669,7 @@ def test_an_unreadable_proc_is_an_error_never_an_empty_tree(monkeypatch):
     with pytest.raises(launcher.EnumerationError):
         launcher._children_map()
     with pytest.raises(launcher.EnumerationError):
-        launcher._descendants(os.getpid())
+        launcher._own_children()
     monkeypatch.undo()
 
     monkeypatch.setattr(launcher.os, "listdir", lambda path: [])
@@ -2533,22 +2694,22 @@ def test_cleanup_uses_the_emergency_path_only_when_nothing_can_be_listed(monkeyp
     launcher = load_launcher()
     reasons = []
 
-    def broken(root):
+    def broken():
         raise launcher.EnumerationError("no descriptors")
 
-    monkeypatch.setattr(launcher, "_descendants", broken)
+    monkeypatch.setattr(launcher, "_children_map", broken)
     monkeypatch.setattr(launcher, "_emergency_kill", lambda reason: reasons.append(str(reason)))
     # The scan fails but the children list works: the launcher carries on.
     monkeypatch.setattr(launcher, "_direct_children", lambda: [])
-    monkeypatch.setattr(launcher, "_children_remain", lambda: False)
-    launcher._kill_descendants()
+    states = iter([(None, True), (None, False)])
+    monkeypatch.setattr(launcher, "_reap_all", lambda main_pid=None: next(states))
     assert launcher._cleanup_tree() is True
     assert reasons == []
     # Neither works: nothing can be named, so the emergency path runs.
     monkeypatch.setattr(launcher, "_direct_children", lambda: None)
-    launcher._kill_descendants()
-    launcher._cleanup_tree()
-    assert reasons == ["no descriptors", "no descriptors"]
+    monkeypatch.setattr(launcher, "_reap_all", lambda main_pid=None: (None, True))
+    assert launcher._cleanup_tree() is False
+    assert reasons == ["no descriptors"]
 
 
 @linux_only
@@ -2576,22 +2737,22 @@ def test_a_proc_entry_the_kernel_refuses_is_skipped_not_an_error(monkeypatch, co
 
 
 @linux_only
-def test_the_tree_scan_falls_back_to_the_children_list_when_the_scan_fails(monkeypatch):
+def test_the_children_list_falls_back_to_a_scan_by_parent_id(monkeypatch):
     launcher = load_launcher()
+    me = os.getpid()
+    monkeypatch.setattr(launcher, "_direct_children", lambda: [31, 32])
+    assert launcher._own_children() == [31, 32]
+    # No children file: only processes whose parent is this one count, never a grandchild.
+    monkeypatch.setattr(launcher, "_direct_children", lambda: None)
+    monkeypatch.setattr(launcher, "_children_map", lambda: {me: 1, 41: me, 42: 41, 43: me})
+    assert launcher._own_children() == [41, 43]
 
-    def broken(root):
+    def broken():
         raise launcher.EnumerationError("denied")
 
-    monkeypatch.setattr(launcher, "_descendants", broken)
-    monkeypatch.setattr(launcher, "_direct_children", lambda: [31, 32])
-    assert launcher._tree_pids(os.getpid()) == [31, 32]
-    monkeypatch.setattr(launcher, "_direct_children", lambda: None)
+    monkeypatch.setattr(launcher, "_children_map", broken)
     with pytest.raises(launcher.EnumerationError):
-        launcher._tree_pids(os.getpid())
-    # A root that is not the launcher has no children list to fall back on.
-    monkeypatch.setattr(launcher, "_direct_children", lambda: [31])
-    with pytest.raises(launcher.EnumerationError):
-        launcher._tree_pids(os.getpid() + 1)
+        launcher._own_children()
 
 
 @linux_only
@@ -2599,11 +2760,9 @@ def test_a_descendant_that_survives_the_cleanup_is_reported_not_forgotten(monkey
     launcher = load_launcher()
     monkeypatch.setattr(launcher, "CLEANUP_SECONDS", 0.3)
     monkeypatch.setattr(launcher, "_direct_children", lambda: [])
-    monkeypatch.setattr(launcher, "_descendants", lambda root: [999999])
-    monkeypatch.setattr(launcher, "_children_remain", lambda: False)
-    monkeypatch.setattr(launcher, "_kill_descendants", lambda sig=9: None)
+    monkeypatch.setattr(launcher, "_reap_all", lambda main_pid=None: (None, True))
     assert launcher._cleanup_tree() is False
-    monkeypatch.setattr(launcher, "_descendants", lambda root: [])
+    monkeypatch.setattr(launcher, "_reap_all", lambda main_pid=None: (None, False))
     assert launcher._cleanup_tree() is True
 
 
@@ -2612,28 +2771,33 @@ def test_an_empty_listing_is_not_proof_the_tree_is_gone(monkeypatch):
     launcher = load_launcher()
     monkeypatch.setattr(launcher, "CLEANUP_SECONDS", 0.3)
     monkeypatch.setattr(launcher, "_direct_children", lambda: [])
-    monkeypatch.setattr(launcher, "_descendants", lambda root: [])
-    monkeypatch.setattr(launcher, "_kill_descendants", lambda sig=9: None)
-    monkeypatch.setattr(launcher, "_children_remain", lambda: True)
+    monkeypatch.setattr(launcher, "_children_map", lambda: {os.getpid(): 1})
+    monkeypatch.setattr(launcher, "_reap_all", lambda main_pid=None: (None, True))
     assert launcher._cleanup_tree() is False
-    monkeypatch.setattr(launcher, "_children_remain", lambda: False)
+    monkeypatch.setattr(launcher, "_reap_all", lambda main_pid=None: (None, False))
     assert launcher._cleanup_tree() is True
 
 
 @linux_only
-def test_the_tree_is_frozen_before_it_is_killed(monkeypatch):
+def test_the_kill_loop_waits_for_nobody_between_listing_and_signalling(monkeypatch):
     launcher = load_launcher()
-    scans = iter([[10, 11], [10, 11, 12], [10, 11, 12], [10, 11, 12, 13]])
-    sent = []
-    monkeypatch.setattr(launcher, "_descendants", lambda root: next(scans))
-    monkeypatch.setattr(launcher, "_direct_children", lambda: [])
-    monkeypatch.setattr(launcher.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    launcher._kill_descendants()
-    stops = [pid for pid, sig in sent if sig == signal.SIGSTOP]
-    kills = [pid for pid, sig in sent if sig == signal.SIGKILL]
-    assert stops == [10, 11, 12]
-    assert kills == [10, 11, 12, 13]
-    assert sent.index((12, signal.SIGSTOP)) < sent.index((10, signal.SIGKILL))
+    events = []
+    states = iter([(None, True), (None, True), (None, False)])
+
+    def reap(main_pid=None):
+        events.append("reap")
+        return next(states)
+
+    def children():
+        events.append("list")
+        return [10, 11]
+
+    monkeypatch.setattr(launcher, "_reap_all", reap)
+    monkeypatch.setattr(launcher, "_own_children", children)
+    monkeypatch.setattr(launcher.os, "kill", lambda pid, sig: events.append((pid, sig)))
+    assert launcher._kill_tree() == (None, True)
+    kill = signal.SIGKILL
+    assert events == ["reap", "list", (10, kill), (11, kill), "reap", "list", (10, kill), (11, kill), "reap"]
 
 
 MOUNTINFO = (
@@ -2855,13 +3019,21 @@ EMERGENCY = """
 """
 
 
-def run_emergency(extra=""):
+@pytest.fixture
+def leftover_sleepers():
+    pids = []
+    yield pids
+    kill_leftover_sleepers(pids)
+
+
+def run_emergency(leftovers, extra=""):
     status_r, status_w = os.pipe()
     code = textwrap.dedent(EMERGENCY) % (str(spawn.LAUNCHER_PATH), status_w, extra)
     process = subprocess.Popen(
         [sys.executable, "-I", "-c", code], stdout=subprocess.PIPE, start_new_session=True, pass_fds=(status_w,)
     )
     os.close(status_w)
+    pids = []
     try:
         pids = [int(p) for p in process.stdout.readline().split()]
         code = process.wait(timeout=30)
@@ -2873,11 +3045,14 @@ def run_emergency(extra=""):
             os.killpg(process.pid, 9)
         except OSError:
             pass
+        # The detached child has a session of its own, so the group kill above
+        # misses it. The caller's fixture kills what is left after its asserts.
+        leftovers.extend(pids)
 
 
 @linux_only
-def test_the_emergency_kill_reaches_detached_children_through_the_children_list():
-    code, pids, record = run_emergency()
+def test_the_emergency_kill_reaches_detached_children_through_the_children_list(leftover_sleepers):
+    code, pids, record = run_emergency(leftover_sleepers)
     assert code == 78
     assert all(wait_dead(pid) for pid in pids), "a child survived the emergency kill"
     assert record["kind"] == "sandbox"
@@ -2885,8 +3060,8 @@ def test_the_emergency_kill_reaches_detached_children_through_the_children_list(
 
 
 @linux_only
-def test_the_emergency_kill_ends_the_group_only_when_nothing_lists_the_children():
-    code, pids, record = run_emergency("launcher._direct_children = lambda: None")
+def test_the_emergency_kill_ends_the_group_only_when_nothing_lists_the_children(leftover_sleepers):
+    code, pids, record = run_emergency(leftover_sleepers, "launcher._direct_children = lambda: None")
     assert code == -9
     assert wait_dead(pids[0]), "a member of the process group survived"
     assert record["kind"] == "sandbox" and "killed its process group" in record["message"]
@@ -2894,12 +3069,207 @@ def test_the_emergency_kill_ends_the_group_only_when_nothing_lists_the_children(
 
 
 @linux_only
-def test_the_emergency_kill_reports_a_survivor_it_could_not_reap():
+def test_the_emergency_kill_reports_a_survivor_it_could_not_reap(leftover_sleepers):
     code, _pids, record = run_emergency(
+        leftover_sleepers,
         "launcher.CLEANUP_SECONDS = 0.3; launcher._children_remain = lambda: True; launcher._kill_own_children = lambda: True"
     )
     assert code == 78
     assert "survived" in record["message"]
+
+
+DIRECT_ONLY = """
+    import ctypes, importlib.util, os, signal, sys, time
+
+    spec = importlib.util.spec_from_file_location("l", %r)
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+
+    # worker -> grandchild: the grandchild's parent is alive, so the launcher
+    # has no claim on its pid.
+    worker = os.fork()
+    if worker == 0:
+        if os.fork() == 0:
+            open(%r, "a").write("%%d\\n" %% os.getpid())
+            time.sleep(300)
+        open(%r, "a").write("%%d\\n" %% os.getpid())
+        time.sleep(300)
+    end = time.monotonic() + 10
+    while time.monotonic() < end and len(open(%r).read().split()) < 2:
+        time.sleep(0.02)
+
+    sent = []
+    real_kill = os.kill
+
+    def recording(pid, sig):
+        with open("/proc/%%d/stat" %% pid) as handle:
+            parent = int(handle.read().rsplit(")", 1)[1].split()[1])
+        sent.append(parent == os.getpid())
+        real_kill(pid, sig)
+
+    os.kill = recording
+    print(launcher._cleanup_tree(), flush=True)
+    print(bool(sent) and all(sent), flush=True)
+"""
+
+
+@linux_only
+def test_the_launcher_signals_only_its_own_children_never_a_grandchild(tmp_path):
+    pids_file = tmp_path / "pids"
+    pids_file.write_text("")
+    code = textwrap.dedent(DIRECT_ONLY) % (str(spawn.LAUNCHER_PATH), str(pids_file), str(pids_file), str(pids_file))
+    result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    assert result.stdout.split() == ["True", "True"], (result.stdout, result.stderr)
+    pids = [int(p) for p in pids_file.read_text().split()]
+    assert len(pids) == 2 and all(wait_dead(pid) for pid in pids)
+
+
+def run_launcher_main(tmp_path, preamble, *, mode="declared", script="pass"):
+    """Run ``launcher.main`` in a child interpreter after ``preamble``. Returns (process, status text)."""
+    status_r, status_w = os.pipe()
+    spec_r, spec_w = os.pipe()
+    life_r, life_w = os.pipe()
+    spec = {"interpreter": sys.executable, "args": ["-I", "-c", script], "cwd": str(tmp_path), "env": {}, "mode": mode}
+    os.write(spec_w, json.dumps(spec).encode())
+    os.close(spec_w)
+    code = (
+        "import importlib.util, os, sys\n"
+        "spec = importlib.util.spec_from_file_location('l', %r)\n"
+        "launcher = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(launcher)\n" % str(spawn.LAUNCHER_PATH)
+        + textwrap.dedent(preamble)
+        + "\nsys.exit(launcher.main(['l', %d, %d, %d]))\n" % (spec_r, life_r, status_w)
+    )
+    try:
+        process = subprocess.run(
+            [sys.executable, "-I", "-c", code], pass_fds=(spec_r, life_r, status_w), capture_output=True, timeout=60
+        )
+        os.close(status_w)
+        status_w = None
+        os.set_blocking(status_r, False)
+        try:
+            text = os.read(status_r, 65536).decode()
+        except BlockingIOError:
+            text = ""
+        return process, text
+    finally:
+        for fd in (status_r, spec_r, life_r, life_w, status_w):
+            if fd is not None:
+                os.close(fd)
+
+
+@linux_only
+def test_a_failure_after_the_worker_was_reaped_signals_nobody_by_its_pid(tmp_path):
+    process, _status = run_launcher_main(
+        tmp_path,
+        """
+        sent = []
+        real_kill = os.kill
+        os.kill = lambda pid, sig: (sent.append((pid, sig)), real_kill(pid, sig))[1]
+
+        def broken(report_r):
+            raise RuntimeError("late failure")
+
+        launcher._forward_child_report = broken
+        import atexit
+        atexit.register(lambda: print("SENT", sent, flush=True))
+        """,
+    )
+    out = process.stdout.decode()
+    assert "late failure" in process.stderr.decode(), (out, process.stderr)
+    # The worker was reaped by then, so no signal may name its pid.
+    assert "SENT []" in out, out
+
+
+@linux_only
+def test_the_launcher_reports_pipes_it_cannot_create_and_leaks_none(tmp_path):
+    process, status = run_launcher_main(
+        tmp_path,
+        """
+        made = []
+        real_pipe = os.pipe
+
+        def failing_second():
+            if len(made) >= 2:
+                raise OSError(24, "Too many open files")
+            pair = real_pipe()
+            made.extend(pair)
+            return pair
+
+        os.pipe = failing_second
+        import atexit
+
+        def leaked():
+            open_ones = []
+            for fd in made:
+                try:
+                    os.fstat(fd)
+                    open_ones.append(fd)
+                except OSError:
+                    pass
+            print("LEAKED", open_ones, flush=True)
+
+        atexit.register(leaked)
+        """,
+    )
+    assert process.returncode == 78, process.stderr
+    assert "LEAKED []" in process.stdout.decode(), process.stdout
+    record = json.loads(status)
+    assert record["kind"] == "sandbox" and "pipes" in record["message"]
+
+
+def test_a_failure_record_stays_under_the_atomic_pipe_write_size_after_escaping():
+    launcher = load_launcher()
+    limit = launcher._RECORD_LIMIT
+    assert 512 <= limit <= 4096
+    for message in ("\u00e9" * 5000, "\U0001f600" * 5000, '"' * 5000, "\x00" * 5000, "plain " * 2000, ""):
+        for newline in (True, False):
+            data = launcher._record("sandbox", message, newline=newline)
+            assert len(data) <= limit
+            assert data.endswith(b"\n") is newline
+            record = json.loads(data)
+            assert record["kind"] == "sandbox" and message.startswith(record["message"])
+    # A long kind cannot push the record over the limit either.
+    assert len(launcher._record("k" * 9000, "m" * 9000)) <= limit
+    short = launcher._record("exec", "exec failed: nope", newline=False)
+    assert json.loads(short) == {"kind": "exec", "message": "exec failed: nope"}
+
+
+@linux_only
+def test_the_host_facing_report_is_bounded_too(monkeypatch):
+    launcher = load_launcher()
+    read_fd, write_fd = os.pipe()
+    try:
+        # A pipe nobody reads: a write over the limit could not be atomic.
+        monkeypatch.setattr(launcher, "_STATUS_FD", write_fd)
+        launcher._report("sandbox", "\u00e9" * 5000)
+        os.set_blocking(read_fd, False)
+        data = os.read(read_fd, 65536)
+        assert len(data) <= launcher._RECORD_LIMIT and data.endswith(b"\n")
+        assert json.loads(data)["kind"] == "sandbox"
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@linux_only
+def test_a_long_non_ascii_failure_path_reaches_the_host_in_one_bounded_record(tmp_path):
+    # JSON escaping turns every non-ASCII character into six bytes.
+    deep = Path(str(tmp_path))
+    for _ in range(14):
+        deep = deep / ("\u00e9" * 120)
+    spec = make_spec(tmp_path, "pass", cwd=deep)
+    process = spawn_worker(spec, probe=DECLARED)
+    try:
+        process.communicate(timeout=30)
+        failure = process.launcher_failure()
+        raw = process._status_text
+    finally:
+        process.stop(0.5)
+    assert process.returncode == policy_module.EXIT_BAD_SPEC
+    assert failure is not None and failure.kind == "spec" and failure.message.startswith("bad working directory")
+    assert 0 < len(raw) <= 4096
 
 
 # --- Platforms without O_PATH ---------------------------------------------------
