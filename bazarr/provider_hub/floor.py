@@ -52,6 +52,8 @@ FLOOR_DIR_ENV = "BAZARR_CATALOG_FLOOR"
 CATALOG_FILE = "catalog.json"
 META_FILE = "floor.json"
 SUPPORTED_LOCK_VERSION = 1
+# The source status the UI shows while the catalog on screen is the snapshot.
+CATALOG_STATUS_BUNDLED = "bundled"
 # The largest file the reader will take. The biggest real file is a catalog of a
 # few hundred kilobytes; the cap only keeps a damaged snapshot from filling memory.
 MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -277,11 +279,13 @@ def mark_seeded(
         if isinstance(entry, dict) and entry.get("source") == OFFICIAL_CATALOG_SOURCE_ID:
             entry["origin"] = ORIGIN_BUNDLED
     source["floor_seed"] = {"commit": commit, "seeded_at": now}
+    source["catalog_status"] = CATALOG_STATUS_BUNDLED
 
 
 def clear_seed(source: dict[str, Any]) -> None:
     """Forget the seed marker once a fetched catalog has replaced the seeded one."""
     source.pop("floor_seed", None)
+    source.pop("catalog_status", None)
 
 
 def bundle_file(manifest: Any, relative_path: str) -> bytes | None:

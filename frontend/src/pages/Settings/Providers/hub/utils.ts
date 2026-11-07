@@ -232,10 +232,13 @@ export function getLatestCatalogEntry(
   sourceId?: string | null,
 ): ProviderHubCatalogEntry | null {
   const entries = catalog?.entries ?? [];
+  // An entry from the snapshot in the release image is never an update: it is
+  // not newer than anything fetched, and the backend has no manifest to apply.
   const matching = entries.filter(
     (e) =>
       e.provider_id === providerId &&
-      (sourceId === undefined || (e.source === sourceId && !e.blocked_reason)),
+      (sourceId === undefined ||
+        (e.source === sourceId && !e.blocked_reason && e.origin !== "bundled")),
   );
   if (matching.length === 0) return null;
   return matching.reduce((best, current) =>

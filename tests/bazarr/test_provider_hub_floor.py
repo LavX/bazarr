@@ -268,6 +268,7 @@ def test_an_offline_first_refresh_seeds_the_official_source_from_the_floor(snaps
     source = _official(state)
     assert source["trusted"] is True and source["trust_reason"] == "release floor"
     assert source["floor_seed"]["commit"] == FLOOR_COMMIT and source["floor_seed"]["seeded_at"]
+    assert source["catalog_status"] == "bundled"
     # A seed is not a successful refresh.
     assert not source.get("resolved_commit") and source["last_checked_at"] is None
     assert source["last_error"]
@@ -304,7 +305,7 @@ def test_a_successful_refresh_replaces_the_seed(snapshot, hub, monkeypatch):
 
     state = load_state()
     source = _official(state)
-    assert "floor_seed" not in source
+    assert "floor_seed" not in source and "catalog_status" not in source
     assert source["resolved_commit"] == LATER_COMMIT and source["trust_reason"] == "default branch"
     entries = list(state["catalog_entries"].values())
     assert [entry["version"] for entry in entries] == ["2.0.0"]
@@ -586,3 +587,38 @@ def test_a_floor_seeded_entry_installs_without_network(snapshot, hub, monkeypatc
     path = hub._fetch_bundle(validate_manifest(entry["manifest"]))
 
     assert (path / "provider.py").read_bytes() == PROVIDER_FILE
+
+
+def test_an_offline_install_runs_end_to_end_from_the_floor(tmp_path, snapshot, hub, monkeypatch):
+    """Refresh falls back to the floor, then the whole install path (binding,
+    refusal checks, staging) runs with the network blocked."""
+    from provider_hub.state import load_state
+
+    _offline(monkeypatch, hub)
+    _no_network(monkeypatch, hub)
+    hub.refresh_catalog()
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated, timeout=None):
+            env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
+            python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text("", encoding="utf-8")
+            return env_path
+
+    monkeypatch.setattr(hub, "PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr(hub, "_smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
+
+    hub.install_catalog_entry("official", "examplehub", "1.0.0")
+
+    row = load_state()["installations"]["examplehub"]
+    assert row["state"] == "staged" and row["staged_version"] == "1.0.0"
+    assert row["source_id"] == "official" and row["source_bound"] and row["trusted"] is True
+    assert row["origin"] == "catalog"
+    bundle = Path(row["staged_path"])
+    assert (bundle / "provider.py").read_bytes() == PROVIDER_FILE
