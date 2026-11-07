@@ -589,9 +589,11 @@ def test_a_floor_seeded_entry_installs_without_network(snapshot, hub, monkeypatc
     assert (path / "provider.py").read_bytes() == PROVIDER_FILE
 
 
-def test_an_offline_install_runs_end_to_end_from_the_floor(tmp_path, snapshot, hub, monkeypatch):
-    """Refresh falls back to the floor, then the whole install path (binding,
-    refusal checks, staging) runs with the network blocked."""
+def test_an_offline_install_stages_a_bundle_from_the_floor(tmp_path, snapshot, hub, monkeypatch):
+    """Refresh falls back to the floor, then the install path (binding, refusal
+    checks, staging) runs with the network blocked. Environment creation and
+    the worker smoke check are mocked, so this proves staging from the floor,
+    not a full install."""
     from provider_hub.state import load_state
 
     _offline(monkeypatch, hub)
