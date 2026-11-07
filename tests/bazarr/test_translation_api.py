@@ -68,7 +68,16 @@ def world(monkeypatch, schema_session):
     monkeypatch.setattr(module, "get_service", lambda: TranslatorSettingsService(
         store, plugin_lookup=plugins.get, plugin_validator=lambda *args: validations.append(args) or {},
         options_source=(lambda *args: sources[0](*args)) if sources else None))
+    # The real blueprint registers these routes only when the switch is on at import, which a test cannot rely
+    # on, so the routes get a blueprint of their own. The real one stays registered for the status route.
+    from flask import Blueprint
+    from flask_restx import Api
+
+    blueprint = Blueprint("translation_test", __name__, url_prefix="/api")
+    Api(blueprint, authorizations={"apikey": {"type": "apiKey", "in": "header", "name": "X-API-KEY"}},
+        security="apikey").add_namespace(module.api_ns_translation, "/")
     app = Flask(__name__)
+    app.register_blueprint(blueprint)
     app.register_blueprint(api_bp)
     client = app.test_client()
     instance = store.create_instance(PLUGIN, name="AI", settings_version=2, plugin_version="2.2.0")
@@ -326,13 +335,34 @@ def test_a_body_that_is_not_an_object_is_refused(world):
 
 
 def test_the_system_status_names_the_switch_only_while_it_is_on(world, monkeypatch):
+    from app.config import settings
+
     def status():
         response = world.client.get("/api/system/status", headers={"X-API-KEY": API_KEY})
         return response.json["data"]
 
+    monkeypatch.setitem(settings.translator, "runtime_v2", True)
     assert status()["translation_runtime_v2"] is True
     monkeypatch.setattr(world.runtime, "runtime_v2_enabled", lambda: False)
     assert "translation_runtime_v2" not in status()
+
+
+def test_the_status_reads_the_setting_before_it_touches_the_runtime(world, monkeypatch):
+    from app.config import settings
+
+    def explode():
+        raise AssertionError("the runtime was asked with the switch off")
+
+    monkeypatch.setitem(settings.translator, "runtime_v2", False)
+    monkeypatch.setattr(world.runtime, "runtime_v2_enabled", explode)
+    response = world.client.get("/api/system/status", headers={"X-API-KEY": API_KEY})
+    assert response.status_code == 200 and "translation_runtime_v2" not in response.json["data"]
+
+
+def test_the_package_lists_the_typed_api_beside_the_history_routes():
+    from api.translation import api_ns_list_translation
+
+    assert "Translation" in {namespace.name for namespace in api_ns_list_translation}
 
 
 # ------------------------------------------------------------ review fixes
