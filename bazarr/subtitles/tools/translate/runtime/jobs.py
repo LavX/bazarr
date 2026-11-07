@@ -28,7 +28,6 @@ import json
 import logging
 import os
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -38,7 +37,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.database import TableTranslatorCheckpoint, TableTranslatorJob
-from media_servers.repository import atomic
+from .transaction import write_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -68,29 +67,15 @@ _REQUEST_ATTEMPTS = 3
 
 
 
-@contextmanager
 def _write(session):
     """One write transaction that commits or rolls back as a whole, on SQLite and PostgreSQL.
 
-    The application runs both in AUTOCOMMIT, so a transaction has to be opened by hand. On SQLite a
-    plain BEGIN that reads first and writes later fails at once with "database is locked" when another
-    connection commits in between (busy_timeout does not help a stale snapshot), so SQLite begins with
-    BEGIN IMMEDIATE and takes the write lock before the first read.
+    The application runs both in AUTOCOMMIT, so a transaction has to be opened by hand, which
+    ``write_transaction`` does: on SQLite it begins with BEGIN IMMEDIATE, so a step that reads first
+    and writes later never meets "database is locked" from a stale snapshot. Called inside another
+    write transaction it opens a savepoint and leaves the commit to the caller.
     """
-    connection = session.connection()
-    if connection.dialect.name != "sqlite" or connection.connection.driver_connection.in_transaction:
-        with atomic(session, durable=True):
-            yield
-        return
-    connection.exec_driver_sql("BEGIN IMMEDIATE")
-    try:
-        with atomic(session):
-            yield
-    except BaseException:
-        connection.exec_driver_sql("ROLLBACK")
-        session.expire_all()
-        raise
-    connection.exec_driver_sql("COMMIT")
+    return write_transaction(session)
 
 
 class TranslationJobError(ValueError):
@@ -481,7 +466,10 @@ class TranslationJobs:
 
     # -------------------------------------------------------------- checkpoints
     def key_of(self, job_id: int) -> CheckpointKey | None:
-        job = self.get(job_id)
+        return self._key_of_row(self.get(job_id))
+
+    @staticmethod
+    def _key_of_row(job) -> CheckpointKey | None:
         if (job is None or job.state != RUNNING or job.source_digest is None
                 or job.engine_instance_id is None or job.settings_revision is None):
             return None
@@ -493,12 +481,21 @@ class TranslationJobs:
         return self.checkpoints.load(key) if key is not None else {}
 
     def save_batch(self, job_id: int, index: int, lines: Sequence[str]) -> bool:
-        """Record a finished batch. False, and nothing kept, when the job is not running any more."""
-        key = self.key_of(job_id)
-        if key is None:
-            return False
-        self.checkpoints.save_batch(key, index, lines)
-        return True
+        """Record a finished batch. False, and nothing kept, when the job is not running any more.
+
+        The check and the write are one transaction, and on PostgreSQL the job row is locked for it. A
+        cancel that lands between a check and a write would otherwise find nothing to delete and let the
+        write bring its checkpoints back.
+        """
+        with _write(self._session):
+            job = self._session.execute(
+                select(TableTranslatorJob).where(TableTranslatorJob.id == job_id).with_for_update()
+                .execution_options(populate_existing=True)).scalar_one_or_none()
+            key = self._key_of_row(job)
+            if key is None:
+                return False
+            self.checkpoints.save_batch(key, index, lines)
+            return True
 
     # ---------------------------------------------------------------- internals
     def _transition(self, job_id: int, from_states: Sequence[str], to_state: str | None, *, _with=None,

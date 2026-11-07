@@ -614,6 +614,81 @@ def test_active_states_are_the_three_that_hold_a_slot():
     assert set(ACTIVE_STATES) == {QUEUED, RUNNING, AWAITING_RETRY}
 
 
+def test_a_cancel_that_lands_between_the_check_and_the_write_leaves_no_checkpoints(jobs, session, clock, queue,
+                                                                                     monkeypatch):
+    """The state check and the checkpoint write are one transaction. A cancel in between either waits for
+    the write (and then deletes it) or comes first (and the write is refused); it never loses to the write."""
+    import threading
+
+    job_id = _running(jobs)
+    real_save = jobs.checkpoints.save_batch
+    outcome = {}
+
+    def cancel_elsewhere():
+        try:
+            outcome["cancelled"] = TranslationJobs(session, clock=clock, queue=queue).cancel(job_id)
+        finally:
+            session.remove()  # this thread's own session
+
+    def save_after_a_cancel_tried(key, index, lines):
+        worker = threading.Thread(target=cancel_elsewhere)
+        worker.start()
+        worker.join(timeout=1.5)  # a cancel that is not held up has finished by now
+        outcome["worker"] = worker
+        return real_save(key, index, lines)
+
+    monkeypatch.setattr(jobs.checkpoints, "save_batch", save_after_a_cancel_tried)
+    jobs.save_batch(job_id, 0, ["a"])
+    outcome["worker"].join(timeout=30)
+    assert not outcome["worker"].is_alive() and outcome["cancelled"] is True
+    assert jobs.get(job_id).state == CANCELLED
+    assert _checkpoints(session) == 0
+
+
+def test_a_write_step_inside_a_ledger_transaction_leaves_the_commit_to_the_ledger(session, jobs):
+    from subtitles.tools.translate.runtime.transaction import ledger_transaction
+
+    with pytest.raises(RuntimeError):
+        with ledger_transaction(session):
+            assert jobs.request(SOURCE, "fr").job_id  # a step that opens its own write transaction
+            session.expire_all()
+            assert jobs.active_for(SOURCE, "fr") is not None
+            raise RuntimeError("the outer step fails after the inner one")
+    assert jobs.active_for(SOURCE, "fr") is None
+    with ledger_transaction(session):
+        assert jobs.request(SOURCE, "fr").job_id
+    session.expire_all()
+    assert jobs.active_for(SOURCE, "fr") is not None
+
+
+def test_a_ledger_step_inside_a_write_transaction_leaves_the_commit_to_the_write(session, jobs):
+    from subtitles.tools.translate.runtime.jobs import _write
+    from subtitles.tools.translate.runtime.transaction import ledger_transaction
+
+    with pytest.raises(RuntimeError):
+        with _write(session):
+            assert jobs.request(SOURCE, "fr").job_id
+            with ledger_transaction(session):  # a step that takes the ledger lock inside
+                pass
+            raise RuntimeError("the outer step fails after the inner one")
+    assert jobs.active_for(SOURCE, "fr") is None
+    assert _checkpoints(session) == 0
+
+
+def test_a_failing_inner_step_rolls_back_to_its_savepoint_and_the_outer_one_decides(session, jobs):
+    from subtitles.tools.translate.runtime.jobs import _write
+
+    with _write(session):
+        assert jobs.request(SOURCE, "fr").job_id
+        with pytest.raises(RuntimeError):
+            with _write(session):
+                assert jobs.request(SOURCE, "de").job_id
+                raise RuntimeError("the inner step fails")
+    session.expire_all()
+    assert jobs.active_for(SOURCE, "fr") is not None
+    assert jobs.active_for(SOURCE, "de") is None
+
+
 # ------------------------------------------------------------ SQLite write locking
 
 def test_a_read_then_write_transaction_is_not_broken_by_another_connections_commit(tmp_path, clock, queue,
