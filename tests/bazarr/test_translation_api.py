@@ -609,6 +609,21 @@ def test_a_malformed_address_with_a_password_is_refused_before_consent_or_storag
     assert world.store.list_connections(world.instance.id) == []
 
 
+def test_the_options_route_checks_every_draft_value_like_a_save_does(world):
+    seen = []
+    world.sources.append(lambda *args: seen.append(args) or {"items": [{"id": "m"}]})
+    path = f"engines/{world.instance.id}/options"
+    body = {"field": "model", "backend_type": "openai_compatible"}
+    for values, field in (({"price_input_per_million": -1}, "price_input_per_million"),
+                          ({"price_input_per_million": {"x": 1}}, "price_input_per_million"),
+                          ({"preset": "not-offered"}, "preset"), ({"base_url": 5}, "base_url")):
+        refused = world.call("post", path, {**body, "values": values})
+        assert refused.status_code == 400 and list(refused.json["field_errors"]) == [field]
+    assert world.call("post", path, {**body, "values": "text"}).status_code == 400
+    assert seen == []
+    assert world.call("post", path, {**body, "values": {"base_url": "http://x:1/v1", "preset": "custom"}}).status_code == 200
+
+
 def test_a_stored_address_with_a_password_is_never_shown_on_the_page(world):
     created = _new_connection(world, backend_type="openai_compatible",
                               values={"base_url": "http://a.example/v1"}, accept_destinations=["http://a.example/v1"])
@@ -619,6 +634,54 @@ def test_a_stored_address_with_a_password_is_never_shown_on_the_page(world):
     assert state.status_code == 200 and "hunter2" not in world.last_text
     shown = state.json["instances"][0]["connections"][0]["values"]
     assert "base_url" not in shown
+
+
+def test_clearing_a_required_connection_secret_alone_is_refused_like_clearing_it_with_values(world):
+    created = _new_connection(world, values={"api_key": SECRET}).json["connection"]
+    path = f"connections/{created['id']}"
+    for body in ({"clear_secrets": ["api_key"]}, {"values": {}, "clear_secrets": ["api_key"]}):
+        refused = world.call("patch", path, body)
+        assert refused.status_code == 400 and refused.json["field_errors"] == {"api_key": "is required"}
+    stored = world.store.get_connection(created["id"])
+    assert stored.revision == created["revision"]
+    assert "api_key" in world.store.secret_summary(("connection", created["id"]), frozenset())
+    # Typing a new key in the same request keeps it valid.
+    ok = world.call("patch", path, {"values": {"api_key": "new-key"}, "clear_secrets": ["api_key"]})
+    assert ok.status_code == 200 and ok.json["connection"]["secrets"]["api_key"]["configured"] is True
+
+
+def test_clearing_a_required_engine_secret_alone_is_refused(world):
+    path = f"engines/{world.instance.id}"
+    assert world.call("patch", path, {"values": {"service_token": SECRET}}).status_code == 200
+    for field in world.plugins[PLUGIN].manifest["settings"]["fields"]:
+        if field["key"] == "service_token":
+            field["required"] = True
+    refused = world.call("patch", path, {"clear_secrets": ["service_token"]})
+    assert refused.status_code == 400 and refused.json["field_errors"] == {"service_token": "is required"}
+    assert world.store.get_instance(world.instance.id).revision == 2
+    assert world.store.secrets_for_request(("instance", world.instance.id), frozenset()) == {"service_token": SECRET}
+
+
+def test_turning_something_on_checks_what_it_holds_while_turning_it_off_needs_nothing(world):
+    created = _new_connection(world, values={"api_key": "k"}).json["connection"]
+    path = f"connections/{created['id']}"
+    assert world.call("patch", path, {"enabled": False}).status_code == 200
+    # The plugin now asks for something this connection never had.
+    world.plugins[PLUGIN].manifest["settings"]["backend_types"]["openrouter"]["fields"].append(
+        {"key": "region", "type": "text", "required": True})
+    refused = world.call("patch", path, {"enabled": True})
+    assert refused.status_code == 400 and refused.json["field_errors"] == {"region": "is required"}
+    assert world.store.get_connection(created["id"]).enabled == 0
+    assert world.call("patch", path, {"values": {"region": "eu"}, "enabled": True}).status_code == 200
+    assert world.call("patch", path, {"enabled": False}).status_code == 200  # off is always allowed
+    # The same for the engine.
+    engine = f"engines/{world.instance.id}"
+    assert world.call("patch", engine, {"enabled": False}).status_code == 200
+    world.plugins[PLUGIN].manifest["settings"]["fields"].append({"key": "site", "type": "text", "required": True})
+    refused = world.call("patch", engine, {"enabled": True})
+    assert refused.status_code == 400 and refused.json["field_errors"] == {"site": "is required"}
+    assert world.store.get_instance(world.instance.id).enabled == 0
+    assert world.call("patch", engine, {"values": {"site": "x"}, "enabled": True}).status_code == 200
 
 
 def test_a_flag_that_is_not_a_boolean_is_refused(world):

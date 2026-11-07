@@ -329,9 +329,22 @@ class TranslatorSettingsService:
             if plugin is None or not plugin.active:
                 raise PluginUnavailableError("The plugin for this engine is not installed.")
             self._save_engine_values(instance, plugin, values, clear, payload, expected)
+        elif enabled is True:
+            self._check_engine_before_turning_on(instance)
         if enabled is not None and bool(instance.enabled) != enabled:
             notices += [self._notice(item) for item in self._store.set_instance_enabled(instance_id, enabled).notices]
         return {"engine": self.instance_view(self._instance(instance_id)), "notices": notices}
+
+    def _check_engine_before_turning_on(self, instance) -> None:
+        """An engine is turned on only while what it holds still satisfies its plugin's manifest."""
+        plugin = self._plugin(instance.plugin_id)
+        if plugin is None or not plugin.active:
+            return
+        schema = self._engine_schema(plugin)
+        owner = (INSTANCE, instance.id)
+        stored = frozenset(self._store.secret_summary(owner, frozenset()))
+        self._validate(schema, self._merged(self._store.settings_of(instance), {}, schema), stored, plugin.plugin_id,
+                       "engine", "")
 
     def _save_engine_values(self, instance, plugin, values, clear, payload, expected) -> None:
         schema = self._engine_schema(plugin)
@@ -339,11 +352,11 @@ class TranslatorSettingsService:
         before = self._store.settings_of(instance)
         stored = frozenset(self._store.secret_summary(owner, frozenset())) - frozenset(clear)
         self._check_clear(clear, schema)
-        validated = ValidatedValues()
-        if values is not None:
-            validated = self._validate(schema, self._merged(before, values, schema), stored, plugin.plugin_id,
-                                       "engine", "")
-        after = validated.settings if values is not None else before
+        # Every save is checked, one that only clears a secret included: the stored settings, with the values
+        # sent laid over them and the secrets that remain after the clear, must still satisfy the manifest.
+        validated = self._validate(schema, self._merged(before, values or {}, schema), stored, plugin.plugin_id,
+                                   "engine", "")
+        after = validated.settings
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
         # The revision claim, the settings and every secret write or clear commit together. A save that only
@@ -415,14 +428,18 @@ class TranslatorSettingsService:
         before = self._store.settings_of(connection)
         stored = frozenset(self._store.secret_summary(owner, frozenset())) - frozenset(clear)
         self._check_clear(clear, schema)
+        # Every save that changes what the connection holds, or turns it on, is checked, a clear-only one
+        # included: the stored settings, the values sent and the secrets that remain must satisfy the manifest.
+        # A save that only turns it off needs nothing checked, so a broken connection can always be switched off.
         validated = ValidatedValues()
+        checked = values is not None or bool(clear) or enabled is True
         host = {MODEL_KEY: connection.model, PRICE_KEYS[0]: connection.price_input_per_million,
                 PRICE_KEYS[1]: connection.price_output_per_million}
-        if values is not None:
-            host, plain = self._split_host(values, keep=connection, schema=schema)
+        if checked:
+            host, plain = self._split_host(values or {}, keep=connection, schema=schema)
             validated = self._validate(self._without_host(schema), self._merged(before, plain, schema), stored,
                                        plugin.plugin_id, "connection", connection.backend_type)
-        after = validated.settings if values is not None else before
+        after = validated.settings if checked else before
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
         with self._store.transaction():
@@ -485,23 +502,16 @@ class TranslatorSettingsService:
         field = next((item for item in fields if item["key"] == field_key and item.get("type") == "options"), None)
         if field is None:
             raise ServiceError(f"{field_key} is not a model list of this engine")
+        if not isinstance(draft, Mapping):
+            raise ServiceError("values must be an object")
         clean = {item["key"]: draft[item["key"]] for item in fields
                  if item["key"] in draft and not is_secret_field(item)}
-        # A draft address is checked like a saved one before any source sees it, so a source is never handed a
-        # malformed address or one that carries a password, and the answer never repeats either.
-        refused = {}
-        for item in fields:
-            value = clean.get(item["key"])
-            if item.get("destination") is True and value not in (None, "", []):
-                for entry in (value if isinstance(value, list) else [value]):
-                    try:
-                        if not isinstance(entry, str):
-                            raise DestinationError(DestinationError.MALFORMED)
-                        normalize_destination(entry)
-                    except DestinationError as error:
-                        refused[item["key"]] = error.message
-        if refused:
-            raise InvalidValuesError("The values are not valid.", field_errors=refused)
+        # A draft is checked like a save is, minus what is merely missing: every value it carries must be of the
+        # field's type and within its limits, and an address must be a clean one. A source is never handed
+        # anything else, and the refusal never repeats a value.
+        checked = validate_values([{**item, "required": False} for item in fields if item["key"] in clean], clean)
+        if checked.errors:
+            raise InvalidValuesError("The values are not valid.", field_errors=checked.errors)
         source = self._options_source
         answer = source(instance_id, backend_type, field_key, clean) if source is not None else None
         if not answer or not isinstance(answer.get("items"), list):

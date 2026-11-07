@@ -656,6 +656,9 @@ describe("Settings > Translation", () => {
     await user.click(screen.getAllByRole("button", { name: "Edit" })[0]);
     const dialog = await screen.findByRole("dialog", { name: "Edit back end" });
     await waitFor(() => expect(asked).toHaveLength(1));
+    // A key is typed first, so there is something that could leak into a request.
+    const typedKey = "sk-typed-0123456789-abcdef"; // pragma: allowlist secret
+    await user.type(within(dialog).getByLabelText("API key"), typedKey);
     const url = within(dialog).getByLabelText("Base URL");
     await user.clear(url);
     await user.type(url, "http://other:9/v1");
@@ -663,6 +666,11 @@ describe("Settings > Translation", () => {
     expect(asked.at(-1)?.values).toMatchObject({
       base_url: "http://other:9/v1",
     });
-    expect(JSON.stringify(asked)).not.toContain("api_key");
+    // The field is still holding the key, and no request named the field or carried the key.
+    expect(within(dialog).getByLabelText("API key")).toHaveValue(typedKey);
+    const everything = JSON.stringify(asked);
+    expect(everything).not.toContain("api_key");
+    expect(everything).not.toContain(typedKey);
+    expect(everything).not.toContain("sk-typed");
   });
 });
