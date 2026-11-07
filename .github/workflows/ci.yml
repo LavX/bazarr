@@ -937,6 +937,8 @@ jobs:
             tests/bazarr/test_provider_hub_state_safety.py \
             tests/bazarr/test_translator_runtime_store.py \
             tests/bazarr/test_translator_runtime_switch.py \
+            tests/bazarr/test_translator_output_checks.py \
+            tests/bazarr/test_translator_request_normalization.py \
             tests/bazarr/test_sportarr_library_migration.py \
             tests/bazarr/test_sportarr_review_guards.py \
             tests/bazarr/test_sportarr_output.py \
