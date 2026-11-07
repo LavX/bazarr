@@ -55,8 +55,11 @@ class TranslationApi extends BaseApi {
     return response.data;
   }
 
-  async deleteConnection(id: number) {
-    await this.delete(`/connections/${id}`);
+  /** The revision is the one the caller loaded; the server refuses a removal made from an older view. */
+  async deleteConnection(id: number, revision: number) {
+    await this.delete(`/connections/${id}`, undefined, {
+      expected_revision: revision,
+    });
   }
 
   async reorderConnections(instanceId: number, order: number[]) {

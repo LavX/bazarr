@@ -111,7 +111,10 @@ const ConnectionList: FunctionComponent<{ engine: TranslationEngine }> = ({
                   color="red"
                   onClick={() => {
                     setConfirming(null);
-                    remove.mutate(item.id, { onError: note });
+                    remove.mutate(
+                      { id: item.id, revision: item.revision },
+                      { onError: note },
+                    );
                   }}
                 >
                   Confirm remove

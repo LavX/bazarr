@@ -151,5 +151,5 @@ class TranslationConnection(Resource):
     @api_ns_translation.response(404, 'No such connection')
     def delete(self, connection_id):
         """Remove a connection and its secrets."""
-        get_service().delete_connection(connection_id)
+        get_service().delete_connection(connection_id, request.args.get("expected_revision"))
         return '', 204

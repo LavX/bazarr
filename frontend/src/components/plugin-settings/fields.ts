@@ -105,15 +105,27 @@ export function groupFields(
   return groups.sort((a, b) => Number(a.group !== "") - Number(b.group !== ""));
 }
 
-/** The values a form starts from: what is stored, nothing for a secret. */
+/**
+ * The values a form starts from: what is stored, nothing for a secret. A list the user can reorder that has
+ * no stored value starts as the order it is shown in (its default, or the manifest's item order), so what
+ * the form displays is what it holds and what a save sends.
+ */
 export function initialValues(
   fields: PluginField[],
   stored: PluginValues,
 ): PluginValues {
   const out: PluginValues = {};
   for (const field of fields) {
-    if (!isSecretField(field) && stored[field.key] !== undefined) {
+    if (isSecretField(field)) {
+      continue;
+    }
+    if (stored[field.key] !== undefined) {
       out[field.key] = stored[field.key];
+    } else if (field.type === "orderable_list") {
+      const shown = Array.isArray(field.default) ? field.default : [];
+      out[field.key] = shown.length
+        ? shown
+        : (field.items ?? []).map((item) => itemOf(item).value);
     }
   }
   return out;

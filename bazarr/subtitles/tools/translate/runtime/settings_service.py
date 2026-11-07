@@ -470,9 +470,20 @@ class TranslatorSettingsService:
             self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
         return {"connection": self.connection_view(instance, self._connection(connection_id)), "notices": []}
 
-    def delete_connection(self, connection_id: int) -> None:
-        self._connection(connection_id)
+    def delete_connection(self, connection_id: int, expected_revision: Any = None) -> None:
+        """Remove a connection. Like a save, it carries the revision the caller loaded, and an older one is refused."""
+        connection = self._connection(connection_id)
+        expected = self._expected({"expected_revision": self._revision_arg(expected_revision)}, required=True)
+        if connection.revision != expected:
+            raise StaleRevisionError("The back end changed since it was loaded.", revision=connection.revision)
         self._store.delete_connection(connection_id)
+
+    @staticmethod
+    def _revision_arg(value: Any) -> Any:
+        """A revision that came in as text, in a query string. Anything that is not a whole number stays as it is."""
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value)
+        return value
 
     def reorder_connections(self, instance_id: int, ordered: Any) -> list[dict[str, Any]]:
         instance = self._instance(instance_id)

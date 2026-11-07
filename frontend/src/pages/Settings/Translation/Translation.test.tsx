@@ -285,8 +285,13 @@ describe("Settings > Translation", () => {
           });
         },
       ),
-      http.delete("/api/translation/connections/:id", ({ params }) => {
-        record("delete", `connection ${String(params.id)}`, null);
+      http.delete("/api/translation/connections/:id", ({ params, request }) => {
+        // The removal carries the revision the list was loaded with.
+        record(
+          "delete",
+          `connection ${String(params.id)}`,
+          new URL(request.url).searchParams.get("expected_revision"),
+        );
         return new HttpResponse(null, { status: 204 });
       }),
     );
@@ -309,6 +314,7 @@ describe("Settings > Translation", () => {
     );
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[1].method).toBe("delete");
+    expect(calls[1].body).toBe("1");
   });
 
   it("asks before sending data to a new address, and sends the answer with the retry", async () => {
@@ -608,6 +614,35 @@ describe("Settings > Translation", () => {
     );
     await waitFor(() => expect(sent).toHaveLength(2));
     expect(sent.map((body) => body.expected_revision)).toEqual([1, 2]);
+  });
+
+  it("saves the order a reorderable setting shows even when it was never touched", async () => {
+    const withOrder = engine();
+    withOrder.schema!.fields.push({
+      key: "order",
+      type: "orderable_list",
+      label: "Order",
+      items: [
+        { value: "a", label: "Alpha" },
+        { value: "b", label: "Beta" },
+      ],
+    });
+    state = { ...state, instances: [second, withOrder] };
+    server.use(
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        record("patch", "engine", await request.json());
+        return HttpResponse.json({ engine: withOrder, notices: [] });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    expect(screen.getByText("Alpha")).toBeVisible();
+    await user.type(screen.getByLabelText("Credit line"), "!");
+    await user.click(
+      screen.getByRole("button", { name: "Save engine settings" }),
+    );
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toMatchObject({ values: { order: ["a", "b"] } });
   });
 
   it("clears a single stored secret on request and says it is pending", async () => {

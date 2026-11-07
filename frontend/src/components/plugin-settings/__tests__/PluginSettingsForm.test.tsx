@@ -313,6 +313,27 @@ describe("plugin settings fields", () => {
     expect(screen.getByDisplayValue("The default")).toBeInTheDocument();
   });
 
+  it("starts an unset reorderable list as the order it shows, so the draft holds what is displayed", () => {
+    expect(initialValues(FIELDS, {}).order).toEqual(["a", "b", "c"]);
+    expect(initialValues(FIELDS, { order: ["c", "a"] }).order).toEqual([
+      "c",
+      "a",
+    ]);
+    const withDefault: PluginField[] = [
+      {
+        key: "order",
+        type: "orderable_list",
+        items: ["a", "b"],
+        default: ["b", "a"],
+      },
+    ];
+    expect(initialValues(withDefault, {}).order).toEqual(["b", "a"]);
+    // A secret field never starts with a value.
+    expect(initialValues([{ key: "k", type: "secret" }], { k: "x" })).toEqual(
+      {},
+    );
+  });
+
   it("stops typing at the declared length", async () => {
     const user = userEvent.setup();
     customRender(<Harness />);
@@ -639,6 +660,7 @@ describe("field helpers", () => {
       api_key: "leaked",
       api_keys: ["leaked"],
     });
-    expect(start).toEqual({ label: "x" });
+    // The reorderable list has no stored value, so it starts as the order it is shown in.
+    expect(start).toEqual({ label: "x", order: ["a", "b", "c"] });
   });
 });

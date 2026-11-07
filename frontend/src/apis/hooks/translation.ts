@@ -128,8 +128,8 @@ export function useUpdateConnection() {
 export function useDeleteConnection() {
   const refresh = useRefresh();
   return useMutation({
-    mutationFn: (id: number) =>
-      withInlineErrors(() => api.translation.deleteConnection(id)),
+    mutationFn: ({ id, revision }: { id: number; revision: number }) =>
+      withInlineErrors(() => api.translation.deleteConnection(id, revision)),
     onSuccess: refresh,
   });
 }

@@ -42,9 +42,7 @@ const ConnectionEditor: FunctionComponent<ConnectionEditorProps> = ({
   const definition = types[backendType];
   const fields = useMemo(() => definition?.fields ?? [], [definition]);
   const [values, setValues] = useState<PluginValues>(() =>
-    connection
-      ? initialValues(definition?.fields ?? [], connection.values)
-      : {},
+    initialValues(definition?.fields ?? [], connection?.values ?? {}),
   );
   const [cleared, setCleared] = useState<string[]>([]);
   const create = useCreateConnection();
@@ -125,7 +123,7 @@ const ConnectionEditor: FunctionComponent<ConnectionEditorProps> = ({
             onChange={(next) => {
               if (next !== null) {
                 setBackendType(next);
-                setValues({});
+                setValues(initialValues(types[next]?.fields ?? [], {}));
               }
             }}
           />

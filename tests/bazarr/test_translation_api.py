@@ -97,6 +97,9 @@ def world(monkeypatch, schema_session):
             if (kind == "connections" or body.get("values") is not None or body.get("clear_secrets")
                     or body.get("enabled") is not None):
                 body = {**body, "expected_revision": row.revision}
+        if current and method == "delete" and path.startswith("connections/") and "?" not in path:
+            row = store.get_connection(int(path.split("/")[1]))
+            path += f"?expected_revision={row.revision}" if row is not None else ""
         response = getattr(client, method)(
             "/api/translation/" + path, headers={"X-API-KEY": API_KEY},
             data=None if body is None else json.dumps(body), content_type="application/json")
@@ -741,6 +744,19 @@ def test_the_store_swaps_the_revision_when_it_turns_an_engine_on_or_off(world):
     with pytest.raises(StaleRevisionError):
         world.store.set_instance_enabled(instance.id, False)
     assert instance.enabled == 1
+
+
+def test_removing_a_connection_needs_the_revision_and_a_stale_one_is_a_conflict(world):
+    created = _new_connection(world, values={"api_key": "k"}).json["connection"]
+    path = f"connections/{created['id']}"
+    assert world.call("delete", path, current=False).json["error"] == "expected_revision_required"
+    assert world.call("delete", path + "?expected_revision=abc", current=False).status_code == 400
+    # Someone else saved it after this view loaded it.
+    assert world.call("patch", path, {"enabled": False, "expected_revision": created["revision"]}).status_code == 200
+    stale = world.call("delete", path + f"?expected_revision={created['revision']}", current=False)
+    assert stale.status_code == 409 and stale.json["error"] == "stale_revision"
+    assert world.store.get_connection(created["id"]) is not None
+    assert world.call("delete", path).status_code == 204
 
 
 def test_a_flag_that_is_not_a_boolean_is_refused(world):
