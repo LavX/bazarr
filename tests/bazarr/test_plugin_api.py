@@ -166,6 +166,8 @@ GATED = [
     ("patch", "/api/plugins/catalog/sources/official", "/api/provider-hub/catalog/sources/official",
      {"dev_ref": "beta"}),
     ("post", "/api/plugins/updates/apply", "/api/provider-hub/updates/apply", {"id": "exampleservice"}),
+    ("post", "/api/plugins/installations/exampleservice/repair",
+     "/api/provider-hub/installations/exampleservice/repair", {"id": "exampleservice"}),
 ]
 
 
@@ -253,6 +255,7 @@ def _decorator_names(view):
     ("installations", "post", "ProviderHubInstallations", "PluginsInstallations"),
     ("local installations", "post", "ProviderHubLocalInstallations", "PluginsLocalInstallations"),
     ("updates apply", "post", "ProviderHubUpdatesApply", "PluginsUpdatesApply"),
+    ("repair", "post", "ProviderHubInstallationRepair", "PluginsInstallationRepair"),
 ])
 def test_gated_routes_carry_the_same_decorators_as_their_provider_hub_counterpart(
         family, method, hub_name, plugin_name):

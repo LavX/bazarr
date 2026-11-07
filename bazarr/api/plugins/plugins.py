@@ -198,6 +198,21 @@ class PluginsInstallation(Resource):
         return {"job_id": hub_jobs.queue_uninstall(plugin_id, installation.get("name"))}, 202
 
 
+@api_ns_plugins.route('plugins/installations/<string:plugin_id>/repair')
+class PluginsInstallationRepair(Resource):
+    @authenticate
+    @require_password_confirmation
+    @api_ns_plugins.response(202, 'Repair queued as a job')
+    @api_ns_plugins.response(401, 'Not Authenticated')
+    @api_ns_plugins.response(403, 'Password confirmation required')
+    @api_ns_plugins.response(404, 'Plugin not found')
+    def post(self, plugin_id):
+        installation = _installation(plugin_id)
+        if not installation:
+            return 'Plugin not found', 404
+        return {"job_id": hub_jobs.queue_repair(plugin_id, installation.get("name"))}, 202
+
+
 @api_ns_plugins.route('plugins/updates/check')
 class PluginsUpdatesCheck(Resource):
     @authenticate
