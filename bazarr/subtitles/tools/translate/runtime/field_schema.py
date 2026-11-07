@@ -125,7 +125,10 @@ def _check_value(definition: Mapping[str, Any], value: Any) -> str | None:
             return "must not contain a user name or password"
         return problem
     if kind in LIST_TYPES:
-        return _check_list(definition, value)
+        problem = _check_list(definition, value)
+        if problem is None and definition.get("destination") is True and any(_has_userinfo(item) for item in value):
+            return "must not contain a user name or password"
+        return problem
     if kind == "toggle":
         return None if isinstance(value, bool) else "must be on or off"
     if kind == "number" or kind == "integer":

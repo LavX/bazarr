@@ -105,3 +105,15 @@ def test_an_address_may_not_carry_a_user_name_or_password():
         assert check({"api_key": "k", "base_url": url}).errors == {
             "base_url": "must not contain a user name or password"}
     assert check({"api_key": "k", "base_url": "http://x.test:1234/v1"}).errors == {}
+
+
+def test_every_entry_of_a_list_of_addresses_is_checked_for_a_user_name_or_password():
+    fields = [{"key": "mirrors", "type": "list", "destination": True}]
+    refused = {"mirrors": "must not contain a user name or password"}
+    assert validate_values(fields, {"mirrors": ["https://x.test", "https://user:password@example.test"]}).errors == refused
+    assert validate_values(fields, {"mirrors": ["http://u@x.test"]}).errors == refused
+    clean = validate_values(fields, {"mirrors": ["https://x.test", "http://y.test:1234/v1"]})
+    assert clean.errors == {} and clean.settings["mirrors"] == ["https://x.test", "http://y.test:1234/v1"]
+    # A list that is not a destination is not an address.
+    plain = [{"key": "notes", "type": "list"}]
+    assert validate_values(plain, {"notes": ["user:password@host"]}).errors == {}
