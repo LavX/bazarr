@@ -1,7 +1,8 @@
 """Checking a settings payload against the fields a manifest declares."""
 import pytest
 
-from subtitles.tools.translate.runtime.field_schema import field_visible, is_secret_field, validate_values
+from subtitles.tools.translate.runtime.field_schema import (field_visible, is_finite_number, is_secret_field,
+                                                            validate_values)
 
 FIELDS = (
     {"key": "base_url", "type": "text", "destination": True, "max_length": 40},
@@ -87,3 +88,20 @@ def test_secret_and_visibility_helpers():
     field = {"key": "a", "show_if": {"key": "m", "in": ["x", "y"]}}
     assert field_visible(field, {"m": "y"}) and not field_visible(field, {"m": "z"})
     assert field_visible({"key": "a"}, {})
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), True, "1", 10 ** 400])
+def test_a_number_must_be_real_and_finite(value):
+    assert is_finite_number(value) is False
+    assert "temperature" in check({"api_key": "k", "temperature": value}).errors
+
+
+def test_finite_numbers_pass():
+    assert is_finite_number(0) and is_finite_number(1.5) and is_finite_number(-3)
+
+
+def test_an_address_may_not_carry_a_user_name_or_password():
+    for url in ("https://u:p@x.test/v1", "http://u@x.test"):
+        assert check({"api_key": "k", "base_url": url}).errors == {
+            "base_url": "must not contain a user name or password"}
+    assert check({"api_key": "k", "base_url": "http://x.test:1234/v1"}).errors == {}

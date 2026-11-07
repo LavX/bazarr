@@ -20,14 +20,16 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from provider_hub.plugin_manifest import parse_plugin_manifest
 
 from .destinations import DestinationSchema, effective_destinations, normalize_destination
-from .field_schema import ValidatedValues, field_visible, is_secret_field, validate_values
-from .store import (CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, TranslatorStore, TranslatorStoreError)
+from .field_schema import (ValidatedValues, field_visible, is_finite_number, is_secret_field, validate_values)
+from .store import (CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, StaleRevisionError as StoreStale,
+                    TranslatorStore, TranslatorStoreError)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,11 @@ class InvalidValuesError(ServiceError):
     code = "invalid"
 
 
+class RevisionRequiredError(ServiceError):
+    status = 400
+    code = "expected_revision_required"
+
+
 class PluginUnavailableError(ServiceError):
     status = 409
     code = "plugin_unavailable"
@@ -120,13 +127,19 @@ def _json_secret(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value)
 
 
-def _register_for_scrubbing(value: Any) -> None:
-    try:
-        from secret_store.scrub import register_secret_values
+def _clean(value: Any) -> Any:
+    """The value as JSON can carry it: a stored NaN or infinity becomes null instead of breaking the response."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _clean(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clean(item) for item in value]
+    return value
 
-        register_secret_values([item for item in (value if isinstance(value, list) else [value]) if item])
-    except Exception:
-        logger.debug("Could not register a translator secret for log scrubbing", exc_info=True)
+
+def _price(value: Any) -> float:
+    return value if is_finite_number(value) else 0
 
 
 class TranslatorSettingsService:
@@ -210,7 +223,7 @@ class TranslatorSettingsService:
             "plugin_version": instance.plugin_version,
             "plugin": None if plugin is None else {"name": plugin.name, "version": plugin.version,
                                                     "active": plugin.active},
-            "schema": self._display_schema(plugin), "values": settings,
+            "schema": self._display_schema(plugin), "values": _clean(settings),
             "secrets": self._secret_view(owner, schema.fields, destinations),
             "connections": [self.connection_view(instance, row) for row in store.list_connections(instance.id)],
         }
@@ -220,14 +233,14 @@ class TranslatorSettingsService:
         schema = self._backend_schema(plugin, connection.backend_type) or DestinationSchema()
         settings = self._store.settings_of(connection)
         destinations = effective_destinations(schema, settings)
-        values = dict(settings)
+        values = _clean(dict(settings))
         values[MODEL_KEY] = connection.model
-        values[PRICE_KEYS[0]] = connection.price_input_per_million
-        values[PRICE_KEYS[1]] = connection.price_output_per_million
+        values[PRICE_KEYS[0]] = _price(connection.price_input_per_million)
+        values[PRICE_KEYS[1]] = _price(connection.price_output_per_million)
         return {
             "id": connection.id, "instance_id": connection.instance_id, "position": connection.position,
             "backend_type": connection.backend_type, "plugin_id": connection.plugin_id, "model": connection.model,
-            "enabled": bool(connection.enabled), "awaiting_secrets": bool(connection.awaiting_secrets),
+            "enabled": bool(connection.enabled), "revision": connection.revision, "awaiting_secrets": bool(connection.awaiting_secrets),
             "usable": self._store.connection_usable(connection), "settings_version": connection.settings_version,
             "values": values, "secrets": self._secret_view((CONNECTION, connection.id), schema.fields, destinations),
         }
@@ -281,11 +294,6 @@ class TranslatorSettingsService:
     def save_engine(self, instance_id: int, payload: Mapping[str, Any]) -> dict[str, Any]:
         instance = self._instance(instance_id)
         notices: list[dict[str, Any]] = []
-        expected = payload.get("expected_revision")
-        if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int)):
-            raise ServiceError("expected_revision must be a number")
-        if expected is not None and instance.revision != expected:
-            raise StaleRevisionError("The engine settings changed since they were loaded.", revision=instance.revision)
         values = payload.get("values")
         if values is not None and not isinstance(values, dict):
             raise ServiceError("values must be an object")
@@ -293,31 +301,39 @@ class TranslatorSettingsService:
         enabled = payload.get("enabled")
         if enabled is not None and not isinstance(enabled, bool):
             raise ServiceError("enabled must be true or false")
+        expected = self._expected(payload, required=values is not None or bool(clear))
+        if expected is not None and instance.revision != expected:
+            raise StaleRevisionError("The engine settings changed since they were loaded.", revision=instance.revision)
         if values is not None or clear:
             plugin = self._plugin(instance.plugin_id)
             if plugin is None or not plugin.active:
                 raise PluginUnavailableError("The plugin for this engine is not installed.")
-            self._save_engine_values(instance, plugin, values, clear, payload)
+            self._save_engine_values(instance, plugin, values, clear, payload, expected)
         if enabled is not None and bool(instance.enabled) != enabled:
             notices += [self._notice(item) for item in self._store.set_instance_enabled(instance_id, enabled).notices]
         return {"engine": self.instance_view(self._instance(instance_id)), "notices": notices}
 
-    def _save_engine_values(self, instance, plugin, values, clear, payload) -> None:
+    def _save_engine_values(self, instance, plugin, values, clear, payload, expected) -> None:
         schema = self._engine_schema(plugin)
         owner = (INSTANCE, instance.id)
         before = self._store.settings_of(instance)
-        stored = frozenset(self._store.secret_summary(owner, frozenset()))
+        stored = frozenset(self._store.secret_summary(owner, frozenset())) - frozenset(clear)
+        self._check_clear(clear, schema)
         validated = ValidatedValues()
         if values is not None:
-            validated = self._validate(schema, dict(values), stored, plugin.plugin_id, "engine", "")
-        validated = self._drop_cleared(validated, clear, schema)
+            validated = self._validate(schema, self._merged(before, values, schema), stored, plugin.plugin_id,
+                                       "engine", "")
         after = validated.settings if values is not None else before
         self._require_consent(schema, before, after, payload, new_owner=False)
         if values is not None:
             parsed = self._parsed(plugin)
-            self._store.save_instance_settings(
-                instance.id, after, schema=schema, settings_version=parsed.settings_version if parsed else None,
-                plugin_version=plugin.version)
+            try:
+                self._store.save_instance_settings(
+                    instance.id, after, schema=schema, settings_version=parsed.settings_version if parsed else None,
+                    plugin_version=plugin.version, expected_revision=expected)
+            except StoreStale as error:
+                raise StaleRevisionError("The engine settings changed since they were loaded.",
+                                         revision=error.revision) from error
         self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
 
     # -------------------------------------------------------- connections
@@ -338,54 +354,61 @@ class TranslatorSettingsService:
         values = payload.get("values") or {}
         if not isinstance(values, dict):
             raise ServiceError("values must be an object")
-        host, plain = self._split_host(values)
-        validated = self._validate(schema, plain, frozenset(), plugin.plugin_id, "connection", backend_type)
+        host, plain = self._split_host(values, schema=schema)
+        validated = self._validate(self._without_host(schema), plain, frozenset(), plugin.plugin_id, "connection",
+                                   backend_type)
         self._require_consent(schema, {}, validated.settings, payload, new_owner=True)
         parsed = self._parsed(plugin)
         row = self._store.add_connection(
             instance_id, backend_type, plugin_id=plugin_id, model=host[MODEL_KEY], settings=validated.settings,
             settings_version=parsed.settings_version if parsed else None, plugin_version=plugin.version,
             price_input_per_million=host[PRICE_KEYS[0]], price_output_per_million=host[PRICE_KEYS[1]],
-            enabled=payload.get("enabled", True) is not False)
+            enabled=self._flag(payload, "enabled", True))
         self._write_secrets((CONNECTION, row.id), validated, [], effective_destinations(schema, validated.settings))
         return {"connection": self.connection_view(instance, self._store.get_connection(row.id)), "notices": []}
 
     def update_connection(self, connection_id: int, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Change a connection. ``values`` are merged onto what is stored: a key left out keeps its value,
+        and one sent empty goes back to its default."""
         connection = self._connection(connection_id)
         instance = self._instance(connection.instance_id)
         plugin = self._serving_plugin(instance, connection)
         schema = self._backend_schema(plugin, connection.backend_type) if plugin and plugin.active else None
-        enabled = payload.get("enabled")
-        if enabled is not None and not isinstance(enabled, bool):
-            raise ServiceError("enabled must be true or false")
+        enabled = self._flag(payload, "enabled", None)
         values = payload.get("values")
         if values is not None and not isinstance(values, dict):
             raise ServiceError("values must be an object")
         clear = self._clear_list(payload)
+        expected = self._expected(payload, required=True)
         if schema is None:
             raise PluginUnavailableError("The plugin that serves this back end is not installed.")
-        if values is None and not clear:
-            if enabled is not None:
-                self._store.update_connection(connection_id, schema=schema, enabled=enabled)
-        else:
-            owner = (CONNECTION, connection_id)
-            before = self._store.settings_of(connection)
-            stored = frozenset(self._store.secret_summary(owner, frozenset()))
-            host, plain = self._split_host(values or {}, keep=connection)
-            validated = ValidatedValues()
-            if values is not None:
-                validated = self._validate(schema, plain, stored, plugin.plugin_id, "connection",
-                                           connection.backend_type)
-            validated = self._drop_cleared(validated, clear, schema)
-            after = validated.settings if values is not None else before
-            self._require_consent(schema, before, after, payload, new_owner=False)
-            parsed = self._parsed(plugin)
+        if connection.revision != expected:
+            raise StaleRevisionError("The back end changed since it was loaded.", revision=connection.revision)
+        if values is None and not clear and enabled is None:
+            return {"connection": self.connection_view(instance, connection), "notices": []}
+        owner = (CONNECTION, connection_id)
+        before = self._store.settings_of(connection)
+        stored = frozenset(self._store.secret_summary(owner, frozenset())) - frozenset(clear)
+        self._check_clear(clear, schema)
+        validated = ValidatedValues()
+        host = {MODEL_KEY: connection.model, PRICE_KEYS[0]: connection.price_input_per_million,
+                PRICE_KEYS[1]: connection.price_output_per_million}
+        if values is not None:
+            host, plain = self._split_host(values, keep=connection, schema=schema)
+            validated = self._validate(self._without_host(schema), self._merged(before, plain, schema), stored,
+                                       plugin.plugin_id, "connection", connection.backend_type)
+        after = validated.settings if values is not None else before
+        self._require_consent(schema, before, after, payload, new_owner=False)
+        parsed = self._parsed(plugin)
+        try:
             self._store.update_connection(
                 connection_id, schema=schema, model=host[MODEL_KEY], settings=after,
                 settings_version=parsed.settings_version if parsed else None, plugin_version=plugin.version,
                 price_input_per_million=host[PRICE_KEYS[0]], price_output_per_million=host[PRICE_KEYS[1]],
-                enabled=enabled)
-            self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
+                enabled=enabled, expected_revision=expected)
+        except StoreStale as error:
+            raise StaleRevisionError("The back end changed since it was loaded.", revision=error.revision) from error
+        self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
         return {"connection": self.connection_view(instance, self._connection(connection_id)), "notices": []}
 
     def delete_connection(self, connection_id: int) -> None:
@@ -412,12 +435,35 @@ class TranslatorSettingsService:
     # ------------------------------------------------------------ options
     def options(self, instance_id: int, backend_type: str, field_key: str,
                 draft: Mapping[str, Any]) -> dict[str, Any]:
-        """The live choices of an ``options`` field, or ``available: false`` so the page offers free text."""
-        self._instance(instance_id)
+        """The live choices of an ``options`` field, or ``available: false`` so the page offers free text.
+
+        The request is checked against the manifest before a source sees it: the back-end type and the
+        field must exist, and only declared, non-secret draft values pass. The contract for a source
+        that makes a network call: a draft address must not be sent a stored key unless
+        ``TranslatorStore.secrets_for_request`` covers that address, and no redirect is followed.
+        """
+        instance = self._instance(instance_id)
+        plugin = self._plugin(instance.plugin_id)
+        display = self._display_schema(plugin)
+        unavailable = {"available": False, "items": [], "reason": "The model list could not be fetched."}
+        if display is None:
+            return unavailable
+        if backend_type:
+            definition = display["backend_types"].get(backend_type)
+            if definition is None:
+                raise ServiceError(f"{plugin.name} has no back end of type {backend_type}")
+            fields = definition["fields"]
+        else:
+            fields = display["fields"]
+        field = next((item for item in fields if item["key"] == field_key and item.get("type") == "options"), None)
+        if field is None:
+            raise ServiceError(f"{field_key} is not a model list of this engine")
+        clean = {item["key"]: draft[item["key"]] for item in fields
+                 if item["key"] in draft and not is_secret_field(item)}
         source = self._options_source
-        answer = source(instance_id, backend_type, field_key, draft) if source is not None else None
+        answer = source(instance_id, backend_type, field_key, clean) if source is not None else None
         if not answer or not isinstance(answer.get("items"), list):
-            return {"available": False, "items": [], "reason": "The model list could not be fetched."}
+            return unavailable
         return {"available": True, "items": answer["items"], "reason": ""}
 
     # ------------------------------------------------------------ helpers
@@ -429,25 +475,75 @@ class TranslatorSettingsService:
         return clear
 
     @staticmethod
-    def _split_host(values: Mapping[str, Any], keep=None) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _expected(payload: Mapping[str, Any], *, required: bool) -> int | None:
+        expected = payload.get("expected_revision")
+        if expected is None:
+            if required:
+                raise RevisionRequiredError("expected_revision is required: send the revision you loaded.")
+            return None
+        if isinstance(expected, bool) or not isinstance(expected, int):
+            raise ServiceError("expected_revision must be a number")
+        return expected
+
+    @staticmethod
+    def _flag(payload: Mapping[str, Any], key: str, default: bool | None) -> bool | None:
+        value = payload.get(key, default)
+        if value is not None and not isinstance(value, bool):
+            raise ServiceError(f"{key} must be true or false")
+        return value
+
+    @staticmethod
+    def _merged(stored: Mapping[str, Any], values: Mapping[str, Any], schema: DestinationSchema) -> dict[str, Any]:
+        """The stored settings with ``values`` laid over them. An empty value removes its key (the default applies)."""
+        toggles = {item["key"] for item in schema.fields if item.get("type") == "toggle"}
+        merged = dict(stored)
+        for key, value in values.items():
+            if (value is None or value == "" or value == []) and key not in toggles:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+        # A secret field is never in the stored settings; only a value typed now reaches validation.
+        for item in schema.fields:
+            if is_secret_field(item) and item["key"] not in values:
+                merged.pop(item["key"], None)
+        return merged
+
+    @staticmethod
+    def _without_host(schema: DestinationSchema) -> DestinationSchema:
+        """The schema for the settings JSON: the model has its own column, so a field of that name is checked apart."""
+        return DestinationSchema(fields=tuple(item for item in schema.fields if item["key"] not in HOST_KEYS),
+                                 endpoints=schema.endpoints)
+
+    @staticmethod
+    def _split_host(values: Mapping[str, Any], keep=None, schema: DestinationSchema | None = None
+                    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Take the model and the prices out of a connection's values; the rest is the back end's settings."""
         host: dict[str, Any] = {
             MODEL_KEY: keep.model if keep is not None else "",
             PRICE_KEYS[0]: keep.price_input_per_million if keep is not None else 0,
             PRICE_KEYS[1]: keep.price_output_per_million if keep is not None else 0}
         plain = dict(values)
+        errors: dict[str, str] = {}
         for key in HOST_KEYS:
-            if key in plain:
-                value = plain.pop(key)
-                if key == MODEL_KEY:
-                    if not isinstance(value, str):
-                        raise InvalidValuesError("The values are not valid.", field_errors={key: "must be text"})
-                    host[key] = value
-                elif isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or value != value:
-                    raise InvalidValuesError("The values are not valid.",
-                                             field_errors={key: "must be a number from 0 up"})
+            if key not in plain:
+                continue
+            value = plain.pop(key)
+            if key == MODEL_KEY:
+                if not isinstance(value, str):
+                    errors[key] = "must be text"
                 else:
                     host[key] = value
+            elif not is_finite_number(value) or value < 0:
+                errors[key] = "must be a number from 0 up"
+            else:
+                host[key] = value
+        # A manifest that declares its own model field keeps its limits and its required flag.
+        declared = next((item for item in (schema.fields if schema else ()) if item["key"] == MODEL_KEY), None)
+        if declared is not None and MODEL_KEY not in errors:
+            checked = validate_values([declared], {MODEL_KEY: host[MODEL_KEY]})
+            errors.update(checked.errors)
+        if errors:
+            raise InvalidValuesError("The values are not valid.", field_errors=errors)
         return host, plain
 
     def _validate(self, schema: DestinationSchema, values: dict[str, Any], stored: frozenset[str], plugin_id: str,
@@ -466,15 +562,12 @@ class TranslatorSettingsService:
         return validated
 
     @staticmethod
-    def _drop_cleared(validated: ValidatedValues, clear: list[str], schema: DestinationSchema) -> ValidatedValues:
+    def _check_clear(clear: list[str], schema: DestinationSchema) -> None:
         secret_fields = {item["key"] for item in schema.fields if is_secret_field(item)}
         unknown = [name for name in clear if name not in secret_fields]
         if unknown:
             raise InvalidValuesError("The values are not valid.",
                                      field_errors={name: "is not a secret of this engine" for name in unknown})
-        for name in clear:
-            validated.secrets.pop(name, None)
-        return validated
 
     def _require_consent(self, schema: DestinationSchema, before: Mapping[str, Any], after: Mapping[str, Any],
                          payload: Mapping[str, Any], *, new_owner: bool) -> None:
@@ -497,11 +590,11 @@ class TranslatorSettingsService:
 
     def _write_secrets(self, owner, validated: ValidatedValues, clear: list[str], destinations) -> None:
         for name in clear:
-            self._store.clear_secret(owner, name, destinations=destinations)
+            # Clear, then type: a secret sent in the same request replaces the stored one instead of being dropped.
+            if name not in validated.secrets:
+                self._store.clear_secret(owner, name, destinations=destinations)
         for name, value in validated.secrets.items():
             self._store.set_secret(owner, name, _json_secret(value), destinations=destinations)
-            if isinstance(value, list):
-                _register_for_scrubbing(value)
 
 
 __all__ = [

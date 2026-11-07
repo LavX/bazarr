@@ -24,8 +24,10 @@ field is called: a ``key_list`` given a string is an error, never a one-item lis
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit
 
 TEXT_LIKE = frozenset({"text", "options"})
 LIST_TYPES = frozenset({"list", "key_list", "orderable_list"})
@@ -63,8 +65,16 @@ class ValidatedValues:
     errors: dict[str, str] = dataclass_field(default_factory=dict)
 
 
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+def is_finite_number(value: Any) -> bool:
+    """A real, finite number. Not a bool, not NaN or an infinity, and an integer small enough to store."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return abs(value) <= 2 ** 53
+    return isinstance(value, float) and math.isfinite(value)
+
+
+_is_number = is_finite_number
 
 
 def _check_text(definition, value) -> str | None:
@@ -98,10 +108,22 @@ def _check_list(definition, value) -> str | None:
     return None
 
 
+def _has_userinfo(value: str) -> bool:
+    try:
+        parts = urlsplit(value.strip())
+    except ValueError:
+        return False
+    return parts.username is not None or parts.password is not None
+
+
 def _check_value(definition: Mapping[str, Any], value: Any) -> str | None:
     kind = definition.get("type")
     if kind in TEXT_LIKE or kind == "secret":
-        return _check_text(definition, value)
+        problem = _check_text(definition, value)
+        # A user name or password in an address is a credential kept in clear text and shown back.
+        if problem is None and definition.get("destination") is True and _has_userinfo(value):
+            return "must not contain a user name or password"
+        return problem
     if kind in LIST_TYPES:
         return _check_list(definition, value)
     if kind == "toggle":

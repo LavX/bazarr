@@ -64,8 +64,10 @@ def world(monkeypatch, schema_session):
     plugins = {PLUGIN: InstalledPlugin(PLUGIN, "AI Subtitle Translator", "2.2.0", True, _manifest())}
     store = TranslatorStore(schema_session, pointers=MemoryPointers(), plugin_active=lambda pid: pid in plugins)
     validations = []
+    sources = []
     monkeypatch.setattr(module, "get_service", lambda: TranslatorSettingsService(
-        store, plugin_lookup=plugins.get, plugin_validator=lambda *args: validations.append(args) or {}))
+        store, plugin_lookup=plugins.get, plugin_validator=lambda *args: validations.append(args) or {},
+        options_source=(lambda *args: sources[0](*args)) if sources else None))
     app = Flask(__name__)
     app.register_blueprint(api_bp)
     client = app.test_client()
@@ -76,8 +78,15 @@ def world(monkeypatch, schema_session):
 
     w = World()
     w.client, w.store, w.instance, w.plugins, w.runtime, w.validations = client, store, instance, plugins, runtime, validations
+    w.sources = sources
 
-    def call(method, path, body=None):
+    def call(method, path, body=None, current=True):
+        """Send a request. A save carries the revision the caller loaded, unless ``current`` is False."""
+        if current and method == "patch" and isinstance(body, dict) and "expected_revision" not in body:
+            kind, _, row_id = path.partition("/")
+            row = (store.get_instance if kind == "engines" else store.get_connection)(int(row_id))
+            if kind == "connections" or body.get("values") is not None or body.get("clear_secrets"):
+                body = {**body, "expected_revision": row.revision}
         response = getattr(client, method)(
             "/api/translation/" + path, headers={"X-API-KEY": API_KEY},
             data=None if body is None else json.dumps(body), content_type="application/json")
@@ -104,7 +113,7 @@ ROUTES = [
 @pytest.mark.parametrize("method,path,body", ROUTES)
 def test_every_route_is_404_while_the_switch_is_off(world, monkeypatch, method, path, body):
     monkeypatch.setattr(world.runtime, "runtime_v2_enabled", lambda: False)
-    response = world.call(method, path, body)
+    response = world.call(method, path, body, current=False)
     assert response.status_code == 404
     # Nothing was read or written behind the refusal.
     assert world.store.list_connections(world.instance.id) == []
@@ -303,10 +312,11 @@ def test_a_changed_base_url_asks_again_and_never_keeps_the_stored_key(world):
 
 
 def test_the_options_route_falls_back_to_free_text_without_a_source(world):
-    answer = world.call("post", f"engines/{world.instance.id}/options", {"field": "model"}).json
+    path = f"engines/{world.instance.id}/options"
+    answer = world.call("post", path, {"field": "model", "backend_type": "openrouter"}).json
     assert answer["available"] is False and answer["items"] == []
-    assert world.call("post", "engines/999/options", {"field": "model"}).status_code == 404
-    assert world.call("post", f"engines/{world.instance.id}/options", {"field": 5}).status_code == 400
+    assert world.call("post", "engines/999/options", {"field": "model", "backend_type": "openrouter"}).status_code == 404
+    assert world.call("post", path, {"field": 5}).status_code == 400
 
 
 def test_a_body_that_is_not_an_object_is_refused(world):
@@ -315,11 +325,171 @@ def test_a_body_that_is_not_an_object_is_refused(world):
     assert response.status_code == 400
 
 
-def test_the_system_status_reports_the_switch(world, monkeypatch):
+def test_the_system_status_names_the_switch_only_while_it_is_on(world, monkeypatch):
     def status():
         response = world.client.get("/api/system/status", headers={"X-API-KEY": API_KEY})
-        return response.json["data"]["translation_runtime_v2"]
+        return response.json["data"]
 
-    assert status() is True
+    assert status()["translation_runtime_v2"] is True
     monkeypatch.setattr(world.runtime, "runtime_v2_enabled", lambda: False)
-    assert status() is False
+    assert "translation_runtime_v2" not in status()
+
+
+# ------------------------------------------------------------ review fixes
+
+def _strict_json(text):
+    """The body as a strict JSON parser reads it: NaN and Infinity are errors."""
+    def refuse(name):
+        raise ValueError(name)
+    return json.loads(text, parse_constant=refuse)
+
+
+def test_a_key_list_save_keeps_every_other_credential_masked_and_masks_each_key(world, monkeypatch):
+    from app.config import settings
+    from secret_store import scrub
+
+    other = "sonarr-key-0123456789abcdef"  # pragma: allowlist secret
+    monkeypatch.setitem(settings.sonarr, "apikey", other)
+    monkeypatch.setitem(settings.translator, "runtime_v2", True)
+    monkeypatch.setattr("app.database.database", world.store._session)
+    scrub.refresh_secret_values(settings)
+    assert other not in scrub.scrub_text(f"key {other}")
+    response = _new_connection(world, backend_type="gemini", values={"api_keys": KEYS})
+    assert response.status_code == 201
+    text = scrub.scrub_text(f"a {other} b {KEYS[0]} c {KEYS[1]}")
+    assert other not in text and KEYS[0] not in text and KEYS[1] not in text
+
+
+@pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "NaN", "1e400"])
+def test_a_non_finite_number_is_refused_everywhere_a_number_is_taken(world, literal):
+    path = f"engines/{world.instance.id}/connections"
+    body = '{"backend_type":"openrouter","values":{"api_key":"k","price_input_per_million":%s}}' % literal
+    response = world.client.post("/api/translation/" + path, headers={"X-API-KEY": API_KEY}, data=body,
+                                 content_type="application/json")
+    assert response.status_code == 400
+    patch = world.client.patch(
+        f"/api/translation/engines/{world.instance.id}", headers={"X-API-KEY": API_KEY},
+        data='{"expected_revision":1,"values":{"concurrency":%s}}' % literal, content_type="application/json")
+    assert patch.status_code == 400
+    assert world.store.list_connections(world.instance.id) == []
+
+
+def test_the_state_stays_valid_json_when_a_stored_price_is_not_finite(world):
+    created = _new_connection(world, values={"api_key": "k"}).json["connection"]
+    row = world.store.get_connection(created["id"])
+    row.price_input_per_million = float("inf")
+    row.settings_json = '{"x": NaN}'
+    world.store._session.flush()
+    response = world.call("get", "state")
+    assert response.status_code == 200
+    connection = _strict_json(world.last_text)["instances"][0]["connections"][0]
+    assert connection["values"]["price_input_per_million"] == 0
+
+
+def test_a_save_without_the_revision_is_refused(world):
+    path = f"engines/{world.instance.id}"
+    response = world.call("patch", path, {"values": {"concurrency": 2}}, current=False)
+    assert response.status_code == 400 and response.json["error"] == "expected_revision_required"
+    created = _new_connection(world, values={"api_key": "k"}).json["connection"]
+    response = world.call("patch", f"connections/{created['id']}", {"enabled": False}, current=False)
+    assert response.status_code == 400 and response.json["error"] == "expected_revision_required"
+
+
+def test_the_store_swaps_the_revision_in_the_database_not_in_memory(world):
+    from sqlalchemy import update
+
+    from app.database import TableTranslatorEngineInstance
+    from subtitles.tools.translate.runtime.destinations import DestinationSchema
+    from subtitles.tools.translate.runtime.store import StaleRevisionError
+
+    instance = world.store.get_instance(world.instance.id)
+    assert instance.revision == 1
+    # Another writer got in after this one read the row: the in-memory revision still says 1.
+    world.store._session.execute(update(TableTranslatorEngineInstance).where(
+        TableTranslatorEngineInstance.id == instance.id).values(revision=5).execution_options(
+        synchronize_session=False))
+    with pytest.raises(StaleRevisionError):
+        world.store.save_instance_settings(instance.id, {"a": 1}, schema=DestinationSchema())
+    assert world.store.settings_of(instance) == {}
+
+
+def test_a_connection_has_its_own_revision_and_a_stale_save_is_a_conflict(world):
+    created = _new_connection(world, values={"api_key": "k"}).json["connection"]
+    assert created["revision"] == 1
+    path = f"connections/{created['id']}"
+    first = world.call("patch", path, {"enabled": False})
+    assert first.status_code == 200 and first.json["connection"]["revision"] == 2
+    stale = world.call("patch", path, {"enabled": True, "expected_revision": 1})
+    assert stale.status_code == 409 and stale.json["error"] == "stale_revision" and stale.json["revision"] == 2
+    assert world.store.get_instance(world.instance.id).revision == 1
+
+
+def test_clearing_a_secret_and_typing_a_new_one_in_one_save_keeps_the_new_one(world):
+    created = _new_connection(world, backend_type="gemini", values={"api_keys": KEYS}).json["connection"]
+    new = ["gem-key-new-0123456789"]  # pragma: allowlist secret
+    response = world.call("patch", f"connections/{created['id']}", {
+        "values": {"api_keys": new}, "clear_secrets": ["api_keys"]})
+    assert response.status_code == 200
+    assert response.json["connection"]["secrets"]["api_keys"]["count"] == 1
+    held = world.store.secrets_for_request(("connection", created["id"]), frozenset())
+    assert json.loads(held["api_keys"]) == new
+    # Clearing alone still removes it.
+    cleared = world.call("patch", f"connections/{created['id']}", {"clear_secrets": ["api_keys"]})
+    assert cleared.json["connection"]["secrets"] == {}
+
+
+def test_a_connection_save_merges_onto_what_is_stored(world):
+    url = "http://lms:1234/v1"
+    created = _new_connection(world, backend_type="openai_compatible", accept_destinations=[url],
+                              values={"base_url": url, "preset": "lmstudio", "model": "m1"}).json["connection"]
+    path = f"connections/{created['id']}"
+    merged = world.call("patch", path, {"values": {"model": "m2"}}).json["connection"]
+    assert merged["values"]["base_url"] == url and merged["values"]["preset"] == "lmstudio"
+    assert merged["values"]["model"] == "m2"
+    # An empty value takes a key back to its default.
+    reset = world.call("patch", path, {"values": {"preset": ""}}).json["connection"]
+    assert "preset" not in reset["values"] and reset["values"]["base_url"] == url
+
+
+def test_a_manifest_that_declares_the_model_field_keeps_its_limits_and_saves_work(world):
+    fields = world.plugins[PLUGIN].manifest["settings"]["backend_types"]["openrouter"]["fields"]
+    fields.append({"key": "model", "type": "options", "required": True, "max_length": 10})
+    assert _new_connection(world, values={"api_key": "k"}).json["field_errors"] == {"model": "is required"}
+    assert _new_connection(world, values={"api_key": "k", "model": "x" * 11}).status_code == 400
+    created = _new_connection(world, values={"api_key": "k", "model": "ok"})
+    assert created.status_code == 201
+    saved = world.call("patch", f"connections/{created.json['connection']['id']}", {"values": {"api_key": "n"}})
+    assert saved.status_code == 200 and saved.json["connection"]["model"] == "ok"
+
+
+def test_the_options_route_checks_the_request_against_the_manifest_and_strips_secrets(world):
+    seen = []
+    world.sources.append(lambda *args: seen.append(args) or {"items": [{"id": "m"}]})
+    path = f"engines/{world.instance.id}/options"
+    answer = world.call("post", path, {
+        "field": "model", "backend_type": "openai_compatible",
+        "values": {"base_url": "http://x:1/v1", "api_key": SECRET, "invented": 1}}).json
+    assert answer["available"] is True
+    (call,) = seen
+    assert call == (world.instance.id, "openai_compatible", "model", {"base_url": "http://x:1/v1"})
+    assert world.call("post", path, {"field": "model", "backend_type": "nope"}).status_code == 400
+    assert world.call("post", path, {"field": "base_url", "backend_type": "openai_compatible"}).status_code == 400
+    assert world.call("post", path, {"field": "model"}).status_code == 400  # the engine itself has no model field
+    assert len(seen) == 1
+
+
+def test_a_user_name_or_password_in_an_address_is_refused_and_never_echoed(world):
+    response = _new_connection(world, backend_type="openai_compatible",
+                               values={"base_url": "https://user:hunter2@a.example/v1"},
+                               accept_destinations=["https://user:hunter2@a.example/v1"])
+    assert response.status_code == 400
+    assert response.json["field_errors"] == {"base_url": "must not contain a user name or password"}
+    assert "hunter2" not in world.last_text
+    assert world.store.list_connections(world.instance.id) == []
+
+
+def test_a_flag_that_is_not_a_boolean_is_refused(world):
+    assert _new_connection(world, enabled="false", values={"api_key": "k"}).status_code == 400
+    created = _new_connection(world, values={"api_key": "k"}).json["connection"]
+    assert world.call("patch", f"connections/{created['id']}", {"enabled": "no"}).status_code == 400
+    assert world.call("patch", f"engines/{world.instance.id}", {"enabled": 0}).status_code == 400

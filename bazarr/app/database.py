@@ -1010,6 +1010,8 @@ class TableTranslatorConnection(Base):
     price_input_per_million = mapped_column(Float, nullable=False, default=0, server_default='0')
     price_output_per_million = mapped_column(Float, nullable=False, default=0, server_default='0')
     enabled = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    # Goes up on every change to the connection, so two saves that read the same state cannot both win.
+    revision = mapped_column(Integer, nullable=False, default=1, server_default='1')
     awaiting_secrets = mapped_column(Integer, nullable=False, default=0, server_default='0')
     created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)

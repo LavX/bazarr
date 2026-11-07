@@ -24,12 +24,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Mapping, Sequence
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from app.database import (TableTranslatorConnection, TableTranslatorEngineInstance,
                           TableTranslatorSecret)
 from media_servers.repository import atomic
 
+from .field_schema import is_finite_number
 from .destinations import DestinationSchema, added_destinations, covers, effective_destinations
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,14 @@ Owner = tuple[str, int]
 
 class TranslatorStoreError(ValueError):
     """A request the store refuses, with a reason a person can read."""
+
+
+class StaleRevisionError(TranslatorStoreError):
+    """The row changed since the caller read it; nothing was written."""
+
+    def __init__(self, message: str, revision: int | None = None):
+        super().__init__(message)
+        self.revision = revision
 
 
 @dataclass(frozen=True)
@@ -136,7 +145,19 @@ def collect_secret_values() -> set[str]:
             continue
         if isinstance(plain, str) and plain:
             values.add(plain)
+            values.update(_list_entries(plain))
     return values
+
+
+def _list_entries(plain: str) -> list[str]:
+    """The entries of a list secret (a JSON array of strings), so each key is scrubbed on its own."""
+    if not plain.startswith("["):
+        return []
+    try:
+        parsed = json.loads(plain)
+    except ValueError:
+        return []
+    return [item for item in parsed if isinstance(item, str) and item] if isinstance(parsed, list) else []
 
 
 def default_plugin_active(plugin_id: str) -> bool:
@@ -232,13 +253,22 @@ class TranslatorStore:
         """Replace an instance's settings. Bumps the revision and checks the destinations."""
         instance = self._require_instance(instance_id)
         if expected_revision is not None and instance.revision != expected_revision:
-            raise TranslatorStoreError("the engine settings changed since they were loaded")
+            raise StaleRevisionError("the engine settings changed since they were loaded", instance.revision)
         owner = (INSTANCE, instance_id)
         before = effective_destinations(schema, self.settings_of(instance))
         after = effective_destinations(schema, settings)
         with atomic(self._session, durable=True):
+            current = int(instance.revision)
+            # Compare and swap in the database, so two saves that both read this revision cannot both win.
+            claimed = self._session.execute(
+                update(TableTranslatorEngineInstance)
+                .where(TableTranslatorEngineInstance.id == instance_id,
+                       TableTranslatorEngineInstance.revision == current)
+                .values(revision=current + 1).execution_options(synchronize_session=False)).rowcount
+            if claimed != 1:
+                raise StaleRevisionError("the engine settings changed since they were loaded")
             instance.settings_json = json.dumps(dict(settings), sort_keys=True)
-            instance.revision = int(instance.revision) + 1
+            instance.revision = current + 1
             if settings_version is not None:
                 instance.settings_version = settings_version
             if plugin_version is not None:
@@ -310,14 +340,26 @@ class TranslatorStore:
     def update_connection(self, connection_id: int, *, schema: DestinationSchema, model: str | None = None,
                           settings: Mapping[str, Any] | None = None, settings_version: int | None = None,
                           plugin_version: str | None = None, price_input_per_million: float | None = None,
-                          price_output_per_million: float | None = None, enabled: bool | None = None) -> SaveResult:
-        """Change a connection. Never touches the instance's revision."""
+                          price_output_per_million: float | None = None, enabled: bool | None = None,
+                          expected_revision: int | None = None) -> SaveResult:
+        """Change a connection and bump its own revision. Never touches the instance's revision."""
         connection = self._require_connection(connection_id)
+        if expected_revision is not None and connection.revision != expected_revision:
+            raise StaleRevisionError("the back end changed since it was loaded", connection.revision)
         _check_price(price_input_per_million or 0, price_output_per_million or 0)
         before = effective_destinations(schema, self.settings_of(connection))
         new_settings = self.settings_of(connection) if settings is None else dict(settings)
         after = effective_destinations(schema, new_settings)
         with atomic(self._session, durable=True):
+            current = int(connection.revision)
+            claimed = self._session.execute(
+                update(TableTranslatorConnection)
+                .where(TableTranslatorConnection.id == connection_id,
+                       TableTranslatorConnection.revision == current)
+                .values(revision=current + 1).execution_options(synchronize_session=False)).rowcount
+            if claimed != 1:
+                raise StaleRevisionError("the back end changed since it was loaded")
+            connection.revision = current + 1
             if model is not None:
                 connection.model = model
             if settings is not None:
@@ -621,5 +663,5 @@ class TranslatorStore:
 
 def _check_price(*prices: float) -> None:
     for price in prices:
-        if isinstance(price, bool) or not isinstance(price, (int, float)) or price < 0 or price != price:
+        if not is_finite_number(price) or price < 0:
             raise TranslatorStoreError("a price per million tokens must be a number from 0 up")
