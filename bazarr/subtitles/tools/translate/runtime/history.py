@@ -75,8 +75,8 @@ class HistoryStore:
         """Create the job's row, or reopen it for another attempt. Returns the row id."""
         if not job_id:
             raise HistoryError("A history row needs a job id")
-        now = self._clock()
         with ledger_transaction(self._session):
+            now = self._clock()
             row = self._row(job_id)
             if row is None:
                 row = TableTranslationHistory(job_id=job_id, started_at=now, created_at=now)
@@ -101,8 +101,8 @@ class HistoryStore:
         """Record that an attempt ran on a connection, whether or not it produced a batch."""
         if outcome not in ATTEMPT_OUTCOMES:
             raise HistoryError(f"Unknown attempt outcome: {outcome}")
-        now = self._clock()
         with ledger_transaction(self._session):
+            now = self._clock()
             history = self._require(job_id)
             row = self._connection_row(history, connection_id, backend_type)
             row.attempts += 1
@@ -121,8 +121,8 @@ class HistoryStore:
         """Count batches a connection translated, and the model that served them."""
         if count < 1:
             raise HistoryError("A batch count is at least 1")
-        now = self._clock()
         with ledger_transaction(self._session):
+            now = self._clock()
             history = self._require(job_id)
             row = self._connection_row(history, connection_id, backend_type)
             row.batches += count
@@ -134,8 +134,8 @@ class HistoryStore:
     def note_declined(self, job_id: str, *, instance_id: int | None, reason: str | None = None,
                       taken_over_by: int | None = None) -> None:
         """Record the engine that declined the job and, when there was one, the engine that took it over."""
-        now = self._clock()
         with ledger_transaction(self._session):
+            now = self._clock()
             history = self._require(job_id)
             history.declined_by_instance_id = instance_id
             history.declined_reason = _scrubbed(reason)
@@ -148,8 +148,8 @@ class HistoryStore:
         """Set the job's status, and its end time for a status that ends it. Totals are brought up to date."""
         if status not in STATUSES or status == RUNNING:
             raise HistoryError(f"Not a status a job can end with: {status}")
-        now = self._clock()
         with ledger_transaction(self._session):
+            now = self._clock()
             history = self._require(job_id)
             history.status = status
             history.error_class = _scrubbed(error_class, ERROR_CLASS_LIMIT)

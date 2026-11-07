@@ -165,15 +165,13 @@ class UsageLedger:
     # ------------------------------------------------------------------- reads
     def month_committed(self, month: str | None = None) -> int:
         """What the month has spent or reserved: its calls at their counted cost plus every job's hold."""
-        month = month or month_key(self._clock())
         with ledger_transaction(self._session):
-            return self._committed(month)
+            return self._committed(month or self._month(self._clock()))
 
     def month_remainder(self, limits: CostLimits, month: str | None = None) -> int | None:
         """What is still unreserved in the month, or ``None`` when it has no cap."""
-        month = month or month_key(self._clock())
         with ledger_transaction(self._session):
-            return self._remainder(limits, month)
+            return self._remainder(limits, month or self._month(self._clock()))
 
     def job_cost(self, job_id: str) -> int:
         """What the job has spent or has reserved at worst case, across every connection and engine."""
@@ -197,9 +195,9 @@ class UsageLedger:
         and ``job_cap_spent`` mean nothing can be reserved: free connections still
         run, priced ones are skipped.
         """
-        now = self._clock()
-        month = month_key(now)
         with ledger_transaction(self._session):
+            now = self._clock()
+            month = self._month(now)
             row = self._budget_row(job_id)
             counted = self._job_counted(job_id)
             if row is not None and row.state == BUDGET_ACTIVE:
@@ -233,9 +231,9 @@ class UsageLedger:
         call (0) is always recorded.
         """
         _micros(worst_case_micros, "worst_case_micros")
-        now = self._clock()
-        month = month_key(now)
         with ledger_transaction(self._session):
+            now = self._clock()
+            month = self._month(now)
             existing = self._call_row(job_id, call_id)
             if existing is not None:
                 return CallReservation(True, None, existing.worst_case_micros)
@@ -266,8 +264,8 @@ class UsageLedger:
         _micros(actual_micros, "actual_micros")
         if input_tokens < 0 or output_tokens < 0:
             raise UsageError("Usage cannot be negative")
-        now = self._clock()
         with ledger_transaction(self._session):
+            now = self._clock()
             row = self._call_row(job_id, call_id)
             if row is None:
                 raise UsageError(f"No reservation for call {call_id} of job {job_id}")
@@ -289,7 +287,7 @@ class UsageLedger:
             if limits is not None:
                 budget = self._budget_row(job_id)
                 if budget is not None and budget.state == BUDGET_ACTIVE:
-                    self._fit_to_caps(budget, limits, month_key(now), self._job_counted(job_id), now)
+                    self._fit_to_caps(budget, limits, self._month(now), self._job_counted(job_id), now)
             self._history.refresh_in_transaction(job_id)
             cost = self._job_counted(job_id)
             over_cap = limits is not None and limits.job_cap is not None and cost > limits.job_cap
@@ -297,8 +295,8 @@ class UsageLedger:
 
     def release_job(self, job_id: str) -> None:
         """Give back what the job still holds. Calls it never settled keep counting at worst case."""
-        now = self._clock()
         with ledger_transaction(self._session):
+            now = self._clock()
             row = self._budget_row(job_id)
             if row is not None and row.state == BUDGET_ACTIVE:
                 row.state = BUDGET_RELEASED
@@ -318,9 +316,9 @@ class UsageLedger:
         The dispatcher calls this at startup, and before ``roll_month`` at the start of a month.
         """
         live = {str(job_id) for job_id in live_job_ids}
-        now = self._clock()
         released = 0
         with ledger_transaction(self._session):
+            now = self._clock()
             for row in self._active_budgets():
                 if row.job_id not in live:
                     row.state = BUDGET_RELEASED
@@ -331,10 +329,10 @@ class UsageLedger:
 
     def roll_month(self, limits: CostLimits) -> int:
         """Move every running job's unspent budget into the current month. Returns how many moved."""
-        now = self._clock()
-        month = month_key(now)
         moved = 0
         with ledger_transaction(self._session):
+            now = self._clock()
+            month = self._month(now)
             rows = self._session.execute(
                 select(TableTranslationBudget)
                 .where(TableTranslationBudget.state == BUDGET_ACTIVE, TableTranslationBudget.month != month)
@@ -345,6 +343,18 @@ class UsageLedger:
         return moved
 
     # ----------------------------------------------------------------- helpers
+    def _month(self, now: datetime) -> str:
+        """The month a step counts in. Called inside the ledger transaction, with a clock read inside it too.
+
+        The ledger never goes back: if anything in it already belongs to a later month than the clock says
+        (the clock was set back, or another step ran in a new month while this one waited), that later month
+        is the one that counts, so a call is never charged to an earlier month than a budget it draws on.
+        """
+        latest = max(
+            self._session.execute(select(func.max(TableTranslationUsage.month))).scalar() or "",
+            self._session.execute(select(func.max(TableTranslationBudget.month))).scalar() or "")
+        return max(month_key(now), latest)
+
     def _allowance(self, job_id: str, limits: CostLimits, month: str, counted: int):
         """What a job that holds nothing may take now: ``(allowance, None)``, or ``(0, status)`` when nothing.
 

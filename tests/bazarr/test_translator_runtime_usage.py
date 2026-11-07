@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.database import TableTranslationUsage
 from subtitles.tools.translate.runtime.history import HistoryError, HistoryStore
 from subtitles.tools.translate.runtime.usage import (
     JOB_CAP_SPENT, MONTH_SPENT, REFUSED_JOB_BUDGET, REFUSED_MONTH_SPENT, REFUSED_NO_BUDGET, RESERVED, WAIT,
@@ -575,6 +576,8 @@ def test_random_use_over_two_months_and_two_jobs_keeps_the_ledger_invariants(ses
     overspent = set()
     counter = 0
     trace = []
+    seen_months = {}
+    newest_seen = [""]
 
     def state():
         """Each job's budget row (month, amount) and cost, for the failure message."""
@@ -587,7 +590,8 @@ def test_random_use_over_two_months_and_two_jobs_keeps_the_ledger_invariants(ses
         return {month: ledger.month_committed(month) for month in MONTHS}
 
     for step in range(36):
-        op = rng.choice(["budget", "call", "call", "settle", "settle", "caps", "month", "roll", "release"])
+        op = rng.choice(["budget", "call", "call", "settle", "settle", "caps", "month", "month", "back", "roll",
+                         "release"])
         before = committed()
         overspend_now = False
         where = f"seed {seed} step {step} op {op} limits {limits}"
@@ -619,17 +623,102 @@ def test_random_use_over_two_months_and_two_jobs_keeps_the_ledger_invariants(ses
                                 translation_limit=2)
         elif op == "month":
             clock.moment = datetime(2026, 12, 1)
+        elif op == "back":
+            clock.moment = datetime(2026, 11, 20)  # a clock set back must not take the ledger back with it
         elif op == "roll":
             ledger.roll_month(limits)
         elif op == "release":
             ledger.release_stale([job for job in jobs if rng.random() < 0.5])
         after = committed()
+        # A month never goes backwards: no budget moves to an earlier month, and no call is added to one.
+        budget_months = {job: (ledger._budget_row(job).month if ledger._budget_row(job) else "") for job in jobs}
+        for job in jobs:
+            assert budget_months[job] >= seen_months.get(job, ""), f"{where}: budget of {job} went back"
+        seen_months.update(budget_months)
+        newest_call = max((row.month for row in session.query(TableTranslationUsage).all()), default="")
+        assert newest_call >= newest_seen[0], f"{where}: a call was charged to an earlier month"
+        newest_seen[0] = newest_call
         for month in MONTHS:
             if limits.month_cap is not None and after[month] > limits.month_cap and not overspend_now:
                 assert after[month] <= before[month], f"{where}: {month} went from {before[month]} to {after[month]}"
         for job in jobs:
             hold = ledger.job_hold(job)
             assert hold is None or hold >= 0, f"{where}: hold of {job} is {hold}"
+
+
+# ------------------------------------------------------------ the clock is read under the lock
+
+def _while_another_thread_holds_the_lock(session, clock, advance_to, action):
+    """Start ``action`` in a thread, let it wait on the ledger lock, move the clock, then let it in."""
+    import threading
+    import time
+
+    from subtitles.tools.translate.runtime.transaction import ledger_transaction
+
+    outcome = {}
+
+    def run():
+        try:
+            outcome["result"] = action()
+        except BaseException as error:  # the test reports whatever went wrong
+            outcome["error"] = repr(error)
+        finally:
+            session.remove()
+
+    worker = threading.Thread(target=run)
+    with ledger_transaction(session):
+        worker.start()
+        time.sleep(0.8)  # long enough for the worker to reach the lock and wait on it
+        clock.moment = advance_to
+    worker.join(timeout=30)
+    assert not worker.is_alive() and "error" not in outcome, outcome
+    return outcome.get("result")
+
+
+def test_a_call_that_waited_across_midnight_is_charged_to_the_new_month(session, clock):
+    limits = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger = UsageLedger(session, clock=clock)
+    clock.moment = datetime(2026, 11, 30, 23, 59, 59)
+    ledger.reserve_job_budget("job", limits)
+    result = _while_another_thread_holds_the_lock(
+        session, clock, datetime(2026, 12, 1, 0, 0, 1),
+        lambda: UsageLedger(session, clock=clock).reserve_call(
+            "job", "c1", worst_case_micros=usd(2.0), limits=limits))
+    assert result.admitted
+    assert ledger.month_committed("2026-12") == usd(10.0)  # the budget rolled, with the call in December
+    assert ledger.month_committed("2026-11") == 0
+
+
+def test_a_budget_asked_for_after_a_wait_across_midnight_is_made_in_the_new_month(session, clock):
+    limits = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger = UsageLedger(session, clock=clock)
+    clock.moment = datetime(2026, 11, 30, 23, 59, 59)
+    budget = _while_another_thread_holds_the_lock(
+        session, clock, datetime(2026, 12, 1, 0, 0, 1),
+        lambda: UsageLedger(session, clock=clock).reserve_job_budget("job", limits))
+    assert budget.month == "2026-12"
+
+
+def test_roll_month_after_a_wait_across_midnight_moves_the_budgets_into_the_new_month(session, clock):
+    limits = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger = UsageLedger(session, clock=clock)
+    clock.moment = datetime(2026, 10, 31, 23, 59, 59)
+    ledger.reserve_job_budget("job", limits)
+    clock.moment = datetime(2026, 11, 30, 23, 59, 59)
+    moved = _while_another_thread_holds_the_lock(
+        session, clock, datetime(2026, 12, 1, 0, 0, 1), lambda: UsageLedger(session, clock=clock).roll_month(limits))
+    assert moved == 1 and ledger.month_committed("2026-12") == usd(10.0)  # not November, which had passed
+
+
+def test_a_clock_set_back_does_not_move_a_budget_or_a_call_to_an_earlier_month(ledger, clock):
+    limits = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    clock.moment = datetime(2026, 12, 3)
+    ledger.reserve_job_budget("job", limits)
+    clock.moment = datetime(2026, 11, 20)  # the clock was set back
+    assert ledger.reserve_job_budget("job", limits).month == "2026-12"
+    assert ledger.reserve_call("job", "c1", worst_case_micros=usd(1.0), limits=limits).admitted
+    assert ledger.month_committed("2026-12") == usd(10.0) and ledger.month_committed("2026-11") == 0
+    assert ledger.roll_month(limits) == 0
 
 
 # ------------------------------------------------------------ lock order

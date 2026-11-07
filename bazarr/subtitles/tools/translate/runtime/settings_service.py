@@ -321,7 +321,7 @@ class TranslatorSettingsService:
         enabled = payload.get("enabled")
         if enabled is not None and not isinstance(enabled, bool):
             raise ServiceError("enabled must be true or false")
-        expected = self._expected(payload, required=values is not None or bool(clear))
+        expected = self._expected(payload, required=values is not None or bool(clear) or enabled is not None)
         if expected is not None and instance.revision != expected:
             raise StaleRevisionError("The engine settings changed since they were loaded.", revision=instance.revision)
         if values is not None or clear:
@@ -332,7 +332,14 @@ class TranslatorSettingsService:
         elif enabled is True:
             self._check_engine_before_turning_on(instance)
         if enabled is not None and bool(instance.enabled) != enabled:
-            notices += [self._notice(item) for item in self._store.set_instance_enabled(instance_id, enabled).notices]
+            # A save above has moved the revision on; the switch is swapped against the revision it left.
+            current = self._instance(instance_id).revision
+            try:
+                change = self._store.set_instance_enabled(instance_id, enabled, expected_revision=current)
+            except StoreStale as error:
+                raise StaleRevisionError("The engine settings changed since they were loaded.",
+                                         revision=error.revision) from error
+            notices += [self._notice(item) for item in change.notices]
         return {"engine": self.instance_view(self._instance(instance_id)), "notices": notices}
 
     def _check_engine_before_turning_on(self, instance) -> None:

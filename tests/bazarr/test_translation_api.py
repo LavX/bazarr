@@ -94,7 +94,8 @@ def world(monkeypatch, schema_session):
         if current and method == "patch" and isinstance(body, dict) and "expected_revision" not in body:
             kind, _, row_id = path.partition("/")
             row = (store.get_instance if kind == "engines" else store.get_connection)(int(row_id))
-            if kind == "connections" or body.get("values") is not None or body.get("clear_secrets"):
+            if (kind == "connections" or body.get("values") is not None or body.get("clear_secrets")
+                    or body.get("enabled") is not None):
                 body = {**body, "expected_revision": row.revision}
         response = getattr(client, method)(
             "/api/translation/" + path, headers={"X-API-KEY": API_KEY},
@@ -682,6 +683,39 @@ def test_turning_something_on_checks_what_it_holds_while_turning_it_off_needs_no
     assert refused.status_code == 400 and refused.json["field_errors"] == {"site": "is required"}
     assert world.store.get_instance(world.instance.id).enabled == 0
     assert world.call("patch", engine, {"values": {"site": "x"}, "enabled": True}).status_code == 200
+
+
+def test_turning_an_engine_on_or_off_needs_the_revision_and_a_stale_one_is_a_conflict(world):
+    path = f"engines/{world.instance.id}"
+    assert world.call("patch", path, {"enabled": False}, current=False).json["error"] == "expected_revision_required"
+    assert world.store.get_instance(world.instance.id).enabled == 1
+    off = world.call("patch", path, {"enabled": False, "expected_revision": 1})
+    assert off.status_code == 200 and off.json["engine"]["enabled"] is False and off.json["engine"]["revision"] == 2
+    # A delayed "turn on" from a view that still showed revision 1 must not win.
+    late = world.call("patch", path, {"enabled": True, "expected_revision": 1})
+    assert late.status_code == 409 and late.json["error"] == "stale_revision" and late.json["revision"] == 2
+    assert world.store.get_instance(world.instance.id).enabled == 0
+    on = world.call("patch", path, {"enabled": True, "expected_revision": 2})
+    assert on.status_code == 200 and on.json["engine"]["revision"] == 3
+    # Settings and the switch in one request move the revision once for each.
+    both = world.call("patch", path, {"enabled": False, "expected_revision": 3, "values": {"credit_line": "x"}})
+    assert both.status_code == 200 and both.json["engine"]["revision"] == 5 and both.json["engine"]["enabled"] is False
+
+
+def test_the_store_swaps_the_revision_when_it_turns_an_engine_on_or_off(world):
+    from sqlalchemy import update
+
+    from app.database import TableTranslatorEngineInstance
+    from subtitles.tools.translate.runtime.store import StaleRevisionError
+
+    instance = world.store.get_instance(world.instance.id)
+    # Another writer got in after this one read the row: the in-memory revision still says 1.
+    world.store._session.execute(update(TableTranslatorEngineInstance).where(
+        TableTranslatorEngineInstance.id == instance.id).values(revision=5).execution_options(
+        synchronize_session=False))
+    with pytest.raises(StaleRevisionError):
+        world.store.set_instance_enabled(instance.id, False)
+    assert instance.enabled == 1
 
 
 def test_a_flag_that_is_not_a_boolean_is_refused(world):

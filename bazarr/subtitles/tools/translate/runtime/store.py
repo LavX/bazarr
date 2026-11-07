@@ -279,12 +279,26 @@ class TranslatorStore:
             instance.awaiting_secrets = 1 if self._stale_secrets(owner, after) else 0
         return SaveResult(instance.revision, added_destinations(before, after), bool(instance.awaiting_secrets))
 
-    def set_instance_enabled(self, instance_id: int, enabled: bool) -> PointerChange:
+    def set_instance_enabled(self, instance_id: int, enabled: bool, *,
+                             expected_revision: int | None = None) -> PointerChange:
+        """Turn an engine on or off. Bumps the revision, and with ``expected_revision`` swaps it in the database
+        so a switch made from a stale view cannot overwrite a newer save."""
         instance = self._require_instance(instance_id)
+        if expected_revision is not None and instance.revision != expected_revision:
+            raise StaleRevisionError("the engine settings changed since they were loaded", instance.revision)
         # Turning an engine off lets the pointers go of it first: if config.yaml cannot be written the engine
         # stays on, instead of being off while a pointer still names it.
         change = PointerChange() if enabled else self.release_pointers({instance_id}, why="turned off")
         with write_transaction(self._session):
+            current = int(instance.revision)
+            claimed = self._session.execute(
+                update(TableTranslatorEngineInstance)
+                .where(TableTranslatorEngineInstance.id == instance_id,
+                       TableTranslatorEngineInstance.revision == current)
+                .values(revision=current + 1).execution_options(synchronize_session=False)).rowcount
+            if claimed != 1:
+                raise StaleRevisionError("the engine settings changed since they were loaded")
+            instance.revision = current + 1
             instance.enabled = 1 if enabled else 0
             instance.updated_at = datetime.now()
         return change
