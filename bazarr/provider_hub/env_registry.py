@@ -127,11 +127,17 @@ def _machine_matches(env_dir: Path) -> bool:
 
 
 def _requirements_match(env_dir: Path, manifest) -> bool:
+    """Whether the environment was built for exactly this dependency set.
+
+    An environment with no dependencies has no ``requirements.txt`` to read, so
+    a missing file only matches the empty set; a file that is there is compared
+    either way, so an environment with packages is never adopted as an empty one.
+    """
     wanted = {requirement.pip_line for requirement in manifest.dependency_requirements}
-    if not wanted:
-        return True
     try:
         lines = (env_dir / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return not wanted
     except OSError:
         return False
     return {line.strip() for line in lines if line.strip()} == wanted
@@ -250,23 +256,35 @@ def reconcile_environments(
     return summary
 
 
-def mark_needs_repair(provider_id: str) -> None:
-    """Flag an installation whose worker failed its check. The error text stays as the worker gave it."""
+def _row_uses(row: Any, python_path: str | None) -> bool:
+    """Whether an installation row still runs from ``python_path`` (always true when none is named)."""
+    if python_path is None:
+        return True
+    return isinstance(row, dict) and row.get("python_path") == python_path
+
+
+def mark_needs_repair(provider_id: str, python_path: str | None = None) -> None:
+    """Flag an installation whose worker failed its check. The error text stays as the worker gave it.
+
+    With ``python_path``, only when the installation still runs from it: a check
+    that ran against an interpreter a repair has since replaced says nothing
+    about the installation.
+    """
 
     def mark(state: dict[str, Any]) -> None:
         row = (state.get("installations") or {}).get(provider_id)
-        if isinstance(row, dict):
+        if isinstance(row, dict) and _row_uses(row, python_path):
             row["needs_repair"] = True
 
     mutate_state(mark)
 
 
-def clear_needs_repair(provider_id: str) -> None:
+def clear_needs_repair(provider_id: str, python_path: str | None = None) -> None:
     """Drop the flag after the plugin's worker ran: its environment works."""
 
     def clear(state: dict[str, Any]) -> None:
         row = (state.get("installations") or {}).get(provider_id)
-        if isinstance(row, dict) and row.pop("needs_repair", None):
+        if _row_uses(row, python_path) and isinstance(row, dict) and row.pop("needs_repair", None):
             if row.get("last_error") == NEEDS_REPAIR_MESSAGE:
                 row["last_error"] = None
 

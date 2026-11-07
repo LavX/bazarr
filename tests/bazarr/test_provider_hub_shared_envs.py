@@ -702,3 +702,15 @@ def test_a_reuse_check_that_spends_the_budget_stops_the_install(hub, monkeypatch
         PluginEnvironment(hub).install(manifest, timeout=5)
 
     assert [c[0] for c in calls] == [str(old / "bin" / "python")]
+
+
+def test_an_environment_with_packages_is_not_adopted_as_an_empty_one(hub, no_subprocess):
+    mispointed = _legacy_env(hub, "alpha", [REQ_A])
+    bare = _legacy_env(hub, "beta_plugin", [])
+    _state_with(_row("alpha", mispointed, []), _row("beta_plugin", bare, []))
+
+    env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+
+    recorded = {entry["path"] for entry in load_state()["plugin_envs"].values()}
+    # No requirements file is accepted for an empty set; one that lists packages is not.
+    assert recorded == {str(bare)}
