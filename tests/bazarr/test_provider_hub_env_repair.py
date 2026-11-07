@@ -1387,3 +1387,57 @@ def test_a_worker_the_idle_reaper_stopped_still_protects_its_environment_through
         removed = env_registry.cleanup_environments(hub)
         time.sleep(0.05)
     assert removed == [str(old)]
+
+
+def test_an_earlier_workers_survivors_still_hold_the_environment_after_a_respawn(hub, hub_registry, monkeypatch):
+    import os
+    import sys
+
+    from provider_hub import worker as worker_module
+    from provider_hub.registry import retire_provider_instances
+    from provider_hub.worker import ProviderWorkerClient, reap_idle_workers
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    interpreter = old / "bin" / "python"
+    interpreter.write_text(f"#!{sys.executable}\n{WORKER_SCRIPT}", encoding="utf-8")
+    interpreter.chmod(0o755)
+    client = ProviderWorkerClient([str(interpreter)])
+    stale.worker_client = client
+    client.request("search", {}, timeout=10)
+    first_group = client.process.pid
+    # A child of the first worker that no signal reaches: its group keeps answering.
+    still_running = {first_group}
+    real_killpg = os.killpg
+
+    def killpg(group, sig):
+        if sig == 0 and group in still_running:
+            return None
+        return real_killpg(group, sig)
+
+    monkeypatch.setattr(worker_module.os, "killpg", killpg)
+
+    # The idle reaper ends the first worker, a request starts a second one, and a repair follows.
+    assert reap_idle_workers(idle_seconds=0) == 1
+    client.request("search", {}, timeout=10)
+    assert client.process.pid != first_group
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+    for drain in retire_provider_instances("examplehub"):
+        drain.join(15)
+
+    # Only the second worker's group is empty; the first one's survivor still holds the environment.
+    assert env_registry.cleanup_environments(hub) == []
+    assert (old / "bin" / "python").exists()
+
+    still_running.clear()
+    removed = []
+    deadline = time.monotonic() + 10
+    while not removed and time.monotonic() < deadline:
+        removed = env_registry.cleanup_environments(hub)
+        time.sleep(0.05)
+    assert removed == [str(old)]

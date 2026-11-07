@@ -314,7 +314,10 @@ class ProviderWorkerClient:
             text=True,
             start_new_session=True,
         )
-        self._group_id = self.process.pid
+        # Every group this client started stays on the list until it is seen
+        # empty: a respawn must not make the previous worker's survivors
+        # forgotten while they still run from the environment.
+        self._groups = [*self._live_groups(), self.process.pid]
         self._stdout_queue = queue.Queue()
         self._stdout_thread = threading.Thread(
             target=self._enqueue_stdout,
@@ -449,28 +452,40 @@ class ProviderWorkerClient:
                 raise subprocess.TimeoutExpired(process.args if hasattr(process, "args") else "worker", timeout)
             time.sleep(0.01)
 
+    @staticmethod
+    def _group_alive(group: int) -> bool:
+        """Whether anything is left in the process group ``group`` (signal 0 sends nothing)."""
+        killpg = getattr(os, "killpg", None)
+        if killpg is None:
+            return False
+        try:
+            killpg(group, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _live_groups(self) -> list[int]:
+        """The groups this client started that still have members; the empty ones are forgotten."""
+        groups = [group for group in getattr(self, "_groups", ()) if self._group_alive(group)]
+        self._groups = groups
+        return groups
+
     def group_gone(self, ceiling: float = 10.0) -> bool:
-        """True once nothing is left in the process group the last worker led.
+        """True once nothing is left in any process group this client has started.
 
         A worker's children can outlive it, and they run from the same
-        environment, so the environment is not free until the group is empty.
-        Checked with signal 0 (nothing is sent), for at most ``ceiling``
-        seconds. Always true where process groups do not exist or no worker
-        was ever started.
+        environment, so the environment is not free until every group is empty,
+        including the groups of workers an earlier respawn replaced. Checked for
+        at most ``ceiling`` seconds. Always true where process groups do not
+        exist or no worker was ever started.
         """
-        group = getattr(self, "_group_id", None)
-        killpg = getattr(os, "killpg", None)
-        if group is None or killpg is None:
-            return True
         deadline = time.monotonic() + ceiling
         while True:
-            try:
-                killpg(group, 0)
-            except ProcessLookupError:
-                return True
-            except PermissionError:
-                pass
-            except OSError:
+            if not self._live_groups():
                 return True
             if time.monotonic() >= deadline:
                 return False
