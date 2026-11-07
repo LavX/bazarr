@@ -219,7 +219,7 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
             jobs_queue.update_job_progress(job_id=job_id, progress_max=1,
                                            progress_message=f'{episode.title} - S{episode.season:02d}E'
                                                             f'{episode.episode:02d} - {episode.episodeTitle}')
-        searched = run_flagged_search(episode, job_id=job_id)
+        searched = run_flagged_search(episode, job_id=job_id, fallback_allowed=fallback_allowed)
         downloaded_count = len(searched.downloaded) if searched else 0
         outcome_msg = (f"{downloaded_count} subtitle(s) downloaded"
                        if downloaded_count else "No subtitles found")

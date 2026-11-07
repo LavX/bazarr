@@ -182,7 +182,7 @@ def test_wanted_episode_with_a_request_takes_the_forced_search_only(monkeypatch)
     module._wanted_episode(_wanted_episode(REQUESTED_AT), ['provider'], job_id=5)
 
     forced.assert_called_once()
-    assert forced.call_args.kwargs == {'job_id': 5}
+    assert forced.call_args.kwargs == {'job_id': 5, 'fallback_allowed': module.settings.general.use_whisper_fallback}
     normal.assert_not_called()
 
 
@@ -281,7 +281,7 @@ def test_episode_search_with_forced_takes_the_forced_search(mass, monkeypatch):
     mass.episode_download_subtitles(no=101, job_id=1, job_sub_function=True, forced=True)
 
     forced.assert_called_once()
-    assert forced.call_args.kwargs == {'job_id': 1}
+    assert forced.call_args.kwargs == {'job_id': 1, 'fallback_allowed': False}
     normal.assert_not_called()
 
 
@@ -427,7 +427,7 @@ def test_a_newer_request_made_during_the_run_stays(flag_runs, library, monkeypat
 def test_the_search_gets_the_jobs_stop_signal(flag_runs, monkeypatch):
     seen = {}
 
-    def forced_search(episode, job_id=None, cancel=None):
+    def forced_search(episode, job_id=None, cancel=None, fallback_allowed=None):
         seen.update(job_id=job_id, cancel=cancel)
         return _result('downloaded')
 
@@ -479,3 +479,17 @@ def test_a_stop_set_during_the_last_download_keeps_the_request(flag_runs, librar
     with pytest.raises(JobCancelled):
         flag_runs.run_flagged_search(_flagged_episode(), job_id=3)
     assert _flag(library, 101) == REQUESTED_AT
+
+
+def test_the_callers_whisper_permission_reaches_the_forced_search(flag_runs, monkeypatch):
+    seen = {}
+
+    def forced_search(episode, job_id=None, cancel=None, fallback_allowed=None):
+        seen['fallback_allowed'] = fallback_allowed
+        return _result('downloaded')
+
+    monkeypatch.setattr(flag_runs, 'run_forced_search', forced_search)
+
+    flag_runs.run_flagged_search(_flagged_episode(), job_id=3, fallback_allowed=True)
+
+    assert seen == {'fallback_allowed': True}

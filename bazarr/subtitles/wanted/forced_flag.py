@@ -39,16 +39,19 @@ def clear_forced_search_request(episode):
     event_stream(type='series', action='update', payload=episode.sonarrSeriesId)
 
 
-def run_flagged_search(episode, job_id=None):
+def run_flagged_search(episode, job_id=None, fallback_allowed=None):
     """Run the forced search for a flagged episode and clear the request when it is complete.
 
     Returns the :class:`~subtitles.wanted.forced.ForcedSearchResult`, or ``None`` when the search raised.
+    ``fallback_allowed`` is the caller's Whisper fallback permission, the same value its normal search
+    passes; ``None`` leaves the choice to the forced search.
+
     A stop (``JobCancelled``) propagates with the request still set. Any other error is logged and also
     leaves the request set, so one broken episode does not end the run for the rest.
     """
     cancel = _JobStop(job_id) if job_id else None
     try:
-        result = run_forced_search(episode, job_id=job_id, cancel=cancel)
+        result = run_forced_search(episode, job_id=job_id, cancel=cancel, fallback_allowed=fallback_allowed)
     except JobCancelled:
         raise
     except Exception:

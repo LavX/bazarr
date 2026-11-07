@@ -36,7 +36,7 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
     if getattr(episode, 'forced_search_requested_at', None) is not None:
         # A flagged episode gets the forced duplicate search in place of the normal one. It looks at
         # every profile language, ignores the adaptive window and does not translate from another language.
-        run_flagged_search(episode, job_id=job_id)
+        run_flagged_search(episode, job_id=job_id, fallback_allowed=settings.general.use_whisper_fallback)
         return
 
     arr_instance_id = getattr(episode, 'arr_instance_id', None)
