@@ -3,7 +3,8 @@
 
 ``frames`` is the wire contract, stdlib only, shared byte for byte with the
 plugin SDK. ``session`` is the host half. ``worker_channel`` is the worker
-half. Provider workers keep speaking the v1 line protocol through
+half. ``pool`` supervises resident workers: states, limits, restarts.
+Provider workers keep speaking the v1 line protocol through
 ``provider_hub.worker`` and ``provider_hub.worker_runner``; nothing here
 changes them.
 """
