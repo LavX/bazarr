@@ -16,6 +16,31 @@ export function episodeCodeOf(value: string): string {
 }
 
 /**
+ * The profile languages that apply to an episode with this audio, the way the
+ * backend picks the languages it searches: a language whose rule excludes the
+ * audio is left out, and so is one that is only for audio the episode does not
+ * have. An item without the audio keys has no restriction.
+ */
+export function wantedLanguagesForAudio(
+  items: {
+    language: string;
+    audio_exclude?: string;
+    audio_only_include?: string;
+  }[],
+  audio: { code2: string }[],
+): string[] {
+  const audioCodes = new Set(audio.map((language) => language.code2));
+  return items
+    .filter((item) => {
+      const matches = audioCodes.has(item.language);
+      if (item.audio_exclude === "True" && matches) return false;
+      if (item.audio_only_include === "True" && !matches) return false;
+      return true;
+    })
+    .map((item) => item.language);
+}
+
+/**
  * Whether the row offers "Force duplicate search": the setting that counts
  * embedded tracks as downloaded is on, and the episode has an embedded track in
  * a wanted language, shown or hidden. With the setting off the wanted search

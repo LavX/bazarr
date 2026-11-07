@@ -41,7 +41,11 @@ import PlayOnMenu from "@/components/PlayOnMenu";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
 import { filterSubtitleBy } from "@/utilities";
-import { canForceDuplicateSearch, episodeCode } from "@/utilities/episodes";
+import {
+  canForceDuplicateSearch,
+  episodeCode,
+  wantedLanguagesForAudio,
+} from "@/utilities/episodes";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
@@ -156,6 +160,8 @@ interface EpisodesTableValue {
   episodeIds: number[];
   onlyDesired: boolean;
   profileItems: ReturnType<typeof useProfileItemsToLanguages>;
+  // The raw profile: its items carry the audio rules the languages above lack.
+  profile?: Language.Profile;
   historyMap: Map<string, History.Episode>;
   embeddedScoreMap: Map<string, History.Episode>;
   download: (item: Item.Episode, result: SearchResultType) => Promise<void>;
@@ -308,7 +314,7 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
 });
 
 const ActionsCell = ({ episode }: { episode: Item.Episode }) => {
-  const { disabled, download, embeddedAsDownloaded, episodeIds, profileItems } =
+  const { disabled, download, embeddedAsDownloaded, episodeIds, profile } =
     useEpisodesTable();
   const modals = useModals();
   const { set: setForcedSearch, clear: clearForcedSearch } =
@@ -319,7 +325,11 @@ const ActionsCell = ({ episode }: { episode: Item.Episode }) => {
   const pending = episode.forced_search_pending === true;
   const canForce = canForceDuplicateSearch({
     embeddedAsDownloaded,
-    wantedLanguages: profileItems.map((item) => item.code2),
+    // Only the languages the audio rules keep, as the search itself does.
+    wantedLanguages: wantedLanguagesForAudio(
+      profile?.items ?? [],
+      episode.audio_language ?? [],
+    ),
     subtitles: episode.subtitles ?? [],
     hiddenLanguages: (hiddenTracks?.get(episode.id) ?? []).map(
       (track) => track.code2,
@@ -643,6 +653,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         episodeIds,
         onlyDesired,
         profileItems,
+        profile,
         historyMap,
         embeddedScoreMap,
         download,
@@ -653,6 +664,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         episodeIds,
         onlyDesired,
         profileItems,
+        profile,
         historyMap,
         embeddedScoreMap,
         download,

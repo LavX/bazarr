@@ -132,7 +132,10 @@ function serve({
   return requests;
 }
 
-async function mountTable(episode: Item.Episode) {
+async function mountTable(
+  episode: Item.Episode,
+  tableProfile: Language.Profile = profile,
+) {
   // The table opens the newest season through its ref.
   function Harness() {
     const ref = useRef<TableInstance<Item.Episode> | null>(null);
@@ -140,7 +143,7 @@ async function mountTable(episode: Item.Episode) {
       <Table
         ref={ref}
         episodes={[episode]}
-        profile={profile}
+        profile={tableProfile}
         onAllRowsExpandedChanged={vi.fn()}
       />
     );
@@ -184,6 +187,31 @@ describe("Episodes Table, duplicate search action", () => {
   it("is absent when the embedded track is not in a wanted language", async () => {
     serve();
     await mountTable(makeEpisode([track("de")]));
+    expect(force()).not.toBeInTheDocument();
+  });
+
+  it("is absent when the audio rules exclude the embedded track's language", async () => {
+    serve();
+    const excluded = {
+      ...profile,
+      items: [{ ...profile.items[0], audio_exclude: "True" }],
+    } as Language.Profile;
+    await mountTable(
+      makeEpisode([track("fr")], {
+        audio_language: [{ code2: "fr", name: "French" }] as never,
+      }),
+      excluded,
+    );
+    expect(force()).not.toBeInTheDocument();
+  });
+
+  it("is absent when the language is only for audio the episode lacks", async () => {
+    serve();
+    const onlyFor = {
+      ...profile,
+      items: [{ ...profile.items[0], audio_only_include: "True" }],
+    } as Language.Profile;
+    await mountTable(makeEpisode([track("fr")]), onlyFor);
     expect(force()).not.toBeInTheDocument();
   });
 
