@@ -1323,3 +1323,23 @@ def test_a_directory_without_list_permission_fails_the_budget_check(make_pool, t
         assert refused.value.code == "folder_budget"
     finally:
         sealed.chmod(0o700)
+
+
+def test_a_draining_worker_that_fills_its_folder_is_killed(make_pool, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    pool = make_pool()
+    pool.register(definition(budgets=[FolderBudget(str(data), 1 * MIB, "plugin data")]))
+    slow = pool.submit("tr", "sleep", {"seconds": 30})
+    first = pid_of(pool, "tr")
+    # New settings arrive with no budget: the old worker keeps the budget it was started under.
+    pool.restart_after_drain("tr", definition())
+    assert pool.state("tr") is WorkerState.DRAINING
+    pool.sweep()
+    assert pid_alive(first)
+    (data / "big").write_bytes(os.urandom(3 * MIB))
+    pool.sweep()
+    with pytest.raises(WorkerKilled) as killed:
+        slow.wait(10)
+    assert killed.value.code == "folder_budget"
+    assert wait_until(lambda: not pid_alive(first))

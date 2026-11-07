@@ -1072,6 +1072,15 @@ class WorkerPool:
                     entry.retiring.remove(slot)
                 self._queue_close(slot, None, "kill")
             return
+        # A draining worker still writes: its own folders, as its own settings named them.
+        problem = self._slot_budget_problem(slot, now)
+        if problem is not None:
+            slot.kill_reason = problem
+            with self._cond:
+                if slot in entry.retiring:
+                    entry.retiring.remove(slot)
+                    self._queue_close(slot, None, "kill")
+            return
         with self._cond:
             if slot in entry.retiring and not slot.busy():
                 entry.retiring.remove(slot)
@@ -1085,14 +1094,22 @@ class WorkerPool:
         if problem is not None:
             slot.kill_reason = problem
         else:
-            if now - slot.last_budget_at < self.limits.budget_interval:
-                return
-            slot.last_budget_at = now
-            problem = self._budget_problem(None, now, definition=slot.definition, force=True)
+            problem = self._slot_budget_problem(slot, now)
             if problem is None:
                 return
             slot.kill_reason = problem
         self._terminate_now(slot)
+
+    def _slot_budget_problem(self, slot, now):
+        """The folder budget problem of a worker that is not the entry's current one, or None.
+
+        Checked against the slot's own definition and no more often than
+        ``budget_interval``.
+        """
+        if now - slot.last_budget_at < self.limits.budget_interval:
+            return None
+        slot.last_budget_at = now
+        return self._budget_problem(None, now, definition=slot.definition, force=True)
 
     # ------------------------------------------------------------ lease / start
 
