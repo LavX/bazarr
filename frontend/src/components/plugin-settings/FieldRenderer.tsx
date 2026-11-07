@@ -117,17 +117,23 @@ function NumberField({
   error,
   onValue,
 }: NumberFieldProps) {
-  const [entry, setEntry] = useState<string | number | null>(null);
+  // What is being typed, and the value the form held when it was last changed from here.
+  const [typed, setTyped] = useState<{
+    entry: string | number;
+    emitted: number | null;
+  } | null>(null);
   const storedNumber = typeof stored === "number" ? stored : null;
-  // The entry is shown while it still agrees with the form; a preset or a reset elsewhere replaces it.
-  const parsed = entry === null ? null : parseEntry(entry);
+  const parsed = typed === null ? null : parseEntry(typed.entry);
+  // The entry is shown while it still agrees with the form. A complete number agrees with the same number; an
+  // empty or half-typed entry ("", "-", "1e") agrees while the form still holds what it held when the typing
+  // began, so replacing 40 with -5 keeps the "-" on screen. A preset or reset elsewhere replaces the entry.
   const agrees =
-    entry !== null &&
-    (storedNumber !== null
+    typed !== null &&
+    (parsed !== null && !Number.isNaN(parsed)
       ? parsed === storedNumber
-      : parsed === null || Number.isNaN(parsed));
+      : storedNumber === typed.emitted);
   const shown = agrees
-    ? entry
+    ? typed.entry
     : storedNumber !== null
       ? storedNumber
       : stored === undefined && typeof field.default === "number"
@@ -148,12 +154,16 @@ function NumberField({
       disabled={disabled}
       error={error}
       onChange={(next) => {
-        setEntry(next);
         const value = parseEntry(next);
         if (value === null) {
+          setTyped({ entry: next, emitted: null });
           onValue(null);
         } else if (Number.isFinite(value)) {
+          setTyped({ entry: next, emitted: value });
           onValue(value);
+        } else {
+          // Not a number yet: keep it on screen, change nothing in the form.
+          setTyped({ entry: next, emitted: storedNumber });
         }
       }}
     />

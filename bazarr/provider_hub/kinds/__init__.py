@@ -66,6 +66,17 @@ class Kind:
         logging them.
         """
 
+    def on_activated(self, plugin_id: str, previous_manifest: dict[str, Any] | None,
+                     manifest: dict[str, Any]) -> str | None:
+        """A new release of this plugin has just become the active one (``previous_manifest`` is the one it
+        replaced, or None for a first activation).
+
+        The place to bring what the kind stores in line with the new manifest. The release is already active,
+        so this cannot refuse it; it returns a short message when something needs the person's attention, which
+        the host shows as the plugin's last error, or None.
+        """
+        return None
+
     def set_enabled(self, installation: dict[str, Any], enabled: bool) -> bool:
         """Turn the plugin on or off. Same return rule."""
         installation["enabled"] = bool(enabled)

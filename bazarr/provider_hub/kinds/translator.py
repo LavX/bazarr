@@ -63,6 +63,12 @@ class TranslatorKind(Kind):
         except Exception:
             logger.exception("Could not remove the engine instances of translator %s", plugin_id)
 
+    def on_activated(self, plugin_id: str, previous_manifest, manifest) -> str | None:
+        """Bring the plugin's saved engines and back ends in line with the release that just became active."""
+        from subtitles.tools.translate.runtime.plugin_update import bring_up_to_date
+
+        return bring_up_to_date(_store(), plugin_id, manifest)
+
     def set_enabled(self, installation: dict[str, Any], enabled: bool) -> bool:
         installation["enabled"] = bool(enabled)
         if enabled:

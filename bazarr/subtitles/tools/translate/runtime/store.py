@@ -24,7 +24,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from sqlalchemy import delete, func, select, update
 
@@ -619,8 +619,12 @@ class TranslatorStore:
 
     def apply_plugin_update(self, plugin_id: str, new_schema: Callable[[str, Any], DestinationSchema],
                             new_settings: Callable[[str, Any], Mapping[str, Any] | None] | None = None,
-                            plugin_version: str | None = None, settings_version: int | None = None) -> list[Owner]:
+                            plugin_version: str | None = None, settings_version: int | None = None,
+                            skip: Iterable[Owner] = ()) -> list[Owner]:
         """Record an activated update: store migrated settings and mark owners whose secrets no longer apply.
+
+        Owners in ``skip`` are left exactly as they were (the caller found their settings do not fit the new
+        release and holds them back separately).
 
         Returns the owners now awaiting their secrets. Secrets stay stored under the destinations they
         were entered with, so a rollback finds them.
@@ -629,7 +633,10 @@ class TranslatorStore:
         # self.transaction(), not a bare transaction: it rebuilds the log-scrub set once the changes have
         # committed, so a secret moved here is masked in the very next log line.
         with self.transaction():
+            skipped = set(skip)
             for kind, row in self._owners_of_plugin(plugin_id):
+                if (kind, row.id) in skipped:
+                    continue
                 stored_before = self.settings_of(row)
                 if new_settings is not None:
                     migrated = new_settings(kind, row)
@@ -649,6 +656,27 @@ class TranslatorStore:
                     waiting.append((kind, row.id))
         return waiting
 
+    def hold_back_for_attention(self, owners: Iterable[Owner]) -> PointerChange:
+        """Turn owners off and flag them for the person to look at, keeping everything they hold.
+
+        Used when a plugin update leaves an owner's settings unfit for the new release. The flag is the one
+        that already means "enter this again": the owner is not usable until it is saved again, and an engine
+        that was turned off lets the pointers go.
+        """
+        engine_ids: set[int] = set()
+        with self.transaction():
+            for kind, owner_id in owners:
+                row = self._require_owner((kind, owner_id))
+                row.enabled = 0
+                row.awaiting_secrets = 1
+                row.revision = int(row.revision) + 1
+                row.updated_at = datetime.now()
+                if kind == INSTANCE:
+                    engine_ids.add(owner_id)
+            self._session.flush()
+            return self.release_pointers(engine_ids, why="turned off by a plugin update") if engine_ids \
+                else PointerChange()
+
     def _move_reclassified_secrets(self, owner: Owner, row, schema: DestinationSchema) -> None:
         """A field the plugin now declares secret may still hold a plaintext value from when it was not.
 
@@ -667,6 +695,10 @@ class TranslatorStore:
                 continue
             self.set_secret(owner, key, value if isinstance(value, str) else json.dumps(value),
                             destinations=destinations)
+
+    def owners_of_plugin(self, plugin_id: str):
+        """Every engine instance and connection a plugin serves, as ``(kind, row)``."""
+        return self._owners_of_plugin(plugin_id)
 
     def _owners_of_plugin(self, plugin_id: str):
         owners = [(INSTANCE, row) for row in self.list_instances(plugin_id)]

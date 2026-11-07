@@ -601,11 +601,25 @@ class TranslatorSettingsService:
     @staticmethod
     def _split_host(values: Mapping[str, Any], keep=None, schema: DestinationSchema | None = None
                     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Take the model and the prices out of a connection's values; the rest is the back end's settings."""
+        """Take the model and the prices out of a connection's values; the rest is the back end's settings.
+
+        The three are checked like any other field: against the manifest's own declaration of them when it has
+        one (limits, required, default), else against the host's. A value that was left out of a new connection
+        or sent empty takes the field's default before it is checked and stored.
+        """
+        declared = {item["key"]: item for item in (schema.fields if schema else ()) if item["key"] in HOST_KEYS}
+        definitions = {item["key"]: declared.get(item["key"], item) for item in HOST_FIELDS}
+
+        def default_of(key: str):
+            found = definitions[key].get("default")
+            if key == MODEL_KEY:
+                return found if isinstance(found, str) else ""
+            return found if is_finite_number(found) and found >= 0 else 0
+
         host: dict[str, Any] = {
-            MODEL_KEY: keep.model if keep is not None else "",
-            PRICE_KEYS[0]: keep.price_input_per_million if keep is not None else 0,
-            PRICE_KEYS[1]: keep.price_output_per_million if keep is not None else 0}
+            MODEL_KEY: keep.model if keep is not None else default_of(MODEL_KEY),
+            PRICE_KEYS[0]: keep.price_input_per_million if keep is not None else default_of(PRICE_KEYS[0]),
+            PRICE_KEYS[1]: keep.price_output_per_million if keep is not None else default_of(PRICE_KEYS[1])}
         plain = dict(values)
         errors: dict[str, str] = {}
         for key in HOST_KEYS:
@@ -616,21 +630,15 @@ class TranslatorSettingsService:
                 if not isinstance(value, str):
                     errors[key] = "must be text"
                 else:
-                    host[key] = value
-            elif value is None:
-                host[key] = 0  # an emptied price goes back to its default, like any other emptied field
-            elif not is_finite_number(value) or value < 0:
-                errors[key] = "must be a number from 0 up"
+                    host[key] = value if value.strip() else default_of(key)
+            elif value is None or value == "":
+                host[key] = default_of(key)  # an emptied price goes back to its default, like any other field
+            elif not is_finite_number(value):
+                errors[key] = "must be a number"
             else:
                 host[key] = value
-        # A manifest that declares its own model field keeps its limits and its required flag, and its default
-        # stands in for a model that was left out or emptied, before the model is checked and stored.
-        declared = next((item for item in (schema.fields if schema else ()) if item["key"] == MODEL_KEY), None)
-        if (declared is not None and not errors.get(MODEL_KEY) and host[MODEL_KEY] == ""
-                and isinstance(declared.get("default"), str)):
-            host[MODEL_KEY] = declared["default"]
-        if declared is not None and MODEL_KEY not in errors:
-            checked = validate_values([declared], {MODEL_KEY: host[MODEL_KEY]})
+        if not errors:
+            checked = validate_values([definitions[item["key"]] for item in HOST_FIELDS], dict(host), context=plain)
             errors.update(checked.errors)
         if errors:
             raise InvalidValuesError("The values are not valid.", field_errors=errors)

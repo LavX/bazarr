@@ -3290,6 +3290,7 @@ def activate_staged_installations() -> list[str]:
             continue
 
         previous_version = installation.get("active_version")
+        previous_manifest = installation.get("manifest") if previous_version else None
         target_version = installation.get("staged_version")
         target_name = installation.get("name") or provider_id
 
@@ -3303,23 +3304,12 @@ def activate_staged_installations() -> list[str]:
         ) as job:
             try:
                 trusted = bool(installation.get("trusted", False))
+                # The kind validates its own manifests: a translator is not a subtitle provider.
+                kind = get_kind(kind_of(installation))
                 manifest_data = installation.get("manifest") or {}
-                manifest = validate_manifest(
-                    manifest_data,
-                    built_in_provider_ids=_validation_built_in_provider_ids(
-                        manifest_data,
-                        trusted,
-                    ),
-                )
+                manifest = kind.validate_manifest(manifest_data, trusted)
                 if isinstance(installation.get("staged_manifest"), dict):
-                    staged_manifest = installation.get("staged_manifest")
-                    manifest = validate_manifest(
-                        staged_manifest,
-                        built_in_provider_ids=_validation_built_in_provider_ids(
-                            staged_manifest,
-                            trusted,
-                        ),
-                    )
+                    manifest = kind.validate_manifest(installation.get("staged_manifest"), trusted)
                 staged_path = installation.get("staged_path")
                 staged_python_path = installation.get("staged_python_path")
                 if not staged_path or not staged_python_path:
@@ -3332,7 +3322,7 @@ def activate_staged_installations() -> list[str]:
                     raise ProviderHubInstallError("staged bundle path is not one of the hub's bundles")
                 _remove_bundle_runtime_artifacts(staged_bundle_path)
                 verify_bundle_tree(manifest, staged_bundle_path)
-                _smoke_validate_worker(manifest, staged_bundle_path, staged_interpreter)
+                kind.smoke_test(manifest, staged_bundle_path, staged_interpreter)
             except Exception as error:
                 installation["last_error"] = refusal_text(error)
                 _abandon_staged_catalog_list(installation)
@@ -3368,6 +3358,14 @@ def activate_staged_installations() -> list[str]:
             installation["last_error"] = None
             installation.pop("needs_repair", None)
             installation["activated_at"] = utcnow_iso()
+            try:
+                attention = get_kind(kind_of(installation)).on_activated(
+                    provider_id, previous_manifest, manifest.raw)
+            except Exception:
+                logging.getLogger(__name__).exception("The kind's activation step failed for %s", provider_id)
+                attention = "Its saved settings could not be brought up to date with this version."
+            if attention:
+                installation["last_error"] = attention
             activated.append(provider_id)
             changed = True
             if previous_version:

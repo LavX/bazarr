@@ -157,6 +157,37 @@ describe("plugin settings fields", () => {
     expect(last()).toBeNull();
   });
 
+  it("keeps a half-typed minus on screen when a number is replaced by a negative one", async () => {
+    const user = userEvent.setup();
+    const seen = vi.fn();
+    const fields: PluginField[] = [
+      { key: "offset", type: "number", label: "Offset" },
+    ];
+    customRender(
+      <Harness fields={fields} start={{ offset: 40 }} onValues={seen} />,
+    );
+    const input = screen.getByLabelText("Offset");
+    // Select the existing 40 and type over it, one key at a time.
+    await user.type(input, "-", {
+      initialSelectionStart: 0,
+      initialSelectionEnd: 2,
+    });
+    expect(input).toHaveValue("-");
+    expect(seen).not.toHaveBeenCalledWith(
+      expect.objectContaining({ offset: 40 }),
+    );
+    await user.type(input, "5");
+    expect(input).toHaveValue("-5");
+    expect(seen).toHaveBeenLastCalledWith({ offset: -5 });
+    // Replacing it again with another negative number works the same way.
+    await user.type(input, "-7", {
+      initialSelectionStart: 0,
+      initialSelectionEnd: 2,
+    });
+    expect(input).toHaveValue("-7");
+    expect(seen).toHaveBeenLastCalledWith({ offset: -7 });
+  });
+
   it("keeps the default visible as a hint while an emptied number is null", async () => {
     const user = userEvent.setup();
     const seen = vi.fn();

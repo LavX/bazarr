@@ -797,6 +797,40 @@ def test_a_condition_on_the_model_sees_the_model_that_will_be_stored(world):
     assert switched.status_code == 400 and switched.json["field_errors"] == {"extra": "is required"}
 
 
+def test_a_manifest_that_declares_a_price_or_the_model_has_its_limits_and_defaults_applied(world):
+    fields = world.plugins[PLUGIN].manifest["settings"]["backend_types"]["openrouter"]["fields"]
+    fields.append({"key": "price_input_per_million", "type": "number", "min": 0.1, "max": 2, "default": 0.5})
+    fields.append({"key": "model", "type": "options", "max_length": 10, "default": "vendor/df"})
+    # Create: left out takes the default; over the limit, under the limit and too long are refused.
+    created = _new_connection(world, values={"api_key": "k"})
+    assert created.status_code == 201, created.json
+    values = created.json["connection"]["values"]
+    assert values["price_input_per_million"] == 0.5 and values["model"] == "vendor/df"
+    assert values["price_output_per_million"] == 0  # not declared: the host's own default
+    for bad, field in (({"price_input_per_million": 3}, "price_input_per_million"),
+                       ({"price_input_per_million": 0.01}, "price_input_per_million"),
+                       ({"model": "x" * 11}, "model"), ({"price_output_per_million": -1}, "price_output_per_million")):
+        refused = _new_connection(world, values={"api_key": "k", **bad})
+        assert refused.status_code == 400 and list(refused.json["field_errors"]) == [field]
+    assert len(world.store.list_connections(world.instance.id)) == 1
+    # Edit: a limit applies to a change, a value inside the limits is kept.
+    path = f"connections/{created.json['connection']['id']}"
+    assert world.call("patch", path, {"values": {"price_input_per_million": 3}}).status_code == 400
+    edited = world.call("patch", path, {"values": {"price_input_per_million": 1.5, "model": "mine"}})
+    assert edited.status_code == 200 and edited.json["connection"]["values"]["price_input_per_million"] == 1.5
+    # Reset: an emptied price or model goes back to the declared default, not to zero or blank.
+    reset = world.call("patch", path, {"values": {"price_input_per_million": None, "model": ""}})
+    values = reset.json["connection"]["values"]
+    assert values["price_input_per_million"] == 0.5 and values["model"] == "vendor/df"
+    # Turning it on checks what it holds against the same rules.
+    assert world.call("patch", path, {"enabled": False}).status_code == 200
+    row = world.store.get_connection(created.json["connection"]["id"])
+    row.price_input_per_million = 9
+    world.store._session.commit()
+    refused = world.call("patch", path, {"enabled": True})
+    assert refused.status_code == 400 and list(refused.json["field_errors"]) == ["price_input_per_million"]
+
+
 def test_a_flag_that_is_not_a_boolean_is_refused(world):
     assert _new_connection(world, enabled="false", values={"api_key": "k"}).status_code == 400
     created = _new_connection(world, values={"api_key": "k"}).json["connection"]
