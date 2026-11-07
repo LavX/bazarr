@@ -1034,3 +1034,39 @@ def test_a_symlinked_bin_directory_is_refused_everywhere_an_interpreter_would_ru
     assert built != env
     assert not any(str(external) in " ".join(call) for call in calls)
     assert (external / "bin" / "python").exists()
+
+
+def test_a_directory_link_inside_the_environment_cannot_carry_the_interpreter_outside(hub, tmp_path):
+    from provider_hub.venv import interpreter_inside_hub
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "python").write_text("", encoding="utf-8")
+
+    # env/bin/python -> env/linked/python, with env/linked -> the outside directory.
+    one = hub / "shared_envs" / "one"
+    (one / "bin").mkdir(parents=True)
+    (one / "linked").symlink_to(outside, target_is_directory=True)
+    (one / "bin" / "python").symlink_to(one / "linked" / "python")
+    assert interpreter_inside_hub(hub, one / "bin" / "python") is False
+
+    # Two levels down: env/a is a real directory, env/a/b is the link.
+    two = hub / "shared_envs" / "two"
+    (two / "bin").mkdir(parents=True)
+    (two / "a").mkdir()
+    (two / "a" / "b").symlink_to(outside, target_is_directory=True)
+    (two / "bin" / "python").symlink_to(two / "a" / "b" / "python")
+    assert interpreter_inside_hub(hub, two / "bin" / "python") is False
+
+    # Even a directory link that stays inside the environment is refused: it can be repointed.
+    inner = hub / "shared_envs" / "inner"
+    (inner / "bin").mkdir(parents=True)
+    (inner / "real").mkdir()
+    (inner / "real" / "python").write_text("", encoding="utf-8")
+    (inner / "alias").symlink_to(inner / "real", target_is_directory=True)
+    (inner / "bin" / "python").symlink_to(inner / "alias" / "python")
+    assert interpreter_inside_hub(hub, inner / "bin" / "python") is False
+
+    # The plain layout is untouched.
+    plain = _plain_env(hub / "shared_envs" / "plain")
+    assert interpreter_inside_hub(hub, plain / "bin" / "python") is True

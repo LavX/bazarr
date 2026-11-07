@@ -265,8 +265,32 @@ def _link_target_trusted(env_dir: Path, python_path: Path) -> bool:
         real = Path(os.path.realpath(path))
         return any(real.is_relative_to(root) for root in host_roots)
 
+    def real_below_the_environment(path: Path) -> bool:
+        """No directory between the environment and ``path`` is a symlink (the last component is the hop itself)."""
+        for root in env_roots:
+            if path.is_relative_to(root):
+                parts = path.relative_to(root).parts
+                break
+        else:
+            return True  # in the host tree, which is trusted as a whole
+        current = root
+        for part in parts[:-1]:
+            current = current / part
+            try:
+                if stat.S_ISLNK(os.lstat(current).st_mode):
+                    return False
+            except FileNotFoundError:
+                return True
+            except OSError:
+                return False
+        return True
+
     current = Path(os.path.abspath(python_path))
     for _ in range(40):
+        # A directory link inside the environment would carry a hop outside
+        # while every name on the way still reads as the environment's own.
+        if not real_below_the_environment(current):
+            return False
         if not os.path.islink(current):
             return True
         target = Path(os.path.abspath(os.path.join(os.path.dirname(current), os.readlink(current))))
