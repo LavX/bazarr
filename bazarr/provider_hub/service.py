@@ -49,10 +49,14 @@ from .state import (
     load_state,
     mutate_state,
     provider_hub_dir,
+    running_installations,
     spoofs_official_catalog_source,
 )
 from . import env_registry
-from .venv import PluginEnvironment, environment_fingerprint, pin_scope, python_executable
+from .venv import (
+    _ENV_LOCK, PluginEnvironment, environment_fingerprint, is_pinned, path_key, pin_scope, python_executable,
+    release_pins,
+)
 from .worker import ProviderWorkerClient, worker_command
 
 
@@ -2176,6 +2180,11 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             )
             try:
                 result = client.request("health", {}, timeout=10)
+            except Exception:
+                # The worker could not start or answer here, which is what a
+                # missing, stale or foreign environment looks like.
+                env_registry.mark_needs_repair(provider_id)
+                raise
             finally:
                 client.stop()
                 _remove_bundle_runtime_artifacts(bundle_path)
@@ -2716,6 +2725,7 @@ def _stage_validated(
     """
     step = checkpoint or (lambda message: None)
     staged = []
+    env_path = None
     state = load_state()
     existing = (state.get("installations") or {}).get(validated.provider_id)
     if isinstance(existing, dict) and kind_of(existing) != validated.kind:
@@ -2759,6 +2769,11 @@ def _stage_validated(
             raise
         except Exception as error:
             install_error = error
+            if env_path is not None:
+                # An environment this install built and nothing records or uses
+                # would otherwise stay on disk for good.
+                release_pins()
+                env_registry.discard_if_unused(provider_hub_dir(), env_path)
 
             def record_failed_install(state: dict[str, Any]) -> dict[str, Any]:
                 installations = state.setdefault("installations", {})
@@ -2821,18 +2836,23 @@ def _discard_stopped_install(paths, existing) -> None:
 
     The bundle lives at a path keyed by the version, so reinstalling the version
     that is already active or staged lands on that installation's own files,
-    which stay. A venv can be shared, so any venv an installation references or
-    the environment record names stays too.
+    which stay. A venv can be shared, so any venv an installation references, the
+    environment record names, or another install is using right now stays too.
     """
     existing = existing if isinstance(existing, dict) else {}
     in_use = {existing.get(key) for key in ("active_path", "staged_path", "python_path", "staged_python_path")}
     in_use.discard(None)
-    shared = env_registry.protected_env_paths(load_state())
-    for path in paths:
-        # A bundle is recorded by its directory, a venv by its interpreter.
-        if {str(path), str(python_executable(path))} & in_use or str(path) in shared:
-            continue
-        shutil.rmtree(path, ignore_errors=True)
+    # This install's own hold ends here, so only other installs' holds count.
+    release_pins()
+    with _ENV_LOCK:
+        shared = env_registry.protected_env_paths(load_state())
+        for path in paths:
+            # A bundle is recorded by its directory, a venv by its interpreter.
+            if {str(path), str(python_executable(path))} & in_use:
+                continue
+            if path_key(path) in shared or is_pinned(path):
+                continue
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def stage_install(
@@ -3172,6 +3192,74 @@ def reconcile_plugin_environments() -> dict[str, list[str]]:
         )
 
     return env_registry.reconcile_environments(validate=validate, probe=_smoke_validate_worker)
+
+
+def repair_installation_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
+    """Rebuild an active installation's environment into a new directory.
+
+    The old directory is left alone, because other plugins may share it. The new
+    one is recorded and the installation pointed at it only after the worker
+    check passes there. Needs the network, so it is an explicit action and never
+    runs at boot.
+    """
+    step = checkpoint or (lambda message: None)
+    row = (load_state().get("installations") or {}).get(provider_id)
+    if not isinstance(row, dict) or not row.get("active_version"):
+        raise ProviderHubInstallError(f"{provider_id} has no active version to repair")
+    active_path = row.get("active_path")
+    manifest_data = row.get("manifest")
+    if not active_path or not isinstance(manifest_data, dict):
+        raise ProviderHubInstallError(f"{provider_id} has no bundle to repair")
+    name = row.get("name") or provider_id
+    with record_job(
+        "repair",
+        target_kind="provider",
+        target_id=provider_id,
+        target_name=name,
+        from_version=row.get("active_version"),
+    ) as job, pin_scope():
+        env_path = None
+        try:
+            validated = validate_manifest(
+                manifest_data,
+                built_in_provider_ids=_validation_built_in_provider_ids(
+                    manifest_data, bool(row.get("trusted", False))
+                ),
+            )
+            step("Rebuilding the plugin's dependencies")
+            env_path = PluginEnvironment(provider_hub_dir()).install(validated, rebuild=True)
+            python_path = python_executable(env_path)
+            step("Checking that the plugin starts")
+            _smoke_validate_worker(validated, Path(active_path), python_path)
+        except Exception:
+            if env_path is not None:
+                release_pins()
+                env_registry.discard_if_unused(provider_hub_dir(), env_path)
+            raise
+
+        def record_repair(state: dict[str, Any]) -> dict[str, Any] | None:
+            current = (state.get("installations") or {}).get(provider_id)
+            if not isinstance(current, dict):
+                return None
+            current["python_path"] = str(python_path)
+            if current.pop("needs_repair", None):
+                current["last_error"] = None
+            env_registry.register_environment(state, environment_fingerprint(validated), env_path)
+            return dict(current)
+
+        repaired = mutate_state(record_repair)
+        if repaired is None:
+            raise ProviderHubInstallError(f"{provider_id} was removed while it was being repaired")
+        try:
+            from .registry import register_active_provider_classes
+
+            register_active_provider_classes(
+                [item for item in running_installations(kind=None) if item.provider_id == provider_id]
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("Provider Hub: could not re-register %s after its repair", provider_id)
+        job.update(message=f"Rebuilt the environment of '{name}'")
+        return _redact_installation(repaired)
 
 
 def cleanup_plugin_environments() -> list[str]:

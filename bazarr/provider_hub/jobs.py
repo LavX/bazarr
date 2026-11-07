@@ -120,6 +120,11 @@ def queue_update(provider_id, name=None):
                     {"provider_id": provider_id, "name": name})
 
 
+def queue_repair(provider_id, name=None):
+    return _enqueue(f"Repairing provider {name or provider_id}", "repair_provider",
+                    {"provider_id": provider_id, "name": name})
+
+
 def queue_catalog_refresh():
     return _enqueue("Refreshing provider catalog", "refresh_catalog", {})
 
@@ -163,6 +168,16 @@ def uninstall_provider(provider_id, name=None, job_id=None):
         raise JobFailed(f"Could not uninstall {label}: {reason_of(error)}") from error
     if not removed:
         raise JobFailed(f"Could not uninstall {label}: it is not installed")
+
+
+def repair_provider(provider_id, name=None, job_id=None):
+    label = name or provider_id
+    try:
+        return service.repair_installation_environment(provider_id, checkpoint=_checkpoint(job_id))
+    except service.ProviderHubStopped as stopped:
+        raise JobCancelled(str(stopped)) from stopped
+    except Exception as error:
+        raise JobFailed(f"Could not repair {label}: {reason_of(error)}") from error
 
 
 def update_provider(provider_id, name=None, job_id=None):

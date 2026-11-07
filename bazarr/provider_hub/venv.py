@@ -4,10 +4,13 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import platform
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
+import uuid
 
 from collections import Counter
 from collections.abc import Iterator
@@ -58,6 +61,15 @@ def pin_scope() -> Iterator[None]:
                 _PINS[key] -= 1
                 if _PINS[key] <= 0:
                     del _PINS[key]
+            held.clear()
+
+
+def path_key(path: str | os.PathLike[str]) -> str:
+    """One spelling of a directory, so a symlinked or unnormalized path compares equal."""
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(Path(path))
 
 
 def _pin(env_path: Path) -> None:
@@ -65,22 +77,38 @@ def _pin(env_path: Path) -> None:
     if held is None:
         return
     with _ENV_LOCK:
-        key = str(env_path)
+        key = path_key(env_path)
         _PINS[key] += 1
         held.append(key)
 
 
+def release_pins() -> None:
+    """End this thread's holds early, for a failed or stopped install about to
+    decide what to remove. Other threads' holds stay."""
+    held = getattr(_SCOPE, "held", None)
+    if not held:
+        return
+    with _ENV_LOCK:
+        for key in held:
+            _PINS[key] -= 1
+            if _PINS[key] <= 0:
+                del _PINS[key]
+        held.clear()
+
+
 def is_pinned(env_path: str | os.PathLike[str]) -> bool:
     with _ENV_LOCK:
-        return _PINS.get(str(env_path), 0) > 0
+        return _PINS.get(path_key(env_path), 0) > 0
 
 
 def environment_fingerprint(manifest: ValidatedManifest) -> str:
     """The key an environment is shared under.
 
     It covers the dependency set and what a compiled wheel depends on, the
-    platform and the interpreter's ABI tag. It does not cover the provider id or
-    the version, so plugins with the same dependencies resolve to one key. The
+    platform, the machine architecture and the interpreter's ABI (its cache tag
+    and SOABI, which tells a free-threaded build from a regular one), so a config
+    directory moved to another architecture never reuses an environment built
+    for the first. It does not cover the provider id or the version, so plugins with the same dependencies resolve to one key. The
     requirement lines are sorted, so their order does not matter.
     """
     digest = hashlib.sha256()
@@ -89,6 +117,8 @@ def environment_fingerprint(manifest: ValidatedManifest) -> str:
         digest.update(b"\n")
     digest.update(sys.platform.encode("utf-8"))
     digest.update((sys.implementation.cache_tag or "").encode("utf-8"))
+    digest.update((sysconfig.get_config_var("SOABI") or "").encode("utf-8"))
+    digest.update(platform.machine().lower().encode("utf-8"))
     return digest.hexdigest()[:16]
 
 
@@ -129,34 +159,59 @@ class PluginEnvironment:
     def path_for(self, manifest: ValidatedManifest) -> Path:
         return self.root / SHARED_ENV_DIR / self._fingerprint(manifest)
 
+    def _inside_hub(self, path: Path) -> bool:
+        key = Path(path_key(path))
+        return any(
+            key.is_relative_to(Path(path_key(self.root / name))) for name in (SHARED_ENV_DIR, "envs")
+        )
+
     def _recorded_path(self, manifest: ValidatedManifest) -> Path | None:
-        """The environment recorded for this dependency set, whether or not it is intact."""
+        """The environment recorded for this dependency set, whether or not it is intact.
+
+        A recorded path outside the hub's own environment directories is ignored,
+        so a hand-edited state document cannot make an install build somewhere else.
+        """
         from .state import load_state
 
         entry = (load_state().get("plugin_envs") or {}).get(self._fingerprint(manifest))
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             return None
-        return Path(entry["path"])
+        candidate = Path(entry["path"])
+        return candidate if self._inside_hub(candidate) else None
 
-    def install(self, manifest: ValidatedManifest, timeout: float | None = None) -> Path:
+    def _fresh_path(self, manifest: ValidatedManifest) -> Path:
+        return self.root / SHARED_ENV_DIR / f"{self._fingerprint(manifest)}-{uuid.uuid4().hex[:8]}"
+
+    def install(self, manifest: ValidatedManifest, timeout: float | None = None, *, rebuild: bool = False) -> Path:
         """Return the venv for this dependency set, building it only when needed.
 
         A recorded environment that is intact is reused as it is: nothing is
-        installed into it and no network is needed. A recorded one that is
-        missing or fails ``pip check`` is rebuilt at the same path, which restores
-        the same dependency set for every plugin that shares it. When ``timeout``
+        installed into it and no network is needed. An environment other plugins
+        may be running from is never modified: when the recorded one fails
+        ``pip check`` (or ``rebuild`` is set), a new directory is built and the
+        caller records it once it passes the worker check. Only a recorded
+        directory with no interpreter at all is rebuilt where it is, because
+        nothing can be running from it. When ``timeout``
         is set it is a hard wall-clock budget for the whole install (shared across
         the venv/pip subprocesses): the startup auto-install passes its remaining
         budget so one stuck pip/venv step can't block boot indefinitely. ``None``
         (manual installs) leaves it unbounded.
         """
-        recorded = self._recorded_path(manifest)
-        if recorded is not None:
-            with _ENV_LOCK:
+        # Read the record and pin in one step under the lock a cleanup holds
+        # while it decides, so the environment cannot vanish in between.
+        with _ENV_LOCK:
+            recorded = self._recorded_path(manifest)
+            if recorded is not None:
                 _pin(recorded)
-            if python_executable(recorded).exists() and _passes_pip_check(recorded):
-                return recorded
-        return self._build(manifest, timeout, recorded or self.path_for(manifest))
+        if rebuild:
+            return self._build(manifest, timeout, self._fresh_path(manifest))
+        if recorded is None:
+            return self._build(manifest, timeout, self.path_for(manifest))
+        if not python_executable(recorded).exists():
+            return self._build(manifest, timeout, recorded)
+        if _passes_pip_check(recorded):
+            return recorded
+        return self._build(manifest, timeout, self._fresh_path(manifest))
 
     def _build(self, manifest: ValidatedManifest, timeout: float | None, env_path: Path) -> Path:
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
@@ -171,9 +226,9 @@ class PluginEnvironment:
                 )
             return left
 
-        env_path.mkdir(parents=True, exist_ok=True)
         with _ENV_LOCK:
             _pin(env_path)
+        env_path.mkdir(parents=True, exist_ok=True)
 
         python_exe = python_executable(env_path)
         # Serialize the heavy venv/pip subprocess work process-wide (see _INSTALL_LOCK).

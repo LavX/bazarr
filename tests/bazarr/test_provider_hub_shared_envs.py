@@ -286,6 +286,150 @@ def test_cleanup_removes_only_unreferenced_environments(hub):
     assert load_state()["plugin_envs"] == {}
 
 
+def _fake_run_that_builds(calls):
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[1:3] == ["-m", "venv"]:
+            target = Path(cmd[3])
+            (target / "bin").mkdir(parents=True, exist_ok=True)
+            (target / "bin" / "python").write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    return fake_run
+
+
+@pytest.mark.parametrize("failure", [
+    subprocess.CalledProcessError(1, "pip"),
+    subprocess.TimeoutExpired("pip", 60),
+])
+def test_a_broken_shared_environment_is_replaced_never_modified(hub, monkeypatch, failure):
+    manifest = _manifest("alpha", [REQ_A])
+    old = hub / "shared_envs" / "recorded"
+    (old / "bin").mkdir(parents=True)
+    (old / "bin" / "python").write_text("", encoding="utf-8")
+    state = load_state()
+    state["plugin_envs"] = {environment_fingerprint(manifest): {"path": str(old)}}
+    save_state(state)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[0] == str(old / "bin" / "python"):
+            raise failure
+        if cmd[1:3] == ["-m", "venv"]:
+            target = Path(cmd[3])
+            (target / "bin").mkdir(parents=True, exist_ok=True)
+            (target / "bin" / "python").write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(venvmod.subprocess, "run", fake_run)
+
+    built = PluginEnvironment(hub).install(manifest)
+
+    assert built != old
+    assert built.parent == hub / "shared_envs"
+    assert built.name.startswith(environment_fingerprint(manifest) + "-")
+    # The live environment only ever saw the consistency check.
+    assert [c[1:] for c in calls if c[0] == str(old / "bin" / "python")] == [["-m", "pip", "check"]]
+    assert any(c[0] == str(built / "bin" / "python") and c[1:4] == ["-m", "pip", "install"] for c in calls)
+
+    # Recording the new one frees the old one for the next cleanup.
+    state = load_state()
+    env_registry.register_environment(state, environment_fingerprint(manifest), built)
+    state["installations"] = {"alpha": _row("alpha", built, [REQ_A])}
+    save_state(state)
+    assert env_registry.cleanup_environments(hub) == [str(old)]
+    assert built.exists()
+
+
+def test_a_recorded_directory_without_an_interpreter_is_rebuilt_where_it_is(hub, monkeypatch):
+    manifest = _manifest("alpha", [REQ_A])
+    gone = hub / "shared_envs" / "recorded"
+    gone.mkdir(parents=True)
+    state = load_state()
+    state["plugin_envs"] = {environment_fingerprint(manifest): {"path": str(gone)}}
+    save_state(state)
+    calls = []
+    monkeypatch.setattr(venvmod.subprocess, "run", _fake_run_that_builds(calls))
+
+    assert PluginEnvironment(hub).install(manifest) == gone
+    assert (gone / "bin" / "python").exists()
+
+
+def test_a_recorded_path_outside_the_hub_is_ignored(hub, tmp_path, monkeypatch):
+    manifest = _manifest("alpha", [REQ_A])
+    outside = tmp_path / "elsewhere"
+    (outside / "bin").mkdir(parents=True)
+    (outside / "bin" / "python").write_text("", encoding="utf-8")
+    state = load_state()
+    state["plugin_envs"] = {environment_fingerprint(manifest): {"path": str(outside)}}
+    save_state(state)
+    calls = []
+    monkeypatch.setattr(venvmod.subprocess, "run", _fake_run_that_builds(calls))
+
+    built = PluginEnvironment(hub).install(manifest)
+
+    assert built == hub / "shared_envs" / environment_fingerprint(manifest)
+    assert not any(str(outside) in " ".join(c) for c in calls)
+
+
+def test_reusing_a_recorded_environment_runs_no_install(hub, monkeypatch):
+    manifest = _manifest("alpha", [REQ_A])
+    env = hub / "shared_envs" / "recorded"
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_text("", encoding="utf-8")
+    state = load_state()
+    state["plugin_envs"] = {environment_fingerprint(manifest): {"path": str(env)}}
+    save_state(state)
+    calls = []
+    monkeypatch.setattr(venvmod.subprocess, "run", _fake_run_that_builds(calls))
+
+    with pin_scope():
+        assert PluginEnvironment(hub).install(manifest) == env
+        # Held by the install in flight: a cleanup leaves it, though nothing references it yet.
+        assert env_registry.cleanup_environments(hub) == []
+    assert [c[1:] for c in calls] == [["-m", "pip", "check"]]
+    assert env_registry.cleanup_environments(hub) == [str(env)]
+
+
+def test_fingerprint_depends_on_architecture_and_abi(monkeypatch):
+    import platform
+    import sysconfig
+
+    manifest = _manifest("alpha", [REQ_A])
+    here = environment_fingerprint(manifest)
+    real_machine = platform.machine()
+    monkeypatch.setattr(platform, "machine", lambda: "riscv64" if real_machine != "riscv64" else "x86_64")
+    assert environment_fingerprint(manifest) != here
+    monkeypatch.undo()
+    real = sysconfig.get_config_var
+    monkeypatch.setattr(sysconfig, "get_config_var",
+                        lambda name: "cpython-314t-other" if name == "SOABI" else real(name))
+    assert environment_fingerprint(manifest) != here
+
+
+def _elf_python(env, machine):
+    header = bytearray(b"\x7fELF" + b"\x02\x01\x01" + b"\x00" * 9)
+    header += (3).to_bytes(2, "little") + machine.to_bytes(2, "little")
+    (env / "bin" / "python").write_bytes(bytes(header))
+
+
+def test_an_environment_built_for_another_architecture_is_not_adopted(hub, no_subprocess, monkeypatch):
+    import platform
+
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    foreign = _legacy_env(hub, "alpha", [REQ_A], old_fp="fp1")
+    _elf_python(foreign, 183)
+    native = _legacy_env(hub, "beta_plugin", [REQ_B], old_fp="fp2")
+    _elf_python(native, 62)
+    _state_with(_row("alpha", foreign, [REQ_A]), _row("beta_plugin", native, [REQ_B]))
+
+    env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+
+    recorded = {entry["path"] for entry in load_state()["plugin_envs"].values()}
+    assert recorded == {str(native)}
+
+
 def test_cleanup_never_leaves_the_hub_directory(hub, tmp_path):
     outside = tmp_path / "elsewhere"
     (outside / "bin").mkdir(parents=True)
