@@ -234,6 +234,11 @@ def _read_document(current: Path) -> dict[str, Any] | None:
         raise _unreadable(current, "not valid JSON") from error
     if not isinstance(data, dict):
         raise _unreadable(current, "the root is not an object")
+    if not isinstance(data.get("installations"), dict):
+        # Every document this module writes carries the inventory. One without
+        # it is damaged: normalising it would fill in an empty inventory that
+        # reads as "nothing is installed" and is then saved as such.
+        raise _unreadable(current, "the installation inventory is missing or not an object")
     return data
 
 
@@ -293,13 +298,8 @@ def load_state_strict(path: str | os.PathLike[str] | None = None) -> dict[str, A
     and the caller fails closed instead of reading no installations.
     """
     current = Path(path) if path is not None else state_file()
-    if not current.exists():
-        return default_state()
-    with current.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if not isinstance(data, dict):
-        raise ValueError("the Provider Hub state document is not an object")
-    return _normalized_state(data)
+    data = _read_document(current)
+    return default_state() if data is None else _normalized_state(data)
 
 
 def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:

@@ -775,7 +775,13 @@ def test_boot_reconcile_leaves_an_unreadable_state_alone(hub, no_subprocess, doc
     assert (hub / "state.json").read_text(encoding="utf-8") == document
 
 
-CORRUPT_ROOTS = ["null", "[]", '"text"', "42", "{not json"]
+CORRUPT_ROOTS = [
+    "null", "[]", '"text"', "42", "{not json",
+    "{}",
+    '{"catalog_entries": {}, "jobs": [], "plugin_envs": {}}',
+    '{"installations": null, "jobs": []}',
+    '{"installations": []}',
+]
 
 
 @pytest.mark.parametrize("document", CORRUPT_ROOTS)
@@ -832,3 +838,22 @@ def test_a_missing_state_file_starts_from_the_default_and_the_recovery_path_keep
     mutate_state(lambda state: state.update(marker=2), recover_corrupt=True)
     assert load_state()["marker"] == 2
     assert [copy.read_text(encoding="utf-8") for copy in corrupt_copies()] == ["[]"]
+
+
+@pytest.mark.parametrize("document", ["{}", '{"catalog_entries": {}, "jobs": []}'])
+def test_boot_reconcile_and_cleanup_do_not_turn_a_document_without_an_inventory_into_an_empty_one(
+    hub, no_subprocess, document
+):
+    from provider_hub.state import corrupt_copies
+
+    shared, legacy = _two_environments(hub)
+    (hub / "state.json").write_text(document, encoding="utf-8")
+
+    summary = env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+    removed = env_registry.cleanup_environments(hub)
+
+    assert summary == {"adopted": [], "repointed": [], "needs_repair": [], "kept": []}
+    assert removed == []
+    assert (hub / "state.json").read_text(encoding="utf-8") == document
+    assert len(corrupt_copies()) == 1
+    assert (shared / "bin" / "python").exists() and (legacy / "bin" / "python").exists()

@@ -7457,7 +7457,7 @@ def test_catalog_rate_limit_preserves_cached_source(tmp_path, monkeypatch, statu
         "catalog_sources": {"community": {
             "id": "community", "name": "community", "url": "https://github.com/example/providers/blob/main/catalog.json",
             "last_checked_at": checked,
-        }}, "catalog_entries": {"community:example:1.0.0": entry}, "jobs": [],
+        }}, "catalog_entries": {"community:example:1.0.0": entry}, "installations": {}, "jobs": [],
     }))
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     response = requests.Response()
