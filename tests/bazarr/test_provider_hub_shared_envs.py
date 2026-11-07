@@ -342,18 +342,89 @@ def test_a_broken_shared_environment_is_replaced_never_modified(hub, monkeypatch
     assert built.exists()
 
 
-def test_a_recorded_directory_without_an_interpreter_is_rebuilt_where_it_is(hub, monkeypatch):
+def test_a_recorded_directory_without_an_interpreter_is_never_rebuilt_in_place(hub, monkeypatch):
     manifest = _manifest("alpha", [REQ_A])
     gone = hub / "shared_envs" / "recorded"
-    gone.mkdir(parents=True)
+    (gone / "lib").mkdir(parents=True)
+    (gone / "lib" / "package.py").write_text("running workers may still import this", encoding="utf-8")
     state = load_state()
     state["plugin_envs"] = {environment_fingerprint(manifest): {"path": str(gone)}}
     save_state(state)
     calls = []
     monkeypatch.setattr(venvmod.subprocess, "run", _fake_run_that_builds(calls))
 
-    assert PluginEnvironment(hub).install(manifest) == gone
-    assert (gone / "bin" / "python").exists()
+    built = PluginEnvironment(hub).install(manifest)
+
+    assert built != gone
+    assert built.parent == hub / "shared_envs"
+    assert built.name.startswith(environment_fingerprint(manifest) + "-")
+    assert (built / "bin" / "python").exists()
+    # The original directory is exactly as it was: nothing was built into it.
+    assert sorted(path.name for path in gone.rglob("*")) == ["lib", "package.py"]
+    assert not any(str(gone) in call or str(gone / "bin" / "python") in call for call in calls)
+
+
+def test_two_concurrent_first_installs_of_one_dependency_set_build_once(hub, monkeypatch):
+    import threading
+    import time
+
+    manifest_one = _manifest("alpha", [REQ_A])
+    manifest_two = _manifest("beta_plugin", [REQ_A], version="3.0.0")
+    calls = []
+    guard = threading.Lock()
+
+    def slow_run(cmd, **kwargs):
+        with guard:
+            calls.append(list(cmd))
+        if cmd[1:3] == ["-m", "venv"]:
+            target = Path(cmd[3])
+            (target / "bin").mkdir(parents=True, exist_ok=True)
+            (target / "bin" / "python").write_text("", encoding="utf-8")
+            time.sleep(0.2)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(venvmod.subprocess, "run", slow_run)
+    environment = PluginEnvironment(hub)
+    results = {}
+    errors = []
+
+    def install(name, manifest):
+        try:
+            with pin_scope():
+                results[name] = environment.install(manifest)
+                time.sleep(0.3)
+        except Exception as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=install, args=("one", manifest_one)),
+        threading.Thread(target=install, args=("two", manifest_two)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert not errors
+    assert results["one"] == results["two"] == hub / "shared_envs" / environment_fingerprint(manifest_one)
+    pip_installs = [call for call in calls if call[1:4] == ["-m", "pip", "install"]]
+    venv_creations = [call for call in calls if call[1:3] == ["-m", "venv"]]
+    assert len(pip_installs) == 1
+    assert len(venv_creations) == 1
+
+
+def test_an_unfinished_canonical_directory_is_not_built_into(hub, monkeypatch):
+    manifest = _manifest("alpha", [REQ_A])
+    canonical = hub / "shared_envs" / environment_fingerprint(manifest)
+    (canonical / "bin").mkdir(parents=True)
+    (canonical / "bin" / "python").write_text("", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(venvmod.subprocess, "run", _fake_run_that_builds(calls))
+
+    built = PluginEnvironment(hub).install(manifest)
+
+    assert built != canonical
+    assert not any(str(canonical) in call or str(canonical / "bin" / "python") in call for call in calls)
 
 
 def test_a_recorded_path_outside_the_hub_is_ignored(hub, tmp_path, monkeypatch):

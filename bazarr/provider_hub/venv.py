@@ -37,6 +37,22 @@ _SCOPE = threading.local()
 
 SHARED_ENV_DIR = "shared_envs"
 
+# Written into an environment once its packages are installed and consistent. An
+# environment no record names is only reused when it carries this file, so the
+# leftovers of an interrupted build are never mistaken for a finished one.
+COMPLETE_MARKER = ".bazarr-env-complete"
+
+# One lock per fingerprint. It covers choosing the directory for a dependency
+# set, building it and the consistency check that follows, so two installs with
+# the same dependencies never both build into the same directory.
+_FINGERPRINT_LOCKS: dict[str, threading.Lock] = {}
+_FINGERPRINT_LOCKS_GUARD = threading.Lock()
+
+
+def _fingerprint_lock(fingerprint: str) -> threading.Lock:
+    with _FINGERPRINT_LOCKS_GUARD:
+        return _FINGERPRINT_LOCKS.setdefault(fingerprint, threading.Lock())
+
 
 class PluginEnvironmentError(RuntimeError):
     """Raised when a Provider Hub environment cannot be built."""
@@ -101,6 +117,12 @@ def is_pinned(env_path: str | os.PathLike[str]) -> bool:
         return _PINS.get(path_key(env_path), 0) > 0
 
 
+def pinned_paths() -> set[str]:
+    """Every environment an install in flight holds right now."""
+    with _ENV_LOCK:
+        return {key for key, count in _PINS.items() if count > 0}
+
+
 def environment_fingerprint(manifest: ValidatedManifest) -> str:
     """The key an environment is shared under.
 
@@ -162,7 +184,8 @@ class PluginEnvironment:
     def _inside_hub(self, path: Path) -> bool:
         key = Path(path_key(path))
         return any(
-            key.is_relative_to(Path(path_key(self.root / name))) for name in (SHARED_ENV_DIR, "envs")
+            key != Path(path_key(self.root / name)) and key.is_relative_to(Path(path_key(self.root / name)))
+            for name in (SHARED_ENV_DIR, "envs")
         )
 
     def _recorded_path(self, manifest: ValidatedManifest) -> Path | None:
@@ -185,33 +208,61 @@ class PluginEnvironment:
     def install(self, manifest: ValidatedManifest, timeout: float | None = None, *, rebuild: bool = False) -> Path:
         """Return the venv for this dependency set, building it only when needed.
 
-        A recorded environment that is intact is reused as it is: nothing is
-        installed into it and no network is needed. An environment other plugins
-        may be running from is never modified: when the recorded one fails
-        ``pip check`` (or ``rebuild`` is set), a new directory is built and the
-        caller records it once it passes the worker check. Only a recorded
-        directory with no interpreter at all is rebuilt where it is, because
-        nothing can be running from it. When ``timeout``
-        is set it is a hard wall-clock budget for the whole install (shared across
-        the venv/pip subprocesses): the startup auto-install passes its remaining
-        budget so one stuck pip/venv step can't block boot indefinitely. ``None``
-        (manual installs) leaves it unbounded.
+        An environment is immutable once built: nothing is ever installed into a
+        directory that already holds one, and nothing is built over it. A recorded
+        environment that is intact is reused as it is, with no install and no
+        network. When the recorded one fails ``pip check``, has lost its
+        interpreter, or ``rebuild`` is set, a new directory is built and the
+        caller records it once it passes the worker check; the old one stays for
+        a cleanup to remove when nothing references it. With no record, a
+        finished environment already sitting in the canonical directory (a
+        concurrent install of the same dependencies built it) is reused too.
+
+        The choice of directory and the build happen under a lock per
+        fingerprint, so two installs of one dependency set never build into the
+        same directory. When ``timeout`` is set it is a hard wall-clock budget for
+        the whole install (shared across the lock waits and the venv/pip
+        subprocesses): the startup auto-install passes its remaining budget so
+        one stuck pip/venv step can't block boot indefinitely. ``None`` (manual
+        installs) leaves it unbounded.
         """
-        # Read the record and pin in one step under the lock a cleanup holds
-        # while it decides, so the environment cannot vanish in between.
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        lock = _fingerprint_lock(self._fingerprint(manifest))
+        if deadline is None:
+            lock.acquire()
+        elif not lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise PluginEnvironmentError(
+                f"Provider Hub install for {manifest.provider_id} timed out waiting for another install of the same dependencies"
+            )
+        try:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            return self._install_locked(manifest, remaining, rebuild)
+        finally:
+            lock.release()
+
+    def _install_locked(self, manifest: ValidatedManifest, timeout: float | None, rebuild: bool) -> Path:
+        canonical = self.path_for(manifest)
+        # Read the record, look at the canonical directory and pin in one step
+        # under the lock a cleanup holds while it decides, so the environment
+        # cannot vanish in between.
         with _ENV_LOCK:
-            recorded = self._recorded_path(manifest)
-            if recorded is not None:
-                _pin(recorded)
+            reusable = self._recorded_path(manifest)
+            if reusable is None and self._is_complete(canonical):
+                reusable = canonical
+            if reusable is not None:
+                _pin(reusable)
+            canonical_free = not os.path.lexists(canonical)
         if rebuild:
             return self._build(manifest, timeout, self._fresh_path(manifest))
-        if recorded is None:
-            return self._build(manifest, timeout, self.path_for(manifest))
-        if not python_executable(recorded).exists():
-            return self._build(manifest, timeout, recorded)
-        if _passes_pip_check(recorded):
-            return recorded
+        if reusable is None:
+            return self._build(manifest, timeout, canonical if canonical_free else self._fresh_path(manifest))
+        if python_executable(reusable).exists() and _passes_pip_check(reusable):
+            return reusable
         return self._build(manifest, timeout, self._fresh_path(manifest))
+
+    @staticmethod
+    def _is_complete(env_path: Path) -> bool:
+        return python_executable(env_path).exists() and (env_path / COMPLETE_MARKER).is_file()
 
     def _build(self, manifest: ValidatedManifest, timeout: float | None, env_path: Path) -> Path:
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
@@ -226,9 +277,18 @@ class PluginEnvironment:
                 )
             return left
 
+        if not self._inside_hub(env_path):
+            raise PluginEnvironmentError(f"Provider Hub will not build an environment outside its own directory: {env_path}")
         with _ENV_LOCK:
             _pin(env_path)
-        env_path.mkdir(parents=True, exist_ok=True)
+        # A directory is only ever built once. One that is already there belongs
+        # to an environment something may be running from.
+        try:
+            env_path.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as error:
+            raise PluginEnvironmentError(
+                f"Provider Hub environment directory already exists: {env_path}"
+            ) from error
 
         python_exe = python_executable(env_path)
         # Serialize the heavy venv/pip subprocess work process-wide (see _INSTALL_LOCK).
@@ -242,12 +302,11 @@ class PluginEnvironment:
                 f"Provider Hub install for {manifest.provider_id} timed out waiting for the install lock"
             )
         try:
-            if not python_exe.exists():
-                subprocess.run(
-                    [sys.executable, "-m", "venv", str(env_path)],
-                    check=True,
-                    timeout=_remaining(),
-                )
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(env_path)],
+                check=True,
+                timeout=_remaining(),
+            )
 
             if manifest.dependency_requirements:
                 requirements_path = env_path / "requirements.txt"
@@ -281,6 +340,7 @@ class PluginEnvironment:
                 cwd=str(env_path),
                 timeout=_remaining(),
             )
+            (env_path / COMPLETE_MARKER).write_text("", encoding="utf-8")
         except subprocess.TimeoutExpired as error:
             raise PluginEnvironmentError(
                 f"Provider Hub install for {manifest.provider_id} timed out"
