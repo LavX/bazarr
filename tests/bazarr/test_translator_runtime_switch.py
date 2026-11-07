@@ -113,9 +113,10 @@ def test_a_broken_settings_object_reads_as_off(monkeypatch):
 def test_with_the_switch_off_the_kind_is_not_registered(monkeypatch, forget_translator_kind):
     from provider_hub.kinds import SUBTITLE_PROVIDER, kind_for_api, known_kinds
     from provider_hub.kinds.translator import register_when_enabled
-    from subtitles.tools.translate import runtime
 
-    monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: False)
+    monkeypatch.setattr("app.config.settings", SimpleNamespace(translator=SimpleNamespace(runtime_v2=False)))
+    # A switched-off boot must not load the translation package at all.
+    monkeypatch.setitem(sys.modules, "subtitles.tools.translate.runtime", None)
     assert register_when_enabled() is False
     assert SUBTITLE_PROVIDER in known_kinds() and "translator" not in known_kinds()
     assert kind_for_api(TRANSLATOR_MANIFEST_API) is None
@@ -136,9 +137,8 @@ def test_with_the_switch_on_the_kind_registers_once(monkeypatch, forget_translat
     from provider_hub.kinds import ATTACH_ON_RESTART, get_kind, kind_for_api
     from provider_hub.kinds.translator import TranslatorKind, register_when_enabled
     from provider_hub.plugin_manifest import parse_plugin_manifest
-    from subtitles.tools.translate import runtime
 
-    monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: True)
+    monkeypatch.setattr("app.config.settings", SimpleNamespace(translator=SimpleNamespace(runtime_v2=True)))
     assert register_when_enabled() is True
     first = get_kind("translator")
     assert isinstance(first, TranslatorKind) and first.attach_policy == ATTACH_ON_RESTART

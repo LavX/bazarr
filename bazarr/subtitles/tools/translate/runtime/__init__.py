@@ -3,7 +3,9 @@
 
 One switch, ``translator.runtime_v2``, decides whether any of it runs. It is off
 by default, it is not offered by the settings API, and ``runtime_v2_enabled`` is
-the only place that reads it. Callers branch on that function at the dispatch
+the only place that reads it for dispatch. Startup code (the translator plugin
+kind's ``register_when_enabled``, the scrub refresh in init.py) reads the same
+setting directly, so a switched-off boot never imports this package. Callers branch on that function at the dispatch
 boundary (enqueue, the availability gate, route registration) and nowhere else.
 Modules in this package may be imported with the switch off; they must not run.
 """

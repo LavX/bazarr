@@ -296,6 +296,14 @@ def init_binaries():
 
 
 init_db()
+try:
+    # The translator secrets live in the database, which is ready only now. Only the switched-on runtime has
+    # any, so a switched-off boot does not touch this.
+    if getattr(settings.translator, "runtime_v2", False) is True:
+        from secret_store.scrub import refresh_secret_values
+        refresh_secret_values(settings)
+except Exception:  # pragma: no cover - scrubbing must not prevent startup
+    logging.exception("Unable to register the translator secrets for log scrubbing on startup")
 init_binaries()
 path_mappings.update()
 

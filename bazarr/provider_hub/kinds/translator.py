@@ -88,10 +88,18 @@ def register_translator_kind() -> Kind:
 
 
 def register_when_enabled() -> bool:
-    """Register the kind when the runtime switch is on. True when the kind is registered."""
-    from subtitles.tools.translate.runtime import runtime_v2_flag
+    """Register the kind when the runtime switch is on. True when the kind is registered.
 
-    if not runtime_v2_flag():
+    Reads the setting itself, on purpose: ``runtime_v2_flag`` lives in the ``subtitles`` package, and
+    importing that package this early in startup would load a great deal that a switched-off boot has
+    never loaded at this point.
+    """
+    try:
+        from app.config import settings
+
+        if getattr(settings.translator, "runtime_v2", False) is not True:
+            return False
+    except Exception:
         return False
     register_translator_kind()
     return True
