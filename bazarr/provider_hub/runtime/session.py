@@ -6,8 +6,10 @@ multiplexes requests by id, answers the worker's calls back into the host
 (reserve, usage, checkpoint and so on), cancels, watches the heartbeat and
 tears the whole process group down when anything goes wrong.
 
-Threads: one reader (frames from the worker), one watchdog (heartbeat,
-deadlines, cancel grace), one host call dispatcher, one stderr drain. Public
+Threads: one reader (frames from the worker), one writer (the only thread
+that writes to the worker's stdin; everything else queues), one watchdog
+(heartbeat, write deadline, request deadlines, cancel grace), one thread per
+request with host calls pending, one stderr drain. Public
 methods are safe to call from any thread. Callbacks (``on_progress``,
 ``on_event``, ``on_stderr``) run on the reader or drain thread and must not
 block.
@@ -23,6 +25,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -48,7 +51,11 @@ from .frames import Codes, FrameError
 logger = logging.getLogger(__name__)
 
 _SIGKILL = getattr(signal, "SIGKILL", None)
+_SIGTERM = getattr(signal, "SIGTERM", None)
 _STDERR_LINE_LIMIT = 2000
+# Read this much of a line before scrubbing, so a secret that straddles the
+# 2000 character display cut is replaced whole first.
+_STDERR_READ_LIMIT = 64 * 1024
 _STDERR_LINES_PER_SECOND = 100
 
 
@@ -62,6 +69,16 @@ class SessionLimits:
     heartbeat_timeout: float = frames.DEFAULT_HEARTBEAT_INTERVAL * frames.DEFAULT_HEARTBEAT_MISSES
     cancel_grace: float = 5.0
     kill_grace: float = 5.0
+    # close() asks with a shutdown frame for the caller's grace, then SIGTERM,
+    # waits this long, then SIGKILL.
+    term_grace: float = 1.0
+    # The worker is killed if one write to its stdin takes longer than this
+    # (it stopped reading), or if this much is queued for it.
+    write_timeout: float = 10.0
+    max_queued_frames: int = 256
+    max_queued_bytes: int = 8 * 1024 * 1024
+    # Worker calls waiting for a host handler, over the whole session.
+    max_pending_calls: int = 64
     max_in_flight: int = frames.DEFAULT_MAX_IN_FLIGHT
     max_result_bytes: int = frames.DEFAULT_MAX_RESULT_BYTES
     # Watchdog resolution. Tests lower it.
@@ -208,10 +225,16 @@ class WorkerSession:
         self._failure: BaseException | None = None
         self._hello = threading.Event()
         self._handshake_error: BaseException | None = None
-        self._writer: frames.FrameWriter | None = None
         self._reader: frames.FrameReader | None = None
         self._threads: list[threading.Thread] = []
-        self._calls: "queue.Queue[Any]" = queue.Queue()
+        # Every host write goes through the outbox and one writer thread, so no
+        # caller (the watchdog and close() least of all) ever waits on a worker
+        # that has stopped reading.
+        self._outbox: "queue.Queue[bytes]" = queue.Queue()
+        self._outbox_bytes = 0
+        self._write_started: float | None = None
+        self._call_queues: dict[Any, deque] = {}
+        self._call_pending = 0
         self._stop = threading.Event()
         self._stderr_window = (0.0, 0)
         self._bye = threading.Event()
@@ -263,22 +286,23 @@ class WorkerSession:
             self.process = process
         handshake_caps = {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES}
         self._reader = frames.FrameReader(process.stdout, handshake_caps)
-        self._writer = frames.FrameWriter(process.stdin)
         self.last_frame_at = time.monotonic()
         for target, label in (
             (self._read_loop, "reader"),
             (self._drain_stderr, "stderr"),
-            (self._call_loop, "calls"),
+            (self._write_loop, "writer"),
         ):
             thread = threading.Thread(target=target, name="%s-%s" % (self.name, label), daemon=True)
             thread.start()
             self._threads.append(thread)
 
-        if not self._hello.wait(self.limits.handshake_timeout):
-            self._fail(HandshakeError("worker sent no hello within %.1fs" % self.limits.handshake_timeout), kill=True)
-        if self._handshake_error is not None:
-            self._fail(self._handshake_error, kill=True)
-            raise self._handshake_error
+        if self._hello.wait(self.limits.handshake_timeout):
+            error = self._handshake_error
+        else:
+            error = HandshakeError("worker sent no hello within %.1fs" % self.limits.handshake_timeout)
+        if error is not None:
+            self._fail(error, kill=True)
+            raise error
         watchdog = threading.Thread(target=self._watchdog, name="%s-watchdog" % self.name, daemon=True)
         watchdog.start()
         self._threads.append(watchdog)
@@ -319,14 +343,13 @@ class WorkerSession:
         if secrets:
             message["secrets"] = secrets
         try:
-            self._writer.write_control(message)
-        except FrameError:
+            queued = self._enqueue(message)
+        except (FrameError, ValueError, RecursionError):
             with self._lock:
                 self._requests.pop(req_id, None)
             raise
-        except (OSError, ValueError) as error:
-            self._fail(WorkerExited("worker pipe closed: %s" % error, exit_code=self._poll()), kill=True)
-            raise self._failure from error
+        if not queued:
+            raise self._failure or SessionClosed("session is not running")
         return RequestHandle(self, request)
 
     def request(self, op, params=None, *, timeout=None, **kwargs):
@@ -344,6 +367,22 @@ class WorkerSession:
     # ----------------------------------------------------------------- reading
 
     def _read_loop(self):
+        try:
+            self._read_frames()
+        finally:
+            self._close_stream(self.process.stdout)
+
+    @staticmethod
+    def _close_stream(stream):
+        # Closed by the thread that uses the stream: closing a pipe another
+        # thread is blocked on would wait on that thread's lock.
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:
+            pass
+
+    def _read_frames(self):
         reader = self._reader
         welcomed = False
         try:
@@ -376,15 +415,23 @@ class WorkerSession:
                 self._handshake_error = failure
                 self._hello.set()
                 return
-            failure = ProtocolViolation(str(error), code=error.code)
             if not welcomed:
-                self._handshake_error = failure
+                self._handshake_error = HandshakeError(str(error), code=error.code)
                 self._hello.set()
                 return
-            self._fail(failure, kill=True)
+            self._fail(ProtocolViolation(str(error), code=error.code), kill=True)
             return
         except (OSError, ValueError):
             pass
+        except Exception as error:
+            # Whatever else a hostile frame provokes. The reader must never die silently.
+            detail = "worker frame could not be processed: %s" % type(error).__name__
+            if not welcomed:
+                self._handshake_error = HandshakeError(detail)
+                self._hello.set()
+                return
+            self._fail(ProtocolViolation(detail), kill=True)
+            return
         # End of stream, or the pipe broke.
         exit_code = self._reap_exit_code()
         if not welcomed:
@@ -428,14 +475,11 @@ class WorkerSession:
             max_in_flight=hello.get("max_in_flight") or self.limits.max_in_flight,
             pid=hello.get("pid"),
         )
-        self._writer.write_control(welcome)
+        self._enqueue(welcome)
         self._hello.set()
 
     def _reject(self, code, message):
-        try:
-            self._writer.write_control({"t": frames.REJECT, "code": code, "message": message})
-        except (OSError, FrameError):
-            pass
+        self._send_quietly({"t": frames.REJECT, "code": code, "message": message})
         self._handshake_error = HandshakeError(message, code=code)
         self._hello.set()
 
@@ -448,13 +492,13 @@ class WorkerSession:
             request = self._get(message["id"])
             if request is not None and request.on_progress is not None:
                 try:
-                    request.on_progress(message)
+                    request.on_progress(self._redact_obj(message))
                 except Exception:
                     logger.debug("progress callback failed", exc_info=True)
         elif kind == frames.RES:
             self._on_result(message)
         elif kind == frames.CALL:
-            self._calls.put(message)
+            self._on_call(message)
         elif kind == frames.SANDBOX_BLOCKED:
             self._emit("sandbox_blocked", message)
         elif kind == frames.BYE:
@@ -511,6 +555,8 @@ class WorkerSession:
             problem = "result checksum does not match its data"
         elif declared is None and data:
             problem = "data frames arrived without a byte count"
+        elif data and message.get("sha256") is None:
+            problem = "chunked result without a checksum"
         if problem:
             self._finish(request, error=ProtocolViolation(problem))
             return
@@ -521,7 +567,7 @@ class WorkerSession:
 
     def _failed(self, error, code, request):
         def clean(value):
-            return scrub_text(value) if isinstance(value, str) else None
+            return self._redact(value) if isinstance(value, str) else None
 
         retry_after = error.get("retry_after")
         if not isinstance(retry_after, (int, float)) or isinstance(retry_after, bool):
@@ -531,7 +577,7 @@ class WorkerSession:
             code=code,
             retryable=error.get("retryable") is True,
             retry_after=retry_after,
-            class_name=error.get("class_name") if isinstance(error.get("class_name"), str) else None,
+            class_name=clean(error.get("class_name")),
             traceback=clean(error.get("traceback")),
             errno=error.get("errno") if isinstance(error.get("errno"), int) else None,
         )
@@ -543,36 +589,72 @@ class WorkerSession:
         request.done.set()
 
     # ------------------------------------------------------------ host calls
+    #
+    # Ordering guarantee: calls that belong to one request are handled one at a
+    # time, in the order the worker sent them. Calls of different requests run
+    # concurrently, each request on its own daemon thread, so a slow handler
+    # for one request never delays another request's calls. Handlers therefore
+    # must be thread safe. At most ``max_pending_calls`` calls may wait in the
+    # whole session; a worker that exceeds that is flooding and is killed.
 
-    def _call_loop(self):
-        while True:
-            message = self._calls.get()
-            if message is None:
-                return
-            name = message["name"]
-            with self._lock:
-                handler = self._host_calls.get(name)
-            if handler is None:
-                ack = {"t": frames.ACK, "cid": message["cid"], "ok": False,
-                       "error": frames.error_object(Codes.UNKNOWN_CALL, "no host call named %s" % name)}
+    def _on_call(self, message):
+        key = message.get("id")
+        refused = None
+        start = False
+        with self._lock:
+            if key is not None and key not in self._requests:
+                refused = frames.error_object(Codes.INVALID_REQUEST, "call for a request that is not running")
+            elif self._call_pending >= self.limits.max_pending_calls:
+                refused = False
             else:
-                try:
-                    result = handler(HostCall(name, message["params"], message.get("id"), self))
-                    if result is None:
-                        result = {}
-                    if not isinstance(result, dict):
-                        raise TypeError("host call %s returned %s, not a dict" % (name, type(result).__name__))
-                    ack = {"t": frames.ACK, "cid": message["cid"], "ok": True, "result": result}
-                except HostCallError as error:
-                    ack = {"t": frames.ACK, "cid": message["cid"], "ok": False,
-                           "error": frames.error_object(error.code, scrub_text(error.message),
-                                                        retryable=error.retryable)}
-                except Exception as error:
-                    logger.warning("%s: host call %s failed", self.name, name, exc_info=True)
-                    ack = {"t": frames.ACK, "cid": message["cid"], "ok": False,
-                           "error": frames.error_object(Codes.HOST_CALL_FAILED, scrub_text(str(error)))}
-            if not self._send_quietly(ack):
-                return
+                self._call_pending += 1
+                pending = self._call_queues.get(key)
+                if pending is None:
+                    pending = self._call_queues[key] = deque()
+                    start = True
+                pending.append(message)
+        if refused is False:
+            self._fail(ProtocolViolation("worker has %d host calls pending" % self.limits.max_pending_calls), kill=True)
+        elif refused is not None:
+            self._send_quietly({"t": frames.ACK, "cid": message["cid"], "ok": False, "error": refused})
+        elif start:
+            threading.Thread(target=self._call_worker, args=(key,), daemon=True,
+                             name="%s-calls-%s" % (self.name, key)).start()
+
+    def _call_worker(self, key):
+        while not self._stop.is_set():
+            with self._lock:
+                pending = self._call_queues.get(key)
+                if not pending:
+                    self._call_queues.pop(key, None)
+                    return
+                message = pending.popleft()
+                self._call_pending -= 1
+            self._send_quietly(self._answer_call(message))
+
+    def _answer_call(self, message):
+        name = message["name"]
+        cid = message["cid"]
+        with self._lock:
+            handler = self._host_calls.get(name)
+        if handler is None:
+            return {"t": frames.ACK, "cid": cid, "ok": False,
+                    "error": frames.error_object(Codes.UNKNOWN_CALL, "no host call named %s" % name)}
+        try:
+            result = handler(HostCall(name, message["params"], message.get("id"), self))
+            if result is None:
+                result = {}
+            if not isinstance(result, dict):
+                raise TypeError("host call %s returned %s, not a dict" % (name, type(result).__name__))
+            return {"t": frames.ACK, "cid": cid, "ok": True, "result": result}
+        except HostCallError as error:
+            return {"t": frames.ACK, "cid": cid, "ok": False,
+                    "error": frames.error_object(error.code, self._redact(error.message),
+                                                 retryable=error.retryable)}
+        except Exception as error:
+            logger.warning("%s: host call %s failed", self.name, name, exc_info=True)
+            return {"t": frames.ACK, "cid": cid, "ok": False,
+                    "error": frames.error_object(Codes.HOST_CALL_FAILED, self._redact(str(error)))}
 
     # --------------------------------------------------------------- watchdog
 
@@ -583,6 +665,12 @@ class WorkerSession:
             if now - self.last_frame_at > limits.heartbeat_timeout:
                 self._fail(HeartbeatTimeout(
                     "no frame from the worker for %.1fs" % (now - self.last_frame_at)), kill=True)
+                return
+            started = self._write_started
+            if started is not None and now - started > limits.write_timeout:
+                self._fail(SessionError(
+                    "worker has not read its input for %.1fs" % (now - started),
+                    code=Codes.WRITE_TIMEOUT), kill=True)
                 return
             with self._lock:
                 pending = list(self._requests.values())
@@ -619,15 +707,56 @@ class WorkerSession:
             self.exit_code = None
         return self.exit_code
 
+    def _enqueue(self, message):
+        """Queue a control frame for the writer thread. Never blocks.
+
+        Returns False if the session is already closed. Raises
+        ``FrameTooLarge`` for a message over the control cap. A full outbox
+        means the worker stopped reading: the group is killed.
+        """
+        data = frames.pack_control(message)
+        full = False
+        with self._lock:
+            if self._closed:
+                return False
+            if (self._outbox.qsize() >= self.limits.max_queued_frames
+                    or self._outbox_bytes + len(data) > self.limits.max_queued_bytes):
+                full = True
+            else:
+                self._outbox_bytes += len(data)
+                self._outbox.put_nowait(data)
+        if full:
+            self._fail(SessionError("worker is not reading its input", code=Codes.WRITE_TIMEOUT), kill=True)
+            return False
+        return True
+
     def _send_quietly(self, message):
-        writer = self._writer
-        if writer is None or self._closed:
-            return False
         try:
-            writer.write_control(message)
-            return True
-        except (OSError, ValueError, FrameError):
+            return self._enqueue(message)
+        except (FrameError, ValueError, RecursionError):
             return False
+
+    def _write_loop(self):
+        stream = self.process.stdin
+        try:
+            while not self._stop.is_set():
+                try:
+                    data = self._outbox.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                with self._lock:
+                    self._outbox_bytes -= len(data)
+                self._write_started = time.monotonic()
+                try:
+                    stream.write(data)
+                    stream.flush()
+                except (OSError, ValueError) as error:
+                    self._write_started = None
+                    self._fail(WorkerExited("worker pipe closed: %s" % error, exit_code=self._poll()), kill=True)
+                    return
+                self._write_started = None
+        finally:
+            self._close_stream(stream)
 
     def _emit(self, name, payload):
         callback = self._on_event
@@ -653,7 +782,9 @@ class WorkerSession:
             pending = list(self._requests.values())
             self._requests.clear()
         self._stop.set()
-        self._calls.put(None)
+        with self._lock:
+            self._call_queues.clear()
+            self._call_pending = 0
         process = self.process
         if kill and process is not None:
             self._kill_tree(process)
@@ -678,15 +809,14 @@ class WorkerSession:
         else:
             # What the worker forked dies with its group.
             _signal_group(process, _SIGKILL)
-        for stream in (process.stdin, process.stdout, process.stderr):
-            try:
-                if stream is not None:
-                    stream.close()
-            except Exception:
-                pass
 
     def close(self, grace=5.0):
-        """Ask the worker to stop, then end its whole group. Idempotent."""
+        """Ask the worker to stop, then end its whole group. Idempotent.
+
+        The shutdown frame is only a request: it is queued, never awaited. If
+        the worker has not exited after ``grace`` it gets SIGTERM, then after
+        ``term_grace`` SIGKILL for the group, whether or not it was reading.
+        """
         process = self.process
         with self._lock:
             already = self._closed
@@ -695,7 +825,15 @@ class WorkerSession:
             try:
                 process.wait(timeout=grace)
             except subprocess.TimeoutExpired:
-                pass
+                if not _signal_group(process, _SIGTERM):
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+                try:
+                    process.wait(timeout=self.limits.term_grace)
+                except subprocess.TimeoutExpired:
+                    pass
         self._fail(SessionClosed("session closed"), kill=process is not None)
         if process is not None:
             # The reader may have closed the session first on a clean exit;
@@ -713,10 +851,11 @@ class WorkerSession:
             return
         try:
             while True:
-                raw = stream.readline(_STDERR_LINE_LIMIT + 1)
+                raw = stream.readline(_STDERR_READ_LIMIT + 1)
                 if not raw:
                     return
-                if len(raw) > _STDERR_LINE_LIMIT and not raw.endswith(b"\n"):
+                cut = len(raw) > _STDERR_READ_LIMIT and not raw.endswith(b"\n")
+                if cut:
                     # Skip the rest of an overlong line.
                     while True:
                         more = stream.readline(65536)
@@ -724,7 +863,13 @@ class WorkerSession:
                             break
                 if not self._stderr_allowed():
                     continue
-                line = self._scrub(raw[:_STDERR_LINE_LIMIT].decode("utf-8", "replace").rstrip("\r\n"))
+                text = raw[:_STDERR_READ_LIMIT].decode("utf-8", "replace").rstrip("\r\n")
+                if cut:
+                    # The cut may have split a secret; drop a secret's length of tail.
+                    text = text[:-max([len(v) for v in self._secrets_snapshot()] or [0])]
+                # Scrub first, truncate second: a secret that straddles the
+                # display limit must be replaced whole, not cut into a prefix.
+                line = self._redact(text)[:_STDERR_LINE_LIMIT]
                 if not line:
                     continue
                 callback = self._on_stderr
@@ -737,6 +882,8 @@ class WorkerSession:
                     logger.debug("%s stderr: %s", self.name, line)
         except (OSError, ValueError):
             return
+        finally:
+            self._close_stream(stream)
 
     def _stderr_allowed(self):
         second = int(time.monotonic())
@@ -749,12 +896,24 @@ class WorkerSession:
         self._stderr_window = (window, count + 1)
         return True
 
-    def _scrub(self, line):
+    def _secrets_snapshot(self):
         with self._lock:
-            secrets = list(self._secret_values)
-        for secret in secrets:
-            line = line.replace(secret, "***")
-        return scrub_text(line)
+            return list(self._secret_values)
+
+    def _redact(self, text):
+        """Replace every secret value this session has carried, then the generic patterns."""
+        for secret in sorted(self._secrets_snapshot(), key=len, reverse=True):
+            text = text.replace(secret, "***")
+        return scrub_text(text)
+
+    def _redact_obj(self, value):
+        if isinstance(value, str):
+            return self._redact(value)
+        if isinstance(value, list):
+            return [self._redact_obj(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self._redact_obj(item) for key, item in value.items()}
+        return value
 
 
 def _as_session_error(error):

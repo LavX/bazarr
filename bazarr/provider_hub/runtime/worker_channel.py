@@ -309,13 +309,13 @@ class WorkerChannel:
                     result, data = (value or {}), b""
                 self._respond_ok(operation, result, data)
             except OperationCancelled:
-                self._respond_error(operation.id, OperationError(Codes.CANCELLED, "cancelled"))
+                self._respond_error(operation.id, OperationError(Codes.CANCELLED, "cancelled"), operation)
             except OperationError as error:
-                self._respond_error(operation.id, error)
+                self._respond_error(operation.id, error, operation)
             except ChannelClosed:
                 pass
             except Exception as error:
-                self._respond_error(operation.id, error)
+                self._respond_error(operation.id, error, operation)
         except ChannelClosed:
             pass
         finally:
@@ -332,14 +332,25 @@ class WorkerChannel:
             message.update({"chunks": chunks, "bytes": total, "sha256": hashlib.sha256(data).hexdigest()})
         self._send(message)
 
-    def _respond_error(self, req_id, error):
+    def _respond_error(self, req_id, error, operation=None):
+        # The request's secret values are replaced in the full text before it is
+        # cut to the traceback limit, so a cut cannot leave half of a secret.
+        secrets = sorted((v for v in (operation.secrets.values() if operation else ()) if isinstance(v, str) and v),
+                         key=len, reverse=True)
+
+        def clean(text):
+            for secret in secrets:
+                text = text.replace(secret, "***")
+            return text
+
         if isinstance(error, OperationError):
-            payload = frames.error_object(error.code, error.message, retryable=error.retryable,
+            payload = frames.error_object(error.code, clean(error.message), retryable=error.retryable,
                                           retry_after=error.retry_after)
         else:
-            tail = "".join(traceback.format_exception(type(error), error, error.__traceback__))[-_TRACEBACK_LIMIT:]
+            full = clean("".join(traceback.format_exception(type(error), error, error.__traceback__)))
+            tail = full[-_TRACEBACK_LIMIT:]
             print(tail, file=sys.stderr, flush=True)
-            payload = frames.error_object(Codes.PLUGIN_ERROR, str(error), class_name=type(error).__name__,
+            payload = frames.error_object(Codes.PLUGIN_ERROR, clean(str(error)), class_name=type(error).__name__,
                                           traceback=tail)
         self._send({"t": frames.RES, "id": req_id, "ok": False, "error": payload})
 

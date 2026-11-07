@@ -666,3 +666,340 @@ def test_fake_worker_settings_are_validated():
     with pytest.raises(ValueError):
         fake_worker_env(nonsense=1)
     assert struct.calcsize(">BI") == frames.HEADER.size
+
+
+# ------------------------------------------------- hostile and stuck workers
+
+RUNTIME_DIR = REPO / "bazarr/provider_hub/runtime"
+
+HOSTILE_PRELUDE = """
+import os, signal, sys, time
+sys.path.insert(0, %r)
+import frames
+out = frames.FrameWriter(sys.stdout.buffer)
+inp = frames.FrameReader(sys.stdin.buffer)
+out.write_control({"t": "hello", "protocols": [{"major": 2, "minor": 0}], "kinds": [], "max_in_flight": 16})
+inp.read_frame()
+""" % str(RUNTIME_DIR)
+
+
+def hostile_session(tmp_path, body, **limits):
+    script = tmp_path / "hostile.py"
+    script.write_text(HOSTILE_PRELUDE + textwrap.dedent(body), encoding="utf-8")
+    values = dict(max_in_flight=16, heartbeat_timeout=30.0)
+    values.update(limits)
+    return WorkerSession([sys.executable, "-B", str(script)], limits=fast_limits(**values))
+
+
+STOPS_READING = """
+while True:
+    out.write_control({"t": "hb", "seq": 1})
+    time.sleep(0.05)
+"""
+
+
+def test_a_worker_that_stops_reading_is_killed_at_the_write_deadline(tmp_path):
+    session = hostile_session(tmp_path, STOPS_READING, write_timeout=0.5)
+    try:
+        session.start()
+        process = session.process
+        pad = "y" * 900_000
+        handles = [session.submit("x", {"pad": pad}) for _ in range(4)]
+        started = time.monotonic()
+        for handle in handles:
+            with pytest.raises(Exception) as caught:
+                handle.wait(8)
+            assert getattr(caught.value, "code", None) == frames.Codes.WRITE_TIMEOUT
+        assert time.monotonic() - started < 6
+        assert wait_until(lambda: process.poll() is not None)
+    finally:
+        session.close(grace=0.5)
+
+
+def test_submit_and_cancel_never_wait_on_a_worker_that_stopped_reading(tmp_path):
+    session = hostile_session(tmp_path, STOPS_READING, write_timeout=30.0)
+    try:
+        session.start()
+        pad = "y" * 900_000
+        started = time.monotonic()
+        handles = [session.submit("x", {"pad": pad}) for _ in range(6)]
+        for handle in handles:
+            handle.cancel()
+        assert time.monotonic() - started < 2
+    finally:
+        session.close(grace=0.3)
+
+
+def test_close_ends_a_worker_that_will_not_read_its_shutdown(tmp_path):
+    session = hostile_session(tmp_path, STOPS_READING, write_timeout=30.0)
+    session.start()
+    process = session.process
+    session.submit("x", {"pad": "y" * 900_000})
+    session.submit("x", {"pad": "y" * 900_000})
+    started = time.monotonic()
+    session.close(grace=0.5)
+    assert time.monotonic() - started < 6
+    assert process.poll() is not None
+
+
+def test_close_sends_sigterm_before_sigkill(tmp_path):
+    marker = tmp_path / "terminated"
+    body = """
+    def on_term(signum, frame):
+        open(%r, "w").write("term")
+    signal.signal(signal.SIGTERM, on_term)
+    while True:
+        out.write_control({"t": "hb", "seq": 1})
+        time.sleep(0.05)
+    """ % str(marker)
+    session = hostile_session(tmp_path, body)
+    session.start()
+    process = session.process
+    time.sleep(0.3)
+    session.close(grace=0.3)
+    assert marker.exists()
+    assert process.poll() is not None
+
+
+def test_deeply_nested_json_fails_the_session_instead_of_the_reader_thread(tmp_path):
+    body = """
+    time.sleep(0.2)
+    payload = b"[" * 500000
+    sys.stdout.buffer.write(frames.HEADER.pack(frames.FRAME_CONTROL, len(payload)) + payload)
+    sys.stdout.buffer.flush()
+    time.sleep(30)
+    """
+    session = hostile_session(tmp_path, body)
+    try:
+        session.start()
+        handle = session.submit("x")
+        started = time.monotonic()
+        with pytest.raises(ProtocolViolation):
+            handle.wait(10)
+        # Well inside the heartbeat deadline: the failure came from the reader.
+        assert time.monotonic() - started < 5
+    finally:
+        session.close(grace=0.5)
+
+
+def test_deeply_nested_json_before_the_handshake_ends_start_quickly(tmp_path):
+    script = tmp_path / "early.py"
+    script.write_text(
+        "import sys, time\n"
+        "payload = b'[' * 50000\n"
+        "sys.stdout.buffer.write(bytes([1]) + len(payload).to_bytes(4, 'big') + payload)\n"
+        "sys.stdout.buffer.flush()\ntime.sleep(30)\n",
+        encoding="utf-8",
+    )
+    session = WorkerSession(
+        [sys.executable, "-B", str(script)], limits=fast_limits(handshake_timeout=20.0))
+    try:
+        started = time.monotonic()
+        with pytest.raises(HandshakeError):
+            session.start()
+        assert time.monotonic() - started < 5
+    finally:
+        session.close(grace=0.5)
+
+
+def test_flooding_host_calls_kills_the_worker(tmp_path):
+    body = """
+    for cid in range(1, 200):
+        out.write_control({"t": "call", "cid": cid, "name": "slow", "params": {}})
+    time.sleep(30)
+    """
+    release = threading.Event()
+    session = hostile_session(tmp_path, body, max_pending_calls=10)
+    session.register_host_call("slow", lambda call: release.wait(5) and {})
+    try:
+        session.start()
+        process = session.process
+        assert wait_until(lambda: process.poll() is not None, timeout=8)
+        assert not session.alive
+    finally:
+        release.set()
+        session.close(grace=0.3)
+
+
+def test_a_slow_host_call_does_not_stall_another_requests_calls(make_session):
+    release = threading.Event()
+
+    def slow(call):
+        release.wait(5)
+        return {"slow": True}
+
+    session = make_session(host_calls={"slow": slow, "quick": lambda call: {"quick": True}})
+    session.start()
+    slow_handle = session.submit("call", {"name": "slow"})
+    time.sleep(0.2)
+    started = time.monotonic()
+    assert session.request("call", {"name": "quick"}, timeout=5).result["ack"] == {"quick": True}
+    assert time.monotonic() - started < 1.5
+    assert not slow_handle.done()
+    release.set()
+    assert slow_handle.wait(5).result["ack"] == {"slow": True}
+
+
+def test_calls_of_one_request_run_in_order_and_one_at_a_time(make_session):
+    active = []
+    order = []
+
+    def checkpoint(call):
+        active.append(1)
+        assert len(active) == 1
+        time.sleep(0.05)
+        order.append(call.params["done"])
+        active.pop()
+        return {}
+
+    session = make_session(host_calls={"reserve": lambda c: {}, "checkpoint": checkpoint, "usage": lambda c: {}})
+    session.start()
+    session.request("translate", {"lines": list("abcdef"), "batch": 1}, timeout=10)
+    assert order == [1, 2, 3, 4, 5, 6]
+
+
+def test_call_claiming_another_request_is_refused(session):
+    session.register_host_call("lookup", lambda call: {})
+    with pytest.raises(RequestFailed) as caught:
+        session.request("call", {"name": "lookup", "as_request": 999}, timeout=5)
+    assert caught.value.code == frames.Codes.INVALID_REQUEST
+
+
+# ------------------------------------------------------------------ scrubbing
+
+SECRET = "sk-test-0123456789abcdef"
+
+
+def test_host_scrubs_secrets_from_error_text_and_traceback(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("raw_error", secrets={"key": SECRET}, timeout=5)
+    assert SECRET not in str(caught.value)
+    assert SECRET not in caught.value.traceback
+    assert "***" in str(caught.value)
+
+
+def test_host_scrubs_secrets_from_progress(session):
+    seen = []
+    session.request("progress_secret", secrets={"key": SECRET}, on_progress=seen.append, timeout=5)
+    assert seen
+    assert SECRET not in json.dumps(seen)
+
+
+def test_worker_scrubs_secrets_before_cutting_the_traceback(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("leak_error", {"tail": 7990}, secrets={"key": SECRET}, timeout=5)
+    traceback_text = caught.value.traceback
+    assert len(traceback_text) <= 8000
+    # A cut-then-scrub order would leave the end of the secret behind.
+    assert SECRET[-9:] not in traceback_text
+    assert SECRET[-9:] not in str(caught.value)
+
+
+def test_a_secret_straddling_the_stderr_display_limit_does_not_leak_a_prefix(make_session):
+    lines = []
+    session = make_session(on_stderr=lines.append)
+    session.start()
+    session.request("leak", {"pad": 1990}, secrets={"key": SECRET}, timeout=5)
+    assert wait_until(lambda: lines)
+    assert all(SECRET[:8] not in line and SECRET[-8:] not in line for line in lines)
+    assert all(len(line) <= 2000 for line in lines)
+
+
+def test_chunked_result_without_a_checksum_is_a_protocol_error(session):
+    with pytest.raises(ProtocolViolation):
+        session.request("chunks", {"size": 1000, "no_sha": True}, timeout=5)
+    assert session.alive
+
+
+# -------------------------------------------------------- fake translator knobs
+
+
+def recording_calls():
+    log = []
+
+    def record(name):
+        def handler(call):
+            log.append((name, dict(call.params)))
+            return {}
+        return handler
+
+    return log, {name: record(name) for name in ("reserve", "checkpoint", "usage")}
+
+
+def names(log):
+    return [entry[0] for entry in log]
+
+
+def test_fake_fails_at_the_requested_batch(make_session):
+    log, calls = recording_calls()
+    session = make_session(host_calls=calls)
+    session.start()
+    fail = {"code": "provider_down", "message": "no", "retryable": True}
+    with pytest.raises(RequestFailed) as caught:
+        session.request("translate", {"lines": list("abcdef"), "batch": 2, "fail": fail, "fail_at_batch": 2}, timeout=10)
+    assert caught.value.code == "provider_down"
+    assert names(log) == ["reserve", "checkpoint", "checkpoint"]
+
+
+def test_fake_dies_after_reserve_before_any_usage(make_session):
+    log, calls = recording_calls()
+    session = make_session(host_calls=calls)
+    session.start()
+    with pytest.raises(WorkerExited) as caught:
+        session.request("translate", {"lines": list("abc"), "die_after": "reserve"}, timeout=10)
+    assert caught.value.exit_code == 9
+    assert names(log) == ["reserve"]
+
+
+def test_fake_dies_after_the_work_and_before_usage(make_session):
+    log, calls = recording_calls()
+    session = make_session(host_calls=calls)
+    session.start()
+    with pytest.raises(WorkerExited):
+        session.request("translate", {"lines": list("abcd"), "batch": 2, "die_after": "work"}, timeout=10)
+    assert names(log) == ["reserve", "checkpoint", "checkpoint"]
+
+
+def test_fake_reports_partial_usage_on_failure(make_session):
+    log, calls = recording_calls()
+    session = make_session(host_calls=calls)
+    session.start()
+    with pytest.raises(RequestFailed):
+        session.request(
+            "translate",
+            {"lines": list("abcd"), "batch": 2, "fail": {"code": "x"}, "usage_on_failure": True},
+            timeout=10,
+        )
+    assert log[-1] == ("usage", {"units": 2, "target": "xx", "partial": True})
+
+
+def test_fake_reports_partial_usage_on_cancel(make_session):
+    log, calls = recording_calls()
+    session = make_session(host_calls=calls)
+    session.start()
+    handle = session.submit(
+        "translate", {"lines": list("abcdefgh"), "batch": 2, "delay": 0.3, "usage_on_failure": True})
+    assert wait_until(lambda: "checkpoint" in names(log))
+    handle.cancel("user")
+    with pytest.raises(RequestCancelled):
+        handle.wait(5)
+    assert wait_until(lambda: names(log)[-1] == "usage")
+    assert log[-1][1]["partial"] is True
+    assert 0 < log[-1][1]["units"] < 8
+
+
+def test_fake_script_gives_each_attempt_its_own_outcome(make_session):
+    log, calls = recording_calls()
+    script = [
+        {"fail": {"code": "rate_limited", "retryable": True, "retry_after": 3}},
+        {"die_after": "batch:1"},
+        {},
+    ]
+    session = make_session(
+        {"script": script}, host_calls=calls, limits=fast_limits(max_in_flight=1))
+    session.start()
+    with pytest.raises(RequestFailed) as first:
+        session.request("translate", {"lines": ["a", "b"]}, timeout=10)
+    assert first.value.retry_after == 3
+    with pytest.raises(WorkerExited):
+        session.request("translate", {"lines": ["a", "b"]}, timeout=10)

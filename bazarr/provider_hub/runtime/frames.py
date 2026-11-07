@@ -141,6 +141,7 @@ class Codes:
     HANDSHAKE_FAILED = "handshake_failed"
     LEGACY_PROTOCOL = "legacy_protocol"
     HEARTBEAT_TIMEOUT = "heartbeat_timeout"
+    WRITE_TIMEOUT = "write_timeout"
     WORKER_EXITED = "worker_exited"
     SESSION_CLOSED = "session_closed"
     SANDBOX_BLOCKED = "sandbox_blocked"
@@ -255,6 +256,18 @@ class FrameWriter:
         return count, len(view)
 
 
+def pack_control(message, cap=MAX_CONTROL_BYTES):
+    """One whole control frame (header and body) as bytes, checked against ``cap``.
+
+    For senders that queue frames for a writer thread instead of writing under
+    a lock.
+    """
+    body = encode_control(message)
+    if len(body) > cap:
+        raise FrameTooLarge("control message of %d bytes exceeds the %d byte cap" % (len(body), cap))
+    return HEADER.pack(FRAME_CONTROL, len(body)) + body
+
+
 def encode_control(message):
     return json.dumps(message, separators=(",", ":"), allow_nan=False, ensure_ascii=False).encode("utf-8")
 
@@ -365,7 +378,8 @@ def validate_message(message, sender):
 def decode_control(body, sender):
     try:
         message = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        # RecursionError: JSON nested deeper than the interpreter allows.
         raise MalformedFrame("control frame is not valid JSON") from error
     return validate_message(message, sender)
 

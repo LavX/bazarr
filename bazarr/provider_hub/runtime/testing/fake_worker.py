@@ -17,14 +17,25 @@ Operations:
 ``translate``      a fake translator: reserve, work in batches with a
                    checkpoint each, report usage, return the lines. Knobs in
                    params: ``lines``, ``target``, ``batch``, ``delay``,
-                   ``fail`` (an error object to raise after the first batch),
-                   ``skip_reserve``.
+                   ``skip_reserve``, ``fail`` (an error object) raised after
+                   batch ``fail_at_batch`` (default 1), ``die_after`` (the
+                   process exits hard: ``reserve``, ``batch:N`` or ``work``,
+                   the last being after the work and before usage),
+                   ``usage_on_failure`` (report partial usage when the
+                   operation fails or is cancelled). The ``script`` setting
+                   is a list of knob dicts applied to the 1st, 2nd, ...
+                   translate request this process serves (the last repeats),
+                   which scripts failover across attempts.
 ``spam``           prints to stdout and writes to stderr, then returns.
 ``oversize_frame`` writes a header that claims a huge control frame.
 ``bad_frame``      writes a control frame that is not valid JSON.
 ``fork``           starts a child that sleeps and returns its pid. It stays in
                    the worker's process group unless ``detached`` is set.
 ``leak``           writes the request's secret values to stderr.
+``leak_error``     raises an exception whose message starts with the request's
+                   secret, ``tail`` characters long after it.
+``raw_error``      answers with an error carrying the secret, uncleaned.
+``progress_secret`` sends a progress message carrying the secret.
 ``blocked``        reports a refused connect, then fails with sandbox_blocked.
 ``exit``           ends the process with ``code``.
 ``raise``          raises a plain exception.
@@ -51,6 +62,7 @@ CONFIG_KEYS = (
     "protocols",      # the hello protocols list
     "max_in_flight",
     "silent",         # send no heartbeats
+    "script",         # translate outcomes by attempt (see the module docstring)
     "no_hello",       # never say hello (a v1 runner looks like this)
     "hello_delay",    # seconds before the hello
 )
@@ -78,29 +90,65 @@ def _sleep(operation, params):
     return {"slept": seconds}
 
 
+_STATE = {"attempts": 0, "config": {}}
+
+
+def _knobs(params):
+    """The request params, overlaid with this attempt's scripted outcome."""
+    knobs = dict(params)
+    script = _STATE["config"].get("script")
+    attempt = _STATE["attempts"]
+    _STATE["attempts"] += 1
+    knobs["attempt"] = attempt
+    if script:
+        knobs.update(script[min(attempt, len(script) - 1)])
+    return knobs
+
+
+def _raise_scripted(failure):
+    raise worker_channel.OperationError(
+        failure.get("code", "plugin_error"), failure.get("message", "failed"),
+        retryable=bool(failure.get("retryable")), retry_after=failure.get("retry_after"))
+
+
 def _translate(operation, params):
-    lines = list(params.get("lines") or [])
-    target = params.get("target", "xx")
-    batch = max(1, int(params.get("batch", 2)))
-    delay = float(params.get("delay", 0.0))
-    if not params.get("skip_reserve"):
+    knobs = _knobs(params)
+    lines = list(knobs.get("lines") or [])
+    target = knobs.get("target", "xx")
+    batch = max(1, int(knobs.get("batch", 2)))
+    delay = float(knobs.get("delay", 0.0))
+    die_after = knobs.get("die_after")
+    if not knobs.get("skip_reserve"):
         operation.call("reserve", {"units": len(lines), "target": target})
+    if die_after == "reserve":
+        os._exit(9)
     out = []
-    for start in range(0, len(lines), batch):
-        operation.check_cancelled()
-        chunk = lines[start:start + batch]
-        if delay:
-            time.sleep(delay)
-        out.extend("[%s] %s" % (target, line) for line in chunk)
-        operation.progress(fraction=len(out) / max(1, len(lines)), message="translated %d" % len(out))
-        operation.call("checkpoint", {"done": len(out), "lines": out[start:start + batch]})
-        failure = params.get("fail")
-        if failure:
-            raise worker_channel.OperationError(
-                failure.get("code", "plugin_error"), failure.get("message", "failed"),
-                retryable=bool(failure.get("retryable")), retry_after=failure.get("retry_after"))
+
+    def report_usage():
+        operation.call("usage", {"units": len(out), "target": target, "partial": True})
+
+    try:
+        for number, start in enumerate(range(0, len(lines), batch), 1):
+            operation.check_cancelled()
+            chunk = lines[start:start + batch]
+            if delay:
+                time.sleep(delay)
+            out.extend("[%s] %s" % (target, line) for line in chunk)
+            operation.progress(fraction=len(out) / max(1, len(lines)), message="translated %d" % len(out))
+            operation.call("checkpoint", {"done": len(out), "lines": out[start:start + batch]})
+            if die_after == "batch:%d" % number:
+                os._exit(9)
+            failure = knobs.get("fail")
+            if failure and number == int(knobs.get("fail_at_batch", 1)):
+                _raise_scripted(failure)
+    except (worker_channel.OperationCancelled, worker_channel.OperationError):
+        if knobs.get("usage_on_failure"):
+            report_usage()
+        raise
+    if die_after == "work":
+        os._exit(9)
     operation.call("usage", {"units": len(lines), "target": target})
-    return {"lines": out, "target": target}
+    return {"lines": out, "target": target, "attempt": knobs["attempt"]}
 
 
 def _handle(operation):
@@ -117,6 +165,12 @@ def _handle(operation):
     if name == "chunks":
         size = int(params.get("size", 1000))
         pattern = (b"0123456789abcdef" * (size // 16 + 1))[:size]
+        if params.get("no_sha"):
+            # Chunks and a reply that leaves out the checksum.
+            count, total = operation._channel._writer.write_data(operation.id, pattern)
+            operation._channel._send({"t": frames.RES, "id": operation.id, "ok": True, "result": {},
+                                      "chunks": count, "bytes": total})
+            return {}
         if params.get("overshoot"):
             # A worker that sends more than the request allows.
             operation._channel._writer.write_data(operation.id, pattern)
@@ -124,7 +178,13 @@ def _handle(operation):
         return worker_channel.OperationResult({"size": size}, pattern)
     if name == "call":
         try:
-            return {"ack": operation.call(params["name"], params.get("params") or {})}
+            if "as_request" in params:
+                # Claim to be another request.
+                ack = operation._channel.call(params["name"], params.get("params") or {},
+                                              request_id=params["as_request"])
+            else:
+                ack = operation.call(params["name"], params.get("params") or {})
+            return {"ack": ack}
         except worker_channel.HostCallFailed as error:
             raise worker_channel.OperationError(error.code, error.message, retryable=error.retryable)
     if name == "translate":
@@ -160,8 +220,24 @@ def _handle(operation):
         return {"child": child.pid}
     if name == "leak":
         for value in operation.secrets.values():
-            print("leaked %s" % value, file=sys.stderr, flush=True)
+            print("x" * int(params.get("pad", 0)) + "leaked %s" % value, file=sys.stderr, flush=True)
         return {"leaked": len(operation.secrets)}
+    if name == "leak_error":
+        # A plugin exception that carries a secret, with a long message so the
+        # traceback is cut at the worker.
+        value = next(iter(operation.secrets.values()))
+        raise ValueError(value + "B" * int(params.get("tail", 10)))
+    if name == "raw_error":
+        # An error reply that skips the worker's own scrubbing.
+        value = next(iter(operation.secrets.values()))
+        operation._channel._send({"t": frames.RES, "id": operation.id, "ok": False,
+                                  "error": frames.error_object("plugin_error", "bad key " + value,
+                                                               traceback="trace " + value)})
+        return {}
+    if name == "progress_secret":
+        value = next(iter(operation.secrets.values()))
+        operation.progress(message="using " + value, data={"nested": ["k=" + value]})
+        return {}
     if name == "blocked":
         operation.sandbox_blocked(params.get("target", "203.0.113.9:25"), errno=13)
         raise worker_channel.OperationError("sandbox_blocked", "connect refused by the sandbox")
@@ -174,6 +250,7 @@ def _handle(operation):
 
 def main():
     config = json.loads(os.environ.get(ENV_NAME) or "{}")
+    _STATE["config"] = config
     if config.get("no_hello"):
         # Behave like a worker that does not know this protocol: read forever, say nothing.
         for _ in sys.stdin.buffer:
