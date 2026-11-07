@@ -274,6 +274,8 @@ class WorkerChannel:
         # its own request's.
         self._secret_values = set()
         self._threads = []
+        # Ids of operations whose terminal reply has been written.
+        self._replied = set()
         self._pending_calls = {}
         self._next_cid = 1
         self._closed = threading.Event()
@@ -326,6 +328,10 @@ class WorkerChannel:
         except (OSError, ValueError) as error:
             self._close()
             raise ChannelClosed(str(error)) from error
+        if message.get("t") == frames.RES:
+            with self._lock:
+                if message.get("id") in self._operations or message.get("id") in self._transmitting:
+                    self._replied.add(message["id"])
 
     def call(self, name, params=None, request_id=None, timeout=60.0, cancelled=None):
         if cancelled is not None and cancelled.is_set():
@@ -570,6 +576,7 @@ class WorkerChannel:
 
     def _forget(self, operation):
         with self._lock:
+            self._replied.discard(operation.id)
             self._transmitting.pop(operation.id, None)
             self._operations.pop(operation.id, None)
 
@@ -624,10 +631,30 @@ class WorkerChannel:
                         escaping = escaping or failure
         finally:
             # Findable by a cancel until the terminal reply is written, and
-            # gone whatever happened above.
+            # gone whatever happened above. A request that reaches this point
+            # without its terminal reply on the wire (building the reply raised
+            # an interrupt, say) gets a fixed one, or the channel closes: the host
+            # must never wait on an operation nobody will answer.
+            self._ensure_replied(operation)
             self._forget(operation)
         if escaping is not None:
             raise escaping
+
+    def _ensure_replied(self, operation):
+        """Send a fixed failure for an operation that has no terminal reply. Never raises."""
+        try:
+            if self._closed.is_set():
+                return
+            with self._lock:
+                replied = operation.id in self._replied
+            if not replied:
+                self._send({"t": frames.RES, "id": operation.id, "ok": False,
+                            "error": frames.error_object(Codes.PLUGIN_ERROR, "the operation ended without a reply")})
+        except BaseException:
+            # Nothing more can be said for this request: end the channel so the
+            # host sees the worker go instead of waiting.
+            self.exit_status = 3
+            self._close()
 
     def _reply(self, operation, reply):
         try:

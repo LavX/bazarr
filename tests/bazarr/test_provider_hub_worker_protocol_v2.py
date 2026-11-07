@@ -93,6 +93,9 @@ def pid_alive(pid):
         return False
     except PermissionError:
         return True
+    if not sys.platform.startswith("linux"):
+        # No /proc here: signal 0 is all there is.
+        return True
     # A zombie still answers signal 0; the session reaps its own child, a
     # forked grandchild is reparented and reaped by init.
     try:
@@ -2696,17 +2699,27 @@ def test_concurrent_closes_signal_the_group_only_once(make_session, monkeypatch)
     assert calls.count(signal.SIGKILL) == 1
 
 
-def test_a_worker_reaped_by_someone_else_is_never_signalled(make_session, monkeypatch):
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+@pytest.mark.parametrize("reaper", ["popen", "waitpid"])
+def test_a_worker_reaped_by_someone_else_is_never_signalled(make_session, monkeypatch, reaper):
     session = make_session()
     session.start()
     process = session.process
     os.killpg(process.pid, signal.SIGKILL)
-    process.wait()  # reaped behind the session's back
+    if reaper == "popen":
+        process.wait()
+    else:
+        # A bare waitpid: Popen is not told, so returncode stays None.
+        os.waitpid(process.pid, 0)
+        assert process.returncode is None
     calls = []
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
     session.close(grace=0.5)
     session._kill_tree(process)
+    session._fail(SessionClosed("again"), kill=True)
+    assert session._signal_leader_group(process, signal.SIGTERM) is True
     assert calls == []
+    assert session._group_lost or process.returncode is not None
 
 
 def test_the_wakeable_input_is_used_on_posix():
@@ -3455,6 +3468,66 @@ def test_an_interrupt_in_a_handler_is_answered_then_raised_again_after_cleanup(e
         assert reply["ok"] is False and reply["error"]["class_name"] == exit_type.__name__
         assert not harness.channel._operations and not harness.channel._transmitting
     finally:
+        harness.finish()
+
+
+@pytest.mark.parametrize("exit_type", [KeyboardInterrupt, GeneratorExit])
+@pytest.mark.parametrize("where", ["error-text", "result"])
+def test_an_interrupt_while_building_the_reply_still_ends_in_a_terminal_reply(exit_type, where):
+    class BadText(Exception):
+        def __str__(self):
+            raise exit_type()
+
+    class BadData:
+        def __len__(self):
+            raise exit_type()
+
+        def __bool__(self):
+            raise exit_type()
+
+    def handler(operation):
+        if where == "error-text":
+            raise BadText()
+        return worker_channel.OperationResult({}, BadData())
+
+    harness = ChannelHarness(handler)
+    harness.start()
+    try:
+        operation = worker_channel.Operation(harness.channel, op_message(1))
+        harness.channel._operations[1] = operation
+        with pytest.raises(exit_type):
+            harness.channel._run_operation(operation)
+        # The host is not left waiting: a fixed failure went out before the re-raise.
+        reply = reply_for(harness, 1)
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == frames.Codes.PLUGIN_ERROR
+        assert not harness.channel._operations and not harness.channel._transmitting
+        assert 1 not in harness.channel._replied
+    finally:
+        harness.finish()
+
+
+def test_an_operation_that_cannot_even_get_its_fixed_reply_closes_the_channel(monkeypatch):
+    class BadText(Exception):
+        def __str__(self):
+            raise KeyboardInterrupt()
+
+    def handler(operation):
+        raise BadText()
+
+    harness = ChannelHarness(handler)
+    harness.start()
+    try:
+        operation = worker_channel.Operation(harness.channel, op_message(1))
+        harness.channel._operations[1] = operation
+        # Every write fails: the only honest thing left is to end the channel.
+        monkeypatch.setattr(harness.channel, "_send", lambda message: (_ for _ in ()).throw(KeyboardInterrupt()))
+        with pytest.raises(KeyboardInterrupt):
+            harness.channel._run_operation(operation)
+        assert harness.channel._closed.is_set()
+        assert harness.channel.exit_status == 3
+    finally:
+        monkeypatch.undo()
         harness.finish()
 
 

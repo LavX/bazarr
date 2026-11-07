@@ -218,27 +218,32 @@ def _signal_group(process, sig):
     return True
 
 
-def _has_exited(process):
-    """Whether the worker has exited, without reaping it.
+_RUNNING, _EXITED, _GONE = "running", "exited", "gone"
+
+
+def _probe(process):
+    """What the worker is doing, without reaping it: ``running``, ``exited`` or ``gone``.
 
     A reaped leader frees its pid, and with it the process group number: a
     signal sent to that group afterwards could hit unrelated processes. So the
     leader stays an unreaped zombie until its group has been dealt with, and
     this looks at it with ``WNOWAIT`` instead of ``poll()``, which reaps.
+    ``gone`` means somebody else already collected it (``ECHILD``): the pid is
+    no longer ours.
     """
     if process.returncode is not None:
-        return True
+        return _EXITED
     waitid = getattr(os, "waitid", None)
     flag = getattr(os, "WNOWAIT", None)
     if waitid is None or flag is None:
-        return process.poll() is not None
+        return _EXITED if process.poll() is not None else _RUNNING
     try:
-        return waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | flag) is not None
+        found = waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | flag)
     except ChildProcessError:
-        # Someone else reaped it.
-        return True
+        return _GONE
     except OSError:
-        return process.poll() is not None
+        return _EXITED if process.poll() is not None else _RUNNING
+    return _RUNNING if found is None else _EXITED
 
 
 class WorkerSession:
@@ -285,6 +290,8 @@ class WorkerSession:
         # that no signal is ever sent to the group (its number may be reused).
         self._group_lock = threading.Lock()
         self._group_ended = False
+        # Set when the leader was reaped by someone else: its number is not ours.
+        self._group_lost = False
         self.last_heartbeat: dict | None = None
         self.last_frame_at = time.monotonic()
 
@@ -331,7 +338,7 @@ class WorkerSession:
 
     @property
     def alive(self):
-        return self.process is not None and not self._closed and not _has_exited(self.process)
+        return self.process is not None and not self._closed and not self._exited(self.process)
 
     @property
     def in_flight(self):
@@ -1015,16 +1022,37 @@ class WorkerSession:
 
     # ------------------------------------------------------------- lifecycle
 
+    def _exited(self, process):
+        """Whether the worker has exited. Notes (once and for good) if it was reaped elsewhere."""
+        state = _probe(process)
+        if state == _GONE:
+            with self._group_lock:
+                self._group_lost = True
+        return state != _RUNNING
+
+    def _ours(self, process):
+        """Whether the leader is still ours to signal. Call with ``_group_lock`` held.
+
+        Not after the group was ended, after the leader was reaped by anyone, or
+        when it turns out to be gone right now.
+        """
+        if self._group_ended or self._group_lost or process.returncode is not None:
+            return False
+        if _probe(process) == _GONE:
+            self._group_lost = True
+            return False
+        return True
+
     def _poll(self):
         process = self.process
-        if process is None or not _has_exited(process):
+        if process is None or not self._exited(process):
             return None
         return self._reap(process, 0.0)
 
     def _wait_exit(self, process, timeout):
         """Wait until the worker has exited, leaving it unreaped. False if it has not within ``timeout``."""
         deadline = time.monotonic() + timeout
-        while not _has_exited(process):
+        while not self._exited(process):
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.005)
@@ -1035,8 +1063,9 @@ class WorkerSession:
         with self._group_lock:
             if self._group_ended:
                 return
+            ours = self._ours(process)
             self._group_ended = True
-            if process.returncode is None:
+            if ours:
                 _signal_group(process, _SIGKILL)
 
     def _reap(self, process, timeout):
@@ -1053,7 +1082,7 @@ class WorkerSession:
         leader may be reaped and its number reused, so nothing is signalled.
         """
         with self._group_lock:
-            if self._group_ended or process.returncode is not None:
+            if not self._ours(process):
                 return True
             return _signal_group(process, sig)
 
@@ -1210,9 +1239,10 @@ class WorkerSession:
     def _kill_tree(self, process):
         """End the worker and its whole group, once. A later call only reaps."""
         with self._group_lock:
-            if not self._group_ended and process.returncode is None:
+            if self._ours(process):
                 # The leader is not reaped (every reap goes through ``_reap``, after
-                # the group is ended), so its group number is still ours.
+                # the group is ended, and an outside reaper is checked for), so its
+                # group number is still ours.
                 self._group_ended = True
                 if not _signal_group(process, _SIGKILL):
                     try:
@@ -1244,7 +1274,7 @@ class WorkerSession:
         # Before the welcome the worker is not in the conversation yet, and a
         # shutdown frame ahead of the welcome would be a frame it cannot place:
         # that worker is simply ended below.
-        if not already and process is not None and handshaken and not _has_exited(process):
+        if not already and process is not None and handshaken and not self._exited(process):
             self._send_quietly({"t": frames.SHUTDOWN, "grace_ms": min(max(int(grace * 1000), 0), frames.MAX_SHUTDOWN_GRACE_MS)})
             if not self._wait_exit(process, grace):
                 if not self._signal_leader_group(process, _SIGTERM):
