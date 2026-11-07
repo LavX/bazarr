@@ -625,6 +625,31 @@ def test_the_options_route_checks_every_draft_value_like_a_save_does(world):
     assert world.call("post", path, {**body, "values": {"base_url": "http://x:1/v1", "preset": "custom"}}).status_code == 200
 
 
+def test_a_field_the_plugin_now_declares_secret_is_never_in_the_values_of_a_response(world):
+    created = _new_connection(world, values={"api_key": "k"}).json["connection"]
+    instance = world.store.get_instance(world.instance.id)
+    instance.settings_json = json.dumps({"credit_line": "plain-credit-0123", "concurrency": 3})
+    world.store.get_connection(created["id"]).settings_json = json.dumps({"region": "plain-region-0123"})
+    world.store._session.commit()
+    # An update of the plugin turns two text fields, populated in the clear, into secrets.
+    manifest = world.plugins[PLUGIN].manifest["settings"]
+    for field in manifest["fields"]:
+        if field["key"] == "credit_line":
+            field["type"] = "secret"
+    manifest["backend_types"]["openrouter"]["fields"].append({"key": "region", "type": "secret"})
+    state = world.call("get", "state")
+    assert state.status_code == 200
+    engine = state.json["instances"][0]
+    assert "plain-credit-0123" not in world.last_text and "plain-region-0123" not in world.last_text
+    assert "credit_line" not in engine["values"] and engine["values"]["concurrency"] == 3
+    assert "region" not in engine["connections"][0]["values"]
+    # Saving drops what is no longer a setting: the value has to be typed again, as a secret.
+    saved = world.call("patch", f"connections/{created['id']}", {"values": {"region": "typed-region-0123"}})
+    assert saved.status_code == 200 and "typed-region-0123" not in world.last_text
+    assert "region" not in json.loads(world.store.get_connection(created["id"]).settings_json)
+    assert world.store.secrets_for_request(("connection", created["id"]), frozenset())["region"] == "typed-region-0123"
+
+
 def test_a_stored_address_with_a_password_is_never_shown_on_the_page(world):
     created = _new_connection(world, backend_type="openai_compatible",
                               values={"base_url": "http://a.example/v1"}, accept_destinations=["http://a.example/v1"])

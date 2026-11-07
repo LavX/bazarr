@@ -1,4 +1,5 @@
 """Engine instances, connections, secrets and the engine pointers, on SQLite and PostgreSQL."""
+import json
 import os
 from uuid import uuid4
 
@@ -561,6 +562,24 @@ def test_a_renamed_destination_field_with_a_new_value_is_caught(store):
     assert waiting == [(INSTANCE, instance.id)]
     assert store.secrets_for_request((INSTANCE, instance.id), effective_destinations(
         new, {"base_url": "http://a:1", "server_url": "http://evil:1"})) == {}
+
+
+def test_a_field_that_becomes_a_secret_moves_its_stored_plaintext_into_the_secret_store(store):
+    after = DestinationSchema(fields=({"key": "base_url", "type": "text", "destination": True},
+                                      {"key": "token", "type": "secret"},
+                                      {"key": "tokens", "type": "key_list", "secret": True},
+                                      {"key": "label", "type": "text"}))
+    instance = store.create_instance("lingarr", settings={"base_url": "http://a:1", "token": KEY, "label": "x",
+                                                          "tokens": ["k1-0123456789", "k2-0123456789"]})
+    connection = store.add_connection(instance.id, "t", plugin_id="lingarr", settings={"token": "", "label": "y"})
+    waiting = store.apply_plugin_update("lingarr", _resolver({INSTANCE: after, CONNECTION: after}))
+    assert waiting == []
+    assert store.settings_of(store.get_instance(instance.id)) == {"base_url": "http://a:1", "label": "x"}
+    held = store.secrets_for_request((INSTANCE, instance.id), effective_destinations(after, {"base_url": "http://a:1"}))
+    assert held["token"] == KEY and json.loads(held["tokens"]) == ["k1-0123456789", "k2-0123456789"]
+    # An empty plaintext value just leaves the settings; it does not become an empty secret.
+    assert store.settings_of(store.get_connection(connection.id)) == {"label": "y"}
+    assert store.secret_summary((CONNECTION, connection.id), frozenset()) == {}
 
 
 def test_a_changed_default_is_a_new_destination(store):

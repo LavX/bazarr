@@ -30,7 +30,7 @@ from sqlalchemy import delete, func, select, update
 from app.database import (TableTranslatorConnection, TableTranslatorEngineInstance,
                           TableTranslatorSecret)
 
-from .field_schema import is_finite_number
+from .field_schema import is_finite_number, is_secret_field
 from .destinations import DestinationSchema, added_destinations, covers, effective_destinations
 from .transaction import inside_write_transaction, write_transaction
 
@@ -614,6 +614,7 @@ class TranslatorStore:
                         row.settings_json = json.dumps(dict(migrated), sort_keys=True)
                         if kind == INSTANCE:
                             row.revision = int(row.revision) + 1
+                self._move_reclassified_secrets((kind, row.id), row, new_schema(kind, row))
                 if plugin_version is not None:
                     row.plugin_version = plugin_version
                 if settings_version is not None:
@@ -622,6 +623,25 @@ class TranslatorStore:
                                                                                   self.settings_of(row))):
                     waiting.append((kind, row.id))
         return waiting
+
+    def _move_reclassified_secrets(self, owner: Owner, row, schema: DestinationSchema) -> None:
+        """A field the plugin now declares secret may still hold a plaintext value from when it was not.
+
+        The value moves into the secret store, bound to the owner's destinations, and leaves the settings
+        JSON. A value that is empty just leaves it.
+        """
+        settings = self.settings_of(row)
+        secret_keys = [item["key"] for item in schema.fields if is_secret_field(item) and item["key"] in settings]
+        if not secret_keys:
+            return
+        moved = {key: settings.pop(key) for key in secret_keys}
+        row.settings_json = json.dumps(settings, sort_keys=True)
+        destinations = effective_destinations(schema, settings)
+        for key, value in moved.items():
+            if value in (None, "", []):
+                continue
+            self.set_secret(owner, key, value if isinstance(value, str) else json.dumps(value),
+                            destinations=destinations)
 
     def _owners_of_plugin(self, plugin_id: str):
         owners = [(INSTANCE, row) for row in self.list_instances(plugin_id)]

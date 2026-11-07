@@ -138,6 +138,14 @@ def _clean(value: Any) -> Any:
     return value
 
 
+def _shown_settings(fields, settings: Mapping[str, Any]) -> dict[str, Any]:
+    """The stored settings as a response may carry them. A field the manifest declares secret *now* is never in
+    them, whatever the JSON holds: a plugin update can turn a text field into a secret after a value was stored
+    in the clear. An address field holding something unclean is left out too."""
+    secrets = {item.get("key") for item in fields if is_secret_field(item)}
+    return _without_unsafe_addresses(fields, {key: value for key, value in settings.items() if key not in secrets})
+
+
 def _without_unsafe_addresses(fields, settings: Mapping[str, Any]) -> dict[str, Any]:
     """The settings as the page may see them: an address field holding something that is not a clean address
     (a stored password in a URL, say) is left out rather than echoed. Saving validates, so this only guards
@@ -241,7 +249,7 @@ class TranslatorSettingsService:
             "plugin_version": instance.plugin_version,
             "plugin": None if plugin is None else {"name": plugin.name, "version": plugin.version,
                                                     "active": plugin.active},
-            "schema": self._display_schema(plugin), "values": _clean(_without_unsafe_addresses(schema.fields, settings)),
+            "schema": self._display_schema(plugin), "values": _clean(_shown_settings(schema.fields, settings)),
             "secrets": self._secret_view(owner, schema.fields, destinations),
             "connections": [self.connection_view(instance, row) for row in store.list_connections(instance.id)],
         }
@@ -251,7 +259,7 @@ class TranslatorSettingsService:
         schema = self._backend_schema(plugin, connection.backend_type) or DestinationSchema()
         settings = self._store.settings_of(connection)
         destinations = effective_destinations(schema, settings)
-        values = _clean(_without_unsafe_addresses(schema.fields, settings))
+        values = _clean(_shown_settings(schema.fields, settings))
         values[MODEL_KEY] = connection.model
         values[PRICE_KEYS[0]] = _price(connection.price_input_per_million)
         values[PRICE_KEYS[1]] = _price(connection.price_output_per_million)
