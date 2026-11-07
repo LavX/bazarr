@@ -1799,3 +1799,30 @@ def test_a_kill_decided_before_a_retirement_ends_the_retiring_worker_cleanly(mak
     other = pool_module._Slot(definition(), 0.0, pool.limits)
     pool._kill_current(entry, other, ("folder_budget", "over its budget"))
     assert other.kill_reason is None
+
+
+@needs_smaps
+def test_a_tree_where_nothing_can_be_read_is_unknown_not_empty(monkeypatch):
+    def denying(path, *names):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(pool_module, "_read_kb", denying)
+    sample = read_process_tree_memory(os.getpid())
+    assert sample is not None and sample.truncated is True and sample.processes == 0
+    monkeypatch.undo()
+    # A process that is simply not there is still None.
+    assert read_process_tree_memory(2 ** 22 + 12345) is None
+
+
+def test_a_worker_whose_every_process_denies_the_read_is_over_budget(make_pool, monkeypatch):
+    def denying(path, *names):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(pool_module, "_read_kb", denying)
+    pool = make_pool(memory_reader=read_process_tree_memory)
+    pool.register(definition(memory_limit_bytes=100 * MIB))
+    handle = pool.submit("tr", "sleep", {"seconds": 30})
+    pool.sweep()
+    with pytest.raises(WorkerKilled) as killed:
+        handle.wait(10)
+    assert killed.value.code == "memory_limit"

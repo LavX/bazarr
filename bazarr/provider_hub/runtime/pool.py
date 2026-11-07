@@ -512,7 +512,11 @@ def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample
         rss_total += rss
         counted += 1
     if not counted:
-        return None
+        # Nothing readable. If nothing was seen at all the process is gone; if
+        # live processes denied the read, the answer is "unknown", not "none".
+        if not truncated:
+            return None
+        return MemorySample(bytes=0, rss_bytes=0, processes=0, source=source, truncated=True)
     return MemorySample(bytes=total, rss_bytes=rss_total, processes=counted, source=source, truncated=truncated)
 
 
