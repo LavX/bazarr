@@ -209,6 +209,9 @@ def reap_idle_workers(idle_seconds: float) -> int:
     return reaped
 
 
+# Guards every client's list of process groups: a respawn appends from the request
+# thread while a release check prunes from another.
+_GROUPS_LOCK = threading.RLock()
 _unverifiable_lock = threading.Lock()
 _unverifiable_logged: set[str] = set()
 
@@ -335,7 +338,8 @@ class ProviderWorkerClient:
         # Every group this client started stays on the list until it is seen
         # empty: a respawn must not make the previous worker's survivors
         # forgotten while they still run from the environment.
-        self._groups = [*self._live_groups(), self.process.pid]
+        with _GROUPS_LOCK:
+            self._groups = [*self._live_groups(), self.process.pid]
         self._stdout_queue = queue.Queue()
         self._stdout_thread = threading.Thread(
             target=self._enqueue_stdout,
@@ -489,9 +493,10 @@ class ProviderWorkerClient:
 
     def _live_groups(self) -> list[int]:
         """The groups this client started that still have members; the empty ones are forgotten."""
-        groups = [group for group in getattr(self, "_groups", ()) if self._group_alive(group)]
-        self._groups = groups
-        return groups
+        with _GROUPS_LOCK:
+            groups = [group for group in getattr(self, "_groups", ()) if self._group_alive(group)]
+            self._groups = groups
+            return groups
 
     def group_gone(self, ceiling: float = 10.0) -> bool:
         """True once nothing is left in any process group this client has started.

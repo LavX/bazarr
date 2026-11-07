@@ -1489,3 +1489,92 @@ def test_a_client_that_never_started_a_worker_releases_its_hold_even_without_pro
 
     assert release_when_gone(ProviderWorkerClient(["unused"]), lambda: released.append(1), "nothing") is True
     assert released == [1]
+
+
+def test_two_simultaneous_first_calls_share_one_worker_client_through_a_retirement(hub, hub_registry, monkeypatch):
+    import sys
+
+    from provider_hub import registry
+    from provider_hub.registry import retire_provider_instances
+    from provider_hub.worker import ProviderWorkerClient
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    interpreter = old / "bin" / "python"
+    interpreter.write_text(f"#!{sys.executable}\n{WORKER_SCRIPT}", encoding="utf-8")
+    interpreter.chmod(0o755)
+    type(stale).bundle_path = str(bundle)
+    type(stale).manifest_json = "{}"
+    created = []
+    inside_creation = threading.Event()
+    proceed = threading.Event()
+
+    def make_client(command, **kwargs):
+        client = ProviderWorkerClient([str(interpreter)])
+        created.append(client)
+        if len(created) == 1:
+            # The first creation is paused half way: the second call arrives now.
+            inside_creation.set()
+            proceed.wait(10)
+        return client
+
+    monkeypatch.setattr(registry, "ProviderWorkerClient", make_client)
+    survivors = _SurvivorsAfterStop(monkeypatch)
+    clients = {}
+
+    def first_call(label):
+        with stale._operation():
+            client = stale._worker()
+            clients[label] = client
+            client.request("search", {}, timeout=10)
+
+    threads = [threading.Thread(target=first_call, args=(label,)) for label in ("a", "b")]
+    threads[0].start()
+    assert inside_creation.wait(10)
+    threads[1].start()
+    time.sleep(0.3)
+    proceed.set()
+    for thread in threads:
+        thread.join(15)
+
+    # One client was created and both calls used it.
+    assert len(created) == 1
+    assert clients["a"] is clients["b"] is stale.worker_client
+
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+    for drain in retire_provider_instances("examplehub"):
+        drain.join(15)
+
+    # That one client was stopped, and the environment stays while its group is not empty.
+    assert created[0]._has_exited(created[0].process)
+    assert env_registry.cleanup_environments(hub) == []
+    survivors.emptied.set()
+    removed = []
+    deadline = time.monotonic() + 10
+    while not removed and time.monotonic() < deadline:
+        removed = env_registry.cleanup_environments(hub)
+        time.sleep(0.05)
+    assert removed == [str(old)]
+
+
+def test_a_retired_proxy_creates_no_worker_client(hub, hub_registry, monkeypatch):
+    from provider_hub import registry
+    from subliminal_patch.core import ProviderRetiredError
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    type(stale).bundle_path = str(hub)
+    type(stale).manifest_json = "{}"
+    made = []
+    monkeypatch.setattr(registry, "ProviderWorkerClient", lambda *args, **kwargs: made.append(1))
+    stale.retire()
+
+    with pytest.raises(ProviderRetiredError):
+        stale._worker()
+    assert made == [] and stale.worker_client is None

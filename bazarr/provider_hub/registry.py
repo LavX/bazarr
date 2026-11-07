@@ -219,19 +219,22 @@ class HubProxyProvider(Provider):
         return isinstance(video, cls.video_types)
 
     def _worker(self):
-        if self._stopping:
-            # Its worker is being or has been stopped for good: nothing on this
-            # proxy may start another. The caller asks the pool for the current
-            # instance.
-            from subliminal_patch.core import ProviderRetiredError
+        # Check, create and publish in one step under the lock that guards the
+        # stop and the retirement: two first calls share one client, and a proxy
+        # that is stopping or retired never creates one (the caller moves to the
+        # current instance), so the client a stop reaches is the only one there is.
+        with _PROXY_LOCK:
+            if self._stopping or (self._retired and not self.worker_client):
+                from subliminal_patch.core import ProviderRetiredError
 
-            raise ProviderRetiredError(self.provider_name)
-        if self.worker_client:
-            return self.worker_client
-        bundle_path = getattr(self.__class__, "bundle_path", None)
-        python_path = getattr(self.__class__, "python_path", None) or sys.executable
-        manifest_json = getattr(self.__class__, "manifest_json", None)
-        if bundle_path and manifest_json:
+                raise ProviderRetiredError(self.provider_name)
+            if self.worker_client:
+                return self.worker_client
+            bundle_path = getattr(self.__class__, "bundle_path", None)
+            python_path = getattr(self.__class__, "python_path", None) or sys.executable
+            manifest_json = getattr(self.__class__, "manifest_json", None)
+            if not (bundle_path and manifest_json):
+                raise WorkerError("Provider Hub worker is not configured")
             runner = Path(__file__).with_name("worker_runner.py")
             self.worker_client = ProviderWorkerClient(
                 worker_command(python_path, runner),
@@ -243,7 +246,6 @@ class HubProxyProvider(Provider):
                 provider_id=self.provider_name,
             )
             return self.worker_client
-        raise WorkerError("Provider Hub worker is not configured")
 
     def _request_timeout(self):
         # The host deadline must never fire before the worker's own per-operation
