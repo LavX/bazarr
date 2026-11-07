@@ -375,6 +375,33 @@ def test_a_call_after_the_month_changes_rolls_the_budget_first(ledger, clock):
     assert ledger.month_committed("2026-12") == usd(10.0)
 
 
+def test_settling_an_old_month_call_after_rollover_does_not_raise_the_new_months_hold(session, clock):
+    limits = CostLimits.from_dollars(month_cap=10.0, job_cap=10.0)
+    ledger = UsageLedger(session, clock=clock)
+    ledger.reserve_job_budget("old", limits)
+    assert _call(ledger, "old", "c1", 10.0, limits).admitted  # the whole budget is out on one call
+    clock.moment = datetime(2026, 12, 1)
+    assert ledger.roll_month(limits) == 1
+    assert ledger.job_hold("old") == 0  # nothing was unspent, so nothing moved into December
+    # Another job reserves all of December while the old call is still unsettled.
+    assert ledger.reserve_job_budget("new", limits).amount == usd(10.0)
+    _settle(ledger, "old", "c1", 1.0)
+    # The nine dollars the call did not use belong to November, where the call was made.
+    assert ledger.job_hold("old") == 0
+    assert ledger.month_committed("2026-12") == usd(10.0)
+    assert ledger.month_remainder(limits, "2026-12") == 0
+    assert ledger.month_committed("2026-11") == usd(1.0)
+
+
+def test_settling_a_call_made_in_the_budgets_own_month_still_returns_the_unused_part(ledger, clock):
+    limits = CostLimits.from_dollars(month_cap=10.0, job_cap=10.0)
+    ledger.reserve_job_budget("job", limits)
+    assert _call(ledger, "job", "c1", 6.0, limits).admitted
+    _settle(ledger, "job", "c1", 2.0)
+    assert ledger.job_hold("job") == usd(8.0)
+    assert ledger.month_committed("2026-11") == usd(10.0)
+
+
 def test_a_budget_asked_for_again_in_a_new_month_moves_with_it(ledger, clock):
     limits = CostLimits.from_dollars(month_cap=10.0, job_cap=6.0)
     ledger.reserve_job_budget("job", limits)

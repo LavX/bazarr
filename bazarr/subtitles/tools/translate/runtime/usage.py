@@ -256,7 +256,9 @@ class UsageLedger:
 
         ``over_budget`` is true when the job's recorded cost has crossed its budget,
         which is the caller's cue to cancel the job. A call is settled even when it
-        used more than it reserved: the money is spent, and the ledger says so.
+        used more than it reserved: the money is spent, and the ledger says so. What a
+        call did not use goes back to the job's hold only while the budget is still in
+        the month the call was made in; after a rollover it goes back to that old month.
         """
         _micros(actual_micros, "actual_micros")
         if input_tokens < 0 or output_tokens < 0:
@@ -268,6 +270,7 @@ class UsageLedger:
                 raise UsageError(f"No reservation for call {call_id} of job {job_id}")
             if row.state == CALL_SETTLED:
                 return Settlement(self._job_counted(job_id), self._over_budget(job_id), already_settled=True)
+            unused = max(0, row.worst_case_micros - actual_micros)
             row.actual_micros = actual_micros
             row.input_tokens = input_tokens
             row.output_tokens = output_tokens
@@ -275,6 +278,7 @@ class UsageLedger:
                 row.model = model
             row.state = CALL_SETTLED
             row.settled_at = now
+            self._return_unused_to_the_calls_month(job_id, row.month, unused)
             self._session.flush()
             self._history.refresh_in_transaction(job_id)
             return Settlement(self._job_counted(job_id), self._over_budget(job_id))
@@ -387,6 +391,19 @@ class UsageLedger:
         row.month = month
         row.updated_at = now
         self._session.flush()
+
+    def _return_unused_to_the_calls_month(self, job_id: str, call_month: str, unused: int) -> None:
+        """Keep what a call did not use out of a budget that has moved on to a later month.
+
+        The call was counted in the month it was made, so its unused part goes back to that month.
+        If the job's budget already rolled into a later month, adding the part back to the job's hold
+        there would let the job spend money the later month gave to other jobs.
+        """
+        budget = self._budget_row(job_id)
+        if unused <= 0 or budget is None or budget.state != BUDGET_ACTIVE or budget.budget_micros is None:
+            return
+        if budget.month != call_month:
+            budget.budget_micros = max(0, budget.budget_micros - unused)
 
     @staticmethod
     def _hold(row, counted: int) -> int | None:
