@@ -268,17 +268,19 @@ class TranslatorSettingsService:
 
     # ------------------------------------------------------------ pointers
     def set_pointers(self, payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-        notices = []
+        """Change the engine, the fallback or both. Both are checked before either is saved."""
+        proposed: dict[str, Any] = {}
+        for key, name in (("engine", "engine"), ("fallback_engine", "fallback")):
+            if key in payload:
+                value = payload[key]
+                if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                    raise ServiceError(f"{key} must be an engine instance id or null")
+                proposed[name] = value
         try:
-            for key, apply in (("engine", self._store.set_engine), ("fallback_engine", self._store.set_fallback)):
-                if key in payload:
-                    value = payload[key]
-                    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
-                        raise ServiceError(f"{key} must be an engine instance id or null")
-                    notices += [self._notice(item) for item in apply(value).notices]
+            change = self._store.set_pointer_pair(**proposed)
         except TranslatorStoreError as error:
             raise ServiceError(str(error)) from error
-        return notices
+        return [self._notice(item) for item in change.notices]
 
     @staticmethod
     def _notice(item) -> dict[str, Any]:

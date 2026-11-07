@@ -240,6 +240,24 @@ def test_pointers_round_trip_and_never_name_the_same_instance(world):
     assert world.call("put", "pointers", {"engine": None}).json["engine"] is None
 
 
+def test_a_pointer_request_that_fails_on_one_part_saves_neither(world, monkeypatch):
+    other = world.store.create_instance(PLUGIN, name="Second")
+    world.call("put", "pointers", {"engine": world.instance.id})
+    writes = []
+    real_set = world.store._pointers.set
+    monkeypatch.setattr(world.store._pointers, "set", lambda *args: writes.append(args) or real_set(*args))
+
+    unknown_fallback = world.call("put", "pointers", {"engine": other.id, "fallback_engine": 999})
+    assert unknown_fallback.status_code == 400
+    same_instance = world.call("put", "pointers", {"engine": other.id, "fallback_engine": other.id})
+    assert same_instance.status_code == 400
+    assert world.store.pointers() == (world.instance.id, None) and writes == []
+
+    both = world.call("put", "pointers", {"engine": other.id, "fallback_engine": world.instance.id})
+    assert both.json == {"engine": other.id, "fallback_engine": world.instance.id, "notices": []}
+    assert len(writes) == 1  # the pair was written once
+
+
 # ----------------------------------------------------------------- connections
 
 def _new_connection(world, **body):

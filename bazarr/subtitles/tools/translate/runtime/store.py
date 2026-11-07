@@ -43,6 +43,7 @@ CONNECTION = "connection"
 LAST_FOUR_MIN_LENGTH = 16
 
 Owner = tuple[str, int]
+_UNSET: Any = object()
 
 
 class TranslatorStoreError(ValueError):
@@ -612,27 +613,38 @@ class TranslatorStore:
 
     def set_engine(self, instance_id: int | None) -> PointerChange:
         """Select the engine. A fallback that named the same instance goes back to its default."""
-        if instance_id is not None:
-            self._require_instance(instance_id)
-        engine, fallback = self._pointers.get()
-        change = PointerChange()
-        if fallback is not None and fallback == instance_id:
-            fallback = self.default_fallback(instance_id)
-            change.notices.append(Notice(
-                "fallback_reset", "The fallback engine was reset because it is now the selected engine.",
-                instance_id))
-        self._write_pointers(instance_id, fallback)
-        return change
+        return self.set_pointer_pair(engine=instance_id)
 
     def set_fallback(self, instance_id: int | None) -> PointerChange:
         """Choose the fallback engine. It must not be the selected engine."""
-        engine, _fallback = self._pointers.get()
-        if instance_id is not None:
-            self._require_instance(instance_id)
-            if instance_id == engine:
+        return self.set_pointer_pair(fallback=instance_id)
+
+    def set_pointer_pair(self, engine: Any = _UNSET, fallback: Any = _UNSET) -> PointerChange:
+        """Change the engine, the fallback or both. The proposed pair is checked as a whole, then written once.
+
+        An argument left out keeps its current value. A fallback that is left out and now names the selected
+        engine goes back to its default, with a notice; a fallback that is asked for and names it is refused.
+        Nothing is written when any part is refused.
+        """
+        for value in (engine, fallback):
+            if value is not _UNSET and value is not None:
+                self._require_instance(value)
+        current_engine, current_fallback = self._pointers.get()
+        new_engine = current_engine if engine is _UNSET else engine
+        change = PointerChange()
+        if fallback is _UNSET:
+            new_fallback = current_fallback
+            if engine is not _UNSET and new_fallback is not None and new_fallback == new_engine:
+                new_fallback = self.default_fallback(new_engine)
+                change.notices.append(Notice(
+                    "fallback_reset", "The fallback engine was reset because it is now the selected engine.",
+                    new_engine))
+        else:
+            new_fallback = fallback
+            if new_fallback is not None and new_fallback == new_engine:
                 raise TranslatorStoreError("the fallback engine cannot be the selected engine")
-        self._write_pointers(engine, instance_id)
-        return PointerChange()
+        self._write_pointers(new_engine, new_fallback)
+        return change
 
     def release_pointers(self, instance_ids: set[int], *, why: str) -> PointerChange:
         """Reset any pointer that names one of these instances to its default, with a notice."""
