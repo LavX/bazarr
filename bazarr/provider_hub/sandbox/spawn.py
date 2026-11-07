@@ -718,13 +718,15 @@ class WorkerProcess(subprocess.Popen):
         anchor = self._anchor
         if anchor is not None:
             timed_out = self._terminate_and_wait(grace)
+            # Kill the group, reap the anchor and let go of it in one step: until
+            # the anchor is reaped its pid cannot be reused, and from then on
+            # ``signal_group`` must not find it, so nobody can slip in between.
             with self._own_lock:
                 try:
                     killpg(anchor.pid, signal.SIGKILL)
                 except OSError:
                     pass
-            _finish_anchor(anchor)
-            with self._own_lock:
+                _finish_anchor(anchor)
                 self._anchor = None
             if timed_out:
                 self._reap_quietly()

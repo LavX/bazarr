@@ -3645,3 +3645,55 @@ def test_concurrent_stop_calls_share_one_run(tmp_path, monkeypatch):
     finally:
         monkeypatch.undo()
         process.stop(0.5)
+
+
+@linux_only
+def test_the_anchor_is_not_reaped_while_a_group_signal_is_being_sent(monkeypatch):
+    """A group signal must never be sent to an anchor that has been reaped meanwhile."""
+    import threading
+
+    plain = spawn._start_plain([sys.executable, "-c", "import time; time.sleep(60)"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    anchor = plain._anchor
+    if anchor is None:
+        plain.stop(0.5)
+        pytest.skip("no process group anchor on this interpreter")
+    in_finish = threading.Event()
+    sent = []
+    real_killpg = os.killpg
+    real_finish = spawn._finish_anchor
+
+    def slow_finish(target):
+        # stop() is about to reap the anchor; give a signaller time to get in first.
+        in_finish.set()
+        time.sleep(0.5)
+        real_finish(target)
+
+    def pausing_killpg(pgid, sig):
+        if sig == signal.SIGCONT:
+            # Past the ownership check, about to signal: the reap may now happen.
+            time.sleep(0.5)
+            sent.append((pgid, anchor.returncode))
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(spawn, "_finish_anchor", slow_finish)
+    monkeypatch.setattr(os, "killpg", pausing_killpg)
+    results = {}
+
+    def signaller():
+        in_finish.wait(5)
+        time.sleep(0.2)
+        results["signal"] = plain.signal_group(signal.SIGCONT)
+
+    threads = [threading.Thread(target=signaller), threading.Thread(target=plain.stop, args=(0.5,))]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        # Either nothing was sent (the group was already ended) or it went to an unreaped anchor.
+        assert all(returncode is None for _pgid, returncode in sent), sent
+        assert anchor.returncode is not None and plain._anchor is None
+    finally:
+        monkeypatch.undo()
+        plain.stop(0.5)
