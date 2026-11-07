@@ -1004,6 +1004,9 @@ class TableTranslatorConnection(Base):
     settings_json = mapped_column(Text, nullable=False, default='{}', server_default='{}')
     settings_version = mapped_column(Integer)
     plugin_version = mapped_column(Text)
+    # Display prices per million tokens, for a cost estimate a person reads. A float is fine for that.
+    # Money that is reserved, summed or compared against a budget must not be computed from these as
+    # floats: convert to integer micro-units or Decimal first.
     price_input_per_million = mapped_column(Float, nullable=False, default=0, server_default='0')
     price_output_per_million = mapped_column(Float, nullable=False, default=0, server_default='0')
     enabled = mapped_column(Integer, nullable=False, default=1, server_default='1')
@@ -1033,6 +1036,16 @@ class TableTranslatorSecret(Base):
     encrypted_value = mapped_column(Text, nullable=False)
     destinations_json = mapped_column(Text, nullable=False, default='[]', server_default='[]')
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+# Tables that only a migration creates. The translation runtime is dark behind a switch, so a boot with the
+# switch off must not add its tables; init_db() leaves them out of create_all. Take a name out of this set
+# when the revision that creates the table has merged and the table should exist on a fresh install.
+MIGRATION_ONLY_TABLES = frozenset({
+    TableTranslatorEngineInstance.__tablename__,
+    TableTranslatorConnection.__tablename__,
+    TableTranslatorSecret.__tablename__,
+})
 
 
 # Database triggers include direct SQL and bulk native imports in publication checks.
@@ -1065,7 +1078,8 @@ def init_db():
     # a created-then-verified history table aborted every fresh install. The
     # guard is a subset test now, so this can create every table like any
     # other and the special case is gone.
-    metadata.create_all(engine)
+    metadata.create_all(engine, tables=[table for table in metadata.sorted_tables
+                                        if table.name not in MIGRATION_ONLY_TABLES])
 
     # Resolve the DB engine/version and current migration revision once, at startup, and
     # stash them in env vars for /system/status to read. The status endpoint used to open a

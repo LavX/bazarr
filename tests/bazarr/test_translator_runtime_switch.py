@@ -65,6 +65,32 @@ def test_on_but_without_the_tables_the_runtime_stays_off(monkeypatch, tmp_path, 
         engine.dispose()
 
 
+def test_a_boot_builds_no_translator_tables(monkeypatch, tmp_path, fresh_table_check):
+    """Only the migration creates the runtime tables, so a boot with the switch off adds none."""
+    import sqlalchemy as sa
+    from sqlalchemy.orm import Session
+
+    from app import database
+
+    runtime = fresh_table_check
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'boot.db'}")
+    session = Session(engine)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "database", session)
+    try:
+        database.init_db()
+        names = set(sa.inspect(engine).get_table_names())
+        assert "table_shows" in names  # the rest of the schema is still built
+        assert not names & {"translator_engine_instances", "translator_connections", "translator_secrets"}
+
+        # With the switch on and the tables still missing, the runtime stays off.
+        monkeypatch.setattr(runtime, "runtime_v2_flag", lambda: True)
+        assert runtime.runtime_v2_enabled() is False
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def test_only_a_real_true_turns_the_switch_on(monkeypatch):
     from subtitles.tools.translate import runtime
 
