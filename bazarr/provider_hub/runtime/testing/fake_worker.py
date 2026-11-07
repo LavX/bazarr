@@ -34,6 +34,7 @@ Operations:
 ``leak``           writes the request's secret values to stderr.
 ``leak_error``     raises an exception whose message starts with the request's
                    secret, ``tail`` characters long after it.
+``nan_result``      returns a result that cannot be encoded as JSON.
 ``bad_str``        raises an exception that cannot be turned into text.
 ``raw_error``      answers with an error carrying the secret, uncleaned.
 ``progress_secret`` sends a progress message carrying the secret.
@@ -230,6 +231,8 @@ def _handle(operation):
         # traceback is cut at the worker.
         value = next(iter(operation.secrets.values()))
         raise ValueError(value + "B" * int(params.get("tail", 10)))
+    if name == "nan_result":
+        return {"value": float("nan")}
     if name == "bad_str":
         class Unprintable(Exception):
             def __str__(self):
@@ -240,7 +243,7 @@ def _handle(operation):
         # An error reply that skips the worker's own scrubbing.
         value = next(iter(operation.secrets.values()))
         operation._channel._send({"t": frames.RES, "id": operation.id, "ok": False,
-                                  "error": frames.error_object("plugin_error", "bad key " + value,
+                                  "error": frames.error_object(params.get("code", "plugin_error"), "bad key " + value,
                                                                traceback="trace " + value)})
         return {}
     if name == "progress_secret":

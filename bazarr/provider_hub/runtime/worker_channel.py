@@ -138,6 +138,7 @@ class WorkerChannel:
         self._next_cid = 1
         self._closed = threading.Event()
         self._stopping = threading.Event()
+        self._ended = threading.Event()
         self._hb_seq = 0
         self.session = None
         self.protocol = None
@@ -146,7 +147,9 @@ class WorkerChannel:
 
     @staticmethod
     def _take_stdio(redirect):
-        stdin = os.fdopen(os.dup(0), "rb")
+        # Unbuffered: the reader thread may still be blocked in a read when the
+        # process exits, and a raw file has no lock for that thread to hold.
+        stdin = os.fdopen(os.dup(0), "rb", buffering=0)
         stdout = os.fdopen(os.dup(1), "wb")
         if redirect:
             try:
@@ -167,8 +170,13 @@ class WorkerChannel:
     def _send(self, message):
         if self._closed.is_set():
             raise ChannelClosed("channel is closed")
+        # Serialization first, on its own: a message that cannot be encoded (not
+        # JSON, NaN, over the cap) is the sender's problem and raises as it is,
+        # to reach the per-request error reply. Only a failed write means the
+        # transport is gone.
+        data = frames.pack_control(message, self._writer.caps[frames.FRAME_CONTROL])
         try:
-            self._writer.write_control(message)
+            self._writer.write_packed(data)
         except (OSError, ValueError) as error:
             self._close()
             raise ChannelClosed(str(error)) from error
@@ -224,6 +232,14 @@ class WorkerChannel:
             return 3
         heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True)
         heartbeat.start()
+        # Frames are read on their own thread for the whole life of the channel,
+        # so acks keep arriving while operations drain after a shutdown.
+        threading.Thread(target=self._read_loop, daemon=True).start()
+        self._ended.wait()
+        self._drain()
+        return self.exit_status
+
+    def _read_loop(self):
         try:
             while True:
                 frame = self._reader.read_frame()
@@ -232,14 +248,14 @@ class WorkerChannel:
                 ftype, body = frame
                 if ftype == frames.FRAME_DATA:
                     raise frames.FrameError("host sent a data frame")
-                if self._dispatch(frames.decode_control(body, "host")):
-                    break
+                self._dispatch(frames.decode_control(body, "host"))
         except frames.FrameError:
             self.exit_status = 3
         except (OSError, ValueError):
             pass
-        self._drain()
-        return self.exit_status
+        finally:
+            self._ended.set()
+            self._close_acks()
 
     def _handshake(self):
         hello = {
@@ -290,12 +306,16 @@ class WorkerChannel:
                 slot["ack"] = message
                 slot["event"].set()
         elif kind == frames.SHUTDOWN:
+            # Reading goes on: draining operations may still wait for acks.
             self._stopping.set()
-            return True
+            self._ended.set()
         return False
 
     def _start_operation(self, message):
         req_id = message["id"]
+        if self._stopping.is_set():
+            self._respond_error(req_id, OperationError(Codes.SHUTTING_DOWN, "worker is shutting down"))
+            return
         with self._lock:
             if req_id in self._operations:
                 busy = Codes.INVALID_REQUEST
@@ -416,21 +436,33 @@ class WorkerChannel:
                 return
 
     def _drain(self):
-        """Cancel what still runs, give it a moment, say goodbye."""
+        """Cancel what still runs, give it a moment, say goodbye.
+
+        The reader thread keeps delivering acks meanwhile, so an operation that
+        settles usage after its cancel is not left waiting.
+        """
         with self._lock:
             running = list(self._operations.values())
             threads = list(self._threads)
         for operation in running:
             operation.cancel_reason = "shutdown"
             operation.cancelled.set()
+        deadline = time.monotonic() + self._wait_grace
         for thread in threads:
-            thread.join(timeout=self._wait_grace)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
         if self._stopping.is_set():
             try:
                 self._send({"t": frames.BYE})
             except ChannelClosed:
                 pass
         self._close()
+
+    def _close_acks(self):
+        """The host side is gone: no ack will come, so waiting calls give up."""
+        with self._lock:
+            slots = list(self._pending_calls.values())
+        for slot in slots:
+            slot["event"].set()
 
     def _close(self):
         self._closed.set()

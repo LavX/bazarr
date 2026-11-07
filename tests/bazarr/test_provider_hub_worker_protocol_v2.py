@@ -1005,7 +1005,7 @@ def test_fake_script_gives_each_attempt_its_own_outcome(make_session):
         session.request("translate", {"lines": ["a", "b"]}, timeout=10)
 
 
-# ------------------------------------------------------- second review round
+# ------------------------------------------- limits, secrets and the reply path
 
 READS_REQUESTS = """
 def next_request():
@@ -1198,3 +1198,130 @@ def test_one_slot_worker_accepts_the_next_request_at_once(make_session):
     session.start()
     for index in range(60):
         assert session.request("echo", {"n": index}, timeout=5).result["echo"] == {"n": index}
+
+
+# ------------------------------------------- worker text, encoding and shutdown
+
+
+def test_unknown_message_name_echoing_a_secret_is_scrubbed_from_the_violation(tmp_path):
+    body = with_reader(
+        """
+        next_request()
+        out.write_control({"t": %r})
+        time.sleep(30)
+        """
+        % SECRET
+    )
+    session = hostile_session(tmp_path, body)
+    try:
+        session.start()
+        with pytest.raises(ProtocolViolation) as caught:
+            session.submit("x", secrets={"key": SECRET}).wait(8)
+        assert SECRET not in str(caught.value)
+        assert "***" in str(caught.value)
+        assert len(str(caught.value)) < 400
+    finally:
+        session.close(grace=0.3)
+
+
+def test_error_code_echoing_a_secret_is_not_passed_on(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("raw_error", {"code": SECRET}, secrets={"key": SECRET}, timeout=5)
+    assert SECRET not in caught.value.code
+    assert caught.value.code == frames.Codes.PLUGIN_ERROR
+    with pytest.raises(RequestFailed) as odd:
+        session.request("raw_error", {"code": "not a code!" * 20}, secrets={"key": SECRET}, timeout=5)
+    assert odd.value.code == frames.Codes.PLUGIN_ERROR
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"nan": float("nan")},
+        {"big": "x" * 2_000_000},
+        {"object": object()},
+    ],
+    ids=["nan", "oversized", "not-json"],
+)
+def test_unsendable_host_call_result_becomes_a_failure_ack(make_session, result):
+    session = make_session(host_calls={"bad": lambda call: result, "good": lambda call: {"ok": 1}})
+    session.start()
+    with pytest.raises(RequestFailed) as caught:
+        session.request("call", {"name": "bad"}, timeout=5)
+    assert caught.value.code == frames.Codes.HOST_CALL_FAILED
+    assert session.request("call", {"name": "good"}, timeout=5).result["ack"] == {"ok": 1}
+    assert wait_until(lambda: not session._call_queues and session._call_pending == 0)
+
+
+def test_a_result_that_cannot_be_encoded_gets_an_error_reply_and_the_channel_lives(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("nan_result", timeout=5)
+    assert caught.value.code == frames.Codes.PLUGIN_ERROR
+    assert session.request("echo", {"after": 1}, timeout=5).result["echo"] == {"after": 1}
+
+
+def test_params_that_cannot_be_encoded_do_not_leak_a_slot(make_session):
+    session = make_session({"max_in_flight": 1})
+    session.start()
+    with pytest.raises(TypeError):
+        session.submit("echo", {"o": object()})
+    with pytest.raises(ValueError):
+        session.submit("echo", {"n": float("nan")})
+    assert session.in_flight == 0
+    assert session.request("echo", {"fine": True}, timeout=5).result["echo"] == {"fine": True}
+
+
+def test_shutdown_still_delivers_acks_to_cleanup_calls(make_session):
+    log, calls = recording_calls()
+    session = make_session(host_calls=calls)
+    session.start()
+    process = session.process
+    handle = session.submit(
+        "translate", {"lines": list("abcdefgh"), "batch": 2, "delay": 0.3, "usage_on_failure": True})
+    assert wait_until(lambda: "checkpoint" in names(log))
+    started = time.monotonic()
+    session.close(grace=4.0)
+    assert time.monotonic() - started < 3.5
+    assert process.returncode == 0
+    assert log[-1][0] == "usage" and log[-1][1]["partial"] is True
+    assert handle.done()
+
+
+def test_requests_during_shutdown_are_refused(tmp_path):
+    from provider_hub.runtime.worker_channel import WorkerChannel
+
+    host_to_worker_r, host_to_worker_w = os.pipe()
+    worker_to_host_r, worker_to_host_w = os.pipe()
+    gate = threading.Event()
+
+    def handler(operation):
+        gate.wait(5)
+        return {}
+
+    channel = WorkerChannel(
+        handler,
+        kinds=[],
+        stdin=os.fdopen(host_to_worker_r, "rb", buffering=0),
+        stdout=os.fdopen(worker_to_host_w, "wb"),
+        redirect_stdout=False,
+        heartbeat_interval=30,
+        wait_grace=3.0,
+    )
+    status = []
+    thread = threading.Thread(target=lambda: status.append(channel.run()), daemon=True)
+    thread.start()
+    host_in = frames.FrameReader(os.fdopen(worker_to_host_r, "rb"))
+    host_out = frames.FrameWriter(os.fdopen(host_to_worker_w, "wb"))
+    assert frames.decode_control(host_in.read_frame()[1], "worker")["t"] == "hello"
+    host_out.write_control({"t": "welcome", "protocol": {"major": 2, "minor": 0}, "limits": {}, "session": "t"})
+    host_out.write_control({"t": "req", "id": 1, "op": "hold", "params": {}})
+    host_out.write_control({"t": "shutdown"})
+    host_out.write_control({"t": "req", "id": 2, "op": "late", "params": {}})
+    refused = frames.decode_control(host_in.read_frame()[1], "worker")
+    assert refused["id"] == 2
+    assert refused["error"]["code"] == frames.Codes.SHUTTING_DOWN
+    gate.set()
+    seen = [frames.decode_control(host_in.read_frame()[1], "worker")["t"] for _ in range(2)]
+    assert seen == ["res", "bye"]
+    thread.join(5)
+    assert status == [0]

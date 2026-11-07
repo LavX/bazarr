@@ -21,6 +21,7 @@ import hashlib
 import logging
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 _SIGKILL = getattr(signal, "SIGKILL", None)
 _SIGTERM = getattr(signal, "SIGTERM", None)
 _STDERR_LINE_LIMIT = 2000
+_CODE_SHAPE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 # Read this much of a line before scrubbing, so a secret that straddles the
 # 2000 character display cut is replaced whole first.
 _STDERR_READ_LIMIT = 64 * 1024
@@ -325,6 +327,10 @@ class WorkerSession:
             limit = min(limit, self.welcome.max_in_flight)
         cap = self.limits.max_result_bytes if max_result_bytes is None else min(
             int(max_result_bytes), self.limits.max_result_bytes)
+        # Encoded before anything is registered: params that cannot be sent
+        # (not JSON, NaN, too big) must not cost an in-flight slot.
+        frames.pack_control({"t": frames.REQ, "id": 0, "op": op, "params": params or {},
+                             "max_result_bytes": cap, "secrets": secrets or {}})
         with self._lock:
             if self._closed or self.welcome is None:
                 raise self._failure or SessionClosed("session is not running")
@@ -357,11 +363,13 @@ class WorkerSession:
             message["secrets"] = secrets
         try:
             queued = self._enqueue(message)
-        except (FrameError, ValueError, RecursionError):
+        except BaseException:
             with self._lock:
                 self._requests.pop(req_id, None)
             raise
         if not queued:
+            with self._lock:
+                self._requests.pop(req_id, None)
             raise self._failure or SessionClosed("session is not running")
         return RequestHandle(self, request)
 
@@ -418,7 +426,7 @@ class WorkerSession:
                 message = frames.decode_control(body, "worker")
                 if not welcomed:
                     if message["t"] != frames.HELLO:
-                        raise FrameError("first message was %s, not hello" % message["t"])
+                        raise FrameError("first message was %s, not hello" % frames.shown(message["t"]))
                     self._on_hello(message)
                     welcomed = True
                     reader.caps.update(frames.default_caps())
@@ -429,15 +437,15 @@ class WorkerSession:
             if not welcomed and getattr(error, "type_byte", None) is not None:
                 code = error.code
                 failure = HandshakeError(
-                    "worker spoke an unknown protocol (%s)" % error, code=code)
+                    "worker spoke an unknown protocol (%s)" % self._public(error), code=code)
                 self._handshake_error = failure
                 self._hello.set()
                 return
             if not welcomed:
-                self._handshake_error = HandshakeError(str(error), code=error.code)
+                self._handshake_error = HandshakeError(self._public(error), code=error.code)
                 self._hello.set()
                 return
-            self._fail(ProtocolViolation(str(error), code=error.code), kill=True)
+            self._fail(ProtocolViolation(self._public(error), code=error.code), kill=True)
             return
         except (OSError, ValueError):
             pass
@@ -520,7 +528,7 @@ class WorkerSession:
         elif kind == frames.CALL:
             self._on_call(message)
         elif kind == frames.SANDBOX_BLOCKED:
-            self._emit("sandbox_blocked", message)
+            self._emit("sandbox_blocked", self._redact_obj(message))
         elif kind == frames.BYE:
             self._bye.set()
         elif kind == frames.HELLO:
@@ -557,7 +565,7 @@ class WorkerSession:
             return
         if not message["ok"]:
             error = message["error"]
-            code = error.get("code") if isinstance(error.get("code"), str) else Codes.PLUGIN_ERROR
+            code = self._safe_code(error.get("code"))
             if code == Codes.CANCELLED and request.timed_out:
                 self._finish(request, error=RequestTimeout("request exceeded its deadline"))
             elif code == Codes.CANCELLED:
@@ -591,7 +599,8 @@ class WorkerSession:
             return self._redact(value) if isinstance(value, str) else None
 
         retry_after = error.get("retry_after")
-        if not isinstance(retry_after, (int, float)) or isinstance(retry_after, bool):
+        if (not isinstance(retry_after, (int, float)) or isinstance(retry_after, bool)
+                or retry_after != retry_after or retry_after in (float("inf"), float("-inf"))):
             retry_after = None
         return RequestFailed(
             clean(error.get("message")) or code,
@@ -643,20 +652,32 @@ class WorkerSession:
                              name="%s-calls-%s" % (self.name, key)).start()
 
     def _call_worker(self, key):
-        while not self._stop.is_set():
-            with self._lock:
-                pending = self._call_queues.get(key)
-                if not pending:
-                    self._call_queues.pop(key, None)
-                    return
-                message = pending.popleft()
-            answer = self._answer_call(message)
-            # Counted until the handler is done: a handler that blocks keeps its
-            # slot, so a worker cannot stack blocked handler threads past the cap.
-            with self._lock:
-                if not self._stop.is_set():
-                    self._call_pending = max(0, self._call_pending - 1)
-            self._send_quietly(answer)
+        clean = False
+        try:
+            while not self._stop.is_set():
+                with self._lock:
+                    pending = self._call_queues.get(key)
+                    if not pending:
+                        self._call_queues.pop(key, None)
+                        clean = True
+                        return
+                    message = pending.popleft()
+                answer = self._answer_call(message)
+                # Counted until the handler is done: a handler that blocks keeps its
+                # slot, so a worker cannot stack blocked handler threads past the cap.
+                with self._lock:
+                    if not self._stop.is_set():
+                        self._call_pending = max(0, self._call_pending - 1)
+                self._send_quietly(answer)
+            clean = True
+        finally:
+            if not clean:
+                # Something escaped the handler's own boundary: give back what
+                # this thread held and drop its queue, so nothing waits on it.
+                with self._lock:
+                    dropped = self._call_queues.pop(key, None)
+                    if not self._stop.is_set():
+                        self._call_pending = max(0, self._call_pending - 1 - len(dropped or ()))
 
     def _answer_call(self, message):
         name = message["name"]
@@ -665,24 +686,28 @@ class WorkerSession:
             handler = self._host_calls.get(name)
         if handler is None:
             return {"t": frames.ACK, "cid": cid, "ok": False,
-                    "error": frames.error_object(Codes.UNKNOWN_CALL, "no host call named %s" % name)}
+                    "error": frames.error_object(Codes.UNKNOWN_CALL, "no host call named %s" % frames.shown(name))}
         try:
             result = handler(HostCall(name, message["params"], message.get("id"), self))
             if result is None:
                 result = {}
             if not isinstance(result, dict):
                 raise TypeError("host call %s returned %s, not a dict" % (name, type(result).__name__))
-            return {"t": frames.ACK, "cid": cid, "ok": True, "result": result}
+            ack = {"t": frames.ACK, "cid": cid, "ok": True, "result": result}
+            # Encoded here, inside the boundary: a result that is too big, holds a
+            # NaN or is not JSON must become a small failure ack, not a dead thread.
+            frames.pack_control(ack)
+            return ack
         except HostCallError as error:
             return {"t": frames.ACK, "cid": cid, "ok": False,
-                    "error": frames.error_object(error.code, self._redact(error.message),
+                    "error": frames.error_object(self._safe_code(error.code), self._public(error.message),
                                                  retryable=error.retryable)}
         except Exception as error:
             # Logged redacted and without the raw exception, which may carry a secret.
             logger.warning("%s: host call %s failed: %s", self.name, name,
                            self._redact("%s: %s" % (type(error).__name__, error)))
             return {"t": frames.ACK, "cid": cid, "ok": False,
-                    "error": frames.error_object(Codes.HOST_CALL_FAILED, self._redact(str(error)))}
+                    "error": frames.error_object(Codes.HOST_CALL_FAILED, self._public(error))}
 
     # --------------------------------------------------------------- watchdog
 
@@ -761,7 +786,7 @@ class WorkerSession:
     def _send_quietly(self, message):
         try:
             return self._enqueue(message)
-        except (FrameError, ValueError, RecursionError):
+        except (FrameError, ValueError, TypeError, RecursionError):
             return False
 
     def _write_loop(self):
@@ -933,6 +958,21 @@ class WorkerSession:
         for secret in self._secrets_snapshot():
             text = text.replace(secret, "***")
         return scrub_text(text)
+
+    def _public(self, value):
+        """Worker-influenced text, redacted and bounded, for an exception or a log line."""
+        return self._redact(str(value))[:300]
+
+    def _safe_code(self, value):
+        """A worker-supplied error code, or ``plugin_error`` if it is not a plain code.
+
+        Redaction runs first, so a secret echoed as a code turns into ``***``
+        and fails the shape check.
+        """
+        if not isinstance(value, str):
+            return Codes.PLUGIN_ERROR
+        code = self._redact(value)
+        return code if _CODE_SHAPE.fullmatch(code) else Codes.PLUGIN_ERROR
 
     def _redact_obj(self, value):
         if isinstance(value, str):
