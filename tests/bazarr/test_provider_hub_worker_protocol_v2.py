@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import signal
 import struct
 import subprocess
 import sys
@@ -2526,17 +2527,19 @@ class _NoSelect:
 
     calls = 0
 
+    EVENT_READ = 1
+
     @classmethod
-    def select(cls, *args, **kwargs):
+    def DefaultSelector(cls, *args, **kwargs):
         cls.calls += 1
-        raise OSError("select only works on sockets here")
+        raise OSError("selectors only work on sockets here")
 
 
 @pytest.fixture
 def no_pipe_select(monkeypatch):
     _NoSelect.calls = 0
     monkeypatch.setattr(worker_channel, "_select_on_pipes", lambda: False)
-    monkeypatch.setattr(worker_channel, "select", _NoSelect)
+    monkeypatch.setattr(worker_channel, "selectors", _NoSelect)
     return _NoSelect
 
 
@@ -2592,6 +2595,118 @@ def test_the_plain_input_reads_without_ever_calling_select(no_pipe_select):
         wake.close()
         if write_fd is not None:
             os.close(write_fd)
+
+
+def _high_fd(fd, floor=1100):
+    """A copy of ``fd`` numbered at or above ``floor`` (select.select refuses 1024 and up)."""
+    import fcntl
+
+    high = fcntl.fcntl(fd, fcntl.F_DUPFD, floor)
+    os.close(fd)
+    return high
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor numbers and rlimits are POSIX")
+def test_the_wakeable_input_works_with_descriptors_past_the_select_limit(monkeypatch):
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = 1300
+    if hard != resource.RLIM_INFINITY and hard < wanted:
+        pytest.skip("cannot raise the descriptor limit far enough")
+    if soft != resource.RLIM_INFINITY and soft < wanted:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+    try:
+        read_fd, write_fd = os.pipe()
+        stream = io.FileIO(_high_fd(read_fd), "r", closefd=True)
+        real_pipe = os.pipe
+
+        def high_pipe():
+            r, w = real_pipe()
+            return _high_fd(r), _high_fd(w, 1200)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "pipe", high_pipe)
+            wake = worker_channel._WakeableInput(stream)
+        assert wake.interruptible
+        assert stream.fileno() > 1024 and wake._wake_r > 1024 and wake._wake_w > 1024
+        try:
+            os.write(write_fd, b"abc")
+            assert wake.read(10) == b"abc"
+            got = []
+            reader = threading.Thread(target=lambda: got.append(wake.read(10)), daemon=True)
+            reader.start()
+            time.sleep(0.2)
+            assert reader.is_alive()
+            wake.interrupt()
+            reader.join(3)
+            assert got == [b""]
+        finally:
+            wake.close()
+            os.close(write_fd)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_group_is_signalled_once_and_only_while_its_leader_is_unreaped(make_session, monkeypatch):
+    session = make_session()
+    session.start()
+    process = session.process
+    calls = []
+    real = os.killpg
+
+    def recording(pgid, sig):
+        # The leader's status must not have been collected yet, or its number is free to reuse.
+        calls.append((pgid, sig, process.returncode))
+        return real(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording)
+    session.close(grace=2.0)
+    assert process.returncode is not None
+    assert len(calls) >= 1 and all(returncode is None for _, _, returncode in calls)
+    first = len(calls)
+    # The leader is reaped and its group number may belong to someone else now.
+    session.close(grace=2.0)
+    session._kill_tree(process)
+    session._fail(SessionClosed("again"), kill=True)
+    assert session._signal_leader_group(process, signal.SIGTERM) is True
+    assert len(calls) == first
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_concurrent_closes_signal_the_group_only_once(make_session, monkeypatch):
+    session = make_session()
+    session.start()
+    calls = []
+    real = os.killpg
+
+    def recording(pgid, sig):
+        calls.append(sig)
+        return real(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", recording)
+    threads = [threading.Thread(target=session.close, kwargs={"grace": 2.0}) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert not any(thread.is_alive() for thread in threads)
+    assert session.process.returncode is not None
+    assert calls.count(signal.SIGKILL) == 1
+
+
+def test_a_worker_reaped_by_someone_else_is_never_signalled(make_session, monkeypatch):
+    session = make_session()
+    session.start()
+    process = session.process
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait()  # reaped behind the session's back
+    calls = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    session.close(grace=0.5)
+    session._kill_tree(process)
+    assert calls == []
 
 
 def test_the_wakeable_input_is_used_on_posix():

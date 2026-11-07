@@ -218,6 +218,29 @@ def _signal_group(process, sig):
     return True
 
 
+def _has_exited(process):
+    """Whether the worker has exited, without reaping it.
+
+    A reaped leader frees its pid, and with it the process group number: a
+    signal sent to that group afterwards could hit unrelated processes. So the
+    leader stays an unreaped zombie until its group has been dealt with, and
+    this looks at it with ``WNOWAIT`` instead of ``poll()``, which reaps.
+    """
+    if process.returncode is not None:
+        return True
+    waitid = getattr(os, "waitid", None)
+    flag = getattr(os, "WNOWAIT", None)
+    if waitid is None or flag is None:
+        return process.poll() is not None
+    try:
+        return waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | flag) is not None
+    except ChildProcessError:
+        # Someone else reaped it.
+        return True
+    except OSError:
+        return process.poll() is not None
+
+
 class WorkerSession:
     """One v2 worker process and the conversation with it.
 
@@ -258,6 +281,10 @@ class WorkerSession:
         self.process: subprocess.Popen | None = None
         self.welcome: Welcome | None = None
         self.exit_code: int | None = None
+        # Group teardown happens once, while the leader is still unreaped; after
+        # that no signal is ever sent to the group (its number may be reused).
+        self._group_lock = threading.Lock()
+        self._group_ended = False
         self.last_heartbeat: dict | None = None
         self.last_frame_at = time.monotonic()
 
@@ -304,7 +331,7 @@ class WorkerSession:
 
     @property
     def alive(self):
-        return self.process is not None and not self._closed and self.process.poll() is None
+        return self.process is not None and not self._closed and not _has_exited(self.process)
 
     @property
     def in_flight(self):
@@ -989,14 +1016,53 @@ class WorkerSession:
     # ------------------------------------------------------------- lifecycle
 
     def _poll(self):
-        return self.process.poll() if self.process is not None else None
+        process = self.process
+        if process is None or not _has_exited(process):
+            return None
+        return self._reap(process, 0.0)
+
+    def _wait_exit(self, process, timeout):
+        """Wait until the worker has exited, leaving it unreaped. False if it has not within ``timeout``."""
+        deadline = time.monotonic() + timeout
+        while not _has_exited(process):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.005)
+        return True
+
+    def _end_group(self, process):
+        """Kill what the worker forked, once, while its leader is still unreaped."""
+        with self._group_lock:
+            if self._group_ended:
+                return
+            self._group_ended = True
+            if process.returncode is None:
+                _signal_group(process, _SIGKILL)
+
+    def _reap(self, process, timeout):
+        """Wait for the exit, end the group, then reap the leader. Returns the exit code."""
+        if not self._wait_exit(process, timeout):
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        self._end_group(process)
+        return process.wait()
+
+    def _signal_leader_group(self, process, sig):
+        """Signal the group only while the leader is certainly unreaped. True if handled.
+
+        Held under the same lock as the teardown: once the group is ended the
+        leader may be reaped and its number reused, so nothing is signalled.
+        """
+        with self._group_lock:
+            if self._group_ended or process.returncode is not None:
+                return True
+            return _signal_group(process, sig)
 
     def _reap_exit_code(self):
         process = self.process
         if process is None:
             return None
         try:
-            self.exit_code = process.wait(timeout=1.0)
+            self.exit_code = self._reap(process, 1.0)
         except Exception:
             self.exit_code = None
         return self.exit_code
@@ -1142,18 +1208,21 @@ class WorkerSession:
                     self._finish(request, error=error)
 
     def _kill_tree(self, process):
-        if process.poll() is None and not _signal_group(process, _SIGKILL):
-            try:
-                process.kill()
-            except OSError:
-                pass
+        """End the worker and its whole group, once. A later call only reaps."""
+        with self._group_lock:
+            if not self._group_ended and process.returncode is None:
+                # The leader is not reaped (every reap goes through ``_reap``, after
+                # the group is ended), so its group number is still ours.
+                self._group_ended = True
+                if not _signal_group(process, _SIGKILL):
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
         try:
-            self.exit_code = process.wait(timeout=self.limits.kill_grace)
+            self.exit_code = self._reap(process, self.limits.kill_grace)
         except Exception:
             logger.warning("%s: worker survived a kill", self.name)
-        else:
-            # What the worker forked dies with its group.
-            _signal_group(process, _SIGKILL)
 
     def close(self, grace=5.0):
         """Ask the worker to stop, then end its whole group. Idempotent.
@@ -1175,20 +1244,15 @@ class WorkerSession:
         # Before the welcome the worker is not in the conversation yet, and a
         # shutdown frame ahead of the welcome would be a frame it cannot place:
         # that worker is simply ended below.
-        if not already and process is not None and handshaken and process.poll() is None:
+        if not already and process is not None and handshaken and not _has_exited(process):
             self._send_quietly({"t": frames.SHUTDOWN, "grace_ms": min(max(int(grace * 1000), 0), frames.MAX_SHUTDOWN_GRACE_MS)})
-            try:
-                process.wait(timeout=grace)
-            except subprocess.TimeoutExpired:
-                if not _signal_group(process, _SIGTERM):
+            if not self._wait_exit(process, grace):
+                if not self._signal_leader_group(process, _SIGTERM):
                     try:
                         process.terminate()
                     except OSError:
                         pass
-                try:
-                    process.wait(timeout=self.limits.term_grace)
-                except subprocess.TimeoutExpired:
-                    pass
+                self._wait_exit(process, self.limits.term_grace)
         self._fail(SessionClosed("session closed"), kill=process is not None)
         if process is not None:
             # The reader may have closed the session first on a clean exit;

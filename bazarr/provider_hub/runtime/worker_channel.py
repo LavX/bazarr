@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-import select
+import selectors
 import sys
 import threading
 import time
@@ -147,7 +147,7 @@ class Operation:
 
 
 def _select_on_pipes():
-    """True where ``select`` can wait on a pipe descriptor (POSIX; on Windows only sockets work)."""
+    """True where the selector can wait on a pipe descriptor (POSIX; on Windows only sockets work)."""
     return os.name == "posix"
 
 
@@ -169,12 +169,17 @@ class _WakeableInput:
     def __init__(self, stream):
         self._stream = stream
         self._fd = self._wake_r = self._wake_w = None
+        self._selector = None
         if _select_on_pipes():
             try:
                 self._fd = stream.fileno()
                 self._wake_r, self._wake_w = os.pipe()
+                # Not ``select.select``: that refuses descriptors past FD_SETSIZE (1024).
+                self._selector = selectors.DefaultSelector()
+                self._selector.register(self._fd, selectors.EVENT_READ)
+                self._selector.register(self._wake_r, selectors.EVENT_READ)
             except (AttributeError, OSError, ValueError):
-                self._fd = self._wake_r = self._wake_w = None
+                self._release_wait()
 
     @property
     def interruptible(self):
@@ -184,13 +189,17 @@ class _WakeableInput:
         if self._fd is None:
             return self._stream.read(size)
         while True:
+            selector, fd, wake = self._selector, self._fd, self._wake_r
             try:
-                ready, _, _ = select.select([self._fd, self._wake_r], [], [])
+                ready = selector.select()
             except InterruptedError:
                 continue
-            if self._wake_r in ready:
+            except (AttributeError, OSError, ValueError):
+                # Closed under a reader that was not woken in time: the end of the stream.
                 return b""
-            return os.read(self._fd, size)
+            if any(key.fd == wake for key, _ in ready):
+                return b""
+            return os.read(fd, size)
 
     def interrupt(self):
         if self._wake_w is not None:
@@ -199,15 +208,24 @@ class _WakeableInput:
             except OSError:
                 pass
 
-    def close(self):
+    def _release_wait(self):
+        if self._selector is not None:
+            try:
+                self._selector.close()
+            except Exception:
+                pass
         for fd in (self._wake_r, self._wake_w):
             if fd is not None:
                 try:
                     os.close(fd)
                 except OSError:
                     pass
+        self._selector = None
         self._wake_r = self._wake_w = None
         self._fd = None
+
+    def close(self):
+        self._release_wait()
         try:
             self._stream.close()
         except Exception:
