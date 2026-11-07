@@ -459,6 +459,27 @@ def test_a_cancel_reason_that_cannot_be_sent_as_given_still_cancels(make_session
     assert session.request("echo", timeout=5).result["echo"] == {}
 
 
+@pytest.mark.parametrize("pad", [150, 170, 185, 190, 195, 199, 200])
+def test_a_secret_crossing_the_cancel_reason_limit_leaks_no_prefix(make_session, pad):
+    session = make_session()
+    session.start()
+    sent = []
+    real = session._enqueue_packed
+    session._enqueue_packed = lambda data: sent.append(data) or real(data)
+    handle = session.submit("sleep", {"seconds": 30}, secrets={"key": SECRET})
+    time.sleep(0.3)
+    # The secret starts `pad` characters in, so the 200 character cut lands inside it.
+    handle.cancel("p" * pad + SECRET + " and a tail")
+    with pytest.raises(RequestCancelled) as caught:
+        handle.wait(8)
+    frame = next(d for d in sent if b'"cancel"' in d)
+    reason = frames.decode_control(frame[frames.HEADER.size:], "host")["reason"]
+    assert len(reason) <= 200 and reason.startswith("p" * min(pad, 200))
+    for text in (str(caught.value), reason, frame[frames.HEADER.size:].decode("utf-8")):
+        for start in range(len(SECRET) - 5):
+            assert SECRET[start:start + 6] not in text
+
+
 def test_a_host_error_text_that_cannot_be_sent_still_answers_the_call(make_session):
     def broken(call):
         raise ValueError("bad \ud800 text")

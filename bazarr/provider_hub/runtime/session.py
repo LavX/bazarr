@@ -181,17 +181,6 @@ class RequestHandle:
 _REASON_LIMIT = 200
 
 
-def _clean_reason(reason):
-    """A cancel reason that always encodes: text, valid Unicode, at most 200 characters."""
-    if not isinstance(reason, str):
-        return "cancelled"
-    try:
-        reason.encode("utf-8")
-    except UnicodeEncodeError:
-        return "cancelled"
-    return reason[:_REASON_LIMIT] or "cancelled"
-
-
 _QUEUED, _CLOSED, _FULL = "queued", "closed", "full"
 
 
@@ -495,7 +484,7 @@ class WorkerSession:
         # ends the whole session when the worker ignores it) starts only once
         # there is a valid frame to send, so a bad reason cannot make the
         # watchdog wait on a cancel that was never sent.
-        reason = _clean_reason(reason)
+        reason = self._clean_reason(reason)
         data = frames.pack_control({"t": frames.CANCEL, "id": request.id, "reason": reason}, sender="host")
         with self._lock:
             if (request.done.is_set() or request.cancel_sent_at is not None
@@ -1269,6 +1258,21 @@ class WorkerSession:
         for secret in self._secrets_snapshot():
             text = text.replace(secret, "***")
         return scrub_text(text)
+
+    def _clean_reason(self, reason):
+        """A cancel reason that always encodes and never carries a secret.
+
+        Text with valid Unicode only (else "cancelled"). The whole reason is
+        redacted first and cut afterwards, so a secret that straddles the cut is
+        replaced whole instead of leaving its prefix.
+        """
+        if not isinstance(reason, str):
+            return "cancelled"
+        try:
+            reason.encode("utf-8")
+        except UnicodeEncodeError:
+            return "cancelled"
+        return self._redact(reason)[:_REASON_LIMIT] or "cancelled"
 
     def _public(self, value):
         """Worker-influenced text, redacted and bounded, for an exception or a log line."""
