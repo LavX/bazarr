@@ -30,6 +30,13 @@ What `build` verifies before it writes a byte:
     bundle_sha256 matches. A file the catalog does not declare cannot ride
     along, and a declared file cannot be missing.
   * every path is a plain relative path and every blob is a regular file.
+  * the lock's opaque_files (below) hash to their lock values at the commit.
+
+Opaque files are pinned by hash but not declared by catalog.json: a detached
+signature next to it, a key file, anything a later stage must carry verbatim.
+They are copied byte for byte into the snapshot and get the same mode checks.
+The map is empty today, and a lock without the key reads as empty, so adding
+one needs no lock_version bump.
 
 Snapshot layout, under the destination directory, at the same relative paths
 the catalog repository uses:
@@ -38,11 +45,15 @@ the catalog repository uses:
   providers/<id>/<file>...
   floor.json        {lock_version, repo, branch, commit, files}
 
+The names catalog.json and floor.json are reserved at the snapshot root: the
+catalog may not declare a bundle file by either name, and an opaque file may
+not use them.
+
 Files are written 0444 and directories 0555, and the modes are asserted.
 Nothing in the running application writes there.
 
 Usage:
-  scripts/release/catalog_floor.py lock  --out docker/catalog-pin.lock.json
+  scripts/release/catalog_floor.py lock  --out docker/catalog-pin.lock.json [--opaque catalog.json.sig]
   scripts/release/catalog_floor.py build --lock docker/catalog-pin.lock.json --dest /catalog_floor
   scripts/release/catalog_floor.py check --dest /app/bazarr/catalog_floor --expect-root-owner
 """
@@ -71,6 +82,10 @@ _SHA1 = re.compile(r'^[0-9a-f]{40}$')
 _SHA256 = re.compile(r'^[0-9a-f]{64}$')
 _REGULAR_BLOB_MODES = frozenset({'100644', '100755'})
 _LOCK_KEYS = frozenset({'lock_version', 'repo', 'branch', 'commit', 'files'})
+_LOCK_OPTIONAL_KEYS = frozenset({'opaque_files'})
+# Written by the build itself, or the catalog document: nothing else may take
+# these names at the snapshot root.
+_RESERVED_PATHS = frozenset({CATALOG_FILE, FLOOR_META_FILE})
 
 
 class FloorError(Exception):
@@ -221,6 +236,8 @@ def declared_bundles(catalog_bytes):
             if not isinstance(pin, str) or not _SHA256.match(pin):
                 raise FloorError(f'{label} has no valid sha256 for {relative_path}')
             repo_path = '/'.join(part for part in (source_path, relative_path) if part)
+            if repo_path in _RESERVED_PATHS:
+                raise FloorError(f'{label} declares {repo_path}, a name the snapshot reserves')
             mapping[repo_path] = (relative_path, pin)
         bundles.append((label, bundle_pin, mapping))
     return bundles
@@ -246,7 +263,7 @@ def validate_lock(lock):
     """Shape check for a parsed lock. Returns it, or raises FloorError."""
     if not isinstance(lock, dict):
         raise FloorError('lock is not a JSON object')
-    unknown = set(lock) - _LOCK_KEYS
+    unknown = set(lock) - _LOCK_KEYS - _LOCK_OPTIONAL_KEYS
     missing = _LOCK_KEYS - set(lock)
     if unknown or missing:
         raise FloorError(f'lock keys wrong (unknown {sorted(unknown)}, missing {sorted(missing)})')
@@ -265,6 +282,17 @@ def validate_lock(lock):
         _safe_path(path, 'lock file path')
         if not isinstance(digest, str) or not _SHA256.match(digest):
             raise FloorError(f'lock hash for {path} is not a lowercase sha256')
+    opaque = lock.get('opaque_files', {})
+    if not isinstance(opaque, dict):
+        raise FloorError('lock opaque_files must be a map of path to sha256')
+    for path, digest in opaque.items():
+        _safe_path(path, 'lock opaque file path')
+        if path in _RESERVED_PATHS:
+            raise FloorError(f'opaque file {path} uses a reserved name')
+        if path in files:
+            raise FloorError(f'opaque file {path} is also listed in files')
+        if not isinstance(digest, str) or not _SHA256.match(digest):
+            raise FloorError(f'lock hash for opaque file {path} is not a lowercase sha256')
     return lock
 
 
@@ -310,14 +338,32 @@ def _read_declared_tree(repo, commit):
     return data
 
 
-def make_lock(repo, commit, branch=DEFAULT_BRANCH, repo_name=DEFAULT_REPO):
+def _read_opaque(repo, commit, paths):
+    """Read opaque files at ``commit``. They must be regular files."""
+    if not paths:
+        return {}
+    entries = _tree_entries(repo, commit)
+    data = {}
+    for path in sorted(paths):
+        mode = entries.get(path)
+        if mode is None:
+            raise FloorError(f'opaque file {path} does not exist at {commit}')
+        if mode not in _REGULAR_BLOB_MODES:
+            raise FloorError(f'opaque file {path} is not a regular file at {commit} (git mode {mode})')
+        data[path] = _read_blob(repo, commit, path)
+    return data
+
+
+def make_lock(repo, commit, branch=DEFAULT_BRANCH, repo_name=DEFAULT_REPO, opaque_paths=()):
     data = _read_declared_tree(repo, commit)
+    opaque = _read_opaque(repo, commit, set(opaque_paths))
     lock = {
         'lock_version': LOCK_VERSION,
         'repo': repo_name,
         'branch': branch,
         'commit': commit,
         'files': {path: _sha256(content) for path, content in data.items()},
+        'opaque_files': {path: _sha256(content) for path, content in opaque.items()},
     }
     return validate_lock(lock)
 
@@ -328,6 +374,13 @@ def verify_lock(lock, repo):
     validate_lock(lock)
     assert_ancestor(repo, lock['commit'], lock['branch'])
     data = _read_declared_tree(repo, lock['commit'])
+    opaque_lock = lock.get('opaque_files', {})
+    opaque = _read_opaque(repo, lock['commit'], set(opaque_lock))
+    for path, content in opaque.items():
+        if path in data:
+            raise FloorError(f'opaque file {path} is also declared by {CATALOG_FILE}')
+        if _sha256(content) != opaque_lock[path]:
+            raise FloorError(f'opaque file {path} does not match the lock hash at {lock["commit"]}')
 
     extra = sorted(set(lock['files']) - set(data))
     absent = sorted(set(data) - set(lock['files']))
@@ -339,7 +392,7 @@ def verify_lock(lock, repo):
     for path, content in data.items():
         if _sha256(content) != lock['files'][path]:
             raise FloorError(f'{path} does not match the lock hash at {lock["commit"]}')
-    return data
+    return {**data, **opaque}
 
 
 # --------------------------------------------------------------------------
@@ -421,7 +474,11 @@ def _cmd_lock(args):
         if not _SHA1.match(commit):
             raise FloorError('--commit must be a full lowercase 40-hex sha')
         assert_ancestor(repo, commit, args.branch)
-        lock = make_lock(repo, commit, args.branch, args.repo)
+        # A rewrite keeps the opaque files the current lock already carries.
+        opaque_paths = set(args.opaque)
+        if Path(args.out).exists():
+            opaque_paths |= set(load_lock(args.out).get('opaque_files', {}))
+        lock = make_lock(repo, commit, args.branch, args.repo, opaque_paths)
     Path(args.out).write_text(dump_lock(lock), encoding='utf-8')
     print(f'locked {lock["repo"]}@{commit[:12]} ({len(lock["files"])} files) -> {args.out}')
 
@@ -458,6 +515,9 @@ def build_parser():
     lock.add_argument('--repo', default=DEFAULT_REPO)
     lock.add_argument('--branch', default=DEFAULT_BRANCH)
     lock.add_argument('--commit', help='default: the branch tip')
+    lock.add_argument('--opaque', action='append', default=[], metavar='PATH',
+                      help='pin a repository file catalog.json does not declare (repeatable); '
+                           'the opaque files of an existing --out lock are kept')
     lock.add_argument('--out', required=True)
     lock.set_defaults(func=_cmd_lock)
 
