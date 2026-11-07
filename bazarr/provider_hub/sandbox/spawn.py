@@ -77,6 +77,11 @@ class LauncherFailure:
 # the filesystem is not enforced there.
 MIN_ENFORCED_ABI = 3
 
+# Longest the launcher needs after the worker is gone or the lifeline closed:
+# one poll tick, two seconds of kill rounds and five of reaping. The host waits
+# this long (on top of the launcher's term_grace) before it kills the group.
+LAUNCHER_CLEANUP_SECONDS = 10.0
+
 # Flipped when the worker spawner starts plugin workers through this launcher.
 # Until then the probe describes what the host could do, not what workers get.
 WORKERS_SANDBOXED = False
@@ -414,6 +419,8 @@ class LauncherProcess(WorkerProcess):
         self._fds = {"lifeline": lifeline, "status": status}
         self._failure: LauncherFailure | None = None
         self._status_text = b""
+        # The launcher's own grace for the worker; set by ``_start``.
+        self.term_grace = 3.0
         weakref.finalize(self, _close_fds, self._fds)
 
     def __del__(self, *args, **kwargs):
@@ -466,27 +473,39 @@ class LauncherProcess(WorkerProcess):
             raise SandboxApplyError(failure.message)
 
     def stop(self, grace: float = 3.0) -> None:
-        """SIGTERM the launcher, which stops the tree; SIGKILL the group after ``grace``.
+        """End the worker tree and wait for the launcher to report it gone.
 
-        Prefer this to killing the process group outright: a launcher that is
-        killed cannot reap workers that moved themselves into a new session.
+        SIGTERM goes to the launcher, which passes it to the worker and gives it
+        its own ``term_grace``. When the launcher is still there after ``grace``
+        the lifeline is closed, which makes it kill the whole tree at once,
+        ``setsid`` and double-forked descendants included. The launcher is then
+        given its configured ``term_grace`` plus the time its tree cleanup can
+        take before anything is escalated: a launcher killed first cannot reap
+        a descendant that left its group, so the group kill is a last resort
+        for a launcher that is stuck, not a timer that races its cleanup.
         """
         if self.poll() is None:
             try:
                 self.terminate()
+                # A launcher stopped with SIGSTOP would never see the signal.
+                os.kill(self.pid, signal.SIGCONT)
             except OSError:
                 pass
             try:
-                self.wait(timeout=grace + 2.0)
+                super().wait(timeout=max(grace, 0.0))
             except subprocess.TimeoutExpired:
+                self.close_lifeline()
                 try:
-                    os.killpg(self.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                try:
-                    self.wait(timeout=5)
+                    super().wait(timeout=self.term_grace + LAUNCHER_CLEANUP_SECONDS)
                 except subprocess.TimeoutExpired:
-                    pass
+                    try:
+                        os.killpg(self.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    try:
+                        super().wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
         self.close_lifeline()
 
     def wait(self, timeout=None):
@@ -550,6 +569,7 @@ def _start(
         os.close(life_r)
         os.close(status_w)
     process.enforcement = enforcement
+    process.term_grace = float(spec.term_grace)
     return process
 
 

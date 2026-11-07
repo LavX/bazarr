@@ -12,12 +12,14 @@ have Landlock), so a regression that makes the probe report "not enforced"
 cannot hide behind skipped tests. Skips for a kernel ABI that is simply too old
 for one specific test (need_abi) stay skips.
 """
+import dataclasses
 import errno
 import gc
 import importlib.util
 import json
 import os
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -1143,6 +1145,90 @@ def test_stop_kills_the_whole_tree_including_setsid_children(mode, tmp_path):
     process.stop(1.0)
     assert process.poll() is not None
     assert wait_dead(worker) and wait_dead(child)
+
+
+STUBBORN = """
+    import os, signal, sys, time
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            open("grand.pid", "w").write(str(os.getpid()))
+            time.sleep(300)
+        os._exit(0)
+    while not os.path.exists("grand.pid") or not open("grand.pid").read():
+        time.sleep(0.02)
+    open("worker.pid", "w").write(str(os.getpid()))
+    %s
+"""
+
+
+@linux_only
+@pytest.mark.parametrize("worker_ending", ["time.sleep(300)", "os.kill(os.getpid(), signal.SIGSTOP)"], ids=["ignores-sigterm", "stopped"])
+def test_stop_with_the_default_grace_leaves_no_descendant_and_lets_the_launcher_finish(mode, tmp_path, worker_ending):
+    spec = make_spec(tmp_path, STUBBORN % worker_ending)
+    spec = dataclasses.replace(spec, term_grace=3.0)
+    process = spawn_worker(spec, probe=mode)
+    grand = read_pid(tmp_path / "rw" / "grand.pid")
+    worker = read_pid(tmp_path / "rw" / "worker.pid")
+    assert alive(grand) and alive(worker)
+    started = time.monotonic()
+    process.stop(0.1)
+    elapsed = time.monotonic() - started
+    assert process.poll() is not None
+    # The launcher ran its own cleanup and reported the worker's death; it was not killed itself.
+    assert process.returncode == 128 + 9, process.returncode
+    assert wait_dead(worker) and wait_dead(grand), "a descendant outlived stop()"
+    assert elapsed < 8, elapsed
+
+
+@linux_only
+def test_stop_wakes_a_stopped_launcher_so_it_can_clean_up(mode, tmp_path):
+    spec = make_spec(tmp_path, GRANDCHILD % "time.sleep(300)")
+    process = spawn_worker(spec, probe=mode)
+    child = read_pid(tmp_path / "rw" / "child.pid")
+    worker = read_pid(tmp_path / "rw" / "worker.pid")
+    os.kill(process.pid, signal.SIGSTOP)
+    process.stop(0.2)
+    assert process.poll() is not None
+    assert wait_dead(worker) and wait_dead(child)
+
+
+def test_stop_waits_for_the_launchers_grace_and_cleanup_before_killing_the_group(tmp_path, monkeypatch):
+    # A launcher that outlasts the caller's grace gets the lifeline closed and then its
+    # own term_grace plus the cleanup allowance, not a fixed two seconds.
+    waits = []
+    killed = []
+
+    class Stub(spawn.LauncherProcess):
+        def __init__(self):
+            self._fds = {"lifeline": None, "status": None}
+            self.pid = 4242
+            self.term_grace = 3.0
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+        def __del__(self):
+            pass
+
+    stub = Stub()
+
+    def fake_wait(self, timeout=None):
+        waits.append(timeout)
+        raise subprocess.TimeoutExpired("launcher", timeout)
+
+    monkeypatch.setattr(subprocess.Popen, "wait", fake_wait)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    stub.stop(0.1)
+    assert waits[0] == 0.1
+    assert waits[1] == 3.0 + spawn.LAUNCHER_CLEANUP_SECONDS
+    assert killed == [(4242, signal.SIGKILL)]
 
 
 @linux_only
