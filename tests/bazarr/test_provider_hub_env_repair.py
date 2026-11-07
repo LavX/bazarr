@@ -760,3 +760,73 @@ def test_two_gated_requests_across_a_repair_both_reach_the_replacement(hub, hub_
     # The outcome of the first call was reported to the instance that served it,
     # so the second was not left waiting on a latch nobody would release.
     assert len(worker.sent) == 2
+
+
+def test_two_simultaneous_first_lookups_share_one_instance_through_a_repair(hub, hub_registry):
+    from provider_hub.registry import HubProxyProvider, retire_provider_instances
+    from subliminal_patch.core import SZProviderPool
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+    constructed = []
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    class OldClass(HubProxyProvider):
+        provider_name = "examplehub"
+        python_path = str(old / "bin" / "python")
+
+        def __init__(self, **config):
+            super().__init__(**config)
+            constructed.append(self)
+            entered.set()
+            proceed.wait(10)
+
+    class NewClass(HubProxyProvider):
+        provider_name = "examplehub"
+        python_path = str(new / "bin" / "python")
+
+        def list_subtitles(self, video, languages):
+            return ["found"]
+
+    hub_registry.register("examplehub", OldClass)
+    pool = SZProviderPool(providers=["examplehub"], provider_configs={})
+    found = {}
+
+    def lookup(label):
+        found[label] = pool["examplehub"]
+
+    first = threading.Thread(target=lookup, args=("a",))
+    first.start()
+    assert entered.wait(10)
+    second = threading.Thread(target=lookup, args=("b",))
+    second.start()
+    time.sleep(0.3)
+    proceed.set()
+    first.join(10)
+    second.join(10)
+
+    # One build, one instance, and both callers hold it.
+    assert len(constructed) == 1
+    assert found["a"] is found["b"] is pool.initialized_providers["examplehub"]
+    # A duplicate that did get built is refused rather than overwriting the cached one.
+    duplicate = OldClass()
+    assert pool._install_provider("examplehub", duplicate, 0) is False
+    assert pool.initialized_providers["examplehub"] is found["a"]
+
+    hub_registry.register("examplehub", NewClass)
+    drains = retire_provider_instances("examplehub")
+    results = [pool._call_current("examplehub", found[label], lambda current: current.list_subtitles(None, set()))
+               for label in ("a", "b")]
+    for drain in drains:
+        drain.join(10)
+
+    # Neither caller failed, and both moved to the same replacement.
+    assert results == [["found"], ["found"]]
+    assert type(pool.initialized_providers["examplehub"]) is NewClass
+    assert env_registry.cleanup_environments(hub) == [str(old)]

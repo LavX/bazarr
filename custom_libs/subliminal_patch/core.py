@@ -613,6 +613,10 @@ class SZProviderPool(ProviderPool):
         #: that came first.
         self._store_lock = threading.RLock()
 
+        #: One lock per provider name, held while an instance of it is built, so
+        #: two lookups that arrive together build one instance between them.
+        self._build_locks = {}
+
         #: Name of providers to use
         self.providers = self._dedupe_provider_names(providers)
 
@@ -782,34 +786,49 @@ class SZProviderPool(ProviderPool):
         except ProviderRetiredError as error:
             raise ProviderBusyError(f"{name} was being replaced") from error
 
-    def _build_and_install(self, name, config):
-        """Build an instance of the registered class and store it.
+    def _build_lock(self, name):
+        with self._store_lock:
+            return self._build_locks.setdefault(name, threading.Lock())
 
-        If the provider was replaced while the instance was being built (a
-        repaired environment), the instance belongs to the old class: it is
-        dropped and a new one is built from the registry as it is now.
+    def _build_and_install(self, name, config):
+        """Build an instance of the registered class and store it, or return the one already stored.
+
+        Only one thread builds a given provider at a time. A thread that waited
+        for the build finds the stored instance and returns it, so every caller
+        ends up on the same instance and a later replacement retires the one
+        every caller holds. If the provider was replaced while the instance was
+        being built (a repaired environment), the instance belongs to the old
+        class: it is dropped and a new one is built from the registry as it is
+        now.
         """
-        while True:
-            generation = provider_generation(name)
-            provider = provider_registry[name](**config())
-            provider.initialize()
-            if self._install_provider(name, provider, generation):
-                return provider
-            logger.info('Provider %s was replaced while it was being initialized; building it again', name)
-            try:
-                provider.terminate()
-            except Exception:
-                logger.exception('Provider %r terminated unexpectedly', name)
+        with self._build_lock(name):
+            while True:
+                with self._store_lock:
+                    stored = self.initialized_providers.get(name)
+                if stored is not None:
+                    return stored
+                generation = provider_generation(name)
+                provider = provider_registry[name](**config())
+                provider.initialize()
+                if self._install_provider(name, provider, generation):
+                    return provider
+                logger.info('Provider %s was replaced while it was being initialized; building it again', name)
+                try:
+                    provider.terminate()
+                except Exception:
+                    logger.exception('Provider %r terminated unexpectedly', name)
 
     def _install_provider(self, name, provider, generation=None):
         """Store an instance this pool built, with the pool's admission check
         attached, so a provider rebuilt by a settings save is gated like the
         one it replaced. With ``generation``, nothing is stored when the
-        provider was replaced since that number was read; the answer says
-        whether it was stored."""
+        provider was replaced since that number was read, or when another
+        instance already holds the name (a cached instance is never
+        overwritten); the answer says whether it was stored."""
         with self._store_lock:
-            if generation is not None and provider_generation(name) != generation:
-                return False
+            if generation is not None:
+                if provider_generation(name) != generation or name in self.initialized_providers:
+                    return False
             provider.admit = partial(self._admits, name)
             self.initialized_providers[name] = provider
             return True
