@@ -400,10 +400,11 @@ def test_real_job_cancellation_releases_waiting_provider_without_publication(
         release.set()
         thread.join(5)
         workflows.jobs_queue.jobs_running_queue.remove(job)
-    # Allow the isolated provider to finish, then prove its abandoned result never saves.
-    for _ in range(100):
-        if automatic._provider_slots._value == 4:
-            break
+    # Allow the isolated provider to finish, then prove its abandoned result never
+    # saves. The wait is as generous as the others: finishing needs a loaded
+    # machine to schedule the provider thread, and is not what the test times.
+    deadline = time.monotonic() + 60
+    while automatic._provider_slots._value != 4 and time.monotonic() < deadline:
         time.sleep(0.05)
     assert automatic._provider_slots._value == 4
     assert not (folder / "1/event.en.srt").exists()
