@@ -43,7 +43,8 @@ the catalog repository uses:
 
   catalog.json
   providers/<id>/<file>...
-  floor.json        {lock_version, repo, branch, commit, files}
+  floor.json        {lock_version, repo, branch, commit, files}, where files
+                    maps every other snapshot path to its sha256
 
 The names catalog.json and floor.json are reserved at the snapshot root: the
 catalog may not declare a bundle file by either name or beneath either name
@@ -447,7 +448,9 @@ def write_floor(lock, data, dest):
         'repo': lock['repo'],
         'branch': lock['branch'],
         'commit': lock['commit'],
-        'files': len(data),
+        # Every file in the snapshot besides this one, with its sha256, so a
+        # reader can check what it opens without the lock file.
+        'files': {path: _sha256(content) for path, content in sorted(data.items())},
     }
     entries = dict(data)
     entries[FLOOR_META_FILE] = (json.dumps(meta, indent=2, sort_keys=True) + '\n').encode('utf-8')

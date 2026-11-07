@@ -168,7 +168,11 @@ def test_a_lock_at_the_branch_tip_builds_a_read_only_snapshot(catalog, tmp_path)
     }
     assert tree['providers/beta/helper.py'] == b'X = 1\n'
     meta = json.loads(tree['floor.json'])
-    assert meta['commit'] == commit and meta['files'] == 4
+    assert meta['commit'] == commit
+    # floor.json lists every other file with its hash.
+    assert meta['files'] == {
+        path: hashlib.sha256(data).hexdigest() for path, data in tree.items() if path != 'floor.json'
+    }
     for dirpath, dirs, names in os.walk(dest):
         assert stat.S_IMODE(os.stat(dirpath).st_mode) == 0o555
         for name in names:
@@ -363,7 +367,9 @@ def test_opaque_files_are_pinned_copied_verbatim_and_mode_checked(catalog, tmp_p
     tree = _tree(dest)
     assert tree['catalog.json.sig'] == b'\x00signature bytes\xff'
     assert tree['keys/catalog-signing-keys.json'] == b'{"keys": []}\n'
-    assert json.loads(tree['floor.json'])['files'] == 6
+    meta_files = json.loads(tree['floor.json'])['files']
+    assert len(meta_files) == 6
+    assert meta_files['catalog.json.sig'] == hashlib.sha256(tree['catalog.json.sig']).hexdigest()
     floor.check_modes(dest)
     assert stat.S_IMODE(os.stat(dest / 'keys').st_mode) == 0o555
     assert stat.S_IMODE(os.stat(dest / 'catalog.json.sig').st_mode) == 0o444
