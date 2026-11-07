@@ -1441,3 +1441,51 @@ def test_an_earlier_workers_survivors_still_hold_the_environment_after_a_respawn
         removed = env_registry.cleanup_environments(hub)
         time.sleep(0.05)
     assert removed == [str(old)]
+
+
+def test_where_process_groups_cannot_be_checked_the_environment_stays_for_the_session(
+    hub, hub_registry, monkeypatch, caplog
+):
+    import sys
+
+    from provider_hub import worker as worker_module
+    from provider_hub.worker import ProviderWorkerClient
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    interpreter = old / "bin" / "python"
+    interpreter.write_text(f"#!{sys.executable}\n{WORKER_SCRIPT}", encoding="utf-8")
+    interpreter.chmod(0o755)
+    client = ProviderWorkerClient([str(interpreter)])
+    stale.worker_client = client
+    client.request("search", {}, timeout=10)
+    # A platform without process groups, as Windows is.
+    monkeypatch.delattr(worker_module.os, "killpg", raising=False)
+    worker_module._unverifiable_logged.clear()
+
+    with caplog.at_level("INFO", logger=worker_module.logger.name):
+        del pool["examplehub"]
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+
+    time.sleep(0.3)
+    assert env_registry.cleanup_environments(hub) == []
+    assert env_registry.cleanup_environments(hub) == []
+    assert (old / "bin" / "python").exists()
+    notes = [record for record in caplog.records if "cannot be checked on this platform" in record.getMessage()]
+    assert len(notes) == 1 and notes[0].levelname == "INFO"
+
+
+def test_a_client_that_never_started_a_worker_releases_its_hold_even_without_process_groups(monkeypatch):
+    from provider_hub import worker as worker_module
+    from provider_hub.worker import ProviderWorkerClient, release_when_gone
+
+    monkeypatch.delattr(worker_module.os, "killpg", raising=False)
+    released = []
+
+    assert release_when_gone(ProviderWorkerClient(["unused"]), lambda: released.append(1), "nothing") is True
+    assert released == [1]

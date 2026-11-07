@@ -209,6 +209,10 @@ def reap_idle_workers(idle_seconds: float) -> int:
     return reaped
 
 
+_unverifiable_lock = threading.Lock()
+_unverifiable_logged: set[str] = set()
+
+
 def _client_gone(client, budget: float) -> bool:
     """Whether a client's worker has exited and nothing it started is left, waiting at most ``budget`` seconds."""
     process = getattr(client, "process", None)
@@ -234,6 +238,20 @@ def release_when_gone(client, release, label: str, budget: float = 3.0) -> bool:
     if _client_gone(client, budget):
         release()
         return True
+    if getattr(os, "killpg", None) is None and getattr(client, "_groups", None):
+        # Where there are no process groups, nothing can show that the worker's
+        # descendants are gone. The hold is kept for the rest of this process:
+        # a cleanup on such a host never removes an environment a worker ran
+        # from this session.
+        with _unverifiable_lock:
+            first = label not in _unverifiable_logged
+            _unverifiable_logged.add(label)
+        if first:
+            logger.info(
+                "Provider Hub: the processes of a worker for %s cannot be checked on this platform; "
+                "its environment is kept until the next restart", label,
+            )
+        return False
     logger.error("Provider Hub: a temporary worker for %s left processes running; its environment stays in place", label)
 
     def wait_then_release() -> None:
@@ -457,7 +475,8 @@ class ProviderWorkerClient:
         """Whether anything is left in the process group ``group`` (signal 0 sends nothing)."""
         killpg = getattr(os, "killpg", None)
         if killpg is None:
-            return False
+            # No way to look: whatever the worker started may still be running.
+            return True
         try:
             killpg(group, 0)
         except ProcessLookupError:
