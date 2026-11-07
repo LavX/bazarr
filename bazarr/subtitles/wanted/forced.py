@@ -235,10 +235,14 @@ class _Run:
                 continue
             applicable = True
             if result.status in _ANSWERED:
-                answered = True
+                # Whisper's listing entry is not a search of anything: it must not stand in for a provider's
+                # answer, or it alone would open the gate to its own fallback.
+                if name != WHISPER_PROVIDER:
+                    answered = True
             elif result.status in _CREDENTIAL_STATUSES:
                 logging.info('BAZARR forced search: %s needs its credentials or setup fixed; not counted', name)
-            elif result.status == 'skipped' and self._credential_blocked(name):
+            elif self._credential_blocked(name):
+                # Whatever the outcome kind: a rejected login can surface as an error as well as a skip.
                 logging.info('BAZARR forced search: %s is out for a credential problem; not counted', name)
             else:
                 holds.append(f'{name}:{result.status}' + (f'/{result.reason}' if result.reason else ''))

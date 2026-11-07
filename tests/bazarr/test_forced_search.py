@@ -1178,3 +1178,47 @@ def test_the_embedded_provider_is_not_in_the_pool_the_listing_walks(run):
     assert run.video_providers == [['alpha', 'beta']]
     # The shared pool itself is left as it was.
     assert run.pool.providers == ['alpha', 'embeddedsubtitles', 'beta']
+
+
+def test_whispers_own_listing_result_is_not_a_providers_answer(run, monkeypatch):
+    """Only a real provider's answer opens the gate to the transcription fallback."""
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    run.candidates = [_candidate('whisperai')]
+    # Every ordinary provider is out for a credential problem; Whisper alone "answered".
+    run.outcomes = [_result('whisperai', 'success'),
+                    _result('alpha', 'authentication_required', 'authentication_required')]
+
+    result = run.go()
+
+    assert run.pool.fallbacks == []
+    assert _statuses(result) == {'en': 'open'}
+    assert result.languages[0].reason == 'no_provider_answered'
+    assert run.not_found == []
+
+
+def test_whisper_does_not_answer_when_the_ordinary_providers_do_not_apply(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    run.candidates = [_candidate('whisperai')]
+    run.outcomes = [_result('whisperai', 'success'), _result('alpha', 'skipped', 'unsupported_language')]
+
+    result = run.go()
+
+    assert run.pool.fallbacks == []
+    assert not result.complete
+
+
+def test_a_credential_error_outcome_is_ignored_whatever_its_kind(run):
+    """A rejected login can surface as an error outcome; the recorded throttle reason decides."""
+    run.throttled = {'beta': 'PaymentRequired'}
+    run.outcomes = [_result('alpha'), _result('beta', 'error', 'PaymentRequired')]
+
+    assert _statuses(run.go()) == {'en': 'finished'}
+
+
+def test_an_error_outcome_without_a_credential_throttle_still_holds(run):
+    run.throttled = {'beta': 'TooManyRequests'}
+    run.outcomes = [_result('alpha'), _result('beta', 'error', 'error')]
+
+    assert _statuses(run.go()) == {'en': 'open'}
