@@ -2099,7 +2099,7 @@ def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None
     return _redact_installation(provider) if redact else provider
 
 
-def _record_provider_last_error(provider_id: str, message: str | None) -> None:
+def _record_provider_last_error(provider_id: str, message: str | None, python_path: str | None = None) -> None:
     # The message is an exception's text, which for a worker failure is the
     # plugin's own words: it is stored in state, shown by the API and read
     # by the next boot, so it is masked and cut at this one write.
@@ -2109,6 +2109,9 @@ def _record_provider_last_error(provider_id: str, message: str | None) -> None:
     def update_error(state: dict[str, Any]) -> None:
         provider = state.setdefault("installations", {}).get(provider_id)
         if not isinstance(provider, dict):
+            return
+        if python_path is not None and provider.get("python_path") != python_path:
+            # The result belongs to an interpreter the installation no longer runs from.
             return
         provider["last_error"] = message
 
@@ -2145,9 +2148,17 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "message": "Restart Bazarr+ before testing this staged plugin",
             }
 
-        manifest_data = provider.get("manifest")
-        active_path = provider.get("active_path")
-        python_path = provider.get("python_path")
+        # The row is read again under the lock a cleanup decides under, and the
+        # environment is held in the same step: a repair and a cleanup that ran
+        # since the first read cannot take it away while the test runs.
+        with _ENV_LOCK:
+            provider = get_provider(provider_id, redact=False) or provider
+            manifest_data = provider.get("manifest")
+            active_path = provider.get("active_path")
+            python_path = provider.get("python_path")
+            release_environment = (
+                hold_environment(env_registry.env_dir_of(python_path)) if python_path else (lambda: None)
+            )
 
         try:
             if not isinstance(manifest_data, dict):
@@ -2183,14 +2194,14 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             except Exception:
                 # The worker could not start or answer here, which is what a
                 # missing, stale or foreign environment looks like.
-                env_registry.mark_needs_repair(provider_id)
+                env_registry.mark_needs_repair(provider_id, python_path)
                 raise
             finally:
                 client.stop()
                 _remove_bundle_runtime_artifacts(bundle_path)
 
-            _record_provider_last_error(provider_id, None)
-            env_registry.clear_needs_repair(provider_id)
+            _record_provider_last_error(provider_id, None, python_path)
+            env_registry.clear_needs_repair(provider_id, python_path)
             job.update(
                 message="Worker health check passed",
                 details={"status": "ready"},
@@ -2204,7 +2215,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             }
         except Exception as error:
             message = scrub_text(str(error) or error.__class__.__name__)
-            _record_provider_last_error(provider_id, message)
+            _record_provider_last_error(provider_id, message, python_path)
             job.data["state"] = "failed"
             job.update(
                 error=message,
@@ -2217,6 +2228,8 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "status": "failed",
                 "message": message,
             }
+        finally:
+            release_environment()
 
 
 def _built_in_provider_ids() -> set[str]:
@@ -3273,6 +3286,10 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             current = (state.get("installations") or {}).get(provider_id)
             if not isinstance(current, dict):
                 return None
+            if current.get("python_path") != row.get("python_path"):
+                # Another repair or an activation moved the installation while
+                # this one was building; theirs stands.
+                return {}
             current["python_path"] = str(python_path)
             if current.pop("needs_repair", None):
                 current["last_error"] = None
@@ -3282,6 +3299,10 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
         repaired = mutate_state(record_repair)
         if repaired is None:
             raise ProviderHubInstallError(f"{provider_id} was removed while it was being repaired")
+        if repaired == {}:
+            release_pins()
+            env_registry.discard_if_unused(provider_hub_dir(), env_path)
+            raise ProviderHubInstallError(f"{provider_id} changed while it was being repaired")
         try:
             from .registry import register_active_provider_classes
 

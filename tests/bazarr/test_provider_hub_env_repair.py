@@ -471,3 +471,71 @@ def test_an_instance_under_construction_while_its_provider_is_replaced_is_not_st
     assert type(result["provider"]) is NewClass
     assert pool.initialized_providers["examplehub"] is result["provider"]
     assert [type(item) for item in terminated] == [OldClass]
+
+
+def test_a_connection_test_does_not_flag_an_installation_a_repair_has_moved(hub, tmp_path, monkeypatch):
+    from provider_hub.service import test_provider_connection
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, old / "bin" / "python")}
+    save_state(state)
+    cleaned = []
+
+    class RepairedMidTest:
+        def __init__(self, command, cwd=None, env=None):
+            pass
+
+        def request(self, op, payload=None, timeout=30):
+            # A repair repoints the installation and a cleanup runs while the test is running.
+            moved = load_state()
+            moved["installations"]["examplehub"]["python_path"] = str(new / "bin" / "python")
+            save_state(moved)
+            cleaned.extend(env_registry.cleanup_environments(hub))
+            raise RuntimeError("the old interpreter is gone")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda _manifest, _path: None)
+    monkeypatch.setattr("provider_hub.service.ProviderWorkerClient", RepairedMidTest)
+
+    result = test_provider_connection("examplehub")
+
+    row = load_state()["installations"]["examplehub"]
+    assert result["ok"] is False
+    # The environment the test ran from was held until it finished.
+    assert cleaned == []
+    # The repaired installation is not marked broken by a result about its old interpreter.
+    assert "needs_repair" not in row
+    assert row["last_error"] is None
+    assert env_registry.cleanup_environments(hub) == [str(old)]
+
+
+def test_a_repair_that_finds_the_installation_moved_discards_its_environment(hub, tmp_path, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, repair_installation_environment
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    old = _env(hub / "shared_envs" / "old")
+    other = _env(hub / "shared_envs" / "other")
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, old / "bin" / "python")}
+    save_state(state)
+    _patch_environment(monkeypatch)
+
+    def probe(manifest, bundle_path, python_path):
+        moved = load_state()
+        moved["installations"]["examplehub"]["python_path"] = str(other / "bin" / "python")
+        save_state(moved)
+
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", probe)
+
+    with pytest.raises(ProviderHubInstallError, match="changed"):
+        repair_installation_environment("examplehub")
+
+    assert load_state()["installations"]["examplehub"]["python_path"] == str(other / "bin" / "python")
+    assert not (hub / "shared_envs" / "rebuilt").exists()
