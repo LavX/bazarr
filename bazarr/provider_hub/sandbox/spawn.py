@@ -117,6 +117,11 @@ class SandboxProbe:
 
 def sandbox_limitations(probe: SandboxProbe) -> list[str]:
     """Plain statements of what the sandbox does not cover on this host."""
+    if not landlock.is_supported_platform():
+        return [
+            "Workers run with a clean environment, but this platform applies no resource limits "
+            "and nothing confines their files, network or signals."
+        ]
     if not probe.enforced:
         return [
             "Workers run with resource limits and a clean environment, but nothing confines "
@@ -380,23 +385,33 @@ class WorkerProcess(subprocess.Popen):
         return None
 
     def stop(self, grace: float = 3.0) -> None:
-        """Terminate the worker, then kill its process group after ``grace``."""
+        """Terminate the worker, then kill its whole process group.
+
+        The group is always cleaned up, not only when the worker ignores
+        SIGTERM: a worker that exits at once can leave children behind in the
+        group it started. The group id is the worker's pid, and the kernel does
+        not hand that pid out again while any process still belongs to the
+        group, so the kill cannot reach an unrelated process.
+        """
         if self.poll() is None:
             try:
                 self.terminate()
             except OSError:
                 pass
+            timed_out = False
             try:
                 self.wait(timeout=grace)
             except subprocess.TimeoutExpired:
-                killpg = getattr(os, "killpg", None)
-                try:
-                    if killpg is not None:
-                        killpg(self.pid, signal.SIGKILL)
-                    else:
-                        self.kill()
-                except OSError:
-                    pass
+                timed_out = True
+            killpg = getattr(os, "killpg", None)
+            try:
+                if killpg is not None:
+                    killpg(self.pid, signal.SIGKILL)
+                elif timed_out:
+                    self.kill()
+            except OSError:
+                pass
+            if timed_out:
                 try:
                     self.wait(timeout=5)
                 except subprocess.TimeoutExpired:

@@ -1940,6 +1940,45 @@ def test_the_fallback_process_answers_the_same_calls(tmp_path, monkeypatch):
         spawn_worker(spec, probe=DECLARED, require_sandbox=True)
 
 
+def test_the_fallback_stop_kills_children_of_a_worker_that_exits_on_sigterm(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    spec = make_spec(
+        tmp_path,
+        """
+        import signal, subprocess, sys, time
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        open("child.pid", "w").write(str(child.pid))
+        signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+        time.sleep(300)
+        """,
+    )
+    process = spawn_worker(spec, probe=DECLARED)
+    child = read_pid(tmp_path / "rw" / "child.pid")
+    assert alive(child)
+    process.stop(5.0)
+    assert process.poll() == 0
+    assert wait_dead(child), "a child outlived a worker that left promptly"
+
+
+def test_status_does_not_claim_resource_limits_where_none_are_applied(tmp_path, monkeypatch):
+    assert "with resource limits" in " ".join(sandbox_status(DECLARED)["limitations"])
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    notes = " ".join(sandbox_status(DECLARED)["limitations"])
+    assert "no resource limits" in notes and "with resource limits" not in notes
+    # The path itself applies none: the worker keeps the host's own limit.
+    import resource
+
+    spec = make_spec(
+        tmp_path,
+        "import resource; print(resource.getrlimit(resource.RLIMIT_NOFILE)[0])",
+        limits=Limits(nofile=64),
+    )
+    process = spawn_worker(spec, probe=DECLARED)
+    out, err = process.communicate(timeout=30)
+    assert process.returncode == 0, err
+    assert int(out) == resource.getrlimit(resource.RLIMIT_NOFILE)[0] != 64
+
+
 def test_the_fallback_process_can_be_stopped(tmp_path, monkeypatch):
     monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
     process = spawn_worker(make_spec(tmp_path, "import time; time.sleep(300)"), probe=DECLARED)
