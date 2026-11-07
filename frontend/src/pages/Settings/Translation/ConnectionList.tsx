@@ -33,7 +33,10 @@ const connectionName = (
 const ConnectionList: FunctionComponent<{ engine: TranslationEngine }> = ({
   engine,
 }) => {
-  const [editing, setEditing] = useState<TranslationConnection | null>(null);
+  // The editor follows the connection by id, so it always holds the current revision.
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const editing =
+    engine.connections.find((item) => item.id === editingId) ?? null;
   const [adding, setAdding] = useState(false);
   const [confirming, setConfirming] = useState<number | null>(null);
   const [problem, setProblem] = useState("");
@@ -85,7 +88,10 @@ const ConnectionList: FunctionComponent<{ engine: TranslationEngine }> = ({
                   update.mutate(
                     {
                       id: item.id,
-                      body: { enabled: event.currentTarget.checked },
+                      body: {
+                        enabled: event.currentTarget.checked,
+                        expected_revision: item.revision,
+                      },
                     },
                     { onError: note },
                   )
@@ -94,7 +100,7 @@ const ConnectionList: FunctionComponent<{ engine: TranslationEngine }> = ({
               <Button
                 size="compact-sm"
                 variant="default"
-                onClick={() => setEditing(item)}
+                onClick={() => setEditingId(item.id)}
               >
                 Edit
               </Button>
@@ -139,7 +145,7 @@ const ConnectionList: FunctionComponent<{ engine: TranslationEngine }> = ({
           connection={editing}
           onClose={() => {
             setAdding(false);
-            setEditing(null);
+            setEditingId(null);
           }}
         />
       )}

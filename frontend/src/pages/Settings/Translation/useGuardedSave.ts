@@ -13,11 +13,13 @@ export function useGuardedSave(send: (accepted: string[]) => Promise<unknown>) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState("");
   const [asking, setAsking] = useState<string[]>([]);
+  const [stale, setStale] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const attempt = async (accepted: string[]): Promise<boolean> => {
     setBusy(true);
     setMessage("");
+    setStale(false);
     setFieldErrors({});
     try {
       await send(accepted);
@@ -31,6 +33,7 @@ export function useGuardedSave(send: (accepted: string[]) => Promise<unknown>) {
         setAsking([]);
         setFieldErrors(refusal.fieldErrors);
         setMessage(refusal.message);
+        setStale(refusal.code === "stale_revision");
       } else {
         setAsking([]);
         setMessage("The request failed. Try again.");
@@ -44,6 +47,7 @@ export function useGuardedSave(send: (accepted: string[]) => Promise<unknown>) {
   return {
     fieldErrors,
     message,
+    stale,
     asking,
     busy,
     save: () => attempt([]),

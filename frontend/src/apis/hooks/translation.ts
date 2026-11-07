@@ -56,6 +56,17 @@ function useRefresh() {
   return () => client.invalidateQueries({ queryKey: stateKey });
 }
 
+// A save refused because the row moved on: load the new state, so the form
+// holds the current revision and a second try can go through.
+function useRefreshOnStale() {
+  const refresh = useRefresh();
+  return (error: unknown) => {
+    if (readRefusal(error)?.code === "stale_revision") {
+      void refresh();
+    }
+  };
+}
+
 // Every write runs with inline errors: the page shows the refusal next to the
 // form that made it (field errors, a conflict, the consent question), so the
 // shared client's toast would only say it a second time.
@@ -72,10 +83,12 @@ export function usePointersMutation() {
 
 export function useSaveEngine() {
   const refresh = useRefresh();
+  const onStale = useRefreshOnStale();
   return useMutation({
     mutationFn: ({ id, body }: { id: number; body: TranslationSaveBody }) =>
       withInlineErrors(() => api.translation.saveEngine(id, body)),
     onSuccess: refresh,
+    onError: onStale,
   });
 }
 
@@ -98,6 +111,7 @@ export function useCreateConnection() {
 
 export function useUpdateConnection() {
   const refresh = useRefresh();
+  const onStale = useRefreshOnStale();
   return useMutation({
     mutationFn: ({
       id,
@@ -107,6 +121,7 @@ export function useUpdateConnection() {
       body: TranslationConnectionBody;
     }) => withInlineErrors(() => api.translation.updateConnection(id, body)),
     onSuccess: refresh,
+    onError: onStale,
   });
 }
 
@@ -151,6 +166,8 @@ export function useFieldOptions(
       instanceId,
       backendType,
       field,
+      // The draft is part of the key: a new base URL asks again instead of showing the old address's models.
+      JSON.stringify(values),
     ],
     queryFn: () =>
       api.translation.options(instanceId, backendType, field, values),

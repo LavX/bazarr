@@ -24,6 +24,7 @@ const connection = (
   plugin_id: "",
   model: `model-${id}`,
   enabled: true,
+  revision: 1,
   awaiting_secrets: false,
   usable: true,
   settings_version: 1,
@@ -239,7 +240,7 @@ describe("Settings > Translation", () => {
     );
     expect(
       await screen.findByText(
-        "The engine settings changed since they were loaded.",
+        /The engine settings changed since they were loaded\./,
       ),
     ).toBeVisible();
   });
@@ -295,7 +296,7 @@ describe("Settings > Translation", () => {
     expect(calls[0]).toEqual({
       method: "patch",
       path: "connection 1",
-      body: { enabled: false },
+      body: { enabled: false, expected_revision: 1 },
     });
     const row = screen
       .getAllByRole("listitem")
@@ -429,5 +430,120 @@ describe("Settings > Translation", () => {
     expect(
       await screen.findByText("The translation settings could not be loaded."),
     ).toBeVisible();
+  });
+
+  it("keeps what was typed after a conflict, loads the new revision, and the next save goes through", async () => {
+    let revision = 3;
+    const sent: Array<{ expected_revision?: number }> = [];
+    server.use(
+      http.get("/api/translation/state", () =>
+        HttpResponse.json({
+          ...state,
+          instances: [second, engine({ revision })],
+        }),
+      ),
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        const body = (await request.json()) as { expected_revision?: number };
+        sent.push(body);
+        if (body.expected_revision !== revision) {
+          return HttpResponse.json(
+            {
+              error: "stale_revision",
+              message: "The engine settings changed since they were loaded.",
+              revision,
+            },
+            { status: 409 },
+          );
+        }
+        revision += 1;
+        return HttpResponse.json({
+          engine: engine({ revision }),
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    revision = 7; // someone else saved
+    const credit = screen.getByLabelText("Credit line");
+    await user.clear(credit);
+    await user.type(credit, "Mine");
+    await user.click(
+      screen.getByRole("button", { name: "Save engine settings" }),
+    );
+    expect(
+      await screen.findByText(/changed since they were loaded/),
+    ).toBeVisible();
+    expect(screen.getByText(/Your changes are kept/)).toBeVisible();
+    expect(screen.getByLabelText("Credit line")).toHaveValue("Mine");
+    await waitFor(() =>
+      expect(screen.queryByText(/Your changes are kept/)).toBeVisible(),
+    );
+    // The state was loaded again, so the form now holds revision 7.
+    await user.click(
+      screen.getByRole("button", { name: "Save engine settings" }),
+    );
+    await waitFor(() => expect(sent.at(-1)?.expected_revision).toBe(7));
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/Your changes are kept/),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("clears a single stored secret on request and says it is pending", async () => {
+    server.use(
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        record("patch", "engine", await request.json());
+        return HttpResponse.json({
+          engine: engine({ revision: 4 }),
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(
+      screen.getByRole("button", { name: "Clear saved Service token" }),
+    );
+    expect(
+      screen.getByPlaceholderText(
+        "The saved value will be removed when you save",
+      ),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Save engine settings" }),
+    );
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toMatchObject({ clear_secrets: ["service_token"] });
+  });
+
+  it("asks for the model list again when the address changes", async () => {
+    const asked: Array<{ values: Record<string, unknown> }> = [];
+    server.use(
+      http.post("/api/translation/engines/:id/options", async ({ request }) => {
+        asked.push(
+          (await request.json()) as { values: Record<string, unknown> },
+        );
+        return HttpResponse.json({
+          available: false,
+          items: [],
+          reason: "none",
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    const dialog = await screen.findByRole("dialog", { name: "Edit back end" });
+    await waitFor(() => expect(asked).toHaveLength(1));
+    const url = within(dialog).getByLabelText("Base URL");
+    await user.clear(url);
+    await user.type(url, "http://other:9/v1");
+    await waitFor(() => expect(asked.length).toBeGreaterThan(1));
+    expect(asked.at(-1)?.values).toMatchObject({
+      base_url: "http://other:9/v1",
+    });
+    expect(JSON.stringify(asked)).not.toContain("api_key");
   });
 });

@@ -128,8 +128,8 @@ declare namespace System {
     translation_availability?: System.TranslationAvailability;
     /**
      * Whether the v2 translation runtime is switched on, which is what makes
-     * Settings > Translation exist. Absent on responses from before the field,
-     * and false on an install that has not turned it on.
+     * Settings > Translation exist. Present, and true, only while the runtime is
+     * switched on; absent otherwise and on responses from before the field.
      */
     translation_runtime_v2?: boolean;
     /**

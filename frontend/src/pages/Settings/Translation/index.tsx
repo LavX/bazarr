@@ -153,10 +153,7 @@ const SettingsTranslationView: FunctionComponent = () => {
                 </Alert>
               )}
               {(engine.schema?.fields.length ?? 0) > 0 && (
-                <EngineSettings
-                  key={`${engine.id}-${engine.revision}`}
-                  engine={engine}
-                />
+                <EngineSettings key={engine.id} engine={engine} />
               )}
               {Object.keys(engine.schema?.backend_types ?? {}).length > 0 && (
                 <ConnectionList engine={engine} />

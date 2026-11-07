@@ -5,13 +5,13 @@ import {
   Badge,
   Button,
   Group,
-  Stack,
   Text,
   TextInput,
 } from "@mantine/core";
 import { faPlus, faXmark } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import type { PluginSecretState } from "./types";
+import GroupWrapper from "./GroupWrapper";
+import type { KeyHealth, PluginSecretState } from "./types";
 
 export interface KeyListFieldProps {
   label: string;
@@ -21,12 +21,14 @@ export interface KeyListFieldProps {
   /** What the server says it holds. It never says what the keys are. */
   stored?: PluginSecretState;
   /** Per-key health, by position, when the engine reports it. */
-  health?: Array<{ state: "ok" | "cooling_down" | "failed"; detail?: string }>;
+  health?: KeyHealth[];
   maxItems?: number;
   disabled?: boolean;
   error?: string;
   onChange: (value: string[]) => void;
   onClear?: () => void;
+  /** The saved keys will be removed when the form is saved. */
+  pendingClear?: boolean;
 }
 
 const HEALTH_COLOR = { ok: "green", cooling_down: "yellow", failed: "red" };
@@ -46,6 +48,7 @@ const KeyListField: FunctionComponent<KeyListFieldProps> = ({
   error,
   onChange,
   onClear,
+  pendingClear,
 }) => {
   const [draft, setDraft] = useState("");
   const full = maxItems !== undefined && value.length >= maxItems;
@@ -58,16 +61,13 @@ const KeyListField: FunctionComponent<KeyListFieldProps> = ({
     setDraft("");
   };
   return (
-    <Stack gap={6}>
-      <Text size="sm" fw={500}>
-        {label}
-      </Text>
-      {description && (
-        <Text size="xs" c="dimmed">
-          {description}
-        </Text>
+    <GroupWrapper label={label} description={description} error={error}>
+      {pendingClear && (
+        <Badge color="red" variant="light">
+          Saved keys will be removed when you save
+        </Badge>
       )}
-      {stored?.configured && (
+      {stored?.configured && !pendingClear && (
         <Group gap="xs">
           <Badge color={stored.stale ? "yellow" : "green"} variant="light">
             {stored.stale
@@ -127,7 +127,7 @@ const KeyListField: FunctionComponent<KeyListFieldProps> = ({
           }
           value={draft}
           disabled={disabled || full}
-          error={error}
+          aria-invalid={error ? true : undefined}
           onChange={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") {
@@ -145,7 +145,7 @@ const KeyListField: FunctionComponent<KeyListFieldProps> = ({
           Add
         </Button>
       </Group>
-    </Stack>
+    </GroupWrapper>
   );
 };
 

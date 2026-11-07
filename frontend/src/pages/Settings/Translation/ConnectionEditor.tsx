@@ -1,6 +1,7 @@
 /* eslint-disable camelcase -- transport names. */
 import { FunctionComponent, useMemo, useState } from "react";
 import { Alert, Button, Group, Modal, Select, Stack } from "@mantine/core";
+import { useDebouncedValue } from "@mantine/hooks";
 import {
   useCreateConnection,
   useFieldOptions,
@@ -57,11 +58,13 @@ const ConnectionEditor: FunctionComponent<ConnectionEditorProps> = ({
         .map((field) => [field.key, shown[field.key]]),
     );
   }, [fields, values]);
+  // One request per pause in typing, not one per key.
+  const [settledDraft] = useDebouncedValue(draft, 400);
   const options = useFieldOptions(
     engine.id,
     backendType,
     "model",
-    draft,
+    settledDraft,
     backendType !== "",
   );
 
@@ -70,6 +73,7 @@ const ConnectionEditor: FunctionComponent<ConnectionEditorProps> = ({
       ? update.mutateAsync({
           id: connection.id,
           body: {
+            expected_revision: connection.revision,
             values,
             clear_secrets: cleared,
             accept_destinations: accepted,
@@ -130,6 +134,7 @@ const ConnectionEditor: FunctionComponent<ConnectionEditorProps> = ({
           secrets={connection?.secrets}
           errors={form.fieldErrors}
           disabled={form.busy}
+          pendingClear={cleared}
           optionsFor={(key) =>
             key === "model"
               ? {
@@ -153,6 +158,7 @@ const ConnectionEditor: FunctionComponent<ConnectionEditorProps> = ({
         {form.message && (
           <Alert color="red" role="alert">
             {form.message}
+            {form.stale && " Your changes are kept. Save again to overwrite."}
           </Alert>
         )}
         <Group justify="flex-end">

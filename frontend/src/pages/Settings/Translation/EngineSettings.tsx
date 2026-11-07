@@ -11,7 +11,12 @@ import type { TranslationEngine } from "@/types/translation";
 import ConsentModal from "./ConsentModal";
 import { useGuardedSave } from "./useGuardedSave";
 
-/** The engine's own settings, drawn from its manifest. Connections have their own form. */
+/**
+ * The engine's own settings, drawn from its manifest. Connections have their
+ * own form. The form keeps what was typed when a save is refused, and takes the
+ * current revision from the engine it is given, so after a conflict the user
+ * sees the refusal and a second save goes through.
+ */
 const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
   engine,
 }) => {
@@ -21,8 +26,8 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
   );
   const [cleared, setCleared] = useState<string[]>([]);
   const mutation = useSaveEngine();
-  const form = useGuardedSave((accepted) =>
-    mutation.mutateAsync({
+  const form = useGuardedSave(async (accepted) => {
+    const saved = await mutation.mutateAsync({
       id: engine.id,
       body: {
         expected_revision: engine.revision,
@@ -30,8 +35,12 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
         clear_secrets: cleared,
         accept_destinations: accepted,
       },
-    }),
-  );
+    });
+    // Typed secrets leave the form once they are saved; the rest follows the server.
+    setValues(initialValues(fields, saved.engine.values));
+    setCleared([]);
+    return saved;
+  });
 
   return (
     <Stack>
@@ -41,6 +50,7 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
         secrets={engine.secrets}
         errors={form.fieldErrors}
         disabled={form.busy}
+        pendingClear={cleared}
         onChange={setValues}
         onClearSecret={(key) =>
           setCleared((current) => [...new Set([...current, key])])
@@ -55,6 +65,7 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
       {form.message && (
         <Alert color="red" role="alert">
           {form.message}
+          {form.stale && " Your changes are kept. Save again to overwrite."}
         </Alert>
       )}
       <Group>

@@ -27,6 +27,7 @@ export interface TranslationConnection {
   plugin_id: string;
   model: string;
   enabled: boolean;
+  revision: number;
   awaiting_secrets: boolean;
   usable: boolean;
   settings_version: number | null;
@@ -67,6 +68,7 @@ export interface TranslationNotice {
 
 /** A save: the values to store, secrets among them, and the consent given. */
 export interface TranslationSaveBody {
+  /** The revision the form was loaded with. The server refuses a save without it. */
   expected_revision?: number;
   enabled?: boolean;
   values?: PluginValues;

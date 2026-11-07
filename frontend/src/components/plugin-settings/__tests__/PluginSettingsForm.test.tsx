@@ -293,6 +293,94 @@ describe("the three rich controls", () => {
   });
 });
 
+describe("labels, errors and secrets for the compound controls", () => {
+  it("names each compound control by its label and links its error", () => {
+    customRender(
+      <Harness
+        errors={{
+          preset: "pick one",
+          order: "bad order",
+          api_keys: "too many",
+        }}
+      />,
+    );
+    for (const [name, message] of [
+      ["Preset", "pick one"],
+      ["Order", "bad order"],
+      ["Keys", "too many"],
+    ]) {
+      const group = screen.getByRole(
+        name === "Preset" ? "radiogroup" : "group",
+        { name },
+      );
+      const alert = screen.getByText(message);
+      expect(alert).toHaveAttribute("role", "alert");
+      expect(group.getAttribute("aria-describedby")).toContain(alert.id);
+    }
+  });
+
+  it("clears a single stored secret from the field and shows it pending", async () => {
+    const user = userEvent.setup();
+    const cleared = vi.fn();
+    customRender(
+      <Harness
+        secrets={{ api_key: { configured: true, last4: "WXYZ" } }}
+        onClearSecret={cleared}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Clear saved API key" }),
+    );
+    expect(cleared).toHaveBeenCalledWith("api_key");
+  });
+
+  it("holds a secret list like a key list, with its stored count", () => {
+    customRender(
+      <Harness
+        fields={[
+          { key: "tokens", type: "list", label: "Tokens", secret: true },
+        ]}
+        secrets={{ tokens: { configured: true, count: 3 } }}
+      />,
+    );
+    expect(screen.getByText("3 saved keys")).toBeVisible();
+    expect(screen.getByLabelText("Add to Tokens")).toHaveAttribute(
+      "type",
+      "password",
+    );
+  });
+
+  it("shows per-key health beside a stored key list", () => {
+    customRender(
+      <Harness
+        fields={[{ key: "ks", type: "key_list", label: "Ks", secret: true }]}
+        start={{ ks: ["abcdefghijkl"] }}
+        secrets={{
+          ks: {
+            configured: true,
+            count: 1,
+            health: [{ state: "cooling_down" }],
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText("cooling down")).toBeVisible();
+  });
+
+  it("keeps the fallback note on a model field that has help text", () => {
+    customRender(
+      <Harness
+        fields={[
+          { key: "model", type: "options", label: "Model", help: "Pick one." },
+        ]}
+        options={{ available: false, items: [] }}
+      />,
+    );
+    expect(screen.getByText(/Pick one\./)).toBeVisible();
+    expect(screen.getByText(/could not be fetched/)).toBeVisible();
+  });
+});
+
 describe("field helpers", () => {
   it("applies defaults for display and conditions", () => {
     expect(withDefaults(FIELDS, { batch: 5 })).toEqual(

@@ -70,10 +70,13 @@ const ModelPicker: FunctionComponent<ModelPickerProps> = ({
       <TextInput
         label={label}
         description={
-          description ??
-          (options.loading
-            ? "Loading the model list."
-            : "The model list could not be fetched. Type the model name.")
+          <>
+            {description}
+            {description ? " " : ""}
+            {options.loading
+              ? "Loading the model list."
+              : "The model list could not be fetched. Type the model name."}
+          </>
         }
         placeholder={placeholder}
         value={value}

@@ -19,6 +19,8 @@ export interface PluginSettingsFormProps {
   disabled?: boolean;
   optionsFor?: (key: string) => OptionsState | undefined;
   onClearSecret?: (key: string) => void;
+  /** Secret fields whose stored value will be removed when the form is saved. */
+  pendingClear?: string[];
 }
 
 /**
@@ -35,6 +37,7 @@ const PluginSettingsForm: FunctionComponent<PluginSettingsFormProps> = ({
   disabled,
   optionsFor,
   onClearSecret,
+  pendingClear,
 }) => {
   const shown = withDefaults(fields, values);
   const visible = fields.filter((field) => isVisible(field, shown));
@@ -58,6 +61,7 @@ const PluginSettingsForm: FunctionComponent<PluginSettingsFormProps> = ({
               disabled={disabled}
               options={optionsFor?.(field.key)}
               onClearSecret={onClearSecret}
+              pendingClear={pendingClear?.includes(field.key)}
             />
           ))}
         </Stack>

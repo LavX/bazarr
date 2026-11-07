@@ -1,6 +1,8 @@
 import { FunctionComponent, ReactNode } from "react";
 import {
   Anchor,
+  Button,
+  Group,
   NumberInput,
   PasswordInput,
   SegmentedControl,
@@ -12,6 +14,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import { applyChoice, choiceOf, itemOf } from "./fields";
+import GroupWrapper from "./GroupWrapper";
 import KeyListField from "./KeyListField";
 import ModelPicker from "./ModelPicker";
 import SortableList from "./SortableList";
@@ -35,6 +38,8 @@ export interface FieldRendererProps {
   options?: OptionsState;
   /** Called with a secret field name when the user clears what is stored. */
   onClearSecret?: (key: string) => void;
+  /** The stored value of this secret field will be removed when the form is saved. */
+  pendingClear?: boolean;
 }
 
 // An address on the loopback interface reaches the Bazarr+ container, not the host it runs on.
@@ -92,6 +97,7 @@ const FieldRenderer: FunctionComponent<FieldRendererProps> = ({
   disabled,
   options,
   onClearSecret,
+  pendingClear,
 }) => {
   const label = field.label ?? field.key;
   const description = <Help field={field} />;
@@ -126,25 +132,42 @@ const FieldRenderer: FunctionComponent<FieldRendererProps> = ({
       );
     case "secret":
       return (
-        <PasswordInput
-          label={label}
-          description={description}
-          placeholder={
-            secret?.configured
-              ? secret.stale
-                ? "Enter the key again for this address"
-                : secret.last4
-                  ? `Saved, ending ${secret.last4}. Leave empty to keep it.`
-                  : "Saved. Leave empty to keep it."
-              : field.placeholder
-          }
-          autoComplete="off"
-          value={asString(values[field.key])}
-          required={field.required && !secret?.configured}
-          disabled={disabled}
-          error={error}
-          onChange={(event) => set(event.currentTarget.value)}
-        />
+        <Stack gap={4}>
+          <PasswordInput
+            label={label}
+            description={description}
+            placeholder={
+              pendingClear
+                ? "The saved value will be removed when you save"
+                : secret?.configured
+                  ? secret.stale
+                    ? "Enter the key again for this address"
+                    : secret.last4
+                      ? `Saved, ending ${secret.last4}. Leave empty to keep it.`
+                      : "Saved. Leave empty to keep it."
+                  : field.placeholder
+            }
+            autoComplete="off"
+            value={asString(values[field.key])}
+            required={field.required && !secret?.configured}
+            disabled={disabled}
+            error={error}
+            onChange={(event) => set(event.currentTarget.value)}
+          />
+          {secret?.configured && onClearSecret && !pendingClear && (
+            <Group>
+              <Button
+                size="compact-xs"
+                variant="subtle"
+                color="red"
+                disabled={disabled}
+                onClick={() => onClearSecret(field.key)}
+              >
+                {`Clear saved ${label}`}
+              </Button>
+            </Group>
+          )}
+        </Stack>
       );
     case "number":
     case "integer":
@@ -181,28 +204,19 @@ const FieldRenderer: FunctionComponent<FieldRendererProps> = ({
       }));
       if (data.length <= 4) {
         return (
-          <Stack gap={4}>
-            <Text size="sm" fw={500}>
-              {label}
-            </Text>
+          <GroupWrapper
+            label={label}
+            description={field.help || field.help_url ? description : undefined}
+            error={error}
+            role="radiogroup"
+          >
             <SegmentedControl
               data={data}
               value={asString(current)}
               disabled={disabled}
-              aria-label={label}
               onChange={(next) => onChange(applyChoice(field, next, values))}
             />
-            {field.help && (
-              <Text size="xs" c="dimmed">
-                {description}
-              </Text>
-            )}
-            {error && (
-              <Text size="xs" c="red">
-                {error}
-              </Text>
-            )}
-          </Stack>
+          </GroupWrapper>
         );
       }
       return (
@@ -247,14 +261,34 @@ const FieldRenderer: FunctionComponent<FieldRendererProps> = ({
           description={field.help}
           value={asList(values[field.key])}
           stored={secret}
+          health={secret?.health}
           maxItems={field.max_items}
           disabled={disabled}
           error={error}
+          pendingClear={pendingClear}
           onChange={(next) => set(next)}
-          onClear={() => onClearSecret?.(field.key)}
+          onClear={onClearSecret ? () => onClearSecret(field.key) : undefined}
         />
       );
     case "list":
+      // A list of secrets is held like a key list: write-only, counted, cleared as a whole.
+      if (field.secret === true) {
+        return (
+          <KeyListField
+            label={label}
+            description={field.help}
+            value={asList(values[field.key])}
+            stored={secret}
+            health={secret?.health}
+            maxItems={field.max_items}
+            disabled={disabled}
+            error={error}
+            pendingClear={pendingClear}
+            onChange={(next) => set(next)}
+            onClear={onClearSecret ? () => onClearSecret(field.key) : undefined}
+          />
+        );
+      }
       return (
         <TagsInput
           label={label}
@@ -275,15 +309,11 @@ const FieldRenderer: FunctionComponent<FieldRendererProps> = ({
       const labelOf = (value: string) =>
         known.find((item) => item.value === value)?.label ?? value;
       return (
-        <Stack gap={6}>
-          <Text size="sm" fw={500}>
-            {label}
-          </Text>
-          {field.help && (
-            <Text size="xs" c="dimmed">
-              {description}
-            </Text>
-          )}
+        <GroupWrapper
+          label={label}
+          description={field.help || field.help_url ? description : undefined}
+          error={error}
+        >
           <SortableList
             items={order}
             getId={(value) => value}
@@ -292,12 +322,7 @@ const FieldRenderer: FunctionComponent<FieldRendererProps> = ({
             onReorder={(ids) => set(ids)}
             renderItem={(value) => <Text size="sm">{labelOf(value)}</Text>}
           />
-          {error && (
-            <Text size="xs" c="red">
-              {error}
-            </Text>
-          )}
-        </Stack>
+        </GroupWrapper>
       );
     }
   }

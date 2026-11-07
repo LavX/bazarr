@@ -57,6 +57,11 @@ export interface PluginField {
 
 export type PluginValues = Record<string, PluginValue | undefined>;
 
+export interface KeyHealth {
+  state: "ok" | "cooling_down" | "failed";
+  detail?: string;
+}
+
 /** What the API says about a stored secret. Never its value. */
 export interface PluginSecretState {
   configured: boolean;
@@ -64,6 +69,8 @@ export interface PluginSecretState {
   last4?: string;
   count?: number;
   decrypt_failed?: boolean;
+  /** Per-key health, by position, when the engine reports it. */
+  health?: KeyHealth[];
 }
 
 export type PluginSecrets = Record<string, PluginSecretState>;
