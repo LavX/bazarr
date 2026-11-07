@@ -274,11 +274,16 @@ def validated_bundle_path(root: str | os.PathLike[str], path: str | os.PathLike[
     return _validated_below(root, path, (BUNDLE_DIR,), 2)
 
 
+def _read_nul_separated(path: str) -> list[str]:
+    with open(path, "rb") as handle:
+        return [item.decode("utf-8", "replace") for item in handle.read().split(b"\0") if item]
+
+
 def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/proc") -> bool | None:
     """Whether any other live process runs from, has open, or maps something under ``directory``.
 
-    Looks at each process's executable, working directory, open files and
-    mapped files (Linux ``/proc``). This sees what the worker's process groups
+    Looks at each process's executable, working directory, open files, mapped
+    files, command line and environment (Linux ``/proc``). This sees what the worker's process groups
     cannot: a child that started its own session is in none of them. A process
     that cannot be read but belongs to this user and began after this process
     counts as using it. ``None``
@@ -327,6 +332,17 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
                     fields = line.rstrip("\n").split(None, 5)
                     if len(fields) == 6 and under(fields[5]):
                         return True
+            # A symlinked venv's python is the host's python as far as the files
+            # above go, so look at how it was started as well: the path it was
+            # run by, and the environment it carries.
+            if any(under(argument) for argument in _read_nul_separated(os.path.join(base, "cmdline"))):
+                return True
+            for entry in _read_nul_separated(os.path.join(base, "environ")):
+                key, _, value = entry.partition("=")
+                if key in ("VIRTUAL_ENV", "PYTHONHOME") and under(value):
+                    return True
+                if key in ("PATH", "PYTHONPATH") and any(under(item) for item in value.split(os.pathsep) if item):
+                    return True
         except PermissionError:
             # Unreadable, but ours: it may be something a worker started. Only a
             # process that began after this one can be (the desktop session, the

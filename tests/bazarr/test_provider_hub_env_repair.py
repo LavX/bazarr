@@ -1733,3 +1733,42 @@ def test_a_pooled_worker_starts_only_from_a_bundle_that_matches_its_manifest(hub
 
     assert spawned == []
     assert load_state()["installations"]["examplehub"]["needs_repair"] is True
+
+
+@pytest.mark.parametrize("how", ["run_by_the_venv_path", "venv_only_in_the_environment"])
+def test_cleanup_skips_an_environment_a_detached_venv_python_uses_even_with_nothing_open(hub, tmp_path, how):
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    env = hub / "shared_envs" / "orphan"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(env)], check=True, capture_output=True)
+    save_state(load_state())
+    ready = tmp_path / "ready"
+    script = "import sys, time\nopen(sys.argv[1], 'w').write('up')\ntime.sleep(60)\n"
+    environment = {key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}
+    if how == "run_by_the_venv_path":
+        command = [str(env / "bin" / "python"), "-c", script, str(ready)]
+    else:
+        # The host interpreter, told about the environment only through the variable a venv sets.
+        command = [os.path.realpath(sys.executable), "-c", script, str(ready)]
+        environment["VIRTUAL_ENV"] = str(env)
+    child = subprocess.Popen(command, start_new_session=True, cwd=str(tmp_path), env=environment)
+    try:
+        deadline = time.monotonic() + 15
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert ready.exists()
+
+        # It has no file of the environment open, runs the host's python binary and sits elsewhere.
+        assert env_registry.cleanup_environments(hub) == []
+        assert env.exists()
+
+        child.send_signal(signal.SIGKILL)
+        child.wait(10)
+        assert env_registry.cleanup_environments(hub) == [str(env)]
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(10)
