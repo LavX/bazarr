@@ -25,6 +25,8 @@ ORIGIN_BUNDLED = "bundled"
 # The trust reason of an official source whose catalog came from that snapshot.
 RELEASE_FLOOR_TRUST_REASON = "release floor"
 _STATE_LOCK = threading.RLock()
+# The mutate_state call this thread is inside, as the document it is editing.
+_ACTIVE = threading.local()
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,14 @@ def _default_state_file() -> Path:
 
 
 def state_file() -> Path:
+    """Where state.json lives.
+
+    The state itself is in the database. The file is what an upgrade imports
+    once, then a copy refreshed after every commit: settings load reads it
+    before the database is open, and an older build finds it after a
+    downgrade. ``BAZARR_PROVIDER_HUB_STATE`` points the whole state API at a
+    plain file instead, for tests and tooling.
+    """
     override = os.environ.get("BAZARR_PROVIDER_HUB_STATE")
     if override:
         return Path(override)
@@ -140,15 +150,16 @@ def state_write_lock():
         yield
 
 
-# Bumped by every successful state write, so caches derived from state.json
+# Bumped by every successful state write, so caches derived from the state
 # (the decrypt-blocked provider set in the Hub service) can key on it and be
 # invalidated by mutate_state deterministically, even where the filesystem's
-# mtime granularity would leave a rewritten file looking unchanged.
+# mtime granularity would leave a rewritten file looking unchanged. The
+# database is written by this process only, so the counter covers it too.
 _STATE_VERSION = 0
 
 
 def state_version() -> int:
-    """How many times state.json has been written by this process."""
+    """How many times the state has been written by this process."""
     return _STATE_VERSION
 
 
@@ -196,6 +207,87 @@ def _unreadable(current: Path, reason: str) -> StateCorruptError:
     return StateCorruptError(f"the Provider Hub state document is unreadable ({reason})")
 
 
+class StateNotReadyError(RuntimeError):
+    """The database is held back and the state cannot be written yet."""
+
+
+_DATABASE_HELD = False
+
+
+def hold_database() -> None:
+    """Keep the state off the database until ``release_database``.
+
+    Settings load before the database can be opened: the database password is
+    itself one of the stored credentials, and it is decrypted only at the end
+    of that step, which needs the plugin credential paths read from the state.
+    While held, reads answer from the last copy written to state.json (every
+    commit refreshes it) and writes are refused.
+    """
+    global _DATABASE_HELD
+    _DATABASE_HELD = True
+
+
+def release_database() -> None:
+    global _DATABASE_HELD
+    _DATABASE_HELD = False
+
+
+def database_held() -> bool:
+    return _DATABASE_HELD and not _uses_file(None)
+
+
+def _snapshot_state(*, strict: bool) -> dict[str, Any]:
+    current = state_file()
+    if not current.exists():
+        return default_state()
+    with current.open("r", encoding="utf-8") as handle:
+        return _parse_document(handle.read(), strict=strict)
+
+
+def _write_snapshot(data: dict[str, Any]) -> None:
+    """Refresh state.json from the committed state, best effort.
+
+    The file is the copy settings load reads before the database is open, and
+    the one an older build finds after a downgrade. The database is the state:
+    a failure here is logged and the write that was just committed stands.
+    """
+    try:
+        write_state_file(data, state_file())
+    except Exception as error:
+        logger.warning("Could not refresh the Provider Hub state file: %s", type(error).__name__)
+
+
+def write_state_file(data: dict[str, Any], current: Path) -> None:
+    current.parent.mkdir(parents=True, exist_ok=True)
+    tmp = current.with_suffix(current.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+    os.replace(tmp, current)
+
+
+def _uses_file(path: str | os.PathLike[str] | None) -> bool:
+    """Whether this call reads and writes a file rather than the database.
+
+    An explicit path always does. The environment override does too: it is
+    how tests and tooling point the state at a file of their own.
+    """
+    return path is not None or bool(os.environ.get("BAZARR_PROVIDER_HUB_STATE"))
+
+
+def _bump_version() -> None:
+    global _STATE_VERSION
+    _STATE_VERSION += 1
+
+
+def _parse_document(text: str, *, strict: bool) -> dict[str, Any]:
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        if strict:
+            raise ValueError("the Provider Hub state document is not an object")
+        return default_state()
+    return _normalized_state(data)
+
+
 def mutate_state(
     mutator: Callable[[dict[str, Any]], Any],
     path: str | os.PathLike[str] | None = None,
@@ -213,17 +305,43 @@ def mutate_state(
     operator action, not for any routine writer.
     """
     with state_write_lock():
-        current = Path(path) if path is not None else state_file()
-        try:
-            data = _read_document(current)
-        except StateCorruptError:
-            if not recover_corrupt:
-                raise
-            data = default_state()
-        else:
-            data = default_state() if data is None else _normalized_state(data)
-        result = mutator(data)
-        save_state(data, path)
+        if _uses_file(path):
+            current = Path(path) if path is not None else state_file()
+            try:
+                data = _read_document(current)
+            except StateCorruptError:
+                if not recover_corrupt:
+                    raise
+                data = default_state()
+            else:
+                data = default_state() if data is None else _normalized_state(data)
+            result = mutator(data)
+            save_state(data, path)
+            return result
+        if _DATABASE_HELD:
+            raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
+        nested = getattr(_ACTIVE, "data", None)
+        if nested is not None:
+            # A mutator that calls mutate_state edits the document the outer
+            # call is already holding and commits with it. A second write
+            # would only make the outer one lose its revision.
+            return mutator(nested)
+        from . import state_store
+
+        def step(text: str) -> tuple[str, Any]:
+            data = _parse_document(text, strict=False)
+            _ACTIVE.data = data
+            try:
+                result = mutator(data)
+            finally:
+                _ACTIVE.data = None
+            written.append(data)
+            return json.dumps(data, sort_keys=True), result
+
+        written: list[dict[str, Any]] = []
+        result = state_store.update_document(step)
+        _bump_version()
+        _write_snapshot(written[-1])
         return result
 
 
@@ -259,20 +377,65 @@ def mutate_state_checked(
     nothing: ``load_state`` would have turned any of them into an empty default.
     """
     with state_write_lock():
-        data = read_state_document(path)
-        validate(data)
-        data = _normalized_state(data)
-        result = mutator(data)
-        save_state(data, path)
+        if _uses_file(path):
+            data = read_state_document(path)
+            validate(data)
+            data = _normalized_state(data)
+            result = mutator(data)
+            save_state(data, path)
+            return result
+        if _DATABASE_HELD:
+            raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
+        from . import state_store
+
+        def step(text: str) -> tuple[str, Any]:
+            data = _stored_document(text)
+            validate(data)
+            data = _normalized_state(data)
+            result = mutator(data)
+            written.append(data)
+            return json.dumps(data, sort_keys=True), result
+
+        written: list[dict[str, Any]] = []
+        result = state_store.update_document(step)
+        _bump_version()
+        _write_snapshot(written[-1])
         return result
+
+
+def _stored_document(text: str) -> dict[str, Any]:
+    """The database document as stored, or an error: never a default."""
+    try:
+        data = json.loads(text)
+    except ValueError as error:
+        raise StateCorruptError("the Provider Hub state document is unreadable (not valid JSON)") from error
+    if not isinstance(data, dict):
+        raise StateCorruptError("the Provider Hub state document is unreadable (the root is not an object)")
+    if not data:
+        # A hub that never wrote a state: the import stores an empty object.
+        raise FileNotFoundError("the Provider Hub state has not been written yet")
+    if not isinstance(data.get("installations"), dict):
+        raise StateCorruptError(
+            "the Provider Hub state document is unreadable (the installation inventory is missing or not an object)"
+        )
+    return data
 
 
 def read_state_document(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     """The stored document as it is, or an error: never a default.
 
-    Raises ``FileNotFoundError`` when the file is missing and ``StateCorruptError``
-    (after keeping a copy) when it is not JSON or its root is not an object.
+    Raises ``FileNotFoundError`` when nothing was stored yet and ``StateCorruptError``
+    (after keeping a copy of a damaged file) when it is not JSON or its root is
+    not an object.
     """
+    if not _uses_file(path):
+        if _DATABASE_HELD:
+            current = state_file()
+            if not current.exists():
+                raise FileNotFoundError(str(current))
+            return _stored_document(current.read_text(encoding="utf-8"))
+        from . import state_store
+        return _stored_document(state_store.read_document()[1])
     current = Path(path) if path is not None else state_file()
     data = _read_document(current)
     if data is None:
@@ -281,6 +444,11 @@ def read_state_document(path: str | os.PathLike[str] | None = None) -> dict[str,
 
 
 def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    if not _uses_file(path):
+        if _DATABASE_HELD:
+            return _snapshot_state(strict=False)
+        from . import state_store
+        return _parse_document(state_store.read_document()[1], strict=False)
     current = Path(path) if path is not None else state_file()
     if not current.exists():
         return default_state()
@@ -301,6 +469,11 @@ def load_state_strict(path: str | os.PathLike[str] | None = None) -> dict[str, A
     unreadable, not an empty installation inventory, so this reader raises
     and the caller fails closed instead of reading no installations.
     """
+    if not _uses_file(path):
+        if _DATABASE_HELD:
+            return _snapshot_state(strict=True)
+        from . import state_store
+        return _parse_document(state_store.read_document()[1], strict=True)
     current = Path(path) if path is not None else state_file()
     data = _read_document(current)
     return default_state() if data is None else _normalized_state(data)
@@ -365,15 +538,18 @@ def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_state(data: dict[str, Any], path: str | os.PathLike[str] | None = None) -> None:
-    global _STATE_VERSION
     with state_write_lock():
-        current = Path(path) if path is not None else state_file()
-        current.parent.mkdir(parents=True, exist_ok=True)
-        tmp = current.with_suffix(current.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=True)
-        os.replace(tmp, current)
-        _STATE_VERSION += 1
+        if not _uses_file(path):
+            if _DATABASE_HELD:
+                raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
+            from . import state_store
+            document = json.dumps(data, sort_keys=True)
+            state_store.update_document(lambda _stored: (document, None))
+            _bump_version()
+            _write_snapshot(data)
+            return
+        write_state_file(data, Path(path) if path is not None else state_file())
+        _bump_version()
 
 
 def _installation_from_row(provider_id: str, item: dict[str, Any],

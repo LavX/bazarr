@@ -982,7 +982,11 @@ migrate_legacy_plex_encryption(settings)
 # pass: the plaintext detection and the in-place decrypt below have to
 # walk them, or a plugin credential stays in the clear (and one left by a
 # removed plugin never decrypts). Reads state.json directly; the service
-# layer is not up while settings load.
+# layer is not up while settings load. The state lives in the database, which
+# cannot be opened until the credentials below are decrypted (its own password
+# is one of them), so until then the state is read from its state.json copy.
+from provider_hub.state import hold_database, release_database  # noqa: E402
+hold_database()
 try:
     from secret_store.registry import load_plugin_secret_paths
     load_plugin_secret_paths(settings)
@@ -1002,6 +1006,7 @@ except Exception:
 _force_first_save_migration = has_plaintext_secrets_on_disk(settings)
 
 decrypt_settings_in_place(settings)
+release_database()
 
 # A stored API key that will not decrypt is the one failure Bazarr can and
 # must repair itself: the key is Bazarr's own, the SPA sends it on every

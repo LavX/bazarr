@@ -881,12 +881,21 @@ def _historical_config_secret_paths(state) -> set[str]:
     return paths
 
 
+_PENDING_PERSISTED_PATHS: set[str] = set()
+
+
 def _persist_plugin_secret_paths(paths) -> None:
     """Add `paths` to the persisted set in state.json so they survive the
     removal of the plugin that owns them."""
     if not paths:
         return
-    from provider_hub.state import mutate_state
+    from provider_hub.state import database_held, mutate_state
+
+    if database_held():
+        # Settings are still loading and the state cannot be written yet. The
+        # paths are kept and written with the first write after it opens.
+        _PENDING_PERSISTED_PATHS.update(paths)
+        return
 
     def add_paths(state):
         known = _valid_persisted_paths(state.get("plugin_secret_paths"))
@@ -894,6 +903,20 @@ def _persist_plugin_secret_paths(paths) -> None:
             state["plugin_secret_paths"] = sorted(known | set(paths))
 
     mutate_state(add_paths)
+
+
+def _flush_pending_persisted_paths() -> None:
+    """Write the paths the boot loader found while the state was read-only."""
+    if not _PENDING_PERSISTED_PATHS:
+        return
+    pending = set(_PENDING_PERSISTED_PATHS)
+    try:
+        _persist_plugin_secret_paths(pending)
+    except Exception as error:
+        logger.warning("Cannot persist the discovered plugin secret paths: %s",
+                       type(error).__name__)
+        return
+    _PENDING_PERSISTED_PATHS.difference_update(pending)
 
 
 def _encrypted_leftover_keys(settings_obj) -> set[str]:
@@ -982,6 +1005,7 @@ def migrate_installation_config_secrets(state=None) -> None:
     `state` is the state as the boot loader just read it, used to decide
     whether there is anything to migrate before the locked write; None
     loads it fresh."""
+    _flush_pending_persisted_paths()
     try:
         from provider_hub.state import load_state, mutate_state
     except Exception as error:
