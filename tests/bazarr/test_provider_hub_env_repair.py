@@ -1210,3 +1210,89 @@ def test_a_repair_that_lands_between_the_generation_check_and_the_cache_store_st
     assert "examplehub" not in pool.initialized_providers
     assert found["provider"]._retired is True
     assert len(found["drains"]) == 1
+
+
+class _SurvivorsAfterStop:
+    """Makes every worker report processes left in its group until ``emptied`` is set."""
+
+    def __init__(self, monkeypatch):
+        from provider_hub.worker import ProviderWorkerClient
+
+        self.emptied = threading.Event()
+        emptied = self.emptied
+        monkeypatch.setattr(ProviderWorkerClient, "group_gone", lambda client, ceiling=10.0: emptied.is_set())
+
+
+def _exiting_interpreter(path):
+    import sys
+
+    path.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(1)\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_a_failed_probe_keeps_the_environment_while_its_worker_left_survivors(hub, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from provider_hub import service
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    env = _env(hub / "shared_envs" / "built")
+    _exiting_interpreter(env / "bin" / "python")
+    save_state(load_state())
+    survivors = _SurvivorsAfterStop(monkeypatch)
+
+    with pytest.raises(Exception):
+        service._smoke_validate_worker(SimpleNamespace(raw={}), bundle, env / "bin" / "python")
+    # The install that ran the probe gives the environment up, as a failed install does.
+    assert env_registry.discard_if_unused(hub, env) is False
+    assert env_registry.cleanup_environments(hub) == []
+    assert (env / "bin" / "python").exists()
+
+    survivors.emptied.set()
+    deadline = time.monotonic() + 10
+    removed = []
+    while not removed and time.monotonic() < deadline:
+        removed = env_registry.cleanup_environments(hub)
+        time.sleep(0.05)
+    assert removed == [str(env)]
+
+
+def test_a_failed_connection_test_keeps_the_environment_while_its_worker_left_survivors(hub, tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.worker import ProviderWorkerClient
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    _exiting_interpreter(old / "bin" / "python")
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, old / "bin" / "python")}
+    save_state(state)
+    survivors = _SurvivorsAfterStop(monkeypatch)
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda _manifest, _path: None)
+
+    class RepairedMidTest(ProviderWorkerClient):
+        def request(self, *args, **kwargs):
+            # A repair repoints the installation while the test is running.
+            moved = load_state()
+            moved["installations"]["examplehub"]["python_path"] = str(new / "bin" / "python")
+            save_state(moved)
+            return super().request(*args, **kwargs)
+
+    monkeypatch.setattr("provider_hub.service.ProviderWorkerClient", RepairedMidTest)
+
+    result = service.test_provider_connection("examplehub")
+
+    assert result["ok"] is False
+    assert env_registry.cleanup_environments(hub) == []
+    assert (old / "bin" / "python").exists()
+
+    survivors.emptied.set()
+    deadline = time.monotonic() + 10
+    removed = []
+    while not removed and time.monotonic() < deadline:
+        removed = env_registry.cleanup_environments(hub)
+        time.sleep(0.05)
+    assert removed == [str(old)]

@@ -209,6 +209,42 @@ def reap_idle_workers(idle_seconds: float) -> int:
     return reaped
 
 
+def _client_gone(client, budget: float) -> bool:
+    """Whether a client's worker has exited and nothing it started is left, waiting at most ``budget`` seconds."""
+    process = getattr(client, "process", None)
+    if process is None:
+        return True
+    deadline = time.monotonic() + budget
+    while not client._has_exited(process):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return client.group_gone(max(0.0, deadline - time.monotonic()))
+
+
+def release_when_gone(client, release, label: str, budget: float = 3.0) -> bool:
+    """Call ``release`` once the client's worker and its process group are confirmed gone.
+
+    For the environment hold of a temporary client (a probe, a connection test):
+    the hold must outlive a stop that did not end everything. Waits briefly in
+    the caller; if something is still running it logs, keeps the hold, and a
+    daemon thread releases it when the survivors are gone. True when released at
+    once.
+    """
+    if _client_gone(client, budget):
+        release()
+        return True
+    logger.error("Provider Hub: a temporary worker for %s left processes running; its environment stays in place", label)
+
+    def wait_then_release() -> None:
+        while not _client_gone(client, 10.0):
+            time.sleep(0.05)
+        release()
+
+    threading.Thread(target=wait_then_release, name="hub-release-when-gone", daemon=True).start()
+    return False
+
+
 # The real process class, taken at import so a patched ``subprocess.Popen`` does not change
 # which objects are treated as real processes.
 _POPEN = subprocess.Popen

@@ -57,7 +57,7 @@ from .venv import (
     _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, interpreter_inside_hub, pin_scope, python_executable,
     release_pins,
 )
-from .worker import ProviderWorkerClient, worker_command
+from .worker import ProviderWorkerClient, release_when_gone, worker_command
 
 
 class CatalogSourceError(ValueError):
@@ -2160,6 +2160,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 hold_environment(env_registry.env_dir_of(python_path)) if python_path else (lambda: None)
             )
 
+        client = None
         try:
             if not isinstance(manifest_data, dict):
                 raise ProviderHubInstallError("active manifest is missing")
@@ -2231,7 +2232,12 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "message": message,
             }
         finally:
-            release_environment()
+            if client is None:
+                release_environment()
+            else:
+                # Held until the worker and anything it started are gone: a
+                # stop that leaves a survivor keeps the environment in place.
+                release_when_gone(client, release_environment, f"the connection test of {provider_id}")
 
 
 def _built_in_provider_ids() -> set[str]:
@@ -2559,19 +2565,30 @@ def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, A
 def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeout: float = 10.0) -> None:
     _remove_bundle_runtime_artifacts(bundle_path)
     runner = Path(__file__).with_name("worker_runner.py")
-    client = ProviderWorkerClient(
-        worker_command(python_path, runner),
-        cwd=bundle_path,
-        env={
-            "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
-            "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
-        },
-    )
+    # The environment is held for as long as the worker may run, which can be
+    # past this call when the stop leaves something running.
+    release = hold_environment(env_registry.env_dir_of(python_path))
+    client = None
     try:
+        client = ProviderWorkerClient(
+            worker_command(python_path, runner),
+            cwd=bundle_path,
+            env={
+                "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
+                "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
+            },
+        )
         client.request("health", {}, timeout=timeout)
     finally:
-        client.stop()
-        _remove_bundle_runtime_artifacts(bundle_path)
+        try:
+            if client is not None:
+                client.stop()
+        finally:
+            _remove_bundle_runtime_artifacts(bundle_path)
+            if client is None:
+                release()
+            else:
+                release_when_gone(client, release, "a health check")
 
 
 def _catalog_list_field(catalog_list: str | None) -> dict[str, str]:
