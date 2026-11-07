@@ -446,6 +446,66 @@ def test_settling_against_lowered_caps_reports_the_overspend(ledger):
     assert _settle(ledger, "job", "c1", 5.0, limits=lowered).over_budget is True
 
 
+def test_settling_an_old_month_call_with_limits_still_keeps_the_refund_in_the_old_month(session, clock):
+    limits = CostLimits.from_dollars(month_cap=10.0, job_cap=10.0)
+    ledger = UsageLedger(session, clock=clock)
+    ledger.reserve_job_budget("old", limits)
+    assert _call(ledger, "old", "c1", 10.0, limits).admitted
+    clock.moment = datetime(2026, 12, 1)
+    assert ledger.roll_month(limits) == 1
+    assert ledger.reserve_job_budget("new", limits).amount == usd(10.0)
+    result = _settle(ledger, "old", "c1", 1.0, limits=limits)
+    assert result.job_cost == usd(1.0) and result.over_budget is False
+    assert ledger.job_hold("old") == 0
+    assert ledger.month_committed("2026-12") == usd(10.0)
+    assert ledger.month_committed("2026-11") == usd(1.0)
+
+
+def test_a_settlement_counts_itself_when_the_caps_are_checked(ledger):
+    wide = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
+    ledger.reserve_job_budget("job", wide)
+    assert _call(ledger, "job", "c1", 8.0, wide).admitted
+    # The call used 2; with the job cap now 3 the job has 1 left, not the 0 its worst case would leave.
+    result = _settle(ledger, "job", "c1", 2.0, limits=CostLimits.from_dollars(month_cap=100.0, job_cap=3.0))
+    assert result.job_cost == usd(2.0) and result.over_budget is False
+    assert ledger.job_hold("job") == usd(1.0)
+
+
+def test_a_lowered_job_cap_applies_across_the_month_boundary(ledger, clock):
+    ledger.reserve_job_budget("job", CostLimits.from_dollars(month_cap=100.0, job_cap=10.0))
+    clock.moment = datetime(2026, 12, 1)
+    lowered = CostLimits.from_dollars(month_cap=100.0, job_cap=1.0)
+    assert ledger.roll_month(lowered) == 1
+    assert ledger.job_hold("job") == usd(1.0)
+    assert ledger.month_committed("2026-12") == usd(1.0)
+
+
+def test_a_call_after_the_month_changes_meets_the_lowered_job_cap(ledger, clock):
+    ledger.reserve_job_budget("job", CostLimits.from_dollars(month_cap=100.0, job_cap=10.0))
+    clock.moment = datetime(2026, 12, 1)
+    lowered = CostLimits.from_dollars(month_cap=100.0, job_cap=1.0)
+    refused = _call(ledger, "job", "c1", 5.0, lowered)
+    assert not refused.admitted and refused.reason == REFUSED_JOB_BUDGET
+    assert _call(ledger, "job", "c2", 1.0, lowered).admitted
+
+
+def test_asking_again_in_a_new_month_applies_the_lowered_job_cap(ledger, clock):
+    ledger.reserve_job_budget("job", CostLimits.from_dollars(month_cap=100.0, job_cap=10.0))
+    clock.moment = datetime(2026, 12, 1)
+    again = ledger.reserve_job_budget("job", CostLimits.from_dollars(month_cap=100.0, job_cap=2.0))
+    assert (again.month, again.amount) == ("2026-12", usd(2.0))
+
+
+def test_a_cap_set_after_an_uncapped_job_reserved_binds_it_when_it_asks_again_or_settles(ledger):
+    ledger.reserve_job_budget("job", CostLimits())
+    assert _call(ledger, "job", "c1", 4.0, CostLimits()).admitted
+    capped = CostLimits.from_dollars(month_cap=100.0, job_cap=5.0)
+    assert ledger.reserve_job_budget("job", capped).amount == usd(1.0)
+    ledger.reserve_job_budget("other", CostLimits())
+    assert _call(ledger, "other", "c1", 4.0, CostLimits()).admitted
+    assert _settle(ledger, "other", "c1", 4.0, limits=CostLimits.from_dollars(job_cap=2.0)).over_budget is True
+
+
 def test_a_budget_within_the_caps_is_left_alone(ledger):
     limits = CostLimits.from_dollars(month_cap=100.0, job_cap=10.0)
     ledger.reserve_job_budget("job", limits)

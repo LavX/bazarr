@@ -205,8 +205,7 @@ class UsageLedger:
             if row is not None and row.state == BUDGET_ACTIVE:
                 if row.month != month:
                     self._roll_row(row, limits, month, counted, now)
-                else:
-                    self._fit_to_caps(row, limits, month, counted, now)
+                self._fit_to_caps(row, limits, month, counted, now)
                 return JobBudget(RESERVED, self._hold(row, counted), row.month)
 
             allowance, status = self._allowance(job_id, limits, month, counted)
@@ -281,12 +280,15 @@ class UsageLedger:
                 row.model = model
             row.state = CALL_SETTLED
             row.settled_at = now
+            # Every read below reloads rows and sums from the database, and the session does not flush on
+            # its own: write the settlement first, and each adjustment before the next read.
+            self._session.flush()
             self._return_unused_to_the_calls_month(job_id, row.month, unused)
+            self._session.flush()
             if limits is not None:
                 budget = self._budget_row(job_id)
                 if budget is not None and budget.state == BUDGET_ACTIVE:
                     self._fit_to_caps(budget, limits, month_key(now), self._job_counted(job_id), now)
-            self._session.flush()
             self._history.refresh_in_transaction(job_id)
             return Settlement(self._job_counted(job_id), self._over_budget(job_id))
 
@@ -393,7 +395,9 @@ class UsageLedger:
 
     def _roll_row(self, row, limits: CostLimits, month: str, counted: int, now: datetime) -> None:
         if row.budget_micros is not None:
-            unspent = max(0, row.budget_micros - counted)
+            # The carried allowance is held to the job cap that applies now, then to what the new month can cover.
+            budget = row.budget_micros if limits.job_cap is None else min(row.budget_micros, limits.job_cap)
+            unspent = max(0, budget - counted)
             remainder = self._remainder(limits, month)  # the row still sits in the old month, so it is not counted
             grant = unspent if remainder is None else min(unspent, remainder)
             row.budget_micros = counted + grant
@@ -408,7 +412,17 @@ class UsageLedger:
         the month has spent plus what jobs hold, so the hold shrinks by however far the month is over it
         (the other jobs' holds and the spending stay as they are). A budget already inside both is untouched.
         """
-        if row.budget_micros is None or row.month != month:
+        if row.month != month:
+            return
+        if row.budget_micros is None:
+            # A cap set after this job reserved with none: it holds a budget from now on.
+            if limits.month_cap is None and limits.job_cap is None:
+                return
+            allowance, _status = self._allowance(row.job_id, limits, month, counted)
+            budget = counted + (allowance or 0)
+            row.budget_micros = budget if limits.job_cap is None else min(budget, limits.job_cap)
+            row.updated_at = now
+            self._session.flush()
             return
         budget = row.budget_micros
         if limits.job_cap is not None:
