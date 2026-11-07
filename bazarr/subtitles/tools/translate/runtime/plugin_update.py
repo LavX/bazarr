@@ -94,7 +94,10 @@ def _fits(store: TranslatorStore, owner, row, fields) -> bool:
     settings = store.settings_of(row)
     secret_keys = {item["key"] for item in fields if is_secret_field(item)}
     known = _settings_keys(owner[0], fields)
-    moved = [key for key in secret_keys if settings.get(key) not in (None, "", [])]
     remaining = {key: value for key, value in settings.items() if key in known and key not in secret_keys}
-    held = frozenset(store.secret_summary(owner, frozenset())) | frozenset(moved)
-    return not validate_owner(fields, remaining, held, None if owner[0] == INSTANCE else host_of(row)).errors
+    held = frozenset(store.secret_summary(owner, frozenset()))
+    # What the stored secrets hold is checked too, in memory, against the new limits (a key list that is now
+    # too long, a key that is now too long), not just that they are there.
+    contents = store.secret_contents(owner, fields)
+    return not validate_owner(fields, remaining, held, None if owner[0] == INSTANCE else host_of(row),
+                              contents).errors

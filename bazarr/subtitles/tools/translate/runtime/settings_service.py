@@ -349,7 +349,7 @@ class TranslatorSettingsService:
         owner = (INSTANCE, instance.id)
         stored = frozenset(self._store.secret_summary(owner, frozenset()))
         self._validate(schema, self._merged(self._store.settings_of(instance), {}, schema), stored, plugin.plugin_id,
-                       "engine", "")
+                       "engine", "", contents=self._store.secret_contents(owner, schema.fields))
 
     def _save_engine_values(self, instance, plugin, values, clear, payload, expected) -> None:
         schema = self._engine_schema(plugin)
@@ -359,8 +359,9 @@ class TranslatorSettingsService:
         self._check_clear(clear, schema)
         # Every save is checked, one that only clears a secret included: the stored settings, with the values
         # sent laid over them and the secrets that remain after the clear, must still satisfy the manifest.
+        replaced = set(values or {}) | set(clear)
         validated = self._validate(schema, self._merged(before, values or {}, schema), stored, plugin.plugin_id,
-                                   "engine", "")
+                                   "engine", "", contents=self._store.secret_contents(owner, schema.fields, replaced))
         after = validated.settings
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
@@ -441,8 +442,10 @@ class TranslatorSettingsService:
         host = host_of(connection)
         if checked:
             host, plain = self._split_host(values or {}, keep=connection, schema=schema)
-            validated = self._validate(schema, self._merged(before, plain, schema), stored, plugin.plugin_id,
-                                       "connection", connection.backend_type, host=host)
+            validated = self._validate(
+                schema, self._merged(before, plain, schema), stored, plugin.plugin_id, "connection",
+                connection.backend_type, host=host,
+                contents=self._store.secret_contents(owner, schema.fields, set(plain) | set(clear)))
         after = validated.settings if checked else before
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
@@ -613,9 +616,11 @@ class TranslatorSettingsService:
         return host, plain
 
     def _validate(self, schema: DestinationSchema, values: dict[str, Any], stored: frozenset[str], plugin_id: str,
-                  scope: str, backend_type: str, host: Mapping[str, Any] | None = None) -> ValidatedValues:
+                  scope: str, backend_type: str, host: Mapping[str, Any] | None = None,
+                  contents: Mapping[str, Any] | None = None) -> ValidatedValues:
         # A connection is checked together with its host-kept model and prices; an engine is just its fields.
-        validated = validate_owner(schema.fields, values, stored, host)
+        # ``contents`` are the stored secrets that stay as they are, so their content is checked too.
+        validated = validate_owner(schema.fields, values, stored, host, contents)
         errors = dict(validated.errors)
         if not errors and self._validator is not None:
             merged = {**validated.settings, **validated.secrets}

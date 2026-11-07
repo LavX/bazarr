@@ -518,6 +518,28 @@ class TranslatorStore:
                              owner[0], owner[1], row.field)
         return granted
 
+    def secret_contents(self, owner: Owner, fields: Sequence[Mapping[str, Any]],
+                        leave_out: Iterable[str] = ()) -> dict[str, Any]:
+        """The decrypted contents of an owner's stored secrets, decoded the way the field holds them (a list
+        field's JSON list, anything else text), for checking against limits. In memory only: never log it or
+        put it in a response. A secret that will not decrypt is left out. ``leave_out`` names the ones a save is
+        replacing or clearing."""
+        skip = set(leave_out)
+        held = self.secrets_for_request(owner, frozenset())
+        list_fields = {item["key"] for item in fields if item.get("type") in ("key_list", "list", "orderable_list")}
+        contents: dict[str, Any] = {}
+        for name, plain in held.items():
+            if name in skip:
+                continue
+            if name in list_fields:
+                try:
+                    contents[name] = json.loads(plain)
+                except ValueError:
+                    contents[name] = plain  # not a list: the list check will say so
+            else:
+                contents[name] = plain
+        return contents
+
     def secret_summary(self, owner: Owner, destinations: frozenset[str]) -> dict[str, dict[str, Any]]:
         """What the API may say about each stored secret: that it is set, and sometimes its last four characters."""
         from secret_store import decrypt_secret

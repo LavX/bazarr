@@ -48,7 +48,8 @@ def host_of(row) -> dict[str, Any]:
 
 
 def validate_connection(fields: Sequence[Mapping[str, Any]], settings: Mapping[str, Any],
-                        host: Mapping[str, Any], stored_secrets: frozenset[str] = frozenset()) -> ValidatedValues:
+                        host: Mapping[str, Any], stored_secrets: frozenset[str] = frozenset(),
+                        stored_secret_values: Mapping[str, Any] | None = None) -> ValidatedValues:
     """Check a connection's settings and its host-kept model and prices together.
 
     ``settings`` are the values of the fields kept in the settings JSON; ``host`` is the model and prices as they
@@ -56,7 +57,8 @@ def validate_connection(fields: Sequence[Mapping[str, Any]], settings: Mapping[s
     JSON side only; the errors cover both.
     """
     plain_fields = [item for item in fields if item["key"] not in HOST_KEYS]
-    result = validate_values(plain_fields, settings, stored_secrets=stored_secrets, context=host)
+    result = validate_values(plain_fields, settings, stored_secrets=stored_secrets, context=host,
+                             stored_secret_values=stored_secret_values)
     defaults = {item["key"]: item.get("default") for item in plain_fields}
     context = {**defaults, **result.settings}
     checked = validate_values(list(host_definitions(fields).values()), dict(host), context=context)
@@ -67,12 +69,14 @@ def validate_connection(fields: Sequence[Mapping[str, Any]], settings: Mapping[s
 
 def validate_owner(fields: Sequence[Mapping[str, Any]], settings: Mapping[str, Any],
                    stored_secrets: frozenset[str] = frozenset(),
-                   host: Mapping[str, Any] | None = None) -> ValidatedValues:
+                   host: Mapping[str, Any] | None = None,
+                   stored_secret_values: Mapping[str, Any] | None = None) -> ValidatedValues:
     """The one entry point for checking what an engine instance or a connection holds.
 
     ``host`` is the model and prices of a connection; an engine has none. A save, a create, turning something on
     and a plugin update that activates a new release all call this, so they cannot disagree.
     """
     if host is None:
-        return validate_values(fields, settings, stored_secrets=stored_secrets)
-    return validate_connection(fields, settings, host, stored_secrets)
+        return validate_values(fields, settings, stored_secrets=stored_secrets,
+                               stored_secret_values=stored_secret_values)
+    return validate_connection(fields, settings, host, stored_secrets, stored_secret_values)

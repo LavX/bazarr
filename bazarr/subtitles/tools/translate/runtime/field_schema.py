@@ -160,13 +160,17 @@ def _is_empty(value: Any) -> bool:
 def validate_values(fields: Sequence[Mapping[str, Any]], values: Mapping[str, Any], *,
                     stored_secrets: frozenset[str] = frozenset(),
                     extra_keys: frozenset[str] = frozenset(),
-                    context: Mapping[str, Any] | None = None) -> ValidatedValues:
+                    context: Mapping[str, Any] | None = None,
+                    stored_secret_values: Mapping[str, Any] | None = None) -> ValidatedValues:
     """Check ``values`` against ``fields``.
 
     ``stored_secrets`` names the secret fields that already hold a value, so a required secret left
     empty keeps it. ``extra_keys`` are keys the caller owns and has already taken out of ``values``
     (the host-owned model and prices); they are not errors here. ``context`` holds those same values for the
     conditions to read, so a field that shows only for one model sees the model that will be stored.
+    ``stored_secret_values`` are the contents of secrets that stay as they are (decoded, in memory only): a
+    secret that is not being replaced is still checked against the field's present limits, so a limit that
+    was tightened since it was stored is not passed by presence alone. They never reach the result.
     """
     result = ValidatedValues()
     declared = {item["key"]: item for item in fields}
@@ -194,6 +198,11 @@ def validate_values(fields: Sequence[Mapping[str, Any]], values: Mapping[str, An
                 result.secrets[key] = value
             else:
                 result.settings[key] = value
+        elif secret and stored_secret_values and key in stored_secret_values and field_visible(definition, merged):
+            problem = _check_value(definition, stored_secret_values[key])
+            if problem:
+                result.errors[key] = problem
+                continue
         if definition.get("required") is True and field_visible(definition, merged):
             if secret:
                 has = key in result.secrets or key in stored_secrets

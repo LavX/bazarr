@@ -853,6 +853,27 @@ def test_a_stale_toggle_loses_to_a_save_that_lands_after_the_request_began(world
     assert world.store.get_instance(world.instance.id).enabled == 1
 
 
+def test_a_stored_secret_is_checked_against_the_present_limits_unless_the_save_replaces_or_clears_it(world):
+    fields = world.plugins[PLUGIN].manifest["settings"]["backend_types"]["gemini"]["fields"]
+    keys = ["gem-key-one-0123456789", "gem-key-two-0123456789"]  # pragma: allowlist secret
+    created = _new_connection(world, backend_type="gemini", values={"api_keys": keys}).json["connection"]
+    path = f"connections/{created['id']}"
+    for field in fields:
+        if field["key"] == "api_keys":
+            field["max_items"] = 1  # the plugin was updated: a key list may now hold one key
+    # Saving something else keeps the stored keys, which no longer fit: refused, by field, without a value.
+    refused = world.call("patch", path, {"values": {}})
+    assert refused.status_code == 400 and refused.json["field_errors"] == {"api_keys": "must hold at most 1 entries"}
+    assert not any(key in world.last_text for key in keys)
+    # Switching it off is always allowed; switching it on is checked the same way.
+    assert world.call("patch", path, {"enabled": False}).status_code == 200
+    turn_on = world.call("patch", path, {"enabled": True})
+    assert turn_on.status_code == 400 and list(turn_on.json["field_errors"]) == ["api_keys"]
+    # Replacing the keys with a list that fits, or clearing them, is a way out.
+    fixed = world.call("patch", path, {"values": {"api_keys": keys[:1]}})
+    assert fixed.status_code == 200 and fixed.json["connection"]["secrets"]["api_keys"]["count"] == 1
+
+
 def test_a_flag_that_is_not_a_boolean_is_refused(world):
     assert _new_connection(world, enabled="false", values={"api_key": "k"}).status_code == 400
     created = _new_connection(world, values={"api_key": "k"}).json["connection"]

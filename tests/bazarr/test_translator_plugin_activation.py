@@ -231,3 +231,31 @@ def test_a_connection_whose_back_end_type_is_gone_shows_none_of_its_stored_setti
         manifest=_manifest("2.0.0", [{"key": "label", "type": "text"}])))
     view = service.instance_view(store.get_instance(instance.id))
     assert SECRET not in json.dumps(view) and view["connections"][0]["values"].get("token") is None
+
+
+def test_a_release_that_tightens_a_secret_limit_holds_back_the_owners_whose_stored_secret_breaks_it(lifecycle):
+    store = lifecycle.store
+    instance = store.create_instance(PLUGIN, settings={"label": "mine"})
+    many = store.add_connection(instance.id, "openrouter", plugin_id=PLUGIN)
+    long_one = store.add_connection(instance.id, "openrouter", plugin_id=PLUGIN)
+    fine = store.add_connection(instance.id, "openrouter", plugin_id=PLUGIN)
+    keys = ["key-one-0123456789", "key-two-0123456789", "key-three-0123456789"]
+    store.set_secret(("connection", many.id), "keys", json.dumps(keys), destinations=frozenset())
+    store.set_secret(("connection", long_one.id), "token", "t" * 30, destinations=frozenset())
+    store.set_secret(("connection", fine.id), "keys", json.dumps(keys[:1]), destinations=frozenset())
+    store.set_secret(("connection", fine.id), "token", "short", destinations=frozenset())
+    old = [{"key": "keys", "type": "key_list", "secret": True, "max_items": 5},
+           {"key": "token", "type": "secret", "max_length": 50}]
+    new = [{"key": "keys", "type": "key_list", "secret": True, "max_items": 1},
+           {"key": "token", "type": "secret", "max_length": 8}]
+    lifecycle.stage(_manifest("1.0.0", [{"key": "label", "type": "text"}], old),
+                    _manifest("2.0.0", [{"key": "label", "type": "text"}], new))
+    installation = _activate()
+    store._session.expire_all()
+    assert store.get_connection(many.id).enabled == 0 and store.get_connection(many.id).awaiting_secrets == 1
+    assert store.get_connection(long_one.id).enabled == 0
+    assert store.get_connection(fine.id).enabled == 1
+    # Held back as it was: the secrets stay where they are, and nothing about them appears in the message.
+    assert json.loads(store.secrets_for_request(("connection", many.id), frozenset())["keys"]) == keys
+    assert "Settings > Translation" in installation["last_error"]
+    assert not any(value in installation["last_error"] for value in keys + ["t" * 30])

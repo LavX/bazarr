@@ -183,3 +183,16 @@ def test_one_function_checks_a_connection_with_its_model_and_prices():
         "price_output_per_million": "must be at least 0"}
     # The settings side holds only the JSON fields.
     assert validate_connection(fields, {"extra": "x"}, host).settings == {"extra": "x"}
+
+
+def test_a_stored_secret_that_stays_is_checked_against_the_present_limits_but_never_returned():
+    fields = [{"key": "keys", "type": "key_list", "secret": True, "max_items": 1},
+              {"key": "token", "type": "secret", "max_length": 4}]
+    stored = {"keys": ["a-key", "b-key"], "token": "toolong"}
+    result = validate_values(fields, {}, stored_secrets=frozenset(stored), stored_secret_values=stored)
+    assert result.errors == {"keys": "must hold at most 1 entries", "token": "must be at most 4 characters"}
+    assert result.secrets == {} and "a-key" not in repr(result.errors)
+    # A secret the save is replacing is judged by the new value, not the stored one.
+    replaced = validate_values(fields, {"token": "ok"}, stored_secrets=frozenset(stored),
+                               stored_secret_values={"keys": ["a-key"]})
+    assert replaced.errors == {} and replaced.secrets == {"token": "ok"}
