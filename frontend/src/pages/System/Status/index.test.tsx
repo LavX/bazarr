@@ -403,6 +403,47 @@ describe("System Status", () => {
     expect(screen.queryByText(/^Sandboxed/)).toBeNull();
   });
 
+  it("says the sandbox check is still running, then shows the answer when it lands", async () => {
+    const pending: System.SandboxStatus = {
+      abi: 0,
+      enforced: false,
+      workers_sandboxed: false,
+      filesystem: "declared",
+      network: "declared",
+      signal_scope: "declared",
+      capabilities: "declared",
+      label: "Checking the worker sandbox",
+      reason: "",
+      limitations: [],
+      pending: true,
+    };
+    statusWith({ sandbox: pending });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Checking the worker sandbox", undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^Sandboxed/)).toBeNull();
+
+    // The check finishes in the background; the page asks again by itself.
+    statusWith({
+      sandbox: {
+        ...pending,
+        label: "Not sandboxed on this host",
+        reason: "kernel has no Landlock (ENOSYS)",
+        pending: false,
+      },
+    });
+    expect(
+      await screen.findByText("Not sandboxed on this host", undefined, {
+        timeout: 15000,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Checking the worker sandbox")).toBeNull();
+  }, 20000);
+
   it("leaves the sandbox row out when the endpoint does not report one", async () => {
     statusWith({});
     customRender(<SystemStatusView />);

@@ -97,12 +97,14 @@ class SystemStatus(Resource):
         system_status.update({'timezone': timezone})
         system_status.update({'cpu_cores': os.cpu_count()})
 
-        # What confines plugin workers on this host. Answered from the cached
-        # boot probe; a host that cannot answer reports nothing rather than
-        # failing the page. "declared" is never shown as protection.
+        # What confines plugin workers on this host. The probe starts at boot
+        # on its own thread; until it has stored a result this reports a
+        # pending status instead of running it here. A host that cannot answer
+        # reports nothing rather than failing the page. "declared" is never
+        # shown as protection.
         try:
-            from provider_hub.sandbox import sandbox_status
-            system_status.update({'sandbox': sandbox_status()})
+            from provider_hub.sandbox import sandbox_status_nowait
+            system_status.update({'sandbox': sandbox_status_nowait()})
         except Exception:
             logging.debug('BAZARR cannot collect the worker sandbox status')
 

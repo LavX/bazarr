@@ -25,7 +25,9 @@ from .spawn import (
     reset_probe_cache,
     sandbox_limitations,
     sandbox_status,
+    sandbox_status_nowait,
     spawn_worker,
+    start_probe_in_background,
 )
 
 __all__ = [
@@ -46,5 +48,7 @@ __all__ = [
     "reset_probe_cache",
     "sandbox_limitations",
     "sandbox_status",
+    "sandbox_status_nowait",
     "spawn_worker",
+    "start_probe_in_background",
 ]

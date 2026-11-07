@@ -10,6 +10,7 @@ single-threaded interpreter that applies the limits and the ruleset and then
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import signal
@@ -46,7 +47,9 @@ __all__ = [
     "reset_probe_cache",
     "sandbox_limitations",
     "sandbox_status",
+    "sandbox_status_nowait",
     "spawn_worker",
+    "start_probe_in_background",
 ]
 
 
@@ -166,7 +169,37 @@ def sandbox_status(probe: SandboxProbe | None = None) -> dict[str, Any]:
         "label": label,
         "reason": probe.reason,
         "limitations": sandbox_limitations(probe),
+        "pending": False,
     }
+
+
+def sandbox_status_nowait() -> dict[str, Any]:
+    """The status payload from the cached probe, or a pending one, never waiting.
+
+    The probe runs a canary through the real launcher and can take about twenty
+    seconds, so a request handler must not be the one to run it.
+    ``start_probe_in_background`` is called at boot; until it has stored its result this
+    returns a payload marked ``pending`` (and starts the probe if boot did
+    not). The cache is read without taking the probe lock, so a caller never
+    waits behind a running probe.
+    """
+    probe = _probe_cache
+    if probe is None:
+        start_probe_in_background()
+        return {
+            "abi": 0,
+            "enforced": False,
+            "filesystem": "declared",
+            "network": "declared",
+            "signal_scope": "declared",
+            "capabilities": "declared",
+            "workers_sandboxed": False,
+            "label": "Checking the worker sandbox",
+            "reason": "",
+            "limitations": [],
+            "pending": True,
+        }
+    return sandbox_status(probe)
 
 
 _CANARY_SCRIPT = """
@@ -276,6 +309,37 @@ def probe_sandbox(refresh: bool = False, *, python: str | None = None) -> Sandbo
             return _probe_cache
         _probe_cache = _run_probe(python or sys.executable)
         return _probe_cache
+
+
+_probe_thread: threading.Thread | None = None
+_probe_thread_lock = threading.Lock()
+
+
+def _probe_in_background() -> None:
+    global _probe_cache
+    try:
+        probe_sandbox()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("sandbox probe failed: %s", exc)
+        # Store an honest "not enforced" answer so the status stops reading pending.
+        with _probe_lock:
+            if _probe_cache is None:
+                _probe_cache = SandboxProbe(abi=0, verified=False, reason="the sandbox probe failed: %s" % exc)
+
+
+def start_probe_in_background() -> bool:
+    """Measure the host's sandbox on a daemon thread, once. Returns whether it started.
+
+    Called at boot, outside any request. Does nothing when a result is already
+    cached or a probe thread is still running.
+    """
+    global _probe_thread
+    with _probe_thread_lock:
+        if _probe_cache is not None or (_probe_thread is not None and _probe_thread.is_alive()):
+            return False
+        _probe_thread = threading.Thread(target=_probe_in_background, name="sandbox-probe", daemon=True)
+        _probe_thread.start()
+        return True
 
 
 def _run_probe(python: str) -> SandboxProbe:

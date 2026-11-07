@@ -1361,16 +1361,111 @@ def test_the_status_payload_carries_the_sandbox_state(monkeypatch):
     import provider_hub.sandbox as package
     from test_build_stamp import _status_payload
 
-    monkeypatch.setattr(package, "sandbox_status", lambda: sandbox_status(DECLARED))
+    monkeypatch.setattr(package, "sandbox_status_nowait", lambda: sandbox_status(DECLARED))
     data = _status_payload(monkeypatch, {})
     assert data["sandbox"]["label"] == "Not sandboxed on this host"
     assert data["sandbox"]["enforced"] is False
+    assert data["sandbox"]["pending"] is False
 
     def broken():
         raise RuntimeError("probe failed")
 
-    monkeypatch.setattr(package, "sandbox_status", broken)
+    monkeypatch.setattr(package, "sandbox_status_nowait", broken)
     assert "sandbox" not in _status_payload(monkeypatch, {})
+
+
+@pytest.fixture
+def slow_probe(monkeypatch):
+    """A probe that takes as long as the test lets it, with a clean cache around it."""
+    import threading
+
+    gate = threading.Event()
+    calls = []
+
+    def slow(python):
+        calls.append(python)
+        gate.wait(30)
+        return SandboxProbe(abi=0, verified=False, reason="test: slow probe finished")
+
+    spawn.reset_probe_cache()
+    spawn._probe_thread = None
+    monkeypatch.setattr(spawn, "_run_probe", slow)
+    yield gate, calls
+    gate.set()
+    thread = spawn._probe_thread
+    if thread is not None:
+        thread.join(5)
+    spawn._probe_thread = None
+    spawn.reset_probe_cache()
+
+
+def test_the_status_never_runs_the_probe_and_reports_pending_until_it_is_cached(slow_probe):
+    gate, calls = slow_probe
+    assert spawn.start_probe_in_background() is True
+    assert spawn.start_probe_in_background() is False  # one probe at a time
+    deadline = time.monotonic() + 5
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(calls) == 1
+    # The probe now holds its lock for as long as the gate stays shut. A status
+    # request must neither wait for it nor start a second probe.
+    started = time.monotonic()
+    first = spawn.sandbox_status_nowait()
+    second = spawn.sandbox_status_nowait()
+    assert time.monotonic() - started < 1.0
+    assert len(calls) == 1
+    for payload in (first, second):
+        assert payload["pending"] is True
+        assert payload["enforced"] is False
+        assert payload["workers_sandboxed"] is False
+        assert payload["label"] == "Checking the worker sandbox"
+    gate.set()
+    spawn._probe_thread.join(5)
+    done = spawn.sandbox_status_nowait()
+    assert done["pending"] is False
+    assert done["reason"] == "test: slow probe finished"
+    assert spawn.start_probe_in_background() is False  # cached already
+
+
+def test_a_status_request_starts_the_probe_when_boot_did_not(slow_probe):
+    gate, calls = slow_probe
+    started = time.monotonic()
+    assert spawn.sandbox_status_nowait()["pending"] is True
+    assert time.monotonic() - started < 1.0
+    deadline = time.monotonic() + 5
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(calls) == 1
+
+
+def test_the_status_endpoint_answers_while_the_probe_is_still_running(monkeypatch, slow_probe):
+    from test_build_stamp import _status_payload
+
+    gate, calls = slow_probe
+    spawn.start_probe_in_background()
+    started = time.monotonic()
+    data = _status_payload(monkeypatch, {})
+    assert time.monotonic() - started < 2.0
+    assert data["sandbox"]["pending"] is True
+
+
+def test_a_probe_that_raises_is_cached_as_not_enforced(monkeypatch):
+    def boom(python):
+        raise RuntimeError("canary exploded")
+
+    spawn.reset_probe_cache()
+    spawn._probe_thread = None
+    monkeypatch.setattr(spawn, "_run_probe", boom)
+    try:
+        assert spawn.start_probe_in_background() is True
+        spawn._probe_thread.join(5)
+        status = spawn.sandbox_status_nowait()
+        assert status["pending"] is False
+        assert status["enforced"] is False
+        assert "canary exploded" in status["reason"]
+    finally:
+        spawn._probe_thread = None
+        spawn.reset_probe_cache()
 
 
 # --- Metadata filter ---------------------------------------------------------

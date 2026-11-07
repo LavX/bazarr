@@ -165,6 +165,11 @@ declare namespace System {
     label: string;
     reason: string;
     limitations: string[];
+    /**
+     * True while the host's one-time sandbox check is still running. The other
+     * fields then carry placeholders and the label says it is checking.
+     */
+    pending?: boolean;
   }
 
   interface TranslationAvailability {

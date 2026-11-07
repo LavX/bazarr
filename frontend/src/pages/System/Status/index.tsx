@@ -221,10 +221,15 @@ const SystemStatusView: FunctionComponent = () => {
   // could be something new: while a probe is running, and once a cached
   // answer has expired. Between those it waits, because every request in
   // that window returns exactly what the page already shows.
+  const sandboxPending = status?.sandbox?.pending === true;
   const pollDelay = useMemo(() => {
     const soonest = Math.min(...mediaServers.map(mediaServerPollDelay));
-    return Number.isFinite(soonest) ? Math.max(soonest, probePollMs) : null;
-  }, [mediaServers]);
+    if (Number.isFinite(soonest)) {
+      return Math.max(soonest, probePollMs);
+    }
+    // The worker sandbox check runs once, in the background, after boot.
+    return sandboxPending ? probePollMs : null;
+  }, [mediaServers, sandboxPending]);
   const { refetch: refetchStatus } = statusQuery;
   const pollVersions = useCallback(() => {
     if (pollDelay !== null) {

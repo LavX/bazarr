@@ -65,6 +65,14 @@ else:
     fix_languages_profiles_with_duplicate_ids()
     activate_staged_installations()
 
+# Measure what confines plugin workers on this host without holding up boot or
+# the first System > Status request.
+try:
+    from provider_hub.sandbox import start_probe_in_background
+    start_probe_in_background()
+except Exception:
+    logging.exception("BAZARR cannot start the worker sandbox probe")
+
 configure_proxy_func()
 
 get_announcements_to_file(startup=True)
