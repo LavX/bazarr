@@ -581,7 +581,9 @@ class WorkerSession:
         with self._lock:
             request = self._requests.pop(message["id"], None)
         if request is None:
-            logger.debug("%s: result for unknown request %s ignored", self.name, message["id"])
+            # The id is worker-supplied and may echo a secret: name only its type.
+            logger.debug("%s: result for an unknown request ignored (id is %s)",
+                         self.name, type(message["id"]).__name__)
             return
         if request.overflow:
             self._finish(request, error=ResultTooLarge(
@@ -725,15 +727,24 @@ class WorkerSession:
             frames.pack_control(ack)
             return ack
         except HostCallError as error:
+            text = self._describe(error.message)
             return {"t": frames.ACK, "cid": cid, "ok": False,
-                    "error": frames.error_object(self._safe_code(error.code), self._public(error.message),
+                    "error": frames.error_object(self._safe_code(error.code), text,
                                                  retryable=error.retryable)}
         except Exception as error:
             # Logged redacted and without the raw exception, which may carry a secret.
+            text = self._describe(error)
             logger.warning("%s: host call %s failed: %s", self.name, name,
-                           self._redact("%s: %s" % (type(error).__name__, error)))
+                           "%s: %s" % (type(error).__name__, text))
             return {"t": frames.ACK, "cid": cid, "ok": False,
-                    "error": frames.error_object(Codes.HOST_CALL_FAILED, self._public(error))}
+                    "error": frames.error_object(Codes.HOST_CALL_FAILED, text)}
+
+    def _describe(self, value):
+        """Redacted, bounded text for a host-side error, or a fixed phrase if it cannot be formatted."""
+        try:
+            return self._public(value)
+        except Exception:
+            return "host handler failed"
 
     # --------------------------------------------------------------- watchdog
 
@@ -743,14 +754,20 @@ class WorkerSession:
             now = time.monotonic()
             if now - self.last_frame_at > limits.heartbeat_timeout:
                 self._fail(HeartbeatTimeout(
-                    "no frame from the worker for %.1fs" % (now - self.last_frame_at)), kill=True)
-                return
+                    "no frame from the worker for %.1fs" % (now - self.last_frame_at)), kill=True,
+                    still=lambda: time.monotonic() - self.last_frame_at > limits.heartbeat_timeout)
+                if self._closed:
+                    return
+                continue
             started = self._write_started
             if started is not None and now - started > limits.write_timeout:
                 self._fail(SessionError(
                     "worker has not read its input for %.1fs" % (now - started),
-                    code=Codes.WRITE_TIMEOUT), kill=True)
-                return
+                    code=Codes.WRITE_TIMEOUT), kill=True,
+                    still=lambda: self._write_started == started)
+                if self._closed:
+                    return
+                continue
             with self._lock:
                 pending = list(self._requests.values())
             for request in pending:
@@ -766,7 +783,8 @@ class WorkerSession:
                         else:
                             error = RequestCancelled(request.cancel_reason or "cancelled")
                         self._fail(error, kill=True, only=request)
-                        return
+                        if self._closed:
+                            return
                 elif request.deadline is not None and now >= request.deadline:
                     request.timed_out = True
                     self._cancel(request, Codes.TIMEOUT)
@@ -851,15 +869,24 @@ class WorkerSession:
         except Exception:
             logger.debug("event callback failed", exc_info=True)
 
-    def _fail(self, error, kill, only=None):
-        """End the session (or just ``only``'s request) with ``error``.
+    def _fail(self, error, kill, only=None, still=None):
+        """End the session with ``error``; ``only`` names the request that caused it.
 
         Killing the worker is how every unrecoverable case ends: a worker that
         broke the contract, went silent or ignored a cancel cannot be trusted
         to finish the work it holds.
+
+        A watchdog decides on a snapshot, so the condition is checked again here,
+        under the lock: ``only`` must still be registered and unfinished, and
+        ``still`` (when given) must still hold. Otherwise the worker answered in
+        the meantime and nothing is ended.
         """
         with self._lock:
             if self._closed:
+                return
+            if only is not None and (only.done.is_set() or self._requests.get(only.id) is not only):
+                return
+            if still is not None and not still():
                 return
             self._closed = True
             self._failure = error if isinstance(error, SessionError) else _as_session_error(error)

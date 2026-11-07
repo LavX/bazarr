@@ -559,6 +559,34 @@ def test_a_worker_that_ignores_cancel_is_killed_after_the_grace(session):
         session.submit("echo")
 
 
+def test_a_reply_landing_before_the_kill_spares_the_session(make_session):
+    session = make_session()
+    session.start()
+    neighbour = session.submit("sleep", {"seconds": 1.5})
+    stuck = session.submit("sleep", {"seconds": 30, "ignore_cancel": True})
+    time.sleep(0.2)
+    process = session.process
+    real_fail = session._fail
+    interleaved = []
+
+    def fail_after_the_reader_finishes(error, kill, only=None, **kwargs):
+        # The watchdog already saw the request unfinished; the worker's reply
+        # is handled in the gap before the session is ended.
+        if only is not None and not interleaved:
+            interleaved.append(only.id)
+            session._on_result({"t": frames.RES, "id": only.id, "ok": True, "result": {"late": True}})
+        return real_fail(error, kill, only=only, **kwargs)
+
+    session._fail = fail_after_the_reader_finishes
+    stuck.cancel()
+    assert wait_until(lambda: interleaved)
+    assert stuck.wait(5).result == {"late": True}
+    time.sleep(0.3)
+    assert session.alive
+    assert process.poll() is None
+    assert neighbour.wait(5).result == {"slept": 1.5}
+
+
 def test_cancelling_a_finished_request_is_a_no_op(session):
     handle = session.submit("echo")
     handle.wait(5)
@@ -1026,6 +1054,22 @@ def test_fake_reports_partial_usage_on_cancel(make_session):
     assert 0 < log[-1][1]["units"] < 8
 
 
+def test_fake_reports_partial_usage_when_a_checkpoint_is_refused(make_session):
+    log, calls = recording_calls()
+
+    def refuse(call):
+        log.append(("checkpoint", dict(call.params)))
+        raise HostCallError("store_full", "no room for the checkpoint")
+
+    calls["checkpoint"] = refuse
+    session = make_session(host_calls=calls)
+    session.start()
+    with pytest.raises(RequestFailed):
+        session.request("translate", {"lines": list("abcd"), "batch": 2, "usage_on_failure": True}, timeout=10)
+    assert names(log) == ["reserve", "checkpoint", "usage"]
+    assert log[-1] == ("usage", {"units": 2, "target": "xx", "partial": True})
+
+
 def test_fake_script_gives_each_attempt_its_own_outcome(make_session):
     log, calls = recording_calls()
     script = [
@@ -1204,6 +1248,44 @@ def test_error_text_is_bounded_after_scrubbing(session):
         session.request("raise", {"message": "m" * 1_000_000}, timeout=5)
     assert len(str(caught.value)) <= 4096
     assert len(caught.value.traceback) <= 8000
+
+
+def test_a_host_handler_error_that_cannot_be_formatted_still_gets_an_ack(make_session):
+    class Unprintable(Exception):
+        def __str__(self):
+            raise RuntimeError("no text for this one")
+
+    def broken(call):
+        raise Unprintable()
+
+    session = make_session(host_calls={"broken": broken, "good": lambda call: {"ok": 1}})
+    session.start()
+    with pytest.raises(RequestFailed) as caught:
+        session.request("call", {"name": "broken"}, timeout=5)
+    assert caught.value.code == frames.Codes.HOST_CALL_FAILED
+    assert "host handler failed" in str(caught.value)
+    assert session.request("call", {"name": "good"}, timeout=5).result["ack"] == {"ok": 1}
+    assert wait_until(lambda: not session._call_queues and session._call_pending == 0)
+
+
+def test_an_unknown_result_id_is_not_written_to_the_log(tmp_path, caplog):
+    secret_id = 4815162342
+    body = with_reader("""
+    rid = next_request()
+    out.write_control({"t": "res", "id": %d, "ok": True, "result": {}})
+    out.write_control({"t": "res", "id": rid, "ok": True, "result": {"done": True}})
+    time.sleep(30)
+    """ % secret_id)
+    session = hostile_session(tmp_path, body)
+    caplog.set_level("DEBUG", logger="provider_hub.runtime.session")
+    try:
+        session.start()
+        assert session.submit("x").wait(8).result == {"done": True}
+    finally:
+        session.close(grace=0.3)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("unknown request" in m for m in messages)
+    assert not any(str(secret_id) in m for m in messages)
 
 
 def test_an_unprintable_error_still_gets_a_terminal_reply(session):

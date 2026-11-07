@@ -150,7 +150,7 @@ def _translate(operation, params):
             failure = knobs.get("fail")
             if failure and number == int(knobs.get("fail_at_batch", 1)):
                 _raise_scripted(failure)
-    except (worker_channel.OperationCancelled, worker_channel.OperationError):
+    except (worker_channel.OperationCancelled, worker_channel.OperationError, worker_channel.HostCallFailed):
         if knobs.get("usage_on_failure"):
             report_usage()
         raise
