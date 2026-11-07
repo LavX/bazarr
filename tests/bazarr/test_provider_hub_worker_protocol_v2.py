@@ -2401,3 +2401,382 @@ def test_the_hello_description_is_bounded(tmp_path):
         assert len(welcome.worker["list"]) <= session_module._ITEM_LIMIT
     finally:
         session.close(grace=0.3)
+
+
+# ------------------------------- escaped secrets and exits that skip an exception clause
+
+ESCAPED_SECRETS = [
+    pytest.param("pa\\ss\\\\wd-9", id="backslash"),
+    pytest.param("pa\tss\twd-9", id="tab"),
+    pytest.param("pass'word\"-9", id="quotes"),
+    pytest.param("pässwörd✓-9", id="non-ascii"),
+    pytest.param("p/a?s=s&w+d#-9 %x", id="url-reserved"),
+    pytest.param("first-line-9\nsecond-line-9", id="newline"),
+]
+
+
+def spellings(secret):
+    """How an error text may spell a secret, worked out here and not by the code under test."""
+    import urllib.parse
+
+    return {
+        secret,
+        repr(secret)[1:-1],
+        ascii(secret)[1:-1],
+        json.dumps(secret)[1:-1],
+        json.dumps(secret, ensure_ascii=False)[1:-1],
+        urllib.parse.quote(secret, safe=""),
+        urllib.parse.quote_plus(secret),
+    }
+
+
+def spelled_in(secret, texts):
+    return sorted(form for form in spellings(secret) if form and any(form in text for text in texts))
+
+
+def raisers(secret):
+    import urllib.parse
+
+    return {
+        "keyerror": lambda: KeyError(secret),
+        "repr": lambda: ValueError(repr(secret)),
+        "fstring": lambda: ValueError(f"cannot use {secret!r} here"),
+        "ascii": lambda: ValueError(ascii(secret)),
+        "json": lambda: ValueError(json.dumps({"key": secret})),
+        "url": lambda: ValueError("GET /x?k=" + urllib.parse.quote(secret, safe="") + " failed"),
+        "url-plus": lambda: ValueError("GET /x?k=" + urllib.parse.quote_plus(secret) + " failed"),
+    }
+
+
+@pytest.mark.parametrize("secret", ESCAPED_SECRETS)
+@pytest.mark.parametrize("how", sorted(raisers("x")))
+def test_a_worker_error_reply_hides_every_escaped_spelling_of_a_secret(secret, how):
+    def handler(operation):
+        raise raisers(operation.secrets["key"])[how]()
+
+    harness = ChannelHarness(handler)
+    harness.start()
+    try:
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}, "secrets": {"key": secret}})
+        assert wait_until(lambda: any(m["t"] == "res" for m in harness.messages))
+        error = next(m for m in harness.messages if m["t"] == "res")["error"]
+        assert error["code"] == frames.Codes.PLUGIN_ERROR
+        texts = [error["message"], error.get("traceback", ""), error.get("class_name", "")]
+        assert spelled_in(secret, texts) == []
+    finally:
+        harness.finish()
+
+
+@pytest.mark.parametrize("secret", ESCAPED_SECRETS)
+def test_a_secret_spelled_out_in_a_worker_error_reply_is_cut_before_the_limit(secret):
+    def handler(operation):
+        raise KeyError(operation.secrets["key"] + "B" * 5000)
+
+    harness = ChannelHarness(handler)
+    harness.start()
+    try:
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}, "secrets": {"key": secret}})
+        assert wait_until(lambda: any(m["t"] == "res" for m in harness.messages))
+        error = next(m for m in harness.messages if m["t"] == "res")["error"]
+        assert len(error["message"]) <= 4096
+        assert spelled_in(secret, [error["message"], error["traceback"]]) == []
+    finally:
+        harness.finish()
+
+
+def escaped_error_script(secret):
+    return with_reader("""
+    import json, urllib.parse
+    SECRET = %r
+    rid = next_request()
+    spelled = [str(KeyError(SECRET)), repr(SECRET), ascii(SECRET), json.dumps({"k": SECRET}),
+               urllib.parse.quote(SECRET, safe=""), urllib.parse.quote_plus(SECRET)]
+    out.write_control({"t": "res", "id": rid, "ok": False, "error": {
+        "code": "plugin_error", "message": " | ".join(spelled), "class_name": spelled[0],
+        "traceback": "\\n".join(spelled)}})
+    time.sleep(30)
+    """ % secret)
+
+
+@pytest.mark.parametrize("secret", ESCAPED_SECRETS)
+def test_the_host_hides_every_escaped_spelling_of_a_secret_in_a_worker_error(tmp_path, secret):
+    session = hostile_session(tmp_path, escaped_error_script(secret))
+    try:
+        session.start()
+        with pytest.raises(RequestFailed) as caught:
+            session.submit("x", secrets={"key": secret}).wait(8)
+        error = caught.value
+        assert spelled_in(secret, [str(error), error.class_name, error.traceback]) == []
+    finally:
+        session.close(grace=0.3)
+
+
+def test_the_host_hides_an_escaped_secret_in_progress_and_stderr(tmp_path):
+    secret = "pa\\ss\twd'9"
+    body = with_reader("""
+    SECRET = %r
+    rid = next_request()
+    print(repr(SECRET), file=sys.stderr, flush=True)
+    out.write_control({"t": "progress", "id": rid, "message": repr(SECRET), "data": {"k": [ascii(SECRET)]}})
+    out.write_control({"t": "res", "id": rid, "ok": True, "result": {}})
+    time.sleep(30)
+    """ % secret)
+    lines, seen = [], []
+    session = hostile_session(tmp_path, body)
+    session._on_stderr = lines.append
+    try:
+        session.start()
+        session.submit("x", secrets={"key": secret}, on_progress=seen.append).wait(8)
+        assert wait_until(lambda: lines)
+        assert spelled_in(secret, lines + [json.dumps(seen)]) == []
+        # The JSON dump above escapes the backslashes once more; check the raw strings too.
+        assert spelled_in(secret, [seen[0]["message"], seen[0]["data"]["k"][0]]) == []
+    finally:
+        session.close(grace=0.3)
+
+
+def test_secret_forms_keep_a_plain_secret_to_one_entry():
+    assert frames.secret_forms("sk-plain_token.9~") == ["sk-plain_token.9~"]
+
+
+def test_secret_spellings_do_not_count_against_the_distinct_secret_limit(make_session):
+    session = make_session(limits=fast_limits(max_secret_values=3))
+    session.start()
+    session.request("echo", secrets={"a": "pa\\ss\twd'9é/&"}, timeout=5)
+    assert len(session._secret_values) == 1 and len(session._secret_forms) > 1
+    session.request("echo", secrets={"b": "second", "c": "third"}, timeout=5)
+
+
+# A handler that exits the interpreter's way
+
+def op_message(op_id, op="x", **extra):
+    return dict({"t": "req", "id": op_id, "op": op, "params": {}}, **extra)
+
+
+def reply_for(harness, op_id):
+    assert wait_until(lambda: any(m["t"] == "res" and m["id"] == op_id for m in harness.messages))
+    return next(m for m in harness.messages if m["t"] == "res" and m["id"] == op_id)
+
+
+def test_a_handler_that_calls_sys_exit_gets_an_error_reply_and_frees_its_slot():
+    def handler(operation):
+        if operation.id == 1:
+            sys.exit(7)
+        return {"fine": operation.id}
+
+    harness = ChannelHarness(handler, max_in_flight=1)
+    harness.start()
+    try:
+        harness.host_out.write_control(op_message(1))
+        reply = reply_for(harness, 1)
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == frames.Codes.PLUGIN_ERROR
+        assert reply["error"]["class_name"] == "SystemExit"
+        assert wait_until(lambda: not harness.channel._operations and not harness.channel._transmitting)
+        # One slot, and the channel is still serving: the exit ended that request only.
+        harness.host_out.write_control(op_message(2))
+        assert reply_for(harness, 2)["result"] == {"fine": 2}
+        assert harness.thread.is_alive()
+    finally:
+        harness.finish()
+
+
+def test_a_handler_that_raises_a_base_exception_subclass_is_answered():
+    class Stop(BaseException):
+        pass
+
+    def handler(operation):
+        raise Stop("stopping")
+
+    harness = ChannelHarness(handler)
+    harness.start()
+    try:
+        harness.host_out.write_control(op_message(1))
+        reply = reply_for(harness, 1)
+        assert reply["ok"] is False and reply["error"]["class_name"] == "Stop"
+        assert wait_until(lambda: not harness.channel._operations and not harness.channel._transmitting)
+    finally:
+        harness.finish()
+
+
+def test_a_sys_exit_inside_a_streamed_reply_is_answered_and_forgotten(monkeypatch):
+    harness = ChannelHarness(lambda operation: worker_channel.OperationResult({}, b"payload"))
+    monkeypatch.setattr(harness.channel._writer, "write_data", lambda *a, **k: sys.exit(2))
+    harness.start()
+    try:
+        harness.host_out.write_control(op_message(1))
+        reply = reply_for(harness, 1)
+        assert reply["ok"] is False and reply["error"]["class_name"] == "SystemExit"
+        assert wait_until(lambda: not harness.channel._operations and not harness.channel._transmitting)
+    finally:
+        harness.finish()
+
+
+@pytest.mark.parametrize("exit_type", [KeyboardInterrupt, GeneratorExit])
+def test_an_interrupt_in_a_handler_is_answered_then_raised_again_after_cleanup(exit_type):
+    def handler(operation):
+        raise exit_type()
+
+    harness = ChannelHarness(handler)
+    harness.start()
+    try:
+        operation = worker_channel.Operation(harness.channel, op_message(1))
+        harness.channel._operations[1] = operation
+        with pytest.raises(exit_type):
+            harness.channel._run_operation(operation)
+        reply = reply_for(harness, 1)
+        assert reply["ok"] is False and reply["error"]["class_name"] == exit_type.__name__
+        assert not harness.channel._operations and not harness.channel._transmitting
+    finally:
+        harness.finish()
+
+
+def test_a_heartbeat_thread_that_dies_ends_the_channel(monkeypatch):
+    harness = ChannelHarness(lambda operation: {}, heartbeat_interval=0.05)
+    monkeypatch.setattr(worker_channel, "_rss_kb", lambda: sys.exit(1))
+    harness.start()
+    try:
+        harness.thread.join(5)
+        assert not harness.thread.is_alive()
+        assert harness.status == [3]
+    finally:
+        harness.finish()
+
+
+def test_a_reader_thread_that_hits_a_system_exit_ends_the_channel_with_a_failure(monkeypatch):
+    harness = ChannelHarness(lambda operation: {})
+    harness.start()
+    monkeypatch.setattr(harness.channel, "_dispatch", lambda message: sys.exit(1))
+    try:
+        harness.host_out.write_control(op_message(1))
+        harness.thread.join(5)
+        assert not harness.thread.is_alive()
+        assert harness.status == [3]
+    finally:
+        harness.finish()
+
+
+def test_a_host_call_handler_that_calls_sys_exit_fails_that_call_only(make_session):
+    session = make_session(host_calls={"quit": lambda call: sys.exit(1), "good": lambda call: {"ok": 1}})
+    session.start()
+    with pytest.raises(RequestFailed) as caught:
+        session.request("call", {"name": "quit"}, timeout=5)
+    assert caught.value.code == frames.Codes.HOST_CALL_FAILED
+    assert session.request("call", {"name": "good"}, timeout=5).result["ack"] == {"ok": 1}
+    assert wait_until(lambda: not session._call_queues and session._call_pending == 0)
+
+
+def test_callbacks_that_call_sys_exit_do_not_stop_the_session(make_session):
+    lines, events = [], []
+
+    def stderr_exit(line):
+        lines.append(line)
+        sys.exit(1)
+
+    def event_exit(name, payload):
+        events.append(name)
+        sys.exit(1)
+
+    session = make_session(on_stderr=stderr_exit, on_event=event_exit)
+    session.start()
+    assert session.request("progress_secret", secrets={"key": "sk-abc-123"},
+                           on_progress=lambda message: sys.exit(1), timeout=5)
+    with pytest.raises(RequestFailed):
+        session.request("blocked", timeout=5)
+    session.request("leak", secrets={"key": PEM_SECRET}, timeout=5)
+    # The stderr drain kept reading after the first line raised: later lines arrive.
+    assert wait_until(lambda: len(lines) >= 4)
+    assert events and session.alive
+
+
+def test_a_writer_that_exits_the_thread_ends_the_session(tmp_path):
+    script = tmp_path / "quiet.py"
+    script.write_text(HOSTILE_PRELUDE + "time.sleep(30)\n", encoding="utf-8")
+
+    class ExitsOnSecondWrite(_BreaksOnSecondWrite):
+        def write(self, data):
+            self._writes += 1
+            if self._writes > 1:
+                sys.exit(1)
+            return self._stream.write(data)
+
+    def spawn():
+        process = subprocess.Popen([sys.executable, "-B", str(script)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        process.stdin = ExitsOnSecondWrite(process.stdin)
+        return process
+
+    session = WorkerSession(spawn=spawn, limits=fast_limits(max_in_flight=16, heartbeat_timeout=30.0))
+    try:
+        session.start()
+        with pytest.raises(SessionError):
+            session.submit("x").wait(8)
+        assert not session.alive
+    finally:
+        session.close(grace=0.3)
+
+
+def test_a_watchdog_that_exits_the_thread_ends_the_session(make_session, monkeypatch):
+    session = make_session()
+    session.start()
+    monkeypatch.setattr(session, "_cancel", lambda *a, **k: sys.exit(1))
+    handle = session.submit("sleep", {"seconds": 30}, timeout=0.1)
+    with pytest.raises(SessionError):
+        handle.wait(8)
+    assert not session.alive
+
+
+# A rejection reaches the worker before the worker is ended
+
+class _SlowStdin:
+    """A worker stdin that is slow to take a frame and notes each frame it took whole."""
+
+    def __init__(self, stream, delivered):
+        self._stream = stream
+        self._delivered = delivered
+        self._pending = b""
+
+    def write(self, data):
+        time.sleep(0.4)
+        self._pending = data
+        return self._stream.write(data)
+
+    def flush(self):
+        # Raises if the worker is already gone, like a real pipe to a dead reader.
+        self._stream.flush()
+        self._delivered.append(self._pending)
+
+    def close(self):
+        self._stream.close()
+
+
+def test_a_rejected_worker_receives_the_rejection_before_it_is_ended(tmp_path):
+    script = tmp_path / "rejected.py"
+    script.write_text(textwrap.dedent("""
+        import sys, time
+        sys.path.insert(0, %r)
+        import frames
+        out = frames.FrameWriter(sys.stdout.buffer)
+        out.write_control({"t": "hello", "protocols": [{"major": 2, "minor": 0}], "kinds": []})
+        time.sleep(30)
+    """) % str(RUNTIME_DIR), encoding="utf-8")
+    delivered = []
+
+    def spawn():
+        process = subprocess.Popen([sys.executable, "-B", str(script)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        process.stdin = _SlowStdin(process.stdin, delivered)
+        return process
+
+    session = WorkerSession(spawn=spawn, kind="translator", limits=fast_limits(heartbeat_timeout=30.0))
+    try:
+        with pytest.raises(HandshakeError) as caught:
+            session.start()
+        assert caught.value.code == frames.Codes.VERSION_MISMATCH
+        # The rejection went onto the worker's pipe whole before the worker was ended.
+        assert len(delivered) == 1
+        ftype, body = frames.FrameReader(io.BytesIO(delivered[0])).read_frame()
+        message = frames.decode_control(body, "host")
+        assert message["t"] == frames.REJECT and message["code"] == frames.Codes.VERSION_MISMATCH
+    finally:
+        session.close(grace=0.3)

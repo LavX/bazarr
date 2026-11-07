@@ -363,7 +363,7 @@ def secret_forms(value):
 
     python_forms(value)
     json_forms(value)
-    for body in list(bodies):
+    for body in bodies:
         add(body)
         # An error that carries a repr or a JSON document is itself repr'd or
         # dumped once more on its way out.
