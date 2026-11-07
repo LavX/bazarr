@@ -2500,6 +2500,83 @@ def test_run_releases_its_streams_and_reader_while_the_peer_keeps_its_end_open()
         harness.finish()
 
 
+class _NoSelect:
+    """Stands in for the ``select`` module on a platform where it cannot wait on pipes."""
+
+    calls = 0
+
+    @classmethod
+    def select(cls, *args, **kwargs):
+        cls.calls += 1
+        raise OSError("select only works on sockets here")
+
+
+@pytest.fixture
+def no_pipe_select(monkeypatch):
+    _NoSelect.calls = 0
+    monkeypatch.setattr(worker_channel, "_select_on_pipes", lambda: False)
+    monkeypatch.setattr(worker_channel, "select", _NoSelect)
+    return _NoSelect
+
+
+def test_the_channel_serves_a_request_and_shuts_down_where_select_cannot_wait_on_pipes(no_pipe_select):
+    harness = ChannelHarness(lambda operation: {"echo": operation.params}, heartbeat_interval=0.05)
+    harness.start()
+    channel = harness.channel
+    try:
+        assert channel._input.interruptible is False
+        harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {"a": 1}})
+        assert wait_until(lambda: any(m["t"] == "res" for m in harness.messages))
+        reply = next(m for m in harness.messages if m["t"] == "res")
+        assert reply["ok"] is True and reply["result"] == {"echo": {"a": 1}}
+        harness.host_out.write_control({"t": "shutdown"})
+        # The host keeps its end open and the reader cannot be woken: run() still returns.
+        harness.thread.join(5)
+        assert not harness.thread.is_alive()
+        assert harness.status == [0]
+        assert any(m["t"] == "bye" for m in harness.messages)
+        assert channel._writer._stream.closed
+        assert wait_until(lambda: channel._input._stream.closed)
+        assert no_pipe_select.calls == 0
+    finally:
+        harness.finish()
+
+
+def test_a_failed_handshake_returns_where_select_cannot_wait_on_pipes(no_pipe_select):
+    harness = ChannelHarness(lambda operation: {})
+    harness.host_out.write_control({"t": "reject", "code": "version_mismatch", "message": "no"})
+    harness.thread.start()
+    try:
+        harness.thread.join(5)
+        assert harness.status == [3]
+        assert no_pipe_select.calls == 0
+    finally:
+        harness.finish()
+
+
+def test_the_plain_input_reads_without_ever_calling_select(no_pipe_select):
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb", buffering=0)
+    wake = worker_channel._WakeableInput(stream)
+    try:
+        assert wake.interruptible is False
+        os.write(write_fd, b"abc")
+        assert wake.read(10) == b"abc"
+        wake.interrupt()  # nothing to wake, and no error
+        os.close(write_fd)
+        write_fd = None
+        assert wake.read(10) == b""
+        assert no_pipe_select.calls == 0
+    finally:
+        wake.close()
+        if write_fd is not None:
+            os.close(write_fd)
+
+
+def test_the_wakeable_input_is_used_on_posix():
+    assert worker_channel._select_on_pipes() is (os.name == "posix")
+
+
 def test_a_failed_handshake_also_releases_the_streams():
     harness = ChannelHarness(lambda operation: {})
     harness.host_out.write_control({"t": "reject", "code": "version_mismatch", "message": "no"})

@@ -146,24 +146,39 @@ class Operation:
             raise OperationCancelled(self.cancel_reason or "cancelled")
 
 
+def _select_on_pipes():
+    """True where ``select`` can wait on a pipe descriptor (POSIX; on Windows only sockets work)."""
+    return os.name == "posix"
+
+
 class _WakeableInput:
-    """The channel's input, with a read that another thread can end.
+    """The channel's input, with a read that another thread can end where the platform allows.
 
     A read blocked on a pipe whose peer keeps its end open never returns, and
-    closing the descriptor does not wake it. This waits on the descriptor and a
-    private wake pipe together: ``interrupt`` makes the blocked ``read`` return
-    ``b""``, the end of the stream. The stream must be unbuffered (it is read
-    straight from its descriptor); one without a descriptor is used as it is.
+    closing the descriptor does not wake it. On POSIX this waits on the
+    descriptor and a private wake pipe together: ``interrupt`` makes the blocked
+    ``read`` return ``b""``, the end of the stream. The stream must be unbuffered
+    (it is read straight from its descriptor).
+
+    Where ``select`` cannot wait on pipes (Windows), or the stream has no
+    descriptor, the read is a plain blocking read and ``interruptible`` is
+    False: the reader thread cannot be woken, so ``run`` abandons it (it is a
+    daemon) and only attempts the close without waiting on it.
     """
 
     def __init__(self, stream):
         self._stream = stream
-        try:
-            self._fd = stream.fileno()
-            self._wake_r, self._wake_w = os.pipe()
-        except (AttributeError, OSError, ValueError):
-            self._fd = None
-            self._wake_r = self._wake_w = None
+        self._fd = self._wake_r = self._wake_w = None
+        if _select_on_pipes():
+            try:
+                self._fd = stream.fileno()
+                self._wake_r, self._wake_w = os.pipe()
+            except (AttributeError, OSError, ValueError):
+                self._fd = self._wake_r = self._wake_w = None
+
+    @property
+    def interruptible(self):
+        return self._fd is not None
 
     def read(self, size):
         if self._fd is None:
@@ -380,18 +395,30 @@ class WorkerChannel:
         status = self.exit_status
         self._close()
         # Wake a reader blocked in a read, then give it a moment to leave.
+        interruptible = self._input.interruptible
         self._input.interrupt()
         for thread in (self._reader_thread, self._heartbeat_thread):
+            if thread is self._reader_thread and not interruptible:
+                # A blocking read cannot be woken: the reader is abandoned, not waited for.
+                continue
             if thread is not None and thread.is_alive() and thread is not threading.current_thread():
                 thread.join(timeout=2.0)
-        self._input.close()
+        if interruptible:
+            self._input.close()
+        else:
+            # Closing a stream another thread is blocked reading may itself block.
+            self._close_bounded(self._input.close)
         # Closing the output waits for a write in progress; a peer that stopped
         # reading must not hold the exit, so it is closed on its own thread.
-        closer = threading.Thread(target=self._close_output, daemon=True)
-        closer.start()
-        closer.join(timeout=1.0)
+        self._close_bounded(self._close_output)
         # A reader woken by the interrupt may report the cut stream as a failure.
         self.exit_status = status
+
+    @staticmethod
+    def _close_bounded(action):
+        closer = threading.Thread(target=action, daemon=True)
+        closer.start()
+        closer.join(timeout=1.0)
 
     def _close_output(self):
         try:
