@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
+import time
 import contextlib
 
 from dataclasses import dataclass
@@ -84,6 +86,13 @@ def catalog_source_for_entry(
     return {}
 
 
+logger = logging.getLogger(__name__)
+
+
+class StateCorruptError(ValueError):
+    """The stored state document is not valid JSON or its root is not an object."""
+
+
 def default_state() -> dict[str, Any]:
     return {
         "catalog_sources": {
@@ -139,15 +148,93 @@ def state_version() -> int:
     return _STATE_VERSION
 
 
+def corrupt_copies(path: str | os.PathLike[str] | None = None) -> list[Path]:
+    """The copies kept of state documents that could not be read, oldest first.
+
+    A copy stays until an operator removes it: while one exists, nothing that
+    deletes on the strength of the state may run.
+    """
+    current = Path(path) if path is not None else state_file()
+    try:
+        return sorted(current.parent.glob(f"{current.name}.*.corrupt"))
+    except OSError:
+        return []
+
+
+def _keep_corrupt_copy(current: Path) -> Path | None:
+    """Copy an unreadable state document aside, once per distinct content. Never deletes or moves it."""
+    try:
+        content = current.read_bytes()
+        for existing in corrupt_copies(current):
+            if existing.read_bytes() == content:
+                return existing
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        target = current.with_name(f"{current.name}.{stamp}.corrupt")
+        counter = 0
+        while target.exists():
+            counter += 1
+            target = current.with_name(f"{current.name}.{stamp}-{counter}.corrupt")
+        partial = target.with_name(target.name + ".part")
+        partial.write_bytes(content)
+        os.replace(partial, target)
+        return target
+    except OSError:
+        logger.exception("Provider Hub: could not keep a copy of the unreadable state document")
+        return None
+
+
+def _unreadable(current: Path, reason: str) -> StateCorruptError:
+    kept = _keep_corrupt_copy(current)
+    logger.error(
+        "Provider Hub: the state document %s is unreadable (%s). A copy was kept at %s and nothing was written.",
+        current, reason, kept,
+    )
+    return StateCorruptError(f"the Provider Hub state document is unreadable ({reason})")
+
+
 def mutate_state(
     mutator: Callable[[dict[str, Any]], Any],
     path: str | os.PathLike[str] | None = None,
+    *,
+    recover_corrupt: bool = False,
 ) -> Any:
+    """Read, change and write the state document.
+
+    A document that cannot be read (text that is not JSON, or a root that is
+    not an object) is never overwritten: a copy is kept beside it and the call
+    raises ``StateCorruptError``, because writing the default over it would turn
+    the damage into an empty installation inventory. A missing file starts from
+    the default. ``recover_corrupt`` is the one documented recovery path: it
+    keeps the copy and then starts from the default, and exists for an explicit
+    operator action, not for any routine writer.
+    """
     with state_write_lock():
-        data = load_state(path)
+        current = Path(path) if path is not None else state_file()
+        try:
+            data = _read_document(current)
+        except StateCorruptError:
+            if not recover_corrupt:
+                raise
+            data = default_state()
+        else:
+            data = default_state() if data is None else _normalized_state(data)
         result = mutator(data)
         save_state(data, path)
         return result
+
+
+def _read_document(current: Path) -> dict[str, Any] | None:
+    """The stored root object, None when there is no file, or ``StateCorruptError`` after keeping a copy."""
+    if not current.exists():
+        return None
+    try:
+        with current.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except ValueError as error:
+        raise _unreadable(current, "not valid JSON") from error
+    if not isinstance(data, dict):
+        raise _unreadable(current, "the root is not an object")
+    return data
 
 
 def mutate_state_checked(
@@ -172,15 +259,15 @@ def mutate_state_checked(
 
 
 def read_state_document(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-    """The stored document as it is, normalised, or an error: never a default.
+    """The stored document as it is, or an error: never a default.
 
-    Raises when the file is missing, is not JSON, or its root is not an object.
+    Raises ``FileNotFoundError`` when the file is missing and ``StateCorruptError``
+    (after keeping a copy) when it is not JSON or its root is not an object.
     """
     current = Path(path) if path is not None else state_file()
-    with current.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if not isinstance(data, dict):
-        raise ValueError("the Provider Hub state document is not an object")
+    data = _read_document(current)
+    if data is None:
+        raise FileNotFoundError(str(current))
     return data
 
 

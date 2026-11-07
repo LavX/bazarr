@@ -5,6 +5,7 @@ from app.job_errors import reason_of
 from app.jobs_queue import JobFailed, jobs_queue
 
 from .jobs import failed_catalog_sources
+from .state import corrupt_copies
 from .service import check_updates, cleanup_plugin_environments, refresh_catalog
 
 
@@ -40,6 +41,15 @@ def provider_hub_check_updates(job_id=None, wait_for_completion=False):
         cleanup_plugin_environments()
     except Exception:
         logging.exception("Provider Hub environment cleanup failed")
+    kept = corrupt_copies()
+    if kept:
+        # Cleanup stays off until an operator has looked at the damaged state.
+        logging.error("Provider Hub environment cleanup is paused: a damaged state document was kept at %s", kept[-1])
+        jobs_queue.update_job_progress(
+            job_id=job_id,
+            progress_message=f"Environment cleanup is paused: a damaged state copy is kept at {kept[-1]}",
+            allow_cancelled=True,
+        )
     if refresh_failure:
         logging.warning("Provider Hub update check failed: reason=catalog_refresh_failed: %s", refresh_failure)
         raise JobFailed(refresh_failure, reason="catalog_refresh_failed")

@@ -773,3 +773,62 @@ def test_boot_reconcile_leaves_an_unreadable_state_alone(hub, no_subprocess, doc
 
     assert summary == {"adopted": [], "repointed": [], "needs_repair": [], "kept": []}
     assert (hub / "state.json").read_text(encoding="utf-8") == document
+
+
+CORRUPT_ROOTS = ["null", "[]", '"text"', "42", "{not json"]
+
+
+@pytest.mark.parametrize("document", CORRUPT_ROOTS)
+def test_a_writer_never_overwrites_an_unreadable_state_and_cleanup_then_deletes_nothing(hub, document):
+    from provider_hub.state import StateCorruptError, corrupt_copies, mutate_state
+
+    shared, legacy = _two_environments(hub)
+    state_file = hub / "state.json"
+    state_file.write_text(document, encoding="utf-8")
+
+    for _ in range(2):
+        with pytest.raises(StateCorruptError):
+            mutate_state(lambda state: state.setdefault("jobs", []).append("x"))
+
+    assert state_file.read_text(encoding="utf-8") == document
+    copies = corrupt_copies()
+    # One copy for one distinct damaged document, with its exact content, never moved or deleted.
+    assert len(copies) == 1 and copies[0].read_text(encoding="utf-8") == document
+    assert env_registry.cleanup_environments(hub) == []
+    assert (shared / "bin" / "python").exists() and (legacy / "bin" / "python").exists()
+    assert copies[0].exists()
+
+
+def test_a_recreated_empty_state_does_not_unlock_cleanup_while_a_damaged_copy_is_kept(hub):
+    from provider_hub.state import corrupt_copies, mutate_state
+
+    shared, legacy = _two_environments(hub)
+    state_file = hub / "state.json"
+    state_file.write_text("null", encoding="utf-8")
+    with pytest.raises(ValueError):
+        mutate_state(lambda state: None)
+    # Someone clears the broken file; the next writer starts from the default, a valid empty inventory.
+    state_file.unlink()
+    mutate_state(lambda state: None)
+    assert load_state()["installations"] == {}
+
+    assert env_registry.cleanup_environments(hub) == []
+    assert (shared / "bin" / "python").exists() and (legacy / "bin" / "python").exists()
+
+    # Once an operator has removed the copy, cleanup works again.
+    for copy in corrupt_copies():
+        copy.unlink()
+    assert sorted(env_registry.cleanup_environments(hub)) == sorted([str(shared), str(legacy)])
+
+
+def test_a_missing_state_file_starts_from_the_default_and_the_recovery_path_keeps_a_copy(hub):
+    from provider_hub.state import corrupt_copies, mutate_state
+
+    mutate_state(lambda state: state.update(marker=1))
+    assert load_state()["marker"] == 1
+    assert corrupt_copies() == []
+
+    (hub / "state.json").write_text("[]", encoding="utf-8")
+    mutate_state(lambda state: state.update(marker=2), recover_corrupt=True)
+    assert load_state()["marker"] == 2
+    assert [copy.read_text(encoding="utf-8") for copy in corrupt_copies()] == ["[]"]

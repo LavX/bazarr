@@ -29,7 +29,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .state import load_state, load_state_strict, mutate_state, mutate_state_checked, read_state_document
+from .state import (
+    corrupt_copies, load_state, load_state_strict, mutate_state, mutate_state_checked, read_state_document,
+)
 from .venv import (
     SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, is_pinned, path_key, pinned_paths, python_executable,
 )
@@ -410,6 +412,10 @@ def validate_inventory(document: Any) -> None:
     that is absent, of the wrong type, or has a row it cannot read must stop it:
     treating that as "nothing is referenced" would delete every environment.
     """
+    if corrupt_copies():
+        raise StateUnreadable(
+            "a copy of a damaged state document is kept beside the state; remove it once the state is checked"
+        )
     if not isinstance(document, dict):
         raise StateUnreadable("the state document is not an object")
     installations = document.get("installations")
@@ -432,6 +438,8 @@ def _checked_state() -> dict[str, Any]:
     A hub that has never written a state document has nothing recorded, which is
     a fresh install and not a damaged one: it reads as the default.
     """
+    if corrupt_copies():
+        raise StateUnreadable("a copy of a damaged state document is kept beside the state")
     try:
         document = read_state_document()
     except FileNotFoundError:
