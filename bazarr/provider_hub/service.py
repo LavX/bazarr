@@ -54,7 +54,7 @@ from .state import (
 )
 from . import env_registry
 from .venv import (
-    _ENV_LOCK, PluginEnvironment, environment_fingerprint, pin_scope, python_executable,
+    _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
     release_pins,
 )
 from .worker import ProviderWorkerClient, worker_command
@@ -3208,6 +3208,22 @@ def reconcile_plugin_environments() -> dict[str, list[str]]:
 
 
 def repair_installation_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
+    """Rebuild an active installation's environment into a new directory; see ``_repair_environment``.
+
+    The environment the installation runs from now is held for the whole repair,
+    so a cleanup cannot remove it between the repoint and the moment the old
+    workers that still run from it have been drained.
+    """
+    row = (load_state().get("installations") or {}).get(provider_id)
+    old_python = row.get("python_path") if isinstance(row, dict) else None
+    release = hold_environment(env_registry.env_dir_of(old_python)) if old_python else (lambda: None)
+    try:
+        return _repair_environment(provider_id, checkpoint)
+    finally:
+        release()
+
+
+def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
     """Rebuild an active installation's environment into a new directory.
 
     The old directory is left alone, because other plugins may share it. The new
@@ -3274,6 +3290,15 @@ def repair_installation_environment(provider_id: str, checkpoint=None) -> dict[s
             )
         except Exception:
             logging.getLogger(__name__).exception("Provider Hub: could not re-register %s after its repair", provider_id)
+        try:
+            # Pools keep the instance, and the worker, they built before the
+            # repair. They drop it now; it drains, and the old environment
+            # stays held until its worker has exited.
+            from .registry import retire_provider_instances
+
+            retire_provider_instances(provider_id)
+        except Exception:
+            logging.getLogger(__name__).exception("Provider Hub: could not retire the workers of %s after its repair", provider_id)
         job.update(message=f"Rebuilt the environment of '{name}'")
         return _redact_installation(repaired)
 

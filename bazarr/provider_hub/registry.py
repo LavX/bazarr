@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import json
 import sys
+import threading
 
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from .migration import (
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
 from .state import active_installations
 from . import runtime_status
+from .env_registry import env_dir_of
+from .venv import hold_environment
 from .worker import ProviderWorkerClient, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
 
 logger = logging.getLogger(__name__)
@@ -351,3 +354,60 @@ def register_active_provider_classes(installations=None) -> list[str]:
         registered.append(manifest.provider_id)
 
     return registered
+
+
+def _instance_environment(instance) -> str | None:
+    client = getattr(instance, "worker_client", None)
+    command = getattr(client, "command", None)
+    python_path = command[0] if command else getattr(type(instance), "python_path", None)
+    return env_dir_of(python_path) if python_path else None
+
+
+def _drain_instance(instance, release) -> None:
+    """Let the instance finish what it is serving, stop its worker, then free its environment."""
+    try:
+        instance.terminate()
+    except Exception:
+        logger.exception("Provider Hub: could not stop a replaced worker for %s", getattr(instance, "provider_name", "?"))
+    finally:
+        try:
+            process = getattr(getattr(instance, "worker_client", None), "process", None)
+            if process is not None and process.poll() is None:
+                process.wait()
+        except Exception:
+            logger.exception("Provider Hub: could not confirm a replaced worker has exited")
+        release()
+
+
+def retire_provider_instances(provider_id: str) -> list[threading.Thread]:
+    """Replace the instances every pool has cached for ``provider_id``.
+
+    Used after the environment a provider runs from changed. Each pool drops its
+    cached instance at once, so the next request builds one from the registered
+    class and runs in the new environment. The dropped instance is drained in the
+    background: it finishes the request it is serving, then its worker stops. Its
+    environment is held against cleanup until that worker has exited. Returns the
+    drain threads.
+    """
+    try:
+        from subliminal_patch.core import live_provider_pools
+
+        pools = live_provider_pools()
+    except Exception:
+        return []
+    drains: list[threading.Thread] = []
+    for pool in pools:
+        cached = getattr(pool, "initialized_providers", {}).get(provider_id)
+        if not isinstance(cached, HubProxyProvider):
+            continue
+        instance = pool.detach_provider(provider_id)
+        if instance is None:
+            continue
+        env_dir = _instance_environment(instance)
+        release = hold_environment(env_dir) if env_dir else (lambda: None)
+        drain = threading.Thread(
+            target=_drain_instance, args=(instance, release), name=f"hub-drain-{provider_id}", daemon=True
+        )
+        drain.start()
+        drains.append(drain)
+    return drains

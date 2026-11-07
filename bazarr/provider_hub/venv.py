@@ -117,6 +117,30 @@ def is_pinned(env_path: str | os.PathLike[str]) -> bool:
         return _PINS.get(path_key(env_path), 0) > 0
 
 
+def hold_environment(env_path: str | os.PathLike[str]):
+    """Pin an environment until the returned callable is called, from any thread.
+
+    For workers that outlive the install scope that started them: a cleanup
+    leaves the environment alone while any of them may still run from it. The
+    release is safe to call more than once.
+    """
+    key = path_key(env_path)
+    with _ENV_LOCK:
+        _PINS[key] += 1
+    released = threading.Event()
+
+    def release() -> None:
+        with _ENV_LOCK:
+            if released.is_set():
+                return
+            released.set()
+            _PINS[key] -= 1
+            if _PINS[key] <= 0:
+                del _PINS[key]
+
+    return release
+
+
 def pinned_paths() -> set[str]:
     """Every environment an install in flight holds right now."""
     with _ENV_LOCK:

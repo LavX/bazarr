@@ -1,6 +1,7 @@
 # coding=utf-8
 """Repairing a plugin's environment, and what a failed check leaves behind."""
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -293,6 +294,83 @@ def test_removing_the_last_installation_frees_its_environment(hub, tmp_path):
     del state["installations"]["second"]
     save_state(state)
     assert env_registry.cleanup_environments(hub) == [str(env)]
+
+
+class _BusyWorker:
+    """A worker client that is serving a request until ``finish`` is set."""
+
+    def __init__(self, python_path):
+        self.command = [str(python_path), "-I", "-B", "runner.py"]
+        self.process = None
+        self.finish = threading.Event()
+        self.stopped = threading.Event()
+
+    def stop(self):
+        self.finish.wait(10)
+        self.stopped.set()
+
+
+@pytest.fixture
+def hub_registry():
+    from subliminal_patch.extensions import provider_registry
+    from provider_hub import registry
+
+    before = dict(provider_registry.providers)
+    ids = set(registry._REGISTERED_PROVIDER_HUB_IDS)
+    yield provider_registry
+    provider_registry.providers.clear()
+    provider_registry.providers.update(before)
+    registry._REGISTERED_PROVIDER_HUB_IDS.clear()
+    registry._REGISTERED_PROVIDER_HUB_IDS.update(ids)
+
+
+def test_repair_replaces_the_cached_worker_and_keeps_the_old_environment_until_it_exits(
+    hub, tmp_path, monkeypatch, hub_registry
+):
+    from provider_hub.registry import register_active_provider_classes
+    from provider_hub.service import repair_installation_environment
+    from provider_hub.state import active_installations
+    from subliminal_patch.core import SZProviderPool
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    old = _env(hub / "shared_envs" / "old")
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, old / "bin" / "python", needs_repair=True)}
+    save_state(state)
+    _patch_environment(monkeypatch)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    register_active_provider_classes(active_installations())
+
+    pool = SZProviderPool(providers=["examplehub"], provider_configs={})
+    stale = pool["examplehub"]
+    busy = _BusyWorker(old / "bin" / "python")
+    stale.worker_client = busy
+    assert stale.python_path == str(old / "bin" / "python")
+
+    repair_installation_environment("examplehub")
+
+    new_python = hub / "shared_envs" / "rebuilt" / "bin" / "python"
+    # The next request builds an instance from the repaired class: it never reaches the old worker.
+    fresh = pool["examplehub"]
+    assert fresh is not stale
+    assert fresh.python_path == str(new_python)
+    assert fresh.worker_client is None
+    # The old worker is still serving, so its environment is not removable yet.
+    assert old.exists()
+    assert env_registry.cleanup_environments(hub) == []
+    assert (old / "bin" / "python").exists()
+
+    busy.finish.set()
+    assert busy.stopped.wait(10)
+    # The release follows the stop by a moment, on the drain thread.
+    removed = []
+    deadline = time.monotonic() + 10
+    while not removed and time.monotonic() < deadline:
+        removed = env_registry.cleanup_environments(hub)
+        time.sleep(0.05)
+    assert removed == [str(old)]
+    assert not old.exists()
 
 
 def test_a_stop_pressed_during_the_repair_probe_ends_the_repair_before_the_repoint(hub, tmp_path, monkeypatch):

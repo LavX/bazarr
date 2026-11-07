@@ -9,6 +9,7 @@ import socket
 import contextvars
 import threading
 import traceback
+import weakref
 import time
 import operator
 import unicodedata
@@ -567,6 +568,15 @@ def _hub_search_languages(provider_class, languages):
     return search
 
 
+# Every pool that is alive, so a caller that replaces what a provider runs on
+# (a repaired plugin environment) can reach the instances the pools have cached.
+_LIVE_POOLS = weakref.WeakSet()
+
+
+def live_provider_pools():
+    return list(_LIVE_POOLS)
+
+
 class SZProviderPool(ProviderPool):
     @staticmethod
     def _dedupe_provider_names(providers):
@@ -575,6 +585,8 @@ class SZProviderPool(ProviderPool):
     def __init__(self, providers=None, provider_configs=None, blacklist=None, ban_list=None, throttle_callback=None,
                  pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None,
                  adoption_gate=None, throttle_announce=None):
+        _LIVE_POOLS.add(self)
+
         #: Name of providers to use
         self.providers = self._dedupe_provider_names(providers)
 
@@ -808,6 +820,15 @@ class SZProviderPool(ProviderPool):
             provider.terminate()
         except Exception:
             logger.exception('Provider %r terminated unexpectedly', name)
+
+    def detach_provider(self, name):
+        """Take an initialized provider out of the pool and hand it back, untouched.
+
+        Unlike ``retire_provider`` nothing is terminated: the caller drains the
+        instance, which may be serving a request. The pool builds a fresh one
+        from the registry the next time the name is used.
+        """
+        return self.initialized_providers.pop(name, None)
 
     def __delitem__(self, name):
         if name not in self.initialized_providers:
