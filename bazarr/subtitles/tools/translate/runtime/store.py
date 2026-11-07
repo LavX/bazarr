@@ -282,13 +282,15 @@ class TranslatorStore:
     def set_instance_enabled(self, instance_id: int, enabled: bool, *,
                              expected_revision: int | None = None) -> PointerChange:
         """Turn an engine on or off. Bumps the revision, and with ``expected_revision`` swaps it in the database
-        so a switch made from a stale view cannot overwrite a newer save."""
+        so a switch made from a stale view cannot overwrite a newer save.
+
+        The revision is claimed first, inside the transaction; only then do the pointers let go of an engine
+        that was turned off. If the pointers cannot be saved, the transaction rolls back and the engine stays as
+        it was, and a switch that loses the race changes no pointer at all.
+        """
         instance = self._require_instance(instance_id)
         if expected_revision is not None and instance.revision != expected_revision:
             raise StaleRevisionError("the engine settings changed since they were loaded", instance.revision)
-        # Turning an engine off lets the pointers go of it first: if config.yaml cannot be written the engine
-        # stays on, instead of being off while a pointer still names it.
-        change = PointerChange() if enabled else self.release_pointers({instance_id}, why="turned off")
         with write_transaction(self._session):
             current = int(instance.revision)
             claimed = self._session.execute(
@@ -301,7 +303,8 @@ class TranslatorStore:
             instance.revision = current + 1
             instance.enabled = 1 if enabled else 0
             instance.updated_at = datetime.now()
-        return change
+            self._session.flush()
+            return PointerChange() if enabled else self.release_pointers({instance_id}, why="turned off")
 
     def delete_instance(self, instance_id: int) -> PointerChange:
         """Remove an instance with its connections and every secret they own.
@@ -413,14 +416,22 @@ class TranslatorStore:
         return SaveResult(self._require_instance(connection.instance_id).revision,
                           added_destinations(before, after), bool(connection.awaiting_secrets))
 
-    def delete_connection(self, connection_id: int) -> None:
-        """Remove a connection and its secrets, then close the gap in the order."""
+    def delete_connection(self, connection_id: int, *, expected_revision: int | None = None) -> None:
+        """Remove a connection and its secrets, then close the gap in the order.
+
+        The delete is conditional on the revision, inside the transaction, so a save that landed after the
+        caller loaded the connection is never deleted unseen; if the delete loses, the secrets stay.
+        """
         connection = self._require_connection(connection_id)
         instance_id = connection.instance_id
+        current = int(connection.revision if expected_revision is None else expected_revision)
         with write_transaction(self._session):
+            removed = self._session.execute(delete(TableTranslatorConnection).where(
+                TableTranslatorConnection.id == connection_id,
+                TableTranslatorConnection.revision == current)).rowcount
+            if removed != 1:
+                raise StaleRevisionError("the back end changed since it was loaded")
             self._delete_secrets((CONNECTION, connection_id))
-            self._session.execute(delete(TableTranslatorConnection)
-                                  .where(TableTranslatorConnection.id == connection_id))
         self._session.expire_all()
         self._renumber(instance_id)
 
@@ -606,15 +617,20 @@ class TranslatorStore:
         were entered with, so a rollback finds them.
         """
         waiting: list[Owner] = []
-        with write_transaction(self._session):
+        # self.transaction(), not a bare transaction: it rebuilds the log-scrub set once the changes have
+        # committed, so a secret moved here is masked in the very next log line.
+        with self.transaction():
             for kind, row in self._owners_of_plugin(plugin_id):
+                stored_before = self.settings_of(row)
                 if new_settings is not None:
                     migrated = new_settings(kind, row)
                     if migrated is not None:
                         row.settings_json = json.dumps(dict(migrated), sort_keys=True)
-                        if kind == INSTANCE:
-                            row.revision = int(row.revision) + 1
                 self._move_reclassified_secrets((kind, row.id), row, new_schema(kind, row))
+                if self.settings_of(row) != stored_before:
+                    # Anything that changes what an owner stores moves its revision, so a draft loaded before
+                    # the update can no longer be saved over it unseen.
+                    row.revision = int(row.revision) + 1
                 if plugin_version is not None:
                     row.plugin_version = plugin_version
                 if settings_version is not None:

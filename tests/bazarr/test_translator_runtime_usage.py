@@ -720,6 +720,80 @@ def test_a_clock_set_back_does_not_move_a_budget_or_a_call_to_an_earlier_month(l
     assert ledger.roll_month(limits) == 0
 
 
+# ------------------------------------------------------------ two processes on PostgreSQL
+
+def _reserve_in_another_process(url, schema, names, start, answers):
+    """Runs in a spawned process: its own engine, whose connections start in REPEATABLE READ, reserving budgets.
+
+    The pause after the allowance is worked out widens the window between reading what is free and writing the
+    reservation, so only a real cross-process lock keeps two processes from taking the same money.
+    """
+    import time
+
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import scoped_session, sessionmaker
+
+    from subtitles.tools.translate.runtime.usage import CostLimits, UsageLedger
+
+    engine = create_engine(url, isolation_level="AUTOCOMMIT")
+
+    @event.listens_for(engine, "connect")
+    def _start_repeatable_read(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"SET search_path TO {schema}")
+        cursor.execute("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        cursor.close()
+
+    real = UsageLedger._allowance
+
+    def slow_allowance(self, *args, **kwargs):
+        found = real(self, *args, **kwargs)
+        time.sleep(0.02)
+        return found
+
+    UsageLedger._allowance = slow_allowance
+    ledger = UsageLedger(scoped_session(sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)))
+    limits = CostLimits.from_dollars(month_cap=30.0, job_cap=4.0, translation_limit=2)
+    start.wait(timeout=120)
+    for name in names:
+        answers.put((name, ledger.reserve_job_budget(name, limits).amount))
+    engine.dispose()
+
+
+def test_two_processes_on_postgres_never_reserve_the_same_money(tmp_path):
+    import multiprocessing
+
+    if not os.environ.get("BAZARR_PG_TEST_URL"):
+        pytest.skip("BAZARR_PG_TEST_URL is required for the PostgreSQL tests")
+    import sqlalchemy as sa
+
+    engine, scoped, pg = _make_session("postgres", tmp_path)
+    admin, schema = pg
+    try:
+        spawn = multiprocessing.get_context("spawn")
+        start, answers = spawn.Barrier(2), spawn.Queue()
+        url = os.environ["BAZARR_PG_TEST_URL"]
+        workers = [spawn.Process(target=_reserve_in_another_process,
+                                 args=(url, schema, [f"{tag}{index}" for index in range(8)], start, answers))
+                   for tag in ("a", "b")]
+        for worker in workers:
+            worker.start()
+        taken = [answers.get(timeout=300) for _ in range(16)]
+        for worker in workers:
+            worker.join(timeout=60)
+            assert worker.exitcode == 0
+        month_cap = usd(30.0)
+        assert sum(amount for _name, amount in taken) <= month_cap
+        total = scoped.execute(sa.text("SELECT COALESCE(SUM(budget_micros), 0) FROM translation_budgets")).scalar()
+        assert int(total) <= month_cap
+    finally:
+        scoped.remove()
+        engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(sa.text(f"DROP SCHEMA {schema} CASCADE"))
+        admin.dispose()
+
+
 # ------------------------------------------------------------ lock order
 
 @pytest.mark.parametrize("ledger_first", [True, False])

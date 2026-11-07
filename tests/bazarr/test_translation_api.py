@@ -759,6 +759,21 @@ def test_removing_a_connection_needs_the_revision_and_a_stale_one_is_a_conflict(
     assert world.call("delete", path).status_code == 204
 
 
+def test_settings_and_the_switch_in_one_request_are_kept_or_dropped_together(world, monkeypatch):
+    from subtitles.tools.translate.runtime.store import StaleRevisionError as StoreStale
+
+    def loses(*args, **kwargs):
+        raise StoreStale("the engine settings changed since they were loaded", 9)
+
+    monkeypatch.setattr(world.store, "set_instance_enabled", loses)
+    path = f"engines/{world.instance.id}"
+    refused = world.call("patch", path, {"enabled": False, "values": {"credit_line": "kept?"}, "expected_revision": 1})
+    assert refused.status_code == 409 and refused.json["error"] == "stale_revision"
+    world.store._session.expire_all()
+    stored = world.store.get_instance(world.instance.id)
+    assert stored.revision == 1 and stored.settings_json in ("{}", "") and stored.enabled == 1
+
+
 def test_a_flag_that_is_not_a_boolean_is_refused(world):
     assert _new_connection(world, enabled="false", values={"api_key": "k"}).status_code == 400
     created = _new_connection(world, values={"api_key": "k"}).json["connection"]

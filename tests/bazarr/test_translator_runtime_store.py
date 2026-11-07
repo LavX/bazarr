@@ -10,7 +10,7 @@ from subtitles.tools.translate.runtime.destinations import (
     DestinationError, DestinationSchema, added_destinations, covers, effective_destinations, normalize_destination,
     schema_for_backend, schema_for_engine)
 from subtitles.tools.translate.runtime.store import (
-    CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, TranslatorStore, TranslatorStoreError)
+    StaleRevisionError, CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, TranslatorStore, TranslatorStoreError)
 
 OPENAI = DestinationSchema(fields=({"key": "base_url", "type": "text", "destination": True,
                                     "default": "https://api.openai.com/v1"},
@@ -355,6 +355,73 @@ def test_turning_an_engine_off_when_the_pointer_write_fails_leaves_it_on(store, 
     pointers.writable = True
     store.set_instance_enabled(google.id, False)
     assert store.get_instance(google.id).enabled == 0 and pointers.get() == (None, None)
+
+
+def _move_revision_elsewhere(store, model, row_id, revision):
+    """Another writer got in after this one read the row: the in-memory revision keeps saying what it said."""
+    from sqlalchemy import update
+
+    store._session.execute(update(model).where(model.id == row_id).values(revision=revision)
+                           .execution_options(synchronize_session=False))
+
+
+def test_a_removal_that_loses_the_revision_race_deletes_neither_the_connection_nor_its_secrets(store):
+    from app.database import TableTranslatorConnection
+
+    instance = _ai_engine(store, with_connection=False)
+    connection = store.add_connection(instance.id, "openrouter", plugin_id=OFFICIAL_ENGINE_PLUGIN_ID)
+    store.set_secret((CONNECTION, connection.id), "api_key", KEY, destinations=frozenset())
+    _move_revision_elsewhere(store, TableTranslatorConnection, connection.id, 9)
+    with pytest.raises(StaleRevisionError):
+        store.delete_connection(connection.id, expected_revision=connection.revision)
+    store._session.expire_all()
+    assert store.get_connection(connection.id) is not None
+    assert "api_key" in store.secret_summary((CONNECTION, connection.id), frozenset())
+    store.delete_connection(connection.id, expected_revision=9)
+    assert store.get_connection(connection.id) is None
+    assert store.secret_summary((CONNECTION, connection.id), frozenset()) == {}
+
+
+def test_turning_an_engine_off_that_loses_the_revision_race_leaves_the_pointers_alone(store, pointers):
+    from app.database import TableTranslatorEngineInstance
+
+    google = store.create_instance("google_translate")
+    store.set_engine(google.id)
+    _move_revision_elsewhere(store, TableTranslatorEngineInstance, google.id, 9)
+    with pytest.raises(StaleRevisionError):
+        store.set_instance_enabled(google.id, False, expected_revision=google.revision)
+    assert pointers.get() == (google.id, None)
+    store._session.expire_all()
+    assert store.get_instance(google.id).enabled == 1
+
+
+def test_a_plugin_update_masks_the_secret_it_moved_in_the_very_next_log_line(store, session, monkeypatch):
+    from secret_store import scrub
+
+    from subtitles.tools.translate.runtime.store import collect_secret_values
+
+    monkeypatch.setattr("app.database.database", session)
+    seen = []
+    monkeypatch.setattr(scrub, "refresh_secret_values", lambda *args, **kwargs: seen.append(collect_secret_values()))
+    after = DestinationSchema(fields=({"key": "token", "type": "secret"},))
+    store.create_instance("lingarr", settings={"token": KEY})
+    store.apply_plugin_update("lingarr", _resolver({INSTANCE: after, CONNECTION: after}))
+    assert seen and KEY in seen[-1]
+
+
+def test_every_plugin_update_that_changes_what_an_owner_stores_moves_its_revision(store):
+    after = DestinationSchema(fields=({"key": "token", "type": "secret"}, {"key": "label", "type": "text"}))
+    instance = store.create_instance("lingarr", settings={"token": KEY, "label": "x"})
+    moved_only = store.create_instance("lingarr", settings={"token": "", "label": "y"})
+    untouched = store.create_instance("lingarr", settings={"label": "z"})
+    connection = store.add_connection(instance.id, "t", plugin_id="lingarr", settings={"label": "c"})
+    store.apply_plugin_update("lingarr", _resolver({INSTANCE: after, CONNECTION: after}),
+                              new_settings=lambda kind, row: {"label": "migrated"} if kind == CONNECTION else None)
+    store._session.expire_all()
+    assert store.get_instance(instance.id).revision == 2  # the token left its settings
+    assert store.get_instance(moved_only.id).revision == 2  # an empty plaintext value left too
+    assert store.get_instance(untouched.id).revision == 1  # nothing it stores changed
+    assert store.get_connection(connection.id).revision == 2  # migrated settings
 
 
 def test_releasing_a_plugin_resets_pointers_and_deletes_nothing_until_asked(store, pointers):

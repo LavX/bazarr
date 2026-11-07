@@ -317,6 +317,40 @@ describe("Settings > Translation", () => {
     expect(calls[1].body).toBe("1");
   });
 
+  it("reloads the state when a removal is refused because the back end changed", async () => {
+    let loads = 0;
+    server.use(
+      http.get("/api/translation/state", () => {
+        loads += 1;
+        return HttpResponse.json(state);
+      }),
+      http.delete("/api/translation/connections/:id", () =>
+        HttpResponse.json(
+          {
+            error: "stale_revision",
+            message: "The back end changed since it was loaded.",
+            revision: 4,
+          },
+          { status: 409 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    const before = loads;
+    const row = screen
+      .getAllByRole("listitem")
+      .find((item) => within(item).queryByText("OpenAI compatible, model-2"))!;
+    await user.click(within(row).getByRole("button", { name: "Remove" }));
+    await user.click(
+      within(row).getByRole("button", { name: "Confirm remove" }),
+    );
+    expect(
+      await screen.findByText("The back end changed since it was loaded."),
+    ).toBeVisible();
+    await waitFor(() => expect(loads).toBeGreaterThan(before));
+  });
+
   it("asks before sending data to a new address, and sends the answer with the retry", async () => {
     let attempt = 0;
     server.use(

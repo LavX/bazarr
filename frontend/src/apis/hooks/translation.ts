@@ -127,10 +127,12 @@ export function useUpdateConnection() {
 
 export function useDeleteConnection() {
   const refresh = useRefresh();
+  const onStale = useRefreshOnStale();
   return useMutation({
     mutationFn: ({ id, revision }: { id: number; revision: number }) =>
       withInlineErrors(() => api.translation.deleteConnection(id, revision)),
     onSuccess: refresh,
+    onError: onStale,
   });
 }
 

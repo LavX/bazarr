@@ -332,22 +332,24 @@ class TranslatorSettingsService:
         expected = self._expected(payload, required=values is not None or bool(clear) or enabled is not None)
         if expected is not None and instance.revision != expected:
             raise StaleRevisionError("The engine settings changed since they were loaded.", revision=instance.revision)
-        if values is not None or clear:
-            plugin = self._plugin(instance.plugin_id)
-            if plugin is None or not plugin.active:
-                raise PluginUnavailableError("The plugin for this engine is not installed.")
-            self._save_engine_values(instance, plugin, values, clear, payload, expected)
-        elif enabled is True:
-            self._check_engine_before_turning_on(instance)
-        if enabled is not None and bool(instance.enabled) != enabled:
-            # A save above has moved the revision on; the switch is swapped against the revision it left.
-            current = self._instance(instance_id).revision
-            try:
-                change = self._store.set_instance_enabled(instance_id, enabled, expected_revision=current)
-            except StoreStale as error:
-                raise StaleRevisionError("The engine settings changed since they were loaded.",
-                                         revision=error.revision) from error
-            notices += [self._notice(item) for item in change.notices]
+        # The settings and the switch are one save: if the switch loses a race, the settings are not kept either.
+        with self._store.transaction():
+            if values is not None or clear:
+                plugin = self._plugin(instance.plugin_id)
+                if plugin is None or not plugin.active:
+                    raise PluginUnavailableError("The plugin for this engine is not installed.")
+                self._save_engine_values(instance, plugin, values, clear, payload, expected)
+            elif enabled is True:
+                self._check_engine_before_turning_on(instance)
+            if enabled is not None and bool(instance.enabled) != enabled:
+                # A save above has moved the revision on; the switch is swapped against the revision it left.
+                current = self._instance(instance_id).revision
+                try:
+                    change = self._store.set_instance_enabled(instance_id, enabled, expected_revision=current)
+                except StoreStale as error:
+                    raise StaleRevisionError("The engine settings changed since they were loaded.",
+                                             revision=error.revision) from error
+                notices += [self._notice(item) for item in change.notices]
         return {"engine": self.instance_view(self._instance(instance_id)), "notices": notices}
 
     def _check_engine_before_turning_on(self, instance) -> None:
@@ -476,7 +478,11 @@ class TranslatorSettingsService:
         expected = self._expected({"expected_revision": self._revision_arg(expected_revision)}, required=True)
         if connection.revision != expected:
             raise StaleRevisionError("The back end changed since it was loaded.", revision=connection.revision)
-        self._store.delete_connection(connection_id)
+        try:
+            self._store.delete_connection(connection_id, expected_revision=expected)
+        except StoreStale as error:
+            raise StaleRevisionError("The back end changed since it was loaded.",
+                                     revision=error.revision) from error
 
     @staticmethod
     def _revision_arg(value: Any) -> Any:
