@@ -114,6 +114,15 @@ class SystemStatus(Resource):
         except Exception:
             system_status.update({'compat_active': False})
 
+        # Whether the v2 translation runtime is switched on, which decides if the
+        # Settings > Translation page exists. Answered from the switch alone while
+        # it is off, so a normal install does no extra work here.
+        try:
+            from subtitles.tools.translate.runtime import runtime_v2_enabled
+            system_status.update({'translation_runtime_v2': runtime_v2_enabled()})
+        except Exception:
+            system_status.update({'translation_runtime_v2': False})
+
         # The gate every translate action asks, with its reason, so the UI can
         # disable its actions with the same answer the queue paths refuse with.
         # The gate never raises: a configuration that cannot be read is just

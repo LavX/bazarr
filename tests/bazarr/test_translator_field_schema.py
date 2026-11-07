@@ -1,0 +1,89 @@
+"""Checking a settings payload against the fields a manifest declares."""
+import pytest
+
+from subtitles.tools.translate.runtime.field_schema import field_visible, is_secret_field, validate_values
+
+FIELDS = (
+    {"key": "base_url", "type": "text", "destination": True, "max_length": 40},
+    {"key": "api_key", "type": "secret", "required": True},
+    {"key": "api_keys", "type": "key_list", "secret": True, "max_items": 2},
+    {"key": "temperature", "type": "number", "min": 0, "max": 2},
+    {"key": "batch", "type": "integer", "min": 1, "max": 500, "default": 100},
+    {"key": "thinking", "type": "toggle"},
+    {"key": "preset", "type": "choice", "choices": ["openai", {"value": "custom", "label": "Custom"}]},
+    {"key": "tags", "type": "list"},
+    {"key": "order", "type": "orderable_list", "items": ["a", {"value": "b", "label": "B"}, "c"]},
+    {"key": "model", "type": "options"},
+    {"key": "region", "type": "text", "required": True, "show_if": {"key": "preset", "equals": "custom"}},
+)
+
+
+def check(values, **kwargs):
+    return validate_values(FIELDS, values, **kwargs)
+
+
+def test_a_valid_payload_is_split_into_settings_and_secrets():
+    out = check({"base_url": "http://x", "api_key": "k", "api_keys": ["a", "b"], "temperature": 0.5, "batch": 10,
+                 "thinking": False, "preset": "openai", "tags": ["x"], "order": ["c", "a"], "model": "free text"})
+    assert out.errors == {}
+    assert out.secrets == {"api_key": "k", "api_keys": ["a", "b"]}
+    assert out.settings["thinking"] is False and out.settings["order"] == ["c", "a"]
+    assert "api_key" not in out.settings and "api_keys" not in out.settings
+
+
+@pytest.mark.parametrize("values,key", [
+    ({"api_keys": "['key']"}, "api_keys"),          # no coercion of a string into a list
+    ({"api_keys": ["a", ""]}, "api_keys"),
+    ({"api_keys": ["a", "b", "c"]}, "api_keys"),
+    ({"tags": "x"}, "tags"),
+    ({"batch": "5"}, "batch"),
+    ({"batch": 5.5}, "batch"),
+    ({"batch": True}, "batch"),
+    ({"batch": 0}, "batch"),
+    ({"temperature": 3}, "temperature"),
+    ({"temperature": "1"}, "temperature"),
+    ({"thinking": "yes"}, "thinking"),
+    ({"preset": "nope"}, "preset"),
+    ({"base_url": 5}, "base_url"),
+    ({"base_url": "x" * 41}, "base_url"),
+    ({"order": ["a", "a"]}, "order"),
+    ({"order": ["z"]}, "order"),
+    ({"mystery": 1}, "mystery"),
+])
+def test_a_value_of_the_wrong_type_or_range_is_refused_for_that_field(values, key):
+    out = check({"api_key": "k", **values})
+    assert key in out.errors
+
+
+def test_a_required_secret_is_met_by_a_stored_one():
+    assert "api_key" in check({}).errors
+    assert "api_key" not in check({}, stored_secrets=frozenset({"api_key"})).errors
+    # An empty secret keeps what is stored; it does not clear it and it does not count as entered.
+    out = check({"api_key": ""}, stored_secrets=frozenset({"api_key"}))
+    assert "api_key" not in out.secrets and "api_key" not in out.errors
+
+
+def test_a_hidden_required_field_is_not_required_and_a_shown_one_is():
+    assert "region" not in check({"api_key": "k"}).errors
+    assert check({"api_key": "k", "preset": "custom"}).errors["region"] == "is required"
+    assert check({"api_key": "k", "preset": "custom", "region": "eu"}).errors == {}
+
+
+def test_an_empty_value_is_dropped_so_the_default_applies_and_a_false_toggle_is_kept():
+    out = check({"api_key": "k", "batch": None, "preset": "", "thinking": False})
+    assert out.errors == {}
+    assert "batch" not in out.settings and "preset" not in out.settings
+    assert out.settings["thinking"] is False
+
+
+def test_host_keys_are_not_unknown():
+    out = check({"api_key": "k", "price": 1}, extra_keys=frozenset({"price"}))
+    assert out.errors == {}
+
+
+def test_secret_and_visibility_helpers():
+    assert is_secret_field({"type": "secret"}) and is_secret_field({"type": "key_list", "secret": True})
+    assert not is_secret_field({"type": "key_list"})
+    field = {"key": "a", "show_if": {"key": "m", "in": ["x", "y"]}}
+    assert field_visible(field, {"m": "y"}) and not field_visible(field, {"m": "z"})
+    assert field_visible({"key": "a"}, {})
