@@ -485,14 +485,23 @@ def test_stop_ends_ffmpegs_whole_process_group(tmp_path, monkeypatch):
     pidfile = tmp_path / "child.pid"
     ffmpeg = _fake_ffmpeg(tmp_path, f"sleep 40 &\necho $! > '{pidfile}'\nwait")
 
+    def stop_once_the_child_exists(step, value, maximum):
+        # Stop only after ffmpeg has started its child. On a loaded machine the
+        # shell can take longer than a fixed number of polls to get that far, and
+        # a stop that lands first has no child to leave behind.
+        if pidfile.exists() and pidfile.read_text().strip():
+            raise RuntimeError("cancelled")
+
     started = time.monotonic()
     with pytest.raises(RuntimeError, match="cancelled"):
-        decode.render_frames("/v.mkv", 0, str(tmp_path), ffmpeg=ffmpeg, progress=_StopAtCall(5))
+        decode.render_frames("/v.mkv", 0, str(tmp_path), ffmpeg=ffmpeg, progress=stop_once_the_child_exists)
 
     # A child left holding ffmpeg's stderr would keep the reap waiting for its 40 s.
     assert time.monotonic() - started < 20
     child = int(pidfile.read_text())
-    deadline = time.monotonic() + 3
+    # The kill is immediate, but the process only disappears once the scheduler
+    # runs it; a busy machine can take a while, still far short of the 40 s sleep.
+    deadline = time.monotonic() + 15
     while _alive(child) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not _alive(child), "a process ffmpeg started outlived the stop"

@@ -370,7 +370,7 @@ def test_real_job_cancellation_releases_waiting_provider_without_publication(
 
     def delayed(**kwargs):
         started.set()
-        assert release.wait(5)
+        assert release.wait(60)
         return original(**kwargs)
 
     monkeypatch.setattr(automatic, "download_best_subtitles", delayed)
@@ -379,27 +379,32 @@ def test_real_job_cancellation_releases_waiting_provider_without_publication(
     )
     workflows.jobs_queue.jobs_running_queue.append(job)
 
+    cancelled_at = []
+
     def stop():
-        assert started.wait(5)
+        # Reaching the provider call takes as long as the machine is slow; the
+        # bound below is on the cancellation latency, not on that wait.
+        assert started.wait(60)
+        cancelled_at.append(time.monotonic())
         job.cancelled = True
 
     thread = Thread(target=stop)
     thread.start()
-    before = time.monotonic()
     try:
         with pytest.raises(JobCancelled):
             automatic.search_event(
                 61, 1, cancel=workflows.SportsJobSignal(1, job.job_id)
             )
-        assert time.monotonic() - before < 3
+        assert time.monotonic() - cancelled_at[0] < 3
     finally:
         release.set()
         thread.join(5)
         workflows.jobs_queue.jobs_running_queue.remove(job)
-    # Allow the isolated provider to finish, then prove its abandoned result never saves.
-    for _ in range(100):
-        if automatic._provider_slots._value == 4:
-            break
+    # Allow the isolated provider to finish, then prove its abandoned result never
+    # saves. The wait is as generous as the others: finishing needs a loaded
+    # machine to schedule the provider thread, and is not what the test times.
+    deadline = time.monotonic() + 60
+    while automatic._provider_slots._value != 4 and time.monotonic() < deadline:
         time.sleep(0.05)
     assert automatic._provider_slots._value == 4
     assert not (folder / "1/event.en.srt").exists()

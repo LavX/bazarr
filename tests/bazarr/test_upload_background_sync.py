@@ -90,7 +90,7 @@ def upload_flow(monkeypatch, tmp_path):
         engine_calls.append(kwargs)
         source = Path(self.srtin).read_text()
         engine_started.set()
-        assert release_engine.wait(5), "test did not release sync engine"
+        assert release_engine.wait(60), "test did not release sync engine"
         output_path.write_text("1\n00:00:03,000 --> 00:00:04,000\nSynced " + source)
         if controls.fail:
             raise RuntimeError("controlled sync failure")
@@ -131,7 +131,7 @@ def upload_flow(monkeypatch, tmp_path):
                           sync_history=sync_history, engine_calls=engine_calls, real_indexers=real_indexers)
     release_engine.set()
     for thread in threads:
-        thread.join(5)
+        thread.join(60)
         assert not thread.is_alive()
 
 
@@ -146,7 +146,8 @@ def test_a_completed_upload_job_no_longer_holds_its_buffer(upload_flow, media_ty
     flow = upload_flow
     flow.submit(media_type)
     job, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
+    assert not thread.is_alive(), "thread did not finish"
 
     assert job.status == "completed"
     assert job.kwargs["subtitle"].closed
@@ -165,7 +166,8 @@ def test_a_failed_upload_job_no_longer_holds_its_buffer(upload_flow, monkeypatch
     monkeypatch.setattr(upload, "save_subtitles", refuse)
     flow.submit(media_type)
     job, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
+    assert not thread.is_alive(), "thread did not finish"
 
     assert job.status == "failed"
     assert job.kwargs["subtitle"].closed
@@ -224,7 +226,8 @@ def test_saved_upload_is_visible_and_upload_completes_before_sync(upload_flow, m
     flow = upload_flow
     upload_id = flow.submit(media_type)
     upload_job, upload_thread = flow.start()
-    upload_thread.join(1)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
 
     assert (flow.video.parent / "Video.en.srt").is_file()
     assert upload_job.status != "failed"
@@ -234,13 +237,14 @@ def test_saved_upload_is_visible_and_upload_completes_before_sync(upload_flow, m
     assert len(flow.history) == 1
     assert len(flow.queue.jobs_pending_queue) == 1
     sync_job, sync_thread = flow.start()
-    assert flow.engine_started.wait(2)
+    assert flow.engine_started.wait(60)
     assert sync_job.job_id != upload_id
     assert sync_job.is_progress
     assert sync_job.status == "running"
     assert "Uploaded" in flow.indexes[-1][1]["Video.en.srt"]
     flow.release_engine.set()
-    sync_thread.join(3)
+    sync_thread.join(60)
+    assert not sync_thread.is_alive(), "sync_thread did not finish"
     assert sync_job.status == "completed"
     assert "Synced" in flow.indexes[-1][1]["Video.en.srt"]
     assert len(flow.history) == 1
@@ -261,18 +265,20 @@ def test_stale_sync_does_not_replace_a_new_upload_or_restore_a_deleted_file(
     flow = upload_flow
     flow.submit(media_type)
     job, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
+    assert not thread.is_alive(), "thread did not finish"
     assert job.status == "completed"
     sync_id = flow.queue.jobs_pending_queue[0].job_id
     if running:
         sync_job, sync_thread = flow.start(sync_id)
-        assert flow.engine_started.wait(2)
+        assert flow.engine_started.wait(60)
 
     source = flow.video.parent / "Video.en.srt"
     if change == "upload":
         second_upload_id = flow.submit(media_type, content="New upload")
         second_job, second_thread = flow.start(second_upload_id)
-        second_thread.join(2)
+        second_thread.join(60)
+        assert not second_thread.is_alive(), "second_thread did not finish"
         assert second_job.status == "completed"
         assert "New upload" in source.read_text()
     else:
@@ -281,7 +287,8 @@ def test_stale_sync_does_not_replace_a_new_upload_or_restore_a_deleted_file(
     flow.release_engine.set()
     if not running:
         sync_job, sync_thread = flow.start(sync_id)
-    sync_thread.join(2)
+    sync_thread.join(60)
+    assert not sync_thread.is_alive(), "sync_thread did not finish"
     assert sync_job.status == "completed"
     if not running:
         assert not flow.engine_started.is_set(), "outdated queued sync should skip its engines"
@@ -290,7 +297,8 @@ def test_stale_sync_does_not_replace_a_new_upload_or_restore_a_deleted_file(
         assert "New upload" in source.read_text()
         assert "Synced" not in source.read_text()
         latest_sync, latest_thread = flow.start()
-        latest_thread.join(2)
+        latest_thread.join(60)
+        assert not latest_thread.is_alive(), "latest_thread did not finish"
         assert latest_sync.status == "completed"
         output = source if output_mode == "overwrite" else source.with_name("Video.en.ffsubsync.srt")
         assert "Synced" in output.read_text()
@@ -307,20 +315,21 @@ def test_delete_during_sync_publication_cannot_be_undone(upload_flow, monkeypatc
     flow = upload_flow
     flow.submit(media_type)
     upload_job, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
     assert upload_job.status == "completed"
     publishing, publish = Event(), Event()
     real_replace = subsync_engines.os.replace
 
     def paused_replace(source, destination):
         publishing.set()
-        assert publish.wait(5)
+        assert publish.wait(60)
         return real_replace(source, destination)
 
     monkeypatch.setattr(subsync_engines.os, "replace", paused_replace)
     flow.release_engine.set()
     sync_job, sync_thread = flow.start()
-    assert publishing.wait(2)
+    assert publishing.wait(60)
     deletion = Thread(target=flow.remove, args=(media_type,))
     deletion.start()
     try:
@@ -328,8 +337,8 @@ def test_delete_during_sync_publication_cannot_be_undone(upload_flow, monkeypatc
         assert deletion.is_alive(), "deletion must serialize with the checked output publication"
     finally:
         publish.set()
-        sync_thread.join(2)
-        deletion.join(2)
+        sync_thread.join(60)
+        deletion.join(60)
     assert not deletion.is_alive()
     assert not flow.video.with_suffix(".en.srt").exists()
 
@@ -349,7 +358,8 @@ def test_optional_sync_failure_or_skip_keeps_the_successful_upload(upload_flow, 
     flow.controls.fail = outcome == "failure"
     flow.submit(media_type, forced=outcome == "forced")
     upload_job, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
     assert upload_job.status == "completed"
     before = flow.indexes[-1]
     if outcome == "disabled":
@@ -357,11 +367,12 @@ def test_optional_sync_failure_or_skip_keeps_the_successful_upload(upload_flow, 
     else:
         sync_job, sync_thread = flow.start()
         if outcome in ("cancel", "failure"):
-            assert flow.engine_started.wait(2)
+            assert flow.engine_started.wait(60)
             if outcome == "cancel":
                 assert flow.queue.cancel_running_job(sync_job.job_id)
         flow.release_engine.set()
-        sync_thread.join(2)
+        sync_thread.join(60)
+        assert not sync_thread.is_alive(), "sync_thread did not finish"
         # The upload stays completed either way. A sync that failed is its own
         # job, and it now fails instead of reading as completed; a cancelled
         # one reports cancelled and a skipped one completes.
@@ -395,12 +406,14 @@ def test_upload_preserves_postprocessing_hi_and_notification_policy(upload_flow,
     monkeypatch.setattr(upload, "postprocessing", postprocess)
     flow.submit(media_type, hi=True)
     upload_job, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
     assert upload_job.status == "completed"
     assert "Processed" in flow.indexes[-1][1]["Video.en.hi.srt"]
     flow.release_engine.set()
     sync_job, sync_thread = flow.start()
-    sync_thread.join(2)
+    sync_thread.join(60)
+    assert not sync_thread.is_alive(), "sync_thread did not finish"
     assert sync_job.status == "completed"
     assert "Synced" in flow.indexes[-1][1]["Video.en.hi.srt"]
     assert "Processed" in flow.indexes[-1][1]["Video.en.hi.srt"]
@@ -505,7 +518,7 @@ def test_unrelated_upload_finishes_while_other_media_postprocessing_is_blocked(u
 
     def postprocess(command, video_path, subtitle_path=None):
         blocked.set()
-        assert unblock.wait(5), 'probe failed to release postprocessing'
+        assert unblock.wait(60), 'probe failed to release postprocessing'
 
     monkeypatch.setattr(processing, '_postprocessing_config', config)
     monkeypatch.setattr(upload, 'pp_replace', lambda *args: ['controlled'])
@@ -513,7 +526,7 @@ def test_unrelated_upload_finishes_while_other_media_postprocessing_is_blocked(u
     monkeypatch.setattr(upload, 'set_chmod', lambda **kwargs: None)
     flow.submit('movie', owner=7)
     first_job, first_thread = flow.start()
-    assert blocked.wait(2)
+    assert blocked.wait(60)
     other_video = flow.video.with_name('Unrelated.mkv')
     other_video.touch()
     second_id = upload.manual_upload_subtitle(
@@ -522,14 +535,14 @@ def test_unrelated_upload_finishes_while_other_media_postprocessing_is_blocked(u
         filename='other.srt', audio_language=[], radarrId=31, arr_instance_id=8)
     second_job, second_thread = flow.start(second_id)
     try:
-        assert second_entered.wait(2), 'second upload did not start'
+        assert second_entered.wait(60), 'second upload did not start'
         second_thread.join(0.25)
         completed_before_release = second_job.status == 'completed'
         saved_before_release = other_video.with_suffix('.en.srt').exists()
     finally:
         unblock.set()
-        first_thread.join(2)
-        second_thread.join(2)
+        first_thread.join(60)
+        second_thread.join(60)
     assert not first_thread.is_alive() and not second_thread.is_alive()
     assert first_job.status == second_job.status == 'completed'
     assert completed_before_release and saved_before_release, 'unrelated upload was blocked by another media postprocessing lock'
@@ -544,7 +557,8 @@ def test_cancel_while_finished_engine_waits_for_publication_preserves_upload(upl
     flow = upload_flow
     flow.submit('movie')
     upload_job, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
     assert upload_job.status == 'completed'
     original = flow.video.with_suffix('.en.srt').read_bytes()
     finished_checkpoint = Event()
@@ -560,10 +574,10 @@ def test_cancel_while_finished_engine_waits_for_publication_preserves_upload(upl
     with subsync_engines.subtitle_write_lock(str(flow.video), str(flow.video.parent)):
         flow.release_engine.set()
         sync_job, sync_thread = flow.start()
-        assert finished_checkpoint.wait(2), 'engine did not reach publication boundary'
+        assert finished_checkpoint.wait(60), 'engine did not reach publication boundary'
         assert flow.video.with_suffix('.en.srt').read_bytes() == original
         assert flow.queue.cancel_running_job(sync_job.job_id)
-    sync_thread.join(2)
+    sync_thread.join(60)
     assert not sync_thread.is_alive()
     assert sync_job.progress_message == 'Cancelled by user'
     assert flow.video.with_suffix('.en.srt').read_bytes() == original
@@ -609,7 +623,7 @@ def test_sync_reindex_cannot_restore_a_listing_after_successful_delete(upload_fl
             if controls["armed"] and isinstance(statement, Update):
                 controls["armed"] = False
                 before_commit.set()
-                assert commit.wait(5)
+                assert commit.wait(60)
             with Session.begin() as session:
                 result = session.execute(statement, *args, **kwargs)
                 return result.freeze()() if statement.is_select else result
@@ -636,20 +650,21 @@ def test_sync_reindex_cannot_restore_a_listing_after_successful_delete(upload_fl
     try:
         flow.submit(media_type)
         upload_job, upload_thread = flow.start()
-        upload_thread.join(2)
+        upload_thread.join(60)
+        assert not upload_thread.is_alive(), "upload_thread did not finish"
         assert upload_job.status == "completed"
         assert len(ast.literal_eval(db.execute(select(table.subtitles)).scalar())) == 1
         controls["armed"] = True
         flow.release_engine.set()
         sync_job, sync_thread = flow.start()
-        assert before_commit.wait(2)
+        assert before_commit.wait(60)
         deleted = []
         deletion = Thread(target=lambda: deleted.append(flow.remove(media_type)))
         deletion.start()
         deletion.join(0.2)
         commit.set()
-        sync_thread.join(2)
-        deletion.join(2)
+        sync_thread.join(60)
+        deletion.join(60)
         assert not deletion.is_alive() and not sync_thread.is_alive()
         assert sync_job.status == "completed"
         assert deleted == [True]
@@ -658,7 +673,7 @@ def test_sync_reindex_cannot_restore_a_listing_after_successful_delete(upload_fl
     finally:
         commit.set()
         if deletion:
-            deletion.join(2)
+            deletion.join(60)
         engine.dispose()
 
 
@@ -684,12 +699,14 @@ def test_review_sync_publication_refreshes_external_consumers(upload_flow, monke
                         lambda event: refresh("media servers", event))
     flow.submit(media_type)
     upload_job, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
     assert upload_job.status == "completed"
     assert len(refreshes) == 2
     flow.release_engine.set()
     sync_job, sync_thread = flow.start()
-    sync_thread.join(3)
+    sync_thread.join(60)
+    assert not sync_thread.is_alive(), "sync_thread did not finish"
     assert sync_job.status == "completed"
     assert len(refreshes) == 4, "external consumers were not refreshed after sync publication"
     expected = "Video.en.ffsubsync.srt" if output_mode == "keep_all" else "Video.en.srt"
@@ -702,7 +719,8 @@ def test_review_upload_sync_uses_resolved_series_id(upload_flow):
     flow = upload_flow
     flow.submit("series", sonarrSeriesId=999)
     upload_job, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
     assert upload_job.status == "completed"
     sync_job = flow.queue.jobs_pending_queue[0]
     assert sync_job.kwargs["sonarr_series_id"] == 10, "unvalidated request ID reached synchronization"
@@ -725,7 +743,8 @@ def test_review_replacement_upload_does_not_list_stale_generated_outputs(upload_
         monkeypatch.setattr(settings.subsync, "use_subsync", False)
     flow.submit(media_type, content="Replacement upload")
     upload_job, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
     assert upload_job.status == "completed"
     assert "Replacement upload" in flow.indexes[-1][1]["Video.en.srt"]
     assert old_output.name not in flow.indexes[-1][1], "the initial upload index exposed old generated text"
@@ -737,11 +756,11 @@ def test_review_replacement_upload_does_not_list_stale_generated_outputs(upload_
         return
     flow.controls.fail = outcome == "failure"
     sync_job, sync_thread = flow.start()
-    assert flow.engine_started.wait(2)
+    assert flow.engine_started.wait(60)
     if outcome == "cancel":
         flow.queue.cancel_running_job(sync_job.job_id)
     flow.release_engine.set()
-    sync_thread.join(3)
+    sync_thread.join(60)
     assert not sync_thread.is_alive()
     if outcome == "success":
         assert "Replacement upload" in old_output.read_text()
@@ -763,11 +782,12 @@ def test_review_deleted_generated_destination_stays_deleted(upload_flow, monkeyp
     destination.write_text("Old generated output")
     flow.submit(media_type)
     upload_job, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
     assert upload_job.status == "completed"
     if running:
         sync_job, sync_thread = flow.start()
-        assert flow.engine_started.wait(2)
+        assert flow.engine_started.wait(60)
     delete.delete_subtitles(media_type=media_type, language="en", forced=False, hi=False,
                            media_path=str(flow.video), subtitles_path=str(destination),
                            sonarr_series_id=10, sonarr_episode_id=20, radarr_id=30, arr_instance_id=7)
@@ -775,7 +795,7 @@ def test_review_deleted_generated_destination_stays_deleted(upload_flow, monkeyp
     flow.release_engine.set()
     if not running:
         sync_job, sync_thread = flow.start()
-    sync_thread.join(3)
+    sync_thread.join(60)
     assert not sync_thread.is_alive()
     assert not destination.exists(), "background sync recreated an explicitly deleted generated destination"
     assert destination.name not in flow.indexes[-1][1]
@@ -820,18 +840,19 @@ def test_review_editor_write_cannot_be_lost_at_sync_publication(upload_flow, mon
         if (Path(destination) == published_destination and Path(temporary).name.startswith(".bazarr-sync-")
                 and current_thread().name != "competing-subtitle-writer"):
             reached_publication.set()
-            assert release_publication.wait(5), "test did not release sync publication"
+            assert release_publication.wait(60), "test did not release sync publication"
         return real_replace(temporary, destination)
 
     monkeypatch.setattr(subsync_engines.os, "replace", replace)
     flow.submit("movie")
     upload_job, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
     assert upload_job.status == "completed"
     promotion.write_text(user_text)
     initial_etag = content.generate_etag(str(source))
     sync_job, sync_thread = flow.start()
-    assert flow.engine_started.wait(2)
+    assert flow.engine_started.wait(60)
     flow.release_engine.set()
     writer_results = []
     writer_errors = []
@@ -947,13 +968,13 @@ def test_review_editor_write_cannot_be_lost_at_sync_publication(upload_flow, mon
 
     writer = Thread(target=write, name="competing-subtitle-writer")
     try:
-        assert reached_publication.wait(2)
+        assert reached_publication.wait(60)
         writer.start()
-        assert writer_started.wait(2)
+        assert writer_started.wait(60)
         writer_done.wait(0.3)
         release_publication.set()
-        sync_thread.join(3)
-        writer.join(3)
+        sync_thread.join(60)
+        writer.join(60)
         assert not writer.is_alive() and not sync_thread.is_alive()
         assert not writer_errors
         if operation == "edit-etag" and output_mode == "overwrite":
@@ -967,7 +988,7 @@ def test_review_editor_write_cannot_be_lost_at_sync_publication(upload_flow, mon
     finally:
         release_publication.set()
         if writer.ident:
-            writer.join(3)
+            writer.join(60)
 
 
 @pytest.mark.parametrize("failure", ["cancel-before-engine", "setup-error", "settings-error"])
@@ -977,7 +998,7 @@ def test_review_terminal_job_releases_publication_lease(upload_flow, monkeypatch
     flow = upload_flow
     flow.submit("movie")
     _, upload_thread = flow.start()
-    upload_thread.join(2)
+    upload_thread.join(60)
     job = flow.queue.jobs_pending_queue[0]
     publication = job.kwargs["source_version"]
     if failure == "settings-error":
@@ -993,7 +1014,7 @@ def test_review_terminal_job_releases_publication_lease(upload_flow, monkeypatch
 
         monkeypatch.setattr(sync, "_report_progress", report)
     _, thread = flow.start()
-    thread.join(3)
+    thread.join(60)
     assert not thread.is_alive()
     assert job.status in ("completed", "failed", "cancelled")
     assert publication.state is None, "terminal Job kwargs retained the media coordinator"
@@ -1014,10 +1035,11 @@ def test_review_partial_publication_refreshes_consumers_after_cancellation(uploa
     monkeypatch.setattr(subsyncer.SubSyncer, "_run_external_engine", cancel)
     flow.submit("movie")
     _, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
     flow.release_engine.set()
     job, thread = flow.start()
-    thread.join(3)
+    thread.join(60)
+    assert not thread.is_alive(), "thread did not finish"
     assert job.status == "cancelled" and job.cancelled
     assert flow.video.with_suffix(".en.ffsubsync.srt").is_file()
     assert sum("arr_client" in kwargs for _, kwargs in flow.notifications) == 2
@@ -1111,7 +1133,7 @@ def test_review_create_cannot_overwrite_a_later_upload(upload_flow, monkeypatch)
     def pause(*args, **kwargs):
         if current_thread().name == "create-subtitle":
             reached.set()
-            assert release.wait(5)
+            assert release.wait(60)
         return mkstemp(*args, **kwargs)
 
     monkeypatch.setattr(new_subtitle, "_new_staging_file", pause)
@@ -1124,19 +1146,20 @@ def test_review_create_cannot_overwrite_a_later_upload(upload_flow, monkeypatch)
     creator = Thread(target=create, name="create-subtitle")
     creator.start()
     try:
-        assert reached.wait(2)
+        assert reached.wait(60)
         flow.submit("movie", content="Uploaded later")
         job, uploader = flow.start()
         uploader.join(0.3)
         release.set()
-        creator.join(3)
-        uploader.join(3)
+        creator.join(60)
+        uploader.join(60)
+        assert not creator.is_alive() and not uploader.is_alive(), "a worker did not finish"
         assert results[0][1] == 201
         assert job.status == "completed"
         assert "Uploaded later" in flow.video.with_suffix(".en.srt").read_text()
     finally:
         release.set()
-        creator.join(3)
+        creator.join(60)
 
 
 def test_review_combine_waits_for_an_existing_publication(upload_flow, monkeypatch):
@@ -1163,7 +1186,8 @@ def test_review_combine_waits_for_an_existing_publication(upload_flow, monkeypat
         worker = Thread(target=combine)
         worker.start()
         blocked = not finished.wait(0.3)
-    worker.join(3)
+    worker.join(60)
+    assert not worker.is_alive(), "worker did not finish"
     assert results[0].status == "built"
     assert blocked, "combine published while another writer owned the publication lock"
     assert output.is_file()
@@ -1197,7 +1221,7 @@ def test_review_external_index_waits_for_publication(upload_flow, monkeypatch, m
         worker = Thread(target=index)
         worker.start()
         entered_while_locked = entered.wait(0.3)
-    worker.join(3)
+    worker.join(60)
     assert not worker.is_alive() and not errors
     assert entered.is_set()
     assert not entered_while_locked, "external scan ran inside another writer's publication transaction"
@@ -1209,7 +1233,7 @@ def test_review_duplicate_enqueue_keeps_the_existing_job_lease(upload_flow):
     flow = upload_flow
     flow.submit("movie")
     _, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
     job = flow.queue.jobs_pending_queue[0]
     publication = job.kwargs["source_version"]
     assert sync.sync_subtitles(**job.kwargs) is False
@@ -1217,7 +1241,7 @@ def test_review_duplicate_enqueue_keeps_the_existing_job_lease(upload_flow):
     assert publication.state is not None, "duplicate rejection invalidated the original queued publication"
     flow.release_engine.set()
     _, thread = flow.start()
-    thread.join(3)
+    thread.join(60)
     assert "Synced" in flow.video.with_suffix(".en.srt").read_text()
     assert publication.state is None
 
@@ -1229,7 +1253,7 @@ def test_review_removed_pending_job_does_not_retain_the_coordinator(upload_flow)
     flow = upload_flow
     flow.submit("movie")
     _, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
     job = flow.queue.jobs_pending_queue[0]
     state = weakref.ref(job.kwargs["source_version"].state)
     assert flow.queue.remove_job_from_pending_queue(job.job_id)
@@ -1247,12 +1271,13 @@ def test_review_notification_failure_does_not_strand_upload_sync(upload_flow, mo
     monkeypatch.setattr(upload, name, Mock(side_effect=RuntimeError("controlled notification failure")))
     flow.submit(media_type)
     job, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
+    assert not thread.is_alive(), "thread did not finish"
     assert job.status == "completed"
     assert len(flow.queue.jobs_pending_queue) == 1
     flow.release_engine.set()
     _, thread = flow.start()
-    thread.join(3)
+    thread.join(60)
     assert "Synced" in flow.video.with_suffix(".en.srt").read_text()
 
 
@@ -1283,7 +1308,7 @@ def review_translator(upload_flow, monkeypatch, request):
 
     def compute(*args, **kwargs):
         started.set()
-        assert release.wait(5)
+        assert release.wait(60)
         computed.set()
         if name == "google":
             return "Translated text"
@@ -1314,11 +1339,11 @@ def review_translator(upload_flow, monkeypatch, request):
 
     worker = Thread(target=run)
     worker.start()
-    assert started.wait(2)
+    assert started.wait(60)
     yield SimpleNamespace(flow=flow, service=service, destination=destination, release=release,
                           computed=computed, worker=worker, errors=errors, job_id=job_id)
     release.set()
-    worker.join(5)
+    worker.join(60)
     assert not worker.is_alive()
 
 
@@ -1336,7 +1361,7 @@ def test_review_translation_preserves_changes_made_during_remote_work(review_tra
     else:
         assert run.flow.remove("movie")
     run.release.set()
-    run.worker.join(3)
+    run.worker.join(60)
     assert not run.worker.is_alive()
     assert any(isinstance(exc, SubtitleDestinationChanged) for exc in run.errors)
     if change == "edit":
@@ -1354,9 +1379,9 @@ def test_review_translation_cancellation_while_waiting_to_publish_keeps_old_file
     original = run.destination.read_bytes()
     with subtitle_write_lock(str(run.flow.video), str(run.destination.parent)):
         run.release.set()
-        assert run.computed.wait(2)
+        assert run.computed.wait(60)
         assert run.flow.queue.cancel_running_job(run.job_id)
-    run.worker.join(3)
+    run.worker.join(60)
     assert not run.worker.is_alive()
     assert any(isinstance(exc, JobCancelled) for exc in run.errors)
     assert run.destination.read_bytes() == original
@@ -1368,7 +1393,7 @@ def test_review_new_translation_preserves_process_umask(review_translator):
     control = run.destination.with_name("permission-control.txt")
     control.write_text("control")
     run.release.set()
-    run.worker.join(3)
+    run.worker.join(60)
     assert not run.errors
     assert run.destination.stat().st_mode & 0o777 == control.stat().st_mode & 0o777
 
@@ -1396,7 +1421,7 @@ def test_review_failed_upload_save_preserves_prior_subtitle_and_outputs(upload_f
         monkeypatch.setattr(builtins, "open", fail)
     flow.submit("movie")
     _, thread = flow.start()
-    thread.join(3)
+    thread.join(60)
     assert source.read_text() == "Prior base bytes"
     assert output.read_text() == "Prior generated bytes"
     assert not flow.queue.jobs_pending_queue
@@ -1474,7 +1499,7 @@ def test_review_combine_format_rebuilds_cannot_delete_each_other(review_combine,
     for worker in workers:
         worker.start()
     for worker in workers:
-        worker.join(3)
+        worker.join(60)
         assert not worker.is_alive()
     assert all(result.status == "built" for result in results)
     assert sum(run.output.with_suffix(ext).is_file() for ext in (".srt", ".ass")) == 1
@@ -1491,7 +1516,7 @@ def test_review_combine_preserves_edit_during_composition(review_combine, monkey
     def compose(**kwargs):
         result = original(**kwargs)
         entered.set()
-        assert release.wait(5)
+        assert release.wait(60)
         return result
 
     monkeypatch.setattr(run.module, "compose", compose)
@@ -1499,18 +1524,18 @@ def test_review_combine_preserves_edit_during_composition(review_combine, monkey
     worker = Thread(target=lambda: results.append(run.run()))
     worker.start()
     try:
-        assert entered.wait(2)
+        assert entered.wait(60)
         edited = b"1\n00:00:01,000 --> 00:00:02,000\nEdited combined\n"
         monkeypatch.setattr(mods.Subtitle, "get_modified_content", lambda *args, **kwargs: edited)
         mods.subtitles_apply_mods("en", str(run.output), [], str(run.flow.video), arr_instance_id=7)
         release.set()
-        worker.join(3)
+        worker.join(60)
         assert not worker.is_alive()
         assert run.output.read_bytes() == edited
         assert results[0].status != "built"
     finally:
         release.set()
-        worker.join(3)
+        worker.join(60)
 
 
 def test_review_postprocessing_without_a_queued_job_invalidates_exact_outputs(upload_flow, monkeypatch):
@@ -1572,12 +1597,12 @@ def test_review_index_failure_does_not_suppress_refresh_of_published_output(uplo
     flow = upload_flow
     flow.submit("movie")
     _, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
     job = flow.queue.jobs_pending_queue[0]
     job.kwargs["callback"] = Mock(side_effect=RuntimeError("controlled final index failure"))
     flow.release_engine.set()
     _, thread = flow.start()
-    thread.join(3)
+    thread.join(60)
     assert "Synced" in flow.video.with_suffix(".en.srt").read_text()
     assert sum("arr_client" in kwargs for _, kwargs in flow.notifications) == 2
     assert job.kwargs["source_version"].state is None
@@ -1594,12 +1619,12 @@ def test_review_deleting_one_engine_destination_preserves_other_engine_publicati
                         (output_path.write_text("Other engine output") and {"offset_seconds": 0}))
     flow.submit("movie")
     _, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
     deleted = flow.video.with_suffix(".en.ffsubsync.srt")
     assert delete.delete_subtitles("movie", "en", False, False, str(flow.video), str(deleted),
                                    radarr_id=30, arr_instance_id=7) is False
     _, thread = flow.start()
-    thread.join(3)
+    thread.join(60)
     assert not flow.engine_calls
     assert not deleted.exists()
     assert flow.video.with_suffix(".en.alass.srt").read_text() == "Other engine output"
@@ -1702,7 +1727,7 @@ def test_review_published_upload_is_accounted_when_quarantine_fails(rejected_qua
     flow = probe.flow
     flow.submit(media_type, content="Replacement uploaded text")
     job, thread = flow.start()
-    thread.join(3)
+    thread.join(60)
     assert not thread.is_alive()
     assert "Replacement uploaded text" in probe.source.read_text()
     assert flow.indexes, "durable upload publication was not indexed"
@@ -1944,7 +1969,8 @@ def test_a_manual_upload_records_the_configured_local_score(upload_flow, monkeyp
     monkeypatch.setitem(settings.general, "local_subtitle_score", 60)
     flow.submit(media_type)
     job, thread = flow.start()
-    thread.join(2)
+    thread.join(60)
+    assert not thread.is_alive(), "thread did not finish"
 
     assert job.status == "completed"
     [(_, kwargs)] = flow.history

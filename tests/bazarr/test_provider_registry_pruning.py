@@ -95,7 +95,9 @@ def startup_install(request, tmp_path_factory):
         env=env,
         capture_output=True,
         text=True,
-        timeout=60,
+        # A bound against a hung boot, not a speed assertion: the child imports
+        # the whole app and takes well over a minute on a loaded CI machine.
+        timeout=600,
     )
     assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     marker = "__RESULT__"
