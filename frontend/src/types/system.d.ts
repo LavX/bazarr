@@ -175,6 +175,8 @@ declare namespace System {
     source: "setting" | "env" | "none";
     /** A FlareSolverr container that answered next to Bazarr, never used until accepted. */
     detected: string | null;
+    /** True until the first check has finished; the answer then arrives on a later read. */
+    detecting: boolean;
   }
 
   interface ProviderSearchOutcome {

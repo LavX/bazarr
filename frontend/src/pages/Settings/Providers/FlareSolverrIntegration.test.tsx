@@ -30,7 +30,13 @@ const Harness: FunctionComponent<PropsWithChildren> = ({ children }) => {
 
 const sibling = "http://flaresolverr:8191";
 const status = (overrides: Partial<System.FlareSolverrStatus> = {}) => ({
-  data: { url: "", source: "none", detected: null, ...overrides },
+  data: {
+    url: "",
+    source: "none",
+    detected: null,
+    detecting: false,
+    ...overrides,
+  },
 });
 
 beforeEach(() => {
@@ -156,6 +162,35 @@ describe("FlareSolverrIntegration", () => {
     );
     expect(
       await screen.findByText(/FLARESOLVERR_URL environment variable/),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps asking while the server is still looking, then shows the hint", async () => {
+    let reads = 0;
+    server.use(
+      http.get("/api/providers/flaresolverr", () => {
+        reads += 1;
+        return HttpResponse.json(
+          reads === 1
+            ? status({ detecting: true })
+            : status({ detected: sibling }),
+        );
+      }),
+    );
+    customRender(
+      <Harness>
+        <FlareSolverrIntegration />
+      </Harness>,
+    );
+    expect(
+      await screen.findByText(/Looking for a FlareSolverr container/),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole(
+        "button",
+        { name: `Use ${sibling}` },
+        { timeout: 5000 },
+      ),
     ).toBeInTheDocument();
   });
 });

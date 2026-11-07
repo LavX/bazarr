@@ -51,6 +51,11 @@ const FlareSolverrIntegration: FunctionComponent = () => {
           {current?.url}). An address saved here replaces it.
         </MantineText>
       )}
+      {status.data?.detecting === true && detect.data === undefined && (
+        <MantineText size="sm" role="status">
+          Looking for a FlareSolverr container next to Bazarr.
+        </MantineText>
+      )}
       {detected && detected !== typed && (
         <Alert color="blue" title="FlareSolverr found">
           <Stack gap="xs">

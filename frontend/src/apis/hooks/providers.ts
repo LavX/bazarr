@@ -17,6 +17,9 @@ export function useFlareSolverrStatus() {
     queryKey: [QueryKeys.System, QueryKeys.Providers, "flaresolverr"],
     queryFn: () => api.providers.flaresolverr(),
     retry: false,
+    // The server answers from a cache and probes behind the request, so the
+    // first read can say "still looking". Ask again until it has an answer.
+    refetchInterval: (query) => (query.state.data?.detecting ? 2000 : false),
   });
 }
 

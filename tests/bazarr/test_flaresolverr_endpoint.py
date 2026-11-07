@@ -18,6 +18,7 @@ FIELD = "flaresolverr_url"
 def _clean_environment(monkeypatch):
     monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
     monkeypatch.setattr(endpoints, "_sibling_cache", {"checked_at": None, "url": None})
+    monkeypatch.setattr(endpoints, "_refresh_started_at", None)
 
 
 def _installation(provider_id, properties=None, trusted=False, manifest_extra=None):
@@ -276,13 +277,15 @@ class TestDetect:
         stored = _settings("")
         status = endpoints.flaresolverr_status(stored, refresh=True)
 
-        assert status == {"url": "", "source": "none", "detected": endpoints.FLARESOLVERR_SIBLING_URL}
+        assert status == {"url": "", "source": "none", "detected": endpoints.FLARESOLVERR_SIBLING_URL,
+                          "detecting": False}
         assert stored == _settings("")
         configs = _overlay(monkeypatch, [_installation("alpha", trusted=True)], {}, stored)
         assert configs["alpha"][FIELD] == ""
 
     def test_the_hint_is_hidden_once_that_address_is_in_use(self, monkeypatch):
         monkeypatch.setattr(endpoints, "_probe_flaresolverr", lambda url: True)
+        endpoints.detect_flaresolverr_sibling(refresh=True)
         status = endpoints.flaresolverr_status(_settings(endpoints.FLARESOLVERR_SIBLING_URL))
         assert status["detected"] is None
         assert status["source"] == "setting"
@@ -310,3 +313,129 @@ class TestDetect:
         assert endpoints._probe_flaresolverr("http://x") is False
         monkeypatch.setattr(requests.Session, "get", fake_get({"msg": "FlareSolverr"}, status=302))
         assert endpoints._probe_flaresolverr("http://x") is False
+
+
+class TestNeverBlocksTheCaller:
+    """A page load reads the cache. Only a background thread or an explicit Detect probes."""
+
+    @staticmethod
+    def _gated_probe(monkeypatch, found=True):
+        import threading
+
+        release = threading.Event()
+        calls = []
+
+        def probe(url):
+            calls.append(url)
+            release.wait(10)
+            return found
+
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr", probe)
+        return release, calls
+
+    def test_a_status_read_answers_at_once_while_the_probe_is_still_running(self, monkeypatch):
+        import time
+
+        release, _calls = self._gated_probe(monkeypatch)
+        started = time.monotonic()
+        status = endpoints.flaresolverr_status(_settings(""))
+        elapsed = time.monotonic() - started
+        try:
+            assert elapsed < 1.0
+            assert status["detected"] is None
+            assert status["detecting"] is True
+        finally:
+            release.set()
+
+    def test_the_background_answer_is_served_by_the_next_read(self, monkeypatch):
+        release, _calls = self._gated_probe(monkeypatch)
+        endpoints.flaresolverr_status(_settings(""))
+        release.set()
+        for _ in range(100):
+            status = endpoints.flaresolverr_status(_settings(""))
+            if not status["detecting"]:
+                break
+            import time
+            time.sleep(0.05)
+        assert status["detected"] == endpoints.FLARESOLVERR_SIBLING_URL
+        assert status["detecting"] is False
+
+    def test_a_stale_answer_is_served_while_a_refresh_runs_behind_it(self, monkeypatch):
+        endpoints._sibling_cache.update(checked_at=time_ago(endpoints.SIBLING_CACHE_SECONDS + 1),
+                                        url=endpoints.FLARESOLVERR_SIBLING_URL)
+        release, calls = self._gated_probe(monkeypatch, found=False)
+        try:
+            status = endpoints.flaresolverr_status(_settings(""))
+            assert status["detected"] == endpoints.FLARESOLVERR_SIBLING_URL
+            assert status["detecting"] is False
+        finally:
+            release.set()
+
+    def test_a_fresh_answer_starts_no_probe(self, monkeypatch):
+        import time
+
+        endpoints._sibling_cache.update(checked_at=time.monotonic(), url=None)
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr",
+                            lambda url: pytest.fail("a fresh answer must not probe"))
+        status = endpoints.flaresolverr_status(_settings(""))
+        assert status["detecting"] is False
+        assert endpoints.schedule_sibling_refresh() is not None  # a refresh is allowed when asked for
+
+    def test_only_one_refresh_runs_at_a_time(self, monkeypatch):
+        release, calls = self._gated_probe(monkeypatch)
+        try:
+            first = endpoints.schedule_sibling_refresh()
+            assert first is not None
+            assert endpoints.schedule_sibling_refresh() is None
+            endpoints.flaresolverr_status(_settings(""))
+            endpoints.flaresolverr_status(_settings(""))
+        finally:
+            release.set()
+            first.join(5)
+        assert len(calls) == 1
+
+    def test_a_probe_stuck_in_name_lookup_is_given_up_on_at_the_deadline(self, monkeypatch):
+        import time
+
+        release, _calls = self._gated_probe(monkeypatch)
+        monkeypatch.setattr(endpoints, "SIBLING_PROBE_DEADLINE_SECONDS", 0.2)
+        started = time.monotonic()
+        try:
+            assert endpoints.detect_flaresolverr_sibling(refresh=True) is None
+            assert time.monotonic() - started < 2.0
+        finally:
+            release.set()
+
+    def test_the_api_read_never_probes_in_the_request(self, monkeypatch):
+        """GET answers from the cache; only POST asks for a probe, and neither writes the setting."""
+        from flask import Flask
+        from flask_restx import Api
+
+        from api.providers import flaresolverr as api_module
+        from app.config import settings
+
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr",
+                            lambda url: pytest.fail("the request must not wait on a probe"))
+        monkeypatch.setattr(endpoints, "schedule_sibling_refresh", lambda: None)
+        app = Flask(__name__)
+        api = Api(app)
+        api.add_namespace(api_module.api_ns_providers_flaresolverr, path="/")
+        headers = {"X-API-KEY": settings.auth.apikey}
+        client = app.test_client()
+
+        response = client.get("/providers/flaresolverr", headers=headers)
+        assert response.status_code == 200, response.data
+        body = response.get_json()
+        assert body["data"]["detecting"] is True
+        assert body["data"]["detected"] is None
+
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr", lambda url: True)
+        body = client.post("/providers/flaresolverr", headers=headers).get_json()
+        assert body["data"]["detected"] == endpoints.FLARESOLVERR_SIBLING_URL
+        assert body["data"]["detecting"] is False
+
+
+def time_ago(seconds):
+    import time
+
+    return time.monotonic() - seconds
