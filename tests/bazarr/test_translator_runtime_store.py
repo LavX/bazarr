@@ -344,6 +344,18 @@ def test_a_removal_whose_pointer_write_fails_deletes_nothing(store, pointers, re
     assert pointers.get() == (google.id, None)
 
 
+def test_turning_an_engine_off_when_the_pointer_write_fails_leaves_it_on(store, pointers):
+    google = store.create_instance("google_translate")
+    store.set_engine(google.id)
+    pointers.writable = False
+    with pytest.raises(TranslatorStoreError):
+        store.set_instance_enabled(google.id, False)
+    assert store.get_instance(google.id).enabled == 1 and pointers.get() == (google.id, None)
+    pointers.writable = True
+    store.set_instance_enabled(google.id, False)
+    assert store.get_instance(google.id).enabled == 0 and pointers.get() == (None, None)
+
+
 def test_releasing_a_plugin_resets_pointers_and_deletes_nothing_until_asked(store, pointers):
     google = store.create_instance("google_translate")
     store.set_engine(google.id)

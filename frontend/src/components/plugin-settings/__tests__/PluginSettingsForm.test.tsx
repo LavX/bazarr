@@ -16,7 +16,7 @@ import type {
   PluginSecrets,
   PluginValues,
 } from "@/components/plugin-settings/types";
-import { customRender, screen, within } from "@/tests";
+import { cleanup, customRender, screen, within } from "@/tests";
 import { openSelect } from "@/tests/select";
 import { FIELDS } from "./fixtures";
 
@@ -93,25 +93,137 @@ describe("plugin settings fields", () => {
     expect(screen.queryByLabelText("Region")).not.toBeInTheDocument();
   });
 
-  it("sends null for an emptied number so the stored override is reset, not kept", async () => {
+  it("keeps a number as typed, character by character, and sends null only for an empty box", async () => {
     const user = userEvent.setup();
     const seen = vi.fn();
     customRender(
       <Harness start={{ price_input_per_million: 40 }} onValues={seen} />,
     );
     const input = screen.getByLabelText("Input price");
+    const sent = () =>
+      seen.mock.calls.map(
+        ([values]) => (values as PluginValues).price_input_per_million,
+      );
+    const last = () => sent().at(-1);
+
     await user.clear(input);
-    expect(seen).toHaveBeenLastCalledWith(
-      expect.objectContaining({ price_input_per_million: null }),
-    );
+    expect(last()).toBeNull();
     // JSON carries a null; it would have dropped an undefined.
     expect(JSON.parse(JSON.stringify(seen.mock.lastCall?.[0]))).toHaveProperty(
       "price_input_per_million",
       null,
     );
+
+    seen.mockClear();
+    await user.type(input, "0.15");
+    expect(input).toHaveValue("0.15");
+    expect(last()).toBe(0.15);
+    // Never the 15 or the null that a half-typed "0." would have become.
+    expect(new Set(sent())).toEqual(new Set([0, 0.1, 0.15]));
+
+    await user.clear(input);
+    seen.mockClear();
+    await user.type(input, "1.");
+    expect(input).toHaveValue("1.");
+    expect(last()).toBe(1);
+    await user.type(input, "5");
+    expect(input).toHaveValue("1.5");
+    expect(last()).toBe(1.5);
+
+    await user.clear(input);
+    seen.mockClear();
+    await user.type(input, "-");
+    expect(
+      sent().every((value) => value === null || Number.isFinite(value)),
+    ).toBe(true);
+    expect(last() ?? null).toBeNull();
+
+    await user.clear(input);
+    seen.mockClear();
+    await user.type(input, "0.0001");
+    expect(input).toHaveValue("0.0001");
+    expect(last()).toBe(0.0001);
+    expect(
+      sent().every(
+        (value) =>
+          value === 0 ||
+          value === 0.0001 ||
+          value === 0.00001 ||
+          (value as number) < 0.001,
+      ),
+    ).toBe(true);
+
+    await user.clear(input);
+    expect(last()).toBeNull();
+  });
+
+  it("keeps the default visible as a hint while an emptied number is null", async () => {
+    const user = userEvent.setup();
+    const seen = vi.fn();
+    customRender(<Harness start={{ batch: 40 }} onValues={seen} />);
+    const input = screen.getByLabelText("Batch size");
+    await user.clear(input);
+    expect(input).toHaveValue("");
+    expect(input).toHaveAttribute("placeholder", "100");
+    expect(seen).toHaveBeenLastCalledWith(
+      expect.objectContaining({ batch: null }),
+    );
     await user.type(input, "7");
     expect(seen).toHaveBeenLastCalledWith(
-      expect.objectContaining({ price_input_per_million: 7 }),
+      expect.objectContaining({ batch: 7 }),
+    );
+  });
+
+  it("takes text, a free-text model, tags and keys exactly as typed", async () => {
+    const user = userEvent.setup();
+    const seen = vi.fn();
+    customRender(
+      <Harness
+        start={{ preset: "custom" }}
+        options={{ available: false, items: [] }}
+        onValues={seen}
+      />,
+    );
+    const last = () => seen.mock.lastCall?.[0] as PluginValues;
+    await user.type(screen.getByLabelText("Label"), "Ab 1.");
+    expect(screen.getByLabelText("Label")).toHaveValue("Ab 1.");
+    expect(last().label).toBe("Ab 1.");
+    await user.type(screen.getByLabelText("Model"), "vendor/m-1.5:free");
+    expect(last().model).toBe("vendor/m-1.5:free");
+    await user.type(
+      screen
+        .getAllByLabelText("Tags")
+        .find(
+          (item) =>
+            item.tagName === "INPUT" && item.getAttribute("type") !== "hidden",
+        )!,
+      "one{Enter}t.w.o{Enter}",
+    );
+    expect(last().tags).toEqual(["one", "t.w.o"]);
+    await user.type(screen.getByLabelText("Add to Keys"), "key-0.9{Enter}");
+    expect(last().api_keys).toEqual(["key-0.9"]);
+  });
+
+  it("reads an emptied field as its default when a condition depends on it, and still sends null", async () => {
+    const user = userEvent.setup();
+    const seen = vi.fn();
+    customRender(<Harness start={{ preset: "lmstudio" }} onValues={seen} />);
+    expect(screen.queryByLabelText("Region")).not.toBeInTheDocument();
+    cleanup();
+    // The preset is emptied to null: the default ("custom") applies, so its dependent field shows.
+    customRender(<Harness start={{ preset: null }} onValues={seen} />);
+    expect(screen.getByLabelText("Region")).toBeVisible();
+    expect(withDefaults(FIELDS, { preset: null }).preset).toBe("custom");
+    expect(
+      isVisible(
+        FIELDS.find((f) => f.key === "region")!,
+        withDefaults(FIELDS, { preset: null }),
+      ),
+    ).toBe(true);
+    // The payload keeps the null while the user edits another field.
+    await user.type(screen.getByLabelText("Label"), "x");
+    expect(seen).toHaveBeenLastCalledWith(
+      expect.objectContaining({ preset: null, label: "x" }),
     );
   });
 

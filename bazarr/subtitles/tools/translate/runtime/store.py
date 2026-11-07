@@ -281,12 +281,13 @@ class TranslatorStore:
 
     def set_instance_enabled(self, instance_id: int, enabled: bool) -> PointerChange:
         instance = self._require_instance(instance_id)
+        # Turning an engine off lets the pointers go of it first: if config.yaml cannot be written the engine
+        # stays on, instead of being off while a pointer still names it.
+        change = PointerChange() if enabled else self.release_pointers({instance_id}, why="turned off")
         with write_transaction(self._session):
             instance.enabled = 1 if enabled else 0
             instance.updated_at = datetime.now()
-        if enabled:
-            return PointerChange()
-        return self.release_pointers({instance_id}, why="turned off")
+        return change
 
     def delete_instance(self, instance_id: int) -> PointerChange:
         """Remove an instance with its connections and every secret they own.

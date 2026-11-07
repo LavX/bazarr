@@ -1,4 +1,4 @@
-import { FunctionComponent, ReactNode } from "react";
+import { FunctionComponent, ReactNode, useState } from "react";
 import {
   Anchor,
   Button,
@@ -81,6 +81,82 @@ function Help({ field }: { field: PluginField }): ReactNode {
         </>
       )}
     </>
+  );
+}
+
+/** The number a half-typed entry stands for: null when it is empty, NaN when it is not a number yet ("-"). */
+function parseEntry(entry: string | number): number | null {
+  if (typeof entry === "number") {
+    return entry;
+  }
+  return entry.trim() === "" ? null : Number(entry);
+}
+
+interface NumberFieldProps {
+  field: PluginField;
+  label: string;
+  description: ReactNode;
+  /** What the form holds for this field: a number, null once emptied, undefined when never set. */
+  stored: PluginValue | undefined;
+  disabled?: boolean;
+  error?: string;
+  onValue: (value: number | null) => void;
+}
+
+/**
+ * A number input that keeps what is being typed. "0." and "1." are steps towards 0.15 and 1.5, so the
+ * entry stays as text while it is edited and only its value goes to the form: a number once there is
+ * one, null (reset to the default) when the box is emptied. A lone "-" changes nothing yet.
+ */
+function NumberField({
+  field,
+  label,
+  description,
+  stored,
+  disabled,
+  error,
+  onValue,
+}: NumberFieldProps) {
+  const [entry, setEntry] = useState<string | number | null>(null);
+  const storedNumber = typeof stored === "number" ? stored : null;
+  // The entry is shown while it still agrees with the form; a preset or a reset elsewhere replaces it.
+  const parsed = entry === null ? null : parseEntry(entry);
+  const agrees =
+    entry !== null &&
+    (storedNumber !== null
+      ? parsed === storedNumber
+      : parsed === null || Number.isNaN(parsed));
+  const shown = agrees
+    ? entry
+    : storedNumber !== null
+      ? storedNumber
+      : stored === undefined && typeof field.default === "number"
+        ? field.default
+        : "";
+  return (
+    <NumberInput
+      label={label}
+      description={description}
+      value={shown}
+      placeholder={
+        typeof field.default === "number" ? String(field.default) : undefined
+      }
+      min={field.min}
+      max={field.max}
+      allowDecimal={field.type === "number"}
+      required={field.required}
+      disabled={disabled}
+      error={error}
+      onChange={(next) => {
+        setEntry(next);
+        const value = parseEntry(next);
+        if (value === null) {
+          onValue(null);
+        } else if (Number.isFinite(value)) {
+          onValue(value);
+        }
+      }}
+    />
   );
 }
 
@@ -172,19 +248,14 @@ const FieldRenderer: FunctionComponent<FieldRendererProps> = ({
     case "number":
     case "integer":
       return (
-        <NumberInput
+        <NumberField
+          field={field}
           label={label}
           description={description}
-          value={typeof current === "number" ? current : ""}
-          min={field.min}
-          max={field.max}
-          allowDecimal={field.type === "number"}
-          required={field.required}
+          stored={values[field.key]}
           disabled={disabled}
           error={error}
-          // An emptied number goes out as null, which the API reads as "back to the default".
-          // Left undefined, JSON would drop the key and the stored override would stay.
-          onChange={(next) => set(typeof next === "number" ? next : null)}
+          onValue={(next) => set(next)}
         />
       );
     case "toggle":

@@ -37,7 +37,11 @@ export function isVisible(field: PluginField, values: PluginValues): boolean {
   return true;
 }
 
-/** The values with every unset field's default filled in, for display and conditions. */
+/**
+ * The values with every unset field's default filled in, for display and conditions. A field emptied
+ * to null is unset: the input shows its default and the API applies it, so a condition reads the
+ * default too. The form's own values keep the null, which is what resets the field on save.
+ */
 export function withDefaults(
   fields: PluginField[],
   values: PluginValues,
@@ -48,7 +52,12 @@ export function withDefaults(
       out[field.key] = field.default;
     }
   }
-  return { ...out, ...values };
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== null && value !== undefined) {
+      out[key] = value;
+    }
+  }
+  return out;
 }
 
 /**
