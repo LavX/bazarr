@@ -595,6 +595,9 @@ class _Slot:
         self.ended = False
         self.generation = 0
         self.last_budget_at = -math.inf
+        # The folder-budget answer for this worker's own definition, and when it was taken.
+        self.last_budget_check = -math.inf
+        self.budget_problem: tuple[str, str] | None = None
         self.stderr_tail: deque = deque(maxlen=max(1, limits.stderr_tail_lines))
         self._stderr_window = (0, 0)
         self._stderr_dropped = 0
@@ -634,8 +637,6 @@ class _Entry:
         self.backoff_until = 0.0
         self.open_until = 0.0
         self.last_error: str | None = None
-        self.last_budget_check = -math.inf
-        self.budget_problem: tuple[str, str] | None = None
         # The slot being started for this entry, until the start finishes.
         self.starting: _Slot | None = None
         self.starts = 0
@@ -839,12 +840,12 @@ class WorkerPool:
                 until = max(entry.backoff_until, entry.open_until)
                 workers[key] = {
                     "state": self._public_state(entry).value,
-                    "kind": entry.definition.kind,
+                    "kind": (slot.definition if slot else entry.definition).kind,
                     "pid": self._live_pid(session),
                     "in_flight": session.in_flight if session else 0,
                     "memory_bytes": slot.memory_bytes if slot else 0,
                     "peak_bytes": slot.peak_bytes if slot else entry.last_peak_bytes,
-                    "memory_limit_bytes": entry.definition.memory_limit(),
+                    "memory_limit_bytes": (slot.definition if slot else entry.definition).memory_limit(),
                     "idle_seconds": max(0.0, now - slot.last_used) if slot and not slot.busy() else 0.0,
                     "retiring": len(entry.retiring),
                     "failures": len(entry.failures),
@@ -1103,11 +1104,11 @@ class WorkerPool:
                 self._handle_death(entry, slot, self._death_reason(slot), idle=idle)
                 return
         self._sample_if_due(slot, now)
-        definition = entry.definition
+        definition = slot.definition
         problem = None
         problem = self._memory_problem(slot, definition.memory_limit())
         if problem is None:
-            problem = self._budget_problem(entry, now)
+            problem = self._budget_problem(slot, now, definition)
         if problem is not None:
             self._kill_current(entry, slot, problem)
             return
@@ -1261,7 +1262,9 @@ class WorkerPool:
         error: BaseException | None = None
         refusal: tuple[str, str] | None = None
         try:
-            refusal = self._violation(entry.definition, entry, fresh=True)
+            # The definition this worker is being started under, not whatever the
+            # entry holds by now.
+            refusal = self._violation(slot.definition, None, fresh=True)
             if refusal is None:
                 self._open_session(slot)
         except BaseException as caught:
@@ -1571,21 +1574,21 @@ class WorkerPool:
         except Exception:
             return None
 
-    def _violation(self, definition, entry, fresh=False) -> tuple[str, str] | None:
+    def _violation(self, definition, holder, fresh=False) -> tuple[str, str] | None:
         """Why this worker must not start or take a request, or None."""
         free = self._free_space()
         if definition.writes_data and free is not None and free < self.limits.config_reserve_bytes:
             return (PoolCodes.DISK_RESERVE,
                     "free space on the config volume (%d MiB) is under the %d MiB reserve" % (
                         free // MIB, self.limits.config_reserve_bytes // MIB))
-        return self._budget_problem(entry, self._clock(), definition=definition, force=fresh or entry is None)
+        return self._budget_problem(holder, self._clock(), definition, force=fresh or holder is None)
 
-    def _budget_problem(self, entry, now, definition=None, force=False):
-        definition = definition or entry.definition
+    def _budget_problem(self, holder, now, definition, force=False):
+        """The folder-budget problem of ``definition``, cached on ``holder`` (a slot) when given."""
         if not definition.budgets:
             return None
-        if entry is not None and not force and now - entry.last_budget_check < self.limits.budget_interval:
-            return entry.budget_problem
+        if holder is not None and not force and now - holder.last_budget_check < self.limits.budget_interval:
+            return holder.budget_problem
         problem = None
         for budget in definition.budgets:
             used, truncated = folder_usage(budget.path, self.limits.budget_max_entries)
@@ -1593,14 +1596,14 @@ class WorkerPool:
                 problem = (PoolCodes.FOLDER_BUDGET, "%s is over its %d MiB budget" % (
                     budget.label or "a worker folder", budget.max_bytes // MIB))
                 break
-        if entry is not None:
-            entry.last_budget_check = now
-            entry.budget_problem = problem
+        if holder is not None:
+            holder.last_budget_check = now
+            holder.budget_problem = problem
         return problem
 
     def _preflight_running(self, entry, slot):
         """Before a request on a running worker: disk reserve and folder budgets."""
-        problem = self._violation(entry.definition, entry)
+        problem = self._violation(slot.definition, slot)
         if problem is None:
             return
         if problem[0] != PoolCodes.DISK_RESERVE:
@@ -1610,10 +1613,18 @@ class WorkerPool:
 
     def _kill_current(self, entry, slot, problem, requested=False):
         with self._cond:
+            # The decision was taken outside the lock; the worker may have been
+            # retired, replaced or torn down since. Only a slot the pool still
+            # holds is killed, and by the path that fits where it is now.
+            if not (entry.slot is slot or slot in entry.retiring or slot.closing):
+                return
             if slot.kill_reason is None:
                 slot.kill_reason = problem
             slot.killed_busy = slot.busy()
-            if entry.slot is slot and entry.state == WorkerState.READY:
+            if slot in entry.retiring:
+                entry.retiring.remove(slot)
+                self._queue_close(slot, None, "kill")
+            elif entry.slot is slot and entry.state == WorkerState.READY:
                 # A request is being refused (``requested``): that caller already holds a pending count.
                 busy = slot.busy() if not requested else slot.session.in_flight > 0
                 if busy:

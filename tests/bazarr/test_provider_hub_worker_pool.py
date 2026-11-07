@@ -1717,3 +1717,85 @@ def test_pid_alive_keeps_the_signal_zero_answer_when_proc_is_unreadable(monkeypa
 
     monkeypatch.setattr("builtins.open", denied)
     assert pid_alive(os.getpid()) is True
+
+
+# ------------------------------------------ a worker is judged by its own definition
+
+
+def test_a_restart_while_a_worker_is_being_sampled_does_not_change_its_limits(make_pool):
+    calls = []
+    armed = []
+
+    def reader(pid):
+        calls.append(pid)
+        if armed and len(calls) == 1:
+            # New settings with a lower limit arrive in the middle of the sweep.
+            pool.restart_after_drain("tr", definition(memory_limit_bytes=100 * MIB))
+        return MemorySample(200 * MIB, 200 * MIB, 1, "test")
+
+    pool = make_pool(memory_reader=reader)
+    pool.register(definition(memory_limit_bytes=500 * MIB))
+    slow = pool.submit("tr", "sleep", {"seconds": 0.8})
+    first = pid_of(pool, "tr")
+    calls.clear()
+    armed.append(1)
+    pool.sweep()
+    assert calls, "the sweep never sampled"
+    assert pool.state("tr") is WorkerState.DRAINING
+    assert pid_alive(first)
+    assert slow.wait(10).result == {"slept": 0.8}
+
+
+def test_a_start_is_judged_by_the_definition_it_was_started_under(make_pool, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "big").write_bytes(os.urandom(3 * MIB))
+    pool = make_pool()
+    started_under = definition()
+    pool.register(started_under)
+    entry = pool._entry("tr")
+    slot = pool_module._Slot(started_under, 0.0, pool.limits)
+    with pool._cond:
+        pool._set_state(entry, WorkerState.STARTING, "request")
+        # Settings with a folder budget it exceeds arrive between the lease and the start.
+        entry.definition = definition(budgets=[FolderBudget(str(data), 1 * MIB, "plugin data")])
+        entry.generation += 1
+    got_entry, got_slot = pool._start_slot(entry, slot)
+    assert got_slot is slot
+    # It started, and drains because the settings changed meanwhile.
+    assert pool.state("tr") is WorkerState.DRAINING
+
+
+def test_a_running_worker_keeps_its_folder_budget_when_settings_change(make_pool, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    pool = make_pool()
+    pool.register(definition(budgets=[FolderBudget(str(data), 1 * MIB, "plugin data")]))
+    slot_first = None
+    pool.warm("tr")
+    entry = pool._entry("tr")
+    slot_first = entry.slot
+    # New settings drop the budget; the cached answer belongs to the slot, not the entry.
+    entry.definition = definition()
+    (data / "big").write_bytes(os.urandom(3 * MIB))
+    with pytest.raises(PoolUnavailable) as refused:
+        pool._preflight_running(entry, slot_first)
+    assert refused.value.code == "folder_budget"
+
+
+def test_a_kill_decided_before_a_retirement_ends_the_retiring_worker_cleanly(make_pool):
+    pool = make_pool()
+    pool.register(definition())
+    slow = pool.submit("tr", "sleep", {"seconds": 30})
+    entry = pool._entry("tr")
+    slot = entry.slot
+    pool.restart_after_drain("tr", definition())
+    assert slot in entry.retiring
+    pool._kill_current(entry, slot, ("folder_budget", "over its budget"))
+    with pytest.raises(WorkerKilled):
+        slow.wait(10)
+    assert slot not in entry.retiring
+    # A slot the pool no longer holds is left alone.
+    other = pool_module._Slot(definition(), 0.0, pool.limits)
+    pool._kill_current(entry, other, ("folder_budget", "over its budget"))
+    assert other.kill_reason is None
