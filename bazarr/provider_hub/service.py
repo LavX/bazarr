@@ -29,6 +29,7 @@ from secret_store.scrub import scrub_job_secrets, scrub_text
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
+from . import floor
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -45,6 +46,7 @@ from .state import (
     OFFICIAL_CATALOG_REPO,
     OFFICIAL_CATALOG_SOURCE_ID,
     OFFICIAL_CATALOG_URL,
+    ORIGIN_BUNDLED,
     catalog_source_for_entry,
     load_state,
     mutate_state,
@@ -1257,6 +1259,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                             url_ref = None
                         if url_ref in _TRUSTED_BRANCHES:
                             skip_commit = previous_commit
+                from_floor = False
                 try:
                     catalog, commit = _fetch_github_catalog(
                         source["url"], override_ref=source.get("dev_ref"),
@@ -1266,10 +1269,18 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     source["resolved_commit"] = commit
                     source["last_checked_at"] = now
                     source["last_error"] = None
+                    floor.clear_seed(source)
                 except Exception as error:
                     source["last_error"] = refusal_text(_catalog_source_error_message(error))
                     failed_sources.append(source.get("name") or source.get("id") or "?")
-                    continue
+                    # An official source that has never refreshed falls back to
+                    # the catalog bundled in the image; any other failure keeps
+                    # what is stored.
+                    seeded = floor.seed_candidate(source, entries) if is_official else None
+                    if seeded is None:
+                        continue
+                    catalog, commit = seeded
+                    from_floor = True
                 if catalog is None:
                     # Unchanged: keep the stored entries, provider ids and
                     # trust, and stay out of refreshed_sources so the prune
@@ -1294,7 +1305,10 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 refreshed_sources.add(source_id)
 
                 if is_official:
-                    _set_official_trust(source, commit, previous_commit, ancestry)
+                    if from_floor:
+                        floor.trust_source(source)
+                    else:
+                        _set_official_trust(source, commit, previous_commit, ancestry)
                     published_ids = set()
                 claimed_kinds: dict[str, set[str]] = {}
                 for item in catalog.get("providers", []):
@@ -1408,6 +1422,8 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     }
                     refreshed_entry_keys.add(key)
                     entries_count += 1
+                if from_floor:
+                    floor.mark_seeded(source, entries, refreshed_entry_keys, commit, now)
                 if is_official and source["trusted"]:
                     source["provider_ids"] = sorted(published_ids)
             for key, entry in list(entries.items()):
@@ -2264,6 +2280,9 @@ def _deadline_request_timeout(deadline: float | None, default: float = 30.0) -> 
 
 
 def _fetch_github_bundle_file(manifest, relative_path: str, deadline: float | None = None) -> bytes:
+    bundled = floor.bundle_file(manifest, relative_path)
+    if bundled is not None:
+        return bundled
     response = requests.get(
         _github_raw_url(manifest, relative_path),
         timeout=_deadline_request_timeout(deadline),
@@ -3299,7 +3318,7 @@ def _latest_catalog_manifest(
             )
         except ValueError:
             return False
-        return _host_refusal(entry, host) is None
+        return entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is None
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
@@ -3319,7 +3338,7 @@ def _refused_update_reason(
     host = current_host()
 
     def refused(entry: dict[str, Any]) -> bool:
-        return _host_refusal(entry, host) is not None
+        return entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is not None
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
