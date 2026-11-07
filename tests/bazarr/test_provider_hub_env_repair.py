@@ -660,3 +660,85 @@ def test_a_repair_that_finds_the_installation_moved_discards_its_environment(hub
 
     assert load_state()["installations"]["examplehub"]["python_path"] == str(other / "bin" / "python")
     assert not (hub / "shared_envs" / "rebuilt").exists()
+
+
+class _ScriptedWorkerClient:
+    """The real worker client with the process replaced by a script: it answers
+    every request with an empty candidate list and counts what reached it."""
+
+    def __new__(cls):
+        import json
+        from types import SimpleNamespace
+
+        from provider_hub.worker import WORKER_ABI_VERSION
+        from provider_hub.worker import ProviderWorkerClient
+
+        class Scripted(ProviderWorkerClient):
+            def __init__(self):
+                super().__init__(["python"], provider_id="examplehub")
+                self.sent = []
+                self.process = SimpleNamespace(stdin=self, stdout=object(), poll=lambda: None)
+
+            def start(self):
+                return False
+
+            def write(self, text):
+                self.sent.append(json.loads(text))
+
+            def flush(self):
+                pass
+
+            def _read_line_with_deadline(self, timeout):
+                return json.dumps({
+                    "abi": WORKER_ABI_VERSION, "id": self.sent[-1]["id"], "ok": True,
+                    "payload": {"candidates": []}, "events": [],
+                })
+
+        return Scripted()
+
+
+def test_two_gated_requests_across_a_repair_both_reach_the_replacement(hub, hub_registry, monkeypatch):
+    from babelfish import Language
+    from subliminal.video import Movie
+    from provider_hub import registry
+    from provider_hub.registry import HubProxyProvider, retire_provider_instances
+    from subliminal_patch.core import SZProviderPool
+
+    worker = _ScriptedWorkerClient()
+    monkeypatch.setattr(registry, "_global_worker_timeout", lambda: 0.5)
+
+    class OldClass(HubProxyProvider):
+        provider_name = "examplehub"
+        languages = {Language("eng")}
+
+    class NewClass(HubProxyProvider):
+        provider_name = "examplehub"
+        languages = {Language("eng")}
+
+    NewClass.worker_client = worker
+    hub_registry.register("examplehub", OldClass)
+    pool = SZProviderPool(providers=["examplehub"], provider_configs={})
+    assert type(pool["examplehub"]) is OldClass
+    hub_registry.register("examplehub", NewClass)
+    admits = pool._admits
+    repaired = []
+
+    def admits_then_repair(name):
+        # The search holds the old instance; the repair retires it before the call is made.
+        answer = admits(name)
+        if not repaired:
+            repaired.append(True)
+            retire_provider_instances("examplehub")
+        return answer
+
+    monkeypatch.setattr(pool, "_admits", admits_then_repair)
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    movie.fps = None
+
+    first = pool.list_subtitles_provider("examplehub", movie, {Language("eng")})
+    second = pool.list_subtitles_provider("examplehub", movie, {Language("eng")})
+
+    assert first == [] and second == []
+    # The outcome of the first call was reported to the instance that served it,
+    # so the second was not left waiting on a latch nobody would release.
+    assert len(worker.sent) == 2

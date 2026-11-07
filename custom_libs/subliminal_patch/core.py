@@ -761,15 +761,24 @@ class SZProviderPool(ProviderPool):
 
         return provider
 
-    def _call_current(self, name, provider, call):
+    def _call_current(self, name, provider, call, invoked=None):
         """Run ``call(provider)``; if the instance was replaced before the call
-        reached its worker, run it on the current one instead (once)."""
+        reached its worker, run it on the current one instead (once).
+
+        ``invoked``, a list, receives each instance a call was attempted on, so
+        the caller can report the outcome to the one that was actually admitted.
+        """
+        def attempt(instance):
+            if invoked is not None:
+                invoked.append(instance)
+            return call(instance)
+
         try:
-            return call(provider)
+            return attempt(provider)
         except ProviderRetiredError:
             pass
         try:
-            return call(self[name])
+            return attempt(self[name])
         except ProviderRetiredError as error:
             raise ProviderBusyError(f"{name} was being replaced") from error
 
@@ -1002,6 +1011,9 @@ class SZProviderPool(ProviderPool):
             self.provider_progress_callback(provider)
 
         initialized_provider = None
+        # Every instance the call was tried on; the last one is the one that
+        # was admitted, and the one whose outcome is reported below.
+        invoked = []
         try:
             try:
                 initialized_provider = self[provider]
@@ -1016,7 +1028,7 @@ class SZProviderPool(ProviderPool):
                 discard()
                 return finish(None, "skipped", "provider_excluded")
             results = self._call_current(
-                provider, initialized_provider, lambda current: current.list_subtitles(video, to_request)
+                provider, initialized_provider, lambda current: current.list_subtitles(video, to_request), invoked
             )
             seen = []
             out = []
@@ -1118,7 +1130,7 @@ class SZProviderPool(ProviderPool):
         finally:
             # After the throttle callback and the discard, so the next request
             # queued on this provider sees them.
-            _outcome_recorded(initialized_provider)
+            _outcome_recorded(invoked[-1] if invoked else initialized_provider)
 
     def list_subtitles(self, video, languages):
         """List subtitles.
@@ -1359,6 +1371,7 @@ class SZProviderPool(ProviderPool):
             while True:
                 tries += 1
                 initialized_provider = None
+                invoked = []
                 try:
                     if self.pre_download_hook:
                         self.pre_download_hook(subtitle)
@@ -1373,7 +1386,7 @@ class SZProviderPool(ProviderPool):
                         return False
                     self._call_current(
                         subtitle.provider_name, initialized_provider,
-                        lambda current: current.download_subtitle(subtitle),
+                        lambda current: current.download_subtitle(subtitle), invoked,
                     )
                     if self.post_download_hook:
                         self.post_download_hook(subtitle)
@@ -1438,7 +1451,7 @@ class SZProviderPool(ProviderPool):
                 finally:
                     # After the throttle callback and the discard, so the next
                     # request queued on this provider sees them.
-                    _outcome_recorded(initialized_provider)
+                    _outcome_recorded(invoked[-1] if invoked else initialized_provider)
 
                 if tries == DOWNLOAD_TRIES:
                     self.discarded_providers.add(subtitle.provider_name)
