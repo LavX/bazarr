@@ -328,6 +328,23 @@ def _write_not_found(episode, attempts):
                TableEpisodes.arr_instance_id, arr_instance_id))
 
 
+def hearing_impaired_for(language):
+    """The hearing-impaired preference a normal search passes for a profile language."""
+    return "force HI" if language.hi else "don't prefer"
+
+
+def _serves(subtitle, language):
+    """Whether a listed candidate is a subtitle of this profile language.
+
+    The listing asks for every language of the profile at once, so a plain English candidate sits next to the
+    forced English ones. The normal search asks for one language at a time and so never mixes them: a forced
+    profile language takes forced candidates only, and every other language takes none of them. The
+    hearing-impaired requirement is enforced by the download itself, through :func:`hearing_impaired_for`.
+    """
+    return (subtitle.language.basename == language.basename
+            and bool(getattr(subtitle.language, 'forced', False)) == bool(language.forced))
+
+
 def _download_language(pool, candidates, video, language, **options):
     """Download the best candidate for one language, ordered the way a normal search orders it.
 
@@ -363,7 +380,7 @@ def _check_stop(stop):
         raise stopped.original from None
 
 
-def run_forced_search(episode, job_id=None, cancel=None):
+def run_forced_search(episode, job_id=None, cancel=None, fallback_allowed=None):
     """Search every provider for every profile language of ``episode`` and report how each language ended.
 
     ``episode`` carries the columns ``wanted_download_subtitles`` selects: ``path``, ``sonarrEpisodeId``,
@@ -372,12 +389,19 @@ def run_forced_search(episode, job_id=None, cancel=None):
 
     ``cancel`` is the job's stop signal (``is_set()`` returns True to stop or raises ``JobCancelled``). It does
     not touch the request flag: the caller clears it only when :attr:`ForcedSearchResult.complete`.
+
+    ``fallback_allowed`` says whether Whisper may stand in when every provider answered and none had a
+    subtitle. Left as None it follows the series search: the general Whisper fallback and the series switch
+    must both be on.
     """
-    return _run(episode, profile_id=episode.profileId, media_type='series', job_id=job_id, cancel=cancel)
+    if fallback_allowed is None:
+        fallback_allowed = bool(settings.general.use_whisper_fallback and settings.general.use_whisper_fallback_series)
+    return _run(episode, profile_id=episode.profileId, media_type='series', job_id=job_id, cancel=cancel,
+                fallback_allowed=fallback_allowed)
 
 
 @update_pools
-def _run(episode, *, profile_id, media_type, job_id, cancel):
+def _run(episode, *, profile_id, media_type, job_id, cancel, fallback_allowed):
     languages = forced_search_languages(episode)
     results = ForcedSearchResult()
     if not languages:
@@ -429,7 +453,6 @@ def _run(episode, *, profile_id, media_type, job_id, cancel):
 
     profile = get_profiles_list(profile_id=profile_id)
     original_format = profile['originalFormat']
-    hi_required = "force HI" if all(language.hi for language in language_set) else "don't prefer"
     min_score, max_score, _ = _get_scores(media_type, settings.general.minimum_score_movie,
                                           settings.general.minimum_score)
     from subtitles.tools.mods import get_subzero_mods
@@ -455,11 +478,10 @@ def _run(episode, *, profile_id, media_type, job_id, cancel):
             continue
 
         answered, holds, applicable = run.listing_verdict(language)
-        language_candidates = [subtitle for subtitle in candidates
-                               if subtitle.language.basename == language.basename]
+        language_candidates = [subtitle for subtitle in candidates if _serves(subtitle, language)]
         run.discarded_before_download = set(pool.discarded_providers)
         download_options = dict(min_score=int(min_score),
-                                hearing_impaired=hi_required,
+                                hearing_impaired=hearing_impaired_for(language),
                                 use_original_format=original_format in (1, "1", "True", True))
         try:
             downloaded = _download_language(pool, language_candidates, video, language, **download_options)
@@ -468,9 +490,10 @@ def _run(episode, *, profile_id, media_type, job_id, cancel):
                 # Whisper is the costliest source and the one that is not a provider's answer: it runs only for
                 # a language every applicable provider answered cleanly, never in place of a candidate that was
                 # skipped and could still be fetched on the next run.
-                if settings.general.use_whisper_fallback and answered and not holds:
+                if fallback_allowed and answered and not holds:
                     downloaded = pool.download_fallback_subtitles(language_candidates, video, {language},
-                                                                  hearing_impaired=hi_required,
+                                                                  hearing_impaired=download_options[
+                                                                      'hearing_impaired'],
                                                                   use_original_format=download_options[
                                                                       'use_original_format'])
         except JobCancelled as error:

@@ -100,7 +100,7 @@ def run(monkeypatch):
     monkeypatch.setattr(forced, 'list_all_subtitles', list_all)
     monkeypatch.setattr(forced, '_get_pool', lambda media_type, profile_id: state.pool)
     monkeypatch.setattr(forced, 'get_providers', lambda: ['alpha', 'beta'])
-    monkeypatch.setattr(forced, 'get_video', lambda *args, **kwargs: video)
+    monkeypatch.setattr(forced, 'get_video', lambda *args, **kwargs: state.video)
     monkeypatch.setattr(forced, 'desired_subtitles_for_profile', lambda profile_id, audio: list(state.items))
     monkeypatch.setattr(forced, 'get_profiles_list', lambda profile_id: {'originalFormat': 'False'})
     monkeypatch.setattr(forced, 'get_audio_profile_languages', lambda audio: [{'name': 'English'}])
@@ -446,6 +446,7 @@ def test_a_video_that_cannot_be_read_keeps_the_request(run, monkeypatch):
 
 def test_whisper_fallback_is_only_allowed_after_a_clean_answer(run, monkeypatch):
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
     run.outcomes = [_result('alpha'), _result('beta', 'timeout')]
     run.go()
     assert run.pool.fallbacks == []
@@ -457,6 +458,7 @@ def test_whisper_fallback_is_only_allowed_after_a_clean_answer(run, monkeypatch)
 
 def test_whisper_fallback_does_not_stand_in_for_a_skipped_candidate(run, monkeypatch):
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
     candidate = _candidate('alpha')
     run.candidates = [candidate]
     run.outcomes = [_result('alpha', 'success')]
@@ -477,6 +479,7 @@ def test_whisper_fallback_does_not_stand_in_for_a_skipped_candidate(run, monkeyp
 
 def test_a_whisper_fallback_that_delivers_is_a_download(run, monkeypatch):
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
     whisper = _candidate('whisperai')
     run.outcomes = [_result('alpha')]
     run.pool.fallback = lambda candidates, language: [whisper]
@@ -868,6 +871,7 @@ def test_a_stop_during_the_fallback_saves_and_records_nothing(run, monkeypatch):
     from app.jobs_queue import JobCancelled
 
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
     run.outcomes = [_result('alpha')]
     pressed = []
 
@@ -933,3 +937,160 @@ def test_the_video_and_the_save_use_the_episodes_instance_mapping(run, monkeypat
 
     expected = '/instance-1-episode/series/fixture/s01e01.mkv'
     assert seen == {'video': expected, 'save': expected}
+
+
+def test_the_series_whisper_switch_gates_the_fallback(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', False)
+    run.outcomes = [_result('alpha')]
+    run.go()
+    assert run.pool.fallbacks == []
+
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    run.go()
+    assert len(run.pool.fallbacks) == 1
+
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', False)
+    run.pool.fallbacks.clear()
+    run.go()
+    assert run.pool.fallbacks == []
+
+
+def test_the_callers_fallback_permission_overrides_the_settings(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', False)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', False)
+    run.outcomes = [_result('alpha')]
+
+    run.go(fallback_allowed=True)
+    assert len(run.pool.fallbacks) == 1
+
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    run.pool.fallbacks.clear()
+    run.go(fallback_allowed=False)
+    assert run.pool.fallbacks == []
+
+
+# Real candidate selection: the pool's own download_best_subtitles scores and picks.
+
+
+class _Candidate:
+    hash_verifiable = False
+    hearing_impaired_verifiable = True
+    release_info = 'Fixture.S01E01'
+    uploader = None
+    page_link = None
+
+    def __init__(self, provider, language, hearing_impaired=False, subtitle_id=None):
+        self.provider_name = provider
+        self.language = language
+        self.hearing_impaired = hearing_impaired
+        self.id = subtitle_id or f'{provider}-{language}-{hearing_impaired}'
+        self.matches = set()
+
+    def get_matches(self, video):
+        matches = {'series', 'season', 'episode', 'year', 'release_group', 'source', 'resolution'}
+        if self.hearing_impaired:
+            matches.add('hearing_impaired')
+        return matches
+
+    def __repr__(self):
+        return self.id
+
+
+def _real_pool(downloaded):
+    from subliminal_patch.core import SZProviderPool
+
+    pool = object.__new__(SZProviderPool)
+    pool.providers = ['alpha']
+    pool.discarded_providers = set()
+    pool.language_hook = None
+
+    def download_subtitle(subtitle):
+        downloaded.append(subtitle)
+        return True
+
+    pool.download_subtitle = download_subtitle
+    return pool
+
+
+def _episode_video():
+    from subliminal_patch.core import Episode
+
+    return Episode('/series/fixture/s01e01.mkv', 'Fixture Series', 1, 1, source='Web', release_group='GRP')
+
+
+def test_a_plain_candidate_does_not_satisfy_the_forced_language(run):
+    downloaded = []
+    run.pool = _real_pool(downloaded)
+    run.video = _episode_video()
+    run.items = [_profile_language('en'), _profile_language('en', forced='True')]
+    plain = _Candidate('alpha', Language('eng'))
+    forced_candidate = _Candidate('alpha', Language('eng', forced=True))
+    run.candidates = [plain, forced_candidate]
+    run.outcomes = [_result('alpha', 'success')]
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'downloaded', 'en:forced': 'downloaded'}
+    assert run.saved == [[plain], [forced_candidate]]
+
+
+def test_only_a_plain_candidate_leaves_the_forced_language_to_finish_empty(run):
+    downloaded = []
+    run.pool = _real_pool(downloaded)
+    run.video = _episode_video()
+    run.items = [_profile_language('en'), _profile_language('en', forced='True')]
+    plain = _Candidate('alpha', Language('eng'))
+    run.candidates = [plain]
+    run.outcomes = [_result('alpha', 'success')]
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'downloaded', 'en:forced': 'finished'}
+    assert run.saved == [[plain]]
+
+
+def test_a_forced_candidate_does_not_satisfy_the_plain_language(run):
+    run.pool = _real_pool([])
+    run.video = _episode_video()
+    run.items = [_profile_language('en')]
+    run.candidates = [_Candidate('alpha', Language('eng', forced=True))]
+    run.outcomes = [_result('alpha', 'success')]
+
+    assert _statuses(run.go()) == {'en': 'finished'}
+    assert run.saved == []
+
+
+def test_a_hearing_impaired_language_only_takes_a_hearing_impaired_candidate(run):
+    run.pool = _real_pool([])
+    run.video = _episode_video()
+    run.items = [_profile_language('en', hi='True')]
+    plain = _Candidate('alpha', Language('eng'))
+    run.candidates = [plain]
+    run.outcomes = [_result('alpha', 'success')]
+
+    assert _statuses(run.go()) == {'en:hi': 'finished'}
+    assert run.saved == []
+
+    impaired = _Candidate('alpha', Language('eng'), hearing_impaired=True)
+    run.candidates = [plain, impaired]
+    result = run.go()
+
+    assert _statuses(result) == {'en:hi': 'downloaded'}
+    assert run.saved[-1] == [impaired]
+
+
+def test_a_mixed_profile_enforces_hearing_impaired_for_its_own_language_only(run):
+    run.pool = _real_pool([])
+    run.video = _episode_video()
+    run.items = [_profile_language('en'), _profile_language('hu', hi='True')]
+    english = _Candidate('alpha', Language('eng'))
+    hungarian_plain = _Candidate('alpha', Language('hun'))
+    run.candidates = [english, hungarian_plain]
+    run.outcomes = [_result('alpha', 'success')]
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'downloaded', 'hu:hi': 'finished'}
+    assert run.saved == [[english]]
