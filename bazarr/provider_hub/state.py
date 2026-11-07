@@ -305,6 +305,13 @@ def mutate_state(
     operator action, not for any routine writer.
     """
     with state_write_lock():
+        nested = getattr(_ACTIVE, "data", None)
+        if nested is not None:
+            # A mutator that calls mutate_state edits the document the outer
+            # call is already holding and commits with it, on either backend.
+            # A second write would only be overwritten by the outer one (file)
+            # or make the outer one lose its revision (database).
+            return mutator(nested)
         if _uses_file(path):
             current = Path(path) if path is not None else state_file()
             try:
@@ -315,17 +322,15 @@ def mutate_state(
                 data = default_state()
             else:
                 data = default_state() if data is None else _normalized_state(data)
-            result = mutator(data)
+            _ACTIVE.data = data
+            try:
+                result = mutator(data)
+            finally:
+                _ACTIVE.data = None
             save_state(data, path)
             return result
         if _DATABASE_HELD:
             raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
-        nested = getattr(_ACTIVE, "data", None)
-        if nested is not None:
-            # A mutator that calls mutate_state edits the document the outer
-            # call is already holding and commits with it. A second write
-            # would only make the outer one lose its revision.
-            return mutator(nested)
         from . import state_store
 
         def step(text: str) -> tuple[str, Any]:

@@ -315,3 +315,30 @@ def test_paths_found_while_held_are_written_once_the_database_opens(hub_store, h
     registry._flush_pending_persisted_paths()
     assert registry._PENDING_PERSISTED_PATHS == set()
     assert state.load_state()["plugin_secret_paths"] == ["demo.token"]
+
+
+def test_a_nested_mutate_commits_with_its_outer_call_on_the_file_backend(monkeypatch, tmp_path):
+    """The file backend means the same thing as the database for a nested call."""
+    from provider_hub.state import load_state, mutate_state
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+
+    def inner(state):
+        state["plugin_secret_paths"].append("demo.token")
+
+    def outer(state):
+        state["installations"]["demo"] = _installation("demo")
+        mutate_state(inner)
+
+    mutate_state(outer)
+    state = load_state()
+    assert state["plugin_secret_paths"] == ["demo.token"]
+    assert "demo" in state["installations"]
+
+    def refused(state):
+        state["plugin_secret_paths"].append("other.token")
+        mutate_state(inner)
+        raise RuntimeError("refused after the nested edit")
+
+    with pytest.raises(RuntimeError):
+        mutate_state(refused)
+    assert load_state()["plugin_secret_paths"] == ["demo.token"]

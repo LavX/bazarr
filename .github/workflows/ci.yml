@@ -916,6 +916,7 @@ jobs:
             tests/bazarr/test_episode_forced_search_api.py \
             tests/bazarr/test_provider_hub_state_pg.py \
             tests/bazarr/test_provider_hub_state_migration.py \
+            tests/bazarr/test_provider_hub_state_flows.py \
             tests/bazarr/test_sportarr_library_migration.py \
             tests/bazarr/test_sportarr_review_guards.py \
             tests/bazarr/test_sportarr_output.py \
