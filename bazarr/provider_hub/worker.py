@@ -209,6 +209,11 @@ def reap_idle_workers(idle_seconds: float) -> int:
     return reaped
 
 
+# The real process class, taken at import so a patched ``subprocess.Popen`` does not change
+# which objects are treated as real processes.
+_POPEN = subprocess.Popen
+
+
 class ProviderWorkerClient:
     """Small NDJSON client for a single provider worker process."""
 
@@ -246,8 +251,13 @@ class ProviderWorkerClient:
         self._stderr_thread: threading.Thread | None = None
 
     def start(self) -> bool:
-        if self.process and self.process.poll() is None:
-            return False
+        if self.process:
+            if not self._has_exited(self.process):
+                return False
+            if getattr(self.process, "returncode", 0) is None:
+                # The previous worker is gone but not collected: end what it
+                # left running before its slot is reused.
+                self._kill_tree(self.process, 5.0)
 
         env = {
             "PATH": os.environ.get("PATH", ""),
@@ -268,6 +278,7 @@ class ProviderWorkerClient:
             text=True,
             start_new_session=True,
         )
+        self._group_id = self.process.pid
         self._stdout_queue = queue.Queue()
         self._stdout_thread = threading.Thread(
             target=self._enqueue_stdout,
@@ -368,6 +379,67 @@ class ProviderWorkerClient:
             return False
         return True
 
+    @staticmethod
+    def _has_exited(process) -> bool:
+        """Whether the worker has exited, without reaping it.
+
+        ``poll()`` collects the exit status, after which the worker's pid, and
+        with it the id of the process group it led, can be handed to an
+        unrelated process: signalling the group would then hit a stranger.
+        Seeing the exit with ``waitid(..., WNOWAIT)`` leaves the worker a
+        zombie that still reserves both, so whatever it forked can be signalled
+        before the caller reaps it.
+        """
+        returncode = getattr(process, "returncode", None)
+        if isinstance(returncode, int):
+            return True
+        waitid = getattr(os, "waitid", None)
+        if waitid is None or not isinstance(process, _POPEN):
+            return process.poll() is not None
+        try:
+            return waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            return True
+
+    @classmethod
+    def _wait_exit(cls, process, timeout: float) -> None:
+        """Wait for the worker to exit without reaping it; ``TimeoutExpired`` if it does not in time."""
+        if getattr(os, "waitid", None) is None or not isinstance(process, _POPEN):
+            process.wait(timeout=timeout)
+            return
+        deadline = time.monotonic() + timeout
+        while not cls._has_exited(process):
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(process.args if hasattr(process, "args") else "worker", timeout)
+            time.sleep(0.01)
+
+    def group_gone(self, ceiling: float = 10.0) -> bool:
+        """True once nothing is left in the process group the last worker led.
+
+        A worker's children can outlive it, and they run from the same
+        environment, so the environment is not free until the group is empty.
+        Checked with signal 0 (nothing is sent), for at most ``ceiling``
+        seconds. Always true where process groups do not exist or no worker
+        was ever started.
+        """
+        group = getattr(self, "_group_id", None)
+        killpg = getattr(os, "killpg", None)
+        if group is None or killpg is None:
+            return True
+        deadline = time.monotonic() + ceiling
+        while True:
+            try:
+                killpg(group, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                pass
+            except OSError:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
     @classmethod
     def _terminate_tree(cls, process, grace_seconds: float) -> None:
         """Ask the group to stop, wait for the worker, reclaim what stayed.
@@ -385,8 +457,10 @@ class ProviderWorkerClient:
         """
         if not cls._signal_group(process, signal.SIGTERM):
             process.terminate()
-        process.wait(timeout=grace_seconds)
+        cls._wait_exit(process, grace_seconds)
+        # The leader is still unreaped here, so the group id is still its own.
         cls._signal_group(process, _SIGKILL)
+        process.wait(timeout=grace_seconds)
 
     @classmethod
     def _kill_tree(cls, process, grace_seconds: float) -> bool:
@@ -424,7 +498,10 @@ class ProviderWorkerClient:
         An idle worker has nothing in progress to unwind.
         """
         process = self.process
-        if process is None or process.poll() is not None:
+        if process is None or self._has_exited(process):
+            if process is not None and getattr(process, "returncode", 0) is None:
+                # Exited but not collected: end what it left running first.
+                self._kill_tree(process, grace_seconds)
             # Nothing to reap. Mirrors stop(): a held survivor whose process
             # finally exited on its own must not stay pinned in the strong
             # set; start() re-registers on the next spawn either way.
@@ -435,7 +512,7 @@ class ProviderWorkerClient:
         try:
             if time.monotonic() - self.last_used < idle_seconds:
                 return False
-            if process.poll() is not None:
+            if self._has_exited(process):
                 return False
             ended = True
             try:
@@ -464,18 +541,27 @@ class ProviderWorkerClient:
         if latch is not None:
             latch.set()
         process = self.process
-        if not process or process.poll() is not None:
+        if not process or self._has_exited(process):
+            if process is not None and getattr(process, "returncode", 0) is None:
+                # Exited but not yet reaped: its group id is still reserved, so
+                # what it left running can be ended before it is collected.
+                self._kill_tree(process, grace_seconds)
             # Nothing left to reap, so this is the one safe unconditional
             # discard.
             self._deregister()
             return
         try:
             self.request("shutdown", {"reason": "app_shutdown", "grace_ms": int(grace_seconds * 1000)}, grace_seconds)
-            process.wait(timeout=grace_seconds)
-            # A clean shutdown ends the worker, not necessarily what it forked.
+            self._wait_exit(process, grace_seconds)
+            # A clean shutdown ends the worker, not necessarily what it forked;
+            # the worker is unreaped, so its group id is still its own.
             self._signal_group(process, _SIGKILL)
+            process.wait(timeout=grace_seconds)
         except Exception:
-            if process.poll() is None:
+            # A failed or refused shutdown does not excuse what the worker
+            # forked. Unless it was already collected, end the whole group (a
+            # worker that died meanwhile is still a zombie holding its id).
+            if getattr(process, "returncode", 0) is None:
                 self._kill_tree(process, grace_seconds)
 
         # Leave the registry only once this process is confirmed dead AND is
@@ -638,7 +724,7 @@ class ProviderWorkerClient:
                 # already on its way (an archive member selection inside a
                 # download) fails instead of respawning the worker.
                 raise WorkerError("worker client is stopped")
-            if op == "shutdown" and not (self.process is not None and self.process.poll() is None):
+            if op == "shutdown" and not (self.process is not None and not self._has_exited(self.process)):
                 # Stopping a worker never starts one: a process that ended
                 # between the caller's check and this request has nothing left
                 # to shut down.

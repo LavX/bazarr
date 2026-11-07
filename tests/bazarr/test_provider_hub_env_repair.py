@@ -1057,3 +1057,98 @@ def test_no_request_starts_a_worker_after_the_proxy_is_stopped(hub, hub_registry
     with pytest.raises(WorkerError):
         client.request("search", {}, timeout=2)
     assert len(spawned) == 1
+
+
+SURVIVOR_SCRIPT = (
+    "import subprocess, sys\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+    "open(sys.argv[1], 'w').write(str(child.pid))\n"
+    "sys.stdin.readline()\n"
+)
+
+
+def _process_alive(pid):
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+def test_a_failed_shutdown_still_ends_what_the_worker_started(tmp_path):
+    import os
+    import signal
+    import sys
+
+    from provider_hub.worker import ProviderWorkerClient
+
+    pid_file = tmp_path / "child.pid"
+    client = ProviderWorkerClient([sys.executable, "-c", SURVIVOR_SCRIPT, str(pid_file)])
+    client.start()
+    deadline = time.monotonic() + 10
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    child = int(pid_file.read_text(encoding="utf-8"))
+    try:
+        assert _process_alive(child)
+        # The worker dies on the shutdown request without answering: the shutdown fails after it exited.
+        client.stop(grace_seconds=2)
+
+        deadline = time.monotonic() + 5
+        while _process_alive(child) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _process_alive(child)
+        assert client.group_gone(5)
+    finally:
+        if _process_alive(child):
+            os.kill(child, signal.SIGKILL)
+
+
+def test_the_environment_stays_pinned_while_the_workers_group_is_not_empty(hub, hub_registry, monkeypatch):
+    import sys
+
+    from provider_hub.registry import retire_provider_instances
+    from provider_hub.worker import ProviderWorkerClient
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    state = load_state()
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    interpreter = old / "bin" / "python"
+    interpreter.write_text(f"#!{sys.executable}\n{WORKER_SCRIPT}", encoding="utf-8")
+    interpreter.chmod(0o755)
+    client = ProviderWorkerClient([str(interpreter)])
+    stale.worker_client = client
+    checks = []
+    emptied = threading.Event()
+
+    def group_gone(ceiling=10.0):
+        checks.append(1)
+        return emptied.wait(0.05)
+
+    monkeypatch.setattr(client, "group_gone", group_gone)
+
+    with stale._operation():
+        client.request("search", {}, timeout=10)
+        drains = retire_provider_instances("examplehub")
+    deadline = time.monotonic() + 10
+    while not checks and time.monotonic() < deadline:
+        time.sleep(0.02)
+    # The worker has exited, but something it started is still running: the environment is not free.
+    assert checks
+    assert env_registry.cleanup_environments(hub) == []
+
+    emptied.set()
+    for drain in drains:
+        drain.join(15)
+    assert env_registry.cleanup_environments(hub) == [str(old)]

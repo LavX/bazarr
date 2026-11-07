@@ -492,10 +492,9 @@ def _drain_instance(instance, release) -> None:
         instance._shutdown_worker()
     except Exception:
         logger.exception("Provider Hub: could not stop a replaced worker for %s", provider_name)
-    process = getattr(getattr(instance, "worker_client", None), "process", None)
+    client = getattr(instance, "worker_client", None)
     try:
-        if process is not None and process.poll() is None:
-            process.wait()
+        _confirm_worker_gone(client, provider_name)
     except Exception:
         logger.exception(
             "Provider Hub: a replaced worker for %s may still be running; its environment stays in place",
@@ -503,6 +502,28 @@ def _drain_instance(instance, release) -> None:
         )
         return
     release()
+
+
+def _confirm_worker_gone(client, provider_name) -> None:
+    """Return only when the worker has exited and nothing it started is left running.
+
+    The wait does not collect the worker (the stopper does, after it has ended
+    the worker's group), and a group that is not empty keeps the caller here:
+    survivors run from the same environment.
+    """
+    process = getattr(client, "process", None)
+    if process is None or not hasattr(client, "group_gone"):
+        return
+    while not client._has_exited(process):
+        time.sleep(0.05)
+    warned = False
+    while not client.group_gone(10.0):
+        if not warned:
+            warned = True
+            logger.error(
+                "Provider Hub: processes started by a replaced worker for %s are still running; "
+                "its environment stays in place until they end", provider_name,
+            )
 
 
 class RetirementIncomplete(RuntimeError):
