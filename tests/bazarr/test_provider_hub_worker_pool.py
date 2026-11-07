@@ -1262,3 +1262,64 @@ def test_the_sampler_does_not_read_a_leader_that_was_reaped(make_pool):
 def test_the_pool_never_signals_a_process_group_itself():
     source = Path(pool_module.__file__).read_text()
     assert "killpg" not in source and "os.kill(" not in source
+
+
+# ------------------------------------------- incomplete measurements fail closed
+
+
+def test_a_process_tree_larger_than_the_read_limit_is_reported_truncated(monkeypatch):
+    fake = list(range(2 ** 22 + 100, 2 ** 22 + 400))
+    monkeypatch.setattr(pool_module, "_children_of", lambda pid: fake if pid == os.getpid() else [])
+    sample = read_process_tree_memory(os.getpid(), max_processes=256)
+    if sample is not None:
+        assert sample.truncated
+    members, overflow = pool_module._process_tree(os.getpid(), 256)
+    assert overflow and len(members) == 256
+    members, overflow = pool_module._process_tree(os.getpid(), 301)
+    assert not overflow and len(members) == 301
+
+
+def test_a_worker_whose_tree_is_too_big_to_measure_is_killed_as_over_its_limit(make_pool):
+    pool = make_pool(memory_reader=lambda pid: MemorySample(1 * MIB, 1 * MIB, 256, "test", truncated=True))
+    pool.register(definition(memory_limit_bytes=100 * MIB))
+    handle = pool.submit("tr", "sleep", {"seconds": 30})
+    pool.sweep()
+    with pytest.raises(WorkerKilled) as killed:
+        handle.wait(10)
+    assert killed.value.code == "memory_limit"
+    assert "measured" in str(killed.value)
+
+
+def test_a_folder_scan_that_cannot_read_a_subtree_is_incomplete(tmp_path, monkeypatch):
+    (tmp_path / "sealed").mkdir()
+    (tmp_path / "sealed" / "big").write_bytes(b"x" * 100_000)
+    real = os.scandir
+
+    def denying(path):
+        if os.fspath(path).endswith("sealed"):
+            raise PermissionError(13, "Permission denied")
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", denying)
+    used, truncated = folder_usage(str(tmp_path))
+    assert truncated is True
+    # A path that is simply not there is empty, not unknown.
+    assert folder_usage(str(tmp_path / "missing")) == (0, False)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_a_directory_without_list_permission_fails_the_budget_check(make_pool, tmp_path):
+    data = tmp_path / "data"
+    sealed = data / "sealed"
+    sealed.mkdir(parents=True)
+    (sealed / "big").write_bytes(os.urandom(3 * MIB))
+    sealed.chmod(0o300)
+    try:
+        assert folder_usage(str(data))[1] is True
+        pool = make_pool()
+        pool.register(definition(budgets=[FolderBudget(str(data), 1 * MIB, "plugin data")]))
+        with pytest.raises(PoolUnavailable) as refused:
+            pool.run("tr", "echo")
+        assert refused.value.code == "folder_budget"
+    finally:
+        sealed.chmod(0o700)

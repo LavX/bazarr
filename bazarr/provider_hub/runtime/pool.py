@@ -363,6 +363,9 @@ class MemorySample:
     rss_bytes: int
     processes: int
     source: str
+    # The tree had more processes than were read: the figure is a lower bound,
+    # and the pool treats the worker as over its limit.
+    truncated: bool = False
 
 
 # ----------------------------------------------------------------- /proc readers
@@ -422,11 +425,13 @@ def _parent_map(limit: int = 8192) -> dict[int, list[int]]:
     return tree
 
 
-def _process_tree(root: int, max_processes: int) -> list[int]:
+def _process_tree(root: int, max_processes: int) -> tuple[list[int], bool]:
+    """The root and its descendants, and whether the walk stopped at ``max_processes``."""
+    overflow = False
     seen = [root]
     index = 0
     fallback: dict[int, list[int]] | None = None
-    while index < len(seen) and len(seen) < max_processes:
+    while index < len(seen):
         current = seen[index]
         index += 1
         kids = _children_of(current)
@@ -435,9 +440,13 @@ def _process_tree(root: int, max_processes: int) -> list[int]:
                 fallback = _parent_map()
             kids = fallback.get(current, [])
         for kid in kids:
-            if kid not in seen and len(seen) < max_processes:
+            if kid in seen:
+                continue
+            if len(seen) < max_processes:
                 seen.append(kid)
-    return seen
+            else:
+                overflow = True
+    return seen, overflow
 
 
 def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample | None:
@@ -446,7 +455,8 @@ def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample
     The sum uses ``Pss`` so pages shared between workers are not counted in
     full by each. A process without ``smaps_rollup`` (older kernel, or a
     hardened ``/proc``) falls back to ``VmRSS`` from ``status``. Returns None
-    when the root process is gone or ``/proc`` is unavailable.
+    when the root process is gone or ``/proc`` is unavailable. A tree larger
+    than ``max_processes`` comes back with ``truncated`` set.
     """
     if not os.path.isdir("/proc/self"):
         return None
@@ -454,7 +464,8 @@ def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample
     rss_total = 0
     counted = 0
     source = "smaps_rollup"
-    for member in _process_tree(pid, max_processes):
+    members, truncated = _process_tree(pid, max_processes)
+    for member in members:
         try:
             values = _read_kb("/proc/%d/smaps_rollup" % member, "Pss", "Rss")
             used = values.get("Pss", values.get("Rss"))
@@ -475,7 +486,7 @@ def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample
         counted += 1
     if not counted:
         return None
-    return MemorySample(bytes=total, rss_bytes=rss_total, processes=counted, source=source)
+    return MemorySample(bytes=total, rss_bytes=rss_total, processes=counted, source=source, truncated=truncated)
 
 
 def folder_usage(path: str, max_entries: int = 100_000) -> tuple[int, bool]:
@@ -483,7 +494,9 @@ def folder_usage(path: str, max_entries: int = 100_000) -> tuple[int, bool]:
 
     Returns ``(bytes, truncated)``; ``truncated`` means the walk stopped at
     ``max_entries`` and the caller should treat the folder as over any budget.
-    A missing folder is empty.
+    So does a subtree that cannot be read (a directory without permission to
+    list it or to stat what is in it): its content is unknown, so the scan is
+    incomplete. A missing folder is empty.
     """
     total = 0
     seen = 0
@@ -501,10 +514,14 @@ def folder_usage(path: str, max_entries: int = 100_000) -> tuple[int, bool]:
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
                         total += getattr(info, "st_blocks", 0) * 512 or info.st_size
-                    except OSError:
+                    except FileNotFoundError:
                         continue
-        except OSError:
+                    except OSError:
+                        return total, True
+        except (FileNotFoundError, NotADirectoryError):
             continue
+        except OSError:
+            return total, True
     return total, False
 
 
@@ -541,6 +558,7 @@ class _Slot:
         self.kill_reason: tuple[str, str] | None = None
         self.killed_busy = False
         self.memory_bytes = 0
+        self.memory_truncated = False
         self.peak_bytes = 0
         self.ephemeral = ephemeral
         self.closing = False
@@ -1017,10 +1035,8 @@ class WorkerPool:
         self._sample_if_due(slot, now)
         definition = entry.definition
         problem = None
-        if slot.memory_bytes > definition.memory_limit():
-            problem = (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
-                slot.memory_bytes // MIB, definition.memory_limit() // MIB))
-        else:
+        problem = self._memory_problem(slot, definition.memory_limit())
+        if problem is None:
             problem = self._budget_problem(entry, now)
         if problem is not None:
             self._kill_current(entry, slot, problem)
@@ -1048,8 +1064,9 @@ class WorkerPool:
                 self._queue_close(slot, None, "reap")
                 return
         self._sample_if_due(slot, now)
-        if slot.memory_bytes > entry.definition.memory_limit():
-            slot.kill_reason = (PoolCodes.MEMORY_LIMIT, "retiring worker over its memory limit")
+        problem = self._memory_problem(slot, entry.definition.memory_limit())
+        if problem is not None:
+            slot.kill_reason = (problem[0], "retiring worker: " + problem[1])
             with self._cond:
                 if slot in entry.retiring:
                     entry.retiring.remove(slot)
@@ -1064,9 +1081,9 @@ class WorkerPool:
         if slot.session is None or not slot.session.alive:
             return
         self._sample_if_due(slot, now)
-        if slot.memory_bytes > slot.definition.memory_limit():
-            slot.kill_reason = (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
-                slot.memory_bytes // MIB, slot.definition.memory_limit() // MIB))
+        problem = self._memory_problem(slot, slot.definition.memory_limit())
+        if problem is not None:
+            slot.kill_reason = problem
         else:
             if now - slot.last_budget_at < self.limits.budget_interval:
                 return
@@ -1403,9 +1420,9 @@ class WorkerPool:
             slot.last_used = self._clock()
             slot.active = max(0, slot.active - 1)
             slot.contexts.pop(request_id, None)
-            if slot.memory_bytes > limit and slot.kill_reason is None:
-                slot.kill_reason = (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
-                    slot.memory_bytes // MIB, limit // MIB))
+            problem = self._memory_problem(slot, limit)
+            if problem is not None and slot.kill_reason is None:
+                slot.kill_reason = problem
                 over = True
             else:
                 over = False
@@ -1525,8 +1542,25 @@ class WorkerPool:
         with self._cond:
             slot.last_sample_at = now
             if sample is not None:
+                slot.memory_truncated = sample.truncated
                 slot.memory_bytes = sample.bytes
-                slot.peak_bytes = max(slot.peak_bytes, sample.bytes)
+                if sample.truncated:
+                    # Only part of the tree was read: that figure is a floor, not
+                    # the total, so the worker counts as over any limit.
+                    slot.memory_bytes = max(sample.bytes, slot.definition.memory_limit() + 1)
+                slot.peak_bytes = max(slot.peak_bytes, slot.memory_bytes)
+
+    @staticmethod
+    def _memory_problem(slot, limit):
+        """``(code, text)`` when the last sample puts the worker over ``limit``, else None."""
+        if slot.memory_bytes <= limit:
+            return None
+        if slot.memory_truncated:
+            return (PoolCodes.MEMORY_LIMIT,
+                    "worker runs more processes than can be measured, counted as over its %d MiB limit" % (
+                        limit // MIB))
+        return (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
+            slot.memory_bytes // MIB, limit // MIB))
 
     def _sample_if_due(self, slot, now):
         if slot.busy() or now - slot.last_sample_at >= self.limits.heartbeat_interval:
