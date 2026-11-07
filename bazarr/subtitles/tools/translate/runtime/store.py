@@ -192,21 +192,23 @@ class TranslatorStore:
         self._plugin_active = plugin_active if plugin_active is not None else default_plugin_active
 
     # ------------------------------------------------------------------ reads
-    def get_instance(self, instance_id: int):
-        return self._session.get(TableTranslatorEngineInstance, instance_id)
+    def get_instance(self, instance_id: int, *, fresh: bool = False):
+        """The instance. ``fresh`` reads it from the database even if this session has seen it before; use it at
+        the start of a request, where the session holds no changes of its own."""
+        return self._session.get(TableTranslatorEngineInstance, instance_id, populate_existing=fresh)
 
     def list_instances(self, plugin_id: str | None = None):
         stmt = select(TableTranslatorEngineInstance).order_by(TableTranslatorEngineInstance.id)
         if plugin_id is not None:
             stmt = stmt.where(TableTranslatorEngineInstance.plugin_id == plugin_id)
-        return list(self._session.execute(stmt).scalars().all())
+        return list(self._session.execute(stmt.execution_options(populate_existing=True)).scalars().all())
 
-    def get_connection(self, connection_id: int):
-        return self._session.get(TableTranslatorConnection, connection_id)
+    def get_connection(self, connection_id: int, *, fresh: bool = False):
+        return self._session.get(TableTranslatorConnection, connection_id, populate_existing=fresh)
 
     def list_connections(self, instance_id: int):
         stmt = (select(TableTranslatorConnection).where(TableTranslatorConnection.instance_id == instance_id)
-                .order_by(TableTranslatorConnection.position))
+                .order_by(TableTranslatorConnection.position).execution_options(populate_existing=True))
         return list(self._session.execute(stmt).scalars().all())
 
     def settings_of(self, row) -> dict[str, Any]:
@@ -551,12 +553,13 @@ class TranslatorStore:
     def _secret_rows(self, owner: Owner):
         return list(self._session.execute(select(TableTranslatorSecret).where(
             TableTranslatorSecret.owner_kind == owner[0], TableTranslatorSecret.owner_id == owner[1])
-            .order_by(TableTranslatorSecret.field)).scalars().all())
+            .order_by(TableTranslatorSecret.field).execution_options(populate_existing=True)).scalars().all())
 
     def _secret_row(self, owner: Owner, field_name: str):
         return self._session.execute(select(TableTranslatorSecret).where(
             TableTranslatorSecret.owner_kind == owner[0], TableTranslatorSecret.owner_id == owner[1],
-            TableTranslatorSecret.field == field_name)).scalar_one_or_none()
+            TableTranslatorSecret.field == field_name).execution_options(populate_existing=True)
+        ).scalar_one_or_none()
 
     def _delete_secrets(self, owner: Owner) -> None:
         self._session.execute(delete(TableTranslatorSecret).where(

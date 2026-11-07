@@ -57,7 +57,7 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
         fields = fields_of(kind, row)
         if fields is None:
             return None
-        known = {item["key"] for item in fields} - HOST_KEYS
+        known = _settings_keys(kind, fields)
         stored = store.settings_of(row)
         kept = {key: value for key, value in stored.items() if key in known}
         return kept if kept != stored else None
@@ -72,6 +72,14 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
     return None
 
 
+def _settings_keys(kind: str, fields) -> set[str]:
+    """The keys of the fields an owner keeps in its settings JSON. A connection keeps its model and prices in
+    columns of their own, so those are not among them; an engine has no such columns, and a field of an engine
+    that happens to be called ``model`` is an ordinary setting."""
+    keys = {item["key"] for item in fields}
+    return keys if kind == INSTANCE else keys - HOST_KEYS
+
+
 def _fits(store: TranslatorStore, owner, row, fields) -> bool:
     """Whether the owner's settings, once its newly secret values have moved, satisfy the new manifest.
 
@@ -81,7 +89,7 @@ def _fits(store: TranslatorStore, owner, row, fields) -> bool:
     """
     settings = store.settings_of(row)
     secret_keys = {item["key"] for item in fields if is_secret_field(item)}
-    known = {item["key"] for item in fields} - HOST_KEYS
+    known = _settings_keys(owner[0], fields)
     moved = [key for key in secret_keys if settings.get(key) not in (None, "", [])]
     remaining = {key: value for key, value in settings.items() if key in known and key not in secret_keys}
     held = frozenset(store.secret_summary(owner, frozenset())) | frozenset(moved)

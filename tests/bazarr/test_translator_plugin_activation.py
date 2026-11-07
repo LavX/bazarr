@@ -177,3 +177,18 @@ def test_a_field_required_only_for_one_model_holds_back_the_connections_that_use
          {"key": "extra", "type": "text", "required": True, "show_if": {"key": "model", "equals": "special"}}])
     assert rows["special"].enabled == 0 and rows["special"].awaiting_secrets == 1
     assert rows["special_ok"].enabled == 1 and rows["plain"].enabled == 1
+
+
+def test_an_engine_that_declares_its_own_model_field_keeps_it_through_activation(lifecycle):
+    store = lifecycle.store
+    optional = store.create_instance(PLUGIN, name="optional", settings={"label": "a", "model": "mine"})
+    required = store.create_instance(PLUGIN, name="required", settings={"label": "b", "model": "needed"})
+    both = [{"key": "label", "type": "text"}, {"key": "model", "type": "text"}]
+    lifecycle.stage(_manifest("1.0.0", both), _manifest("2.0.0", [
+        {"key": "label", "type": "text"}, {"key": "model", "type": "text", "required": True}]))
+    installation = _activate()
+    store._session.expire_all()
+    # The value of an engine's own "model" setting is kept, and a required one it already holds is satisfied.
+    assert store.settings_of(store.get_instance(optional.id)) == {"label": "a", "model": "mine"}
+    assert store.get_instance(optional.id).enabled == 1 and store.get_instance(required.id).enabled == 1
+    assert installation["last_error"] is None

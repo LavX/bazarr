@@ -167,7 +167,8 @@ class CheckpointStore:
             TableTranslatorCheckpoint.target == key.target,
             TableTranslatorCheckpoint.engine_instance_id == key.engine_instance_id,
             TableTranslatorCheckpoint.settings_revision == key.settings_revision,
-            TableTranslatorCheckpoint.release_digest == key.release_digest)).scalar_one_or_none()
+            TableTranslatorCheckpoint.release_digest == key.release_digest)
+            .execution_options(populate_existing=True)).scalar_one_or_none()
 
     def load(self, key: CheckpointKey) -> dict[int, list[str]]:
         row = self._row(key)
@@ -314,12 +315,15 @@ class TranslationJobs:
 
     # ------------------------------------------------------------------ reads
     def get(self, job_id: int):
-        return self._session.get(TableTranslatorJob, job_id)
+        # Read from the database each time: another session may have moved the job on since this one saw it.
+        return self._session.execute(select(TableTranslatorJob).where(TableTranslatorJob.id == job_id)
+                                     .execution_options(populate_existing=True)).scalar_one_or_none()
 
     def active_for(self, source_path: str, target: str):
         return self._session.execute(select(TableTranslatorJob).where(
             TableTranslatorJob.source_path == source_path, TableTranslatorJob.target == target,
-            TableTranslatorJob.state.in_(ACTIVE_STATES))).scalar_one_or_none()
+            TableTranslatorJob.state.in_(ACTIVE_STATES)).execution_options(populate_existing=True)
+        ).scalar_one_or_none()
 
     def due_retries(self) -> list[int]:
         """Jobs awaiting a retry whose time has come, oldest first."""
@@ -327,7 +331,7 @@ class TranslationJobs:
         rows = self._session.execute(select(TableTranslatorJob).where(
             TableTranslatorJob.state == AWAITING_RETRY,
             (TableTranslatorJob.retry_at.is_(None)) | (TableTranslatorJob.retry_at <= now))
-            .order_by(TableTranslatorJob.id)).scalars().all()
+            .order_by(TableTranslatorJob.id).execution_options(populate_existing=True)).scalars().all()
         return [row.id for row in rows]
 
     # --------------------------------------------------------------- requests
@@ -451,7 +455,8 @@ class TranslationJobs:
         resumes after the last finished batch.
         """
         rows = self._session.execute(select(TableTranslatorJob).where(
-            TableTranslatorJob.state.in_((QUEUED, RUNNING))).order_by(TableTranslatorJob.id)).scalars().all()
+            TableTranslatorJob.state.in_((QUEUED, RUNNING))).order_by(TableTranslatorJob.id)
+            .execution_options(populate_existing=True)).scalars().all()
         recovered = []
         now = self._clock()
         for row in list(rows):

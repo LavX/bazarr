@@ -679,6 +679,29 @@ describe("Settings > Translation", () => {
     expect(calls[0].body).toMatchObject({ values: { order: ["a", "b"] } });
   });
 
+  it("keeps the forms and what was typed when a refresh fails, and says so", async () => {
+    const user = userEvent.setup();
+    await showPage();
+    const credit = screen.getByLabelText("Credit line");
+    await user.clear(credit);
+    await user.type(credit, "Half written");
+    server.use(
+      http.get(
+        "/api/translation/state",
+        () => new HttpResponse(null, { status: 500 }),
+      ),
+    );
+    await act(async () => {
+      await queryClient.invalidateQueries();
+    });
+    expect(await screen.findByText(/could not be refreshed/)).toBeVisible();
+    // The page was not replaced: the same form is still there with the same text in it.
+    expect(screen.getByLabelText("Credit line")).toHaveValue("Half written");
+    expect(
+      screen.queryByText("The translation settings could not be loaded."),
+    ).not.toBeInTheDocument();
+  });
+
   it("clears a single stored secret on request and says it is pending", async () => {
     server.use(
       http.patch("/api/translation/engines/:id", async ({ request }) => {

@@ -22,6 +22,14 @@ export function isSecretField(field: PluginField): boolean {
  * Whether a field applies given the other fields' values (`show_if`). Pass the
  * values with defaults applied (`withDefaults`): a condition reads what a field shows.
  */
+// Equal the way the backend compares for a condition: lists by their members in order, not by identity.
+function sameValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, i) => sameValue(item, b[i]));
+  }
+  return a === b;
+}
+
 export function isVisible(field: PluginField, values: PluginValues): boolean {
   const condition = field.show_if;
   if (!condition) {
@@ -29,10 +37,10 @@ export function isVisible(field: PluginField, values: PluginValues): boolean {
   }
   const current = values[condition.key];
   if (condition.equals !== undefined) {
-    return current === condition.equals;
+    return sameValue(current, condition.equals);
   }
   if (condition.in) {
-    return condition.in.includes(current as PluginValue);
+    return condition.in.some((option) => sameValue(current, option));
   }
   return true;
 }

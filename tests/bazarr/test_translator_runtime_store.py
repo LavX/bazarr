@@ -484,6 +484,29 @@ def test_a_release_and_a_pointer_change_at_once_both_land(session, active_plugin
     assert (pointers.engine, pointers.fallback) == (None, c.id)
 
 
+def test_a_session_reads_what_another_session_changed_in_engines_connections_and_secrets(session, store):
+    from sqlalchemy.orm import sessionmaker
+
+    instance = _ai_engine(store, with_connection=False)
+    connection = store.add_connection(instance.id, "openrouter", plugin_id=OFFICIAL_ENGINE_PLUGIN_ID)
+    store.set_secret((CONNECTION, connection.id), "api_key", KEY, destinations=frozenset({"https://a.test"}))
+    # What this session has loaded and keeps hold of.
+    held = (store.get_instance(instance.id), store.list_connections(instance.id)[0],
+            store._secret_rows((CONNECTION, connection.id))[0])
+    other = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)()
+    try:
+        elsewhere = TranslatorStore(other, pointers=MemoryPointers(), plugin_active=lambda plugin_id: True)
+        elsewhere.set_instance_enabled(instance.id, False)
+        elsewhere.update_connection(connection.id, schema=DestinationSchema(), model="changed")
+        elsewhere.set_secret((CONNECTION, connection.id), "api_key", KEY, destinations=frozenset({"https://b.test"}))
+    finally:
+        other.close()
+    assert store.get_instance(instance.id, fresh=True).enabled == 0
+    assert store.list_connections(instance.id)[0].model == "changed"
+    assert store._secret_rows((CONNECTION, connection.id))[0].destinations_json == '["https://b.test"]'
+    assert held[0] is not None and held[1] is not None and held[2] is not None
+
+
 def test_releasing_a_plugin_resets_pointers_and_deletes_nothing_until_asked(store, pointers):
     google = store.create_instance("google_translate")
     store.set_engine(google.id)

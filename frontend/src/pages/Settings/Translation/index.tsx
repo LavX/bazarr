@@ -99,14 +99,16 @@ const SettingsTranslationView: FunctionComponent = () => {
   useDocumentTitle(`Translation - Settings - ${title}`);
   const { data, isLoading, error } = useTranslationState();
 
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
       <Container py="xl">
         <Loader />
       </Container>
     );
   }
-  if (error || !data) {
+  // Only a page that has never had data is replaced by the error. Once there is data, a failed refresh is
+  // shown above it, so the forms (and what is typed in them) stay where they are.
+  if (!data) {
     return (
       <Container py="xl">
         <Alert color="red" role="alert">
@@ -120,6 +122,12 @@ const SettingsTranslationView: FunctionComponent = () => {
     <Container size="md" py="md">
       <Stack gap="lg">
         <Title order={2}>Translation</Title>
+        {error && (
+          <Alert color="red" role="alert">
+            The translation settings could not be refreshed. What is shown may
+            be out of date, and nothing you typed has been lost.
+          </Alert>
+        )}
         <EnginePickers
           engines={data.instances}
           engine={data.engine}

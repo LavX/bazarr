@@ -301,7 +301,7 @@ class TranslatorSettingsService:
 
     # ------------------------------------------------------------ engines
     def _instance(self, instance_id: int):
-        row = self._store.get_instance(instance_id)
+        row = self._store.get_instance(instance_id, fresh=True)
         if row is None:
             raise NotFoundError(f"no engine instance {instance_id}")
         return row
@@ -489,7 +489,7 @@ class TranslatorSettingsService:
         return [self.connection_view(instance, row) for row in self._store.list_connections(instance_id)]
 
     def _connection(self, connection_id: int):
-        row = self._store.get_connection(connection_id)
+        row = self._store.get_connection(connection_id, fresh=True)
         if row is None:
             raise NotFoundError(f"no connection {connection_id}")
         return row

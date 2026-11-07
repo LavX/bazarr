@@ -689,6 +689,48 @@ def test_a_failing_inner_step_rolls_back_to_its_savepoint_and_the_outer_one_deci
     assert jobs.active_for(SOURCE, "de") is None
 
 
+# ------------------------------------------------------------ rows another session changed
+
+def _second_session(session):
+    from sqlalchemy.orm import sessionmaker
+
+    return sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)()
+
+
+def test_a_session_that_saw_a_job_running_sees_what_another_session_did_to_it(session, jobs, clock, queue):
+    job_id = _running(jobs)
+    # Hold what this session loaded, as a long-running worker does, so the session keeps it in its identity map.
+    held = (jobs.get(job_id), jobs.active_for(SOURCE, "fr"))
+    assert [row.state for row in held] == [RUNNING, RUNNING]
+    other = _second_session(session)
+    try:
+        assert TranslationJobs(other, clock=clock, queue=queue).await_retry(job_id, "rate_limited")
+    finally:
+        other.close()
+    # This session still holds the object it loaded earlier; every read goes back to the database.
+    assert jobs.get(job_id).state == AWAITING_RETRY
+    assert jobs.active_for(SOURCE, "fr").state == AWAITING_RETRY
+    assert jobs.key_of(job_id) is None  # no longer running, so no checkpoint key
+
+
+def test_a_session_reads_the_checkpoints_another_session_saved(session, jobs, clock, queue):
+    job_id = _running(jobs)
+    held = jobs.checkpoints._row(jobs.key_of(job_id))  # nothing saved yet
+    assert held is None and jobs.finished_batches(job_id) == {}
+    assert jobs.save_batch(job_id, 5, ["first, from here"])
+    held = jobs.checkpoints._row(jobs.key_of(job_id))  # the session now holds the checkpoint row
+    other = _second_session(session)
+    try:
+        assert TranslationJobs(other, clock=clock, queue=queue).save_batch(job_id, 0, ["from the other session"])
+    finally:
+        other.close()
+    assert jobs.finished_batches(job_id) == {0: ["from the other session"], 5: ["first, from here"]}
+    # And a batch saved here adds to theirs instead of replacing the whole record from an older copy.
+    assert jobs.save_batch(job_id, 1, ["here"])
+    assert jobs.finished_batches(job_id) == {0: ["from the other session"], 1: ["here"], 5: ["first, from here"]}
+    assert held is not None
+
+
 # ------------------------------------------------------------ SQLite write locking
 
 def test_a_read_then_write_transaction_is_not_broken_by_another_connections_commit(tmp_path, clock, queue,

@@ -365,6 +365,50 @@ describe("plugin settings fields", () => {
     );
   });
 
+  it("compares a list in a condition by its members, not by identity", () => {
+    const field: PluginField = {
+      key: "extra",
+      type: "text",
+      show_if: { key: "tags", equals: ["x"] },
+    };
+    expect(isVisible(field, { tags: ["x"] })).toBe(true);
+    expect(isVisible(field, { tags: ["x", "y"] })).toBe(false);
+    expect(isVisible(field, { tags: ["y"] })).toBe(false);
+    expect(isVisible(field, { tags: "x" })).toBe(false);
+    const among: PluginField = {
+      key: "extra",
+      type: "text",
+      show_if: { key: "tags", in: [["a"], ["x", "y"]] },
+    };
+    expect(isVisible(among, { tags: ["x", "y"] })).toBe(true);
+    expect(isVisible(among, { tags: ["y", "x"] })).toBe(false);
+  });
+
+  it("shows a field whose condition equals a list when the typed list matches", async () => {
+    const user = userEvent.setup();
+    const fields: PluginField[] = [
+      { key: "tags", type: "list", label: "Tags" },
+      {
+        key: "extra",
+        type: "text",
+        label: "Extra",
+        show_if: { key: "tags", equals: ["x"] },
+      },
+    ];
+    customRender(<Harness fields={fields} />);
+    expect(screen.queryByLabelText("Extra")).not.toBeInTheDocument();
+    await user.type(
+      screen
+        .getAllByLabelText("Tags")
+        .find(
+          (item) =>
+            item.tagName === "INPUT" && item.getAttribute("type") !== "hidden",
+        )!,
+      "x{Enter}",
+    );
+    expect(screen.getByLabelText("Extra")).toBeVisible();
+  });
+
   it("stops typing at the declared length", async () => {
     const user = userEvent.setup();
     customRender(<Harness />);
