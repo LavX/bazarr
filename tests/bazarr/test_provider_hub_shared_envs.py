@@ -511,3 +511,114 @@ def test_cleanup_never_leaves_the_hub_directory(hub, tmp_path):
 
     assert env_registry.cleanup_environments(hub) == []
     assert outside.exists()
+
+
+def _plain_env(path):
+    (path / "bin").mkdir(parents=True)
+    (path / "bin" / "python").write_text("", encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("parent", ["envs/plugin", "shared_envs", "envs", "envs/plugin/1.0.0"])
+def test_a_registry_entry_naming_a_parent_directory_removes_nothing_beneath_it(hub, parent):
+    referenced = _plain_env(hub / "envs" / "plugin" / "1.0.0" / "fp")
+    pinned = _plain_env(hub / "shared_envs" / "pinned")
+    state = load_state()
+    state["plugin_envs"] = {"parent": {"path": str(hub / parent)}}
+    state["installations"] = {"alpha": _row("alpha", referenced, [])}
+    save_state(state)
+
+    with pin_scope():
+        venvmod._pin(pinned)
+        assert env_registry.cleanup_environments(hub) == []
+
+    assert (referenced / "bin" / "python").exists()
+    assert (pinned / "bin" / "python").exists()
+    assert (hub / "envs").is_dir() and (hub / "shared_envs").is_dir()
+
+
+def test_an_unreferenced_parent_entry_is_not_a_deletable_environment(hub):
+    inside = _plain_env(hub / "envs" / "plugin" / "1.0.0" / "fp")
+    state = load_state()
+    state["plugin_envs"] = {"parent": {"path": str(hub / "envs" / "plugin")}}
+    save_state(state)
+
+    assert env_registry.cleanup_environments(hub) == []
+
+    # The malformed record protects what lies beneath it rather than taking it out.
+    assert inside.exists()
+    assert (hub / "envs" / "plugin").is_dir()
+
+
+def test_the_legacy_sweep_does_not_follow_a_symlinked_ancestor_out_of_the_hub(hub, tmp_path):
+    outside = tmp_path / "elsewhere"
+    victim = _plain_env(outside / "1.0.0" / "fp")
+    (hub / "envs").mkdir()
+    (hub / "envs" / "plugin").symlink_to(outside, target_is_directory=True)
+
+    assert env_registry.cleanup_environments(hub) == []
+
+    assert (victim / "bin" / "python").exists()
+
+
+def test_a_symlinked_container_directory_is_not_swept(hub, tmp_path):
+    outside = tmp_path / "elsewhere"
+    victim = _plain_env(outside / "fp")
+    (hub / "shared_envs").symlink_to(outside, target_is_directory=True)
+
+    assert env_registry.cleanup_environments(hub) == []
+
+    assert (victim / "bin" / "python").exists()
+
+
+def test_a_registry_entry_behind_a_symlinked_ancestor_is_not_removed(hub, tmp_path):
+    outside = tmp_path / "elsewhere"
+    victim = _plain_env(outside / "fp")
+    (hub / "shared_envs").symlink_to(outside, target_is_directory=True)
+    state = load_state()
+    state["plugin_envs"] = {"x": {"path": str(hub / "shared_envs" / "fp")}}
+    save_state(state)
+
+    assert env_registry.cleanup_environments(hub) == []
+
+    assert (victim / "bin" / "python").exists()
+
+
+def test_a_symlink_where_an_environment_should_be_is_left_alone(hub, tmp_path):
+    outside = _plain_env(tmp_path / "elsewhere" / "fp")
+    (hub / "shared_envs").mkdir()
+    (hub / "shared_envs" / "link").symlink_to(outside, target_is_directory=True)
+
+    assert env_registry.cleanup_environments(hub) == []
+
+    assert (outside / "bin" / "python").exists()
+    assert (hub / "shared_envs" / "link").is_symlink()
+
+
+def test_a_stopped_install_removes_nothing_outside_the_hub(hub, tmp_path):
+    from provider_hub.service import _discard_stopped_install
+
+    outside = _plain_env(tmp_path / "elsewhere" / "fp")
+    link = hub / "shared_envs"
+    link.symlink_to(outside.parent, target_is_directory=True)
+    sibling = tmp_path / "provider_hub_sibling"
+    sibling.mkdir()
+
+    with pin_scope():
+        _discard_stopped_install([outside, link / "fp", sibling, hub], {})
+
+    assert (outside / "bin" / "python").exists()
+    assert sibling.exists() and hub.exists()
+
+
+def test_a_stopped_install_removes_a_bundle_inside_the_hub(hub):
+    from provider_hub.service import _discard_stopped_install
+
+    bundle = hub / "bundles" / "alpha" / "1.0.0"
+    bundle.mkdir(parents=True)
+    (bundle / "provider.py").write_text("", encoding="utf-8")
+
+    with pin_scope():
+        _discard_stopped_install([bundle], {})
+
+    assert not bundle.exists()

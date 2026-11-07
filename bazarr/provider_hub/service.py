@@ -54,7 +54,7 @@ from .state import (
 )
 from . import env_registry
 from .venv import (
-    _ENV_LOCK, PluginEnvironment, environment_fingerprint, is_pinned, path_key, pin_scope, python_executable,
+    _ENV_LOCK, PluginEnvironment, environment_fingerprint, pin_scope, python_executable,
     release_pins,
 )
 from .worker import ProviderWorkerClient, worker_command
@@ -2844,15 +2844,19 @@ def _discard_stopped_install(paths, existing) -> None:
     in_use.discard(None)
     # This install's own hold ends here, so only other installs' holds count.
     release_pins()
+    hub = provider_hub_dir()
     with _ENV_LOCK:
-        shared = env_registry.protected_env_paths(load_state())
         for path in paths:
             # A bundle is recorded by its directory, a venv by its interpreter.
             if {str(path), str(python_executable(path))} & in_use:
                 continue
-            if path_key(path) in shared or is_pinned(path):
+            # Both removals stay inside the hub and never cross a symlink; a
+            # venv is also kept while anything references, records or pins it.
+            if env_registry.discard_if_unused(hub, path):
                 continue
-            shutil.rmtree(path, ignore_errors=True)
+            if env_registry.is_environment_path(hub, path):
+                continue
+            env_registry.remove_inside_hub(hub, path)
 
 
 def stage_install(

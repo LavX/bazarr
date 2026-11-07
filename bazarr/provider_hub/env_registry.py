@@ -19,8 +19,10 @@ Two entry points, both free of pip and of the network:
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import shutil
+import stat
 import sys
 
 from collections.abc import Callable
@@ -28,7 +30,9 @@ from pathlib import Path
 from typing import Any
 
 from .state import load_state, mutate_state
-from .venv import SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, is_pinned, path_key, python_executable
+from .venv import (
+    SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, is_pinned, path_key, pinned_paths, python_executable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -269,11 +273,105 @@ def clear_needs_repair(provider_id: str) -> None:
     mutate_state(clear)
 
 
-def _inside(path: Path, parent: Path) -> bool:
-    try:
-        path.resolve().relative_to(parent.resolve())
-    except (OSError, ValueError):
+LEGACY_ENV_DIR = "envs"
+
+
+def _hub_relative(root: str | Path, target: str | Path) -> tuple[Path, tuple[str, ...]] | None:
+    """The resolved hub directory and ``target`` as parts below it, or None.
+
+    The comparison is lexical, so a symlink in the target's own spelling can
+    never make it look like it is inside the hub. The caller then walks the
+    parts with ``lstat``.
+    """
+    hub = Path(path_key(root))
+    candidate = Path(os.path.abspath(target))
+    for base in (Path(os.path.abspath(root)), hub):
+        try:
+            return hub, candidate.relative_to(base).parts
+        except ValueError:
+            continue
+    return None
+
+
+def _is_env_layout(parts: tuple[str, ...]) -> bool:
+    """``shared_envs/<name>`` or the old ``envs/<id>/<version>/<fingerprint>``.
+
+    Anything shallower is a container directory, anything deeper is inside an
+    environment: neither is an environment to remove.
+    """
+    if not parts or any(part in ("", ".", "..") for part in parts):
         return False
+    return (parts[0] == SHARED_ENV_DIR and len(parts) == 2) or (parts[0] == LEGACY_ENV_DIR and len(parts) == 4)
+
+
+def _walk_real_directories(hub: Path, parts: tuple[str, ...]) -> Path | None:
+    """``hub / parts`` when every component is a real directory, never a symlink."""
+    current = hub
+    for part in parts:
+        current = current / part
+        try:
+            mode = os.lstat(current).st_mode
+        except OSError:
+            return None
+        if not stat.S_ISDIR(mode):
+            return None
+    return current
+
+
+def _locate(root: str | Path, target: str | Path, *, env_layout: bool = True) -> Path | None:
+    """The directory to remove for ``target``, or None when it is not safe to.
+
+    It must be strictly inside the hub (an environment directory, not a
+    container), and no component of the way down from the hub may be a symlink.
+    """
+    located = _hub_relative(root, target)
+    if located is None:
+        return None
+    hub, parts = located
+    if env_layout and not _is_env_layout(parts):
+        return None
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        return None
+    return _walk_real_directories(hub, parts)
+
+
+def _overlaps(target: Path, others) -> bool:
+    """Whether any of ``others`` is ``target``, inside it, or contains it."""
+    for other in others:
+        candidate = Path(other)
+        if candidate == target or target in candidate.parents or candidate in target.parents:
+            return True
+    return False
+
+
+def _remove_environment(root: str | Path, target: str | Path, protected) -> bool:
+    """Remove one environment directory if it is safe to. Callers hold ``_ENV_LOCK``.
+
+    Refused when the target is not an environment directory strictly inside the
+    hub, when a symlink lies on the way to it, or when a referenced, recorded
+    or pinned environment is the target, lies inside it or contains it.
+    """
+    located = _locate(root, target)
+    if located is None:
+        return False
+    if _overlaps(located, (*protected, *pinned_paths())):
+        return False
+    shutil.rmtree(located, ignore_errors=True)
+    return True
+
+
+def is_environment_path(root: str | Path, target: str | Path) -> bool:
+    """Whether ``target`` is spelled as an environment directory under the hub."""
+    located = _hub_relative(root, target)
+    return located is not None and _is_env_layout(located[1])
+
+
+def remove_inside_hub(root: str | Path, target: str | Path) -> bool:
+    """Remove a staged bundle directory, only when it is strictly inside the hub without a symlink on the way."""
+    located = _locate(root, target, env_layout=False)
+    if located is None:
+        return False
+    shutil.rmtree(located, ignore_errors=True)
     return True
 
 
@@ -283,15 +381,33 @@ def discard_if_unused(root: str | Path, env_path: str | Path) -> bool:
     Referenced, recorded and pinned environments stay. Call it after
     ``venv.release_pins`` so this install's own hold does not count.
     """
-    root = Path(root)
     with _ENV_LOCK:
-        key = path_key(env_path)
-        if key in protected_env_paths(load_state()) or is_pinned(key):
-            return False
-        if not (_inside(Path(env_path), root / SHARED_ENV_DIR) or _inside(Path(env_path), root / "envs")):
-            return False
-        shutil.rmtree(env_path, ignore_errors=True)
-        return True
+        return _remove_environment(root, env_path, protected_env_paths(load_state()))
+
+
+def _legacy_environment_dirs(root: Path) -> list[Path]:
+    """Every directory where an unrecorded environment can sit, without following a symlink.
+
+    A container that is a symlink is not entered; a symlink entry is skipped.
+    """
+    hub = Path(path_key(root))
+
+    def children(parent: Path, parts: tuple[str, ...]) -> list[Path]:
+        if _walk_real_directories(hub, parts) is None:
+            return []
+        try:
+            with os.scandir(parent) as entries:
+                return sorted(
+                    parent / entry.name for entry in entries if entry.is_dir(follow_symlinks=False)
+                )
+        except OSError:
+            return []
+
+    found = children(root / SHARED_ENV_DIR, (SHARED_ENV_DIR,))
+    for provider in children(root / LEGACY_ENV_DIR, (LEGACY_ENV_DIR,)):
+        for version in children(provider, (LEGACY_ENV_DIR, provider.name)):
+            found.extend(children(version, (LEGACY_ENV_DIR, provider.name, version.name)))
+    return sorted(found)
 
 
 def cleanup_environments(root: str | Path) -> list[str]:
@@ -300,7 +416,9 @@ def cleanup_environments(root: str | Path) -> list[str]:
     Covers the recorded environments, the unrecorded directories under
     ``shared_envs`` and the old per-provider directories
     (``envs/<id>/<version>/<fingerprint>``). An environment an install is using
-    right now is pinned and stays. Only directories under ``root`` are removed.
+    right now is pinned and stays. Only environment directories strictly inside
+    ``root`` are removed, reached without crossing a symlink, and never one that
+    contains or sits inside a referenced or pinned environment.
     """
     root = Path(root)
     removed: list[str] = []
@@ -315,11 +433,9 @@ def cleanup_environments(root: str | Path) -> list[str]:
                 continue
             if path_key(path) in referenced or is_pinned(path):
                 continue
-            target = Path(path)
-            if target.exists():
-                if not (_inside(target, root / SHARED_ENV_DIR) or _inside(target, root / "envs")):
+            if os.path.lexists(path):
+                if not _remove_environment(root, path, referenced):
                     continue
-                shutil.rmtree(target, ignore_errors=True)
                 removed.append(path)
             del envs[fingerprint]
         recorded = {
@@ -329,12 +445,10 @@ def cleanup_environments(root: str | Path) -> list[str]:
         # Environments built into a new directory leave the replaced one behind,
         # and a failed install can leave one nothing recorded. Both are swept
         # here once nothing references or pins them.
-        for old in sorted((*(root / SHARED_ENV_DIR).glob("*"), *(root / "envs").glob("*/*/*"))):
-            key = path_key(old)
-            if not old.is_dir() or key in referenced or key in recorded or is_pinned(key):
-                continue
-            shutil.rmtree(old, ignore_errors=True)
-            removed.append(str(old))
+        removed.extend(
+            str(old) for old in _legacy_environment_dirs(root)
+            if _remove_environment(root, old, referenced | recorded)
+        )
 
     # The decision and the state write happen under the lock an install takes
     # to read the record and pin, so an install never sees a record whose
