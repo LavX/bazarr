@@ -46,6 +46,19 @@ def _secret_parts(value):
     return parts
 
 
+def _secret_spellings(value):
+    """Each part of a secret in every escaped spelling an error text may use."""
+    out = []
+    for part in _secret_parts(value):
+        out.extend(frames.secret_forms(part))
+    return out
+
+
+def _passes_through(error):
+    """Exits a thread boundary must not swallow after it has done its cleanup."""
+    return isinstance(error, (KeyboardInterrupt, GeneratorExit))
+
+
 class OperationError(Exception):
     def __init__(self, code, message="", *, retryable=False, retry_after=None):
         super().__init__(message or code)
@@ -151,8 +164,9 @@ class WorkerChannel:
         # They no longer hold a slot, but a cancel must still find them.
         self._transmitting = {}
         # Every secret value the host has sent this worker, whichever request
-        # carried it. A plugin may keep a secret past its request, so an error
-        # reply is scrubbed with all of them, not only its own request's.
+        # carried it, in every escaped spelling. A plugin may keep a secret past
+        # its request, so an error reply is scrubbed with all of them, not only
+        # its own request's.
         self._secret_values = set()
         self._threads = []
         self._pending_calls = {}
@@ -291,8 +305,10 @@ class WorkerChannel:
             self.exit_status = 3
         except (OSError, ValueError):
             pass
-        except Exception:
-            # Whatever else ends the reader ends the worker, with a failure status.
+        except BaseException:
+            # Whatever else ends the reader ends the worker, with a failure
+            # status. SystemExit and friends included: the reader thread dying
+            # quietly would leave run() waiting on a channel nobody reads.
             self.exit_status = 3
         finally:
             self._ended.set()
@@ -357,7 +373,7 @@ class WorkerChannel:
         secrets = message.get("secrets") or {}
         with self._lock:
             for value in secrets.values():
-                self._secret_values.update(_secret_parts(value))
+                self._secret_values.update(_secret_spellings(value))
 
     def _start_operation(self, message):
         req_id = message["id"]
@@ -401,7 +417,19 @@ class WorkerChannel:
             self._operations.pop(operation.id, None)
 
     def _run_operation(self, operation):
+        """Run one handler and answer it. Whatever the handler does, it is answered.
+
+        The boundary catches ``BaseException``: a handler that calls
+        ``sys.exit()`` raises ``SystemExit``, and a bare ``Exception`` clause
+        would let it skip the reply and the cleanup, leaving the host to wait on
+        a request nobody will answer. ``SystemExit`` fails that request only
+        (``plugin_error``, the class name says what it was) and the channel keeps
+        serving: a handler runs on a thread, where an exit would end the thread
+        and nothing else. ``KeyboardInterrupt`` and ``GeneratorExit`` are
+        answered the same way and then raised again once cleanup is done.
+        """
         reply = None
+        escaping = None
         try:
             try:
                 value = self._handler(operation)
@@ -418,18 +446,31 @@ class WorkerChannel:
                 reply = ("error", OperationError(Codes.CANCELLED, "cancelled"))
             except ChannelClosed:
                 reply = None
-            except Exception as error:
+            except BaseException as error:
                 reply = ("error", error)
-        finally:
-            # The slot is free before the reply goes out: the host may send the
-            # next request the moment it reads this reply.
-            self._release(operation)
-        try:
+                if _passes_through(error):
+                    escaping = error
+            finally:
+                # The slot is free before the reply goes out: the host may send
+                # the next request the moment it reads this reply.
+                self._release(operation)
             if reply is not None:
-                self._reply(operation, reply)
+                try:
+                    self._reply(operation, reply)
+                except BaseException as failure:
+                    # A reply that cannot be written at all leaves the host
+                    # waiting: end the channel so the host sees the worker go.
+                    if not _passes_through(failure):
+                        self.exit_status = 3
+                        self._close()
+                    else:
+                        escaping = escaping or failure
         finally:
-            # Findable by a cancel until the terminal reply is written.
+            # Findable by a cancel until the terminal reply is written, and
+            # gone whatever happened above.
             self._forget(operation)
+        if escaping is not None:
+            raise escaping
 
     def _reply(self, operation, reply):
         try:
@@ -439,7 +480,9 @@ class WorkerChannel:
                         self._respond_ok(operation, reply[1], reply[2])
                     except (ChannelClosed, OperationCancelled):
                         raise
-                    except Exception as error:
+                    except BaseException as error:
+                        if _passes_through(error):
+                            raise
                         self._respond_error(operation.id, error)
                 else:
                     self._respond_error(operation.id, reply[1])
@@ -498,11 +541,23 @@ class WorkerChannel:
             self._send({"t": frames.RES, "id": req_id, "ok": False, "error": payload})
         except ChannelClosed:
             raise
-        except Exception:
+        except BaseException as caught:
+            # An error object whose text raises SystemExit is still only a failed reply.
+            if _passes_through(caught):
+                raise
             self._send({"t": frames.RES, "id": req_id, "ok": False,
                         "error": frames.error_object(Codes.PLUGIN_ERROR, "the error reply could not be sent")})
 
     def _heartbeat_loop(self):
+        try:
+            self._beat()
+        except BaseException:
+            # A heartbeat that dies silently reads as a hung worker to the host.
+            # Say so instead: fail and let run() return.
+            self.exit_status = 3
+            self._close()
+
+    def _beat(self):
         while not self._closed.wait(self._heartbeat_interval):
             self._hb_seq += 1
             message = {"t": frames.HB, "seq": self._hb_seq}

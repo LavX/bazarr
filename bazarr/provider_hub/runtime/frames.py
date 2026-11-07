@@ -73,8 +73,10 @@ line protocol in ``provider_hub.worker`` and are selected by ``wire_version``.
 from __future__ import annotations
 
 import json
+import re
 import struct
 import threading
+import urllib.parse
 
 PROTOCOL_MAJOR = 2
 PROTOCOL_MINOR = 0
@@ -327,6 +329,51 @@ def is_secrets(value):
     """
     return isinstance(value, dict) and all(
         isinstance(name, str) and isinstance(item, str) and item for name, item in value.items())
+
+
+def secret_forms(value):
+    """Every spelling of a secret that an error message, log line or URL may carry.
+
+    The literal value is never enough: ``KeyError(secret)`` prints through
+    ``repr`` and doubles every backslash, a JSON body escapes control and
+    non-ASCII characters, and a URL percent-encodes the reserved ones. Each
+    spelling is a string to cut out of outgoing text, so the list is built once
+    per secret when it is registered. The literal value comes first.
+    """
+    forms = [value]
+
+    def add(text):
+        if text and text not in forms:
+            forms.append(text)
+
+    bodies = []
+
+    def python_forms(text):
+        for spelled in (repr(text), ascii(text)):
+            body = spelled[1:-1]
+            plain = body.replace("\\'", "'")
+            # repr picks its quote by content: a body holds \' or a bare '.
+            bodies.extend((body, plain, plain.replace("'", "\\'")))
+        bodies.append(repr(text.encode("utf-8", "surrogatepass"))[2:-1])
+
+    def json_forms(text):
+        for ensure_ascii in (True, False):
+            body = json.dumps(text, ensure_ascii=ensure_ascii)[1:-1]
+            bodies.extend((body, body.replace("/", "\\/")))
+
+    python_forms(value)
+    json_forms(value)
+    for body in list(bodies):
+        add(body)
+        # An error that carries a repr or a JSON document is itself repr'd or
+        # dumped once more on its way out.
+        add(repr(body)[1:-1])
+        add(json.dumps(body)[1:-1])
+    for encoded in (urllib.parse.quote(value, safe=""), urllib.parse.quote(value),
+                    urllib.parse.quote_plus(value)):
+        add(encoded)
+        add(re.sub("%[0-9A-F]{2}", lambda m: m.group(0).lower(), encoded))
+    return forms
 
 
 def _opt(check):

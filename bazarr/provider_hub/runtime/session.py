@@ -71,6 +71,8 @@ _CODE_SHAPE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 # 2000 character display cut is replaced whole first.
 _STDERR_READ_LIMIT = 64 * 1024
 _STDERR_LINES_PER_SECOND = 100
+# How long a queued reject may take to reach the worker before it is ended anyway.
+_REJECT_FLUSH_WAIT = 2.0
 
 
 @dataclass(frozen=True)
@@ -270,6 +272,11 @@ class WorkerSession:
         # that has stopped reading.
         self._outbox: "queue.Queue[bytes]" = queue.Queue()
         self._outbox_bytes = 0
+        # Frames queued and frames the writer has finished, so a caller can wait
+        # for one frame to be written (the reject) before the worker is ended.
+        self._queued_total = 0
+        self._written_total = 0
+        self._written = threading.Condition(self._lock)
         self._write_started: float | None = None
         self._call_queues: dict[Any, deque] = {}
         self._call_pending = 0
@@ -279,6 +286,9 @@ class WorkerSession:
         # Secret values seen in requests, kept after the request ends: its last
         # stderr lines can reach the drain thread after the reply reached the caller.
         self._secret_values: set[str] = set()
+        # The same values and lines in every escaped spelling (repr, JSON, URL):
+        # what redaction cuts out. Not counted against ``max_secret_values``.
+        self._secret_forms: set[str] = set()
         self._secrets_by_length: tuple = ()
         self.recycle_needed = False
 
@@ -431,7 +441,9 @@ class WorkerSession:
                     code=Codes.RECYCLE_REQUIRED)
             if fresh:
                 self._secret_values.update(fresh)
-                self._secrets_by_length = tuple(sorted(self._secret_values, key=len, reverse=True))
+                for value in fresh:
+                    self._secret_forms.update(frames.secret_forms(value))
+                self._secrets_by_length = tuple(sorted(self._secret_forms, key=len, reverse=True))
             self._next_id += 1
             message = {
                 "t": frames.REQ,
@@ -539,8 +551,9 @@ class WorkerSession:
             return
         except (OSError, ValueError):
             pass
-        except Exception as error:
-            # Whatever else a hostile frame provokes. The reader must never die silently.
+        except BaseException as error:
+            # Whatever else a hostile frame or a callback provokes, SystemExit
+            # included. The reader must never die silently.
             detail = "worker frame could not be processed: %s" % type(error).__name__
             if not welcomed:
                 self._handshake_error = HandshakeError(detail)
@@ -610,9 +623,24 @@ class WorkerSession:
         self._hello.set()
 
     def _reject(self, code, message):
-        self._send_quietly({"t": frames.REJECT, "code": code, "message": message})
+        if self._send_quietly({"t": frames.REJECT, "code": code, "message": message}):
+            # Waking start() ends the worker; give the writer a bounded moment to
+            # put the rejection on the pipe first, so the worker can read why.
+            self._wait_written(min(self.limits.write_timeout, _REJECT_FLUSH_WAIT))
         self._handshake_error = HandshakeError(message, code=code)
         self._hello.set()
+
+    def _wait_written(self, timeout):
+        """Wait until every frame queued so far is written. False on timeout or when the session ends."""
+        deadline = time.monotonic() + timeout
+        with self._written:
+            target = self._queued_total
+            while self._written_total < target:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self._stop.is_set():
+                    return False
+                self._written.wait(min(remaining, 0.05))
+        return True
 
     def _on_message(self, message):
         """Handle one control message. True means the reader should stop."""
@@ -624,7 +652,7 @@ class WorkerSession:
             if request is not None and request.on_progress is not None:
                 try:
                     request.on_progress(self._redact_obj(message))
-                except Exception as error:
+                except BaseException as error:
                     self._log_callback_failure("progress", error)
         elif kind == frames.RES:
             self._on_result(message)
@@ -845,8 +873,9 @@ class WorkerSession:
             return {"t": frames.ACK, "cid": cid, "ok": False,
                     "error": frames.error_object(self._safe_code(error.code), text,
                                                  retryable=error.retryable)}
-        except Exception as error:
-            # Logged redacted and without the raw exception, which may carry a secret.
+        except BaseException as error:
+            # Logged redacted and without the raw exception, which may carry a
+            # secret. SystemExit from a handler is a failed call like any other.
             text = self._describe(error)
             logger.warning("%s: host call %s failed: %s", self.name, name,
                            "%s: %s" % (type(error).__name__, text))
@@ -857,7 +886,7 @@ class WorkerSession:
         """Redacted, bounded text for a host-side error, or a fixed phrase if it cannot be formatted."""
         try:
             return self._public(value)
-        except Exception:
+        except BaseException:
             return "host handler failed"
 
     # --------------------------------------------------------------- watchdog
@@ -866,7 +895,7 @@ class WorkerSession:
         while not self._stop.wait(self.limits.tick):
             try:
                 self._tick()
-            except Exception as error:
+            except BaseException as error:
                 # A dead watchdog would leave every deadline and heartbeat unenforced.
                 logger.error("%s: watchdog failed: %s", self.name, type(error).__name__)
                 self._fail(SessionError("watchdog failed (%s)" % type(error).__name__), kill=True)
@@ -965,6 +994,7 @@ class WorkerSession:
             if self._outbox_full(len(data)):
                 return _FULL
             self._outbox_bytes += len(data)
+            self._queued_total += 1
             self._outbox.put_nowait(data)
         return _QUEUED
 
@@ -993,11 +1023,16 @@ class WorkerSession:
                     self._fail(WorkerExited("worker pipe closed: %s" % self._describe(error), exit_code=self._poll()),
                                kill=True)
                     return
-                except Exception as error:
+                except BaseException as error:
+                    # SystemExit from an odd stream included: a writer that dies
+                    # quietly leaves every request waiting on a frame never sent.
                     self._write_started = None
                     self._fail(SessionError("writer failed (%s)" % type(error).__name__), kill=True)
                     return
                 self._write_started = None
+                with self._written:
+                    self._written_total += 1
+                    self._written.notify_all()
         finally:
             self._close_stream(stream)
 
@@ -1007,7 +1042,7 @@ class WorkerSession:
             return
         try:
             callback(name, payload)
-        except Exception as error:
+        except BaseException as error:
             self._log_callback_failure("event", error)
 
     def _log_callback_failure(self, what, error):
@@ -1144,7 +1179,7 @@ class WorkerSession:
                 if callback is not None:
                     try:
                         callback(line)
-                    except Exception:
+                    except BaseException:
                         pass
                 else:
                     logger.debug("%s stderr: %s", self.name, line)
