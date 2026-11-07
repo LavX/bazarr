@@ -409,7 +409,7 @@ class TranslatorSettingsService:
             raise ServiceError("values must be an object")
         host, plain = self._split_host(values, schema=schema)
         validated = self._validate(self._without_host(schema), plain, frozenset(), plugin.plugin_id, "connection",
-                                   backend_type)
+                                   backend_type, context=host)
         self._require_consent(schema, {}, validated.settings, payload, new_owner=True)
         parsed = self._parsed(plugin)
         with self._store.transaction():
@@ -455,7 +455,7 @@ class TranslatorSettingsService:
         if checked:
             host, plain = self._split_host(values or {}, keep=connection, schema=schema)
             validated = self._validate(self._without_host(schema), self._merged(before, plain, schema), stored,
-                                       plugin.plugin_id, "connection", connection.backend_type)
+                                       plugin.plugin_id, "connection", connection.backend_type, context=host)
         after = validated.settings if checked else before
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
@@ -637,8 +637,8 @@ class TranslatorSettingsService:
         return host, plain
 
     def _validate(self, schema: DestinationSchema, values: dict[str, Any], stored: frozenset[str], plugin_id: str,
-                  scope: str, backend_type: str) -> ValidatedValues:
-        validated = validate_values(schema.fields, values, stored_secrets=stored)
+                  scope: str, backend_type: str, context: Mapping[str, Any] | None = None) -> ValidatedValues:
+        validated = validate_values(schema.fields, values, stored_secrets=stored, context=context)
         errors = dict(validated.errors)
         if not errors and self._validator is not None:
             merged = {**validated.settings, **validated.secrets}

@@ -774,6 +774,29 @@ def test_settings_and_the_switch_in_one_request_are_kept_or_dropped_together(wor
     assert stored.revision == 1 and stored.settings_json in ("{}", "") and stored.enabled == 1
 
 
+def test_a_connection_created_with_an_empty_controlling_value_is_checked_as_it_will_be_stored(world):
+    fields = world.plugins[PLUGIN].manifest["settings"]["backend_types"]["openrouter"]["fields"]
+    fields.append({"key": "mode", "type": "text", "default": "custom"})
+    for field in fields:
+        if field["key"] == "api_key":
+            field["show_if"] = {"key": "mode", "equals": "custom"}
+    refused = _new_connection(world, values={"mode": ""})
+    assert refused.status_code == 400 and refused.json["field_errors"] == {"api_key": "is required"}
+    assert world.store.list_connections(world.instance.id) == []
+    assert _new_connection(world, values={"mode": "other"}).status_code == 201
+
+
+def test_a_condition_on_the_model_sees_the_model_that_will_be_stored(world):
+    fields = world.plugins[PLUGIN].manifest["settings"]["backend_types"]["openrouter"]["fields"]
+    fields.append({"key": "extra", "type": "text", "required": True, "show_if": {"key": "model", "equals": "special"}})
+    refused = _new_connection(world, values={"api_key": "k", "model": "special"})
+    assert refused.status_code == 400 and refused.json["field_errors"] == {"extra": "is required"}
+    created = _new_connection(world, values={"api_key": "k", "model": "plain"})
+    assert created.status_code == 201
+    switched = world.call("patch", f"connections/{created.json['connection']['id']}", {"values": {"model": "special"}})
+    assert switched.status_code == 400 and switched.json["field_errors"] == {"extra": "is required"}
+
+
 def test_a_flag_that_is_not_a_boolean_is_refused(world):
     assert _new_connection(world, enabled="false", values={"api_key": "k"}).status_code == 400
     created = _new_connection(world, values={"api_key": "k"}).json["connection"]

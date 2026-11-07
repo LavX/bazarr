@@ -159,20 +159,26 @@ def _is_empty(value: Any) -> bool:
 
 def validate_values(fields: Sequence[Mapping[str, Any]], values: Mapping[str, Any], *,
                     stored_secrets: frozenset[str] = frozenset(),
-                    extra_keys: frozenset[str] = frozenset()) -> ValidatedValues:
+                    extra_keys: frozenset[str] = frozenset(),
+                    context: Mapping[str, Any] | None = None) -> ValidatedValues:
     """Check ``values`` against ``fields``.
 
     ``stored_secrets`` names the secret fields that already hold a value, so a required secret left
     empty keeps it. ``extra_keys`` are keys the caller owns and has already taken out of ``values``
-    (the host-owned model and prices); they are not errors here.
+    (the host-owned model and prices); they are not errors here. ``context`` holds those same values for the
+    conditions to read, so a field that shows only for one model sees the model that will be stored.
     """
     result = ValidatedValues()
     declared = {item["key"]: item for item in fields}
     for key in values:
         if key not in declared and key not in extra_keys:
             result.errors[str(key)] = "is not a setting of this engine"
+    # Conditions read what will be stored, and an empty value is not stored (its default applies again), so a
+    # condition sees the default for a field that was sent empty. A toggle keeps off as a value.
     merged = {key: definition.get("default") for key, definition in declared.items()}
-    merged.update({key: value for key, value in values.items() if key in declared})
+    merged.update({key: value for key, value in (context or {}).items() if key not in declared})
+    merged.update({key: value for key, value in values.items()
+                   if key in declared and (declared[key].get("type") == "toggle" or not _is_empty(value))})
     for key, definition in declared.items():
         secret = is_secret_field(definition)
         value = values.get(key)

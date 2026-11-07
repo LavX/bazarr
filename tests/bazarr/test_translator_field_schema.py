@@ -150,3 +150,16 @@ def test_a_clean_address_is_accepted_and_one_in_a_list_is_checked_like_a_single_
         assert validate_values(fields, {"base_url": url}).errors == {}
     assert validate_values(fields, {"base_url": "not a url"}).errors == {
         "base_url": "must be a web address that starts with http:// or https://"}
+
+
+def test_a_condition_sees_the_default_for_a_field_sent_empty_as_it_will_be_stored():
+    fields = [{"key": "mode", "type": "text", "default": "custom"},
+              {"key": "api_key", "type": "secret", "required": True, "show_if": {"key": "mode", "equals": "custom"}},
+              {"key": "flag", "type": "toggle", "default": True},
+              {"key": "extra", "type": "text", "required": True, "show_if": {"key": "flag", "equals": False}}]
+    # An empty mode is stored as no mode, so "custom" applies and the key is required.
+    assert validate_values(fields, {"mode": ""}).errors == {"api_key": "is required"}
+    assert validate_values(fields, {"mode": None}).errors == {"api_key": "is required"}
+    assert validate_values(fields, {"mode": "other"}).errors == {}
+    # A toggle sent off is a value, not an empty one.
+    assert validate_values(fields, {"flag": False, "api_key": "k"}).errors == {"extra": "is required"}

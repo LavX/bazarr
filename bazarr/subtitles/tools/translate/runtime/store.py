@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -43,6 +44,8 @@ CONNECTION = "connection"
 LAST_FOUR_MIN_LENGTH = 16
 
 Owner = tuple[str, int]
+# Stands in for a pointer store that has no lock of its own (a test double).
+_POINTER_LOCK = threading.RLock()
 _UNSET: Any = object()
 
 
@@ -86,6 +89,12 @@ class PointerChange:
 
 class ConfigPointers:
     """The two pointers as they live in config.yaml, as instance ids ('' for none)."""
+
+    def lock(self):
+        """The lock every writer of config.yaml takes. Hold it across a whole read, check and write."""
+        from discover.metadata import CONFIG_LOCK
+
+        return CONFIG_LOCK
 
     def get(self) -> tuple[int | None, int | None]:
         from app.config import settings
@@ -697,6 +706,15 @@ class TranslatorStore:
         for value in (engine, fallback):
             if value is not _UNSET and value is not None:
                 self._require_instance(value)
+        # The pair is read, checked and written under one lock: two requests that each change one pointer both
+        # land, instead of the later write putting back the value the earlier one read.
+        with self._pointer_cycle():
+            return self._change_pointer_pair(engine, fallback)
+
+    def _pointer_cycle(self):
+        return getattr(self._pointers, "lock", lambda: _POINTER_LOCK)()
+
+    def _change_pointer_pair(self, engine: Any, fallback: Any) -> PointerChange:
         current_engine, current_fallback = self._pointers.get()
         new_engine = current_engine if engine is _UNSET else engine
         change = PointerChange()
@@ -716,6 +734,10 @@ class TranslatorStore:
 
     def release_pointers(self, instance_ids: set[int], *, why: str) -> PointerChange:
         """Reset any pointer that names one of these instances to its default, with a notice."""
+        with self._pointer_cycle():
+            return self._release_pointers(instance_ids, why)
+
+    def _release_pointers(self, instance_ids: set[int], why: str) -> PointerChange:
         engine, fallback = self._pointers.get()
         change = PointerChange()
         new_engine, new_fallback = engine, fallback

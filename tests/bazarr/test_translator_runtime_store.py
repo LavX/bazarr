@@ -424,6 +424,66 @@ def test_every_plugin_update_that_changes_what_an_owner_stores_moves_its_revisio
     assert store.get_connection(connection.id).revision == 2  # migrated settings
 
 
+class SlowLockedPointers(MemoryPointers):
+    """Pointers held like config.yaml is: one lock for a whole cycle, and a read that takes its time."""
+
+    def __init__(self, engine=None, fallback=None):
+        super().__init__(engine, fallback)
+        import threading
+
+        self._lock = threading.RLock()
+
+    def lock(self):
+        return self._lock
+
+    def get(self):
+        import time
+
+        found = (self.engine, self.fallback)
+        time.sleep(0.2)  # long enough for another request to read the same pair
+        return found
+
+
+def _two_requests_at_once(session, active_plugins, pointers, first, second):
+    import threading
+
+    failures = []
+
+    def run(action):
+        try:
+            action(TranslatorStore(session, pointers=pointers, plugin_active=lambda plugin_id: plugin_id in active_plugins))
+        except BaseException as error:  # the test reports whatever went wrong
+            failures.append(repr(error))
+        finally:
+            session.remove()
+
+    threads = [threading.Thread(target=run, args=(action,)) for action in (first, second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads) and failures == []
+
+
+def test_two_pointer_changes_at_once_both_land(session, active_plugins):
+    setup = TranslatorStore(session, pointers=MemoryPointers(), plugin_active=lambda plugin_id: plugin_id in active_plugins)
+    a, b, c, d = (setup.create_instance("google_translate", name=name) for name in "abcd")
+    pointers = SlowLockedPointers(a.id, b.id)
+    _two_requests_at_once(session, active_plugins, pointers,
+                          lambda store: store.set_engine(c.id), lambda store: store.set_fallback(d.id))
+    assert (pointers.engine, pointers.fallback) == (c.id, d.id)
+
+
+def test_a_release_and_a_pointer_change_at_once_both_land(session, active_plugins):
+    setup = TranslatorStore(session, pointers=MemoryPointers(), plugin_active=lambda plugin_id: plugin_id in active_plugins)
+    a, b, c = (setup.create_instance("google_translate", name=name) for name in "abc")
+    pointers = SlowLockedPointers(a.id, b.id)
+    _two_requests_at_once(session, active_plugins, pointers,
+                          lambda store: store.release_pointers({a.id}, why="removed"),
+                          lambda store: store.set_fallback(c.id))
+    assert (pointers.engine, pointers.fallback) == (None, c.id)
+
+
 def test_releasing_a_plugin_resets_pointers_and_deletes_nothing_until_asked(store, pointers):
     google = store.create_instance("google_translate")
     store.set_engine(google.id)
