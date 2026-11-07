@@ -520,11 +520,26 @@ class WorkerProcess(subprocess.Popen):
     ``enforcement`` is ``"enforced"`` or ``"declared"``. A plain worker (a
     platform without the launcher) has no failure record, no lifeline and
     nothing to raise, but answers the same calls.
+
+    One lock (``_own_lock``) serialises everything that decides whether the
+    process is still ours and then acts on it: the ``returncode`` check and the
+    signal that follows, ``poll``, ``wait`` and the reap they perform. A pid may
+    be handed out again the moment it is reaped, so a signal sent after a reap
+    that raced the check would reach a stranger. Nothing here sleeps or waits
+    for the process while holding the lock for more than a short slice, and
+    ``stop()`` is the only long operation: concurrent callers share one run.
     """
 
     enforcement: str = "declared"
     # The process that keeps the worker's group id reserved; see ``_start_plain``.
     _anchor: "subprocess.Popen | None" = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Before the child exists, so every override below is safe to call from
+        # Popen's own code.
+        self._own_lock = threading.RLock()
+        self._stop_running: "threading.Event | None" = None
+        super().__init__(*args, **kwargs)
 
     def launcher_failure(self) -> "LauncherFailure | None":
         return None
@@ -546,6 +561,99 @@ class WorkerProcess(subprocess.Popen):
             except OSError:
                 pass
         super().__del__(*args, **kwargs)
+
+    # -- everything below goes through ``_own_lock`` ------------------------------
+
+    def poll(self):
+        with self._own_lock:
+            return super().poll()
+
+    def send_signal(self, sig):
+        # Popen polls first and sends nothing to a reaped child; under the lock
+        # no other reap can slip in between that check and the signal.
+        with self._own_lock:
+            super().send_signal(sig)
+
+    def wait(self, timeout=None):
+        """``Popen.wait`` in short slices, so a signaller is never kept out for long."""
+        end = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        while True:
+            with self._own_lock:
+                if self.returncode is not None:
+                    return self.returncode
+                step = 0.05 if end is None else max(0.0, min(0.05, end - time.monotonic()))
+                try:
+                    return super().wait(timeout=step)
+                except subprocess.TimeoutExpired:
+                    pass
+            if end is not None and time.monotonic() >= end:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            time.sleep(0.002)
+
+    def _still_ours(self) -> bool:
+        """Whether the pid is still this child's. Call with ``_own_lock`` held.
+
+        False once it was reaped, by this object or by anything else (``waitid``
+        finds no such child). A zombie is still ours: it keeps its pid.
+        """
+        if self.returncode is not None:
+            return False
+        waitid = getattr(os, "waitid", None)
+        if waitid is None:
+            return True
+        try:
+            waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return False
+        except OSError:
+            return True
+        return self.returncode is None
+
+    def signal_group(self, sig: int) -> "bool | None":
+        """Signal the worker's process group while it is certainly ours.
+
+        True: signalled. None: not ours any more (reaped), nothing was sent.
+        False: the signal could not be sent. With an anchor the group is the
+        anchor's, which stays unreaped until ``stop`` has used it; otherwise the
+        worker leads its own group and its pid names it only while unreaped.
+        """
+        killpg = getattr(os, "killpg", None)
+        if killpg is None:
+            return False
+        with self._own_lock:
+            anchor = self._anchor
+            try:
+                if anchor is not None and anchor.returncode is None:
+                    killpg(anchor.pid, sig)
+                    return True
+                if not self._still_ours():
+                    return None
+                killpg(self.pid, sig)
+                return True
+            except OSError:
+                return False
+
+    def stop(self, grace: float = 3.0) -> None:
+        """End the worker and everything it started. Concurrent callers share one run.
+
+        A caller that arrives while another stop is running waits for it and
+        returns; a call after it finished runs again, harmlessly (every step
+        checks, under the lock, that the process is still ours).
+        """
+        with self._own_lock:
+            running = self._stop_running
+            leader = running is None
+            if leader:
+                running = self._stop_running = threading.Event()
+        if not leader:
+            running.wait()
+            return
+        try:
+            self._do_stop(grace)
+        finally:
+            with self._own_lock:
+                self._stop_running = None
+            running.set()
 
     def _terminate_and_wait(self, grace: float) -> bool:
         """SIGTERM the worker and wait. True when it was still running after ``grace``."""
@@ -581,7 +689,7 @@ class WorkerProcess(subprocess.Popen):
         except subprocess.TimeoutExpired:
             pass
 
-    def stop(self, grace: float = 3.0) -> None:
+    def _do_stop(self, grace: float) -> None:
         """Terminate the worker, then kill its whole process group.
 
         The group is cleaned up whether or not the worker is still running, and
@@ -592,13 +700,12 @@ class WorkerProcess(subprocess.Popen):
         this object has not reaped, so the kernel cannot hand that pid out
         again and the kill always reaches the right group. Without an anchor
         the group id is the worker's own pid, which is safe to signal only
-        while the worker is not reaped: this call keeps it unreaped until the
-        group has been signalled (``waitid`` sees the exit without consuming
-        it) and sends nothing when something else reaped it first. Where
+        while the worker is not reaped: the check and the signal happen under
+        the lock, the exit is seen with ``waitid`` (which does not consume it)
+        and nothing is sent when something else reaped it first. Where
         ``waitid`` does not exist the group is signalled only when the worker
         outlived its grace, since waiting for it would reap it.
         """
-        anchor, self._anchor = self._anchor, None
         killpg = getattr(os, "killpg", None)
         if killpg is None:
             if self._terminate_and_wait(grace):
@@ -608,13 +715,17 @@ class WorkerProcess(subprocess.Popen):
                     pass
                 self._reap_quietly()
             return
+        anchor = self._anchor
         if anchor is not None:
             timed_out = self._terminate_and_wait(grace)
-            try:
-                killpg(anchor.pid, signal.SIGKILL)
-            except OSError:
-                pass
+            with self._own_lock:
+                try:
+                    killpg(anchor.pid, signal.SIGKILL)
+                except OSError:
+                    pass
             _finish_anchor(anchor)
+            with self._own_lock:
+                self._anchor = None
             if timed_out:
                 self._reap_quietly()
             return
@@ -627,21 +738,27 @@ class WorkerProcess(subprocess.Popen):
                 # Not self.terminate(): it polls first and would reap an
                 # exited worker. The worker is unreaped here (zombies take
                 # signals as a no-op), so its pid is still its own.
-                try:
-                    os.kill(self.pid, signal.SIGTERM)
-                except OSError:
-                    pass
+                with self._own_lock:
+                    if self._still_ours():
+                        try:
+                            os.kill(self.pid, signal.SIGTERM)
+                        except OSError:
+                            pass
                 self._wait_for_exit_unreaped(grace)
-                killpg(self.pid, signal.SIGKILL)
+                with self._own_lock:
+                    if self._still_ours():
+                        killpg(self.pid, signal.SIGKILL)
             except (ChildProcessError, OSError):
                 pass
             self._reap_quietly()
             return
         if self._terminate_and_wait(grace):
-            try:
-                killpg(self.pid, signal.SIGKILL)
-            except OSError:
-                pass
+            with self._own_lock:
+                if self._still_ours():
+                    try:
+                        killpg(self.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
             self._reap_quietly()
 
 
@@ -675,7 +792,8 @@ class LauncherProcess(WorkerProcess):
         super().__del__(*args, **kwargs)
 
     def close_lifeline(self) -> None:
-        fd, self._fds["lifeline"] = self._fds.get("lifeline"), None
+        with self._own_lock:
+            fd, self._fds["lifeline"] = self._fds.get("lifeline"), None
         if fd is not None:
             try:
                 os.close(fd)
@@ -686,14 +804,15 @@ class LauncherProcess(WorkerProcess):
         fd = self._fds.get("status")
         if fd is None:
             return
-        try:
-            while True:
-                chunk = os.read(fd, 4096)
-                if not chunk:
-                    break
-                self._status_text += chunk
-        except (BlockingIOError, OSError):
-            pass
+        with self._own_lock:
+            try:
+                while True:
+                    chunk = os.read(fd, 4096)
+                    if not chunk:
+                        break
+                    self._status_text += chunk
+            except (BlockingIOError, OSError):
+                pass
 
     def launcher_failure(self) -> LauncherFailure | None:
         """The launcher's own report that the worker could not be started.
@@ -737,7 +856,7 @@ class LauncherProcess(WorkerProcess):
         if failure is not None and failure.kind == "sandbox":
             raise SandboxApplyError(failure.message)
 
-    def stop(self, grace: float = 3.0) -> None:
+    def _do_stop(self, grace: float) -> None:
         """End the worker tree and wait for the launcher to report it gone.
 
         SIGTERM goes to the launcher, which passes it to the worker and gives it
@@ -766,12 +885,14 @@ class LauncherProcess(WorkerProcess):
                     super().wait(timeout=self.term_grace + LAUNCHER_CLEANUP_SECONDS)
                 except subprocess.TimeoutExpired:
                     # Still unreaped (the wait timed out), so the pid is the
-                    # group id of the launcher's own session.
-                    if self.returncode is None:
-                        try:
-                            os.killpg(self.pid, signal.SIGKILL)
-                        except OSError:
-                            pass
+                    # group id of the launcher's own session; checked and sent
+                    # under the lock that every reap takes.
+                    with self._own_lock:
+                        if self._still_ours():
+                            try:
+                                os.killpg(self.pid, signal.SIGKILL)
+                            except OSError:
+                                pass
                     try:
                         super().wait(timeout=5)
                     except subprocess.TimeoutExpired:

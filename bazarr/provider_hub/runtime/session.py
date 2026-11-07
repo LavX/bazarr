@@ -1170,6 +1170,16 @@ class WorkerSession:
         Held under the same lock as the teardown: once the group is ended the
         leader may be reaped and its number reused, so nothing is signalled.
         """
+        # A process that checks ownership and signals under one lock of its own
+        # (a launcher, an anchored worker) is asked to; the session's lock cannot
+        # keep ``stop()`` or a reap on that object from interleaving with it.
+        signal_group = getattr(process, "signal_group", None)
+        if callable(signal_group):
+            with self._group_lock:
+                if self._group_ended or self._group_lost:
+                    return True
+            sent = signal_group(sig)
+            return True if sent is None else bool(sent)
         with self._group_lock:
             if not self._ours(process):
                 return True

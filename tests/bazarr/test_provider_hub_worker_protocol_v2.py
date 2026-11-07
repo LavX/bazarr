@@ -4015,3 +4015,32 @@ def test_a_process_that_ends_its_own_tree_is_handed_the_teardown(monkeypatch):
     assert process.events == ["lifeline", "stop"]
     assert calls == []
     assert session.exit_code == 0
+
+
+class _GroupSignallingProcess(_OwnTreeProcess):
+    """A handle that checks ownership and signals under its own lock."""
+
+    def __init__(self, answer):
+        super().__init__()
+        self.answer = answer
+        self.signals = []
+
+    def signal_group(self, sig):
+        self.signals.append(sig)
+        return self.answer
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+@pytest.mark.parametrize("answer,expected", [(True, True), (None, True), (False, False)])
+def test_a_process_with_its_own_group_signal_is_asked_to_send_it(monkeypatch, answer, expected):
+    session = WorkerSession(["worker"])
+    process = _GroupSignallingProcess(answer)
+    calls = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    assert session._signal_leader_group(process, signal.SIGTERM) is expected
+    assert process.signals == [signal.SIGTERM]
+    assert calls == []
+    # Once the group was ended nothing is asked of the process any more.
+    session._group_ended = True
+    assert session._signal_leader_group(process, signal.SIGTERM) is True
+    assert process.signals == [signal.SIGTERM]

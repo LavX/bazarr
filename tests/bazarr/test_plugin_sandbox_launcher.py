@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -1333,6 +1334,8 @@ def test_stop_waits_for_the_launchers_grace_and_cleanup_before_killing_the_group
 
     class Stub(spawn.LauncherProcess):
         def __init__(self):
+            self._own_lock = threading.RLock()
+            self._stop_running = None
             self._fds = {"lifeline": None, "status": None}
             self.pid = 4242
             self.term_grace = 3.0
@@ -1344,6 +1347,9 @@ def test_stop_waits_for_the_launchers_grace_and_cleanup_before_killing_the_group
         def terminate(self):
             pass
 
+        def _still_ours(self):
+            return self.returncode is None
+
         def __del__(self):
             pass
 
@@ -1353,7 +1359,7 @@ def test_stop_waits_for_the_launchers_grace_and_cleanup_before_killing_the_group
         waits.append(timeout)
         raise subprocess.TimeoutExpired("launcher", timeout)
 
-    monkeypatch.setattr(subprocess.Popen, "wait", fake_wait)
+    monkeypatch.setattr(spawn.WorkerProcess, "wait", fake_wait)
     monkeypatch.setattr(os, "kill", lambda pid, sig: None)
     monkeypatch.setattr(os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     stub.stop(0.1)
@@ -3556,3 +3562,86 @@ def test_the_cleanup_record_is_one_short_line_without_a_kind():
     lines = [json.loads(line) for line in raw.decode().splitlines()]
     assert lines == [{"cleanup": "survivors", "count": 3}, {"cleanup": "complete"}]
     assert all("kind" not in line for line in lines)
+
+
+# --- One lock per process object ---------------------------------------------------
+
+
+@linux_only
+def test_a_reap_cannot_slip_in_between_the_ownership_check_and_the_group_signal(tmp_path, monkeypatch):
+    """The check and the signal are one step: a reap waits for it, so no signal follows a reap."""
+    import threading
+
+    plain = WorkerProcess([sys.executable, "-c", "pass"], start_new_session=True,
+                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        # Wait until it is a zombie, unreaped.
+        while os.waitid(os.P_PID, plain.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            time.sleep(0.01)
+        seen = []
+        in_check = threading.Event()
+        real_killpg = os.killpg
+
+        def pausing_killpg(pgid, sig):
+            # We are past the ownership check, about to signal: let the reaper try.
+            seen.append((pgid, sig, plain.returncode))
+            in_check.set()
+            time.sleep(0.4)
+            seen.append(("after-pause", plain.returncode))
+            real_killpg(pgid, sig)
+
+        monkeypatch.setattr(os, "killpg", pausing_killpg)
+        results = {}
+
+        def signaller():
+            results["signal"] = plain.signal_group(signal.SIGKILL)
+
+        def reaper():
+            in_check.wait(5)
+            results["reaped_at"] = time.monotonic()
+            plain.wait(timeout=10)
+            results["reap_done"] = time.monotonic()
+
+        threads = [threading.Thread(target=signaller), threading.Thread(target=reaper)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(15)
+        assert results["signal"] is True
+        # Still unreaped while the signal was being sent, and the reap came after it.
+        assert seen[0][2] is None and seen[1] == ("after-pause", None)
+        assert results["reap_done"] - results["reaped_at"] >= 0.3
+        # Once reaped nothing is sent any more.
+        seen.clear()
+        assert plain.signal_group(signal.SIGKILL) is None
+        assert seen == []
+    finally:
+        monkeypatch.undo()
+        plain.stop(0.5)
+
+
+@linux_only
+def test_concurrent_stop_calls_share_one_run(tmp_path, monkeypatch):
+    import threading
+
+    process = spawn_worker(make_spec(tmp_path, "import time; time.sleep(60)"), probe=DECLARED)
+    runs = []
+    real = type(process)._do_stop
+
+    def counting(self, grace):
+        runs.append(grace)
+        time.sleep(0.3)
+        return real(self, grace)
+
+    monkeypatch.setattr(type(process), "_do_stop", counting)
+    try:
+        threads = [threading.Thread(target=process.stop, args=(1.0,)) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        assert len(runs) == 1
+        assert process.returncode is not None
+    finally:
+        monkeypatch.undo()
+        process.stop(0.5)
