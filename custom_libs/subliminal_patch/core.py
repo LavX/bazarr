@@ -582,10 +582,21 @@ def _hub_search_languages(provider_class, languages):
 # Every pool that is alive, so a caller that replaces what a provider runs on
 # (a repaired plugin environment) can reach the instances the pools have cached.
 _LIVE_POOLS = weakref.WeakSet()
+# Registration and the snapshot a retirement walks share this lock: a pool
+# created while another thread retires would otherwise change the set under the
+# iteration.
+_LIVE_POOLS_LOCK = threading.Lock()
 
 
 def live_provider_pools():
-    return list(_LIVE_POOLS)
+    """A list copy of the pools that are alive, taken under the registration lock."""
+    with _LIVE_POOLS_LOCK:
+        return list(_LIVE_POOLS)
+
+
+def _register_live_pool(pool):
+    with _LIVE_POOLS_LOCK:
+        _LIVE_POOLS.add(pool)
 
 
 # Bumped when what a provider name runs on is replaced. A pool that was building
@@ -613,8 +624,6 @@ class SZProviderPool(ProviderPool):
     def __init__(self, providers=None, provider_configs=None, blacklist=None, ban_list=None, throttle_callback=None,
                  pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None,
                  adoption_gate=None, throttle_announce=None):
-        _LIVE_POOLS.add(self)
-
         #: Held while an instance is stored or detached, so a built instance is
         #: either seen by a detach that follows or checked against a replacement
         #: that came first.
@@ -675,6 +684,9 @@ class SZProviderPool(ProviderPool):
         #: Provider configuration
         self.provider_configs = _ProviderConfigs(self)
         self.provider_configs.update(provider_configs or {})
+
+        # Last, so a retirement never walks a pool that is half built.
+        _register_live_pool(self)
 
     def update(self, providers, provider_configs, blacklist, ban_list, language_equals=None):
         # Check if the pool was initialized enough hours ago

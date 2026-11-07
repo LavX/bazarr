@@ -830,3 +830,159 @@ def test_two_simultaneous_first_lookups_share_one_instance_through_a_repair(hub,
     assert results == [["found"], ["found"]]
     assert type(pool.initialized_providers["examplehub"]) is NewClass
     assert env_registry.cleanup_environments(hub) == [str(old)]
+
+
+def test_a_pool_created_while_a_retirement_walks_the_pools_does_not_break_the_retirement(
+    hub, hub_registry, monkeypatch
+):
+    from subliminal_patch import core
+    from provider_hub.registry import retire_provider_instances
+    from subliminal_patch.core import SZProviderPool
+
+    class CreatesAPoolWhileBeingIterated(set):
+        """A set that, like any set, refuses to change while it is walked, and
+        another thread builds a pool at the moment the walk is under way."""
+
+        def __iter__(self):
+            for item in super().__iter__():
+                yield item
+                # Midway through the walk, another thread builds a pool.
+                if not getattr(self, "spawned", False):
+                    self.spawned = True
+                    worker = threading.Thread(
+                        target=lambda: self.newcomers.append(SZProviderPool(providers=[], provider_configs={}))
+                    )
+                    worker.start()
+                    worker.join(0.3)
+
+    live = CreatesAPoolWhileBeingIterated()
+    live.newcomers = []
+    monkeypatch.setattr(core, "_LIVE_POOLS", live)
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+
+    drains = retire_provider_instances("examplehub")
+    for drain in drains:
+        drain.join(10)
+
+    # The pool that was already alive was still found and its instance retired.
+    assert len(drains) == 1
+    assert "examplehub" not in pool.initialized_providers
+    assert stale._retired is True
+
+
+def test_a_failed_retirement_is_reported_and_the_old_environment_stays_in_place(hub, tmp_path, monkeypatch, hub_registry):
+    from provider_hub.registry import RetirementIncomplete, retire_provider_instances
+    from provider_hub.service import repair_installation_environment
+    from provider_hub.registry import register_active_provider_classes
+    from provider_hub.state import active_installations
+    from subliminal_patch.core import SZProviderPool
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    old = _env(hub / "shared_envs" / "old")
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, old / "bin" / "python", needs_repair=True)}
+    save_state(state)
+    _patch_environment(monkeypatch)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    register_active_provider_classes(active_installations())
+    pool = SZProviderPool(providers=["examplehub"], provider_configs={})
+    pool["examplehub"]
+
+    def broken(name):
+        raise RuntimeError("cannot detach")
+
+    monkeypatch.setattr(pool, "detach_provider", broken)
+    with pytest.raises(RetirementIncomplete):
+        retire_provider_instances("examplehub")
+
+    repair_installation_environment("examplehub")
+
+    # The repair went through, but a worker may still run from the old environment: it is not removable.
+    assert load_state()["installations"]["examplehub"]["python_path"].endswith("rebuilt/bin/python")
+    assert old.exists()
+    assert env_registry.cleanup_environments(hub) == []
+    assert (old / "bin" / "python").exists()
+
+
+WORKER_SCRIPT = (
+    "import sys, json\n"
+    "for line in sys.stdin:\n"
+    "    m = json.loads(line)\n"
+    "    print(json.dumps({'abi': m['abi'], 'id': m['id'], 'ok': True, 'payload': {}, 'events': []}), flush=True)\n"
+    "    if m['op'] == 'shutdown':\n"
+    "        break\n"
+)
+
+
+def _counting_popen(monkeypatch):
+    import subprocess
+
+    from provider_hub import worker
+
+    spawned = []
+    real = subprocess.Popen
+
+    def counting(*args, **kwargs):
+        process = real(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr(worker.subprocess, "Popen", counting)
+    return spawned
+
+
+def test_a_shutdown_request_never_starts_a_worker(monkeypatch):
+    import sys
+
+    from provider_hub.worker import ProviderWorkerClient, WorkerError
+
+    spawned = _counting_popen(monkeypatch)
+    client = ProviderWorkerClient([sys.executable, "-c", "pass"])
+    client.start()
+    first = client.process
+    first.wait(10)
+    assert len(spawned) == 1
+
+    with pytest.raises(WorkerError):
+        client.request("shutdown", {}, 2)
+
+    # The process had ended before the request: nothing new was started for it.
+    assert len(spawned) == 1
+    assert client.process is first
+
+
+def test_the_last_call_and_the_drain_stop_a_retired_worker_once(hub, hub_registry, monkeypatch):
+    import sys
+
+    from provider_hub.registry import retire_provider_instances
+    from provider_hub.worker import ProviderWorkerClient
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    state = load_state()
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    spawned = _counting_popen(monkeypatch)
+    client = ProviderWorkerClient([str(old / "bin" / "python")])
+    client.command = [sys.executable, "-c", WORKER_SCRIPT]
+    stale.worker_client = client
+    stops = []
+    real_stop = client.stop
+    monkeypatch.setattr(client, "stop", lambda *args, **kwargs: stops.append(1) or real_stop(*args, **kwargs))
+
+    with stale._operation():
+        client.request("health", {}, timeout=10)
+        drains = retire_provider_instances("examplehub")
+    for drain in drains:
+        drain.join(15)
+
+    assert len(stops) == 1
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
+    assert env_registry.cleanup_environments(hub) == [str(old)]

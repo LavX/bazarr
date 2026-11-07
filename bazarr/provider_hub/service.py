@@ -3319,7 +3319,15 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
 
             retire_provider_instances(provider_id)
         except Exception:
-            logging.getLogger(__name__).exception("Provider Hub: could not retire the workers of %s after its repair", provider_id)
+            logging.getLogger(__name__).exception(
+                "Provider Hub: could not retire the workers of %s after its repair; "
+                "its previous environment is kept in place", provider_id,
+            )
+            old_python = row.get("python_path")
+            if old_python:
+                # Never released: a worker may still run from it, and a cleanup
+                # must leave it alone until the process restarts.
+                hold_environment(env_registry.env_dir_of(old_python))
         job.update(message=f"Rebuilt the environment of '{name}'")
         return _redact_installation(repaired)
 

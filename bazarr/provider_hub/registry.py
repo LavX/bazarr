@@ -102,6 +102,8 @@ class HubProxyProvider(Provider):
     #: proxy admits no new operation and never starts a worker.
     _retired = False
     _active_operations = 0
+    #: Set by whichever path stops this proxy's worker first, so only one does.
+    _stopping = False
 
     def __init__(self, timeout=None, worker_client=None, **config):
         # An explicit per-instance timeout override is optional; when absent the
@@ -118,6 +120,22 @@ class HubProxyProvider(Provider):
         """Refuse every operation that has not been admitted yet."""
         with _PROXY_LOCK:
             self._retired = True
+
+    def _shutdown_worker(self) -> bool:
+        """Stop the worker, if no other path has claimed that. True when this call did the stopping.
+
+        The last admitted call of a retired proxy and the drain both reach for
+        the stop; claiming it atomically leaves one owner, and stopping never
+        starts a process.
+        """
+        with _PROXY_LOCK:
+            if self._stopping:
+                return False
+            self._stopping = True
+        client = self.worker_client
+        if client:
+            client.stop()
+        return True
 
     @contextlib.contextmanager
     def _operation(self):
@@ -143,9 +161,11 @@ class HubProxyProvider(Provider):
                 last_of_retired = self._retired and self._active_operations == 0
                 _PROXY_OPERATIONS_ENDED.notify_all()
             try:
-                if last_of_retired and self.worker_client:
-                    self.worker_client.stop()
+                if last_of_retired:
+                    self._shutdown_worker()
             except Exception:
+                # The drain holds the environment until the worker has exited,
+                # so a failed stop here keeps it pinned rather than freeing it.
                 logger.exception("Provider Hub: could not stop the worker of a replaced %s", self.provider_name)
             finally:
                 release()
@@ -443,21 +463,31 @@ def _drain_instance(instance, release) -> None:
 
     A call admitted before the retirement may still be on its way to the worker,
     or between the two requests of a download. Stopping first would fail it as
-    busy or cut it between them, so the stop waits for those calls.
+    busy or cut it between them, so the stop waits for those calls. The
+    environment is released only once the worker is confirmed gone: if it
+    cannot be, the pin stays, and cleanup leaves the environment alone.
     """
+    provider_name = getattr(instance, "provider_name", "?")
     try:
         _wait_for_operations(instance)
-        instance.terminate()
+        instance._shutdown_worker()
     except Exception:
-        logger.exception("Provider Hub: could not stop a replaced worker for %s", getattr(instance, "provider_name", "?"))
-    finally:
-        try:
-            process = getattr(getattr(instance, "worker_client", None), "process", None)
-            if process is not None and process.poll() is None:
-                process.wait()
-        except Exception:
-            logger.exception("Provider Hub: could not confirm a replaced worker has exited")
-        release()
+        logger.exception("Provider Hub: could not stop a replaced worker for %s", provider_name)
+    process = getattr(getattr(instance, "worker_client", None), "process", None)
+    try:
+        if process is not None and process.poll() is None:
+            process.wait()
+    except Exception:
+        logger.exception(
+            "Provider Hub: a replaced worker for %s may still be running; its environment stays in place",
+            provider_name,
+        )
+        return
+    release()
+
+
+class RetirementIncomplete(RuntimeError):
+    """A cached instance could not be retired, so its environment may still be in use."""
 
 
 def retire_provider_instances(provider_id: str) -> list[threading.Thread]:
@@ -472,26 +502,34 @@ def retire_provider_instances(provider_id: str) -> list[threading.Thread]:
     """
     try:
         from subliminal_patch.core import bump_provider_generation, live_provider_pools
-
-        # First, so a pool that is building an instance of the old class right
-        # now sees the change before it stores it, and builds again.
-        bump_provider_generation(provider_id)
-        pools = live_provider_pools()
-    except Exception:
+    except ImportError:
+        # Without the pool module there are no pools and nothing cached.
         return []
+    # First, so a pool that is building an instance of the old class right
+    # now sees the change before it stores it, and builds again.
+    bump_provider_generation(provider_id)
+    failures: list[Exception] = []
     drains: list[threading.Thread] = []
-    for pool in pools:
-        cached = getattr(pool, "initialized_providers", {}).get(provider_id)
-        if not isinstance(cached, HubProxyProvider):
-            continue
-        instance = pool.detach_provider(provider_id)
-        if instance is None:
-            continue
-        env_dir = _instance_environment(instance)
-        release = hold_environment(env_dir) if env_dir else (lambda: None)
-        drain = threading.Thread(
-            target=_drain_instance, args=(instance, release), name=f"hub-drain-{provider_id}", daemon=True
-        )
-        drain.start()
-        drains.append(drain)
+    for pool in live_provider_pools():
+        try:
+            cached = getattr(pool, "initialized_providers", {}).get(provider_id)
+            if not isinstance(cached, HubProxyProvider):
+                continue
+            instance = pool.detach_provider(provider_id)
+            if instance is None:
+                continue
+            env_dir = _instance_environment(instance)
+            release = hold_environment(env_dir) if env_dir else (lambda: None)
+            drain = threading.Thread(
+                target=_drain_instance, args=(instance, release), name=f"hub-drain-{provider_id}", daemon=True
+            )
+            drain.start()
+            drains.append(drain)
+        except Exception as error:
+            logger.exception("Provider Hub: could not retire the cached %s of a pool", provider_id)
+            failures.append(error)
+    if failures:
+        raise RetirementIncomplete(
+            f"{len(failures)} cached instance(s) of {provider_id} could not be retired"
+        ) from failures[0]
     return drains

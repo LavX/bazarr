@@ -475,7 +475,8 @@ class ProviderWorkerClient:
             # A clean shutdown ends the worker, not necessarily what it forked.
             self._signal_group(process, _SIGKILL)
         except Exception:
-            self._kill_tree(process, grace_seconds)
+            if process.poll() is None:
+                self._kill_tree(process, grace_seconds)
 
         # Leave the registry only once this process is confirmed dead AND is
         # still the one this client owns. Two ways to get that wrong:
@@ -632,6 +633,11 @@ class ProviderWorkerClient:
             # outside it, the sweep can acquire the lock after start() returns,
             # read the old timestamp, and kill the worker this request is
             # about to write to.
+            if op == "shutdown" and not (self.process is not None and self.process.poll() is None):
+                # Stopping a worker never starts one: a process that ended
+                # between the caller's check and this request has nothing left
+                # to shut down.
+                raise WorkerError("worker is not running")
             worker_started = self.start() is True
             provider_id = getattr(self, "provider_id", None)
             status_generation = (
