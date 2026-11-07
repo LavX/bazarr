@@ -1772,3 +1772,35 @@ def test_cleanup_skips_an_environment_a_detached_venv_python_uses_even_with_noth
         if child.poll() is None:
             child.kill()
             child.wait(10)
+
+
+def test_a_restored_environment_does_not_clear_the_flag_of_a_bundle_that_fails_its_check(hub):
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.service import _verify_bundle_for_run
+
+    env = _env(hub / "envs" / "alpha" / "1.0.0" / "fp1")
+    bundle = _bundle_with(hub)
+    row = _active_row(bundle, env / "bin" / "python", needs_repair=True, last_error=env_registry.NEEDS_REPAIR_MESSAGE)
+    state = load_state()
+    state["installations"] = {"examplehub": row}
+    save_state(state)
+    # The environment is back, but the code under it was changed.
+    (bundle / "provider.py").write_bytes(b"class ExampleProvider: ran_something_else = True\n")
+
+    def validate(row, staged):
+        return validate_manifest(row["manifest"], built_in_provider_ids=set())
+
+    summary = env_registry.reconcile_environments(
+        validate=validate, probe=lambda *args: None, verify_bundle=_verify_bundle_for_run
+    )
+
+    row = load_state()["installations"]["examplehub"]
+    assert summary["needs_repair"] == ["examplehub"]
+    assert row["needs_repair"] is True
+    assert row["last_error"] == env_registry.NEEDS_REPAIR_MESSAGE
+
+    # With the bundle intact the same pass clears it.
+    (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
+    env_registry.reconcile_environments(validate=validate, probe=lambda *args: None, verify_bundle=_verify_bundle_for_run)
+    row = load_state()["installations"]["examplehub"]
+    assert "needs_repair" not in row and row["last_error"] is None

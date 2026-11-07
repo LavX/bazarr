@@ -221,12 +221,28 @@ def reconcile_environments(
                 flags.append(provider_id)
                 summary["needs_repair"].append(provider_id)
                 continue
-            if not staged and row.get("needs_repair") and row.get("last_error") == NEEDS_REPAIR_MESSAGE:
-                unflags.append(provider_id)
+            clearing = (
+                not staged and bool(row.get("needs_repair")) and row.get("last_error") == NEEDS_REPAIR_MESSAGE
+            )
             try:
                 manifest = validate(row, staged)
             except Exception:
                 continue
+            if clearing:
+                # The flag goes only when the environment is back and the bundle
+                # still matches its manifest; a failed check keeps (or sets) it.
+                bundle_for_flag = validated_bundle_path(root, row.get("active_path"))
+                if verify_bundle is not None and bundle_for_flag is not None:
+                    try:
+                        verify_bundle(manifest, bundle_for_flag)
+                    except Exception:
+                        logger.warning(
+                            "Provider Hub: the bundle of %s does not match its manifest", provider_id, exc_info=True
+                        )
+                        flags.append(provider_id)
+                        summary["needs_repair"].append(provider_id)
+                        continue
+                unflags.append(provider_id)
             fingerprint = environment_fingerprint(manifest)
             interpreter = validated_interpreter(root, python_path)
             if interpreter is None:
@@ -284,6 +300,8 @@ def reconcile_environments(
                 if not row.get("last_error"):
                     row["last_error"] = NEEDS_REPAIR_MESSAGE
         for provider_id in unflags:
+            if provider_id in flags:
+                continue  # a check in this pass found it broken: the flag stays
             row = installations.get(provider_id)
             if isinstance(row, dict) and row.get("last_error") == NEEDS_REPAIR_MESSAGE:
                 row.pop("needs_repair", None)
