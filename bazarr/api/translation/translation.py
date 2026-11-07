@@ -124,10 +124,11 @@ class TranslationOptions(Resource):
         """The live choices of an ``options`` field. ``available`` is false when they cannot be fetched."""
         payload = _body()
         field = payload.get("field")
+        backend_type = payload.get("backend_type") or ""
         draft = payload.get("values") or {}
-        if not isinstance(field, str) or not isinstance(draft, dict):
-            raise ServiceError("field must be text and values an object")
-        return get_service().options(instance_id, field, draft)
+        if not isinstance(field, str) or not isinstance(backend_type, str) or not isinstance(draft, dict):
+            raise ServiceError("field and backend_type must be text and values an object")
+        return get_service().options(instance_id, backend_type, field, draft)
 
 
 @api_ns_translation.route('translation/connections/<int:connection_id>')

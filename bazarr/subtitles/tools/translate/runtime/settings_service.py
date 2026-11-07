@@ -112,7 +112,8 @@ def installed_plugin(plugin_id: str) -> InstalledPlugin | None:
 # Hooks D8 binds to the worker. With no worker, a value that passes the schema is accepted as is and the
 # model list is unavailable, which the page shows as a free-text model field.
 PluginValidator = Callable[[str, str, str, Mapping[str, Any]], Mapping[str, str] | None]
-OptionsSource = Callable[[int, str, Mapping[str, Any]], Mapping[str, Any] | None]
+# (engine instance id, back-end type or '' for the engine's own field, field key, draft values without secrets)
+OptionsSource = Callable[[int, str, str, Mapping[str, Any]], Mapping[str, Any] | None]
 
 
 def _json_secret(value: Any) -> str:
@@ -409,11 +410,12 @@ class TranslatorSettingsService:
         return row
 
     # ------------------------------------------------------------ options
-    def options(self, instance_id: int, field_key: str, draft: Mapping[str, Any]) -> dict[str, Any]:
+    def options(self, instance_id: int, backend_type: str, field_key: str,
+                draft: Mapping[str, Any]) -> dict[str, Any]:
         """The live choices of an ``options`` field, or ``available: false`` so the page offers free text."""
         self._instance(instance_id)
         source = self._options_source
-        answer = source(instance_id, field_key, draft) if source is not None else None
+        answer = source(instance_id, backend_type, field_key, draft) if source is not None else None
         if not answer or not isinstance(answer.get("items"), list):
             return {"available": False, "items": [], "reason": "The model list could not be fetched."}
         return {"available": True, "items": answer["items"], "reason": ""}
