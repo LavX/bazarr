@@ -228,9 +228,27 @@ def reconcile_environments(
                 manifest = validate(row, staged)
             except Exception:
                 continue
+            fingerprint = environment_fingerprint(manifest)
+            interpreter = validated_interpreter(root, python_path)
+            if interpreter is None:
+                # An interpreter outside the hub's own environments, or reached
+                # through a symlink, is neither adopted nor probed nor pointed at.
+                logger.warning(
+                    "Provider Hub: %s runs from %s, which is not one of the hub's environments; left as it is",
+                    provider_id, python_path,
+                )
+                continue
+            env_dir = Path(env_dir_of(interpreter))
             if clearing:
-                # The flag goes only when the environment is back and the bundle
-                # still matches its manifest; a failed check keeps (or sets) it.
+                # The flag goes only when the environment is back, its interpreter
+                # is one this host can run, and the bundle still matches its
+                # manifest; any failed check keeps (or sets) it.
+                if not (_interpreter_matches(env_dir) and _machine_matches(env_dir)):
+                    logger.warning(
+                        "Provider Hub: the restored environment of %s was built for another Python or architecture",
+                        provider_id,
+                    )
+                    continue
                 bundle_for_flag = validated_bundle_path(root, row.get("active_path"))
                 if verify_bundle is not None and bundle_for_flag is not None:
                     try:
@@ -243,17 +261,6 @@ def reconcile_environments(
                         summary["needs_repair"].append(provider_id)
                         continue
                 unflags.append(provider_id)
-            fingerprint = environment_fingerprint(manifest)
-            interpreter = validated_interpreter(root, python_path)
-            if interpreter is None:
-                # An interpreter outside the hub's own environments, or reached
-                # through a symlink, is neither adopted nor probed nor pointed at.
-                logger.warning(
-                    "Provider Hub: %s runs from %s, which is not one of the hub's environments; left as it is",
-                    provider_id, python_path,
-                )
-                continue
-            env_dir = Path(env_dir_of(interpreter))
             recorded = _recorded_dir(envs, fingerprint, root)
             if recorded is None:
                 if _adoptable(env_dir, manifest):

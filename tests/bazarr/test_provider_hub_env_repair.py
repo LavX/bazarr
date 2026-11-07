@@ -1780,6 +1780,9 @@ def test_a_restored_environment_does_not_clear_the_flag_of_a_bundle_that_fails_i
     from provider_hub.service import _verify_bundle_for_run
 
     env = _env(hub / "envs" / "alpha" / "1.0.0" / "fp1")
+    (env / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\nversion = {sys.version_info.major}.{sys.version_info.minor}.0\n", encoding="utf-8"
+    )
     bundle = _bundle_with(hub)
     row = _active_row(bundle, env / "bin" / "python", needs_repair=True, last_error=env_registry.NEEDS_REPAIR_MESSAGE)
     state = load_state()
@@ -1862,3 +1865,37 @@ def test_a_refused_environment_keeps_its_id_and_settings_through_startup_and_rep
     assert provider_id in hub_registry.names()
     assert "needs_repair" not in load_state()["installations"][provider_id]
     registry._REGISTRATION_INCOMPLETE.clear()
+
+
+def test_a_restored_environment_built_for_another_architecture_does_not_clear_the_flag(hub, monkeypatch):
+    import platform
+
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.service import _verify_bundle_for_run
+
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    env = _env(hub / "envs" / "alpha" / "1.0.0" / "fp1")
+    (env / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\nversion = {sys.version_info.major}.{sys.version_info.minor}.0\n", encoding="utf-8"
+    )
+    # An ELF executable for aarch64 (machine 183) where x86_64 is expected.
+    header = bytearray(b"\x7fELF" + b"\x02\x01\x01" + b"\x00" * 9)
+    header += (3).to_bytes(2, "little") + (183).to_bytes(2, "little")
+    (env / "bin" / "python").write_bytes(bytes(header))
+    bundle = _bundle_with(hub)
+    state = load_state()
+    state["installations"] = {
+        "examplehub": _active_row(
+            bundle, env / "bin" / "python", needs_repair=True, last_error=env_registry.NEEDS_REPAIR_MESSAGE
+        )
+    }
+    save_state(state)
+
+    def validate(row, staged):
+        return validate_manifest(row["manifest"], built_in_provider_ids=set())
+
+    env_registry.reconcile_environments(validate=validate, probe=lambda *args: None, verify_bundle=_verify_bundle_for_run)
+
+    row = load_state()["installations"]["examplehub"]
+    assert row["needs_repair"] is True
+    assert row["last_error"] == env_registry.NEEDS_REPAIR_MESSAGE
