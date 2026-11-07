@@ -412,6 +412,8 @@ jobs:
             tests/bazarr/test_provider_hub_archive_candidates.py \
             tests/bazarr/test_archive_member_matching.py \
             tests/bazarr/test_provider_hub_worker_timeout.py \
+            tests/bazarr/test_provider_hub_env_repair.py \
+            tests/bazarr/test_provider_hub_shared_envs.py \
             tests/bazarr/test_arr_instances_schema.py \
             tests/bazarr/test_sportarr_instances.py \
             tests/bazarr/test_arr_ownership_columns.py \
