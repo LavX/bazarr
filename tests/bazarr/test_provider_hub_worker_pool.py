@@ -25,6 +25,7 @@ from provider_hub.runtime.pool import (
     FolderBudget,
     MemorySample,
     PoolClosed,
+    PoolHostCall,
     PoolLimits,
     PoolUnavailable,
     UnknownWorker,
@@ -377,7 +378,25 @@ def test_a_worker_that_dies_while_idle_is_noticed_by_the_sweep(make_pool, clock)
     pid = pid_of(pool, "tr")
     os.kill(pid, 9)
     assert wait_until(lambda: not pid_alive(pid))
-    assert wait_until(lambda: (pool.sweep() or pool.state("tr") is WorkerState.BACKOFF))
+    assert wait_until(lambda: (pool.sweep() or pool.state("tr") is WorkerState.STOPPED))
+    status = pool.status()["workers"]["tr"]
+    assert status["crashes"] == 1 and status["failures"] == 1
+    # Nothing was running, so there is no backoff: the next request just starts a worker.
+    assert pool.run("tr", "echo").result["echo"] == {}
+    assert pool.status()["workers"]["tr"]["crashes"] == 1
+
+
+def test_a_worker_found_dead_by_a_request_is_replaced_and_counted_once(make_pool):
+    pool = make_pool()
+    pool.register(definition())
+    pool.run("tr", "echo")
+    pid = pid_of(pool, "tr")
+    session = pool._entries["tr"].slot.session
+    os.kill(pid, 9)
+    assert wait_until(lambda: not pid_alive(pid))
+    assert wait_until(lambda: session._closed)
+    assert pool.run("tr", "echo").result["echo"] == {}
+    assert pid_of(pool, "tr") != pid
     assert pool.status()["workers"]["tr"]["crashes"] == 1
 
 
@@ -394,7 +413,7 @@ def test_idle_workers_are_stopped_after_the_idle_timeout(make_pool, clock):
     assert pool.state("tr") is WorkerState.READY
     clock.advance(20)
     pool.sweep()
-    assert pool.state("tr") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED)
     assert wait_until(lambda: not pid_alive(pid))
     assert pool.status()["workers"]["tr"]["failures"] == 0
     pool.run("tr", "echo")
@@ -605,28 +624,45 @@ def test_a_request_on_a_running_worker_over_budget_is_refused(make_pool, tmp_pat
     assert wait_until(lambda: not pid_alive(pid))
 
 
-def test_the_config_reserve_blocks_starts_and_kills_running_writers(make_pool):
+def test_a_short_config_reserve_refuses_new_work_but_kills_nothing(make_pool):
     free = {"bytes": 10 * GIB}
     pool = make_pool(disk_free=lambda: free["bytes"])
     pool.register(definition("writer"))
     pool.register(definition("reader", writes_data=False))
-    handle = pool.submit("writer", "sleep", {"seconds": 30})
+    pool.register(definition("fresh"))
+    handle = pool.submit("writer", "sleep", {"seconds": 1.0})
     pool.run("reader", "echo")
     free["bytes"] = 100 * MIB
     pool.sweep()
-    with pytest.raises(WorkerKilled) as killed:
-        handle.wait(10)
-    assert killed.value.code == "disk_reserve"
-    assert pool.state("reader") is WorkerState.READY
-    with pytest.raises(PoolUnavailable) as refused:
-        pool.run("writer", "echo")
-    assert refused.value.code in ("disk_reserve", "backoff")
-    pool.reset("writer")
+    pool.sweep()
+    assert pool.state("writer") is WorkerState.BUSY
+    # A request on the running writer, and a start, are refused. The reader is not a writer.
     with pytest.raises(PoolUnavailable) as refused:
         pool.run("writer", "echo")
     assert refused.value.code == "disk_reserve"
+    with pytest.raises(PoolUnavailable) as refused:
+        pool.run("fresh", "echo")
+    assert refused.value.code == "disk_reserve"
+    assert "reserve" in pool.status()["workers"]["fresh"]["last_error"]
+    assert pool.run("reader", "echo").result["echo"] == {}
+    # The running request finishes, nothing counted against the worker.
+    assert handle.wait(10).result == {"slept": 1.0}
+    status = pool.status()["workers"]["writer"]
+    assert status["state"] == "ready" and status["failures"] == 0
     free["bytes"] = 10 * GIB
     pool.run("writer", "echo")
+    pool.run("fresh", "echo")
+
+
+def test_a_start_refused_by_a_folder_budget_says_why(make_pool, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "big").write_bytes(os.urandom(3 * MIB))
+    pool = make_pool()
+    pool.register(definition(budgets=[FolderBudget(str(data), 1 * MIB, "plugin data")]))
+    with pytest.raises(PoolUnavailable):
+        pool.run("tr", "echo")
+    assert "budget" in pool.status()["workers"]["tr"]["last_error"]
 
 
 # --------------------------------------------------- recycling and new settings
@@ -778,7 +814,7 @@ def test_run_once_does_not_touch_the_breaker(make_pool):
 # ---------------------------------------------------------- through the launcher
 
 
-def launcher_definition(tmp_path, key="tr"):
+def launcher_definition(tmp_path, config=None):
     from provider_hub.sandbox import Limits, RuntimeSpec, SandboxPolicy, SandboxProbe, clean_env
     from provider_hub.runtime import testing
 
@@ -793,7 +829,7 @@ def launcher_definition(tmp_path, key="tr"):
             interpreter=command[0],
             args=tuple(command[1:]),
             cwd=str(data),
-            env=clean_env(home=data, tmpdir=data, extra=fake_worker_env()),
+            env=clean_env(home=data, tmpdir=data, extra=fake_worker_env(**(config or {}))),
             policy=policy,
             limits=Limits(),
             term_grace=1.0,
@@ -832,3 +868,267 @@ def test_launcher_spawn_refuses_without_a_sandbox_when_required(make_pool, tmp_p
         pool.run("tr", "echo")
     assert refused.value.code == "sandbox_refused"
     assert pool.status()["workers"]["tr"]["failures"] == 0
+
+
+linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="launcher is Linux only")
+
+
+def stubborn_launcher_pool(make_pool, tmp_path, **limits):
+    """A pool with one launcher-started worker that ignores SIGTERM and the shutdown frame."""
+    build, declared = launcher_definition(tmp_path, {"stubborn": True})
+    pool = make_pool(fast_pool_limits(close_grace=0.3, **limits), use_clock=False)
+    pool.register(WorkerDefinition("tr", kind="translator", spawn=launcher_spawn(build, probe=declared),
+                                   session_limits=fast_session()))
+    return pool
+
+
+def start_with_setsid_child(pool, key="tr"):
+    child = pool.run(key, "fork", {"detached": True}).result["child"]
+    assert pid_alive(child)
+    return child, pid_of(pool, key)
+
+
+@linux_only
+@pytest.mark.parametrize("how", ["stop", "close", "drain", "unregister"])
+def test_a_stubborn_worker_and_its_setsid_child_are_gone_after_a_polite_stop(make_pool, tmp_path, clock, how):
+    pool = stubborn_launcher_pool(make_pool, tmp_path)
+    child, launcher = start_with_setsid_child(pool)
+    started = time.monotonic()
+    if how == "stop":
+        pool.stop("tr")
+    elif how == "close":
+        pool.close()
+    elif how == "drain":
+        pool.restart_after_drain("tr")
+        pool.sweep()
+    else:
+        pool.unregister("tr")
+    assert wait_until(lambda: not pid_alive(child), 20)
+    assert wait_until(lambda: not pid_alive(launcher), 20)
+    assert time.monotonic() - started < 15
+
+
+@linux_only
+def test_an_idle_stop_ends_a_stubborn_launcher_worker_tree(make_pool, tmp_path, clock):
+    build, declared = launcher_definition(tmp_path, {"stubborn": True})
+    pool = make_pool(fast_pool_limits(close_grace=0.3, idle_timeout=30.0))
+    pool.register(WorkerDefinition("tr", kind="translator", spawn=launcher_spawn(build, probe=declared),
+                                   session_limits=fast_session()))
+    child, launcher = start_with_setsid_child(pool)
+    clock.advance(100)
+    pool.sweep()
+    assert wait_until(lambda: not pid_alive(child), 20)
+    assert wait_until(lambda: not pid_alive(launcher), 20)
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED)
+
+
+@linux_only
+def test_lru_eviction_ends_a_stubborn_launcher_worker_tree(make_pool, tmp_path):
+    build, declared = launcher_definition(tmp_path, {"stubborn": True})
+    pool = make_pool(fast_pool_limits(close_grace=0.3, max_resident=1, acquire_timeout=20.0), use_clock=False)
+    pool.register(WorkerDefinition("tr", kind="translator", spawn=launcher_spawn(build, probe=declared),
+                                   session_limits=fast_session()))
+    pool.register(definition("other"))
+    child, launcher = start_with_setsid_child(pool)
+    pool.run("other", "echo")
+    assert not pid_alive(launcher) and not pid_alive(child)
+
+
+# ------------------------------------------------------------- settings during a start
+
+
+def test_settings_changed_during_a_start_apply_to_the_next_worker(make_pool):
+    import threading
+
+    pool = make_pool(use_clock=False)
+    pool.register(definition(idle_timeout=float("inf"), config={"hello_delay": 0.6}))
+    outcome = {}
+
+    def first():
+        outcome["result"] = pool.run("tr", "echo")
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STARTING)
+    updated = definition(idle_timeout=float("inf"))
+    pool.restart_after_drain("tr", updated)
+    thread.join(10)
+    # The request that asked for the worker was served; the worker is already retired.
+    assert outcome["result"].result["echo"] == {}
+    assert pool.state("tr") is WorkerState.DRAINING
+    old = [slot.session.process.pid for slot in pool._entries["tr"].retiring]
+    assert len(old) == 1
+    pool.run("tr", "echo")
+    assert pid_of(pool, "tr") != old[0]
+    assert pool._entries["tr"].slot.definition is updated
+    pool.sweep()
+    assert wait_until(lambda: not pid_alive(old[0]))
+    assert pool.status()["workers"]["tr"]["retiring"] == 0
+
+
+def test_a_restart_with_no_new_definition_also_catches_a_start_under_way(make_pool):
+    import threading
+
+    pool = make_pool(use_clock=False)
+    pool.register(definition(idle_timeout=float("inf"), config={"hello_delay": 0.5}))
+    thread = threading.Thread(target=lambda: pool.run("tr", "echo"))
+    thread.start()
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STARTING)
+    pool.restart_after_drain("tr")
+    thread.join(10)
+    assert pool.state("tr") is WorkerState.DRAINING
+
+
+# ------------------------------------------------------------------ request context
+
+
+def test_the_first_host_call_carries_the_request_context_even_before_submit_returns(make_pool, monkeypatch):
+    from provider_hub.runtime.session import WorkerSession
+
+    seen = []
+
+    def reserve(call):
+        seen.append((call.name, call.request_id, call.context, call.key))
+        return {"granted": True}
+
+    real_submit = WorkerSession.submit
+
+    def slow_submit(self, *args, **kwargs):
+        handle = real_submit(self, *args, **kwargs)
+        # The worker already has its request; the pool does not know the id yet.
+        time.sleep(0.4)
+        return handle
+
+    monkeypatch.setattr(WorkerSession, "submit", slow_submit)
+    pool = make_pool(use_clock=False)
+    pool.register(definition(host_calls={"reserve": reserve}))
+    job = {"job": 41}
+    result = pool.run("tr", "call", {"name": "reserve", "params": {}}, context=job)
+    assert result.result["ack"] == {"granted": True}
+    assert len(seen) == 1
+    name, request_id, context, key = seen[0]
+    assert name == "reserve" and context is job and key == "reserve"
+    assert pool._entries["tr"].slot.contexts == {}
+
+
+def test_requests_get_their_own_context(make_pool):
+    seen = []
+
+    def reserve(call):
+        seen.append(call.context)
+        return {}
+
+    pool = make_pool(use_clock=False)
+    pool.register(definition(host_calls={"reserve": reserve}))
+    pool.run("tr", "call", {"name": "reserve", "params": {}}, context="first")
+    pool.run("tr", "call", {"name": "reserve", "params": {}}, context="second")
+    pool.run("tr", "call", {"name": "reserve", "params": {}})
+    assert seen == ["first", "second", None]
+    assert isinstance(PoolHostCall("n", {}, 1, None), PoolHostCall)
+
+
+def test_run_once_passes_the_context_too(make_pool):
+    seen = []
+    pool = make_pool(use_clock=False)
+    pool.run_once(definition("d", host_calls={"reserve": lambda call: seen.append(call.context) or {}}),
+                  "call", {"name": "reserve", "params": {}}, context={"draft": True})
+    assert seen == [{"draft": True}]
+
+
+# ------------------------------------------------------ cap, closing and status
+
+
+def test_a_worker_that_is_still_stopping_counts_toward_the_cap(make_pool):
+    pool = make_pool(fast_pool_limits(max_resident=1, acquire_timeout=20.0, close_grace=0.5), use_clock=False)
+    pool.register(definition("slow", config={"stubborn": True}))
+    pool.register(definition("next"))
+    pool.run("slow", "echo")
+    slow_pid = pid_of(pool, "slow")
+    pool.run("next", "echo")
+    # "next" only started once the stubborn worker's process was really gone.
+    assert not pid_alive(slow_pid)
+    assert pool.status()["processes"] == 1
+
+
+def test_sweep_does_not_wait_for_a_slow_stop(make_pool, clock):
+    pool = make_pool(fast_pool_limits(idle_timeout=30.0, close_grace=1.0))
+    pool.register(definition(config={"stubborn": True}))
+    pool.run("tr", "echo")
+    pid = pid_of(pool, "tr")
+    clock.advance(100)
+    started = time.monotonic()
+    pool.sweep()
+    assert time.monotonic() - started < 0.5
+    assert pool.state("tr") is WorkerState.STOPPING
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED, 15)
+    assert not pid_alive(pid)
+
+
+def test_last_error_in_status_has_no_paths(make_pool):
+    pool = make_pool()
+    pool.register(WorkerDefinition("x", command=["/nonexistent/dir/worker-binary"], kind="translator"))
+    with pytest.raises(PoolUnavailable):
+        pool.run("x", "echo")
+    error = pool.status()["workers"]["x"]["last_error"]
+    assert error and "/nonexistent" not in error and "<path>" in error
+    assert pool_module._public_text("open '/config/plugins/run/x/y.py' failed in /tmp/a") == \
+        "open '<path>' failed in <path>"
+    assert pool_module._public_text("and/or 10 / 5 http://host/x") == "and/or 10 / 5 http://host/x"
+
+
+# ---------------------------------------------------------------------- runtime seam
+
+
+class StubRuntime:
+    """A worker that is not a process: the shape another runtime has to provide."""
+
+    def __init__(self):
+        self.process = None
+        self.exit_code = None
+        self.recycle_needed = False
+        self.started = False
+        self.closed_with = None
+        self.alive_flag = True
+
+    @property
+    def alive(self):
+        return self.started and self.alive_flag
+
+    @property
+    def in_flight(self):
+        return 0
+
+    def start(self):
+        self.started = True
+
+    def request(self, op, params=None, **kwargs):
+        from provider_hub.runtime.session import RequestResult
+
+        return RequestResult({"op": op})
+
+    def submit(self, op, params=None, **kwargs):
+        raise NotImplementedError
+
+    def close(self, grace=5.0):
+        self.alive_flag = False
+        self.closed_with = grace
+
+
+def test_the_pool_runs_a_non_session_runtime_through_the_factory(make_pool, clock):
+    created = []
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtime = StubRuntime()
+        created.append((runtime, limits, sorted(host_calls)))
+        return runtime
+
+    pool = make_pool(fast_pool_limits(idle_timeout=10.0), memory_reader=lambda pid: pytest.fail("no process to sample"))
+    pool.register(WorkerDefinition("daemon", kind="daemon", runtime=factory, host_calls={"x": lambda c: {}}))
+    pool.warm("daemon")
+    assert pool.state("daemon") is WorkerState.READY
+    assert created[0][2] == ["x"]
+    assert pool.status()["workers"]["daemon"]["pid"] is None
+    clock.advance(60)
+    pool.sweep()
+    assert wait_until(lambda: pool.state("daemon") is WorkerState.STOPPED)
+    assert created[0][0].closed_with is not None

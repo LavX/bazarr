@@ -21,9 +21,12 @@ Worker states (``WorkerState``)::
 
 Limits and what enforces them:
 
-* Resident workers are capped (default 8). Starting one more stops the least
-  recently used idle worker; if every resident worker is busy the caller waits
-  a little, then gets ``PoolUnavailable`` with code ``pool_full``.
+* Worker processes are capped (default 8). Starting one more stops the least
+  recently used idle worker and waits for it to be gone; if every worker is busy
+  the caller waits a little, then gets ``PoolUnavailable`` with code
+  ``pool_full``. Workers that are stopping or draining still count, so the
+  number of live processes never exceeds the cap by more than the retiring
+  workers that a settings change leaves behind for a moment.
 * Memory is read from ``/proc/<pid>/smaps_rollup`` for the launcher's whole
   process tree: when a request starts and ends, on every sweep while requests
   run, and once per heartbeat interval otherwise. Over the limit (translators
@@ -31,8 +34,9 @@ Limits and what enforces them:
   the check is skipped.
 * Folder budgets (a byte cap per directory the worker may write) and the free
   space reserve on the config volume (1 GiB) are checked before a start, before
-  a request and on every sweep. A worker over budget is killed, and nothing
-  starts while the reserve is short.
+  a request and on every sweep. A worker over its folder budget is killed.
+  A short reserve only refuses new starts and requests: it is often the host's
+  own doing, so it never kills a worker and never counts toward the breaker.
 * Heartbeats (15 s, three misses) are enforced by the session; the pool turns
   the session's death into a failure and a restart policy.
 * Restarts back off exponentially. Five failures within five minutes open the
@@ -42,10 +46,34 @@ Limits and what enforces them:
 * Standard error is scrubbed by the session for every secret value it ever
   carried. The pool adds its own log rate limit and a short tail for status
   pages. Request parameters and secrets never reach a pool log line.
+* Every stop that is not an instant kill (idle, LRU, recycle, drain, close)
+  asks politely first. When the polite window ends, a launcher-started worker
+  gets the launcher's own cleanup (its lifeline is cut and ``stop()`` runs),
+  which also removes children that moved themselves into a new session. A bare
+  group kill would take the launcher down before it could do that.
 
 Threading: all state is guarded by one lock. Slow work (spawn, handshake,
-shutdown, reading ``/proc``, measuring folders) runs outside it. Public methods
-are safe to call from any thread.
+shutdown, reading ``/proc``, measuring folders) runs outside it. Shutdowns run
+on their own short-lived threads, so ``submit``, ``wait`` and ``sweep`` never
+wait for another worker to finish stopping; ``stop``, ``unregister``,
+``set_max_resident`` and ``close`` do wait for the stops they started. Public
+methods are safe to call from any thread.
+
+Request context: ``submit(..., context=obj)`` attaches ``obj`` to the request
+before the worker can see it. A host call handler receives a ``PoolHostCall``
+whose ``context`` is that object, even when the worker's first call arrives
+before ``submit`` has returned.
+
+Runtime seam: the pool talks to a started worker through ``WorkerRuntime``, the
+small surface ``WorkerSession`` already has (``start``, ``submit``, ``request``,
+``close``, ``alive``, ``in_flight``, ``recycle_needed``, ``exit_code`` and
+``process``). ``WorkerDefinition.runtime`` is a factory returning one; the
+default builds a ``WorkerSession``. A managed container runtime (a daemon kind
+such as FlareSolverr) is meant to plug in there: it supplies its own start,
+health, stop and removal, reports ``process`` as None while it has no local
+process (the memory sampler then skips it, and its own memory cap applies), and
+reuses the pool's states, breaker, idle stop and cap unchanged. Nothing of that
+exists yet.
 """
 
 from __future__ import annotations
@@ -54,18 +82,19 @@ import enum
 import logging
 import math
 import os
+import re
 import shutil
 import signal
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from ..sandbox import spawn_worker
 from .errors import HandshakeError, RequestError, SessionError
 from .frames import Codes
-from .session import RequestHandle, RequestResult, SessionLimits, WorkerSession
+from .session import HostCall, RequestHandle, RequestResult, SessionLimits, WorkerSession
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +108,7 @@ __all__ = [
     "PoolCodes",
     "PoolClosed",
     "PoolError",
+    "PoolHostCall",
     "PoolLimits",
     "PoolRequest",
     "PoolUnavailable",
@@ -86,6 +116,7 @@ __all__ = [
     "WorkerDefinition",
     "WorkerKilled",
     "WorkerPool",
+    "WorkerRuntime",
     "WorkerState",
     "folder_usage",
     "launcher_spawn",
@@ -163,13 +194,19 @@ _S = WorkerState
 _TRANSITIONS: dict[WorkerState, frozenset] = {
     _S.STOPPED: frozenset({_S.STARTING}),
     _S.STARTING: frozenset({_S.READY, _S.BACKOFF, _S.BROKEN, _S.STOPPED}),
-    _S.READY: frozenset({_S.DRAINING, _S.STOPPING, _S.BACKOFF, _S.BROKEN}),
+    _S.READY: frozenset({_S.DRAINING, _S.STOPPING, _S.STOPPED, _S.BACKOFF, _S.BROKEN}),
     _S.DRAINING: frozenset({_S.STARTING, _S.STOPPED}),
     _S.STOPPING: frozenset({_S.STOPPED}),
     _S.BACKOFF: frozenset({_S.STARTING, _S.STOPPED}),
     _S.BROKEN: frozenset({_S.STARTING, _S.STOPPED}),
 }
 _COUNTS_AS_RESIDENT = (_S.STARTING, _S.READY)
+_PATH_IN_TEXT = re.compile(r"(?<![\w:/.])/[\w.\-+@%~]+(?:/[\w.\-+@%~]*)*")
+
+
+def _public_text(text) -> str:
+    """Error text safe for a status page: filesystem paths removed, length bounded."""
+    return _PATH_IN_TEXT.sub("<path>", str(text))[:300]
 
 
 def memory_limit_for(kind: str | None) -> int:
@@ -183,6 +220,59 @@ class FolderBudget:
     path: str
     max_bytes: int
     label: str = ""
+
+
+class WorkerRuntime(Protocol):
+    """What the pool needs from a started worker. ``WorkerSession`` is one.
+
+    The seam for other runtimes: implement this, return it from
+    ``WorkerDefinition.runtime`` and the pool supervises it with the same
+    states, limits and restart policy. ``process`` may be None when there is no
+    local process to sample.
+    """
+
+    process: Any
+    exit_code: int | None
+    recycle_needed: bool
+
+    @property
+    def alive(self) -> bool: ...
+
+    @property
+    def in_flight(self) -> int: ...
+
+    def start(self) -> Any: ...
+
+    def submit(self, op, params=None, *, timeout=None, max_result_bytes=None, secrets=None,
+               on_progress=None) -> RequestHandle: ...
+
+    def request(self, op, params=None, *, timeout=None, **kwargs) -> RequestResult: ...
+
+    def close(self, grace: float = 5.0) -> None: ...
+
+
+@dataclass
+class PoolHostCall(HostCall):
+    """A host call as the pool hands it to a handler: the session's call plus the request context."""
+
+    context: Any = None
+    key: str = ""
+
+
+def _session_runtime(definition, limits, host_calls, on_event, on_stderr):
+    return WorkerSession(
+        definition.command,
+        spawn=definition.spawn,
+        cwd=definition.cwd,
+        env=dict(definition.env) if definition.env else None,
+        kind=definition.kind,
+        kind_versions=definition.kind_versions,
+        limits=limits,
+        host_calls=host_calls,
+        on_event=on_event,
+        on_stderr=on_stderr,
+        name=definition.name or definition.key,
+    )
 
 
 @dataclass(frozen=True)
@@ -211,6 +301,9 @@ class WorkerDefinition:
     idle_timeout: float | None = None
     session_limits: SessionLimits | None = None
     name: str | None = None
+    # Builds the runtime object; None means a ``WorkerSession``. Called as
+    # ``runtime(definition, session_limits, host_calls, on_event, on_stderr)``.
+    runtime: Callable[..., WorkerRuntime] | None = None
 
     def memory_limit(self) -> int:
         return self.memory_limit_bytes if self.memory_limit_bytes else memory_limit_for(self.kind)
@@ -218,8 +311,8 @@ class WorkerDefinition:
     def check(self) -> None:
         if not self.key or not isinstance(self.key, str):
             raise ValueError("a worker definition needs a key")
-        if self.spawn is None and not self.command:
-            raise ValueError("a worker definition needs spawn or command")
+        if self.spawn is None and not self.command and self.runtime is None:
+            raise ValueError("a worker definition needs spawn, command or runtime")
 
 
 @dataclass(frozen=True)
@@ -422,17 +515,22 @@ class _Slot:
 
     def __init__(self, definition: WorkerDefinition, now: float, limits: PoolLimits, ephemeral: bool = False):
         self.definition = definition
-        self.session: WorkerSession | None = None
+        self.session: WorkerRuntime | None = None
         self.started_at = now
         self.last_used = now
         self.last_sample_at = -math.inf
         self.pending = 0  # submits in progress: the session does not know about them yet
+        self.active = 0  # requests submitted through the pool and not yet finished
+        self.contexts: dict[int, Any] = {}
+        self.runtime_error: BaseException | None = None
         self.kill_reason: tuple[str, str] | None = None
         self.killed_busy = False
         self.memory_bytes = 0
         self.peak_bytes = 0
         self.ephemeral = ephemeral
         self.closing = False
+        self.generation = 0
+        self.last_budget_at = -math.inf
         self.stderr_tail: deque = deque(maxlen=max(1, limits.stderr_tail_lines))
         self._stderr_window = (0, 0)
         self._stderr_dropped = 0
@@ -477,6 +575,8 @@ class _Entry:
         self.starts = 0
         self.crashes = 0
         self.last_peak_bytes = 0
+        # Raised by every restart_after_drain; a start that began under an older one is stale.
+        self.generation = 0
 
 
 class PoolRequest:
@@ -489,6 +589,7 @@ class PoolRequest:
         self._handle = handle
         self._finished = False
         self._finish_lock = threading.Lock()
+        self.context = None
 
     @property
     def id(self):
@@ -516,7 +617,7 @@ class PoolRequest:
             if self._finished:
                 return
             self._finished = True
-        self._pool._after_request(self._entry, self._slot, error)
+        self._pool._after_request(self._entry, self._slot, error, self._handle.id)
 
 
 class WorkerPool:
@@ -548,6 +649,9 @@ class WorkerPool:
         self._oneshot = threading.BoundedSemaphore(max(1, self.limits.max_oneshot))
         self._closed = False
         self._closes: list[tuple[_Slot, _Entry | None, str, float]] = []
+        self._closing = 0  # polite and hard stops queued or running
+        self._close_threads: set = set()
+        self._end_lock = threading.Lock()
         self._events: list[tuple[str, str, dict]] = []
         self._sampler: threading.Thread | None = None
         self._sampler_stop = threading.Event()
@@ -576,7 +680,7 @@ class WorkerPool:
             entry.retiring = []
             entry.state = WorkerState.STOPPED
             self._cond.notify_all()
-        self._flush()
+        self._flush(wait=True)
 
     def definition(self, key: str) -> WorkerDefinition:
         with self._cond:
@@ -597,19 +701,22 @@ class WorkerPool:
                 if definition.key != key:
                     raise ValueError("definition key %s does not match %s" % (definition.key, key))
                 entry.definition = definition
+            entry.generation += 1
             if entry.state == WorkerState.READY and entry.slot is not None:
                 self._retire(entry, "settings changed")
+            # A start under way keeps the definition it began with; _start_slot
+            # sees that it is stale and retires it once it is up.
         self._flush()
 
     def set_max_resident(self, count: int) -> None:
         """Change the resident cap (the user setting). Idle surplus workers stop now."""
         with self._cond:
             self._max_resident = max(1, int(count))
-            surplus = self._resident_count() - self._max_resident
+            surplus = self._process_count() - self._max_resident - self._closing
             if surplus > 0:
                 for entry in self._idle_by_age(None)[:surplus]:
                     self._begin_stop(entry, "resident cap lowered")
-        self._flush()
+        self._flush(wait=True)
 
     @property
     def max_resident(self) -> int:
@@ -622,7 +729,12 @@ class WorkerPool:
             return self._public_state(self._entry(key))
 
     def status(self) -> dict:
-        """A snapshot for status pages. No parameters, secrets or paths."""
+        """A snapshot for status pages.
+
+        No request parameters or secrets. Filesystem paths are removed from
+        ``last_error``. ``recent_stderr`` is the plugin's own output with
+        secrets scrubbed by the session; it is the plugin's to keep clean.
+        """
         now = self._clock()
         with self._cond:
             workers = {}
@@ -650,19 +762,25 @@ class WorkerPool:
             return {
                 "max_resident": self._max_resident,
                 "resident": self._resident_count(),
+                "processes": self._process_count(),
                 "workers": workers,
             }
 
     # ---------------------------------------------------------------- requests
 
     def submit(self, key: str, op: str, params=None, *, timeout=None, max_result_bytes=None,
-               secrets=None, on_progress=None) -> PoolRequest:
+               secrets=None, on_progress=None, context=None) -> PoolRequest:
         """Send a request to the worker for ``key``, starting it if needed.
 
         ``secrets`` travel in the request frame only; they are never stored in
         the definition or logged. Raises ``PoolUnavailable`` (backoff, open
         breaker, full pool, low disk, budget), ``PoolClosed``, ``UnknownWorker``,
         ``SessionBusy`` (the worker is at its in-flight limit) or a start error.
+
+        ``context`` is any object the caller wants its host call handlers to
+        see for this request (a job record, say). It is attached before the
+        worker can issue a call, so the very first call already carries it as
+        ``PoolHostCall.context``. It is dropped when the request finishes.
         """
         last_error: BaseException | None = None
         for _attempt in range(3):
@@ -696,7 +814,11 @@ class WorkerPool:
                 raise
             with self._cond:
                 slot.pending -= 1
+                slot.active += 1
                 slot.last_used = self._clock()
+                if context is not None:
+                    slot.contexts[handle.id] = context
+                self._cond.notify_all()
             return PoolRequest(self, entry, slot, handle)
         raise last_error  # type: ignore[misc]
 
@@ -712,7 +834,7 @@ class WorkerPool:
         self._flush()
 
     def run_once(self, definition: WorkerDefinition, op: str, params=None, *, timeout=None,
-                 max_result_bytes=None, secrets=None, on_progress=None) -> RequestResult:
+                 max_result_bytes=None, secrets=None, on_progress=None, context=None) -> RequestResult:
         """Run one request on a throwaway worker that is not part of the pool.
 
         For draft ``options`` and ``test`` calls on settings that are not
@@ -741,9 +863,22 @@ class WorkerPool:
             except BaseException as error:
                 raise self._start_error(slot, error)
             try:
-                return slot.session.request(
-                    op, params, timeout=timeout, max_result_bytes=max_result_bytes,
-                    secrets=secrets, on_progress=on_progress)
+                with self._cond:
+                    slot.pending += 1
+                try:
+                    handle = slot.session.submit(
+                        op, params, timeout=timeout, max_result_bytes=max_result_bytes,
+                        secrets=secrets, on_progress=on_progress)
+                except BaseException:
+                    with self._cond:
+                        slot.pending -= 1
+                    raise
+                with self._cond:
+                    slot.pending -= 1
+                    if context is not None:
+                        slot.contexts[handle.id] = context
+                    self._cond.notify_all()
+                return handle.wait()
             except (SessionError, RequestError) as error:
                 raise self._translate(slot, error)
         finally:
@@ -764,7 +899,7 @@ class WorkerPool:
             entry = self._entry(key)
             if entry.state == WorkerState.READY:
                 self._begin_stop(entry, "stopped")
-        self._flush()
+        self._flush(wait=True)
 
     def reset(self, key: str) -> None:
         """Forget the failure history and end backoff or an open breaker."""
@@ -794,7 +929,7 @@ class WorkerPool:
             for slot in list(self._ephemeral):
                 self._queue_close(slot, None, "kill")
             self._cond.notify_all()
-        self._flush(parallel=True)
+        self._flush(wait=True)
         sampler = self._sampler
         if sampler is not None and sampler is not threading.current_thread():
             sampler.join(timeout=3.0)
@@ -816,14 +951,12 @@ class WorkerPool:
             current = [(entry, entry.slot) for entry in self._entries.values() if entry.slot is not None]
             retiring = [(entry, slot) for entry in self._entries.values() for slot in entry.retiring]
             ephemeral = list(self._ephemeral)
-        free = self._free_space()
-        short_on_disk = free is not None and free < self.limits.config_reserve_bytes
         for entry, slot in current:
-            self._sweep_current(entry, slot, now, short_on_disk)
+            self._sweep_current(entry, slot, now)
         for entry, slot in retiring:
             self._sweep_retiring(entry, slot, now)
         for slot in ephemeral:
-            self._sweep_ephemeral(slot, now, short_on_disk)
+            self._sweep_ephemeral(slot, now)
         with self._cond:
             for entry in self._entries.values():
                 if entry.state == WorkerState.DRAINING and not entry.retiring and entry.slot is None:
@@ -831,12 +964,13 @@ class WorkerPool:
             self._cond.notify_all()
         self._flush()
 
-    def _sweep_current(self, entry, slot, now, short_on_disk):
+    def _sweep_current(self, entry, slot, now):
         with self._cond:
             if entry.slot is not slot or entry.state != WorkerState.READY:
                 return
             if not slot.session.alive:
-                self._handle_death(entry, slot, self._death_reason(slot))
+                idle = slot.active == 0 and slot.pending == 0
+                self._handle_death(entry, slot, self._death_reason(slot), idle=idle)
                 return
         self._sample_if_due(slot, now)
         definition = entry.definition
@@ -844,8 +978,6 @@ class WorkerPool:
         if slot.memory_bytes > definition.memory_limit():
             problem = (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
                 slot.memory_bytes // MIB, definition.memory_limit() // MIB))
-        elif short_on_disk and definition.writes_data:
-            problem = (PoolCodes.DISK_RESERVE, "free space on the config volume is under the reserve")
         else:
             problem = self._budget_problem(entry, now)
         if problem is not None:
@@ -886,17 +1018,21 @@ class WorkerPool:
                 entry.retiring.remove(slot)
                 self._queue_close(slot, None, "stop")
 
-    def _sweep_ephemeral(self, slot, now, short_on_disk):
+    def _sweep_ephemeral(self, slot, now):
         if slot.session is None or not slot.session.alive:
             return
         self._sample_if_due(slot, now)
         if slot.memory_bytes > slot.definition.memory_limit():
             slot.kill_reason = (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
                 slot.memory_bytes // MIB, slot.definition.memory_limit() // MIB))
-        elif short_on_disk and slot.definition.writes_data:
-            slot.kill_reason = (PoolCodes.DISK_RESERVE, "free space on the config volume is under the reserve")
         else:
-            return
+            if now - slot.last_budget_at < self.limits.budget_interval:
+                return
+            slot.last_budget_at = now
+            problem = self._budget_problem(None, now, definition=slot.definition, force=True)
+            if problem is None:
+                return
+            slot.kill_reason = problem
         self._terminate_now(slot)
 
     # ------------------------------------------------------------ lease / start
@@ -922,6 +1058,7 @@ class WorkerPool:
         deadline = self._clock() + self.limits.acquire_timeout
         try:
             while True:
+                self._flush()
                 with self._cond:
                     self._check_open()
                     entry = self._entry(key)
@@ -930,7 +1067,9 @@ class WorkerPool:
                     if state == WorkerState.READY:
                         slot = entry.slot
                         if slot is None or not slot.session.alive:
-                            self._handle_death(entry, slot, self._death_reason(slot))
+                            # Found dead before any request used it: restart now, count it once.
+                            idle = slot is None or (slot.active == 0 and slot.pending == 0)
+                            self._handle_death(entry, slot, self._death_reason(slot), idle=idle)
                             continue
                         if slot.session.recycle_needed:
                             self._retire(entry, "too many distinct secrets")
@@ -950,20 +1089,22 @@ class WorkerPool:
                             "worker keeps failing and is paused: %s" % (entry.last_error or "no detail"),
                             code=PoolCodes.CIRCUIT_OPEN, retry_after=entry.open_until - now)
                     # stopped, draining, or a backoff or breaker period that has ended
-                    victims = self._claim_capacity(entry)
-                    if victims is None:
-                        self._wait(deadline, "every resident worker is busy", code=PoolCodes.POOL_FULL)
+                    if not self._claim_capacity(entry):
+                        self._wait(deadline, "no free worker slot", code=PoolCodes.POOL_FULL)
                         continue
                     self._set_state(entry, WorkerState.STARTING, "request")
                     entry.starts += 1
                     definition = entry.definition
                     slot = _Slot(definition, now, self.limits)
+                    slot.generation = entry.generation
                 break
         finally:
             self._flush()
         return self._start_slot(entry, slot)
 
     def _wait(self, deadline, why, code=PoolCodes.UNAVAILABLE):
+        if self._closes:
+            return  # stops queued by this very pass have to run before there is anything to wait for
         remaining = deadline - self._clock()
         if remaining <= 0:
             raise PoolUnavailable(why, code=code, retry_after=1.0)
@@ -987,6 +1128,7 @@ class WorkerPool:
                 self._cond.notify_all()
                 failed = PoolClosed("the worker pool is closed")
             elif refusal is not None:
+                entry.last_error = _public_text(refusal[1])
                 self._set_state(entry, WorkerState.STOPPED, refusal[0])
                 self._cond.notify_all()
                 failed = PoolUnavailable(refusal[1], code=refusal[0])
@@ -998,6 +1140,10 @@ class WorkerPool:
                 slot.pending += 1
                 slot.last_used = self._clock()
                 self._set_state(entry, WorkerState.READY, "started")
+                if slot.generation != entry.generation:
+                    # New settings arrived while this worker was starting. It serves
+                    # the request that asked for it, then drains; the next one starts fresh.
+                    self._retire(entry, "settings changed during start")
                 self._cond.notify_all()
                 failed = None
         self._flush()
@@ -1012,21 +1158,44 @@ class WorkerPool:
             heartbeat_interval=self.limits.heartbeat_interval,
             heartbeat_timeout=self.limits.heartbeat_interval * self.limits.heartbeat_misses,
         )
-        session = WorkerSession(
-            definition.command,
-            spawn=definition.spawn,
-            cwd=definition.cwd,
-            env=dict(definition.env) if definition.env else None,
-            kind=definition.kind,
-            kind_versions=definition.kind_versions,
-            limits=limits,
-            host_calls=dict(definition.host_calls),
-            on_event=lambda name, payload, _key=key: self._emit(_key, name, payload),
-            on_stderr=slot.stderr_sink(key),
-            name=definition.name or key,
+        host_calls = {name: self._wrap_host_call(slot, name, handler)
+                      for name, handler in definition.host_calls.items()}
+        factory = definition.runtime or _session_runtime
+        session = factory(
+            definition,
+            limits,
+            host_calls,
+            lambda name, payload, _key=key: self._emit(_key, name, payload),
+            slot.stderr_sink(key),
         )
         slot.session = session
         session.start()
+
+    def _wrap_host_call(self, slot, key, handler):
+        def wrapped(call):
+            context = self._context_for(slot, call.request_id)
+            return handler(PoolHostCall(call.name, call.params, call.request_id, call.session,
+                                        context=context, key=key))
+
+        return wrapped
+
+    def _context_for(self, slot, request_id):
+        """The context ``submit`` attached to this request.
+
+        A worker can call the host the moment it gets its request, before
+        ``submit`` has returned and the pool has been told the request id, so
+        the handler waits (briefly) while a submit is still in progress.
+        """
+        if request_id is None:
+            return None
+        deadline = time.monotonic() + 5.0
+        with self._cond:
+            while request_id not in slot.contexts and slot.pending > 0 and not self._closed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._cond.wait(min(remaining, 0.2))
+            return slot.contexts.get(request_id)
 
     def _launcher_failure(self, slot):
         process = slot.session.process if slot.session is not None else None
@@ -1089,6 +1258,11 @@ class WorkerPool:
     def _resident_count(self) -> int:
         return sum(1 for entry in self._entries.values() if entry.state in _COUNTS_AS_RESIDENT)
 
+    def _process_count(self) -> int:
+        """Live worker processes: resident, draining and the ones still being stopped."""
+        retiring = sum(len(entry.retiring) for entry in self._entries.values())
+        return self._resident_count() + retiring + self._closing
+
     def _idle_by_age(self, skip) -> list[_Entry]:
         idle = [
             entry for entry in self._entries.values()
@@ -1098,18 +1272,23 @@ class WorkerPool:
         idle.sort(key=lambda e: e.slot.last_used)
         return idle
 
-    def _claim_capacity(self, entry) -> list | None:
-        """Stop idle LRU workers to make room for ``entry``. None: no room yet."""
-        over = self._resident_count() + 1 - self._max_resident
+    def _claim_capacity(self, entry) -> bool:
+        """Is there room for one more process? If not, stop idle LRU workers to make some.
+
+        Workers already stopping or draining count: their processes are still
+        alive. Stops already under way are not repeated, so the caller just
+        waits for them. False means the caller has to wait.
+        """
+        over = self._process_count() + 1 - self._max_resident
         if over <= 0:
-            return []
-        idle = self._idle_by_age(entry)
-        if len(idle) < over:
-            return None
-        chosen = idle[:over]
-        for victim in chosen:
-            self._begin_stop(victim, "evicted for %s" % self._key_of(entry))
-        return chosen
+            return True
+        evict = over - self._closing
+        if evict > 0:
+            idle = self._idle_by_age(entry)
+            if len(idle) >= evict:
+                for victim in idle[:evict]:
+                    self._begin_stop(victim, "evicted for %s" % self._key_of(entry))
+        return False
 
     def _begin_stop(self, entry, reason):
         slot = entry.slot
@@ -1128,24 +1307,33 @@ class WorkerPool:
         if slot is not None:
             entry.retiring.append(slot)
 
-    def _record_failure(self, entry, reason):
+    def _record_failure(self, entry, reason, idle=False):
+        """Count a failure and pick the next state.
+
+        ``idle``: a worker that died while nothing used it. It is counted (a
+        worker that keeps dying still opens the breaker) but not backed off, so
+        the next request simply starts a new one.
+        """
         now = self._clock()
         limits = self.limits
         entry.failures.append(now)
         while entry.failures and now - entry.failures[0] > limits.breaker_window:
             entry.failures.popleft()
+        reason = _public_text(reason)
         entry.last_error = reason
         entry.crashes += 1
         count = len(entry.failures)
         if count >= limits.breaker_threshold:
             entry.open_until = now + limits.breaker_open
             self._set_state(entry, WorkerState.BROKEN, reason)
+        elif idle and entry.state == WorkerState.READY:
+            self._set_state(entry, WorkerState.STOPPED, reason)
         else:
             delay = min(limits.backoff_cap, limits.backoff_base * (2 ** (count - 1)))
             entry.backoff_until = now + delay
             self._set_state(entry, WorkerState.BACKOFF, reason)
 
-    def _handle_death(self, entry, slot, reason):
+    def _handle_death(self, entry, slot, reason, idle=False):
         """The current worker ended without being asked to. Caller holds the lock."""
         if slot is not None and entry.slot is slot:
             entry.slot = None
@@ -1153,7 +1341,7 @@ class WorkerPool:
             entry.last_peak_bytes = slot.peak_bytes
             self._queue_close(slot, None, "reap")
         if entry.state == WorkerState.READY:
-            self._record_failure(entry, reason)
+            self._record_failure(entry, reason, idle=idle)
         self._cond.notify_all()
 
     def _death_reason(self, slot) -> str:
@@ -1164,12 +1352,14 @@ class WorkerPool:
         code = slot.session.exit_code if slot.session is not None else None
         return "worker exited unexpectedly" + (" (exit code %s)" % code if code is not None else "")
 
-    def _after_request(self, entry, slot, error):
+    def _after_request(self, entry, slot, error, request_id=None):
         """A request finished. Settle the worker's health and re-sample its memory."""
         self._sample(slot)
         limit = slot.definition.memory_limit()
         with self._cond:
             slot.last_used = self._clock()
+            slot.active = max(0, slot.active - 1)
+            slot.contexts.pop(request_id, None)
             if slot.memory_bytes > limit and slot.kill_reason is None:
                 slot.kill_reason = (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
                     slot.memory_bytes // MIB, limit // MIB))
@@ -1251,7 +1441,9 @@ class WorkerPool:
         problem = self._violation(entry.definition, entry)
         if problem is None:
             return
-        self._kill_current(entry, slot, problem, requested=True)
+        if problem[0] != PoolCodes.DISK_RESERVE:
+            # A worker over its folder budget is ended. A short disk only refuses work.
+            self._kill_current(entry, slot, problem, requested=True)
         raise PoolUnavailable(problem[1], code=problem[0])
 
     def _kill_current(self, entry, slot, problem, requested=False):
@@ -1299,60 +1491,123 @@ class WorkerPool:
     # ---------------------------------------------------- closing and killing
 
     def _queue_close(self, slot, entry, mode, grace=None):
-        """Schedule ending a session. Runs in ``_flush``, outside the lock."""
+        """Schedule ending a session. Runs in ``_flush``, outside the lock.
+
+        Modes: ``stop`` and ``close`` ask politely first; ``kill`` does not;
+        ``reap`` tidies a worker that is already dead. All but ``reap`` count
+        toward the process cap until they finish.
+        """
         if slot.closing:
             return
         slot.closing = True
+        if mode != "reap":
+            self._closing += 1
         self._closes.append((slot, entry, mode, self.limits.close_grace if grace is None else grace))
 
-    def _terminate_now(self, slot):
-        """End the worker's whole tree without a polite shutdown frame."""
-        session = slot.session
-        process = session.process if session else None
+    def _end_process(self, process, grace):
+        """End a worker process and everything it started.
+
+        A launcher process first loses its lifeline: the launcher then kills
+        the whole worker tree itself, including children that moved into a
+        new session, which a signal to the group cannot reach. ``stop()`` and
+        a group kill after that are the backstop.
+        """
         if process is None:
             return
         try:
+            cut = getattr(process, "close_lifeline", None)
+            if callable(cut):
+                with self._end_lock:
+                    cut()
             stop = getattr(process, "stop", None)
             if callable(stop):
-                stop(0.5)
+                stop(grace)
             elif process.poll() is None and _SIGKILL is not None and hasattr(os, "killpg"):
                 try:
                     os.killpg(process.pid, _SIGKILL)
                 except OSError:
                     process.kill()
         except Exception:
-            logger.debug("terminate failed", exc_info=True)
+            logger.debug("ending a worker process failed", exc_info=True)
+
+    def _terminate_now(self, slot):
+        """End the worker's whole tree without a polite shutdown frame."""
+        session = slot.session
+        if session is not None:
+            self._end_process(session.process, 0.5)
+
+    def _polite_close(self, slot, grace):
+        """Shutdown frame, wait, SIGTERM, and then the launcher's own cleanup.
+
+        ``WorkerSession.close`` ends with a SIGKILL of the whole group, which
+        would take the launcher down before it could clean up a worker that
+        ignored the shutdown. So when the polite window is over, a timer cuts
+        the lifeline first and the launcher does the killing.
+        """
+        session = slot.session
+        process = session.process
+        timer = None
+        if callable(getattr(process, "close_lifeline", None)):
+            timer = threading.Timer(grace + 0.25, self._end_process, (process, 0.5))
+            timer.daemon = True
+            timer.start()
+        try:
+            session.close(grace=grace)
+        finally:
+            if timer is not None:
+                timer.cancel()
+                timer.join()
+            self._end_process(process, 0.5)
 
     def _run_close(self, job):
         slot, entry, mode, grace = job
         try:
-            if slot.session is not None:
+            session = slot.session
+            if session is not None:
                 if mode == "kill":
-                    self._terminate_now(slot)
-                slot.session.close(grace=0 if mode in ("kill", "reap") else grace)
+                    self._end_process(session.process, 0.5)
+                    session.close(grace=0)
+                elif mode == "reap":
+                    session.close(grace=0)
+                    self._end_process(session.process, 0.5)
+                else:
+                    self._polite_close(slot, grace)
         except Exception:
             logger.debug("worker close failed", exc_info=True)
         finally:
-            if entry is not None:
-                with self._cond:
-                    if entry.state == WorkerState.STOPPING and entry.slot is None:
-                        self._set_state(entry, WorkerState.STOPPED, "stopped")
-                    self._cond.notify_all()
+            with self._cond:
+                if mode != "reap":
+                    self._closing = max(0, self._closing - 1)
+                if entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None:
+                    self._set_state(entry, WorkerState.STOPPED, "stopped")
+                self._close_threads.discard(threading.current_thread())
+                self._cond.notify_all()
+            self._deliver_events()
 
-    def _flush(self, parallel=False):
-        """Run queued closes and deliver queued events, outside the lock."""
+    def _flush(self, wait=False):
+        """Start queued closes on their own threads and deliver queued events.
+
+        Never waits for a close unless ``wait`` is set, so a request or a sweep
+        is not held up by another worker's slow shutdown.
+        """
         with self._cond:
             jobs, self._closes = self._closes, []
-        if jobs:
-            if parallel and len(jobs) > 1:
-                threads = [threading.Thread(target=self._run_close, args=(job,), daemon=True) for job in jobs]
-                for thread in threads:
-                    thread.start()
-                for thread in threads:
-                    thread.join(timeout=self.limits.close_grace + 10.0)
-            else:
-                for job in jobs:
-                    self._run_close(job)
+            threads = []
+            for job in jobs:
+                thread = threading.Thread(target=self._run_close, args=(job,), name="worker-pool-close", daemon=True)
+                self._close_threads.add(thread)
+                threads.append(thread)
+        for thread in threads:
+            thread.start()
+        if wait:
+            deadline = time.monotonic() + self.limits.close_grace + 30.0
+            with self._cond:
+                pending = list(self._close_threads)
+            for thread in pending:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        self._deliver_events()
+
+    def _deliver_events(self):
         with self._cond:
             events, self._events = self._events, []
         for key, name, payload in events:
