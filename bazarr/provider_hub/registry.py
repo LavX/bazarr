@@ -22,10 +22,10 @@ from .migration import (
     validation_built_in_provider_ids,
 )
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
-from .state import active_installations
+from .state import active_installations, provider_hub_dir
 from . import runtime_status
 from .env_registry import env_dir_of
-from .venv import hold_environment
+from .venv import hold_environment, interpreter_inside_hub
 from .worker import ProviderWorkerClient, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
 
 logger = logging.getLogger(__name__)
@@ -381,6 +381,9 @@ def _make_provider_class(manifest, worker_client=None, installation=None):
         if installation.active_path:
             attrs["bundle_path"] = installation.active_path
         if getattr(installation, "python_path", None):
+            if not interpreter_inside_hub(provider_hub_dir(), installation.python_path):
+                # Never run a plugin from an interpreter the hub did not build.
+                raise ValueError(f"the interpreter {installation.python_path} is not one of the hub's environments")
             attrs["python_path"] = installation.python_path
     return type(f"{manifest.provider_id.title().replace('_', '')}HubProvider", (HubProxyProvider,), attrs)
 

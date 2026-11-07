@@ -30,10 +30,11 @@ from pathlib import Path
 from typing import Any
 
 from .state import (
-    corrupt_copies, load_state, load_state_strict, mutate_state, mutate_state_checked, read_state_document,
+    corrupt_copies, provider_hub_dir, load_state, load_state_strict, mutate_state, mutate_state_checked, read_state_document,
 )
 from .venv import (
-    SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, is_pinned, path_key, pinned_paths, python_executable,
+    SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, interpreter_inside_hub, is_pinned, path_inside_hub, path_key,
+    pinned_paths, python_executable,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,11 +150,12 @@ def _adoptable(env_dir: Path, manifest) -> bool:
     return _interpreter_matches(env_dir) and _machine_matches(env_dir) and _requirements_match(env_dir, manifest)
 
 
-def _recorded_dir(envs: dict[str, Any], fingerprint: str) -> Path | None:
+def _recorded_dir(envs: dict[str, Any], fingerprint: str, root: Path) -> Path | None:
+    """The recorded environment for a dependency set, only if it is the hub's own and has an interpreter."""
     entry = envs.get(fingerprint)
     if isinstance(entry, dict) and isinstance(entry.get("path"), str):
         recorded = Path(entry["path"])
-        if python_executable(recorded).exists():
+        if path_inside_hub(root, recorded) and python_executable(recorded).exists():
             return recorded
     return None
 
@@ -162,6 +164,7 @@ def reconcile_environments(
     *,
     validate: Callable[[dict[str, Any], bool], Any],
     probe: Callable[[Any, Path, Path], None],
+    root: str | Path | None = None,
 ) -> dict[str, list[str]]:
     """Adopt the environments installations already use. Boot-safe: no pip, no network.
 
@@ -181,6 +184,7 @@ def reconcile_environments(
     that skips any row that changed in the meantime.
     """
     summary: dict[str, list[str]] = {"adopted": [], "repointed": [], "needs_repair": [], "kept": []}
+    root = Path(root) if root is not None else provider_hub_dir()
     try:
         state = load_state_strict()
     except (OSError, ValueError):
@@ -216,8 +220,16 @@ def reconcile_environments(
             except Exception:
                 continue
             fingerprint = environment_fingerprint(manifest)
+            if not interpreter_inside_hub(root, python_path):
+                # An interpreter outside the hub's own environments, or reached
+                # through a symlink, is neither adopted nor probed nor pointed at.
+                logger.warning(
+                    "Provider Hub: %s runs from %s, which is not one of the hub's environments; left as it is",
+                    provider_id, python_path,
+                )
+                continue
             env_dir = Path(env_dir_of(python_path))
-            recorded = _recorded_dir(envs, fingerprint)
+            recorded = _recorded_dir(envs, fingerprint, root)
             if recorded is None:
                 if _adoptable(env_dir, manifest):
                     envs[fingerprint] = {"path": str(env_dir)}

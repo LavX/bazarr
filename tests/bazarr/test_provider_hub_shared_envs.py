@@ -879,3 +879,83 @@ def test_a_symlinked_environment_container_is_never_reused_or_built_into(hub, tm
     # Neither the finished environment outside the hub nor the recorded one was used or touched.
     assert calls == []
     assert sorted(path.name for path in outside.iterdir()) == sorted([canonical.name, recorded.name])
+
+
+def test_boot_reconcile_ignores_an_interpreter_outside_the_hub(hub, tmp_path, no_subprocess):
+    outside_root = tmp_path / "elsewhere"
+    outside = _legacy_env(outside_root, "alpha", [REQ_A])
+    _state_with(_row("alpha", outside, [REQ_A]))
+
+    summary = env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+
+    assert summary == {"adopted": [], "repointed": [], "needs_repair": [], "kept": []}
+    state = load_state()
+    assert state["plugin_envs"] == {}
+    assert state["installations"]["alpha"]["python_path"] == str(outside / "bin" / "python")
+
+
+def test_boot_reconcile_ignores_an_interpreter_reached_through_a_symlink(hub, tmp_path, no_subprocess):
+    outside = _legacy_env(tmp_path / "elsewhere", "alpha", [REQ_A])
+    (hub / "envs").symlink_to(tmp_path / "elsewhere" / "envs", target_is_directory=True)
+    through_link = hub / "envs" / "alpha" / "1.0.0" / "0ldf1ngerprint0"
+    assert (through_link / "bin" / "python").exists()
+    _state_with(_row("alpha", through_link, [REQ_A]))
+
+    summary = env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+
+    assert summary["adopted"] == [] and load_state()["plugin_envs"] == {}
+    assert (outside / "bin" / "python").exists()
+
+
+def test_boot_reconcile_never_probes_or_adopts_a_recorded_environment_outside_the_hub(hub, tmp_path, no_subprocess):
+    outside = _legacy_env(tmp_path / "elsewhere", "recorded", [REQ_A])
+    inside = _legacy_env(hub, "alpha", [REQ_A])
+    state = load_state()
+    state["plugin_envs"] = {environment_fingerprint(_manifest("alpha", [REQ_A])): {"path": str(outside)}}
+    state["installations"] = {"alpha": _row("alpha", inside, [REQ_A])}
+    save_state(state)
+
+    summary = env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+
+    # The record outside the hub is not trusted as the shared environment; the hub's own one is adopted.
+    assert summary["adopted"] == ["alpha"]
+    assert load_state()["plugin_envs"] == {environment_fingerprint(_manifest("alpha", [REQ_A])): {"path": str(inside)}}
+
+
+def test_an_interpreter_outside_the_hub_is_not_run_by_the_test_activation_or_registration(hub, tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.registry import register_active_provider_classes
+    from provider_hub.state import active_installations
+    from test_provider_hub import _manifest as plugin_manifest
+
+    outside = _legacy_env(tmp_path / "elsewhere", "alpha", [])
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    row = {
+        "provider_id": "examplehub", "name": "Example", "active_version": "1.0.0", "active_path": str(bundle),
+        "python_path": str(outside / "bin" / "python"), "state": "active", "pending_restart": False,
+        "manifest": plugin_manifest(dependencies={"requirements": []}), "config": {}, "last_error": None,
+        "staged_version": "1.1.0", "staged_path": str(bundle), "staged_python_path": str(outside / "bin" / "python"),
+    }
+    state = load_state()
+    state["installations"] = {"examplehub": row}
+    save_state(state)
+
+    def never(*args, **kwargs):
+        raise AssertionError("an interpreter outside the hub was run")
+
+    monkeypatch.setattr(service, "ProviderWorkerClient", never)
+    monkeypatch.setattr(service, "_smoke_validate_worker", never)
+
+    result = service.test_provider_connection("examplehub")
+    assert result["ok"] is False and "hub's environments" in result["message"]
+    assert register_active_provider_classes(active_installations()) == []
+
+    row["pending_restart"] = True
+    row["state"] = "staged"
+    state = load_state()
+    state["installations"] = {"examplehub": row}
+    save_state(state)
+    service.activate_staged_installations()
+    assert load_state()["installations"]["examplehub"]["python_path"] == str(outside / "bin" / "python")
+    assert "hub's environments" in load_state()["installations"]["examplehub"]["last_error"]
