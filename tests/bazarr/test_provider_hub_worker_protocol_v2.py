@@ -3923,3 +3923,95 @@ def test_a_group_found_gone_after_the_session_ended_it_is_not_reported_lost(monk
     fresh = WorkerSession(["worker"])
     fresh._exited(process)
     assert fresh._group_lost
+
+
+# --------------------------------------------- processes that end their own tree
+
+
+def _launcher_session(tmp_path, config=None, **kwargs):
+    """A session whose worker is the real sandbox launcher around the fake worker."""
+    from provider_hub.runtime import testing
+    from provider_hub.sandbox import Limits, RuntimeSpec, SandboxPolicy, SandboxProbe, clean_env, spawn_worker
+
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    runtime_dir = Path(testing.__file__).resolve().parents[1]
+    command = fake_worker_command()
+    declared = SandboxProbe(abi=0, verified=False, reason="test: declared mode")
+
+    def spawn():
+        policy = SandboxPolicy.for_interpreter(sys.executable, read_only=[runtime_dir], read_write=[data])
+        spec = RuntimeSpec(
+            interpreter=command[0], args=tuple(command[1:]), cwd=str(data),
+            env=clean_env(home=data, tmpdir=data, extra=fake_worker_env(**(config or {}))),
+            policy=policy, limits=Limits(), term_grace=1.0)
+        return spawn_worker(spec, probe=declared)
+
+    return WorkerSession(spawn=spawn, kind="translator", limits=fast_limits(**kwargs), name="launcher-session")
+
+
+linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the launcher is Linux only")
+
+
+@linux_only
+@pytest.mark.parametrize("ending", ["close", "ignored-cancel"])
+def test_a_launcher_worker_is_ended_by_the_launcher_not_by_a_group_kill(tmp_path, monkeypatch, ending):
+    """The launcher's own cleanup must finish: it reaches a child that left the group with setsid."""
+    session = _launcher_session(tmp_path, {"stubborn": True})
+    session.start()
+    launcher = session.process
+    child = session.request("fork", {"detached": True}, timeout=5).result["child"]
+    assert pid_alive(child)
+    kills = []
+    real = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (kills.append((pgid, sig)), real(pgid, sig))[1])
+    if ending == "close":
+        session.close(grace=0.3)
+    else:
+        handle = session.submit("sleep", {"seconds": 30, "ignore_cancel": True}, timeout=0.3)
+        with pytest.raises(RequestTimeout):
+            handle.wait()
+        session.close(grace=0.3)
+    assert wait_until(lambda: not pid_alive(child), timeout=10), "the setsid child outlived the session"
+    # The launcher left on its own after its cleanup; nobody killed it first.
+    assert launcher.returncode is not None and launcher.returncode != -signal.SIGKILL
+    assert (launcher.pid, signal.SIGKILL) not in kills
+
+
+class _OwnTreeProcess:
+    """A handle with the launcher contract: a lifeline to cut and a stop() that ends everything."""
+
+    args = ["worker"]
+
+    def __init__(self):
+        self.pid = os.getpid()
+        self.returncode = None
+        self.events = []
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return 0
+
+    def close_lifeline(self):
+        self.events.append("lifeline")
+
+    def stop(self, grace=3.0):
+        self.events.append("stop")
+        self.returncode = 0
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_process_that_ends_its_own_tree_is_handed_the_teardown(monkeypatch):
+    session = WorkerSession(["worker"])
+    process = _OwnTreeProcess()
+    calls = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    session._kill_tree(process)
+    session._end_group(process)
+    session._kill_tree(process)
+    assert process.events == ["lifeline", "stop"]
+    assert calls == []
+    assert session.exit_code == 0

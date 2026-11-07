@@ -1109,8 +1109,38 @@ class WorkerSession:
             time.sleep(0.005)
         return True
 
+    def _hand_over(self, process):
+        """Let a process that ends its own tree do it. True when ``process`` has that contract.
+
+        A sandbox launcher or an anchored worker (anything with ``stop()``)
+        knows how to end everything it started, including children that left
+        the group with ``setsid``, which a signal to the group cannot reach. A
+        group SIGKILL would take the launcher down before that cleanup
+        finished, so the teardown goes to the process: cut its lifeline (if
+        any), then ``stop()``, which waits for the confirmed exit within its own
+        bound. Done once; the group is never signalled by the session after
+        this, so a reaped or not-owned group number is never used.
+        """
+        stop = getattr(process, "stop", None)
+        if not callable(stop):
+            return False
+        with self._group_lock:
+            first = not self._group_ended
+            self._group_ended = True
+        if first:
+            try:
+                cut = getattr(process, "close_lifeline", None)
+                if callable(cut):
+                    cut()
+                stop(self.limits.kill_grace)
+            except Exception as error:
+                logger.warning("%s: stopping the worker failed: %s", self.name, type(error).__name__)
+        return True
+
     def _end_group(self, process):
         """Kill what the worker forked, once, while its leader is still unreaped."""
+        if self._hand_over(process):
+            return
         with self._group_lock:
             if self._group_ended:
                 return
@@ -1297,6 +1327,14 @@ class WorkerSession:
 
     def _kill_tree(self, process):
         """End the worker and its whole group, once. A later call only reaps."""
+        if not self._hand_over(process):
+            self._kill_group(process)
+        try:
+            self.exit_code = self._reap(process, self.limits.kill_grace)
+        except Exception:
+            logger.warning("%s: worker survived a kill", self.name)
+
+    def _kill_group(self, process):
         with self._group_lock:
             if self._ours(process):
                 # The leader is not reaped (every reap goes through ``_reap``, after
@@ -1308,10 +1346,6 @@ class WorkerSession:
                         process.kill()
                     except OSError:
                         pass
-        try:
-            self.exit_code = self._reap(process, self.limits.kill_grace)
-        except Exception:
-            logger.warning("%s: worker survived a kill", self.name)
 
     def close(self, grace=5.0):
         """Ask the worker to stop, then end its whole group. Idempotent.
