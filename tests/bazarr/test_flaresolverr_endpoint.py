@@ -19,6 +19,18 @@ def _clean_environment(monkeypatch):
     monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
     monkeypatch.setattr(endpoints, "_sibling_cache", {"checked_at": None, "url": None})
     monkeypatch.setattr(endpoints, "_refresh_started_at", None)
+    yield
+    _join_background_threads()
+
+
+def _join_background_threads():
+    """Every probe and refresh thread this module starts ends before the next test."""
+    import threading
+
+    for thread in threading.enumerate():
+        if thread.name.startswith("flaresolverr-") and thread is not threading.current_thread():
+            thread.join(5)
+            assert not thread.is_alive(), f"{thread.name} did not finish"
 
 
 def _installation(provider_id, properties=None, trusted=False, manifest_extra=None):
@@ -278,7 +290,7 @@ class TestDetect:
         status = endpoints.flaresolverr_status(stored, refresh=True)
 
         assert status == {"url": "", "source": "none", "detected": endpoints.FLARESOLVERR_SIBLING_URL,
-                          "detecting": False}
+                          "detecting": False, "sibling_found": True}
         assert stored == _settings("")
         configs = _overlay(monkeypatch, [_installation("alpha", trusted=True)], {}, stored)
         assert configs["alpha"][FIELD] == ""
@@ -288,6 +300,7 @@ class TestDetect:
         endpoints.detect_flaresolverr_sibling(refresh=True)
         status = endpoints.flaresolverr_status(_settings(endpoints.FLARESOLVERR_SIBLING_URL))
         assert status["detected"] is None
+        assert status["sibling_found"] is True
         assert status["source"] == "setting"
 
     def test_the_probe_only_accepts_a_flaresolverr_reply(self, monkeypatch):
@@ -375,11 +388,23 @@ class TestNeverBlocksTheCaller:
         import time
 
         endpoints._sibling_cache.update(checked_at=time.monotonic(), url=None)
-        monkeypatch.setattr(endpoints, "_probe_flaresolverr",
-                            lambda url: pytest.fail("a fresh answer must not probe"))
+        calls = []
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr", lambda url: calls.append(url) or True)
         status = endpoints.flaresolverr_status(_settings(""))
         assert status["detecting"] is False
-        assert endpoints.schedule_sibling_refresh() is not None  # a refresh is allowed when asked for
+        assert status["sibling_found"] is False
+        _join_background_threads()
+        assert calls == []
+
+    def test_an_explicit_refresh_probes_once_with_a_recording_stub(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr", lambda url: calls.append(url) or True)
+        thread = endpoints.schedule_sibling_refresh()
+        assert thread is not None
+        thread.join(5)
+        _join_background_threads()
+        assert calls == [endpoints.FLARESOLVERR_SIBLING_URL]
+        assert endpoints.flaresolverr_status(_settings(""))["detected"] == endpoints.FLARESOLVERR_SIBLING_URL
 
     def test_only_one_refresh_runs_at_a_time(self, monkeypatch):
         release, calls = self._gated_probe(monkeypatch)

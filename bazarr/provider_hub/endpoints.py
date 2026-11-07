@@ -248,4 +248,7 @@ def flaresolverr_status(settings=None, refresh: bool = False) -> dict:
         # Once an address is in use there is nothing to accept.
         "detected": detected if detected and detected != url else None,
         "detecting": detecting,
+        # Whether the sibling answered at all, even when it is the address
+        # already in use and so has nothing left to offer.
+        "sibling_found": detected is not None,
     }

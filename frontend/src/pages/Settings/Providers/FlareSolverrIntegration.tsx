@@ -25,13 +25,16 @@ const FlareSolverrIntegration: FunctionComponent = () => {
   const status = useFlareSolverrStatus();
   const detect = useFlareSolverrDetect();
 
-  // The latest answer wins: pressing Detect replaces what the page read on load.
-  const current = detect.data ?? status.data;
+  // One source: pressing Detect writes its answer into the status query, and a
+  // settings save refetches it, so the newer of the two is always what shows.
+  const current = status.data;
   const detected = current?.detected ?? null;
   const typed = (value ?? "").trim();
   const fromEnvironment = current?.source === "env" && typed === "";
-  const lookedAndFoundNothing =
-    detect.isSuccess && detect.data.detected === null;
+  const checked =
+    detect.isSuccess && current !== undefined && !current.detecting;
+  const nothingAnswered = checked && !current.sibling_found;
+  const alreadyInUse = checked && current.sibling_found && detected === null;
 
   return (
     <Stack gap="sm" maw={720}>
@@ -51,7 +54,7 @@ const FlareSolverrIntegration: FunctionComponent = () => {
           {current?.url}). An address saved here replaces it.
         </MantineText>
       )}
-      {status.data?.detecting === true && detect.data === undefined && (
+      {status.data?.detecting === true && (
         <MantineText size="sm" role="status">
           Looking for a FlareSolverr container next to Bazarr.
         </MantineText>
@@ -86,7 +89,13 @@ const FlareSolverrIntegration: FunctionComponent = () => {
         >
           Detect
         </Button>
-        {lookedAndFoundNothing && (
+        {alreadyInUse && (
+          <MantineText size="sm" role="status">
+            FlareSolverr answered at the usual sibling address, which is already
+            in use. No new address to offer.
+          </MantineText>
+        )}
+        {nothingAnswered && (
           <MantineText size="sm" role="status">
             Nothing answered at the usual sibling address.
           </MantineText>

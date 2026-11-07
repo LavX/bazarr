@@ -1,8 +1,10 @@
+/* eslint-disable camelcase -- API fixtures retain transport field names. */
 import { FunctionComponent, PropsWithChildren } from "react";
 import { useForm } from "@mantine/form";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
+import { useSettingsMutation } from "@/apis/hooks/system";
 import queryClient from "@/apis/queries";
 import {
   FormContext,
@@ -35,6 +37,7 @@ const status = (overrides: Partial<System.FlareSolverrStatus> = {}) => ({
     source: "none",
     detected: null,
     detecting: false,
+    sibling_found: overrides.detected != null,
     ...overrides,
   },
 });
@@ -192,5 +195,81 @@ describe("FlareSolverrIntegration", () => {
         { timeout: 5000 },
       ),
     ).toBeInTheDocument();
+  });
+
+  it("says no new address is offered when the sibling is the one in use", async () => {
+    server.use(
+      http.get("/api/providers/flaresolverr", () =>
+        HttpResponse.json(status({ url: sibling, source: "setting" })),
+      ),
+      http.post("/api/providers/flaresolverr", () =>
+        HttpResponse.json(
+          status({ url: sibling, source: "setting", sibling_found: true }),
+        ),
+      ),
+    );
+    customRender(
+      <Harness>
+        <FlareSolverrIntegration />
+      </Harness>,
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Detect" }));
+    expect(
+      await screen.findByText(/No new address to offer/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Nothing answered at the usual sibling address/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the fresh status after Detect and then a settings save", async () => {
+    let saved = false;
+    server.use(
+      http.get("/api/providers/flaresolverr", () =>
+        HttpResponse.json(
+          saved
+            ? status({ url: "http://typed:8191", source: "setting" })
+            : status({ url: "http://env:8191", source: "env" }),
+        ),
+      ),
+      http.post("/api/providers/flaresolverr", () =>
+        HttpResponse.json(status({ url: "http://env:8191", source: "env" })),
+      ),
+      http.post("/api/system/settings", () => {
+        saved = true;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const SaveButton: FunctionComponent = () => {
+      const save = useSettingsMutation();
+      return (
+        <button
+          type="button"
+          onClick={() =>
+            save.mutate({ [flaresolverrSettingKey]: "http://typed:8191" })
+          }
+        >
+          Save now
+        </button>
+      );
+    };
+    customRender(
+      <Harness>
+        <FlareSolverrIntegration />
+        <SaveButton />
+      </Harness>,
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Detect" }));
+    expect(
+      await screen.findByText(/FLARESOLVERR_URL environment variable/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save now" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/FLARESOLVERR_URL environment variable/),
+      ).not.toBeInTheDocument(),
+    );
   });
 });

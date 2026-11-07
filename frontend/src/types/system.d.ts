@@ -177,6 +177,8 @@ declare namespace System {
     detected: string | null;
     /** True until the first check has finished; the answer then arrives on a later read. */
     detecting: boolean;
+    /** Whether the sibling answered at all, even when it is the address in use. */
+    sibling_found: boolean;
   }
 
   interface ProviderSearchOutcome {
