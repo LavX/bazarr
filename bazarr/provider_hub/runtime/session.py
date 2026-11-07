@@ -165,6 +165,9 @@ class RequestHandle:
         return self._request.outcome
 
 
+_QUEUED, _CLOSED, _FULL = "queued", "closed", "full"
+
+
 def _with_line_parts(values):
     """The secret values plus every nonempty line of a multiline one.
 
@@ -371,27 +374,26 @@ class WorkerSession:
                 self._secret_values.update(fresh)
                 self._secrets_by_length = tuple(sorted(self._secret_values, key=len, reverse=True))
             self._next_id += 1
-            self._requests[req_id] = request
-        message = {
-            "t": frames.REQ,
-            "id": req_id,
-            "op": op,
-            "params": params or {},
-            "max_result_bytes": cap,
-        }
-        if timeout is not None:
-            message["deadline_ms"] = int(float(timeout) * 1000)
-        if secrets:
-            message["secrets"] = secrets
-        try:
-            queued = self._enqueue(message)
-        except BaseException:
-            with self._lock:
-                self._requests.pop(req_id, None)
-            raise
-        if not queued:
-            with self._lock:
-                self._requests.pop(req_id, None)
+            message = {
+                "t": frames.REQ,
+                "id": req_id,
+                "op": op,
+                "params": params or {},
+                "max_result_bytes": cap,
+            }
+            if timeout is not None:
+                message["deadline_ms"] = int(float(timeout) * 1000)
+            if secrets:
+                message["secrets"] = secrets
+            # The request becomes visible to the watchdog and to cancel only
+            # together with its frame in the outbox, so a cancel can never be
+            # queued ahead of the request it cancels.
+            status = self._put(frames.pack_control(message))
+            if status == _QUEUED:
+                self._requests[req_id] = request
+        if status == _FULL:
+            self._fail(SessionError("worker is not reading its input", code=Codes.WRITE_TIMEOUT), kill=True)
+        if status != _QUEUED:
             raise self._failure or SessionClosed("session is not running")
         return RequestHandle(self, request)
 
@@ -604,6 +606,8 @@ class WorkerSession:
             problem = "result declared %d chunks and sent %d" % (message["chunks"], len(request.chunks))
         elif message.get("sha256") is not None and message["sha256"] != hashlib.sha256(data).hexdigest():
             problem = "result checksum does not match its data"
+        elif request.chunks and message.get("chunks") is None:
+            problem = "chunked result without a chunk count"
         elif declared is None and data:
             problem = "data frames arrived without a byte count"
         elif data and message.get("sha256") is None:
@@ -789,21 +793,26 @@ class WorkerSession:
         ``FrameTooLarge`` for a message over the control cap. A full outbox
         means the worker stopped reading: the group is killed.
         """
-        data = frames.pack_control(message)
-        full = False
+        status = self._put(frames.pack_control(message))
+        if status == _FULL:
+            self._fail(SessionError("worker is not reading its input", code=Codes.WRITE_TIMEOUT), kill=True)
+        return status == _QUEUED
+
+    def _put(self, data):
+        """Put one packed frame in the outbox. Never blocks, never ends the session.
+
+        Returns ``_QUEUED``, ``_CLOSED`` or ``_FULL``; the caller acts on a full
+        outbox once it holds no lock.
+        """
         with self._lock:
             if self._closed:
-                return False
+                return _CLOSED
             if (self._outbox.qsize() >= self.limits.max_queued_frames
                     or self._outbox_bytes + len(data) > self.limits.max_queued_bytes):
-                full = True
-            else:
-                self._outbox_bytes += len(data)
-                self._outbox.put_nowait(data)
-        if full:
-            self._fail(SessionError("worker is not reading its input", code=Codes.WRITE_TIMEOUT), kill=True)
-            return False
-        return True
+                return _FULL
+            self._outbox_bytes += len(data)
+            self._outbox.put_nowait(data)
+        return _QUEUED
 
     def _send_quietly(self, message):
         try:

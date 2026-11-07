@@ -943,6 +943,12 @@ def test_chunked_result_without_a_checksum_is_a_protocol_error(session):
     assert session.alive
 
 
+def test_chunked_result_without_a_chunk_count_is_a_protocol_error(session):
+    with pytest.raises(ProtocolViolation):
+        session.request("chunks", {"size": 1000, "no_chunks": True}, timeout=5)
+    assert session.alive
+
+
 # -------------------------------------------------------- fake translator knobs
 
 
@@ -1408,6 +1414,36 @@ def test_a_single_short_line_of_a_multiline_secret_is_scrubbed_from_error_text(s
         session.request("leak_error", {"tail": 5, "part": part}, secrets={"key": SHORT_LINES_SECRET}, timeout=5)
     assert line not in str(caught.value)
     assert line not in caught.value.traceback
+
+
+def test_a_request_is_always_queued_before_its_cancel(make_session, monkeypatch):
+    session = make_session(limits=fast_limits(tick=0.005))
+    session.start()
+    queued = []
+    real_put = session._outbox.put_nowait
+
+    def record(data):
+        message = json.loads(data[frames.HEADER.size:])
+        if message["t"] in (frames.REQ, frames.CANCEL):
+            queued.append(message["t"])
+        real_put(data)
+
+    monkeypatch.setattr(session._outbox, "put_nowait", record)
+    real_pack = frames.pack_control
+
+    def slow_pack(message, *args, **kwargs):
+        # The window between a request becoming known and its frame being
+        # queued. The pre-check pack uses id 0 and is left alone.
+        if message.get("t") == frames.REQ and message.get("id"):
+            time.sleep(0.2)
+        return real_pack(message, *args, **kwargs)
+
+    monkeypatch.setattr(frames, "pack_control", slow_pack)
+    # A deadline that has already passed: the watchdog cancels at its first look.
+    handle = session.submit("sleep", {"seconds": 5}, timeout=0)
+    with pytest.raises(RequestTimeout):
+        handle.wait(8)
+    assert queued == [frames.REQ, frames.CANCEL]
 
 
 def test_start_after_close_is_refused_and_spawns_nothing():
