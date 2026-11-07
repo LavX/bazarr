@@ -373,6 +373,7 @@ const ACTION_LABELS: Record<string, string> = {
   stage_update: "Stage update",
   activate: "Activate plugin",
   uninstall: "Uninstall plugin",
+  repair: "Repair plugin",
   test_connection: "Test connection",
   refresh_catalog: "Refresh catalog",
   check_updates: "Check updates",

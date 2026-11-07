@@ -57,8 +57,20 @@ export const ProviderStatusBadge: FunctionComponent<{
   state: ProviderState;
   pendingRestart?: boolean;
   activeVersion?: string | null;
-}> = ({ state, pendingRestart, activeVersion }) => {
+  needsRepair?: boolean;
+}> = ({ state, pendingRestart, activeVersion, needsRepair }) => {
   const meta: StatusMeta = getProviderStateMeta(state);
+  if (needsRepair && !pendingRestart) {
+    return (
+      <StatusBadge
+        tone="danger"
+        label="Needs repair"
+        icon={meta.icon}
+        variant="dot"
+        tooltip="This plugin's Python environment is missing or broken. Use Repair to rebuild it."
+      />
+    );
+  }
   if (pendingRestart) {
     if (state === "removed") {
       return (

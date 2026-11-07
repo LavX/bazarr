@@ -206,6 +206,61 @@ describe("Settings > Providers (Provider Hub)", () => {
     await waitFor(() => expect(uninstallRequest).toHaveBeenCalledTimes(1));
   });
 
+  it("flags a plugin whose environment is broken and repairs it from the card", async () => {
+    const repairRequest = vi.fn();
+    server.use(
+      http.get("/api/provider-hub/providers", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              provider_id: "officialhub",
+              name: "Official Hub Provider",
+              active_version: "1.0.0",
+              staged_version: null,
+              state: "active",
+              pending_restart: false,
+              trusted: true,
+              active_path: "/config/provider_hub/active/officialhub",
+              python_path: "/config/provider_hub/shared_envs/abc/bin/python",
+              last_error:
+                "The plugin's Python environment is missing or broken.",
+              needs_repair: true,
+              manifest,
+            },
+          ],
+        });
+      }),
+      http.post("/api/provider-hub/installations/officialhub/repair", () => {
+        repairRequest();
+        return HttpResponse.json({ job_id: null }, { status: 202 });
+      }),
+    );
+
+    customRender(<SettingsProvidersView />);
+
+    await userEvent.click(
+      await screen.findByRole("tab", { name: /Marketplace/i }),
+    );
+    const marketplacePanel = await screen.findByRole("tabpanel", {
+      name: /Marketplace/i,
+    });
+
+    expect(
+      await within(marketplacePanel).findByRole("status", {
+        name: /Needs repair/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(marketplacePanel).queryByRole("button", { name: /^Installed$/i }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(
+      within(marketplacePanel).getByRole("button", { name: /^Repair$/i }),
+    );
+
+    await waitFor(() => expect(repairRequest).toHaveBeenCalledTimes(1));
+  });
+
   it("shows staged install actions as activation pending and cancelable", async () => {
     const uninstallRequest = vi.fn();
     server.use(

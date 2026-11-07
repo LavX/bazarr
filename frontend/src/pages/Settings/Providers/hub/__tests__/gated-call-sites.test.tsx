@@ -131,6 +131,53 @@ describe("MarketplacePanel and the password confirmation", () => {
     });
   });
 
+  it("prompts before repairing a plugin's environment, then repairs", async () => {
+    const user = userEvent.setup();
+    const repairs: string[] = [];
+    server.use(
+      http.post("/api/provider-hub/installations/someprovider/repair", () => {
+        repairs.push("repaired");
+        return HttpResponse.json({ job_id: null });
+      }),
+    );
+
+    customRender(
+      <MarketplacePanel
+        catalog={catalog}
+        providers={[
+          {
+            // eslint-disable-next-line camelcase
+            provider_id: "someprovider",
+            name: "Some Provider",
+            // eslint-disable-next-line camelcase
+            active_version: "1.0.0",
+            state: "active",
+            // eslint-disable-next-line camelcase
+            pending_restart: false,
+            // eslint-disable-next-line camelcase
+            source_id: "official",
+            // eslint-disable-next-line camelcase
+            source_bound: true,
+            // eslint-disable-next-line camelcase
+            needs_repair: true,
+            manifest,
+          },
+        ]}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^repair$/i }));
+
+    expect(repairs).toEqual([]);
+    expect(
+      await screen.findByText("Confirm your password"),
+    ).toBeInTheDocument();
+
+    await confirmThePassword(user);
+
+    await waitFor(() => expect(repairs).toEqual(["repaired"]));
+  });
+
   it("prompts before uploading a local package, then uploads", async () => {
     const user = userEvent.setup();
     const uploads: string[] = [];

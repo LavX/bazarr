@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useProviderHubInstall,
   useProviderHubRefreshCatalog,
+  useProviderHubRepair,
   useProviderHubUninstall,
 } from "@/apis/hooks/providerHub";
 import { QueryKeys } from "@/apis/queries/keys";
@@ -25,6 +26,8 @@ vi.mock("@/apis/raw", () => ({
       install: vi.fn().mockResolvedValue({ job_id: 21 }),
       // eslint-disable-next-line camelcase
       uninstall: vi.fn().mockResolvedValue({ job_id: 22 }),
+      // eslint-disable-next-line camelcase
+      repair: vi.fn().mockResolvedValue({ job_id: 24 }),
       // eslint-disable-next-line camelcase
       refreshCatalog: vi.fn().mockResolvedValue({ job_id: 23 }),
     },
@@ -165,5 +168,42 @@ describe("Provider Hub jobs", () => {
         ([filters]) => filters?.queryKey?.[0] === QueryKeys.ProviderHub,
       ),
     ).toHaveLength(2);
+  });
+
+  it("settles a repair with its job and carries the failure reason", async () => {
+    const { client, wrapper, invalidate } = setup();
+    const { result } = renderHook(() => useProviderHubRepair(), { wrapper });
+
+    act(() => result.current.mutate("examplehub"));
+    await waitFor(() =>
+      expect(api.providerHub.repair).toHaveBeenCalledWith("examplehub"),
+    );
+    expect(result.current.isPending).toBe(true);
+
+    act(() =>
+      client.setQueryData(JOBS_KEY, [
+        /* eslint-disable camelcase */
+        {
+          job_id: 24,
+          job_name: "Repair",
+          status: "failed",
+          error: {
+            reason: "failed",
+            message: "Could not repair Example: no network",
+          },
+        },
+        /* eslint-enable camelcase */
+      ]),
+    );
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect((result.current.error as Error).message).toBe(
+      "Could not repair Example: no network",
+    );
+    expect(
+      invalidate.mock.calls.filter(
+        ([filters]) => filters?.queryKey?.[0] === QueryKeys.ProviderHub,
+      ),
+    ).toHaveLength(1);
   });
 });
