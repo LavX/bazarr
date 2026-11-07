@@ -1104,7 +1104,7 @@ class WorkerPool:
                 self._queue_close(slot, None, "reap")
                 return
         self._sample_if_due(slot, now)
-        problem = self._memory_problem(slot, entry.definition.memory_limit())
+        problem = self._memory_problem(slot, slot.definition.memory_limit())
         if problem is not None:
             slot.kill_reason = (problem[0], "retiring worker: " + problem[1])
             with self._cond:

@@ -1581,3 +1581,16 @@ def test_a_worker_reported_stuck_twice_is_listed_once_and_keeps_its_release(make
     pool._stuck[0][2]()
     assert freed == [1]
     pool._stuck.clear()
+
+
+def test_a_draining_worker_keeps_the_memory_limit_it_started_with(make_pool):
+    pool = make_pool(memory_reader=lambda pid: MemorySample(200 * MIB, 200 * MIB, 1, "test"))
+    pool.register(definition(memory_limit_bytes=500 * MIB))
+    slow = pool.submit("tr", "sleep", {"seconds": 1.0})
+    first = pid_of(pool, "tr")
+    # New settings lower the limit; the worker already running was started under 500 MiB.
+    pool.restart_after_drain("tr", definition(memory_limit_bytes=100 * MIB))
+    assert pool.state("tr") is WorkerState.DRAINING
+    pool.sweep()
+    assert pid_alive(first)
+    assert slow.wait(10).result == {"slept": 1.0}
