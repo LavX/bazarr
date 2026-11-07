@@ -19,8 +19,10 @@ What happens, in order:
    reaper. When the worker exits, when the host dies (lifeline EOF) or on
    SIGTERM, every descendant is killed, ``setsid`` children included.
 3. The child sets the parent-death signal, core size 0, open-file and
-   file-size limits, nice, ``oom_score_adj``, umask, ``no_new_privs``, changes
-   to the working directory, applies the ruleset and ``execve``s the worker
+   file-size limits, nice, ``oom_score_adj``, umask, ``no_new_privs``, a
+   seccomp filter that denies chmod, chown, utime and xattr calls (see
+   ``seccomp.py``), changes to the working directory, applies the ruleset and
+   ``execve``s the worker
    interpreter with exactly the environment in the spec.
 
 Exit codes: the worker's own code (128 + signal when it was killed by one);
@@ -48,8 +50,9 @@ Spec layout (JSON object)::
       "term_grace": 3.0
     }
 
-In ``declared`` mode no ruleset is applied; limits, ``no_new_privs`` and the
-clean environment still are.
+In ``declared`` mode no ruleset is applied; limits, ``no_new_privs``, the
+clean environment and, where the architecture is supported, the metadata
+filter still are.
 """
 import importlib.util
 import json
@@ -91,13 +94,17 @@ def _say(message):
         pass
 
 
-def _load_landlock():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "landlock.py")
-    spec = importlib.util.spec_from_file_location("bazarr_sandbox_landlock", path)
+def _load_sibling(name):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name + ".py")
+    spec = importlib.util.spec_from_file_location("bazarr_sandbox_" + name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_landlock():
+    return _load_sibling("landlock")
 
 
 def _read_spec(fd):
@@ -163,7 +170,7 @@ def _apply_limits(limits):
             _say("oom_score_adj not applied: %s" % exc)
 
 
-def _child(spec, landlock, parent_pid, close_fds, report_fd):
+def _child(spec, landlock, seccomp, parent_pid, close_fds, report_fd):
     """Runs in the forked child. Never returns.
 
     ``report_fd`` is a close-on-exec pipe: whatever is written there is a
@@ -185,6 +192,16 @@ def _child(spec, landlock, parent_pid, close_fds, report_fd):
             os._exit(EXIT_SANDBOX_FAILED)
         _apply_limits(spec.get("limits") or {})
         landlock.prctl(landlock.PR_SET_NO_NEW_PRIVS, 1)
+        # chmod, chown, utime and xattr calls cannot be scoped by Landlock or by
+        # a path-blind filter, so they are denied outright. Required when the
+        # sandbox is enforced; best effort on a host that only declares.
+        if spec.get("mode", "enforce") == "enforce":
+            seccomp.apply_filter()
+        else:
+            try:
+                seccomp.apply_filter()
+            except OSError as exc:
+                _say("metadata filter not applied: %s" % exc)
         kind, code = "spec", EXIT_BAD_SPEC
         os.chdir(spec["cwd"])
         kind, code = "sandbox", EXIT_SANDBOX_FAILED
@@ -383,6 +400,7 @@ def main(argv):
         return EXIT_BAD_SPEC
     try:
         landlock = _load_landlock()
+        seccomp = _load_sibling("seccomp")
         landlock.prctl(landlock.PR_SET_CHILD_SUBREAPER, 1)
     except Exception as exc:
         _say("launcher setup failed: %s" % exc)
@@ -402,7 +420,7 @@ def main(argv):
     # One thread here, so this fork is safe. The host never forks itself.
     pid = os.fork()
     if pid == 0:
-        _child(spec, landlock, parent_pid, (lifeline_fd, wake_r, wake_w, report_r, _STATUS_FD), report_w)
+        _child(spec, landlock, seccomp, parent_pid, (lifeline_fd, wake_r, wake_w, report_r, _STATUS_FD), report_w)
     os.close(report_w)
     try:
         status = _supervise(pid, wake_r, lifeline_fd, float(spec.get("term_grace", DEFAULT_TERM_GRACE)))

@@ -153,6 +153,11 @@ declare namespace System {
   interface SandboxStatus {
     abi: number;
     enforced: boolean;
+    /**
+     * Whether plugin workers actually run sandboxed. The host can be able to
+     * sandbox (enforced) while workers still start the old way.
+     */
+    workers_sandboxed: boolean;
     filesystem: "enforced" | "declared";
     network: "enforced" | "declared";
     signal_scope: "enforced" | "declared";

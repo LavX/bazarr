@@ -127,11 +127,10 @@ function mediaServerTitle(
 }
 
 function sandboxValue(sandbox: System.SandboxStatus): string {
-  // Neutral on purpose: a host without a sandbox is stated as a fact, never
-  // dressed up as protection.
-  return sandbox.enforced
-    ? `${sandbox.label} (Landlock ABI ${sandbox.abi})`
-    : sandbox.label;
+  // The backend words this: a host that cannot sandbox says so as a plain
+  // fact, and a host that can says what is available and whether workers use
+  // it yet. Never dressed up as protection.
+  return sandbox.label;
 }
 
 function mediaServerValue(server: System.MediaServerStatus): string {

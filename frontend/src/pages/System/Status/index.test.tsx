@@ -348,6 +348,7 @@ describe("System Status", () => {
       sandbox: {
         abi: 0,
         enforced: false,
+        workers_sandboxed: false,
         filesystem: "declared",
         network: "declared",
         signal_scope: "declared",
@@ -368,15 +369,17 @@ describe("System Status", () => {
     ).toBeInTheDocument();
   });
 
-  it("names the Landlock level when a sandbox is enforced", async () => {
+  it("says the sandbox is available but not active for workers yet", async () => {
     statusWith({
       sandbox: {
         abi: 6,
         enforced: true,
+        workers_sandboxed: false,
         filesystem: "enforced",
         network: "enforced",
         signal_scope: "enforced",
-        label: "Sandboxed",
+        label:
+          "Sandbox available: Landlock ABI 6. Not active for plugin workers yet.",
         reason: "",
         limitations: [],
       },
@@ -384,10 +387,13 @@ describe("System Status", () => {
     customRender(<SystemStatusView />);
 
     expect(
-      await screen.findByText("Sandboxed (Landlock ABI 6)", undefined, {
-        timeout: 8000,
-      }),
+      await screen.findByText(
+        "Sandbox available: Landlock ABI 6. Not active for plugin workers yet.",
+        undefined,
+        { timeout: 8000 },
+      ),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/^Sandboxed/)).toBeNull();
   });
 
   it("leaves the sandbox row out when the endpoint does not report one", async () => {

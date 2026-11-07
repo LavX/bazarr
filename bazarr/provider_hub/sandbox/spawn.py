@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import landlock
+from . import landlock, seccomp
 from .policy import (
     PolicyError,
     RuntimeSpec,
@@ -36,14 +36,17 @@ LAUNCHER_PATH = Path(__file__).with_name("launcher.py")
 
 __all__ = [
     "LAUNCHER_PATH",
+    "LauncherFailure",
     "LauncherProcess",
+    "MIN_ENFORCED_ABI",
     "SandboxApplyError",
     "SandboxProbe",
+    "WorkerProcess",
     "probe_sandbox",
     "reset_probe_cache",
+    "sandbox_limitations",
     "sandbox_status",
     "spawn_worker",
-    "LauncherFailure",
 ]
 
 
@@ -69,13 +72,24 @@ class LauncherFailure:
     message: str
 
 
+# Landlock ABI 3 is the first that can restrict truncate(2). Below it a
+# same-user worker could empty any file the user owns, wherever it lives, so
+# the filesystem is not enforced there.
+MIN_ENFORCED_ABI = 3
+
+# Flipped when the worker spawner starts plugin workers through this launcher.
+# Until then the probe describes what the host could do, not what workers get.
+WORKERS_SANDBOXED = False
+
+
 @dataclass(frozen=True)
 class SandboxProbe:
     """What this host can enforce, measured and not assumed."""
 
     abi: int
-    # A child applied a test ruleset and could not read a canary or write
-    # outside its allowed directory.
+    # A child applied a test ruleset and a metadata filter and could not read a
+    # canary, write or truncate outside its allowed directory, or change the
+    # mode, owner, times or extended attributes of any file.
     verified: bool
     network_verified: bool = False
     signal_scope_verified: bool = False
@@ -83,7 +97,7 @@ class SandboxProbe:
 
     @property
     def enforced(self) -> bool:
-        return self.abi >= 1 and self.verified
+        return self.abi >= MIN_ENFORCED_ABI and self.verified
 
     @property
     def network_enforced(self) -> bool:
@@ -101,7 +115,7 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
             "Workers run with resource limits and a clean environment, but nothing confines "
             "their files, network or signals."
         ]
-    notes = []
+    notes = ["Workers cannot change file modes, owners, times or extended attributes anywhere."]
     if probe.abi < 4 or not probe.network_enforced:
         notes.append("Network connections are not restricted.")
     if probe.abi < 9:
@@ -118,16 +132,25 @@ def sandbox_status(probe: SandboxProbe | None = None) -> dict[str, Any]:
     """Status payload for System > Status and plugin cards.
 
     ``declared`` means nothing confines the worker. The label is neutral on
-    purpose: it must never read as protection.
+    purpose: it must never read as protection. ``enforced`` and the labels
+    describe what the host can do; ``workers_sandboxed`` says whether plugin
+    workers actually run that way yet.
     """
     probe = probe or probe_sandbox()
+    if not probe.enforced:
+        label = "Not sandboxed on this host"
+    elif WORKERS_SANDBOXED:
+        label = "Sandboxed (Landlock ABI %d)" % probe.abi
+    else:
+        label = "Sandbox available: Landlock ABI %d. Not active for plugin workers yet." % probe.abi
     return {
         "abi": probe.abi,
         "enforced": probe.enforced,
         "filesystem": "enforced" if probe.enforced else "declared",
         "network": "enforced" if probe.network_enforced else "declared",
         "signal_scope": "enforced" if probe.signal_scope_enforced else "declared",
-        "label": "Sandboxed" if probe.enforced else "Not sandboxed on this host",
+        "workers_sandboxed": bool(probe.enforced and WORKERS_SANDBOXED),
+        "label": label,
         "reason": probe.reason,
         "limitations": sandbox_limitations(probe),
     }
@@ -154,6 +177,18 @@ def write_outside():
 def write_inside():
     with open(os.path.join(allowed, "ok.txt"), "w"):
         pass
+def trunc_outside():
+    os.truncate(os.path.join(base, "trunc.txt"), 0)
+def chmod_outside():
+    os.chmod(os.path.join(base, "canary.txt"), 0o644)
+def chmod_inside():
+    os.chmod(os.path.join(allowed, "ok.txt"), 0o600)
+def chown_outside():
+    os.chown(os.path.join(base, "canary.txt"), -1, -1)
+def utime_outside():
+    os.utime(os.path.join(base, "canary.txt"), None)
+def setxattr_outside():
+    os.setxattr(os.path.join(base, "canary.txt"), "user.bazarr", b"1")
 def connect():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -164,6 +199,12 @@ def connect():
 attempt("read_outside", read_outside)
 attempt("write_outside", write_outside)
 attempt("write_inside", write_inside)
+attempt("truncate_outside", trunc_outside)
+attempt("chmod_outside", chmod_outside)
+attempt("chmod_inside", chmod_inside)
+attempt("chown_outside", chown_outside)
+attempt("utime_outside", utime_outside)
+attempt("setxattr_outside", setxattr_outside)
 attempt("connect", connect)
 attempt("signal", lambda: os.kill(os.getppid(), 0))
 print(json.dumps(out))
@@ -200,6 +241,14 @@ def _run_probe(python: str) -> SandboxProbe:
     abi, reason = landlock.probe_abi()
     if abi < 1:
         return SandboxProbe(abi=0, verified=False, reason=reason)
+    if abi < MIN_ENFORCED_ABI:
+        return SandboxProbe(
+            abi=abi,
+            verified=False,
+            reason="Landlock ABI %d cannot restrict truncate(2); ABI %d is the minimum" % (abi, MIN_ENFORCED_ABI),
+        )
+    if not seccomp.supported():
+        return SandboxProbe(abi=abi, verified=False, reason="no metadata filter for this architecture")
     if getattr(sys, "frozen", False) and python == sys.executable:
         return SandboxProbe(abi=abi, verified=False, reason="frozen build has no stand-alone interpreter for the launcher")
     base = tempfile.mkdtemp(prefix="bazarr-landlock-")
@@ -208,6 +257,7 @@ def _run_probe(python: str) -> SandboxProbe:
         allowed = os.path.join(base, "allowed")
         os.mkdir(allowed)
         Path(base, "canary.txt").write_text("canary", encoding="utf-8")
+        Path(base, "trunc.txt").write_text("keep me", encoding="utf-8")
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
         listener.listen(4)
@@ -227,7 +277,7 @@ def _run_probe(python: str) -> SandboxProbe:
             policy=policy,
             term_grace=1.0,
         )
-        process = _start(spec, enforce=True, min_abi=1, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = _start(spec, enforce=True, min_abi=1, enforcement="enforced", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             out, err = process.communicate(timeout=20)
         except subprocess.TimeoutExpired:
@@ -240,13 +290,13 @@ def _run_probe(python: str) -> SandboxProbe:
             detail = failure.message if failure else (err.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"])[0]
             return SandboxProbe(abi=abi, verified=False, reason="canary could not run: %s" % detail)
         result = json.loads(out.decode("utf-8").strip().splitlines()[-1])
-        verified = (
-            result.get("read_outside") == "denied"
-            and result.get("write_outside") == "denied"
-            and result.get("write_inside") == "allowed"
-        )
+        denied = ("read_outside", "write_outside", "truncate_outside", "chmod_outside", "chmod_inside",
+                  "chown_outside", "utime_outside", "setxattr_outside")
+        verified = result.get("write_inside") == "allowed" and all(result.get(k) == "denied" for k in denied)
+        if verified and Path(base, "trunc.txt").read_text(encoding="utf-8") != "keep me":
+            verified = False
         if not verified:
-            return SandboxProbe(abi=abi, verified=False, reason="canary escaped the ruleset: %s" % result)
+            return SandboxProbe(abi=abi, verified=False, reason="canary escaped the sandbox: %s" % result)
         return SandboxProbe(
             abi=abi,
             verified=True,
@@ -273,7 +323,50 @@ def _close_fds(holder: dict) -> None:
                 pass
 
 
-class LauncherProcess(subprocess.Popen):
+class WorkerProcess(subprocess.Popen):
+    """What the worker spawner sees, with or without a launcher.
+
+    ``enforcement`` is ``"enforced"`` or ``"declared"``. A plain worker (a
+    platform without the launcher) has no failure record, no lifeline and
+    nothing to raise, but answers the same calls.
+    """
+
+    enforcement: str = "declared"
+
+    def launcher_failure(self) -> "LauncherFailure | None":
+        return None
+
+    def raise_for_sandbox_failure(self) -> None:
+        return None
+
+    def close_lifeline(self) -> None:
+        return None
+
+    def stop(self, grace: float = 3.0) -> None:
+        """Terminate the worker, then kill its process group after ``grace``."""
+        if self.poll() is None:
+            try:
+                self.terminate()
+            except OSError:
+                pass
+            try:
+                self.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                killpg = getattr(os, "killpg", None)
+                try:
+                    if killpg is not None:
+                        killpg(self.pid, signal.SIGKILL)
+                    else:
+                        self.kill()
+                except OSError:
+                    pass
+                try:
+                    self.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+
+
+class LauncherProcess(WorkerProcess):
     """The launcher process. Its subtree is the worker.
 
     Holds the write end of the lifeline pipe: when this object is closed or
@@ -281,8 +374,6 @@ class LauncherProcess(subprocess.Popen):
     when the host dies, the launcher sees end-of-file and kills the whole
     worker tree.
     """
-
-    enforcement: str = "declared"
 
     def __init__(self, *args, lifeline: int | None = None, status: int | None = None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -389,7 +480,15 @@ def _spec_fd(data: bytes) -> int:
     return fd
 
 
-def _start(spec: RuntimeSpec, *, enforce: bool, min_abi: int, launcher_python: str | None = None, **popen_kwargs) -> LauncherProcess:
+def _start(
+    spec: RuntimeSpec,
+    *,
+    enforce: bool,
+    min_abi: int,
+    enforcement: str,
+    launcher_python: str | None = None,
+    **popen_kwargs,
+) -> LauncherProcess:
     data = spec.to_launch_json(enforce=enforce, min_abi=min_abi)
     python = launcher_python or sys.executable
     spec_fd = _spec_fd(data)
@@ -418,7 +517,7 @@ def _start(spec: RuntimeSpec, *, enforce: bool, min_abi: int, launcher_python: s
         os.close(spec_fd)
         os.close(life_r)
         os.close(status_w)
-    process.enforcement = "enforced" if enforce else "declared"
+    process.enforcement = enforcement
     return process
 
 
@@ -432,7 +531,7 @@ def spawn_worker(
     stdout: Any = subprocess.PIPE,
     stderr: Any = subprocess.PIPE,
     **popen_kwargs: Any,
-) -> LauncherProcess:
+) -> WorkerProcess:
     """Start one worker through the launcher and return its process handle.
 
     This is what the worker spawner calls. The decision follows the probe:
@@ -442,9 +541,17 @@ def spawn_worker(
       ``process.launcher_failure()`` carries the reason and
       ``process.raise_for_sandbox_failure()`` raises ``SandboxApplyError``).
       There is no silent downgrade.
-    * Probe negative: the worker runs with limits and a clean environment but
-      without a ruleset, ``process.enforcement == "declared"``. With
-      ``require_sandbox=True`` this raises ``SandboxRefused`` instead.
+    * Probe negative (no Landlock, an ABI below 3, an unsupported
+      architecture, or a canary that escaped): the worker runs with limits and
+      a clean environment but without a ruleset, ``process.enforcement ==
+      "declared"``. With ``require_sandbox=True`` this raises
+      ``SandboxRefused`` instead.
+    * A policy whose ``abi_cap`` is below 3 gets the weaker ruleset it asks
+      for and is reported as declared: truncate(2) is not covered.
+
+    "Enforced" means all of: the ruleset (filesystem, plus network and signal
+    scope where the ABI has them), the seccomp filter that denies chmod, chown,
+    utime and xattr calls, and the limits.
 
     ``popen_kwargs`` (``text``, ``bufsize`` and so on) go to ``subprocess.Popen``;
     ``preexec_fn`` is refused. On a platform other than Linux the worker starts
@@ -455,7 +562,7 @@ def spawn_worker(
     if not landlock.is_supported_platform():
         if require_sandbox:
             raise SandboxRefused("this platform cannot sandbox workers")
-        process = subprocess.Popen(
+        return WorkerProcess(
             [spec.interpreter, *spec.args],
             cwd=spec.cwd,
             env=dict(spec.env),
@@ -465,14 +572,19 @@ def spawn_worker(
             start_new_session=True,
             **popen_kwargs,
         )
-        return process  # type: ignore[return-value]
     probe = probe or probe_sandbox()
-    if not probe.enforced and require_sandbox:
+    cap = spec.policy.abi_cap
+    effective = min(probe.abi, cap) if cap else probe.abi
+    # Filesystem integrity needs truncate(2) covered, which is ABI 3. A policy
+    # capped below that still gets the weaker ruleset, but it is not "enforced".
+    sandboxed = probe.enforced and effective >= MIN_ENFORCED_ABI
+    if not sandboxed and require_sandbox:
         raise SandboxRefused("this host cannot sandbox workers: %s" % (probe.reason or "no Landlock"))
     return _start(
         spec,
         enforce=probe.enforced,
         min_abi=probe.abi,
+        enforcement="enforced" if sandboxed else "declared",
         launcher_python=launcher_python,
         stdin=stdin,
         stdout=stdout,

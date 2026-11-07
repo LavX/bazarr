@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat as stat_module
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -117,6 +118,9 @@ def _abs(path: str | os.PathLike) -> str:
     text = os.fspath(path)
     if not os.path.isabs(text):
         raise PolicyError("sandbox paths must be absolute: %r" % text)
+    # Collapsing ".." lexically is wrong across symlinks, so it is not allowed.
+    if ".." in text.split("/"):
+        raise PolicyError("sandbox paths cannot contain '..': %r" % text)
     return os.path.normpath(text)
 
 
@@ -125,13 +129,7 @@ def _is_proc_self(path: str) -> bool:
 
 
 def _canonical(paths: Iterable[str | os.PathLike]) -> tuple[str, ...]:
-    """Absolute, symlink-resolved, de-duplicated, order kept.
-
-    Only the resolved form is kept, never the symlink that led to it: the
-    launcher opens every grant without following symlinks and compares it with
-    what was resolved here. ``/proc/self`` stays symbolic, because the launcher's
-    child resolves it and resolving it here would grant the host's own entry.
-    """
+    """Absolute, symlink-resolved, de-duplicated, order kept (trusted paths only)."""
     seen: dict[str, None] = {}
     for item in paths:
         path = _abs(item)
@@ -139,46 +137,103 @@ def _canonical(paths: Iterable[str | os.PathLike]) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _existing(paths: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(p for p in paths if _is_proc_self(p) or os.path.lexists(p))
+# Called after each directory step of a walk, with the path reached so far.
+# Tests use it to swap a directory mid-walk; production leaves it unset.
+_walk_hook = None
 
 
-def _identities(paths: Iterable[str]) -> dict[str, tuple[int, int]]:
-    result: dict[str, tuple[int, int]] = {}
-    for path in paths:
-        if _is_proc_self(path):
-            continue
-        try:
-            info = os.stat(path)
-        except OSError:
-            continue
-        result[path] = (info.st_dev, info.st_ino)
-    return result
+def _walk_below(root_real: str, parts: Sequence[str], root_lexical: str) -> tuple[int, int, int] | None:
+    """Walk ``parts`` below a writable root with descriptors and no symlink following.
 
-
-def _reject_links_in_writable_trees(given: Iterable[str | os.PathLike], writable_given: Iterable[str | os.PathLike]) -> None:
-    """Refuse grants a worker could redirect by swapping a link into its own tree.
-
-    A grant that resolves into a writable tree must be spelled as a path under
-    that tree with no symlink below the tree's root. Links above the root (a
-    ``/config`` that points at another disk) are the host's business and fine.
+    ``root_real`` is the host-resolved writable root, trusted because the
+    worker cannot write above it. Every component below it is opened with
+    ``openat(O_PATH|O_NOFOLLOW)`` relative to the descriptor of the previous
+    one, so a worker that swaps a directory for a link while this runs either
+    gets refused or is held to the object the walk already holds. Returns
+    ``(st_dev, st_ino, st_mode)`` of the final object read from its own
+    descriptor, or ``None`` when something on the way is missing.
     """
-    roots = [os.path.normpath(_abs(g)) for g in writable_given]
+    try:
+        fd = os.open(root_real, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    reached = root_real
+    try:
+        for index, part in enumerate(parts):
+            try:
+                nxt = os.open(part, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            except (FileNotFoundError, NotADirectoryError):
+                return None
+            os.close(fd)
+            fd = nxt
+            reached = os.path.join(reached, part)
+            info = os.fstat(fd)
+            if stat_module.S_ISLNK(info.st_mode):
+                raise PolicyError("%s is a symlink inside the writable tree %s" % (reached, root_lexical))
+            if index < len(parts) - 1 and not stat_module.S_ISDIR(info.st_mode):
+                return None
+            if _walk_hook is not None:
+                _walk_hook(reached)
+        info = os.fstat(fd)
+        return info.st_dev, info.st_ino, info.st_mode
+    finally:
+        os.close(fd)
+
+
+def _resolve_grants(
+    items: Iterable[str | os.PathLike],
+    writable: Iterable[str | os.PathLike],
+    *,
+    required: bool = False,
+) -> list[tuple[str, tuple[int, int], int]]:
+    """Resolve grants to ``(path, (dev, ino), mode)``; grants that do not exist are left out.
+
+    A grant inside a writable tree is walked with descriptors (see
+    ``_walk_below``) and must contain no symlink below the tree's root. Links
+    above the root, such as a ``/config`` that points at another disk, are the
+    host's own business. A grant outside every writable tree is resolved the
+    ordinary way, but it may not resolve into one: that would be a link
+    reaching in. ``/proc/self`` is skipped; the launcher's child resolves it.
+    """
+    roots = [os.path.normpath(_abs(g)) for g in writable]
     real_roots = [os.path.realpath(r) for r in roots]
-    for item in given:
-        lexical = os.path.normpath(_abs(item))
+    result: list[tuple[str, tuple[int, int], int]] = []
+    seen: set[str] = set()
+    for item in items:
+        lexical = _abs(item)
         if _is_proc_self(lexical):
             continue
-        real = os.path.realpath(lexical)
+        walked = None
         for root, real_root in zip(roots, real_roots):
             if lexical == root or lexical.startswith(root.rstrip("/") + "/"):
-                current = root
-                for part in Path(lexical).relative_to(root).parts:
-                    current = os.path.join(current, part)
-                    if os.path.islink(current):
-                        raise PolicyError("%s is a symlink inside the writable tree %s" % (current, root))
-            elif real == real_root or real.startswith(real_root.rstrip("/") + "/"):
-                raise PolicyError("%s reaches the writable tree %s through a symlink" % (lexical, root))
+                parts = Path(lexical).relative_to(root).parts
+                walked = (real_root, parts, root)
+                break
+        if walked is not None:
+            real_root, parts, root = walked
+            found = _walk_below(real_root, parts, root)
+            if found is None:
+                if required:
+                    raise PolicyError("read-write path does not exist: %s" % lexical)
+                continue
+            path = os.path.join(real_root, *parts)
+            dev, ino, mode = found
+        else:
+            path = os.path.realpath(lexical)
+            for root, real_root in zip(roots, real_roots):
+                if path == real_root or path.startswith(real_root.rstrip("/") + "/"):
+                    raise PolicyError("%s reaches the writable tree %s through a symlink" % (lexical, root))
+            try:
+                info = os.stat(path)
+            except OSError:
+                if required:
+                    raise PolicyError("read-write path does not exist: %s" % lexical) from None
+                continue
+            dev, ino, mode = info.st_dev, info.st_ino, info.st_mode
+        if path not in seen:
+            seen.add(path)
+            result.append((path, (dev, ino), mode))
+    return result
 
 
 def interpreter_read_paths(interpreter: str | os.PathLike) -> tuple[str, ...]:
@@ -264,22 +319,22 @@ class SandboxPolicy:
             ports = frozenset(values)
         read_only = tuple(read_only)
         read_write = tuple(read_write)
-        _reject_links_in_writable_trees((*read_only, *read_write), read_write)
-        rw = _canonical(read_write)
-        for path in rw:
-            if not os.path.isdir(path):
+        rw_items = _resolve_grants(read_write, read_write, required=True)
+        for path, _ident, mode in rw_items:
+            if not stat_module.S_ISDIR(mode):
                 raise PolicyError("read-write path is not an existing directory: %s" % path)
-        ro = _existing(_canonical((*SYSTEM_READ_PATHS, *interpreter_read_paths(interpreter), *read_only)))
-        devices = _existing(_canonical(DEVICE_PATHS))
-        resolve_unix = _existing(_canonical(RESOLVE_UNIX_PATHS))
+        ro_items = _resolve_grants((*SYSTEM_READ_PATHS, *interpreter_read_paths(interpreter), *read_only), read_write)
+        device_items = _resolve_grants(DEVICE_PATHS, read_write)
+        unix_items = _resolve_grants(RESOLVE_UNIX_PATHS, read_write)
+        every = [*ro_items, *rw_items, *device_items, *unix_items]
         policy = cls(
-            read_only=ro,
-            read_write=rw,
-            devices=devices,
-            resolve_unix=resolve_unix,
+            read_only=(*(p for p, _i, _m in ro_items), "/proc/self"),
+            read_write=tuple(p for p, _i, _m in rw_items),
+            devices=tuple(p for p, _i, _m in device_items),
+            resolve_unix=tuple(p for p, _i, _m in unix_items),
             connect_ports=ports,
             abi_cap=abi_cap,
-            identities=_identities((*ro, *rw, *devices, *resolve_unix)),
+            identities={p: ident for p, ident, _m in every},
         )
         policy.validate(protected_paths)
         return policy

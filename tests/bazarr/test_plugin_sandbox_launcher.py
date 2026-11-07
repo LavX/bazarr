@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import textwrap
@@ -21,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from provider_hub.sandbox import (
+    WorkerProcess,
     Limits,
     PolicyError,
     RuntimeSpec,
@@ -33,6 +35,7 @@ from provider_hub.sandbox import (
     policy as policy_module,
     probe_sandbox,
     sandbox_status,
+    seccomp,
     spawn,
     spawn_worker,
 )
@@ -163,7 +166,7 @@ def test_policy_refuses_a_grant_that_contains_a_protected_path(tmp_path):
 def test_policy_refuses_writable_system_paths():
     with pytest.raises(PolicyError):
         SandboxPolicy.for_interpreter(sys.executable, read_write=["/usr"])
-    with pytest.raises(PolicyError, match="system path"):
+    with pytest.raises(PolicyError, match="system path|symlink"):
         SandboxPolicy.for_interpreter(sys.executable, read_write=["/etc"])
 
 
@@ -177,7 +180,7 @@ def test_policy_refuses_nested_writable_grants(tmp_path):
 
 
 def test_policy_requires_existing_writable_directories(tmp_path):
-    with pytest.raises(PolicyError, match="existing directory"):
+    with pytest.raises(PolicyError, match="does not exist"):
         SandboxPolicy.for_interpreter(sys.executable, read_write=[tmp_path / "missing"])
 
 
@@ -190,11 +193,11 @@ def test_policy_keeps_only_resolved_paths_and_records_identities(tmp_path):
     assert policy.read_write == (str(real),)
     info = os.stat(real)
     assert policy.identities[str(real)] == (info.st_dev, info.st_ino)
-    spec = make_spec(tmp_path, "pass")
-    payload = json.loads(spec.to_launch_json(enforce=True, min_abi=1))
-    assert [str(real), info.st_dev, info.st_ino] in payload["read_write"] or any(
-        isinstance(g, list) and g[0] == str(spec.policy.read_write[0]) for g in payload["read_write"]
+    spec = RuntimeSpec(
+        interpreter=sys.executable, args=("-I", "-c", "pass"), cwd=str(real), env=clean_env(), policy=policy
     )
+    payload = json.loads(spec.to_launch_json(enforce=True, min_abi=1))
+    assert [str(real), info.st_dev, info.st_ino] in payload["read_write"]
 
 
 def test_policy_refuses_grants_a_worker_could_redirect(tmp_path):
@@ -384,6 +387,8 @@ def test_live_probe_confines_the_canary(live):
     assert live.enforced and live.abi >= 1 and live.verified
     status = sandbox_status(live)
     assert status["filesystem"] == "enforced"
+    assert status["workers_sandboxed"] is False
+    assert status["label"] == "Sandbox available: Landlock ABI %d. Not active for plugin workers yet." % live.abi
     assert status["network"] == ("enforced" if live.abi >= 4 else "declared")
     assert status["signal_scope"] == ("enforced" if live.abi >= 6 else "declared")
 
@@ -419,6 +424,7 @@ def test_writes_outside_the_allowed_paths_fail(live, tmp_path):
         attempt("read_config", lambda: read(%(secret)r))
         attempt("write_db", lambda: write(%(db)r))
         attempt("overwrite_config", lambda: write(%(secret)r))
+        attempt("truncate_config", lambda: os.truncate(%(secret)r, 0))
         attempt("list_outside", lambda: os.listdir(%(outside)r))
         attempt("mkdir_outside", lambda: os.mkdir(%(outside)r + "/d"))
         attempt("read_etc_passwd", lambda: read("/etc/passwd"))
@@ -435,7 +441,7 @@ def test_writes_outside_the_allowed_paths_fail(live, tmp_path):
     assert result["read_usr"] == "allowed"
     assert result["dev_null"] == "allowed"
     assert result["home"] == "allowed"  # HOME is the plugin data dir
-    for name in ("write_outside", "read_config", "write_db", "overwrite_config", "list_outside", "mkdir_outside"):
+    for name in ("write_outside", "read_config", "write_db", "overwrite_config", "truncate_config", "list_outside", "mkdir_outside"):
         assert result[name] == "denied", (name, result)
     assert secret.read_text(encoding="utf-8") == "secret: 1"
     assert not (outside / "new.txt").exists()
@@ -467,6 +473,7 @@ def test_read_only_grants_cannot_be_written(live, tmp_path):
 
 @linux_only
 def test_rename_and_move_inside_the_data_dir_work_but_not_across_the_edge(live, tmp_path):
+    need_abi(live, 2)
     # ABI 2 and above: renames inside the data dir work, moves across the edge
     # are denied. The ABI 1 behavior has its own test below.
     ro = tmp_path / "bundle"
@@ -499,7 +506,8 @@ def test_rename_and_move_inside_the_data_dir_work_but_not_across_the_edge(live, 
 def test_abi_1_denies_cross_directory_renames_and_move_falls_back_to_copy(live, tmp_path):
     # A domain that does not handle REFER, which is every ABI 1 kernel and what
     # abi_cap=1 reproduces on a newer one, refuses cross-directory renames with
-    # EXDEV. shutil.move must then copy and delete.
+    # EXDEV, so shutil.move has to copy and delete. Its default copy_function
+    # needs utime, which the metadata filter denies; copyfile does not.
     script = """
         import json, os, shutil
         os.makedirs("a"); os.makedirs("c")
@@ -510,14 +518,22 @@ def test_abi_1_denies_cross_directory_renames_and_move_falls_back_to_copy(live, 
         except OSError as exc:
             out["rename"] = exc.errno
         out["same_dir_rename"] = os.rename("a/f", "a/g") is None
-        shutil.move("a/g", "c/g")
+        try:
+            shutil.move("a/g", "c/g")
+            out["default_move"] = "ok"
+        except PermissionError:
+            out["default_move"] = "denied"  # copy2 wants utime
+            os.unlink("c/g")
+        shutil.move("a/g", "c/g", copy_function=shutil.copyfile)
         out["moved"] = os.path.exists("c/g") and not os.path.exists("a/g")
         out["content"] = open("c/g").read()
         print(json.dumps(out))
     """
     rc, out, err = run(make_spec(tmp_path, script, abi_cap=1), live)
     assert rc == 0, err
-    assert json.loads(out) == {"rename": errno.EXDEV, "same_dir_rename": True, "moved": True, "content": "1"}
+    assert json.loads(out) == {
+        "rename": errno.EXDEV, "same_dir_rename": True, "default_move": "denied", "moved": True, "content": "1",
+    }
 
 
 @linux_only
@@ -1088,3 +1104,322 @@ def test_the_status_payload_carries_the_sandbox_state(monkeypatch):
 
     monkeypatch.setattr(package, "sandbox_status", broken)
     assert "sandbox" not in _status_payload(monkeypatch, {})
+
+
+# --- Metadata filter ---------------------------------------------------------
+
+
+def run_bpf(program, arch, number):
+    """Evaluate a classic BPF program on a synthetic seccomp_data."""
+    insns = [struct.unpack_from("=HBBI", program, offset) for offset in range(0, len(program), 8)]
+    data = {0: number, 4: arch}
+    pc = acc = 0
+    for _ in range(1000):
+        code, jt, jf, k = insns[pc]
+        if code == 0x20:
+            acc = data[k]
+            pc += 1
+        elif code == 0x15:
+            pc += 1 + (jt if acc == k else jf)
+        elif code == 0x45:
+            pc += 1 + (jt if acc & k else jf)
+        elif code == 0x06:
+            return k
+        else:
+            raise AssertionError("unexpected opcode %#x" % code)
+    raise AssertionError("filter does not terminate")
+
+
+@pytest.mark.parametrize("arch", sorted(seccomp.DENIED_SYSCALLS))
+def test_filter_denies_exactly_the_listed_calls(arch):
+    program = seccomp.build_filter(arch)
+    assert len(program) % 8 == 0
+    eperm = seccomp.SECCOMP_RET_ERRNO | errno.EPERM
+    denied = set(seccomp.DENIED_SYSCALLS[arch].values())
+    for number in range(0, 600):
+        expected = eperm if number in denied else seccomp.SECCOMP_RET_ALLOW
+        assert run_bpf(program, arch, number) == expected, number
+
+
+@pytest.mark.parametrize("arch", sorted(seccomp.DENIED_SYSCALLS))
+def test_filter_kills_calls_from_another_syscall_abi(arch):
+    program = seccomp.build_filter(arch)
+    for other in (0x40000003, 0xC0000028, 0x40000028, arch ^ 1):  # i386, ppc64le, arm, nonsense
+        for number in (0, 90, 15, 5):
+            assert run_bpf(program, other, number) == seccomp.SECCOMP_RET_KILL_PROCESS
+    if arch == seccomp.AUDIT_ARCH_X86_64:
+        # The x32 ABI reuses the arch but ORs a bit into the number, so chmod
+        # would otherwise slip through as an unknown call.
+        assert run_bpf(program, arch, seccomp.X32_SYSCALL_BIT | 90) == seccomp.SECCOMP_RET_KILL_PROCESS
+
+
+def test_filter_lists_the_dangerous_calls():
+    names = set(seccomp.DENIED_SYSCALLS[seccomp.AUDIT_ARCH_X86_64])
+    assert {"chmod", "fchmod", "fchmodat", "fchmodat2", "chown", "fchown", "lchown", "fchownat"} <= names
+    assert {"setxattr", "lsetxattr", "fsetxattr", "removexattr", "lremovexattr", "fremovexattr"} <= names
+    assert {"utime", "utimes", "utimensat", "futimesat"} <= names
+    arm = set(seccomp.DENIED_SYSCALLS[seccomp.AUDIT_ARCH_AARCH64])
+    assert {"fchmod", "fchmodat", "fchmodat2", "fchownat", "fchown", "utimensat", "setxattr"} <= arm
+    with pytest.raises(ValueError):
+        seccomp.build_filter(0x40000003)
+
+
+METADATA_SCRIPT = """
+    import errno, json, os
+    out = {}
+    def attempt(name, fn):
+        try:
+            fn(); out[name] = "allowed"
+        except OSError as exc:
+            out[name] = errno.errorcode.get(exc.errno, exc.errno)
+    inside = "inside.txt"
+    open(inside, "w").close()
+    outside = %(outside)r
+    for label, path in (("outside", outside), ("inside", inside)):
+        attempt("chmod_" + label, lambda p=path: os.chmod(p, 0))
+        attempt("chown_" + label, lambda p=path: os.chown(p, -1, -1))
+        attempt("lchown_" + label, lambda p=path: os.lchown(p, -1, -1))
+        attempt("utime_" + label, lambda p=path: os.utime(p, None))
+        attempt("setxattr_" + label, lambda p=path: os.setxattr(p, "user.x", b"1"))
+        attempt("removexattr_" + label, lambda p=path: os.removexattr(p, "user.x"))
+    fd = os.open(inside, os.O_RDONLY)
+    attempt("fchmod", lambda: os.fchmod(fd, 0))
+    attempt("fchown", lambda: os.fchown(fd, -1, -1))
+    attempt("futime", lambda: os.utime(fd, None))
+    dirfd = os.open(".", os.O_RDONLY)
+    attempt("fchmodat", lambda: os.chmod(inside, 0, dir_fd=dirfd))
+    attempt("fchownat", lambda: os.chown(inside, -1, -1, dir_fd=dirfd))
+    attempt("utimensat", lambda: os.utime(inside, None, dir_fd=dirfd))
+    print(json.dumps(out))
+"""
+
+
+@linux_only
+@pytest.mark.skipif(not seccomp.supported(), reason="no metadata filter for this architecture")
+def test_metadata_changes_fail_with_eperm_inside_and_outside_the_grants(mode, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    outside.chmod(0o644)
+    before = outside.stat()
+    rc, out, err = run(make_spec(tmp_path, METADATA_SCRIPT % {"outside": str(outside)}), mode)
+    assert rc == 0, err
+    result = json.loads(out)
+    assert result and set(result.values()) == {"EPERM"}, result
+    after = outside.stat()
+    assert (after.st_mode, after.st_mtime_ns) == (before.st_mode, before.st_mtime_ns)
+
+
+@linux_only
+@pytest.mark.skipif(not seccomp.supported(), reason="no metadata filter for this architecture")
+def test_ordinary_writes_still_work_and_modes_come_from_the_umask(mode, tmp_path):
+    script = """
+        import json, os, shutil, stat
+        out = {}
+        with open("a.txt", "w") as handle:
+            handle.write("hello")
+        os.mkdir("d")
+        os.makedirs("d/e/f")
+        fd = os.open("b.bin", os.O_WRONLY | os.O_CREAT, 0o666)
+        os.write(fd, b"x"); os.close(fd)
+        shutil.copyfile("a.txt", "c.txt")
+        shutil.copyfile("a.txt", "d/g.txt")
+        try:
+            shutil.copy("a.txt", "d/h.txt")
+            out["shutil_copy"] = "ok"
+        except PermissionError:
+            out["shutil_copy"] = "denied"
+        os.rename("c.txt", "d/c.txt")
+        os.symlink("a.txt", "link")
+        os.truncate("b.bin", 0)
+        out["modes"] = {n: stat.S_IMODE(os.stat(n).st_mode) for n in ("a.txt", "b.bin", "d", "d/e/f", "d/g.txt", "d/c.txt")}
+        out["content"] = open("d/g.txt").read()
+        print(json.dumps(out))
+    """
+    rc, out, err = run(make_spec(tmp_path, script), mode)
+    assert rc == 0, err
+    result = json.loads(out)
+    assert result["content"] == "hello"
+    assert result["shutil_copy"] == "denied"  # copymode needs chmod, which workers do not get
+    assert result["modes"] == {
+        "a.txt": 0o600, "b.bin": 0o600, "d": 0o700, "d/e/f": 0o700, "d/g.txt": 0o600, "d/c.txt": 0o600,
+    }
+
+
+@linux_only
+@pytest.mark.skipif(not seccomp.supported(), reason="no metadata filter for this architecture")
+def test_a_venv_built_by_the_host_is_usable_but_not_rebuildable_by_the_worker(mode, tmp_path):
+    import venv
+
+    data = tmp_path / "rw"
+    data.mkdir()
+    venv.create(data / "env", with_pip=False, symlinks=True)
+    script = """
+        import json, os
+        out = {"cfg": open("env/pyvenv.cfg").read().startswith("home"), "bin": sorted(os.listdir("env/bin"))[:1]}
+        try:
+            import venv
+            venv.create("mine", with_pip=False)
+            out["create"] = "ok"
+        except PermissionError:
+            out["create"] = "denied"
+        print(json.dumps(out))
+    """
+    rc, out, err = run(make_spec(tmp_path, script, rw=data), mode)
+    assert rc == 0, err
+    result = json.loads(out)
+    assert result["cfg"] is True and result["bin"]
+    assert result["create"] == "denied"
+
+
+# --- Enforcement level -------------------------------------------------------
+
+
+def test_enforced_needs_landlock_abi_3_or_more():
+    assert not SandboxProbe(abi=2, verified=True).enforced
+    assert not SandboxProbe(abi=1, verified=True).enforced
+    assert SandboxProbe(abi=3, verified=True).enforced
+    assert not SandboxProbe(abi=9, verified=False).enforced
+
+
+def test_a_kernel_below_abi_3_is_declared_because_truncate_is_not_covered(monkeypatch):
+    monkeypatch.setattr(landlock, "probe_abi", lambda: (2, "kernel reports ABI 2"))
+    result = spawn._run_probe(sys.executable)
+    assert result.abi == 2 and not result.enforced and not result.verified
+    assert "truncate" in result.reason
+    assert sandbox_status(result)["label"] == "Not sandboxed on this host"
+
+
+def test_a_host_without_a_metadata_filter_is_declared(monkeypatch):
+    monkeypatch.setattr(landlock, "probe_abi", lambda: (6, "kernel reports ABI 6"))
+    monkeypatch.setattr(seccomp, "supported", lambda: False)
+    result = spawn._run_probe(sys.executable)
+    assert not result.enforced and "metadata filter" in result.reason
+
+
+def test_a_canary_that_can_truncate_or_chmod_is_not_verified(monkeypatch):
+    monkeypatch.setattr(landlock, "probe_abi", lambda: (6, "kernel reports ABI 6"))
+    good = {
+        "read_outside": "denied", "write_outside": "denied", "write_inside": "allowed", "truncate_outside": "denied",
+        "chmod_outside": "denied", "chmod_inside": "denied", "chown_outside": "denied", "utime_outside": "denied",
+        "setxattr_outside": "denied",
+    }
+
+    class Fake:
+        returncode = 0
+
+        def __init__(self, result):
+            self.result = result
+
+        def communicate(self, timeout=None):
+            return json.dumps(self.result).encode(), b""
+
+        def stop(self, grace=0):
+            pass
+
+    monkeypatch.setattr(spawn, "_start", lambda *a, **k: Fake(good))
+    assert spawn._run_probe(sys.executable).enforced
+    for key in ("truncate_outside", "chmod_outside", "chmod_inside", "chown_outside", "utime_outside", "setxattr_outside"):
+        monkeypatch.setattr(spawn, "_start", lambda *a, _k=key, **k: Fake({**good, _k: "allowed"}))
+        assert not spawn._run_probe(sys.executable).enforced, key
+
+
+@linux_only
+def test_a_policy_capped_below_abi_3_is_reported_as_declared(live, tmp_path):
+    need_abi(live, 3)
+    capped = make_spec(tmp_path, "pass", abi_cap=2)
+    process = spawn_worker(capped, probe=live)
+    process.communicate(timeout=30)
+    assert process.enforcement == "declared"
+    with pytest.raises(SandboxRefused):
+        spawn_worker(capped, probe=live, require_sandbox=True)
+    full = spawn_worker(make_spec(tmp_path, "pass", abi_cap=3), probe=live)
+    full.communicate(timeout=30)
+    assert full.enforcement == "enforced"
+
+
+@linux_only
+def test_the_live_canary_checks_truncation_and_metadata(live):
+    # The real probe passed, so the canary saw all of these denied and the
+    # trunc file untouched; verify the keys it demands are the ones it asks for.
+    assert live.verified
+    assert "truncate_outside" in spawn._CANARY_SCRIPT and "chmod_outside" in spawn._CANARY_SCRIPT
+
+
+# --- Walk with descriptors ----------------------------------------------------
+
+
+def test_a_directory_swapped_during_the_walk_cannot_redirect_the_recorded_identity(tmp_path, monkeypatch):
+    rw = tmp_path / "rw"
+    (rw / "a" / "b").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "b").mkdir(parents=True)
+    real_rw = Path(os.path.realpath(rw))
+    original = os.stat(rw / "a" / "b")
+    foreign = os.stat(elsewhere / "b")
+    swapped = []
+
+    def hook(reached):
+        if reached == str(real_rw / "a") and not swapped:
+            os.rename(rw / "a", rw / "a_old")
+            os.symlink(elsewhere, rw / "a")
+            swapped.append(reached)
+
+    monkeypatch.setattr(policy_module, "_walk_hook", hook)
+    policy = SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[rw / "a" / "b"])
+    assert swapped, "the hook never ran"
+    recorded = policy.identities[str(real_rw / "a" / "b")]
+    assert recorded == (original.st_dev, original.st_ino)
+    assert recorded != (foreign.st_dev, foreign.st_ino)
+
+
+@linux_only
+def test_a_directory_swapped_after_the_walk_stops_the_launch(live, tmp_path):
+    rw = tmp_path / "rw"
+    (rw / "a" / "b").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "b").mkdir(parents=True)
+    (elsewhere / "b" / "secret.txt").write_text("secret", encoding="utf-8")
+    policy = SandboxPolicy.for_interpreter(sys.executable, read_write=[rw], read_only=[rw / "a" / "b"])
+    os.rename(rw / "a", rw / "a_old")
+    os.symlink(elsewhere, rw / "a")
+    spec = RuntimeSpec(
+        interpreter=sys.executable,
+        args=("-I", "-c", "print(open('a/b/secret.txt').read())"),
+        cwd=str(rw),
+        env=clean_env(),
+        policy=policy,
+    )
+    result = run(spec, live)
+    assert result[0] == policy_module.EXIT_SANDBOX_FAILED and result[1] == ""
+    assert result.failure.kind == "sandbox" and "changed" in result.failure.message
+
+
+def test_dotdot_in_a_grant_is_refused(tmp_path):
+    with pytest.raises(PolicyError, match="'..'"):
+        SandboxPolicy.for_interpreter(sys.executable, read_only=[str(tmp_path) + "/x/../y"])
+
+
+# --- Platforms without the launcher --------------------------------------------
+
+
+def test_the_fallback_process_answers_the_same_calls(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    spec = make_spec(tmp_path, "print('plain')")
+    process = spawn_worker(spec, probe=DECLARED)
+    assert isinstance(process, WorkerProcess) and not isinstance(process, spawn.LauncherProcess)
+    out, err = process.communicate(timeout=30)
+    assert out.decode().strip() == "plain" and process.returncode == 0, err
+    assert process.enforcement == "declared"
+    assert process.launcher_failure() is None
+    process.raise_for_sandbox_failure()
+    process.close_lifeline()
+    process.stop(0.5)
+    with pytest.raises(SandboxRefused):
+        spawn_worker(spec, probe=DECLARED, require_sandbox=True)
+
+
+def test_the_fallback_process_can_be_stopped(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    process = spawn_worker(make_spec(tmp_path, "import time; time.sleep(300)"), probe=DECLARED)
+    process.stop(0.5)
+    assert process.poll() is not None
