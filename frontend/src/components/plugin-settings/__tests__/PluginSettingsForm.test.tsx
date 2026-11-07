@@ -409,6 +409,34 @@ describe("plugin settings fields", () => {
     expect(screen.getByLabelText("Extra")).toBeVisible();
   });
 
+  it("draws a text field marked secret as a masked secret with its stored status and a clear button", async () => {
+    const user = userEvent.setup();
+    const cleared = vi.fn();
+    const seen = vi.fn();
+    const fields: PluginField[] = [
+      { key: "token", type: "text", secret: true, label: "Token" },
+    ];
+    customRender(
+      <Harness
+        fields={fields}
+        secrets={{ token: { configured: true, last4: "abcd" } }}
+        onClearSecret={cleared}
+        onValues={seen}
+      />,
+    );
+    const input = screen.getByLabelText("Token");
+    expect(input).toHaveAttribute("type", "password");
+    expect(input).toHaveAttribute(
+      "placeholder",
+      "Saved, ending abcd. Leave empty to keep it.",
+    );
+    await user.type(input, "typed-secret");
+    expect(seen).toHaveBeenLastCalledWith({ token: "typed-secret" });
+    expect(input).toHaveAttribute("type", "password");
+    await user.click(screen.getByRole("button", { name: "Clear saved Token" }));
+    expect(cleared).toHaveBeenCalledWith("token");
+  });
+
   it("stops typing at the declared length", async () => {
     const user = userEvent.setup();
     customRender(<Harness />);

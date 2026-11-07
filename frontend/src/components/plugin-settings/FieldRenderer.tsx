@@ -191,7 +191,11 @@ const FieldRenderer: FunctionComponent<FieldRendererProps> = ({
   const set = (value: PluginValue | undefined) =>
     onChange({ ...values, [field.key]: value });
 
-  switch (field.type) {
+  // A text field the manifest marks secret is held like a secret field: masked, with its stored status and a
+  // way to clear it. It must never be drawn as a plain text box.
+  const kind =
+    field.type === "text" && field.secret === true ? "secret" : field.type;
+  switch (kind) {
     case "text":
       return (
         <TextInput

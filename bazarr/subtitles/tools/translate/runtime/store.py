@@ -699,6 +699,24 @@ class TranslatorStore:
             self.set_secret(owner, key, value if isinstance(value, str) else json.dumps(value),
                             destinations=destinations)
 
+    def move_newly_secret_values(self, plugin_id: str, new_schema: Callable[[str, Any], DestinationSchema]) -> int:
+        """Move every plaintext value of a field the plugin now declares secret into the secret store.
+
+        It covers every owner of the plugin, held back or disabled or not, and nothing else about them changes
+        (the revision moves when their settings do). The scrub set is rebuilt once it has committed. Returns how
+        many owners had something to move. It runs first on an activation so that a later step failing cannot
+        leave a credential sitting in the clear.
+        """
+        changed = 0
+        with self.transaction():
+            for kind, row in self._owners_of_plugin(plugin_id):
+                stored_before = self.settings_of(row)
+                self._move_reclassified_secrets((kind, row.id), row, new_schema(kind, row))
+                if self.settings_of(row) != stored_before:
+                    row.revision = int(row.revision) + 1
+                    changed += 1
+        return changed
+
     def owners_of_plugin(self, plugin_id: str):
         """Every engine instance and connection a plugin serves, as ``(kind, row)``."""
         return self._owners_of_plugin(plugin_id)

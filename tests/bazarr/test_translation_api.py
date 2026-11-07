@@ -831,6 +831,28 @@ def test_a_manifest_that_declares_a_price_or_the_model_has_its_limits_and_defaul
     assert refused.status_code == 400 and list(refused.json["field_errors"]) == ["price_input_per_million"]
 
 
+def test_a_stale_toggle_loses_to_a_save_that_lands_after_the_request_began(world, monkeypatch):
+    from sqlalchemy import update
+
+    from app.database import TableTranslatorEngineInstance
+
+    path = f"engines/{world.instance.id}"
+    real = world.store.transaction
+
+    def another_writer_gets_in_first():
+        world.store._session.execute(update(TableTranslatorEngineInstance).where(
+            TableTranslatorEngineInstance.id == world.instance.id).values(revision=2)
+            .execution_options(synchronize_session=False))
+        return real()
+
+    monkeypatch.setattr(world.store, "transaction", another_writer_gets_in_first)
+    stale = world.call("patch", path, {"enabled": False, "expected_revision": 1})
+    assert stale.status_code == 409 and stale.json["error"] == "stale_revision"
+    monkeypatch.undo()
+    world.store._session.expire_all()
+    assert world.store.get_instance(world.instance.id).enabled == 1
+
+
 def test_a_flag_that_is_not_a_boolean_is_refused(world):
     assert _new_connection(world, enabled="false", values={"api_key": "k"}).status_code == 400
     created = _new_connection(world, values={"api_key": "k"}).json["connection"]

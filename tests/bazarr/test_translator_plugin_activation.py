@@ -126,8 +126,11 @@ def test_a_release_whose_new_rules_the_saved_settings_do_not_meet_holds_them_bac
     store._session.expire_all()
     held = store.get_instance(instance.id)
     assert held.enabled == 0 and held.awaiting_secrets == 1
-    assert store.settings_of(held) == {"label": "mine", "token": SECRET}  # nothing was changed or moved
-    assert store.secret_summary(("instance", instance.id), frozenset()) == {}
+    # Held back is not left in the clear: the token that is a secret now has moved into the secret store, and
+    # the log scrubber knows it. Everything else it held is as it was.
+    assert store.settings_of(held) == {"label": "mine"}
+    assert store.secrets_for_request(("instance", instance.id), frozenset()) == {"token": SECRET}
+    assert lifecycle.scrubbed and SECRET in lifecycle.scrubbed[-1]
     assert lifecycle.pointers.get() == (None, None)
     # The back end met the new rules and was migrated normally.
     assert store.get_connection(connection.id).enabled == 1
@@ -192,3 +195,39 @@ def test_an_engine_that_declares_its_own_model_field_keeps_it_through_activation
     assert store.settings_of(store.get_instance(optional.id)) == {"label": "a", "model": "mine"}
     assert store.get_instance(optional.id).enabled == 1 and store.get_instance(required.id).enabled == 1
     assert installation["last_error"] is None
+
+
+def test_a_failure_while_checking_a_release_still_moves_the_newly_secret_values(lifecycle, monkeypatch):
+    from subtitles.tools.translate.runtime import plugin_update
+
+    store = lifecycle.store
+    instance = store.create_instance(PLUGIN, settings={"label": "mine", "token": SECRET})
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("the check failed")
+
+    monkeypatch.setattr(plugin_update, "_fits", broken)
+    new_fields = [{"key": "label", "type": "text"}, {"key": "token", "type": "secret"}]
+    lifecycle.stage(_manifest("1.0.0", OLD_FIELDS), _manifest("2.0.0", new_fields))
+    installation = _activate()
+    assert "could not be brought up to date" in installation["last_error"]
+    store._session.expire_all()
+    assert store.settings_of(store.get_instance(instance.id)) == {"label": "mine"}
+    assert store.secrets_for_request(("instance", instance.id), frozenset()) == {"token": SECRET}
+    assert lifecycle.scrubbed and SECRET in lifecycle.scrubbed[-1]
+
+
+def test_a_connection_whose_back_end_type_is_gone_shows_none_of_its_stored_settings(lifecycle):
+    from subtitles.tools.translate.runtime.settings_service import TranslatorSettingsService
+
+    store = lifecycle.store
+    instance = store.create_instance(PLUGIN, settings={"label": "mine"})
+    store.add_connection(instance.id, "retired", plugin_id=PLUGIN, settings={"token": SECRET, "label": "c"})
+    lifecycle.stage(_manifest("1.0.0", OLD_FIELDS), _manifest("2.0.0", [{"key": "label", "type": "text"}]))
+    _activate()
+    store._session.expire_all()
+    service = TranslatorSettingsService(store, plugin_lookup=lambda plugin_id: SimpleNamespace(
+        plugin_id=plugin_id, name="Lingarr", version="2.0.0", active=True,
+        manifest=_manifest("2.0.0", [{"key": "label", "type": "text"}])))
+    view = service.instance_view(store.get_instance(instance.id))
+    assert SECRET not in json.dumps(view) and view["connections"][0]["values"].get("token") is None

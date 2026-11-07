@@ -46,6 +46,10 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
             return None
         return list(backend_fields[row.backend_type])
 
+    # First of all, and for every owner whether or not it fits: a value of a field that is secret now leaves the
+    # settings for the secret store. Whatever fails after this cannot leave a credential in the clear.
+    store.move_newly_secret_values(plugin_id, schema_for)
+
     blocked = []
     for kind, row in store.owners_of_plugin(plugin_id):
         fields = fields_of(kind, row)

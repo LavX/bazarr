@@ -129,8 +129,8 @@ def _shown_settings(fields, settings: Mapping[str, Any]) -> dict[str, Any]:
     """The stored settings as a response may carry them. A field the manifest declares secret *now* is never in
     them, whatever the JSON holds: a plugin update can turn a text field into a secret after a value was stored
     in the clear. An address field holding something unclean is left out too."""
-    secrets = {item.get("key") for item in fields if is_secret_field(item)}
-    return _without_unsafe_addresses(fields, {key: value for key, value in settings.items() if key not in secrets})
+    declared = {item.get("key") for item in fields if not is_secret_field(item)}
+    return _without_unsafe_addresses(fields, {key: value for key, value in settings.items() if key in declared})
 
 
 def _without_unsafe_addresses(fields, settings: Mapping[str, Any]) -> dict[str, Any]:
@@ -329,10 +329,11 @@ class TranslatorSettingsService:
             elif enabled is True:
                 self._check_engine_before_turning_on(instance)
             if enabled is not None and bool(instance.enabled) != enabled:
-                # A save above has moved the revision on; the switch is swapped against the revision it left.
-                current = self._instance(instance_id).revision
+                # The switch is swapped against the revision the client sent. Only when this request's own save
+                # has just moved it on does the switch use the revision that save produced.
+                produced = expected + 1 if (values is not None or clear) else expected
                 try:
-                    change = self._store.set_instance_enabled(instance_id, enabled, expected_revision=current)
+                    change = self._store.set_instance_enabled(instance_id, enabled, expected_revision=produced)
                 except StoreStale as error:
                     raise StaleRevisionError("The engine settings changed since they were loaded.",
                                              revision=error.revision) from error
