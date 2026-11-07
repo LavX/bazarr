@@ -293,3 +293,58 @@ def test_removing_the_last_installation_frees_its_environment(hub, tmp_path):
     del state["installations"]["second"]
     save_state(state)
     assert env_registry.cleanup_environments(hub) == [str(env)]
+
+
+def test_a_stop_pressed_during_the_repair_probe_ends_the_repair_before_the_repoint(hub, tmp_path, monkeypatch):
+    from provider_hub.service import ProviderHubStopped, repair_installation_environment
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    old = _env(hub / "shared_envs" / "old")
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, old / "bin" / "python", needs_repair=True)}
+    save_state(state)
+    _patch_environment(monkeypatch)
+    stop_requested = threading.Event()
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker",
+                        lambda manifest, bundle_path, python_path: stop_requested.set())
+
+    def checkpoint(message):
+        if stop_requested.is_set():
+            raise ProviderHubStopped("stopped")
+
+    with pytest.raises(ProviderHubStopped):
+        repair_installation_environment("examplehub", checkpoint=checkpoint)
+
+    row = load_state()["installations"]["examplehub"]
+    assert row["python_path"] == str(old / "bin" / "python")
+    assert row["needs_repair"] is True
+    assert load_state()["plugin_envs"] == {}
+    assert not (hub / "shared_envs" / "rebuilt").exists()
+
+
+def test_the_install_worker_check_runs_inside_the_remaining_install_budget(hub, monkeypatch):
+    from provider_hub.service import stage_install
+    from test_provider_hub import _FakeResponse
+
+    content = b"class ExampleProvider: pass\n"
+    manifest = _manifest(file_payloads={"provider.py": content}, dependencies={"requirements": []})
+    seen = []
+
+    class Environment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated, timeout=None):
+            return _env(self.root / "shared_envs" / "fresh")
+
+    def probe(manifest, bundle_path, python_path, timeout=10.0):
+        seen.append(timeout)
+
+    monkeypatch.setattr("provider_hub.service.requests.get", lambda url, timeout: _FakeResponse(content=content))
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", Environment)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", probe)
+
+    stage_install(manifest, install_timeout=3)
+
+    assert len(seen) == 1 and 0 < seen[0] <= 3

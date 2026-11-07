@@ -622,3 +622,83 @@ def test_a_stopped_install_removes_a_bundle_inside_the_hub(hub):
         _discard_stopped_install([bundle], {})
 
     assert not bundle.exists()
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+def _recorded_intact(hub, manifest):
+    env = hub / "shared_envs" / "recorded"
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_text("", encoding="utf-8")
+    state = load_state()
+    state["plugin_envs"] = {environment_fingerprint(manifest): {"path": str(env)}}
+    save_state(state)
+    return env
+
+
+def test_the_reuse_check_is_bounded_by_the_remaining_install_budget(hub, monkeypatch):
+    manifest = _manifest("alpha", [REQ_A])
+    env = _recorded_intact(hub, manifest)
+    timeouts = []
+
+    def fake_run(cmd, **kwargs):
+        timeouts.append((cmd[0], kwargs.get("timeout")))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(venvmod.subprocess, "run", fake_run)
+
+    assert PluginEnvironment(hub).install(manifest, timeout=5) == env
+    assert len(timeouts) == 1 and timeouts[0][1] <= 5
+
+
+def test_a_failed_reuse_check_does_not_restart_the_install_budget(hub, monkeypatch):
+    manifest = _manifest("alpha", [REQ_A])
+    old = _recorded_intact(hub, manifest)
+    clock = _Clock()
+    monkeypatch.setattr(venvmod, "time", clock)
+    timeouts = []
+
+    def fake_run(cmd, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        if cmd[0] == str(old / "bin" / "python"):
+            clock.now += 4
+            raise subprocess.CalledProcessError(1, "pip")
+        if cmd[1:3] == ["-m", "venv"]:
+            target = Path(cmd[3])
+            (target / "bin").mkdir(parents=True, exist_ok=True)
+            (target / "bin" / "python").write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(venvmod.subprocess, "run", fake_run)
+
+    PluginEnvironment(hub).install(manifest, timeout=5)
+
+    # The check used 4 of the 5 seconds, so every build step gets what is left.
+    assert all(value <= 1.0 + 1e-9 for value in timeouts[1:])
+    assert len(timeouts) > 1
+
+
+def test_a_reuse_check_that_spends_the_budget_stops_the_install(hub, monkeypatch):
+    manifest = _manifest("alpha", [REQ_A])
+    old = _recorded_intact(hub, manifest)
+    clock = _Clock()
+    monkeypatch.setattr(venvmod, "time", clock)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        clock.now += 6
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(venvmod.subprocess, "run", fake_run)
+
+    with pytest.raises(venvmod.PluginEnvironmentError, match="time budget"):
+        PluginEnvironment(hub).install(manifest, timeout=5)
+
+    assert [c[0] for c in calls] == [str(old / "bin" / "python")]

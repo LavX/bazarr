@@ -148,8 +148,23 @@ def python_executable(env_path: str | os.PathLike[str]) -> Path:
     return Path(env_path) / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
-def _passes_pip_check(env_path: Path) -> bool:
-    """Whether the environment's installed packages are consistent. Local only."""
+_PIP_CHECK_LIMIT = 60.0
+
+
+def _passes_pip_check(env_path: Path, deadline: float | None = None, provider_id: str = "") -> bool:
+    """Whether the environment's installed packages are consistent. Local only.
+
+    ``deadline`` is the install's absolute ``time.monotonic()`` budget. The check
+    never runs past it: an exhausted budget raises, and a check cut short by the
+    budget raises too instead of reading as a failed check, which would send the
+    caller on to a build it has no time for.
+    """
+    limit = _PIP_CHECK_LIMIT
+    if deadline is not None:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise PluginEnvironmentError(f"Provider Hub install for {provider_id} exceeded its time budget")
+        limit = min(limit, left)
     try:
         subprocess.run(
             [str(python_executable(env_path)), "-m", "pip", "check"],
@@ -157,8 +172,12 @@ def _passes_pip_check(env_path: Path) -> bool:
             capture_output=True,
             env={"PATH": os.environ.get("PATH", ""), "PYTHONNOUSERSITE": "1"},
             cwd=str(env_path),
-            timeout=60,
+            timeout=limit,
         )
+    except subprocess.TimeoutExpired as error:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise PluginEnvironmentError(f"Provider Hub install for {provider_id} exceeded its time budget") from error
+        return False
     except (subprocess.SubprocessError, OSError):
         return False
     return True
@@ -235,12 +254,11 @@ class PluginEnvironment:
                 f"Provider Hub install for {manifest.provider_id} timed out waiting for another install of the same dependencies"
             )
         try:
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            return self._install_locked(manifest, remaining, rebuild)
+            return self._install_locked(manifest, deadline, rebuild)
         finally:
             lock.release()
 
-    def _install_locked(self, manifest: ValidatedManifest, timeout: float | None, rebuild: bool) -> Path:
+    def _install_locked(self, manifest: ValidatedManifest, deadline: float | None, rebuild: bool) -> Path:
         canonical = self.path_for(manifest)
         # Read the record, look at the canonical directory and pin in one step
         # under the lock a cleanup holds while it decides, so the environment
@@ -253,19 +271,19 @@ class PluginEnvironment:
                 _pin(reusable)
             canonical_free = not os.path.lexists(canonical)
         if rebuild:
-            return self._build(manifest, timeout, self._fresh_path(manifest))
+            return self._build(manifest, deadline, self._fresh_path(manifest))
         if reusable is None:
-            return self._build(manifest, timeout, canonical if canonical_free else self._fresh_path(manifest))
-        if python_executable(reusable).exists() and _passes_pip_check(reusable):
+            return self._build(manifest, deadline, canonical if canonical_free else self._fresh_path(manifest))
+        if python_executable(reusable).exists() and _passes_pip_check(reusable, deadline, manifest.provider_id):
             return reusable
-        return self._build(manifest, timeout, self._fresh_path(manifest))
+        return self._build(manifest, deadline, self._fresh_path(manifest))
 
     @staticmethod
     def _is_complete(env_path: Path) -> bool:
         return python_executable(env_path).exists() and (env_path / COMPLETE_MARKER).is_file()
 
-    def _build(self, manifest: ValidatedManifest, timeout: float | None, env_path: Path) -> Path:
-        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+    def _build(self, manifest: ValidatedManifest, deadline: float | None, env_path: Path) -> Path:
+        """Build ``env_path``. ``deadline`` is the install's absolute ``time.monotonic()`` budget."""
 
         def _remaining() -> float | None:
             if deadline is None:

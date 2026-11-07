@@ -2541,7 +2541,7 @@ def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, A
     return result
 
 
-def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path) -> None:
+def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeout: float = 10.0) -> None:
     _remove_bundle_runtime_artifacts(bundle_path)
     runner = Path(__file__).with_name("worker_runner.py")
     client = ProviderWorkerClient(
@@ -2553,7 +2553,7 @@ def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path) -> No
         },
     )
     try:
-        client.request("health", {}, timeout=10)
+        client.request("health", {}, timeout=timeout)
     finally:
         client.stop()
         _remove_bundle_runtime_artifacts(bundle_path)
@@ -2762,7 +2762,16 @@ def _stage_validated(
             staged.append(env_path)
             staged_python_path = python_executable(env_path)
             step("Checking that the provider starts")
-            _smoke_validate_worker(validated, bundle_path, staged_python_path)
+            if deadline is None:
+                _smoke_validate_worker(validated, bundle_path, staged_python_path)
+            else:
+                # The check shares the install's budget instead of adding its own.
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise ProviderHubInstallError(
+                        f"install for {validated.provider_id} exceeded its time budget"
+                    )
+                _smoke_validate_worker(validated, bundle_path, staged_python_path, timeout=min(10.0, left))
             step("Recording the installation")
         except ProviderHubStopped:
             _discard_stopped_install(staged, existing)
@@ -3235,6 +3244,9 @@ def repair_installation_environment(provider_id: str, checkpoint=None) -> dict[s
             python_path = python_executable(env_path)
             step("Checking that the plugin starts")
             _smoke_validate_worker(validated, Path(active_path), python_path)
+            # A stop pressed during the check ends the repair here, before the
+            # installation is pointed at the new environment.
+            step("Recording the repair")
         except Exception:
             if env_path is not None:
                 release_pins()
