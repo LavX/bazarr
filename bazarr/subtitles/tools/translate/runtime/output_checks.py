@@ -17,10 +17,11 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Sequence
 
-RLE = "‫"  # right-to-left embedding
-PDF = "‬"  # pop directional formatting
+RLE = "\u202b"  # right-to-left embedding
+PDF = "\u202c"  # pop directional formatting
 
-# The tags a subtitle line may carry, with no attributes.
+# The tags any subtitle line may carry, with no attributes. Beyond these, an output line may carry only
+# the tags its own source line carried (a "<font color=...>" that an engine keeps), never a new one.
 ALLOWED_TAGS = frozenset({"i", "b", "u", "s"})
 # An output line may be this many times as long as its input line, with room for short lines.
 MAX_LENGTH_FACTOR = 4
@@ -34,7 +35,10 @@ _TAG = re.compile(r"</?[A-Za-z!?][^<>]*>")
 _ALLOWED_TAG = re.compile(r"</?[ibus]>", re.IGNORECASE)
 # Directional overrides, embeddings and isolates, and the line and paragraph separators. A line break
 # inside a cue is "\n"; these are not. Bazarr+ adds the direction marks itself, after the check.
-_FORBIDDEN_FORMAT = frozenset("  ‪‫‬‭‮⁦⁧⁨⁩")
+# A line break inside a cue is "\n". "\r" (an engine that answers with CRLF) and a tab are ordinary
+# whitespace in a subtitle, so they are not control characters here.
+_ALLOWED_WHITESPACE = frozenset("\n\r\t")
+_FORBIDDEN_FORMAT = frozenset("\u2028\u2029\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
 
 @dataclass(frozen=True)
@@ -63,15 +67,37 @@ def length_limit(source_line: str) -> int:
 def _control_characters(text: str) -> list[str]:
     found = []
     for char in text:
-        if char == "\n":
+        if char in _ALLOWED_WHITESPACE:
             continue
         if unicodedata.category(char) == "Cc" or char in _FORBIDDEN_FORMAT:
             found.append(char)
     return found
 
 
-def _disallowed_tags(text: str) -> list[str]:
-    return [match.group(0) for match in _TAG.finditer(text) if not _ALLOWED_TAG.fullmatch(match.group(0))]
+def _tag_key(tag: str) -> str:
+    """A tag compared without case or extra spaces: "<FONT  color=red>" and "<font color=red>" are one tag."""
+    return " ".join(tag.lower().split())
+
+
+def _tag_name(tag: str) -> str:
+    return re.match(r"</?\s*([^\s/>]*)", tag).group(1).lower()
+
+
+def _disallowed_tags(source: str, text: str) -> list[str]:
+    """The tags in ``text`` that are neither a plain subtitle tag nor carried over from ``source``."""
+    source_tags = [match.group(0) for match in _TAG.finditer(source)]
+    source_keys = {_tag_key(tag) for tag in source_tags}
+    source_names = {_tag_name(tag) for tag in source_tags}
+    found = []
+    for match in _TAG.finditer(text):
+        tag = match.group(0)
+        if _ALLOWED_TAG.fullmatch(tag) or _tag_key(tag) in source_keys:
+            continue
+        # A closing tag has no attributes to compare, so the source only has to use that tag name.
+        if tag.startswith("</") and _tag_name(tag) in source_names:
+            continue
+        found.append(tag)
+    return found
 
 
 def check_line(source_line: str, output_line: str, index: int | None = None) -> list[Violation]:
@@ -86,7 +112,7 @@ def check_line(source_line: str, output_line: str, index: int | None = None) -> 
             "too_long", f"a line is {len(output_line)} characters, over its limit of {length_limit(source_line)}", index))
     if _control_characters(output_line):
         problems.append(Violation("control_character", "a line holds a control character", index))
-    disallowed = _disallowed_tags(output_line)
+    disallowed = _disallowed_tags(source_line, output_line)
     if disallowed:
         problems.append(Violation("disallowed_tag", f"a line holds a tag that is not allowed: {disallowed[0]}", index))
     return problems

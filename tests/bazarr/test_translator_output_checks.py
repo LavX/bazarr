@@ -54,23 +54,48 @@ def test_markup_beyond_the_four_tags_is_refused(bad):
     assert "disallowed_tag" in codes(["a"], [bad])
 
 
+def test_a_font_tag_the_source_carried_is_kept():
+    source = ['<font color="#ffff00">Hello</font>', "<font color=\"#ff0000\" face='Arial'>One</font>\nTwo"]
+    output = ['<font color="#ffff00">Szia</font>', "<FONT  color=\"#ff0000\" face='Arial'>Egy</font>\nKetto"]
+    assert check_output(source, output).ok
+
+
+def test_a_new_tag_an_engine_adds_is_still_refused():
+    source = ['<font color="#ffff00">Hello</font>']
+    assert codes(source, ['<font color="#ff0000">Szia</font>']) == {"disallowed_tag"}  # other attributes
+    assert codes(source, ['<font color="#ffff00">Szia</font><b class="x">!</b>']) == {"disallowed_tag"}
+    assert codes(source, ['<script>x</script><font color="#ffff00">Szia</font>']) == {"disallowed_tag"}
+    assert codes(source, ["<a href=x>Szia</a>"]) == {"disallowed_tag"}
+    # A tag from another line does not count: each line is checked against its own source.
+    assert codes(["plain", '<font color="#ffff00">x</font>'],
+                 ["plain", "ok"]) == set()
+    assert codes(["plain", '<font color="#ffff00">x</font>'],
+                 ['<font color="#ffff00">plain</font>', "ok"]) == {"disallowed_tag"}
+
+
 @pytest.mark.parametrize("text", ["a < b", "a > b", "I <3 you", "5 < 6 > 4", "<", ">", "< b >", "x << y"])
 def test_text_that_only_looks_like_markup_is_fine(text):
     assert codes(["a"], [text]) == set()
 
 
-@pytest.mark.parametrize("char", ["\x00", "\x07", "\x08", "\t", "\r", "\x1b", "\x7f", "\x85", " ", " ",
-                                  "‪", "‫", "‬", "‭", "‮", "⁦", "⁧", "⁨",
-                                  "⁩"])
+@pytest.mark.parametrize("char", ["\x00", "\x07", "\x08", "\x1b", "\x7f", "\x85", "\u2028", "\u2029",
+                                  "\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068",
+                                  "\u2069"])
 def test_control_characters_and_direction_overrides_are_refused(char):
     assert "control_character" in codes(["a"], [f"ab{char}cd"])
 
 
+def test_crlf_and_tabs_are_ordinary_whitespace():
+    assert codes(["a\nb"], ["x\r\ny"]) == set()
+    assert codes(["a"], ["x\ty"]) == set()
+    assert codes(["a"], ["x\ry"]) == set()
+
+
 def test_a_line_break_and_the_direction_marks_a_translator_may_use_are_fine():
     assert codes(["a\nb"], ["x\ny"]) == set()
-    assert codes(["a"], ["‏x‎"]) == set()  # right-to-left and left-to-right marks
-    assert codes(["a"], ["؜x"]) == set()  # Arabic letter mark
-    assert codes(["a"], ["x​y"]) == set()
+    assert codes(["a"], ["\u200fx\u200e"]) == set()  # right-to-left and left-to-right marks
+    assert codes(["a"], ["\u061cx"]) == set()  # Arabic letter mark
+    assert codes(["a"], ["x\u200by"]) == set()
 
 
 def test_a_non_text_line_is_refused():
