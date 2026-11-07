@@ -178,6 +178,20 @@ class RequestHandle:
         return self._request.outcome
 
 
+_REASON_LIMIT = 200
+
+
+def _clean_reason(reason):
+    """A cancel reason that always encodes: text, valid Unicode, at most 200 characters."""
+    if not isinstance(reason, str):
+        return "cancelled"
+    try:
+        reason.encode("utf-8")
+    except UnicodeEncodeError:
+        return "cancelled"
+    return reason[:_REASON_LIMIT] or "cancelled"
+
+
 _QUEUED, _CLOSED, _FULL = "queued", "closed", "full"
 
 
@@ -477,17 +491,24 @@ class WorkerSession:
         return self.submit(op, params, timeout=timeout, **kwargs).wait()
 
     def _cancel(self, request, reason, timed_out=False):
+        # The frame is built first. The cancellation (and its grace timer, which
+        # ends the whole session when the worker ignores it) starts only once
+        # there is a valid frame to send, so a bad reason cannot make the
+        # watchdog wait on a cancel that was never sent.
+        reason = _clean_reason(reason)
+        data = frames.pack_control({"t": frames.CANCEL, "id": request.id, "reason": reason}, sender="host")
         with self._lock:
             if (request.done.is_set() or request.cancel_sent_at is not None
                     or self._requests.get(request.id) is not request):
                 return
             request.cancel_sent_at = time.monotonic()
-            if not isinstance(reason, str):
-                reason = "cancelled"
             request.cancel_reason = reason
             if timed_out:
                 request.timed_out = True
-        self._send_quietly({"t": frames.CANCEL, "id": request.id, "reason": reason})
+        try:
+            self._enqueue_packed(data)
+        except (FrameError, ValueError, TypeError, RecursionError):
+            pass
 
     # ----------------------------------------------------------------- reading
 
@@ -862,7 +883,7 @@ class WorkerSession:
                 with self._lock:
                     if not self._stop.is_set():
                         self._call_pending = max(0, self._call_pending - 1)
-                self._send_quietly(answer)
+                self._send_quietly(self._sendable(answer))
             clean = True
         finally:
             if not clean:
@@ -905,6 +926,19 @@ class WorkerSession:
                            "%s: %s" % (type(error).__name__, text))
             return {"t": frames.ACK, "cid": cid, "ok": False,
                     "error": frames.error_object(Codes.HOST_CALL_FAILED, text)}
+
+    def _sendable(self, ack):
+        """The ack itself if it can be sent, else a plain failure for the same call.
+
+        An error text can carry what the schema refuses (a lone surrogate). A
+        dropped ack would leave the worker waiting out its call timeout.
+        """
+        try:
+            frames.pack_control(ack, sender="host")
+            return ack
+        except Exception:
+            return {"t": frames.ACK, "cid": ack["cid"], "ok": False,
+                    "error": frames.error_object(Codes.HOST_CALL_FAILED, "host handler failed")}
 
     def _describe(self, value):
         """Redacted, bounded text for a host-side error, or a fixed phrase if it cannot be formatted."""
@@ -985,7 +1019,10 @@ class WorkerSession:
         ``FrameTooLarge`` for a message over the control cap. A full outbox
         means the worker stopped reading: the group is killed.
         """
-        data = frames.pack_control(message, sender="host")
+        return self._enqueue_packed(frames.pack_control(message, sender="host"))
+
+    def _enqueue_packed(self, data):
+        """``_enqueue`` for a frame already built by ``pack_control``."""
         for _ in range(3):
             status = self._put(data)
             if status != _FULL:

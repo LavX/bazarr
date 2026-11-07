@@ -441,6 +441,39 @@ def test_a_huge_shutdown_grace_is_clamped_to_a_frame_the_worker_accepts(make_ses
     assert process.returncode == 0
 
 
+@pytest.mark.parametrize("reason", ["x" * 100_000, "bad \ud800 text", "\udfff", 5, None, ""])
+def test_a_cancel_reason_that_cannot_be_sent_as_given_still_cancels(make_session, reason):
+    # A long grace: if the cancel frame were dropped, only the watchdog's kill
+    # (after 20 seconds) would end the request, and it would end the session.
+    session = make_session(limits=fast_limits(cancel_grace=20.0))
+    session.start()
+    process = session.process
+    handle = session.submit("sleep", {"seconds": 30})
+    time.sleep(0.3)
+    started = time.monotonic()
+    handle.cancel(reason)
+    with pytest.raises(RequestCancelled):
+        handle.wait(8)
+    assert time.monotonic() - started < 5
+    assert session.alive and session.process is process and process.poll() is None
+    assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+def test_a_host_error_text_that_cannot_be_sent_still_answers_the_call(make_session):
+    def broken(call):
+        raise ValueError("bad \ud800 text")
+
+    session = make_session(host_calls={"broken": broken})
+    session.start()
+    started = time.monotonic()
+    with pytest.raises(RequestFailed) as caught:
+        session.request("call", {"name": "broken"}, timeout=8)
+    # Answered at once, not after the worker's own 60 second call timeout.
+    assert time.monotonic() - started < 5
+    assert caught.value.code == frames.Codes.HOST_CALL_FAILED
+    assert session.alive
+
+
 _SCHEMA_SAMPLES = [None, True, 0, -1, 7, 1.5, float("nan"), "", "text", [], [1], {}, {"a": 1}, 10 ** 9, "\ud800"]
 
 
@@ -2425,6 +2458,63 @@ def test_an_operation_that_cannot_get_a_thread_is_answered_with_an_error(monkeyp
         harness.finish()
 
 
+def test_the_goodbye_is_bounded_when_the_output_is_stuck():
+    harness = ChannelHarness(lambda operation: {}, heartbeat_interval=30)
+    harness.start()
+    release = threading.Event()
+    real = harness.channel._writer.write_packed
+
+    def stuck(data):
+        release.wait(20)
+        return real(data)
+
+    try:
+        harness.channel._writer.write_packed = stuck
+        harness.host_out.write_control({"t": "shutdown", "grace_ms": 500})
+        # The goodbye cannot be written; the drain does not wait on it forever.
+        harness.thread.join(4)
+        assert not harness.thread.is_alive()
+    finally:
+        release.set()
+        harness.finish()
+
+
+def test_run_releases_its_streams_and_reader_while_the_peer_keeps_its_end_open():
+    harness = ChannelHarness(lambda operation: {}, heartbeat_interval=0.05)
+    harness.start()
+    channel = harness.channel
+    assert wait_until(lambda: channel._reader_thread is not None and channel._reader_thread.is_alive())
+    reader = channel._reader_thread
+    try:
+        harness.host_out.write_control({"t": "shutdown"})
+        harness.thread.join(5)
+        assert not harness.thread.is_alive()
+        # harness.to_worker is still open here: the host has not hung up.
+        assert not harness.to_worker.closed
+        assert harness.status == [0]
+        assert not reader.is_alive()
+        assert channel._input._stream.closed
+        assert channel._writer._stream.closed
+        assert wait_until(lambda: not channel._heartbeat_thread.is_alive())
+    finally:
+        harness.finish()
+
+
+def test_a_failed_handshake_also_releases_the_streams():
+    harness = ChannelHarness(lambda operation: {})
+    harness.host_out.write_control({"t": "reject", "code": "version_mismatch", "message": "no"})
+    harness.thread.start()
+    try:
+        harness.thread.join(5)
+        assert not harness.thread.is_alive()
+        assert harness.status == [3]
+        assert harness.channel._input._stream.closed
+        assert harness.channel._writer._stream.closed
+        assert not harness.to_worker.closed
+    finally:
+        harness.finish()
+
+
 # ------------------------------------------ handshake order and operation lifetime
 
 
@@ -2663,8 +2753,11 @@ def test_shutdown_without_a_grace_uses_the_channels_own_budget():
         harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}})
         assert wait_until(lambda: 1 in harness.channel._operations)
         harness.host_out.write_control({"t": "shutdown"})
-        # The handler never finishes: the drain gives up after its own 0.3 seconds.
-        assert wait_until(lambda: any(m["t"] == "bye" for m in harness.messages), timeout=3)
+        # The handler never finishes: the drain gives up after its own 0.3 seconds
+        # and, with the budget spent, does not write a goodbye.
+        harness.thread.join(3)
+        assert not harness.thread.is_alive()
+        assert not any(m["t"] == "bye" for m in harness.messages)
     finally:
         gate.set()
         harness.finish()

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import select
 import sys
 import threading
 import time
@@ -145,6 +146,59 @@ class Operation:
             raise OperationCancelled(self.cancel_reason or "cancelled")
 
 
+class _WakeableInput:
+    """The channel's input, with a read that another thread can end.
+
+    A read blocked on a pipe whose peer keeps its end open never returns, and
+    closing the descriptor does not wake it. This waits on the descriptor and a
+    private wake pipe together: ``interrupt`` makes the blocked ``read`` return
+    ``b""``, the end of the stream. The stream must be unbuffered (it is read
+    straight from its descriptor); one without a descriptor is used as it is.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        try:
+            self._fd = stream.fileno()
+            self._wake_r, self._wake_w = os.pipe()
+        except (AttributeError, OSError, ValueError):
+            self._fd = None
+            self._wake_r = self._wake_w = None
+
+    def read(self, size):
+        if self._fd is None:
+            return self._stream.read(size)
+        while True:
+            try:
+                ready, _, _ = select.select([self._fd, self._wake_r], [], [])
+            except InterruptedError:
+                continue
+            if self._wake_r in ready:
+                return b""
+            return os.read(self._fd, size)
+
+    def interrupt(self):
+        if self._wake_w is not None:
+            try:
+                os.write(self._wake_w, b"x")
+            except OSError:
+                pass
+
+    def close(self):
+        for fd in (self._wake_r, self._wake_w):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        self._wake_r = self._wake_w = None
+        self._fd = None
+        try:
+            self._stream.close()
+        except Exception:
+            pass
+
+
 class WorkerChannel:
     """Runs the worker side of one session.
 
@@ -169,8 +223,12 @@ class WorkerChannel:
         self._shutdown_grace = None
         if stdin is None or stdout is None:
             stdin, stdout = self._take_stdio(redirect_stdout)
-        self._reader = frames.FrameReader(stdin, {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES})
+        # The channel owns both streams from here on and releases them when run() ends.
+        self._input = _WakeableInput(stdin)
+        self._reader = frames.FrameReader(self._input, {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES})
         self._writer = frames.FrameWriter(stdout, sender="worker")
+        self._reader_thread = None
+        self._heartbeat_thread = None
         self._lock = threading.Lock()
         # Operations whose handler is running; these are what the in-flight cap counts.
         self._operations = {}
@@ -280,7 +338,18 @@ class WorkerChannel:
     # ------------------------------------------------------------------ loop
 
     def run(self):
-        """Handshake and serve until shutdown or EOF. Returns the exit status."""
+        """Handshake and serve until shutdown or EOF. Returns the exit status.
+
+        However it ends, the channel's input and output are released before it
+        returns: a reader blocked on a peer that keeps its end open is woken
+        first, so no thread outlives ``run`` holding the streams.
+        """
+        try:
+            return self._serve()
+        finally:
+            self._release_streams()
+
+    def _serve(self):
         try:
             self._handshake()
         except frames.FrameError:
@@ -288,11 +357,13 @@ class WorkerChannel:
         except (OSError, ValueError):
             return 3
         heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._heartbeat_thread = heartbeat
         try:
             heartbeat.start()
             # Frames are read on their own thread for the whole life of the channel,
             # so acks keep arriving while operations drain after a shutdown.
-            threading.Thread(target=self._read_loop, daemon=True).start()
+            self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader_thread.start()
         except Exception:
             # A thread could not start: the worker cannot serve. Stop what did
             # start and report failure rather than run half a channel.
@@ -304,6 +375,29 @@ class WorkerChannel:
         self._ended.wait()
         self._drain()
         return self.exit_status
+
+    def _release_streams(self):
+        status = self.exit_status
+        self._close()
+        # Wake a reader blocked in a read, then give it a moment to leave.
+        self._input.interrupt()
+        for thread in (self._reader_thread, self._heartbeat_thread):
+            if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+        self._input.close()
+        # Closing the output waits for a write in progress; a peer that stopped
+        # reading must not hold the exit, so it is closed on its own thread.
+        closer = threading.Thread(target=self._close_output, daemon=True)
+        closer.start()
+        closer.join(timeout=1.0)
+        # A reader woken by the interrupt may report the cut stream as a failure.
+        self.exit_status = status
+
+    def _close_output(self):
+        try:
+            self._writer._stream.close()
+        except Exception:
+            pass
 
     def _read_loop(self):
         try:
@@ -605,12 +699,23 @@ class WorkerChannel:
         deadline = time.monotonic() + grace
         for thread in threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        if self._stopping.is_set():
+        # The goodbye is a write that can block on a full pipe or a held frame
+        # lock. It is skipped when the budget ran out with work still running,
+        # and otherwise bounded by what is left of it (a quarter second at least).
+        if self._stopping.is_set() and not any(thread.is_alive() for thread in threads):
+            self._say_bye(max(deadline - time.monotonic(), _BYE_FLOOR))
+        self._close()
+
+    def _say_bye(self, budget):
+        def write():
             try:
                 self._send({"t": frames.BYE})
             except ChannelClosed:
                 pass
-        self._close()
+
+        sender = threading.Thread(target=write, daemon=True)
+        sender.start()
+        sender.join(timeout=budget)
 
     def _close_acks(self):
         """The host side is gone: no ack will come, so waiting calls give up."""
@@ -628,6 +733,9 @@ class WorkerChannel:
             slots = list(self._pending_calls.values())
         for slot in slots:
             slot["event"].set()
+
+
+_BYE_FLOOR = 0.25
 
 
 def _rss_kb():
