@@ -386,6 +386,106 @@ def test_params_the_worker_would_refuse_are_refused_before_sending(make_session,
     assert session.request("echo", {"fine": True}, timeout=5).result["echo"] == {"fine": True}
 
 
+@pytest.mark.parametrize("kind", ["progress", "progress_data", "event", "call_params", "call_name"])
+def test_a_plugin_sending_a_schema_breaking_message_fails_only_its_own_request(make_session, kind):
+    session = make_session(host_calls={"lookup": lambda call: {}})
+    session.start()
+    process = session.process
+    other = session.submit("sleep", {"seconds": 1.0})
+    with pytest.raises(RequestFailed) as caught:
+        session.request("bad_send", {"kind": kind}, timeout=5)
+    assert caught.value.code == frames.Codes.PLUGIN_ERROR
+    # The session, the worker and an unrelated request in flight are untouched.
+    assert session.alive and session.process is process and process.poll() is None
+    assert other.wait(8).result == {"slept": 1.0}
+    assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
+
+
+@pytest.mark.parametrize("op, params, kwargs", [
+    ("echo", [1], {}),
+    ("echo", "text", {}),
+    ("echo", {"ok": 1}, {"secrets": {"k": 5}}),
+    (5, {}, {}),
+    (None, {}, {}),
+])
+def test_a_request_the_worker_would_reject_is_refused_locally_and_others_survive(make_session, op, params, kwargs):
+    session = make_session({"max_in_flight": 2})
+    session.start()
+    process = session.process
+    other = session.submit("sleep", {"seconds": 0.5})
+    with pytest.raises((ValueError, TypeError)):
+        session.submit(op, params, **kwargs)
+    assert session.in_flight == 1
+    assert session.alive and process.poll() is None
+    assert other.wait(8).result == {"slept": 0.5}
+    assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
+
+
+def test_a_cancel_with_a_reason_that_is_not_text_still_cancels(session):
+    handle = session.submit("sleep", {"seconds": 30})
+    time.sleep(0.3)
+    process = session.process
+    handle.cancel(reason=5)
+    with pytest.raises(RequestCancelled):
+        handle.wait(8)
+    assert session.alive and session.process is process and process.poll() is None
+    assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+def test_a_huge_shutdown_grace_is_clamped_to_a_frame_the_worker_accepts(make_session):
+    session = make_session()
+    session.start()
+    process = session.process
+    session.close(grace=10 ** 7)
+    # A shutdown frame the worker rejected would have ended it with status 3.
+    assert process.returncode == 0
+
+
+_SCHEMA_SAMPLES = [None, True, 0, -1, 7, 1.5, float("nan"), "", "text", [], [1], {}, {"a": 1}, 10 ** 9, "\ud800"]
+
+
+def _frame_fields(sender):
+    names = (frames.FROM_WORKER if sender == "worker" else frames.FROM_HOST)
+    for name in sorted(names):
+        keys = set(frames._REQUIRED[name]) | set(frames._OPTIONAL.get(name, {}))
+        yield name, sorted(keys | {"extra"})
+
+
+@pytest.mark.parametrize("sender", ["host", "worker"])
+def test_every_message_a_side_can_send_passes_the_other_sides_checks(sender):
+    import random
+
+    rng = random.Random(7 if sender == "host" else 11)
+    accepted = refused = 0
+    for name, keys in _frame_fields(sender):
+        for _ in range(400):
+            message = {"t": name}
+            for key in keys:
+                if rng.random() < 0.7:
+                    message[key] = rng.choice(_SCHEMA_SAMPLES)
+            try:
+                body = frames.encode_control(message, sender)
+            except (ValueError, TypeError):
+                refused += 1
+                continue
+            accepted += 1
+            # What leaves the sender is always something the receiver takes.
+            assert frames.decode_control(body, sender) == message
+    assert accepted > 100 and refused > 1000
+
+
+def test_the_sender_check_names_the_problem_and_is_a_value_error():
+    with pytest.raises(frames.UnencodableFrame) as caught:
+        frames.encode_control({"t": "progress", "id": 1, "fraction": "x"}, "worker")
+    assert isinstance(caught.value, ValueError)
+    assert "fraction" in str(caught.value)
+    with pytest.raises(frames.UnencodableFrame):
+        frames.pack_control({"t": "req", "id": 1, "op": "x", "params": [1]}, sender="host")
+    # A message that belongs to the other side is not this side's to send.
+    with pytest.raises(frames.UnencodableFrame):
+        frames.encode_control({"t": "req", "id": 1, "op": "x", "params": {}}, "worker")
+
+
 def test_writer_refuses_a_message_over_the_cap():
     writer = frames.FrameWriter(io.BytesIO(), {frames.FRAME_CONTROL: 32, frames.FRAME_DATA: 64})
     with pytest.raises(frames.FrameTooLarge):

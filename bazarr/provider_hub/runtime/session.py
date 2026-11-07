@@ -423,7 +423,7 @@ class WorkerSession:
         if secrets is not None and not frames.is_secrets(secrets):
             raise ValueError("secrets must be a flat mapping of text names to non-empty text values")
         frames.pack_control({"t": frames.REQ, "id": 0, "op": op, "params": params or {},
-                             "max_result_bytes": cap, "secrets": secrets or {}})
+                             "max_result_bytes": cap, "secrets": secrets or {}}, sender="host")
         with self._lock:
             if self._closed or self.welcome is None:
                 raise self._failure or SessionClosed("session is not running")
@@ -459,7 +459,7 @@ class WorkerSession:
             # The request becomes visible to the watchdog and to cancel only
             # together with its frame in the outbox, so a cancel can never be
             # queued ahead of the request it cancels.
-            data = frames.pack_control(message)
+            data = frames.pack_control(message, sender="host")
             status = self._put(data)
             if status == _QUEUED:
                 self._requests[req_id] = request
@@ -482,6 +482,8 @@ class WorkerSession:
                     or self._requests.get(request.id) is not request):
                 return
             request.cancel_sent_at = time.monotonic()
+            if not isinstance(reason, str):
+                reason = "cancelled"
             request.cancel_reason = reason
             if timed_out:
                 request.timed_out = True
@@ -615,7 +617,7 @@ class WorkerSession:
             max_in_flight=hello.get("max_in_flight") or self.limits.max_in_flight,
             pid=hello.get("pid"),
         )
-        data = frames.pack_control(welcome)
+        data = frames.pack_control(welcome, sender="host")
         # The welcome is queued and the negotiated state published in one locked
         # step, and only if the welcome was queued: submit() reads that state
         # under the same lock, so no request frame can be queued ahead of the
@@ -888,7 +890,7 @@ class WorkerSession:
             ack = {"t": frames.ACK, "cid": cid, "ok": True, "result": result}
             # Encoded here, inside the boundary: a result that is too big, holds a
             # NaN or is not JSON must become a small failure ack, not a dead thread.
-            frames.pack_control(ack)
+            frames.pack_control(ack, sender="host")
             return ack
         except HostCallError as error:
             text = self._describe(error.message)
@@ -983,7 +985,7 @@ class WorkerSession:
         ``FrameTooLarge`` for a message over the control cap. A full outbox
         means the worker stopped reading: the group is killed.
         """
-        data = frames.pack_control(message)
+        data = frames.pack_control(message, sender="host")
         for _ in range(3):
             status = self._put(data)
             if status != _FULL:
@@ -1148,7 +1150,7 @@ class WorkerSession:
         # shutdown frame ahead of the welcome would be a frame it cannot place:
         # that worker is simply ended below.
         if not already and process is not None and handshaken and process.poll() is None:
-            self._send_quietly({"t": frames.SHUTDOWN, "grace_ms": int(grace * 1000)})
+            self._send_quietly({"t": frames.SHUTDOWN, "grace_ms": min(max(int(grace * 1000), 0), frames.MAX_SHUTDOWN_GRACE_MS)})
             try:
                 process.wait(timeout=grace)
             except subprocess.TimeoutExpired:

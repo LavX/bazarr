@@ -234,7 +234,10 @@ class FrameWriter:
     interleaved with other frames; the operation id says which they belong to.
     """
 
-    def __init__(self, stream, caps=None, lock=None):
+    def __init__(self, stream, caps=None, lock=None, sender=None):
+        # ``sender`` ("host" or "worker"), when given, makes every control message
+        # this writer sends pass the receiving side's schema first.
+        self._sender = sender
         self._stream = stream
         self.caps = dict(caps) if caps else default_caps()
         self._lock = lock or threading.Lock()
@@ -252,7 +255,7 @@ class FrameWriter:
             self._stream.flush()
 
     def write_control(self, message):
-        body = encode_control(message)
+        body = encode_control(message, self._sender)
         cap = self.caps[FRAME_CONTROL]
         if len(body) > cap:
             raise FrameTooLarge("control message of %d bytes exceeds the %d byte cap" % (len(body), cap))
@@ -276,21 +279,32 @@ class FrameWriter:
         return count, len(view)
 
 
-def pack_control(message, cap=MAX_CONTROL_BYTES):
+def pack_control(message, cap=MAX_CONTROL_BYTES, sender=None):
     """One whole control frame (header and body) as bytes, checked against ``cap``.
 
     For senders that queue frames for a writer thread instead of writing under
     a lock.
     """
-    body = encode_control(message)
+    body = encode_control(message, sender)
     if len(body) > cap:
         raise FrameTooLarge("control message of %d bytes exceeds the %d byte cap" % (len(body), cap))
     return HEADER.pack(FRAME_CONTROL, len(body)) + body
 
 
-def encode_control(message):
-    """Serialise one control message, refusing exactly what ``decode_control`` refuses."""
+def encode_control(message, sender=None):
+    """Serialise one control message, refusing exactly what ``decode_control`` refuses.
+
+    With ``sender`` ("host" or "worker") the message must also pass the schema the
+    receiving side checks, so a frame the peer would reject never leaves: it is
+    the sender's mistake (``UnencodableFrame``, a ``ValueError``), not the peer's
+    reason to end the session.
+    """
     _check_tree(message, True)
+    if sender is not None:
+        try:
+            validate_message(message, sender)
+        except MalformedFrame as error:
+            raise UnencodableFrame(str(error)) from None
     return json.dumps(message, separators=(",", ":"), allow_nan=False, ensure_ascii=False).encode("utf-8")
 
 

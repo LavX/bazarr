@@ -40,6 +40,7 @@ Operations:
                    request: ``pad`` characters, the secret, ``tail`` more.
 ``parallel_calls``  makes the host calls named in ``names``, each from its own thread.
 ``list_result``     returns a JSON array instead of an object.
+``bad_send``       calls progress, sandbox_blocked or call with arguments that break the schema (``kind``).
 ``unencodable_result``  returns a result the strict encoder refuses (``kind``: deep, duplicate_keys, surrogate).
 ``nan_result``      returns a result that cannot be encoded as JSON.
 ``bad_str``        raises an exception that cannot be turned into text.
@@ -305,6 +306,20 @@ def _handle(operation):
         for thread in threads:
             thread.join()
         return {"results": results}
+    if name == "bad_send":
+        # A plugin that hands the channel arguments its schema does not allow.
+        kind = params["kind"]
+        if kind == "progress":
+            operation.progress(fraction="half")
+        if kind == "progress_data":
+            operation.progress(data=[1, 2])
+        if kind == "event":
+            operation.sandbox_blocked(5)
+        if kind == "call_params":
+            operation.call("lookup", [1])
+        if kind == "call_name":
+            operation.call(7, {})
+        return {"sent": kind}
     if name == "unencodable_result":
         return _unencodable(params["kind"])
     if name == "list_result":

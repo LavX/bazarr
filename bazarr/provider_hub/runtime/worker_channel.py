@@ -170,7 +170,7 @@ class WorkerChannel:
         if stdin is None or stdout is None:
             stdin, stdout = self._take_stdio(redirect_stdout)
         self._reader = frames.FrameReader(stdin, {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES})
-        self._writer = frames.FrameWriter(stdout)
+        self._writer = frames.FrameWriter(stdout, sender="worker")
         self._lock = threading.Lock()
         # Operations whose handler is running; these are what the in-flight cap counts.
         self._operations = {}
@@ -229,7 +229,7 @@ class WorkerChannel:
         # JSON, NaN, over the cap) is the sender's problem and raises as it is,
         # to reach the per-request error reply. Only a failed write means the
         # transport is gone.
-        data = frames.pack_control(message, self._writer.caps[frames.FRAME_CONTROL])
+        data = frames.pack_control(message, self._writer.caps[frames.FRAME_CONTROL], sender="worker")
         try:
             self._writer.write_packed(data)
         except (OSError, ValueError) as error:
