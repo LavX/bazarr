@@ -52,10 +52,16 @@ class FakePool:
         self.language_hook = None
         self.downloads = []
         self.behaviour = lambda pool, candidates, language: []
+        self.fallbacks = []
+        self.fallback = lambda candidates, language: []
 
     def download_best_subtitles(self, candidates, video, languages, **kwargs):
         self.downloads.append((list(candidates), set(languages), kwargs))
         return self.behaviour(self, candidates, next(iter(languages)))
+
+    def download_fallback_subtitles(self, candidates, video, languages, **kwargs):
+        self.fallbacks.append((list(candidates), set(languages), kwargs))
+        return self.fallback(candidates, next(iter(languages)))
 
 
 @pytest.fixture
@@ -108,7 +114,7 @@ def run(monkeypatch):
     monkeypatch.setattr(forced.path_mappings, 'path_replace', lambda value: value)
     monkeypatch.setattr(forced, '_stop_check', lambda cancel: state.stop)
 
-    def save(video, subtitles, episode, video_path, audio_language, max_score, job_id, subz_mods):
+    def save(video, subtitles, episode, video_path, language, audio_language, max_score, job_id, subz_mods):
         state.saved.append(list(subtitles))
         return [SimpleNamespace(message='saved')]
 
@@ -441,11 +447,43 @@ def test_whisper_fallback_is_only_allowed_after_a_clean_answer(run, monkeypatch)
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
     run.outcomes = [_result('alpha'), _result('beta', 'timeout')]
     run.go()
-    assert run.pool.downloads[-1][2]['fallback_allowed'] is False
+    assert run.pool.fallbacks == []
 
     run.outcomes = [_result('alpha')]
     run.go()
-    assert run.pool.downloads[-1][2]['fallback_allowed'] is True
+    assert len(run.pool.fallbacks) == 1
+
+
+def test_whisper_fallback_does_not_stand_in_for_a_skipped_candidate(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+
+    def behaviour(pool, candidates, language):
+        candidate.skip_reason = 'provider_busy'
+        return []
+
+    run.pool.behaviour = behaviour
+    run.pool.fallback = lambda candidates, language: [_candidate('whisperai')]
+
+    result = run.go()
+
+    assert run.pool.fallbacks == []
+    assert result.languages[0].status == 'open'
+    assert run.saved == []
+
+
+def test_a_whisper_fallback_that_delivers_is_a_download(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    whisper = _candidate('whisperai')
+    run.outcomes = [_result('alpha')]
+    run.pool.fallback = lambda candidates, language: [whisper]
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'downloaded'}
+    assert run.saved == [[whisper]]
 
 
 def test_the_translate_from_rule_is_not_consulted(run, monkeypatch):
@@ -484,7 +522,8 @@ def test_stop_between_languages_propagates(run):
     from app.jobs_queue import JobCancelled
 
     run.items = [_profile_language('en'), _profile_language('hu')]
-    run.outcomes = [_result('alpha')]
+    run.candidates = [_candidate('alpha', 'eng'), _candidate('alpha', 'hun')]
+    run.outcomes = [_result('alpha', 'success')]
     calls = []
 
     def stop():
@@ -515,7 +554,8 @@ def test_a_listing_error_propagates(run, monkeypatch):
 def test_stop_during_a_download_for_this_job_propagates(run):
     from app.jobs_queue import JobCancelled
 
-    run.outcomes = [_result('alpha')]
+    run.candidates = [_candidate('alpha')]
+    run.outcomes = [_result('alpha', 'success')]
 
     def behaviour(pool, candidates, language):
         raise JobCancelled(job_id=7)
@@ -650,7 +690,8 @@ def test_the_support_check_reads_the_provider_class(monkeypatch):
 def test_stop_of_another_job_during_a_download_keeps_that_language_open(run):
     from app.jobs_queue import JobCancelled
 
-    run.outcomes = [_result('alpha')]
+    run.candidates = [_candidate('alpha')]
+    run.outcomes = [_result('alpha', 'success')]
 
     def behaviour(pool, candidates, language):
         raise JobCancelled(job_id=99)
@@ -661,3 +702,136 @@ def test_stop_of_another_job_during_a_download_keeps_that_language_open(run):
 
     assert _statuses(result) == {'en': 'open'}
     assert run.not_found == []
+
+
+def test_a_credential_loss_during_the_download_does_not_hold(run):
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success'), _result('beta')]
+
+    def behaviour(pool, candidates, language):
+        pool.discarded_providers.add('alpha')
+        run.throttled = {'alpha': 'AuthenticationError'}
+        return []
+
+    run.pool.behaviour = behaviour
+
+    assert _statuses(run.go()) == {'en': 'finished'}
+
+
+def test_a_skipped_download_of_a_credential_blocked_provider_does_not_hold(run):
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+
+    def behaviour(pool, candidates, language):
+        candidate.skip_reason = 'provider_excluded'
+        run.throttled = {'alpha': 'ConfigurationError'}
+        return []
+
+    run.pool.behaviour = behaviour
+
+    assert _statuses(run.go()) == {'en': 'finished'}
+
+
+def test_provider_priority_tries_providers_in_the_pools_order(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_provider_priority', True)
+    beta = _candidate('beta')
+    alpha = _candidate('alpha')
+    run.candidates = [beta, alpha]
+    run.outcomes = [_result('alpha', 'success'), _result('beta', 'success')]
+    run.pool.behaviour = lambda pool, candidates, language: []
+
+    run.go()
+    assert [offered for offered, _, _ in run.pool.downloads] == [[alpha], [beta]]
+
+    run.pool.downloads.clear()
+    run.pool.behaviour = lambda pool, candidates, language: candidates[:1]
+    result = run.go()
+    assert [offered for offered, _, _ in run.pool.downloads] == [[alpha]]
+    assert _statuses(result) == {'en': 'downloaded'}
+
+
+def test_without_provider_priority_the_best_score_wins_across_providers(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_provider_priority', False)
+    beta = _candidate('beta')
+    alpha = _candidate('alpha')
+    run.candidates = [beta, alpha]
+    run.outcomes = [_result('alpha', 'success'), _result('beta', 'success')]
+
+    run.go()
+
+    assert [offered for offered, _, _ in run.pool.downloads] == [[beta, alpha]]
+
+
+def test_a_language_no_provider_applies_to_is_open_with_its_own_reason(run):
+    run.outcomes = [_result('alpha', 'skipped', 'unsupported_language')]
+
+    result = run.go()
+
+    assert result.languages[0].status == 'open'
+    assert result.languages[0].reason == 'no_applicable_provider'
+    assert run.not_found == []
+
+
+def test_only_the_embedded_provider_answering_is_no_applicable_provider(run):
+    run.outcomes = [_result('embeddedsubtitles', 'success')]
+
+    assert run.go().languages[0].reason == 'no_applicable_provider'
+
+
+def test_a_credential_failure_alone_still_has_an_applicable_provider(run):
+    run.outcomes = [_result('alpha', 'authentication_required')]
+
+    assert run.go().languages[0].reason == 'no_provider_answered'
+
+
+def test_the_subtitle_cache_is_synced_after_a_run(run, monkeypatch):
+    synced = []
+    monkeypatch.setattr(run.forced, '_sync_cache', lambda: synced.append(1))
+    run.outcomes = [_result('alpha')]
+
+    run.go()
+
+    assert synced == [1]
+
+
+def _saving(monkeypatch, forced, language, on_disk):
+    """Run ``_save_and_process`` with the writing and processing replaced."""
+    import contextlib
+
+    cleared = []
+    subtitle = SimpleNamespace(format='srt', storage_path='/series/fixture/s01e01.en.srt', language=language,
+                               matches={'hash', 'series'})
+
+    monkeypatch.setattr(forced, 'get_target_folder', lambda path: None)
+    monkeypatch.setattr(forced, 'subtitle_write_locks', lambda *args: contextlib.nullcontext())
+    monkeypatch.setattr(forced, 'save_subtitles',
+                        lambda *args, **kwargs: (kwargs['write_subtitle'].keywords['written_paths'].append(
+                            subtitle.storage_path), [subtitle])[1])
+    monkeypatch.setattr(forced.os.path, 'isfile', lambda path: on_disk)
+    monkeypatch.setattr(forced, 'process_subtitle', lambda **kwargs: SimpleNamespace(message='saved'))
+    monkeypatch.setattr(forced, 'clear_mismatch_for_video',
+                        lambda video, media_type, lang, arr_instance_id=None: cleared.append(lang))
+    video = SimpleNamespace(original_path='/series/fixture/s01e01.mkv')
+    processed = forced._save_and_process(video, [subtitle], _episode(), '/series/fixture/s01e01.mkv', language,
+                                         'English', 100, None, [])
+    return processed, cleared
+
+
+def test_a_saved_subtitle_clears_the_recorded_mismatch(monkeypatch):
+    import subtitles.wanted.forced as forced
+
+    processed, cleared = _saving(monkeypatch, forced, Language('eng'), on_disk=True)
+
+    assert len(processed) == 1
+    assert cleared == [Language('eng')]
+
+
+def test_a_subtitle_that_never_reached_disk_keeps_the_mismatch(monkeypatch):
+    import subtitles.wanted.forced as forced
+
+    processed, cleared = _saving(monkeypatch, forced, Language('eng'), on_disk=False)
+
+    assert processed == []
+    assert cleared == []

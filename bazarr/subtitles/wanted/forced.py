@@ -52,6 +52,7 @@ from app.jobs_queue import JobCancelled
 from app.notifier import send_notifications
 from media_servers.events import publication_callback
 from sonarr.history import history_log
+import subliminal
 from subliminal_patch.core import ListingStopped, _hub_search_languages, save_subtitles
 from subliminal_patch.core_persistent import list_all_subtitles
 from subliminal_patch.extensions import provider_registry
@@ -63,6 +64,7 @@ from utilities.path_mappings import path_mappings
 
 from ..adaptive_searching import updateFailedAttempts
 from ..download import _get_language_obj
+from ..mismatch import clear_mismatch_for_video
 from ..manual import _stop_check
 from ..pool import _get_pool, update_pools
 from ..processing import process_subtitle
@@ -194,18 +196,21 @@ class _Run:
         return reason is not None and is_credential_throttle_reason(reason)
 
     def listing_verdict(self, language):
-        """``(answered, holds)`` for one language from the listing and the throttle table.
+        """``(answered, holds, applicable)`` for one language from the listing and the throttle table.
 
         ``holds`` lists the reasons the language cannot be called finished: a provider that applies to it
-        failed, was throttled, was busy or was excluded.
+        failed, was throttled, was busy or was excluded. ``applicable`` is whether any enabled provider
+        handles the language at all, a provider with a credential problem included.
         """
         answered = False
+        applicable = False
         holds = []
         for name, result in self.outcomes.items():
             if result.status == 'skipped' and result.reason in _NOT_APPLICABLE_REASONS:
                 continue
             if not _provider_supports(self.pool, name, self.video, language):
                 continue
+            applicable = True
             if result.status in _ANSWERED:
                 answered = True
             elif result.status in _CREDENTIAL_STATUSES:
@@ -217,27 +222,37 @@ class _Run:
         for name, reason in self.throttled_at_start.items():
             if name in self.outcomes or not _provider_supports(self.pool, name, self.video, language):
                 continue
+            applicable = True
             if is_credential_throttle_reason(reason):
                 logging.info('BAZARR forced search: %s is backed off for a credential problem; not counted', name)
             else:
                 holds.append(f'{name}:throttled')
-        return answered, holds
+        return answered, holds, applicable
 
     def download_holds(self, candidates):
-        """Reasons the download left a candidate unattempted: a skipped download, or a provider lost since the listing."""
+        """Reasons the download left a candidate unattempted: a skipped download, or a provider lost since the listing.
+
+        A provider lost to a credential problem is not a reason to wait, as in the listing.
+        """
         holds = []
         for subtitle in candidates:
             skip_reason = getattr(subtitle, 'skip_reason', None)
-            if skip_reason:
+            if skip_reason and not self._credential_blocked(subtitle.provider_name):
                 holds.append(f'{subtitle.provider_name}:{skip_reason}')
         lost = self.pool.discarded_providers - self.discarded_before_download
-        holds.extend(f'{name}:lost_during_download'
-                     for name in sorted({subtitle.provider_name for subtitle in candidates})
-                     if name in lost or provider_is_throttled(name))
+        for name in sorted({subtitle.provider_name for subtitle in candidates}):
+            if name not in lost and not provider_is_throttled(name):
+                continue
+            if self._credential_blocked(name):
+                logging.info('BAZARR forced search: %s was lost to a credential problem during the download; '
+                             'not counted', name)
+            else:
+                holds.append(f'{name}:lost_during_download')
         return holds
 
 
-def _save_and_process(video, subtitles, episode, video_path, audio_language, max_score, job_id, subz_mods):
+def _save_and_process(video, subtitles, episode, video_path, language, audio_language, max_score, job_id,
+                      subz_mods):
     """Write downloaded subtitles next to the video and process each one. Returns the processed results."""
     arr_instance_id = getattr(episode, 'arr_instance_id', None)
     path = video.original_path
@@ -269,10 +284,15 @@ def _save_and_process(video, subtitles, episode, video_path, audio_language, max
         logging.exception('BAZARR forced search: error saving subtitles for %s', video_path)
         return []
 
+    # Only for a subtitle that really reached disk: a recorded release-type mismatch is cleared once the file
+    # is there, never before.
+    on_disk = [subtitle for subtitle in saved
+               if getattr(subtitle, 'storage_path', None) and os.path.isfile(subtitle.storage_path)]
+    if any(str(getattr(subtitle, 'language', None)) == str(language) for subtitle in on_disk):
+        clear_mismatch_for_video(video, 'series', language, arr_instance_id=arr_instance_id)
+
     processed = []
-    for subtitle in saved:
-        if not getattr(subtitle, 'storage_path', None) or not os.path.isfile(subtitle.storage_path):
-            continue
+    for subtitle in on_disk:
         if "hash" in subtitle.matches:
             # make matches set cleaner for history purpose when hash matches
             subtitle.matches = {match for match in subtitle.matches if match in ("hash", "hearing_impaired")}
@@ -306,6 +326,31 @@ def _write_not_found(episode, attempts):
                .values(failedAttempts=attempts)
                .where(TableEpisodes.sonarrEpisodeId == episode.sonarrEpisodeId),
                TableEpisodes.arr_instance_id, arr_instance_id))
+
+
+def _download_language(pool, candidates, video, language, **options):
+    """Download the best candidate for one language, ordered the way a normal search orders it.
+
+    With provider priority on, providers are tried in the pool's order and the first one that delivers wins,
+    which is what the priority waterfall does. Otherwise the best score wins whatever the provider.
+    """
+    if not settings.general.use_provider_priority:
+        return pool.download_best_subtitles(candidates, video, {language}, fallback_allowed=False, **options)
+    for name in pool.providers:
+        own = [subtitle for subtitle in candidates if subtitle.provider_name == name]
+        if not own:
+            continue
+        downloaded = pool.download_best_subtitles(own, video, {language}, fallback_allowed=False, **options)
+        if downloaded:
+            return downloaded
+    return []
+
+
+def _sync_cache():
+    try:
+        subliminal.region.backend.sync()
+    except Exception:
+        logging.debug('BAZARR forced search: the subtitle cache could not be synced', exc_info=True)
 
 
 def _check_stop(stop):
@@ -409,20 +454,25 @@ def _run(episode, *, profile_id, media_type, job_id, cancel):
             results.languages.append(LanguageResult(code, CUTOFF_MET))
             continue
 
-        answered, holds = run.listing_verdict(language)
+        answered, holds, applicable = run.listing_verdict(language)
         language_candidates = [subtitle for subtitle in candidates
                                if subtitle.language.basename == language.basename]
         run.discarded_before_download = set(pool.discarded_providers)
-        candidate_sink = []
+        download_options = dict(min_score=int(min_score),
+                                hearing_impaired=hi_required,
+                                use_original_format=original_format in (1, "1", "True", True))
         try:
-            downloaded = pool.download_best_subtitles(
-                language_candidates, video, {language},
-                min_score=int(min_score),
-                hearing_impaired=hi_required,
-                use_original_format=original_format in (1, "1", "True", True),
-                # Whisper is the costliest source: only for a language every provider has answered cleanly.
-                fallback_allowed=bool(settings.general.use_whisper_fallback and answered and not holds),
-                candidate_sink=candidate_sink)
+            downloaded = _download_language(pool, language_candidates, video, language, **download_options)
+            if not downloaded:
+                holds = holds + run.download_holds(language_candidates)
+                # Whisper is the costliest source and the one that is not a provider's answer: it runs only for
+                # a language every applicable provider answered cleanly, never in place of a candidate that was
+                # skipped and could still be fetched on the next run.
+                if settings.general.use_whisper_fallback and answered and not holds:
+                    downloaded = pool.download_fallback_subtitles(language_candidates, video, {language},
+                                                                  hearing_impaired=hi_required,
+                                                                  use_original_format=download_options[
+                                                                      'use_original_format'])
         except JobCancelled as error:
             if error.job_id == job_id:
                 raise
@@ -431,8 +481,8 @@ def _run(episode, *, profile_id, media_type, job_id, cancel):
             continue
 
         if downloaded:
-            processed = _save_and_process(video, downloaded, episode, video_path, audio_language, max_score,
-                                          job_id, subz_mods)
+            processed = _save_and_process(video, downloaded, episode, video_path, language, audio_language,
+                                          max_score, job_id, subz_mods)
             for result in processed:
                 _record_download(episode, result)
             if processed:
@@ -441,16 +491,17 @@ def _run(episode, *, profile_id, media_type, job_id, cancel):
                 results.languages.append(LanguageResult(code, OPEN, 'save_failed'))
             continue
 
-        holds = holds + run.download_holds(language_candidates)
         if holds:
             logging.info('BAZARR forced search: %s stays open for %s (%s)', code, episode.path, ', '.join(holds))
             results.languages.append(LanguageResult(code, OPEN, ', '.join(holds)))
         elif not answered:
-            logging.info('BAZARR forced search: no provider answered for %s, %s stays open', episode.path, code)
-            results.languages.append(LanguageResult(code, OPEN, 'no_provider_answered'))
+            reason = 'no_provider_answered' if applicable else 'no_applicable_provider'
+            logging.info('BAZARR forced search: %s stays open for %s (%s)', code, episode.path, reason)
+            results.languages.append(LanguageResult(code, OPEN, reason))
         else:
             attempts = updateFailedAttempts(desired_language=code, attempt_string=attempts)
             _write_not_found(episode, attempts)
             results.languages.append(LanguageResult(code, FINISHED))
 
+    _sync_cache()
     return results
