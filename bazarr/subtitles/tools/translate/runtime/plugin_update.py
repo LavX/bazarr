@@ -16,7 +16,7 @@ from provider_hub.plugin_manifest import parse_plugin_manifest
 
 from .destinations import DestinationSchema
 from .field_schema import is_secret_field, validate_values
-from .store import CONNECTION, INSTANCE, TranslatorStore
+from .store import INSTANCE, TranslatorStore
 
 logger = logging.getLogger(__name__)
 
