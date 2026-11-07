@@ -1594,3 +1594,71 @@ def test_a_draining_worker_keeps_the_memory_limit_it_started_with(make_pool):
     pool.sweep()
     assert pid_alive(first)
     assert slow.wait(10).result == {"slept": 1.0}
+
+
+# ------------------------------------------------ shutdown during a one-off start
+
+
+def test_closing_the_pool_during_a_one_off_start_leaves_no_worker_behind(make_pool):
+    import threading
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    runtimes = []
+
+    class SlowStart(StubProcessRuntime):
+        def start(self):
+            entered.set()
+            proceed.wait(10)
+            super().start()
+
+        def close(self, grace=5.0):
+            self.process.returncode = 0
+            super().close(grace)
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtimes.append(SlowStart())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(), use_clock=False)
+    outcome = []
+
+    def one_off():
+        try:
+            pool.run_once(WorkerDefinition("draft", kind="daemon", runtime=factory), "echo")
+            outcome.append(None)
+        except BaseException as error:
+            outcome.append(error)
+
+    runner = threading.Thread(target=one_off)
+    runner.start()
+    assert entered.wait(5)
+    closer = threading.Thread(target=pool.close)
+    closer.start()
+    time.sleep(0.2)
+    # close() waits for the start; it has not returned and the worker is not torn down yet.
+    assert closer.is_alive()
+    proceed.set()
+    runner.join(10)
+    closer.join(10)
+    assert not runner.is_alive() and not closer.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], PoolClosed)
+    assert runtimes[0].closed_with is not None
+    assert runtimes[0].process.returncode == 0
+    assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0
+
+
+def test_no_one_off_worker_is_spawned_once_the_pool_is_closing(make_pool):
+    spawned = []
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        spawned.append(1)
+        return StubProcessRuntime()
+
+    pool = make_pool(fast_pool_limits(), use_clock=False)
+    slot = pool_module._Slot(WorkerDefinition("draft", kind="daemon", runtime=factory), 0.0, pool.limits,
+                             ephemeral=True)
+    pool.close()
+    with pytest.raises(PoolClosed):
+        pool._open_session(slot)
+    assert spawned == [] and slot.session is None

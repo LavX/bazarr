@@ -713,6 +713,9 @@ class WorkerPool:
         # closed meanwhile: still a process in the making, counted until the start
         # ends and its teardown is queued.
         self._detached: set = set()
+        # One-off workers whose session is still being created or started. Close
+        # waits for them, and none begins once the pool is closing.
+        self._ephemeral_starting: set = set()
         self._stuck: list = []
         self._stuck_lock = threading.Lock()
         self._events: list[tuple[str, str, dict]] = []
@@ -748,6 +751,13 @@ class WorkerPool:
             self._cond.notify_all()
         self._flush(wait=True)
         self._wait_detached()
+
+    def _wait_ephemeral_starts(self):
+        """Wait (bounded) for one-off workers that are still being started."""
+        deadline = time.monotonic() + self.limits.close_grace + 30.0
+        with self._cond:
+            while self._ephemeral_starting and time.monotonic() < deadline:
+                self._cond.wait(0.2)
 
     def _wait_detached(self):
         """Wait (bounded) for starts that were cut off to end, and for the teardown they queued."""
@@ -942,6 +952,7 @@ class WorkerPool:
             with self._cond:
                 self._check_open()
                 self._ephemeral.add(slot)
+                self._ephemeral_starting.add(slot)
             self._ensure_sampler()
             try:
                 self._open_session(slot)
@@ -949,6 +960,12 @@ class WorkerPool:
                 raise
             except BaseException as error:
                 raise self._start_error(slot, error)
+            finally:
+                with self._cond:
+                    self._ephemeral_starting.discard(slot)
+                    self._cond.notify_all()
+            with self._cond:
+                self._check_open()
             try:
                 with self._cond:
                     slot.pending += 1
@@ -1021,9 +1038,12 @@ class WorkerPool:
                     self._queue_close(slot, None, "close")
                 entry.retiring = []
                 entry.state = WorkerState.STOPPED
+            self._cond.notify_all()
+        self._wait_ephemeral_starts()
+        with self._cond:
+            # Now that every one-off start has ended, each has its session (or none).
             for slot in list(self._ephemeral):
                 self._queue_close(slot, None, "kill")
-            self._cond.notify_all()
         self._flush(wait=True)
         self._wait_detached()
         if self._stuck:
@@ -1280,6 +1300,11 @@ class WorkerPool:
     def _open_session(self, slot):
         definition = slot.definition
         key = definition.key
+        if slot.ephemeral:
+            # Nothing is spawned for a one-off run once the pool is closing; close()
+            # waits for the ones that got past this point.
+            with self._cond:
+                self._check_open()
         limits = definition.session_limits or SessionLimits(
             heartbeat_interval=self.limits.heartbeat_interval,
             heartbeat_timeout=self.limits.heartbeat_interval * self.limits.heartbeat_misses,
