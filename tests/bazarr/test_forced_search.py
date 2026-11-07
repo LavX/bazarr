@@ -1,0 +1,663 @@
+# coding=utf-8
+
+"""The forced duplicate search of one episode.
+
+It lists every provider with outcomes, downloads per language through the pool,
+and ends each language as downloaded, finished, cutoff_met or open. The
+provider statuses are the ones the listing reports, so the finish rule is
+tested by feeding scripted results through ``on_outcome``.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+
+from subliminal_patch.core import ListingStopped, ProviderSearchResult
+from subzero.language import Language
+
+pytestmark = pytest.mark.usefixtures('languages_loaded')
+
+
+def _episode(failed_attempts='[]', profile_id=1):
+    return SimpleNamespace(
+        arr_instance_id=1,
+        audio_language="['English']",
+        failedAttempts=failed_attempts,
+        path="/series/fixture/s01e01.mkv",
+        profileId=profile_id,
+        sceneName="Fixture.Scene",
+        sonarrEpisodeId=20,
+        sonarrSeriesId=10,
+        subtitles="[['en', None, 100]]",
+        title="Fixture Series",
+    )
+
+
+def _profile_language(language='en', hi='False', forced='False'):
+    return {'language': language, 'hi': hi, 'forced': forced}
+
+
+def _candidate(provider, language='eng'):
+    return SimpleNamespace(provider_name=provider, language=Language(language))
+
+
+class _Video:
+    arr_instance_id = None
+
+
+class FakePool:
+    def __init__(self, providers=('alpha', 'beta')):
+        self.providers = list(providers)
+        self.discarded_providers = set()
+        self.language_hook = None
+        self.downloads = []
+        self.behaviour = lambda pool, candidates, language: []
+
+    def download_best_subtitles(self, candidates, video, languages, **kwargs):
+        self.downloads.append((list(candidates), set(languages), kwargs))
+        return self.behaviour(self, candidates, next(iter(languages)))
+
+
+@pytest.fixture
+def run(monkeypatch):
+    """A harness around ``forced._run`` with every outside dependency replaced."""
+    import subtitles.pool as pool_module
+    import subtitles.tools.mods as mods_module
+    import subtitles.wanted.forced as forced
+
+    state = SimpleNamespace(
+        forced=forced,
+        pool=FakePool(),
+        outcomes=[],
+        candidates=[],
+        items=[_profile_language('en')],
+        throttled={},
+        supports=lambda name, language: True,
+        cutoff=lambda episode: False,
+        listed=[],
+        recorded=[],
+        not_found=[],
+        saved=[],
+        stop=None,
+    )
+    video = _Video()
+    state.video = video
+
+    def list_all(videos, languages, pool, min_score=0, cancel=None, on_outcome=None):
+        state.listed.append(set(languages))
+        for outcome in state.outcomes:
+            on_outcome(outcome)
+        return {videos[0]: list(state.candidates)}
+
+    monkeypatch.setattr(pool_module, '_update_pool', lambda *args, **kwargs: False)
+    monkeypatch.setattr(mods_module, 'get_subzero_mods', lambda arr_instance_id: [])
+    monkeypatch.setattr(forced, 'list_all_subtitles', list_all)
+    monkeypatch.setattr(forced, '_get_pool', lambda media_type, profile_id: state.pool)
+    monkeypatch.setattr(forced, 'get_providers', lambda: ['alpha', 'beta'])
+    monkeypatch.setattr(forced, 'get_video', lambda *args, **kwargs: video)
+    monkeypatch.setattr(forced, 'desired_subtitles_for_profile', lambda profile_id, audio: list(state.items))
+    monkeypatch.setattr(forced, 'get_profiles_list', lambda profile_id: {'originalFormat': 'False'})
+    monkeypatch.setattr(forced, 'get_audio_profile_languages', lambda audio: [{'name': 'English'}])
+    monkeypatch.setattr(forced, 'snapshot_throttled_providers',
+                        lambda: {'providers': [{'provider': name, 'reason': reason}
+                                               for name, reason in state.throttled.items()]})
+    monkeypatch.setattr(forced, 'provider_is_throttled', lambda name: name in state.throttled)
+    monkeypatch.setattr(forced, '_provider_supports',
+                        lambda pool, name, video, language: state.supports(name, language))
+    monkeypatch.setattr(forced, 'external_cutoff_met', lambda episode: state.cutoff(episode))
+    monkeypatch.setattr(forced.path_mappings, 'path_replace', lambda value: value)
+    monkeypatch.setattr(forced, '_stop_check', lambda cancel: state.stop)
+
+    def save(video, subtitles, episode, video_path, audio_language, max_score, job_id, subz_mods):
+        state.saved.append(list(subtitles))
+        return [SimpleNamespace(message='saved')]
+
+    monkeypatch.setattr(forced, '_save_and_process', save)
+    monkeypatch.setattr(forced, '_record_download', lambda episode, result: state.recorded.append(result))
+    monkeypatch.setattr(forced, '_write_not_found', lambda episode, attempts: state.not_found.append(attempts))
+
+    def go(episode=None, **kwargs):
+        return forced.run_forced_search(episode or _episode(), **kwargs)
+
+    state.go = go
+    return state
+
+
+def _result(provider, status='empty', reason=None):
+    return ProviderSearchResult(provider, status=status, reason=reason)
+
+
+def _statuses(result):
+    return {item.language: item.status for item in result.languages}
+
+
+def test_language_list_is_every_profile_language_after_the_audio_rules(run):
+    run.items = [_profile_language('en'), _profile_language('hu', hi='True'), _profile_language('de', forced='True')]
+    run.outcomes = [_result('alpha')]
+
+    result = run.go()
+
+    assert [item.language for item in result.languages] == ['en', 'hu:hi', 'de:forced']
+    assert len(run.listed) == 1 and len(run.listed[0]) == 3
+
+
+def test_an_episode_without_a_profile_has_nothing_to_search(run):
+    result = run.go(_episode(profile_id=None))
+
+    assert result.languages == []
+    assert result.complete
+    assert run.listed == []
+
+
+@pytest.mark.parametrize('outcomes, expected', [
+    # One provider answered with nothing and none failed.
+    ([_result('alpha')], 'finished'),
+    ([_result('alpha'), _result('beta', 'success')], 'finished'),
+    # A provider that does not handle the media or the language is not a failure.
+    ([_result('alpha'), _result('beta', 'skipped', 'unsupported_language')], 'finished'),
+    ([_result('alpha'), _result('beta', 'skipped', 'unsupported_media')], 'finished'),
+    ([_result('alpha'), _result('beta', 'skipped', 'excluded_language')], 'finished'),
+    # A busy provider is not an answer and not a failure: the request waits.
+    ([_result('alpha'), _result('beta', 'skipped', 'provider_busy')], 'open'),
+    ([_result('alpha'), _result('beta', 'skipped', 'provider_excluded')], 'open'),
+    ([_result('alpha'), _result('beta', 'cooldown', 'cooldown')], 'open'),
+    ([_result('alpha'), _result('beta', 'timeout', 'timeout')], 'open'),
+    ([_result('alpha'), _result('beta', 'unreachable', 'unreachable')], 'open'),
+    ([_result('alpha'), _result('beta', 'error', 'error')], 'open'),
+    # Nobody answered.
+    ([], 'open'),
+    ([_result('alpha', 'timeout')], 'open'),
+])
+def test_finish_rule(run, outcomes, expected):
+    run.outcomes = outcomes
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': expected}
+    assert bool(run.not_found) == (expected == 'finished')
+    assert result.complete == (expected == 'finished')
+
+
+def test_a_finished_language_writes_one_not_found_record_per_language(run):
+    run.items = [_profile_language('en'), _profile_language('hu')]
+    run.outcomes = [_result('alpha')]
+
+    result = run.go(_episode(failed_attempts='[]'))
+
+    assert _statuses(result) == {'en': 'finished', 'hu': 'finished'}
+    # The second record builds on the first, so both languages are in the final string.
+    assert len(run.not_found) == 2
+    assert "'en'" in run.not_found[-1] and "'hu'" in run.not_found[-1]
+
+
+@pytest.mark.parametrize('status', ['authentication_required', 'setup_required'])
+def test_a_credential_failure_is_neither_an_answer_nor_a_hold(run, status):
+    run.outcomes = [_result('alpha'), _result('beta', status, status)]
+
+    assert _statuses(run.go()) == {'en': 'finished'}
+
+
+def test_a_credential_failure_alone_is_not_an_answer(run):
+    run.outcomes = [_result('beta', 'authentication_required', 'authentication_required')]
+
+    result = run.go()
+
+    assert result.languages[0].status == 'open'
+    assert result.languages[0].reason == 'no_provider_answered'
+
+
+def test_a_provider_excluded_for_a_credential_backoff_is_ignored(run):
+    run.throttled = {'beta': 'AuthenticationError'}
+    run.outcomes = [_result('alpha'), _result('beta', 'skipped', 'provider_excluded')]
+
+    assert _statuses(run.go()) == {'en': 'finished'}
+
+
+def test_a_credential_backoff_at_start_is_ignored(run):
+    run.throttled = {'beta': 'ConfigurationError'}
+    run.outcomes = [_result('alpha')]
+
+    assert _statuses(run.go()) == {'en': 'finished'}
+
+
+def test_a_provider_throttled_at_start_holds_the_request(run):
+    run.throttled = {'beta': 'TooManyRequests'}
+    run.outcomes = [_result('alpha')]
+
+    result = run.go()
+
+    assert result.languages[0].status == 'open'
+    assert 'beta:throttled' in result.languages[0].reason
+
+
+def test_a_throttled_provider_that_does_not_support_the_language_does_not_hold(run):
+    run.throttled = {'beta': 'TooManyRequests'}
+    run.outcomes = [_result('alpha')]
+    run.supports = lambda name, language: name != 'beta'
+
+    assert _statuses(run.go()) == {'en': 'finished'}
+
+
+def test_a_failure_of_a_provider_that_does_not_support_a_language_holds_only_the_others(run):
+    run.items = [_profile_language('en'), _profile_language('hu')]
+    run.outcomes = [_result('alpha'), _result('beta', 'timeout')]
+    # beta handles Hungarian only.
+    run.supports = lambda name, language: not (name == 'beta' and language.alpha3 == 'eng')
+
+    assert _statuses(run.go()) == {'en': 'finished', 'hu': 'open'}
+
+
+def test_the_embedded_provider_never_counts(run):
+    run.outcomes = [_result('alpha'), _result('embeddedsubtitles', 'error')]
+
+    assert _statuses(run.go()) == {'en': 'finished'}
+
+
+def test_the_embedded_provider_answer_is_not_an_answer(run):
+    run.outcomes = [_result('embeddedsubtitles', 'success')]
+
+    assert _statuses(run.go()) == {'en': 'open'}
+
+
+def test_embedded_provider_candidates_are_never_downloaded(run):
+    embedded = _candidate('embeddedsubtitles')
+    external = _candidate('alpha')
+    run.candidates = [embedded, external]
+    run.outcomes = [_result('alpha', 'success')]
+    run.pool.behaviour = lambda pool, candidates, language: [external]
+
+    result = run.go()
+
+    offered, languages, _ = run.pool.downloads[0]
+    assert offered == [external]
+    assert result.downloaded == ['en']
+
+
+def test_a_downloaded_language_is_recorded_and_writes_no_not_found(run):
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+    run.pool.behaviour = lambda pool, candidates, language: [candidate]
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'downloaded'}
+    assert run.saved == [[candidate]]
+    assert len(run.recorded) == 1
+    assert run.not_found == []
+
+
+def test_a_download_that_cannot_be_saved_keeps_the_language_open(run, monkeypatch):
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+    run.pool.behaviour = lambda pool, candidates, language: [candidate]
+    monkeypatch.setattr(run.forced, '_save_and_process', lambda *args, **kwargs: [])
+
+    result = run.go()
+
+    assert result.languages[0].status == 'open'
+    assert result.languages[0].reason == 'save_failed'
+    assert run.not_found == []
+
+
+def test_a_skipped_download_holds_the_request(run):
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+
+    def behaviour(pool, candidates, language):
+        candidate.skip_reason = 'provider_busy'
+        return []
+
+    run.pool.behaviour = behaviour
+
+    result = run.go()
+
+    assert result.languages[0].status == 'open'
+    assert 'alpha:provider_busy' in result.languages[0].reason
+    assert run.not_found == []
+
+
+def test_a_provider_discarded_during_the_download_holds_the_request(run):
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success'), _result('beta')]
+
+    def behaviour(pool, candidates, language):
+        pool.discarded_providers.add('alpha')
+        return []
+
+    run.pool.behaviour = behaviour
+
+    result = run.go()
+
+    assert result.languages[0].status == 'open'
+    assert 'alpha:lost_during_download' in result.languages[0].reason
+
+
+def test_a_provider_throttled_during_the_download_holds_the_request(run):
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success'), _result('beta')]
+
+    def behaviour(pool, candidates, language):
+        run.throttled = {'alpha': 'TooManyRequests'}
+        return []
+
+    run.pool.behaviour = behaviour
+
+    assert _statuses(run.go()) == {'en': 'open'}
+
+
+def test_a_rejected_candidate_counts_as_an_answer(run):
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+
+    def behaviour(pool, candidates, language):
+        candidate.rejected_reason = 'not a subtitle'
+        return []
+
+    run.pool.behaviour = behaviour
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'finished'}
+    assert len(run.not_found) == 1
+
+
+def test_a_language_only_downloads_from_its_own_candidates_per_call(run):
+    run.items = [_profile_language('en'), _profile_language('hu')]
+    english = _candidate('alpha', 'eng')
+    hungarian = _candidate('alpha', 'hun')
+    run.candidates = [english, hungarian]
+    run.outcomes = [_result('alpha', 'success')]
+    run.pool.behaviour = lambda pool, candidates, language: [candidates[0]]
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'downloaded', 'hu': 'downloaded'}
+    assert [languages for _, languages, _ in run.pool.downloads] == [
+        {Language('eng')}, {Language('hun')}]
+    assert [offered for offered, _, _ in run.pool.downloads] == [[english], [hungarian]]
+
+
+def test_a_cutoff_already_met_by_external_subtitles_searches_nothing(run):
+    run.items = [_profile_language('en'), _profile_language('hu')]
+    run.cutoff = lambda episode: True
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'cutoff_met', 'hu': 'cutoff_met'}
+    assert result.complete
+    assert run.listed == []
+    assert run.not_found == []
+
+
+def test_a_cutoff_met_by_an_earlier_download_stops_the_remaining_languages(run):
+    run.items = [_profile_language('en'), _profile_language('hu')]
+    candidate = _candidate('alpha', 'eng')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+    run.pool.behaviour = lambda pool, candidates, language: [candidate]
+    # The first check, before anything is listed, finds the cutoff unmet. The saved download then meets it.
+    run.cutoff = lambda episode: bool(run.recorded)
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'downloaded', 'hu': 'cutoff_met'}
+    assert len(run.pool.downloads) == 1
+    assert run.not_found == []
+    assert result.complete
+
+
+def test_no_provider_in_the_pool_keeps_the_request(run, monkeypatch):
+    monkeypatch.setattr(run.forced, 'get_providers', lambda: None)
+
+    result = run.go()
+
+    assert result.languages[0].status == 'open'
+    assert result.languages[0].reason == 'no_providers'
+    assert run.listed == []
+
+
+def test_an_empty_pool_keeps_the_request(run):
+    run.pool.providers = []
+
+    assert _statuses(run.go()) == {'en': 'open'}
+
+
+def test_a_video_that_cannot_be_read_keeps_the_request(run, monkeypatch):
+    monkeypatch.setattr(run.forced, 'get_video', lambda *args, **kwargs: None)
+
+    result = run.go()
+
+    assert result.languages[0].reason == 'no_video'
+    assert run.listed == []
+
+
+def test_whisper_fallback_is_only_allowed_after_a_clean_answer(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    run.outcomes = [_result('alpha'), _result('beta', 'timeout')]
+    run.go()
+    assert run.pool.downloads[-1][2]['fallback_allowed'] is False
+
+    run.outcomes = [_result('alpha')]
+    run.go()
+    assert run.pool.downloads[-1][2]['fallback_allowed'] is True
+
+
+def test_the_translate_from_rule_is_not_consulted(run, monkeypatch):
+    """The forced branch searches providers for every language: a profile's translate-from never replaces that."""
+    queued = []
+    monkeypatch.setattr('subtitles.tools.translate.main.translate_subtitles_file',
+                        lambda **kwargs: queued.append(kwargs))
+    run.items = [dict(_profile_language('hu'), translate_from='en')]
+    run.outcomes = [_result('alpha')]
+
+    result = run.go()
+
+    assert queued == []
+    assert len(run.listed) == 1 and Language('hun') in run.listed[0]
+    assert _statuses(result) == {'hu': 'finished'}
+
+
+def test_stop_during_the_listing_propagates_and_leaves_nothing_behind(run, monkeypatch):
+    from app.jobs_queue import JobCancelled
+
+    stopped = JobCancelled(job_id=7)
+
+    def list_all(*args, **kwargs):
+        raise ListingStopped(stopped)
+
+    monkeypatch.setattr(run.forced, 'list_all_subtitles', list_all)
+
+    with pytest.raises(JobCancelled) as raised:
+        run.go(job_id=7)
+
+    assert raised.value is stopped
+    assert run.not_found == [] and run.recorded == []
+
+
+def test_stop_between_languages_propagates(run):
+    from app.jobs_queue import JobCancelled
+
+    run.items = [_profile_language('en'), _profile_language('hu')]
+    run.outcomes = [_result('alpha')]
+    calls = []
+
+    def stop():
+        calls.append(1)
+        if len(run.pool.downloads) == 1:
+            raise ListingStopped(JobCancelled(job_id=7))
+
+    run.stop = stop
+
+    with pytest.raises(JobCancelled):
+        run.go(job_id=7)
+
+    assert len(run.not_found) == 1
+
+
+def test_a_listing_error_propagates(run, monkeypatch):
+    def list_all(*args, **kwargs):
+        raise RuntimeError('listing failed')
+
+    monkeypatch.setattr(run.forced, 'list_all_subtitles', list_all)
+
+    with pytest.raises(RuntimeError):
+        run.go()
+
+    assert run.not_found == []
+
+
+def test_stop_during_a_download_for_this_job_propagates(run):
+    from app.jobs_queue import JobCancelled
+
+    run.outcomes = [_result('alpha')]
+
+    def behaviour(pool, candidates, language):
+        raise JobCancelled(job_id=7)
+
+    run.pool.behaviour = behaviour
+
+    with pytest.raises(JobCancelled):
+        run.go(job_id=7)
+
+
+def test_complete_means_no_language_is_open():
+    from subtitles.wanted.forced import ForcedSearchResult, LanguageResult
+
+    assert ForcedSearchResult([LanguageResult('en', 'downloaded'), LanguageResult('hu', 'finished'),
+                               LanguageResult('de', 'cutoff_met')]).complete
+    assert not ForcedSearchResult([LanguageResult('en', 'downloaded'), LanguageResult('hu', 'open')]).complete
+
+
+# The pieces that read the real profile, the real stored subtitles and the real listing.
+
+
+def test_the_listing_does_not_drop_a_language_the_video_already_has_an_embedded_track_for(monkeypatch):
+    """``list_all_subtitles`` asks for ``languages - video.subtitle_languages``.
+
+    Nothing in the app's video pipeline fills ``subtitle_languages`` (the metadata refiner has its embedded
+    detection removed), so the language whose embedded track is broken is still listed.
+    """
+    import subliminal_patch.core_persistent as persistent
+    from subliminal_patch.core import Episode
+
+    video = Episode('/series/fixture/s01e01.mkv', 'Fixture Series', 1, 1)
+    asked = []
+
+    def list_provider(pool, name, video, languages, cancel):
+        asked.append((name, set(languages)))
+        return ProviderSearchResult(name)
+
+    monkeypatch.setattr(persistent, '_list_provider_with_outcome', list_provider)
+    pool = SimpleNamespace(providers=['alpha'], discarded_providers=set())
+    outcomes = []
+
+    persistent.list_all_subtitles([video], {Language('eng'), Language('hun')}, pool, on_outcome=outcomes.append)
+
+    assert video.subtitle_languages == set()
+    assert asked == [('alpha', {Language('eng'), Language('hun')})]
+    assert [outcome.provider for outcome in outcomes] == ['alpha']
+
+
+def test_external_cutoff_ignores_embedded_tracks(monkeypatch):
+    import subtitles.indexer.series as indexer
+    import subtitles.wanted.forced as forced
+
+    monkeypatch.setattr(indexer, 'get_profile_cutoff',
+                        lambda profile_id: [{'language': 'en', 'forced': 'False', 'hi': 'False'}])
+    monkeypatch.setattr(indexer, 'get_audio_profile_languages', lambda audio: [])
+
+    embedded_only = "[['en', None, None]]"
+    monkeypatch.setattr(forced, '_external_subtitles_text', lambda episode: embedded_only)
+    assert forced.external_cutoff_met(_episode()) is False
+
+    external = "[['en', '/series/fixture/s01e01.en.srt', 100]]"
+    monkeypatch.setattr(forced, '_external_subtitles_text', lambda episode: external)
+    assert forced.external_cutoff_met(_episode()) is True
+
+    monkeypatch.setattr(forced, '_external_subtitles_text', lambda episode: None)
+    assert forced.external_cutoff_met(_episode()) is False
+
+
+def test_external_cutoff_counts_hearing_impaired_as_good_as_normal(monkeypatch):
+    import subtitles.indexer.series as indexer
+    import subtitles.wanted.forced as forced
+
+    monkeypatch.setattr(indexer, 'get_profile_cutoff',
+                        lambda profile_id: [{'language': 'en', 'forced': 'False', 'hi': 'False'}])
+    monkeypatch.setattr(indexer, 'get_audio_profile_languages', lambda audio: [])
+    monkeypatch.setattr(forced, '_external_subtitles_text',
+                        lambda episode: "[['en:hi', '/series/fixture/s01e01.en.hi.srt', 100]]")
+
+    assert forced.external_cutoff_met(_episode()) is True
+
+
+def test_forced_search_languages_follow_the_audio_rules(monkeypatch):
+    import subtitles.indexer.series as indexer
+    import subtitles.wanted.forced as forced
+
+    profile = {'items': [
+        {'language': 'en', 'forced': 'False', 'hi': 'False', 'audio_exclude': 'True'},
+        {'language': 'hu', 'forced': 'False', 'hi': 'True'},
+        {'language': 'de', 'forced': 'True', 'hi': 'False', 'audio_only_include': 'True'},
+        {'language': 'fr', 'forced': 'False', 'hi': 'False'},
+    ]}
+    monkeypatch.setattr(indexer, 'get_profiles_list', lambda profile_id: profile)
+    monkeypatch.setattr(indexer, 'get_audio_profile_languages',
+                        lambda audio: [{'name': 'English', 'code2': 'en', 'code3': 'eng'}])
+
+    pairs = forced.forced_search_languages(_episode())
+
+    # English audio excludes the English subtitle, and German is only wanted for German audio.
+    assert pairs == [('hu:hi', ('hu', 'True', 'False')), ('fr', ('fr', 'False', 'False'))]
+
+
+def test_the_support_check_reads_the_provider_class(monkeypatch):
+    import subtitles.wanted.forced as forced
+
+    class Alpha:
+        languages = {Language('eng')}
+
+        @classmethod
+        def check(cls, video):
+            return True
+
+    class Video:
+        @classmethod
+        def check(cls, video):
+            return False
+
+    class Equals:
+        def check_set(self, languages):
+            return languages
+
+    pool = SimpleNamespace(language_hook=None, lang_equals=Equals())
+    monkeypatch.setattr(forced, 'provider_registry', {'alpha': Alpha, 'video': Video})
+
+    assert forced._provider_supports(pool, 'alpha', object(), Language('eng')) is True
+    assert forced._provider_supports(pool, 'alpha', object(), Language('hun')) is False
+    assert forced._provider_supports(pool, 'video', object(), Language('eng')) is False
+
+    pool.language_hook = lambda name: {Language('eng')}
+    assert forced._provider_supports(pool, 'alpha', object(), Language('eng')) is False
+
+
+def test_stop_of_another_job_during_a_download_keeps_that_language_open(run):
+    from app.jobs_queue import JobCancelled
+
+    run.outcomes = [_result('alpha')]
+
+    def behaviour(pool, candidates, language):
+        raise JobCancelled(job_id=99)
+
+    run.pool.behaviour = behaviour
+
+    result = run.go(job_id=7)
+
+    assert _statuses(result) == {'en': 'open'}
+    assert run.not_found == []
