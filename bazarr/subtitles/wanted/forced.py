@@ -399,7 +399,7 @@ def _run(episode, *, profile_id, media_type, job_id, cancel):
         return all_languages(OPEN, 'no_providers')
 
     arr_instance_id = getattr(episode, 'arr_instance_id', None)
-    video_path = path_mappings.path_replace(episode.path)
+    video_path = path_mappings.path_replace_instance(episode.path, arr_instance_id, 'episode')
     pool = _get_pool(media_type, profile_id)
     providers = pool.providers
     if not providers:
@@ -480,6 +480,10 @@ def _run(episode, *, profile_id, media_type, job_id, cancel):
             results.languages.append(LanguageResult(code, OPEN, 'download_error'))
             continue
 
+        # Stop can arrive while a download or the fallback runs. Nothing is saved or recorded after it, and the
+        # language stays open.
+        _check_stop(stop)
+
         if downloaded:
             processed = _save_and_process(video, downloaded, episode, video_path, language, audio_language,
                                           max_score, job_id, subz_mods)
@@ -503,5 +507,6 @@ def _run(episode, *, profile_id, media_type, job_id, cancel):
             _write_not_found(episode, attempts)
             results.languages.append(LanguageResult(code, FINISHED))
 
+    _check_stop(stop)
     _sync_cache()
     return results

@@ -112,6 +112,7 @@ def run(monkeypatch):
                         lambda pool, name, video, language: state.supports(name, language))
     monkeypatch.setattr(forced, 'external_cutoff_met', lambda episode: state.cutoff(episode))
     monkeypatch.setattr(forced.path_mappings, 'path_replace', lambda value: value)
+    monkeypatch.setattr(forced.path_mappings, 'path_replace_instance', lambda value, instance, media: value)
     monkeypatch.setattr(forced, '_stop_check', lambda cancel: state.stop)
 
     def save(video, subtitles, episode, video_path, language, audio_language, max_score, job_id, subz_mods):
@@ -528,7 +529,7 @@ def test_stop_between_languages_propagates(run):
 
     def stop():
         calls.append(1)
-        if len(run.pool.downloads) == 1:
+        if len(run.not_found) == 1:
             raise ListingStopped(JobCancelled(job_id=7))
 
     run.stop = stop
@@ -835,3 +836,100 @@ def test_a_subtitle_that_never_reached_disk_keeps_the_mismatch(monkeypatch):
 
     assert processed == []
     assert cleared == []
+
+
+def test_a_stop_during_the_download_saves_and_records_nothing(run):
+    from app.jobs_queue import JobCancelled
+
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+    pressed = []
+
+    def stop():
+        if pressed:
+            raise ListingStopped(JobCancelled(job_id=7))
+
+    def behaviour(pool, candidates, language):
+        # Stop is pressed while the downloader runs; the downloader itself does not notice.
+        pressed.append(1)
+        return [candidate]
+
+    run.stop = stop
+    run.pool.behaviour = behaviour
+
+    with pytest.raises(JobCancelled):
+        run.go(job_id=7)
+
+    assert run.saved == [] and run.recorded == [] and run.not_found == []
+
+
+def test_a_stop_during_the_fallback_saves_and_records_nothing(run, monkeypatch):
+    from app.jobs_queue import JobCancelled
+
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    run.outcomes = [_result('alpha')]
+    pressed = []
+
+    def stop():
+        if pressed:
+            raise ListingStopped(JobCancelled(job_id=7))
+
+    def fallback(candidates, language):
+        pressed.append(1)
+        return [_candidate('whisperai')]
+
+    run.stop = stop
+    run.pool.fallback = fallback
+
+    with pytest.raises(JobCancelled):
+        run.go(job_id=7)
+
+    assert run.saved == [] and run.recorded == []
+
+
+def test_a_stop_pressed_while_the_last_download_is_recorded_does_not_return_complete(run, monkeypatch):
+    from app.jobs_queue import JobCancelled
+
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+    run.pool.behaviour = lambda pool, candidates, language: [candidate]
+    pressed = []
+
+    def stop():
+        if pressed:
+            raise ListingStopped(JobCancelled(job_id=7))
+
+    run.stop = stop
+    monkeypatch.setattr(run.forced, '_record_download', lambda episode, result: pressed.append(1))
+
+    with pytest.raises(JobCancelled):
+        run.go(job_id=7)
+
+
+def test_the_video_and_the_save_use_the_episodes_instance_mapping(run, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(run.forced.path_mappings, 'path_replace', lambda value: '/global' + value)
+    monkeypatch.setattr(run.forced.path_mappings, 'path_replace_instance',
+                        lambda value, instance, media: f'/instance-{instance}-{media}' + value)
+
+    def get_video(path, *args, **kwargs):
+        seen['video'] = path
+        return run.video
+
+    def save(video, subtitles, episode, video_path, *args):
+        seen['save'] = video_path
+        return [SimpleNamespace(message='saved')]
+
+    candidate = _candidate('alpha')
+    run.candidates = [candidate]
+    run.outcomes = [_result('alpha', 'success')]
+    run.pool.behaviour = lambda pool, candidates, language: [candidate]
+    monkeypatch.setattr(run.forced, 'get_video', get_video)
+    monkeypatch.setattr(run.forced, '_save_and_process', save)
+
+    run.go()
+
+    expected = '/instance-1-episode/series/fixture/s01e01.mkv'
+    assert seen == {'video': expected, 'save': expected}
