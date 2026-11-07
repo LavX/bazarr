@@ -19,6 +19,7 @@ import hashlib
 import os
 import sys
 import threading
+import time
 import traceback
 
 try:
@@ -28,6 +29,8 @@ except ImportError:  # run as a plain script next to frames.py
 Codes = frames.Codes
 
 _TRACEBACK_LIMIT = 8000
+_MESSAGE_LIMIT = 4096
+_CODE_LIMIT = 200
 
 
 class OperationError(Exception):
@@ -87,9 +90,15 @@ class Operation:
             payload["data"] = data
         self._channel._send(payload)
 
-    def call(self, name, params=None, timeout=60.0):
-        """Ask the host something and wait for the ack. Returns the result dict."""
-        return self._channel.call(name, params, request_id=self.id, timeout=timeout)
+    def call(self, name, params=None, timeout=60.0, cancellable=True):
+        """Ask the host something and wait for the ack. Returns the result dict.
+
+        While it waits, a cancel of this operation raises ``OperationCancelled``
+        within a fraction of a second. Pass ``cancellable=False`` for a call
+        that must still go out after a cancel, such as settling usage.
+        """
+        return self._channel.call(name, params, request_id=self.id, timeout=timeout,
+                                  cancelled=self.cancelled if cancellable else None)
 
     def sandbox_blocked(self, target, errno=None):
         self._channel.sandbox_blocked(target, errno=errno, request_id=self.id)
@@ -164,7 +173,9 @@ class WorkerChannel:
             self._close()
             raise ChannelClosed(str(error)) from error
 
-    def call(self, name, params=None, request_id=None, timeout=60.0):
+    def call(self, name, params=None, request_id=None, timeout=60.0, cancelled=None):
+        if cancelled is not None and cancelled.is_set():
+            raise OperationCancelled("cancelled")
         slot = {"event": threading.Event()}
         with self._lock:
             cid = self._next_cid
@@ -175,8 +186,12 @@ class WorkerChannel:
             message["id"] = request_id
         try:
             self._send(message)
-            if not slot["event"].wait(timeout):
-                raise HostCallFailed(Codes.TIMEOUT, "host did not answer %s in %.1fs" % (name, timeout))
+            deadline = time.monotonic() + timeout
+            while not slot["event"].wait(0.05 if cancelled is not None else max(0.0, deadline - time.monotonic())):
+                if cancelled is not None and cancelled.is_set():
+                    raise OperationCancelled("cancelled")
+                if time.monotonic() >= deadline:
+                    raise HostCallFailed(Codes.TIMEOUT, "host did not answer %s in %.1fs" % (name, timeout))
         finally:
             with self._lock:
                 self._pending_calls.pop(cid, None)
@@ -299,28 +314,43 @@ class WorkerChannel:
             self._threads.append(thread)
         thread.start()
 
+    def _release(self, operation):
+        with self._lock:
+            self._operations.pop(operation.id, None)
+
     def _run_operation(self, operation):
+        reply = None
         try:
             try:
                 value = self._handler(operation)
                 if isinstance(value, OperationResult):
-                    result, data = value.result, value.data
+                    reply = ("ok", value.result, value.data)
                 else:
-                    result, data = (value or {}), b""
-                self._respond_ok(operation, result, data)
+                    reply = ("ok", value or {}, b"")
             except OperationCancelled:
-                self._respond_error(operation.id, OperationError(Codes.CANCELLED, "cancelled"), operation)
-            except OperationError as error:
-                self._respond_error(operation.id, error, operation)
+                reply = ("error", OperationError(Codes.CANCELLED, "cancelled"))
             except ChannelClosed:
-                pass
+                reply = None
             except Exception as error:
-                self._respond_error(operation.id, error, operation)
+                reply = ("error", error)
+        finally:
+            # The slot is free before the reply goes out: the host may send the
+            # next request the moment it reads this reply.
+            self._release(operation)
+        if reply is None:
+            return
+        try:
+            if reply[0] == "ok":
+                try:
+                    self._respond_ok(operation, reply[1], reply[2])
+                except ChannelClosed:
+                    raise
+                except Exception as error:
+                    self._respond_error(operation.id, error, operation)
+            else:
+                self._respond_error(operation.id, reply[1], operation)
         except ChannelClosed:
             pass
-        finally:
-            with self._lock:
-                self._operations.pop(operation.id, None)
 
     def _respond_ok(self, operation, result, data):
         cap = operation.max_result_bytes
@@ -333,26 +363,43 @@ class WorkerChannel:
         self._send(message)
 
     def _respond_error(self, req_id, error, operation=None):
-        # The request's secret values are replaced in the full text before it is
-        # cut to the traceback limit, so a cut cannot leave half of a secret.
+        """Send the terminal error reply for a request. Always sends something.
+
+        The request's secret values are replaced in the full text before it is
+        cut to size, so a cut cannot leave half of a secret. Every text field is
+        bounded after that. If the reply cannot be built or serialized, a small
+        fixed error goes out instead, so the host never waits on a request that
+        has no terminal reply.
+        """
         secrets = sorted((v for v in (operation.secrets.values() if operation else ()) if isinstance(v, str) and v),
                          key=len, reverse=True)
 
-        def clean(text):
+        def clean(text, limit):
+            text = text if isinstance(text, str) else str(text)
             for secret in secrets:
                 text = text.replace(secret, "***")
-            return text
+            return text[:limit]
 
-        if isinstance(error, OperationError):
-            payload = frames.error_object(error.code, clean(error.message), retryable=error.retryable,
-                                          retry_after=error.retry_after)
-        else:
-            full = clean("".join(traceback.format_exception(type(error), error, error.__traceback__)))
-            tail = full[-_TRACEBACK_LIMIT:]
-            print(tail, file=sys.stderr, flush=True)
-            payload = frames.error_object(Codes.PLUGIN_ERROR, clean(str(error)), class_name=type(error).__name__,
-                                          traceback=tail)
-        self._send({"t": frames.RES, "id": req_id, "ok": False, "error": payload})
+        try:
+            if isinstance(error, OperationError):
+                retry_after = error.retry_after
+                if not isinstance(retry_after, (int, float)) or isinstance(retry_after, bool) \
+                        or retry_after != retry_after or retry_after in (float("inf"), float("-inf")):
+                    retry_after = None
+                payload = frames.error_object(clean(error.code, _CODE_LIMIT), clean(error.message, _MESSAGE_LIMIT),
+                                              retryable=error.retryable is True, retry_after=retry_after)
+            else:
+                full = clean("".join(traceback.format_exception(type(error), error, error.__traceback__)), 1 << 20)
+                tail = full[-_TRACEBACK_LIMIT:]
+                print(tail, file=sys.stderr, flush=True)
+                payload = frames.error_object(Codes.PLUGIN_ERROR, clean(str(error), _MESSAGE_LIMIT),
+                                              class_name=clean(type(error).__name__, _CODE_LIMIT), traceback=tail)
+            self._send({"t": frames.RES, "id": req_id, "ok": False, "error": payload})
+        except ChannelClosed:
+            raise
+        except Exception:
+            self._send({"t": frames.RES, "id": req_id, "ok": False,
+                        "error": frames.error_object(Codes.PLUGIN_ERROR, "the error reply could not be sent")})
 
     def _heartbeat_loop(self):
         while not self._closed.wait(self._heartbeat_interval):

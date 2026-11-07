@@ -41,7 +41,7 @@ from typing import Any, BinaryIO, Sequence
 
 from . import __version__
 from ._protocol import frames
-from ._protocol.worker_channel import Operation, OperationCancelled, OperationError, OperationResult, WorkerChannel
+from ._protocol.worker_channel import ChannelClosed, Operation, OperationCancelled, OperationError, OperationResult, WorkerChannel
 from .context import PluginContext
 from .errors import INTERNAL, PluginError
 from .kinds import KindSpec, MethodSpec, get_kind
@@ -64,19 +64,7 @@ log = logging.getLogger("bazarr_plugin_sdk.runner")
 class SdkChannel(WorkerChannel):
     """The reference channel, with failed responses that keep a plugin error's parts."""
 
-    def _release(self, req_id: int) -> None:
-        # The reference loop frees an operation's slot after it has written the response, so a
-        # host that sends its next request the moment it reads the response can meet a worker
-        # that still counts the old one, and a worker with room for one is told it is busy.
-        with self._lock:
-            self._operations.pop(req_id, None)
-
-    def _respond_ok(self, operation: Operation, result: dict[str, Any], data: bytes) -> None:
-        self._release(operation.id)
-        super()._respond_ok(operation, result, data)
-
     def _respond_error(self, req_id: int, error: BaseException, operation: Operation | None = None) -> None:
-        self._release(req_id)
         if isinstance(error, PluginError):
             payload = error.to_dict()
             # The request's secret values never leave the worker in an error, as in the base class.
@@ -89,9 +77,15 @@ class SdkChannel(WorkerChannel):
                 if isinstance(payload.get(key), str):
                     for secret in secrets:
                         payload[key] = payload[key].replace(secret, "***")
-            self._send({"t": frames.RES, "id": req_id, "ok": False, "error": payload})
-        else:
-            super()._respond_error(req_id, error, operation)
+            try:
+                self._send({"t": frames.RES, "id": req_id, "ok": False, "error": payload})
+                return
+            except ChannelClosed:
+                raise
+            except Exception:
+                # An error that cannot be built or encoded gets the base class's fixed reply.
+                pass
+        super()._respond_error(req_id, error, operation)
 
 
 class PluginWorker:

@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Sequence, TypeVar
 
-from ._protocol.worker_channel import HostCallFailed, Operation
+from ._protocol.worker_channel import HostCallFailed, Operation, OperationCancelled
 from .errors import CANCELLED, ERROR_CODES, INTERNAL, PluginError
 
 T = TypeVar("T")
@@ -114,7 +114,7 @@ class PluginContext:
         cancelled request starts no new spending.
         """
         self.raise_if_cancelled()
-        result = self._call("reserve", {"amount": _money(amount, "amount"), "model": str(model)})
+        result = self._call("reserve", {"amount": _money(amount, "amount"), "model": str(model)}, cancellable=True)
         hold = result.get("hold")
         return hold if isinstance(hold, str) else None
 
@@ -132,12 +132,13 @@ class PluginContext:
                 "model": str(model),
                 "reservations": [str(r) for r in reservations],
             },
+            cancellable=False,
         )
 
     def checkpoint_sync(self, data: dict[str, Any]) -> None:
         """Store resumable state. Returns once the host has stored it."""
         self.raise_if_cancelled()
-        self._call("checkpoint", {"data": data})
+        self._call("checkpoint", {"data": data}, cancellable=False)
 
     # host calls, awaitable form
 
@@ -153,9 +154,13 @@ class PluginContext:
     async def _offload(self, func: Callable[..., T], *args: Any) -> T:
         return await asyncio.get_running_loop().run_in_executor(None, func, *args)
 
-    def _call(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _call(self, name: str, params: dict[str, Any], *, cancellable: bool) -> dict[str, Any]:
+        """A host call. A cancellable one gives up when the host cancels the request; a settle
+        (usage) or a store (checkpoint) that has gone out is waited for."""
         try:
-            return self.operation.call(name, params, timeout=HOST_CALL_TIMEOUT)
+            return self.operation.call(name, params, timeout=HOST_CALL_TIMEOUT, cancellable=cancellable)
+        except OperationCancelled:
+            raise PluginError(CANCELLED, "the host cancelled this request") from None
         except HostCallFailed as failure:
             code = failure.code if failure.code in ERROR_CODES else INTERNAL
             reason = None if code == failure.code else failure.code
