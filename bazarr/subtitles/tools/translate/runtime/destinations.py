@@ -12,6 +12,7 @@ Pure functions. Nothing here touches the database or the settings.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -25,25 +26,51 @@ class DestinationSchema:
     endpoints: tuple[str, ...] = ()
 
 
-def normalize_destination(value: Any) -> str:
-    """A destination value in one spelling: trimmed, with the scheme and host in lower case.
+class DestinationError(ValueError):
+    """A destination that cannot be accepted. The message is fixed and never carries the value."""
 
-    A value that is not a URL is kept as typed (trimmed). A trailing slash and a
-    path stay as they are: two spellings that differ there are two destinations,
-    which can only ask for a secret again, never hand one out.
+    CREDENTIALS = "must not contain a user name or password"
+    MALFORMED = "must be a web address that starts with http:// or https://"
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+def normalize_destination(value: Any) -> str:
+    """The one place a destination value is parsed. Returns it in one spelling, or raises ``DestinationError``.
+
+    An address is a clean http or https URL with a host: nothing that urllib cannot split (a bad port, an
+    unclosed bracket), no scheme other than http and https, no blanks or control characters, and no user
+    name or password. The scheme and host come back in lower case. A path and a trailing slash stay as
+    typed: two spellings that differ there are two destinations, which can only ask for a secret again,
+    never hand one out. An empty value is ``""``; the caller decides what that means.
     """
     text = str(value).strip()
     if not text:
         return ""
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise DestinationError(DestinationError.MALFORMED)
     try:
         parts = urlsplit(text)
+        parts.port  # reading it is the check: a port that is not a number raises
+        host = parts.hostname
     except ValueError:
-        return text
-    if not parts.scheme or not parts.netloc:
-        return text
-    host = parts.netloc
-    userinfo, at, hostport = host.rpartition("@")
-    return urlunsplit((parts.scheme.lower(), userinfo + at + hostport.lower(), parts.path, parts.query, parts.fragment))
+        raise DestinationError(DestinationError.MALFORMED) from None
+    if parts.scheme.lower() not in ("http", "https") or not host:
+        raise DestinationError(DestinationError.MALFORMED)
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        raise DestinationError(DestinationError.CREDENTIALS)
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, parts.fragment))
+
+
+def _unusable(text: str) -> str:
+    """Stands in for a stored or default value that is not a clean address.
+
+    It matches nothing a secret was ever bound to, so a secret is never handed out for it, and it does
+    not carry the value (which may hold a password).
+    """
+    return "invalid:" + hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _is_destination(field: Mapping[str, Any]) -> bool:
@@ -54,6 +81,13 @@ def _values(value: Any) -> Iterable[Any]:
     if isinstance(value, (list, tuple)):
         return value
     return (value,)
+
+
+def _effective(item: Any) -> str:
+    try:
+        return normalize_destination(item)
+    except DestinationError:
+        return _unusable(str(item).strip())
 
 
 def effective_destinations(schema: DestinationSchema, settings: Mapping[str, Any] | None) -> frozenset[str]:
@@ -70,13 +104,10 @@ def effective_destinations(schema: DestinationSchema, settings: Mapping[str, Any
         for item in _values(value):
             if item is None:
                 continue
-            text = normalize_destination(item)
-            if text:
-                found.add(text)
+            found.add(_effective(item))
     for origin in schema.endpoints:
-        text = normalize_destination(origin)
-        if text:
-            found.add(text)
+        found.add(_effective(origin))
+    found.discard("")
     return frozenset(found)
 
 

@@ -269,6 +269,50 @@ describe("plugin settings fields", () => {
     ).toEqual({ name: "n", tags: ["t"], size: 0, flag: true });
   });
 
+  it("shows an options field's manifest default until a value is saved", async () => {
+    const user = userEvent.setup();
+    const seen = vi.fn();
+    const fields: PluginField[] = [
+      {
+        key: "model",
+        type: "options",
+        label: "Model",
+        default: "vendor/default",
+      },
+    ];
+    const { unmount } = customRender(
+      <Harness
+        fields={fields}
+        options={{ available: false, items: [] }}
+        onValues={seen}
+      />,
+    );
+    expect(screen.getByLabelText("Model")).toHaveValue("vendor/default");
+    await user.type(screen.getByLabelText("Model"), "x");
+    expect(seen).toHaveBeenLastCalledWith({ model: "vendor/defaultx" });
+    unmount();
+    customRender(
+      <Harness
+        fields={fields}
+        start={{ model: "vendor/mine" }}
+        options={{ available: false, items: [] }}
+      />,
+    );
+    expect(screen.getByLabelText("Model")).toHaveValue("vendor/mine");
+    cleanup();
+    // With a live list the picker selects the default, which the list may or may not offer.
+    customRender(
+      <Harness
+        fields={fields}
+        options={{
+          available: true,
+          items: [{ id: "vendor/default", name: "The default" }],
+        }}
+      />,
+    );
+    expect(screen.getByDisplayValue("The default")).toBeInTheDocument();
+  });
+
   it("stops typing at the declared length", async () => {
     const user = userEvent.setup();
     customRender(<Harness />);

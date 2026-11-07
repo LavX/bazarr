@@ -547,6 +547,34 @@ def test_a_manifest_that_declares_the_model_field_keeps_its_limits_and_saves_wor
     assert saved.status_code == 200 and saved.json["connection"]["model"] == "ok"
 
 
+def test_a_required_model_with_a_manifest_default_stores_the_default_when_left_out_or_emptied(world):
+    fields = world.plugins[PLUGIN].manifest["settings"]["backend_types"]["openrouter"]["fields"]
+    fields.append({"key": "model", "type": "options", "required": True, "default": "vendor/default"})
+    left_out = _new_connection(world, values={"api_key": "k"})
+    assert left_out.status_code == 201 and left_out.json["connection"]["model"] == "vendor/default"
+    assert world.store.get_connection(left_out.json["connection"]["id"]).model == "vendor/default"
+    emptied = _new_connection(world, values={"api_key": "k", "model": ""})
+    assert emptied.status_code == 201 and emptied.json["connection"]["model"] == "vendor/default"
+    chosen = _new_connection(world, values={"api_key": "k", "model": "vendor/mine"}).json["connection"]
+    assert chosen["model"] == "vendor/mine"
+    reset = world.call("patch", f"connections/{chosen['id']}", {"values": {"model": ""}})
+    assert reset.json["connection"]["model"] == "vendor/default"
+    kept = world.call("patch", f"connections/{chosen['id']}", {"values": {"api_key": "n"}})
+    assert kept.json["connection"]["model"] == "vendor/default"
+
+
+def test_the_options_route_refuses_a_draft_address_that_is_malformed_or_holds_a_password(world):
+    seen = []
+    world.sources.append(lambda *args: seen.append(args) or {"items": [{"id": "m"}]})
+    path = f"engines/{world.instance.id}/options"
+    for url in ("https://user:hunter2@[bad/v1", "https://user:hunter2@a.example/v1", "x.test:1234", "ftp://a.test"):
+        response = world.call("post", path, {"field": "model", "backend_type": "openai_compatible",
+                                              "values": {"base_url": url}})
+        assert response.status_code == 400 and list(response.json["field_errors"]) == ["base_url"]
+        assert "hunter2" not in world.last_text
+    assert seen == []
+
+
 def test_the_options_route_checks_the_request_against_the_manifest_and_strips_secrets(world):
     seen = []
     world.sources.append(lambda *args: seen.append(args) or {"items": [{"id": "m"}]})
@@ -571,6 +599,26 @@ def test_a_user_name_or_password_in_an_address_is_refused_and_never_echoed(world
     assert response.json["field_errors"] == {"base_url": "must not contain a user name or password"}
     assert "hunter2" not in world.last_text
     assert world.store.list_connections(world.instance.id) == []
+
+
+def test_a_malformed_address_with_a_password_is_refused_before_consent_or_storage(world):
+    url = "https://user:hunter2@[invalid/v1"
+    response = _new_connection(world, backend_type="openai_compatible", values={"base_url": url})
+    assert response.status_code == 400 and list(response.json["field_errors"]) == ["base_url"]
+    assert "hunter2" not in world.last_text and response.json.get("destinations") is None
+    assert world.store.list_connections(world.instance.id) == []
+
+
+def test_a_stored_address_with_a_password_is_never_shown_on_the_page(world):
+    created = _new_connection(world, backend_type="openai_compatible",
+                              values={"base_url": "http://a.example/v1"}, accept_destinations=["http://a.example/v1"])
+    row = world.store.get_connection(created.json["connection"]["id"])
+    row.settings_json = json.dumps({"base_url": "https://user:hunter2@a.example/v1"})  # stored some other way
+    world.store._session.commit()
+    state = world.call("get", "state")
+    assert state.status_code == 200 and "hunter2" not in world.last_text
+    shown = state.json["instances"][0]["connections"][0]["values"]
+    assert "base_url" not in shown
 
 
 def test_a_flag_that_is_not_a_boolean_is_refused(world):

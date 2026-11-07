@@ -117,3 +117,36 @@ def test_every_entry_of_a_list_of_addresses_is_checked_for_a_user_name_or_passwo
     # A list that is not a destination is not an address.
     plain = [{"key": "notes", "type": "list"}]
     assert validate_values(plain, {"notes": ["user:password@host"]}).errors == {}
+
+
+MALFORMED_WITH_CREDENTIALS = [
+    "https://user:password@[invalid/v1",
+    "https://user:password@host:notaport/v1",
+    "https://user:password@exa mple.test/v1",
+    "https://user:password@/v1",
+    "user:password@example.test",
+    "ftp://user:password@example.test/v1",
+    "javascript://user:password@example.test",
+    "https://user:password@exa\tmple.test",
+    "//user:password@example.test",
+]
+
+
+@pytest.mark.parametrize("url", MALFORMED_WITH_CREDENTIALS)
+def test_a_malformed_address_with_a_password_in_it_is_refused_without_repeating_it(url):
+    for fields, values in (
+            ([{"key": "base_url", "type": "text", "destination": True}], {"base_url": url}),
+            ([{"key": "mirrors", "type": "list", "destination": True}], {"mirrors": ["https://ok.test", url]})):
+        result = validate_values(fields, values)
+        assert list(result.errors) == [fields[0]["key"]] and result.settings == {}
+        assert "password" not in repr(result.errors)
+        assert result.errors[fields[0]["key"]] in (
+            "must not contain a user name or password", "must be a web address that starts with http:// or https://")
+
+
+def test_a_clean_address_is_accepted_and_one_in_a_list_is_checked_like_a_single_one():
+    fields = [{"key": "base_url", "type": "text", "destination": True}]
+    for url in ("https://x.test", "http://lm.lan:1234/v1", "HTTPS://X.Test/V1", "http://[::1]:8080/v1"):
+        assert validate_values(fields, {"base_url": url}).errors == {}
+    assert validate_values(fields, {"base_url": "not a url"}).errors == {
+        "base_url": "must be a web address that starts with http:// or https://"}

@@ -27,7 +27,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
+
+from .destinations import DestinationError, normalize_destination
 
 TEXT_LIKE = frozenset({"text", "options"})
 LIST_TYPES = frozenset({"list", "key_list", "orderable_list"})
@@ -108,12 +109,13 @@ def _check_list(definition, value) -> str | None:
     return None
 
 
-def _has_userinfo(value: str) -> bool:
+def _address_problem(value: str) -> str | None:
+    """Why a destination value is refused, in words that never repeat the value, or None when it is clean."""
     try:
-        parts = urlsplit(value.strip())
-    except ValueError:
-        return False
-    return parts.username is not None or parts.password is not None
+        normalize_destination(value)
+    except DestinationError as error:
+        return error.message
+    return None
 
 
 def _check_value(definition: Mapping[str, Any], value: Any) -> str | None:
@@ -121,13 +123,14 @@ def _check_value(definition: Mapping[str, Any], value: Any) -> str | None:
     if kind in TEXT_LIKE or kind == "secret":
         problem = _check_text(definition, value)
         # A user name or password in an address is a credential kept in clear text and shown back.
-        if problem is None and definition.get("destination") is True and _has_userinfo(value):
-            return "must not contain a user name or password"
+        if problem is None and definition.get("destination") is True and value.strip():
+            return _address_problem(value)
         return problem
     if kind in LIST_TYPES:
         problem = _check_list(definition, value)
-        if problem is None and definition.get("destination") is True and any(_has_userinfo(item) for item in value):
-            return "must not contain a user name or password"
+        if problem is None and definition.get("destination") is True:
+            return next((found for item in value if item.strip() for found in [_address_problem(item)] if found),
+                        None)
         return problem
     if kind == "toggle":
         return None if isinstance(value, bool) else "must be on or off"

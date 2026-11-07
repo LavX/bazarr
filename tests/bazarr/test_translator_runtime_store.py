@@ -6,7 +6,7 @@ import pytest
 
 from provider_hub.manifest import ManifestValidationError  # noqa: F401  (import order guard)
 from subtitles.tools.translate.runtime.destinations import (
-    DestinationSchema, added_destinations, covers, effective_destinations, normalize_destination,
+    DestinationError, DestinationSchema, added_destinations, covers, effective_destinations, normalize_destination,
     schema_for_backend, schema_for_engine)
 from subtitles.tools.translate.runtime.store import (
     CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, TranslatorStore, TranslatorStoreError)
@@ -623,8 +623,10 @@ def test_a_migration_that_changes_a_destination_is_caught_through_its_settings(s
 
 def test_destination_values_are_normalised_and_defaults_apply():
     assert normalize_destination("  HTTP://LM.Lan:1234/v1 ") == "http://lm.lan:1234/v1"
-    assert normalize_destination("not a url") == "not a url"
     assert normalize_destination("   ") == ""
+    for bad in ("not a url", "ftp://x.test", "x.test:1234", "http://", "https://[bad/v1", "http://x.test:port/v1"):
+        with pytest.raises(DestinationError):
+            normalize_destination(bad)
     assert effective_destinations(OPENAI, None) == {"https://api.openai.com/v1"}
     assert effective_destinations(OPENAI, {"base_url": ""}) == {"https://api.openai.com/v1"}
     assert effective_destinations(OPENAI, {"base_url": "http://x:1"}) == {"http://x:1"}
@@ -632,6 +634,14 @@ def test_destination_values_are_normalised_and_defaults_apply():
     listed = DestinationSchema(fields=({"key": "urls", "type": "list", "destination": True},))
     assert effective_destinations(listed, {"urls": ["http://a", "http://b", ""]}) == {"http://a", "http://b"}
     assert added_destinations({"a"}, {"a", "b"}) == {"b"} and covers({"a", "b"}, {"a"}) and not covers({"a"}, {"b"})
+
+
+def test_a_stored_or_default_value_that_is_not_a_clean_address_never_matches_a_secret_binding():
+    secret_url = "https://user:password@example.test/v1"
+    found = effective_destinations(OPENAI, {"base_url": secret_url})
+    assert len(found) == 1 and not any("password" in item or "example" in item for item in found)
+    assert not covers({"https://api.openai.com/v1", secret_url}, found)  # nothing a secret was bound to equals it
+    assert effective_destinations(OPENAI, {"base_url": secret_url}) == found  # stable, so it still compares
 
 
 def test_schemas_come_from_the_manifest_envelope():

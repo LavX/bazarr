@@ -26,7 +26,7 @@ from typing import Any, Callable, Mapping
 
 from provider_hub.plugin_manifest import parse_plugin_manifest
 
-from .destinations import DestinationSchema, effective_destinations, normalize_destination
+from .destinations import DestinationError, DestinationSchema, effective_destinations, normalize_destination
 from .field_schema import (ValidatedValues, field_visible, is_finite_number, is_secret_field, validate_values)
 from .store import (CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, StaleRevisionError as StoreStale,
                     TranslatorStore, TranslatorStoreError)
@@ -138,6 +138,24 @@ def _clean(value: Any) -> Any:
     return value
 
 
+def _without_unsafe_addresses(fields, settings: Mapping[str, Any]) -> dict[str, Any]:
+    """The settings as the page may see them: an address field holding something that is not a clean address
+    (a stored password in a URL, say) is left out rather than echoed. Saving validates, so this only guards
+    what was stored some other way."""
+    shown = dict(settings)
+    for item in fields:
+        key = item.get("key")
+        if item.get("destination") is not True or key not in shown:
+            continue
+        for entry in (shown[key] if isinstance(shown[key], list) else [shown[key]]):
+            try:
+                normalize_destination(entry if isinstance(entry, str) else "\x00")
+            except DestinationError:
+                del shown[key]
+                break
+    return shown
+
+
 def _price(value: Any) -> float:
     return value if is_finite_number(value) else 0
 
@@ -223,7 +241,7 @@ class TranslatorSettingsService:
             "plugin_version": instance.plugin_version,
             "plugin": None if plugin is None else {"name": plugin.name, "version": plugin.version,
                                                     "active": plugin.active},
-            "schema": self._display_schema(plugin), "values": _clean(settings),
+            "schema": self._display_schema(plugin), "values": _clean(_without_unsafe_addresses(schema.fields, settings)),
             "secrets": self._secret_view(owner, schema.fields, destinations),
             "connections": [self.connection_view(instance, row) for row in store.list_connections(instance.id)],
         }
@@ -233,7 +251,7 @@ class TranslatorSettingsService:
         schema = self._backend_schema(plugin, connection.backend_type) or DestinationSchema()
         settings = self._store.settings_of(connection)
         destinations = effective_destinations(schema, settings)
-        values = _clean(dict(settings))
+        values = _clean(_without_unsafe_addresses(schema.fields, settings))
         values[MODEL_KEY] = connection.model
         values[PRICE_KEYS[0]] = _price(connection.price_input_per_million)
         values[PRICE_KEYS[1]] = _price(connection.price_output_per_million)
@@ -469,6 +487,21 @@ class TranslatorSettingsService:
             raise ServiceError(f"{field_key} is not a model list of this engine")
         clean = {item["key"]: draft[item["key"]] for item in fields
                  if item["key"] in draft and not is_secret_field(item)}
+        # A draft address is checked like a saved one before any source sees it, so a source is never handed a
+        # malformed address or one that carries a password, and the answer never repeats either.
+        refused = {}
+        for item in fields:
+            value = clean.get(item["key"])
+            if item.get("destination") is True and value not in (None, "", []):
+                for entry in (value if isinstance(value, list) else [value]):
+                    try:
+                        if not isinstance(entry, str):
+                            raise DestinationError(DestinationError.MALFORMED)
+                        normalize_destination(entry)
+                    except DestinationError as error:
+                        refused[item["key"]] = error.message
+        if refused:
+            raise InvalidValuesError("The values are not valid.", field_errors=refused)
         source = self._options_source
         answer = source(instance_id, backend_type, field_key, clean) if source is not None else None
         if not answer or not isinstance(answer.get("items"), list):
@@ -548,8 +581,12 @@ class TranslatorSettingsService:
                 errors[key] = "must be a number from 0 up"
             else:
                 host[key] = value
-        # A manifest that declares its own model field keeps its limits and its required flag.
+        # A manifest that declares its own model field keeps its limits and its required flag, and its default
+        # stands in for a model that was left out or emptied, before the model is checked and stored.
         declared = next((item for item in (schema.fields if schema else ()) if item["key"] == MODEL_KEY), None)
+        if (declared is not None and not errors.get(MODEL_KEY) and host[MODEL_KEY] == ""
+                and isinstance(declared.get("default"), str)):
+            host[MODEL_KEY] = declared["default"]
         if declared is not None and MODEL_KEY not in errors:
             checked = validate_values([declared], {MODEL_KEY: host[MODEL_KEY]})
             errors.update(checked.errors)
@@ -593,11 +630,24 @@ class TranslatorSettingsService:
         accepted = payload.get("accept_destinations") or []
         if not isinstance(accepted, list):
             raise ServiceError("accept_destinations must be a list")
-        missing = sorted(new - {normalize_destination(item) for item in accepted if isinstance(item, str)})
+        missing = sorted(new - self._clean_destinations(accepted))
         if missing:
             raise ConsentRequiredError(
                 "These addresses are new. Check that you trust them: the text to translate, and the key if you "
                 "entered one, are sent there.", destinations=missing)
+
+    @staticmethod
+    def _clean_destinations(items: Any) -> set[str]:
+        """The addresses in a list the client sent, in one spelling. One that is not an address accepts nothing."""
+        clean = set()
+        for item in items:
+            try:
+                text = normalize_destination(item) if isinstance(item, str) else ""
+            except DestinationError:
+                continue
+            if text:
+                clean.add(text)
+        return clean
 
     def _write_secrets(self, owner, validated: ValidatedValues, clear: list[str], destinations) -> None:
         for name in clear:
