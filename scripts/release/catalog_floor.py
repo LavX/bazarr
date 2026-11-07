@@ -3,10 +3,10 @@
 """Pin the official provider catalog into a release image.
 
 The image ships a snapshot of the official catalog (its catalog.json and every
-provider bundle file it names), so a first run with no network can still list
-and install providers. This script makes that snapshot reproducible and
-checked. It uses the standard library and git only, so the Docker stage that
-runs it needs nothing else.
+provider bundle file it names), on disk and read-only, for a runtime reader to
+use later. Nothing reads it yet: this script only makes the snapshot
+reproducible and checked. It uses the standard library and git only, so the
+Docker stage that runs it needs nothing else.
 
 The pin is one lock file, docker/catalog-pin.lock.json: the catalog repository,
 the branch, one commit and the sha256 of every file taken from that commit.
@@ -46,8 +46,8 @@ the catalog repository uses:
   floor.json        {lock_version, repo, branch, commit, files}
 
 The names catalog.json and floor.json are reserved at the snapshot root: the
-catalog may not declare a bundle file by either name, and an opaque file may
-not use them.
+catalog may not declare a bundle file by either name or beneath either name
+(floor.json/x), and an opaque file may not use them either.
 
 Files are written 0444 and directories 0555, and the modes are asserted.
 Nothing in the running application writes there.
@@ -86,6 +86,11 @@ _LOCK_OPTIONAL_KEYS = frozenset({'opaque_files'})
 # Written by the build itself, or the catalog document: nothing else may take
 # these names at the snapshot root.
 _RESERVED_PATHS = frozenset({CATALOG_FILE, FLOOR_META_FILE})
+
+
+def _is_reserved(path):
+    """Whether ``path`` is a reserved name or sits beneath one."""
+    return path.split('/', 1)[0] in _RESERVED_PATHS
 
 
 class FloorError(Exception):
@@ -236,7 +241,7 @@ def declared_bundles(catalog_bytes):
             if not isinstance(pin, str) or not _SHA256.match(pin):
                 raise FloorError(f'{label} has no valid sha256 for {relative_path}')
             repo_path = '/'.join(part for part in (source_path, relative_path) if part)
-            if repo_path in _RESERVED_PATHS:
+            if _is_reserved(repo_path):
                 raise FloorError(f'{label} declares {repo_path}, a name the snapshot reserves')
             mapping[repo_path] = (relative_path, pin)
         bundles.append((label, bundle_pin, mapping))
@@ -280,6 +285,8 @@ def validate_lock(lock):
         raise FloorError(f'lock files must be a map that includes {CATALOG_FILE}')
     for path, digest in files.items():
         _safe_path(path, 'lock file path')
+        if path != CATALOG_FILE and _is_reserved(path):
+            raise FloorError(f'lock file {path} uses a reserved name')
         if not isinstance(digest, str) or not _SHA256.match(digest):
             raise FloorError(f'lock hash for {path} is not a lowercase sha256')
     opaque = lock.get('opaque_files', {})
@@ -287,7 +294,7 @@ def validate_lock(lock):
         raise FloorError('lock opaque_files must be a map of path to sha256')
     for path, digest in opaque.items():
         _safe_path(path, 'lock opaque file path')
-        if path in _RESERVED_PATHS:
+        if _is_reserved(path):
             raise FloorError(f'opaque file {path} uses a reserved name')
         if path in files:
             raise FloorError(f'opaque file {path} is also listed in files')
@@ -399,21 +406,42 @@ def verify_lock(lock, repo):
 # writing the snapshot
 # --------------------------------------------------------------------------
 
-def _all_dirs_deepest_first(root):
-    dirs = [Path(dirpath) for dirpath, _names, _files in os.walk(root)]
-    return sorted(dirs, key=lambda p: len(p.parts), reverse=True)
+def _reject_symlinked_path(path):
+    """Fail if any existing component of ``path``, the last one included, is a
+    symlink. The path is taken as written (made absolute, not resolved)."""
+    current = Path(os.path.abspath(path))
+    for candidate in [*reversed(current.parents), current]:
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise FloorError(f'{candidate} could not be inspected: {error}') from error
+        if stat.S_ISLNK(info.st_mode):
+            raise FloorError(f'{candidate} is a symlink: refusing to write the snapshot through it')
 
 
 def write_floor(lock, data, dest):
-    dest = Path(dest)
-    if dest.exists() and any(dest.iterdir()):
-        raise FloorError(f'{dest} is not empty')
-    dest.mkdir(parents=True, exist_ok=True)
+    """Write the snapshot under ``dest``.
 
-    for path in sorted(data):
-        target = dest / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data[path])
+    The destination path may not contain a symlink. Every file and directory
+    is then created relative to an open directory descriptor, without
+    following links and without replacing anything, so a component swapped for
+    a link after the check cannot send a write outside the destination."""
+    dest = Path(os.path.abspath(dest))
+    _reject_symlinked_path(dest)
+    if dest.exists():
+        if not dest.is_dir():
+            raise FloorError(f'{dest} is not a directory')
+        if any(dest.iterdir()):
+            raise FloorError(f'{dest} is not empty')
+    else:
+        try:
+            dest.mkdir(parents=True)
+        except OSError as error:
+            raise FloorError(f'{dest} could not be created: {error}') from error
+        _reject_symlinked_path(dest)
+
     meta = {
         'lock_version': lock['lock_version'],
         'repo': lock['repo'],
@@ -421,13 +449,39 @@ def write_floor(lock, data, dest):
         'commit': lock['commit'],
         'files': len(data),
     }
-    (dest / FLOOR_META_FILE).write_text(json.dumps(meta, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    entries = dict(data)
+    entries[FLOOR_META_FILE] = (json.dumps(meta, indent=2, sort_keys=True) + '\n').encode('utf-8')
 
-    for dirpath, _names, filenames in os.walk(dest):
-        for name in filenames:
-            os.chmod(Path(dirpath) / name, FILE_MODE)
-    for directory in _all_dirs_deepest_first(dest):
-        os.chmod(directory, DIR_MODE)
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    opened = {(): None}
+    try:
+        opened[()] = os.open(dest, dir_flags)
+
+        def directory(parts):
+            if parts not in opened:
+                parent = directory(parts[:-1])
+                try:
+                    os.mkdir(parts[-1], 0o755, dir_fd=parent)
+                except FileExistsError:
+                    pass
+                opened[parts] = os.open(parts[-1], dir_flags, dir_fd=parent)
+            return opened[parts]
+
+        for path in sorted(entries):
+            *parents, name = path.split('/')
+            fd = os.open(name, file_flags, FILE_MODE, dir_fd=directory(tuple(parents)))
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write(entries[path])
+                os.fchmod(handle.fileno(), FILE_MODE)
+        for parts in sorted(opened, key=len, reverse=True):
+            os.fchmod(opened[parts], DIR_MODE)
+    except OSError as error:
+        raise FloorError(f'snapshot could not be written under {dest}: {error}') from error
+    finally:
+        for fd in opened.values():
+            if fd is not None:
+                os.close(fd)
 
 
 def check_modes(dest, expect_root_owner=False):
