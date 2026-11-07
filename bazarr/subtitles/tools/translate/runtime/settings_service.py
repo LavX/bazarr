@@ -116,7 +116,7 @@ def installed_plugin(plugin_id: str) -> InstalledPlugin | None:
                            str(item.get("active_version") or manifest.get("version") or ""), active, manifest)
 
 
-# Hooks D8 binds to the worker. With no worker, a value that passes the schema is accepted as is and the
+# Hooks the translation worker binds once it exists. With no worker, a value that passes the schema is accepted as is and the
 # model list is unavailable, which the page shows as a free-text model field.
 PluginValidator = Callable[[str, str, str, Mapping[str, Any]], Mapping[str, str] | None]
 # (engine instance id, back-end type or '' for the engine's own field, field key, draft values without secrets)
@@ -325,8 +325,11 @@ class TranslatorSettingsService:
                                        "engine", "")
         after = validated.settings if values is not None else before
         self._require_consent(schema, before, after, payload, new_owner=False)
-        if values is not None:
-            parsed = self._parsed(plugin)
+        parsed = self._parsed(plugin)
+        # The revision claim, the settings and every secret write or clear commit together. A save that only
+        # clears a secret still claims a revision, so a concurrent save of the same engine is never overwritten
+        # behind its back.
+        with self._store.transaction():
             try:
                 self._store.save_instance_settings(
                     instance.id, after, schema=schema, settings_version=parsed.settings_version if parsed else None,
@@ -334,7 +337,7 @@ class TranslatorSettingsService:
             except StoreStale as error:
                 raise StaleRevisionError("The engine settings changed since they were loaded.",
                                          revision=error.revision) from error
-        self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
+            self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
 
     # -------------------------------------------------------- connections
     def create_connection(self, instance_id: int, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -359,12 +362,14 @@ class TranslatorSettingsService:
                                    backend_type)
         self._require_consent(schema, {}, validated.settings, payload, new_owner=True)
         parsed = self._parsed(plugin)
-        row = self._store.add_connection(
-            instance_id, backend_type, plugin_id=plugin_id, model=host[MODEL_KEY], settings=validated.settings,
-            settings_version=parsed.settings_version if parsed else None, plugin_version=plugin.version,
-            price_input_per_million=host[PRICE_KEYS[0]], price_output_per_million=host[PRICE_KEYS[1]],
-            enabled=self._flag(payload, "enabled", True))
-        self._write_secrets((CONNECTION, row.id), validated, [], effective_destinations(schema, validated.settings))
+        with self._store.transaction():
+            row = self._store.add_connection(
+                instance_id, backend_type, plugin_id=plugin_id, model=host[MODEL_KEY], settings=validated.settings,
+                settings_version=parsed.settings_version if parsed else None, plugin_version=plugin.version,
+                price_input_per_million=host[PRICE_KEYS[0]], price_output_per_million=host[PRICE_KEYS[1]],
+                enabled=self._flag(payload, "enabled", True))
+            self._write_secrets((CONNECTION, row.id), validated, [],
+                                effective_destinations(schema, validated.settings))
         return {"connection": self.connection_view(instance, self._store.get_connection(row.id)), "notices": []}
 
     def update_connection(self, connection_id: int, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -400,15 +405,17 @@ class TranslatorSettingsService:
         after = validated.settings if values is not None else before
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
-        try:
-            self._store.update_connection(
-                connection_id, schema=schema, model=host[MODEL_KEY], settings=after,
-                settings_version=parsed.settings_version if parsed else None, plugin_version=plugin.version,
-                price_input_per_million=host[PRICE_KEYS[0]], price_output_per_million=host[PRICE_KEYS[1]],
-                enabled=enabled, expected_revision=expected)
-        except StoreStale as error:
-            raise StaleRevisionError("The back end changed since it was loaded.", revision=error.revision) from error
-        self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
+        with self._store.transaction():
+            try:
+                self._store.update_connection(
+                    connection_id, schema=schema, model=host[MODEL_KEY], settings=after,
+                    settings_version=parsed.settings_version if parsed else None, plugin_version=plugin.version,
+                    price_input_per_million=host[PRICE_KEYS[0]], price_output_per_million=host[PRICE_KEYS[1]],
+                    enabled=enabled, expected_revision=expected)
+            except StoreStale as error:
+                raise StaleRevisionError("The back end changed since it was loaded.",
+                                         revision=error.revision) from error
+            self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
         return {"connection": self.connection_view(instance, self._connection(connection_id)), "notices": []}
 
     def delete_connection(self, connection_id: int) -> None:

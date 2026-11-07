@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Mapping, Sequence
@@ -28,10 +29,10 @@ from sqlalchemy import delete, func, select, update
 
 from app.database import (TableTranslatorConnection, TableTranslatorEngineInstance,
                           TableTranslatorSecret)
-from media_servers.repository import atomic
 
 from .field_schema import is_finite_number
 from .destinations import DestinationSchema, added_destinations, covers, effective_destinations
+from .transaction import inside_write_transaction, write_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +237,7 @@ class TranslatorStore:
             plugin_id=plugin_id, name=name, enabled=1 if enabled else 0,
             settings_json=json.dumps(dict(settings or {}), sort_keys=True),
             settings_version=settings_version, plugin_version=plugin_version, revision=1)
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             self._session.add(row)
             self._session.flush()
         return row
@@ -257,7 +258,7 @@ class TranslatorStore:
         owner = (INSTANCE, instance_id)
         before = effective_destinations(schema, self.settings_of(instance))
         after = effective_destinations(schema, settings)
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             current = int(instance.revision)
             # Compare and swap in the database, so two saves that both read this revision cannot both win.
             claimed = self._session.execute(
@@ -279,7 +280,7 @@ class TranslatorStore:
 
     def set_instance_enabled(self, instance_id: int, enabled: bool) -> PointerChange:
         instance = self._require_instance(instance_id)
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             instance.enabled = 1 if enabled else 0
             instance.updated_at = datetime.now()
         if enabled:
@@ -290,7 +291,7 @@ class TranslatorStore:
         """Remove an instance with its connections and every secret they own."""
         self._require_instance(instance_id)
         connection_ids = [row.id for row in self.list_connections(instance_id)]
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             for connection_id in connection_ids:
                 self._delete_secrets((CONNECTION, connection_id))
             self._delete_secrets((INSTANCE, instance_id))
@@ -323,7 +324,7 @@ class TranslatorStore:
         if not backend_type:
             raise TranslatorStoreError("a connection needs a back-end type")
         _check_price(price_input_per_million, price_output_per_million)
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             last = self._session.execute(
                 select(func.max(TableTranslatorConnection.position))
                 .where(TableTranslatorConnection.instance_id == instance_id)).scalar()
@@ -350,7 +351,7 @@ class TranslatorStore:
         before = effective_destinations(schema, self.settings_of(connection))
         new_settings = self.settings_of(connection) if settings is None else dict(settings)
         after = effective_destinations(schema, new_settings)
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             current = int(connection.revision)
             claimed = self._session.execute(
                 update(TableTranslatorConnection)
@@ -383,7 +384,7 @@ class TranslatorStore:
         """Remove a connection and its secrets, then close the gap in the order."""
         connection = self._require_connection(connection_id)
         instance_id = connection.instance_id
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             self._delete_secrets((CONNECTION, connection_id))
             self._session.execute(delete(TableTranslatorConnection)
                                   .where(TableTranslatorConnection.id == connection_id))
@@ -395,7 +396,7 @@ class TranslatorStore:
         rows = {row.id: row for row in self.list_connections(instance_id)}
         if sorted(ordered_ids) != sorted(rows):
             raise TranslatorStoreError("the new order must list every connection of the engine once")
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             # Two passes: the unique (instance, position) index would refuse a swap in one.
             for index, connection_id in enumerate(ordered_ids):
                 rows[connection_id].position = -(index + 1)
@@ -420,7 +421,7 @@ class TranslatorStore:
             return
         persist_master_key()
         encrypted = encrypt_secret(value)
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             row = self._secret_row(owner, field_name)
             payload = json.dumps(sorted(destinations))
             if row is None:
@@ -433,15 +434,15 @@ class TranslatorStore:
                 row.updated_at = datetime.now()
             self._session.flush()
             self._refresh_awaiting(owner, destinations)
-        self._refresh_scrubbing()
+        self._scrub_after_commit()
 
     def clear_secret(self, owner: Owner, field_name: str, *, destinations: frozenset[str]) -> None:
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             self._session.execute(delete(TableTranslatorSecret).where(
                 TableTranslatorSecret.owner_kind == owner[0], TableTranslatorSecret.owner_id == owner[1],
                 TableTranslatorSecret.field == field_name))
             self._refresh_awaiting(owner, destinations)
-        self._refresh_scrubbing()
+        self._scrub_after_commit()
 
     def secrets_for_request(self, owner: Owner, destinations: frozenset[str]) -> dict[str, str]:
         """The decrypted secrets a request with these effective destinations may carry.
@@ -482,7 +483,7 @@ class TranslatorStore:
 
     def refresh_awaiting(self, owner: Owner, destinations: frozenset[str]) -> bool:
         """Recompute and store whether the owner waits for its secrets. Returns the new flag."""
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             return self._refresh_awaiting(owner, destinations)
 
     def _refresh_awaiting(self, owner: Owner, destinations: frozenset[str]) -> bool:
@@ -507,6 +508,23 @@ class TranslatorStore:
     def _delete_secrets(self, owner: Owner) -> None:
         self._session.execute(delete(TableTranslatorSecret).where(
             TableTranslatorSecret.owner_kind == owner[0], TableTranslatorSecret.owner_id == owner[1]))
+
+    @contextmanager
+    def transaction(self):
+        """Run several store calls as one transaction: all of them commit together, or none does.
+
+        The log-scrub set is rebuilt once, after the commit, because it reads the secrets table through
+        another connection that cannot see what is not committed yet.
+        """
+        outermost = not inside_write_transaction(self._session)
+        with write_transaction(self._session):
+            yield self
+        if outermost:
+            self._refresh_scrubbing()
+
+    def _scrub_after_commit(self) -> None:
+        if not inside_write_transaction(self._session):
+            self._refresh_scrubbing()
 
     @staticmethod
     def _refresh_scrubbing() -> None:
@@ -555,7 +573,7 @@ class TranslatorStore:
         were entered with, so a rollback finds them.
         """
         waiting: list[Owner] = []
-        with atomic(self._session, durable=True):
+        with write_transaction(self._session):
             for kind, row in self._owners_of_plugin(plugin_id):
                 if new_settings is not None:
                     migrated = new_settings(kind, row)
