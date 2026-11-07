@@ -250,6 +250,28 @@ def test_endpoints_are_listed_per_back_end_type():
         _parse(service_manifest("multi", settings_version=1, settings={"fields": [], "backend_types": ["gemini"]}))
 
 
+@pytest.mark.parametrize("key", ["model", "price_input_per_million", "price_output_per_million"])
+@pytest.mark.parametrize("declaration", [{"type": "secret"}, {"type": "text", "secret": True},
+                                         {"type": "text", "destination": True},
+                                         {"type": "options", "destination": True}])
+def test_a_back_end_cannot_declare_a_host_field_as_a_secret_or_an_address(key, declaration):
+    from provider_hub.manifest import ManifestValidationError
+
+    with pytest.raises(ManifestValidationError, match="kept by the host as a plain value"):
+        _parse(_multi_backend(gemini={"fields": [{"key": key, **declaration}]}))
+
+
+def test_a_back_end_may_still_label_a_host_field_and_other_keys_may_be_secrets():
+    plugin = _parse(_multi_backend(gemini={"fields": [
+        {"key": "model", "type": "options", "label": "Model", "required": True},
+        {"key": "price_input_per_million", "type": "number", "min": 0},
+        {"key": "api_key", "type": "secret"}]}))
+    assert [item["key"] for item in dict(plugin.backend_fields)["gemini"]] == [
+        "model", "price_input_per_million", "api_key"]
+    # The engine's own fields are not the host's: a plugin may call one of them model.
+    _parse(service_manifest("single", settings_version=1, settings={"fields": [{"key": "model", "type": "secret"}]}))
+
+
 def test_a_schema_2_secret_field_is_known_to_the_secret_registry():
     from secret_store.registry import manifest_secret_fields
 

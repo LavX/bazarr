@@ -80,6 +80,10 @@ SETTING_TYPES = frozenset({
     "text", "secret", "number", "integer", "toggle", "choice",
     "list", "key_list", "orderable_list", "options",
 })
+# The host owns these fields of a back end: it keeps them in columns of their own, outside the settings
+# JSON, and treats them as plain values. A manifest may declare one to label it or set its limits, but not
+# as a secret or an address, which would need the handling the host does not give them.
+BACKEND_HOST_FIELD_KEYS = frozenset({"model", "price_input_per_million", "price_output_per_million"})
 HOST_CAPABILITY_PREFIX = "host."
 # CPython compatibility tags of the wheels an entry's closure ships (cp312,
 # cp313, cp314), or py3 when every wheel is pure Python.
@@ -290,7 +294,7 @@ def _login(manifest: dict[str, Any], permissions: tuple[str, ...]) -> dict[str, 
     return {"argv": argv, "flow": flow, "paths": paths}
 
 
-def _field_list(fields: Any, where: str) -> tuple[dict[str, Any], ...]:
+def _field_list(fields: Any, where: str, *, host_keys: frozenset[str] = frozenset()) -> tuple[dict[str, Any], ...]:
     if not isinstance(fields, list):
         raise ManifestValidationError(f"{where} must be a list")
     seen = set()
@@ -305,6 +309,10 @@ def _field_list(fields: Any, where: str) -> tuple[dict[str, Any], ...]:
         seen.add(key)
         if item.get("type") not in SETTING_TYPES:
             raise ManifestValidationError(f"settings field {key} has an unsupported type")
+        if key in host_keys and (item.get("type") == "secret" or item.get("secret") is True
+                                 or item.get("destination") is True):
+            raise ManifestValidationError(
+                f"settings field {key} is kept by the host as a plain value and cannot be a secret or an address")
     return tuple(dict(item) for item in fields)
 
 
@@ -335,7 +343,8 @@ def _settings(manifest: dict[str, Any]) -> tuple[
                 raise ManifestValidationError(f"settings.backend_types.{type_id} must be an object under a type id")
             backend_endpoints.append((type_id, _endpoints(definition.get("endpoints"))))
             backend_fields.append((type_id, _field_list(
-                definition.get("fields") or [], f"settings.backend_types.{type_id}.fields")))
+                definition.get("fields") or [], f"settings.backend_types.{type_id}.fields",
+                host_keys=BACKEND_HOST_FIELD_KEYS)))
     return settings_version, fields, tuple(backend_endpoints), tuple(backend_fields)
 
 
