@@ -1860,3 +1860,14 @@ def test_a_cancelled_request_nobody_waits_on_still_settles(make_pool):
     request.cancel()
     assert wait_until(request.done)
     assert wait_until(lambda: slot.active == 0 and not slot.contexts)
+
+
+def test_a_caller_that_gets_its_result_finds_the_books_settled(make_pool, clock):
+    pool = make_pool()
+    pool.register(definition())
+    slot = None
+    for _ in range(200):
+        pool.run("tr", "echo")
+        slot = pool._entry("tr").slot
+        # Settled by the time run() returns, whichever thread got there first.
+        assert slot.active == 0 and not slot.contexts

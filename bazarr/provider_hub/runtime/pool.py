@@ -660,6 +660,7 @@ class PoolRequest:
         self._handle = handle
         self._finished = False
         self._finish_lock = threading.Lock()
+        self._settled_event = threading.Event()
         self.context = None
 
     @property
@@ -688,10 +689,17 @@ class PoolRequest:
 
     def _finish(self, error):
         with self._finish_lock:
-            if self._finished:
-                return
+            first = not self._finished
             self._finished = True
-        self._pool._after_request(self._entry, self._slot, error, self._handle.id)
+        if not first:
+            # The completion callback may be settling the books on another thread:
+            # a caller that gets its result back must find them settled.
+            self._settled_event.wait(30)
+            return
+        try:
+            self._pool._after_request(self._entry, self._slot, error, self._handle.id)
+        finally:
+            self._settled_event.set()
 
 
 class WorkerPool:
