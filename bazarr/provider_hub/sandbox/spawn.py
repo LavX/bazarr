@@ -429,6 +429,82 @@ def _close_fds(holder: dict) -> None:
                 pass
 
 
+_ANCHOR_SCRIPT = (
+    "import os, sys\n"
+    "sys.stdin.buffer.read()\n"
+    "if os.getpgrp() == os.getpid():\n"
+    "    os.killpg(os.getpgrp(), 9)\n"
+)
+
+
+def _finish_anchor(anchor: "subprocess.Popen") -> None:
+    """Reap the anchor after its group was killed. Only now may its pid be reused."""
+    try:
+        if anchor.stdin is not None:
+            anchor.stdin.close()
+    except OSError:
+        pass
+    try:
+        anchor.kill()
+    except OSError:
+        pass
+    try:
+        anchor.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _start_anchor() -> "subprocess.Popen | None":
+    """A tiny process that leads a fresh process group and never exits by itself.
+
+    The kernel does not reuse a process id while it is still a process group
+    id, and a process this object has not waited for (running or zombie) keeps
+    its pid reserved. The anchor leads the worker's group and is reaped only by
+    ``stop``, so the group stays addressable however many times the worker was
+    reaped or its children came and went. The anchor reads its stdin until end
+    of file and then kills the group: when the host dies or drops the handle,
+    the whole group goes with it. ``None`` where process groups are not
+    available or the anchor cannot start (a frozen build has no stand-alone
+    interpreter; Python before 3.11 cannot join a group without ``preexec_fn``).
+    """
+    if not hasattr(os, "killpg") or sys.version_info < (3, 11) or getattr(sys, "frozen", False):
+        return None
+    try:
+        return subprocess.Popen(
+            [sys.executable, "-I", "-S", "-B", "-c", _ANCHOR_SCRIPT],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={},
+            close_fds=True,
+            process_group=0,
+        )
+    except OSError:
+        return None
+
+
+def _start_plain(command: list, **kwargs: Any) -> "WorkerProcess":
+    """Start a worker directly (no launcher), in a group an anchor holds.
+
+    The anchor starts first and the worker joins its group, so the group id is
+    the anchor's pid, not the worker's. The worker is then free to be reaped by
+    ``poll``, ``wait`` or ``communicate`` without the group becoming
+    unaddressable. Without an anchor the worker leads its own session instead.
+    """
+    anchor = _start_anchor()
+    try:
+        if anchor is not None:
+            process = WorkerProcess(command, process_group=anchor.pid, **kwargs)
+        else:
+            process = WorkerProcess(command, start_new_session=True, **kwargs)
+    except BaseException:
+        if anchor is not None:
+            _finish_anchor(anchor)
+        raise
+    process._anchor = anchor
+    return process
+
+
 class WorkerProcess(subprocess.Popen):
     """What the worker spawner sees, with or without a launcher.
 
@@ -438,6 +514,8 @@ class WorkerProcess(subprocess.Popen):
     """
 
     enforcement: str = "declared"
+    # The process that keeps the worker's group id reserved; see ``_start_plain``.
+    _anchor: "subprocess.Popen | None" = None
 
     def launcher_failure(self) -> "LauncherFailure | None":
         return None
@@ -451,15 +529,18 @@ class WorkerProcess(subprocess.Popen):
     def stop(self, grace: float = 3.0) -> None:
         """Terminate the worker, then kill its whole process group.
 
-        The group is cleaned up whether or not the worker is still running: a
-        worker that exited on its own can leave children behind in the group it
-        started. The group id is the worker's pid, and the kernel does not hand
-        that pid out again while the worker is unreaped (it is a zombie until
-        this object collects it) or any process still belongs to the group. So
-        the kill is made only when this object had not reaped the worker before
-        the call, which keeps it from reaching an unrelated process after a pid
-        was reused.
+        The group is cleaned up whether or not the worker is still running, and
+        whether or not something already reaped it (``poll``, ``wait`` and
+        ``communicate`` all do): a worker that exited on its own can leave
+        children behind in its group. When the worker was started with a group
+        anchor (see ``_start_plain``) the group id belongs to the anchor, which
+        this object has not reaped, so the kernel cannot hand that pid out
+        again and the kill always reaches the right group. Without an anchor
+        the group id is the worker's own pid, which is safe to signal only
+        while this object has not reaped the worker; after that the pid may
+        belong to someone else and nothing is sent.
         """
+        anchor, self._anchor = self._anchor, None
         unreaped = self.returncode is None
         if self.poll() is None:
             try:
@@ -474,7 +555,13 @@ class WorkerProcess(subprocess.Popen):
         else:
             timed_out = False
         killpg = getattr(os, "killpg", None)
-        if unreaped:
+        if anchor is not None and killpg is not None:
+            try:
+                killpg(anchor.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            _finish_anchor(anchor)
+        elif unreaped:
             try:
                 if killpg is not None:
                     killpg(self.pid, signal.SIGKILL)
@@ -700,14 +787,13 @@ def spawn_worker(
     if not landlock.is_supported_platform():
         if require_sandbox:
             raise SandboxRefused("this platform cannot sandbox workers")
-        return WorkerProcess(
+        return _start_plain(
             [spec.interpreter, *spec.args],
             cwd=spec.cwd,
             env=dict(spec.env),
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
-            start_new_session=True,
             **popen_kwargs,
         )
     probe = probe or probe_sandbox()

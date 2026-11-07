@@ -2119,6 +2119,83 @@ def test_the_fallback_stop_kills_children_of_a_worker_that_already_exited(tmp_pa
     assert wait_dead(child), "a child outlived a worker that had already exited"
 
 
+@linux_only
+def test_the_fallback_stop_kills_children_after_communicate_reaped_the_leader(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    spec = make_spec(
+        tmp_path,
+        """
+        import subprocess, sys
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        open("child.pid", "w").write(str(child.pid))
+        """,
+    )
+    process = spawn_worker(spec, probe=DECLARED)
+    out, err = process.communicate(timeout=30)
+    child = read_pid(tmp_path / "rw" / "child.pid")
+    assert process.returncode == 0 and alive(child)
+    process.stop(1.0)
+    assert wait_dead(child), "a child outlived stop() once the leader had been reaped"
+    process.stop(1.0)
+
+
+@linux_only
+def test_the_fallback_group_is_held_by_the_anchor_not_the_worker(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    process = spawn_worker(make_spec(tmp_path, "import time; time.sleep(300)"), probe=DECLARED)
+    anchor = process._anchor
+    assert anchor is not None and anchor.pid != process.pid
+    assert os.getpgid(process.pid) == anchor.pid
+    process.kill()
+    process.wait(timeout=10)
+    # The leader is gone, the group id is still the anchor's, unreaped.
+    assert os.getpgid(anchor.pid) == anchor.pid and anchor.poll() is None
+    process.stop(0.5)
+    assert anchor.returncode is not None and process._anchor is None
+
+
+@linux_only
+def test_dropping_the_fallback_handle_ends_the_group(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    spec = make_spec(
+        tmp_path,
+        """
+        import subprocess, sys, time
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        open("child.pid", "w").write(str(child.pid))
+        time.sleep(300)
+        """,
+    )
+    process = spawn_worker(spec, probe=DECLARED)
+    child = read_pid(tmp_path / "rw" / "child.pid")
+    anchor = process._anchor
+    anchor.stdin.close()
+    assert wait_dead(child), "the anchor did not end its group when its pipe closed"
+    process.stop(0.5)
+
+
+def test_without_an_anchor_a_reaped_leader_gets_no_group_signal(tmp_path, monkeypatch):
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    monkeypatch.setattr(spawn, "_start_anchor", lambda: None)
+    sent = []
+    process = spawn_worker(make_spec(tmp_path, "print('done')"), probe=DECLARED)
+    process.communicate(timeout=30)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    process.stop(0.5)
+    assert sent == []
+
+
+def test_the_anchor_is_skipped_where_it_cannot_work(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert spawn._start_anchor() is None
+    monkeypatch.undo()
+    monkeypatch.delattr(os, "killpg", raising=False)
+    assert spawn._start_anchor() is None
+
+
 def test_status_does_not_claim_resource_limits_where_none_are_applied(tmp_path, monkeypatch):
     assert "with resource limits" in " ".join(sandbox_status(DECLARED)["limitations"])
     monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
@@ -2463,6 +2540,7 @@ def test_cleanup_uses_the_emergency_path_only_when_nothing_can_be_listed(monkeyp
     monkeypatch.setattr(launcher, "_emergency_kill", lambda reason: reasons.append(str(reason)))
     # The scan fails but the children list works: the launcher carries on.
     monkeypatch.setattr(launcher, "_direct_children", lambda: [])
+    monkeypatch.setattr(launcher, "_children_remain", lambda: False)
     launcher._kill_descendants()
     assert launcher._cleanup_tree() is True
     assert reasons == []
@@ -2520,6 +2598,7 @@ def test_the_tree_scan_falls_back_to_the_children_list_when_the_scan_fails(monke
 def test_a_descendant_that_survives_the_cleanup_is_reported_not_forgotten(monkeypatch):
     launcher = load_launcher()
     monkeypatch.setattr(launcher, "CLEANUP_SECONDS", 0.3)
+    monkeypatch.setattr(launcher, "_direct_children", lambda: [])
     monkeypatch.setattr(launcher, "_descendants", lambda root: [999999])
     monkeypatch.setattr(launcher, "_children_remain", lambda: False)
     monkeypatch.setattr(launcher, "_kill_descendants", lambda sig=9: None)
@@ -2532,6 +2611,7 @@ def test_a_descendant_that_survives_the_cleanup_is_reported_not_forgotten(monkey
 def test_an_empty_listing_is_not_proof_the_tree_is_gone(monkeypatch):
     launcher = load_launcher()
     monkeypatch.setattr(launcher, "CLEANUP_SECONDS", 0.3)
+    monkeypatch.setattr(launcher, "_direct_children", lambda: [])
     monkeypatch.setattr(launcher, "_descendants", lambda root: [])
     monkeypatch.setattr(launcher, "_kill_descendants", lambda sig=9: None)
     monkeypatch.setattr(launcher, "_children_remain", lambda: True)
