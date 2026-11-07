@@ -49,6 +49,8 @@ Operations:
 ``raw_error``      answers with an error carrying the secret, uncleaned.
 ``progress_secret`` sends a progress message carrying the secret.
 ``blocked``        reports a refused connect, then fails with sandbox_blocked.
+``alloc``          touches ``mb`` megabytes and holds them for ``seconds``
+                   (cancellable), as a memory hog does.
 ``exit``           ends the process with ``code``.
 ``raise``          raises a plain exception.
 """
@@ -370,6 +372,15 @@ def _handle(operation):
     if name == "blocked":
         operation.sandbox_blocked(params.get("target", "203.0.113.9:25"), errno=13)
         raise worker_channel.OperationError("sandbox_blocked", "connect refused by the sandbox")
+    if name == "alloc":
+        held = bytearray(int(params.get("mb", 64)) * 1024 * 1024)
+        for offset in range(0, len(held), 4096):
+            held[offset] = 1
+        deadline = time.monotonic() + float(params.get("seconds", 5.0))
+        while time.monotonic() < deadline:
+            if operation.cancelled.wait(0.02):
+                raise worker_channel.OperationCancelled()
+        return {"held": len(held)}
     if name == "exit":
         os._exit(int(params.get("code", 1)))
     if name == "raise":
