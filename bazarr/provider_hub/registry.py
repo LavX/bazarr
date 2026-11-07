@@ -552,10 +552,10 @@ def retire_provider_instances(provider_id: str) -> list[threading.Thread]:
     drains: list[threading.Thread] = []
     for pool in live_provider_pools():
         try:
-            cached = getattr(pool, "initialized_providers", {}).get(provider_id)
-            if not isinstance(cached, HubProxyProvider):
-                continue
-            instance = pool.detach_provider(provider_id)
+            # The look at the cache and the detach are one step under the pool's
+            # store lock: a constructor that is storing an instance right now is
+            # either finished (and found here) or sees the new generation.
+            instance = pool.detach_provider(provider_id, lambda cached: isinstance(cached, HubProxyProvider))
             if instance is None:
                 continue
             env_dir = _instance_environment(instance)

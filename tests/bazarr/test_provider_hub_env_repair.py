@@ -1152,3 +1152,61 @@ def test_the_environment_stays_pinned_while_the_workers_group_is_not_empty(hub, 
     for drain in drains:
         drain.join(15)
     assert env_registry.cleanup_environments(hub) == [str(old)]
+
+
+def test_a_repair_that_lands_between_the_generation_check_and_the_cache_store_still_retires_the_instance(
+    hub, hub_registry, monkeypatch
+):
+    from subliminal_patch import core
+    from provider_hub.registry import HubProxyProvider, retire_provider_instances
+    from subliminal_patch.core import SZProviderPool
+
+    old = _env(hub / "shared_envs" / "old")
+
+    class OldClass(HubProxyProvider):
+        provider_name = "examplehub"
+        python_path = str(old / "bin" / "python")
+
+    hub_registry.register("examplehub", OldClass)
+    pool = SZProviderPool(providers=["examplehub"], provider_configs={})
+    checked = threading.Event()
+    proceed = threading.Event()
+    real_generation = core.provider_generation
+    pausing = {"armed": False}
+
+    def generation_then_pause(name):
+        value = real_generation(name)
+        if pausing["armed"] and threading.current_thread().name == "constructor":
+            pausing["armed"] = False
+            checked.set()
+            proceed.wait(10)
+        return value
+
+    monkeypatch.setattr(core, "provider_generation", generation_then_pause)
+    # The pause is armed after the build read its generation, so only the check under the lock stops.
+    original_install = pool._install_provider
+
+    def install(name, provider, generation=None):
+        pausing["armed"] = True
+        return original_install(name, provider, generation)
+
+    monkeypatch.setattr(pool, "_install_provider", install)
+    found = {}
+    constructor = threading.Thread(target=lambda: found.setdefault("provider", pool["examplehub"]), name="constructor")
+    constructor.start()
+    assert checked.wait(10)
+
+    # The check passed; the repair now bumps the generation and walks the pools while the store is still to happen.
+    retiring = threading.Thread(target=lambda: found.setdefault("drains", retire_provider_instances("examplehub")))
+    retiring.start()
+    time.sleep(0.3)
+    proceed.set()
+    constructor.join(10)
+    retiring.join(10)
+    for drain in found.get("drains", []):
+        drain.join(10)
+
+    # The store completed first, so the retirement found the instance and took it out.
+    assert "examplehub" not in pool.initialized_providers
+    assert found["provider"]._retired is True
+    assert len(found["drains"]) == 1

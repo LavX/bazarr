@@ -942,21 +942,27 @@ class SZProviderPool(ProviderPool):
         except Exception:
             logger.exception('Provider %r terminated unexpectedly', name)
 
-    def detach_provider(self, name):
+    def detach_provider(self, name, accept=None):
         """Take an initialized provider out of the pool and hand it back, untouched.
 
         Unlike ``retire_provider`` nothing is terminated: the caller drains the
         instance, which may be serving a request. The pool builds a fresh one
-        from the registry the next time the name is used.
+        from the registry the next time the name is used. With ``accept``, the
+        instance is detached only if ``accept(instance)`` is true: the check and
+        the detach are one step under the lock a store takes, so an instance
+        that is being stored is either seen here or refused by the generation
+        it carries.
         """
         with self._store_lock:
-            provider = self.initialized_providers.pop(name, None)
-            if provider is not None:
-                # Marked in the same step, so a call that is already on its way
-                # to this instance is refused rather than starting its worker.
-                retire = getattr(provider, "retire", None)
-                if retire is not None:
-                    retire()
+            provider = self.initialized_providers.get(name)
+            if provider is None or (accept is not None and not accept(provider)):
+                return None
+            del self.initialized_providers[name]
+            # Marked in the same step, so a call that is already on its way to
+            # this instance is refused rather than starting its worker.
+            retire = getattr(provider, "retire", None)
+            if retire is not None:
+                retire()
             return provider
 
     def __delitem__(self, name):
