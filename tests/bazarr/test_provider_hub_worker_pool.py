@@ -1132,3 +1132,133 @@ def test_the_pool_runs_a_non_session_runtime_through_the_factory(make_pool, cloc
     pool.sweep()
     assert wait_until(lambda: pool.state("daemon") is WorkerState.STOPPED)
     assert created[0][0].closed_with is not None
+
+
+# ------------------------------------------------- ownership and confirmed exit
+
+
+class StubProcess:
+    """A process handle the pool can stop but that never reports an exit by itself."""
+
+    def __init__(self):
+        self.pid = 424242
+        self.returncode = None
+        self.stops = []
+        self.lifeline_cuts = 0
+
+    def close_lifeline(self):
+        self.lifeline_cuts += 1
+
+    def stop(self, grace=3.0):
+        self.stops.append(grace)
+
+
+class StubProcessRuntime(StubRuntime):
+    def __init__(self):
+        super().__init__()
+        self.process = StubProcess()
+
+    @property
+    def alive(self):
+        return self.started and self.process.returncode is None
+
+    def submit(self, op, params=None, **kwargs):
+        from provider_hub.runtime.session import RequestResult
+
+        class Handle:
+            id = 1
+
+            def done(self):
+                return True
+
+            def wait(self, timeout=None):
+                return RequestResult({"op": op})
+
+        return Handle()
+
+    def close(self, grace=5.0):
+        self.closed_with = grace
+
+
+def test_close_grace_must_fit_a_shutdown_frame():
+    for bad in (float("nan"), float("inf"), -1.0, 601, True, "2"):
+        with pytest.raises(ValueError):
+            PoolLimits(close_grace=bad)
+    assert PoolLimits(close_grace=0).close_grace == 0
+    assert PoolLimits(close_grace=600).close_grace == 600
+
+
+def test_bad_secrets_and_timeouts_are_refused_before_a_worker_starts(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition("tr"))
+    for secrets in ({"token": 1}, {"token": ""}, {"token": {"nested": "x"}}, {1: "x"}):
+        with pytest.raises(ValueError):
+            pool.submit("tr", "echo", secrets=secrets)
+    for timeout in (-1, float("nan"), float("inf"), True):
+        with pytest.raises(ValueError):
+            pool.submit("tr", "echo", timeout=timeout)
+    with pytest.raises(ValueError):
+        pool.run_once(definition("draft"), "echo", secrets={"token": ["x"]})
+    assert pool.state("tr") is WorkerState.STOPPED
+    assert pool.status()["workers"]["tr"]["starts"] == 0
+    assert pool.status()["processes"] == 0
+
+
+def test_a_worker_whose_process_is_not_confirmed_gone_keeps_its_place(make_pool):
+    runtimes = []
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtimes.append(StubProcessRuntime())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(max_resident=1), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    pool.register(WorkerDefinition("b", kind="daemon", runtime=factory))
+    pool.warm("a")
+    process = runtimes[0].process
+    pool.stop("a")
+    # The process never reported an exit: still counted, entry still stopping.
+    assert pool.state("a") is WorkerState.STOPPING
+    assert pool.status()["processes"] == 1
+    assert process.lifeline_cuts >= 1 and process.stops
+    with pytest.raises(PoolUnavailable):
+        pool.warm("b")
+    process.returncode = 0
+    pool.sweep()
+    assert pool.state("a") is WorkerState.STOPPED
+    assert pool.status()["processes"] == 0
+    pool.warm("b")
+    assert pool.state("b") is WorkerState.READY
+
+
+def test_run_once_holds_its_permit_until_the_process_is_gone(make_pool):
+    holder = []
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        holder.append(StubProcessRuntime())
+        return holder[-1]
+
+    pool = make_pool(fast_pool_limits(max_oneshot=1, acquire_timeout=0.3), use_clock=False)
+    stuck = WorkerDefinition("draft", kind="daemon", runtime=factory)
+    pool.run_once(stuck, "echo")
+    with pytest.raises(PoolUnavailable) as full:
+        pool.run_once(stuck, "echo")
+    assert full.value.code == "pool_full"
+    holder[0].process.returncode = 0
+    pool.sweep()
+    assert pool.run_once(stuck, "echo").result == {"op": "echo"}
+
+
+def test_the_sampler_does_not_read_a_leader_that_was_reaped(make_pool):
+    runtime = StubProcessRuntime()
+    pool = make_pool(memory_reader=lambda pid: pytest.fail("sampled a reaped process"))
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=lambda *args: runtime))
+    pool.warm("a")
+    runtime.process.returncode = 0
+    pool.sweep()
+    assert pool.status()["workers"]["a"]["pid"] is None or pool.state("a") is not WorkerState.READY
+
+
+def test_the_pool_never_signals_a_process_group_itself():
+    source = Path(pool_module.__file__).read_text()
+    assert "killpg" not in source and "os.kill(" not in source

@@ -52,6 +52,13 @@ Limits and what enforces them:
   which also removes children that moved themselves into a new session. A bare
   group kill would take the launcher down before it could do that.
 
+* The pool never signals a process group. Only the session knows whether the
+  leader was already reaped (and its number may be someone else's), so a plain
+  child is ended through ``session.close`` and a launcher or anchored worker
+  through its own ``stop()``. A worker counts toward the process cap, and its
+  entry stays ``stopping``, until its process is confirmed gone; one that
+  survives a stop is ended again on every sweep.
+
 Threading: all state is guarded by one lock. Slow work (spawn, handshake,
 shutdown, reading ``/proc``, measuring folders) runs outside it. Shutdowns run
 on their own short-lived threads, so ``submit``, ``wait`` and ``sweep`` never
@@ -84,16 +91,15 @@ import math
 import os
 import re
 import shutil
-import signal
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from ..sandbox import spawn_worker
+from ..sandbox import SandboxApplyError, SandboxRefused, spawn_worker
 from .errors import HandshakeError, RequestError, SessionError
-from .frames import Codes
+from .frames import Codes, is_secrets
 from .session import HostCall, RequestHandle, RequestResult, SessionLimits, WorkerSession
 
 logger = logging.getLogger(__name__)
@@ -132,7 +138,8 @@ TRANSLATOR_MEMORY_BYTES = 1 * GIB
 DEFAULT_MEMORY_BYTES = 512 * MIB
 CONFIG_RESERVE_BYTES = 1 * GIB
 
-_SIGKILL = getattr(signal, "SIGKILL", None)
+# Longest polite window a stop may ask for: the shutdown frame cannot carry more.
+MAX_CLOSE_GRACE = 600
 
 
 class PoolCodes:
@@ -341,6 +348,14 @@ class PoolLimits:
     stderr_log_per_second: int = 20
     stderr_tail_lines: int = 50
 
+    def __post_init__(self):
+        # The grace goes into a shutdown frame, which only carries whole
+        # milliseconds up to a bound; refuse what the frame could not hold.
+        grace = self.close_grace
+        if (isinstance(grace, bool) or not isinstance(grace, (int, float)) or not math.isfinite(grace)
+                or grace < 0 or grace > MAX_CLOSE_GRACE):
+            raise ValueError("close_grace must be a number of seconds from 0 to %d" % MAX_CLOSE_GRACE)
+
 
 @dataclass(frozen=True)
 class MemorySample:
@@ -529,6 +544,10 @@ class _Slot:
         self.peak_bytes = 0
         self.ephemeral = ephemeral
         self.closing = False
+        # Only one thread ends the process at a time, and once it has, nobody
+        # signals it again unless the pool is retrying a worker it could not confirm gone.
+        self.end_lock = threading.Lock()
+        self.ended = False
         self.generation = 0
         self.last_budget_at = -math.inf
         self.stderr_tail: deque = deque(maxlen=max(1, limits.stderr_tail_lines))
@@ -651,7 +670,9 @@ class WorkerPool:
         self._closes: list[tuple[_Slot, _Entry | None, str, float]] = []
         self._closing = 0  # polite and hard stops queued or running
         self._close_threads: set = set()
-        self._end_lock = threading.Lock()
+        # Workers whose process could not be confirmed gone after a stop. They
+        # keep counting toward the process cap, and the sweep ends them again.
+        self._stuck: list = []
         self._events: list[tuple[str, str, dict]] = []
         self._sampler: threading.Thread | None = None
         self._sampler_stop = threading.Event()
@@ -745,7 +766,7 @@ class WorkerPool:
                 workers[key] = {
                     "state": self._public_state(entry).value,
                     "kind": entry.definition.kind,
-                    "pid": session.process.pid if session and session.process else None,
+                    "pid": self._live_pid(session),
                     "in_flight": session.in_flight if session else 0,
                     "memory_bytes": slot.memory_bytes if slot else 0,
                     "peak_bytes": slot.peak_bytes if slot else entry.last_peak_bytes,
@@ -782,6 +803,7 @@ class WorkerPool:
         worker can issue a call, so the very first call already carries it as
         ``PoolHostCall.context``. It is dropped when the request finishes.
         """
+        self._check_request(timeout, secrets)
         last_error: BaseException | None = None
         for _attempt in range(3):
             entry, slot = self._lease(key)
@@ -822,6 +844,15 @@ class WorkerPool:
             return PoolRequest(self, entry, slot, handle)
         raise last_error  # type: ignore[misc]
 
+    @staticmethod
+    def _check_request(timeout, secrets) -> None:
+        """Refuse what the session would refuse, before a worker is started for it."""
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                                    or not math.isfinite(timeout) or timeout < 0):
+            raise ValueError("timeout must be a finite number of seconds, not negative")
+        if secrets is not None and not is_secrets(secrets):
+            raise ValueError("secrets must be a flat mapping of text names to non-empty text values")
+
     def run(self, key: str, op: str, params=None, *, timeout=None, **kwargs) -> RequestResult:
         """Submit and wait. ``timeout`` is the deadline for the whole request."""
         return self.submit(key, op, params, timeout=timeout, **kwargs).wait()
@@ -843,6 +874,7 @@ class WorkerPool:
         ``max_oneshot`` run at once.
         """
         definition.check()
+        self._check_request(timeout, secrets)
         with self._cond:
             self._check_open()
         if not self._oneshot.acquire(timeout=self.limits.acquire_timeout):
@@ -882,14 +914,20 @@ class WorkerPool:
             except (SessionError, RequestError) as error:
                 raise self._translate(slot, error)
         finally:
+            gone = True
             if slot.session is not None:
                 try:
-                    slot.session.close(grace=1.0)
+                    self._polite_close(slot, 1.0)
                 except Exception:
                     logger.debug("one-off worker close failed", exc_info=True)
+                gone = self._confirmed_gone(slot)
             with self._cond:
                 self._ephemeral.discard(slot)
-            self._oneshot.release()
+                if not gone:
+                    # The permit stays taken until the process is really gone.
+                    self._stuck.append((slot, None, self._oneshot.release))
+            if gone:
+                self._oneshot.release()
 
     # --------------------------------------------------------------- operations
 
@@ -930,6 +968,8 @@ class WorkerPool:
                 self._queue_close(slot, None, "kill")
             self._cond.notify_all()
         self._flush(wait=True)
+        if self._stuck:
+            self._retry_stuck()
         sampler = self._sampler
         if sampler is not None and sampler is not threading.current_thread():
             sampler.join(timeout=3.0)
@@ -957,6 +997,8 @@ class WorkerPool:
             self._sweep_retiring(entry, slot, now)
         for slot in ephemeral:
             self._sweep_ephemeral(slot, now)
+        if self._stuck:
+            self._retry_stuck()
         with self._cond:
             for entry in self._entries.values():
                 if entry.state == WorkerState.DRAINING and not entry.retiring and entry.slot is None:
@@ -1211,9 +1253,10 @@ class WorkerPool:
         """Map whatever a failed start raised to the error a caller sees."""
         if isinstance(error, PoolError):
             return error
-        refused = type(error).__name__ == "SandboxRefused"
-        if refused:
+        if isinstance(error, SandboxRefused):
             return PoolUnavailable(str(error), code=PoolCodes.SANDBOX_REFUSED)
+        if isinstance(error, SandboxApplyError):
+            return PoolUnavailable("the sandbox could not be applied: %s" % error, code=PoolCodes.SANDBOX_BLOCKED)
         failure = self._launcher_failure(slot)
         if failure is not None and failure.kind == "sandbox":
             return PoolUnavailable("the sandbox could not be applied: %s" % failure.message,
@@ -1261,7 +1304,7 @@ class WorkerPool:
     def _process_count(self) -> int:
         """Live worker processes: resident, draining and the ones still being stopped."""
         retiring = sum(len(entry.retiring) for entry in self._entries.values())
-        return self._resident_count() + retiring + self._closing
+        return self._resident_count() + retiring + self._closing + len(self._stuck)
 
     def _idle_by_age(self, skip) -> list[_Entry]:
         idle = [
@@ -1471,7 +1514,8 @@ class WorkerPool:
     def _sample(self, slot):
         session = slot.session
         process = session.process if session else None
-        if process is None:
+        if process is None or process.returncode is not None:
+            # Nothing local, or a leader that was reaped: its number may belong to someone else now.
             return
         try:
             sample = self._memory_reader(process.pid)
@@ -1504,37 +1548,73 @@ class WorkerPool:
             self._closing += 1
         self._closes.append((slot, entry, mode, self.limits.close_grace if grace is None else grace))
 
-    def _end_process(self, process, grace):
-        """End a worker process and everything it started.
+    def _live_pid(self, session):
+        process = session.process if session is not None else None
+        if process is None or process.returncode is not None:
+            return None
+        return process.pid
+
+    def _confirmed_gone(self, slot) -> bool:
+        """Whether the worker's process is certainly gone.
+
+        Never polls or signals: a leader the session or ``stop()`` has reaped
+        reads as gone, one that is still unreaped does not, and a runtime with
+        no local process is gone once it says it is not alive. The pool holds on
+        to the worker's slot until this is true.
+        """
+        session = slot.session
+        if session is None:
+            return True
+        process = session.process
+        if process is None:
+            return not session.alive
+        return process.returncode is not None
+
+    def _end_process(self, slot, grace, again=False):
+        """End a launcher or anchored worker's whole tree, once.
 
         A launcher process first loses its lifeline: the launcher then kills
         the whole worker tree itself, including children that moved into a
-        new session, which a signal to the group cannot reach. ``stop()`` and
-        a group kill after that are the backstop.
+        new session, which a signal to the group cannot reach. ``stop()`` then
+        waits for it and ends the group. A process without ``stop`` (the
+        session's own plain child) is the session's to end: the pool never
+        signals a process group itself, because only the session knows whether
+        the leader was already reaped and its number could belong to someone else.
+
+        One thread ends a process at a time and a second call finds it done,
+        unless ``again`` (the pool retrying a worker it could not confirm gone).
         """
-        if process is None:
+        session = slot.session
+        process = session.process if session is not None else None
+        stop = getattr(process, "stop", None)
+        if not callable(stop):
             return
-        try:
-            cut = getattr(process, "close_lifeline", None)
-            if callable(cut):
-                with self._end_lock:
+        with slot.end_lock:
+            if slot.ended and not again:
+                return
+            try:
+                cut = getattr(process, "close_lifeline", None)
+                if callable(cut):
                     cut()
-            stop = getattr(process, "stop", None)
-            if callable(stop):
                 stop(grace)
-            elif process.poll() is None and _SIGKILL is not None and hasattr(os, "killpg"):
-                try:
-                    os.killpg(process.pid, _SIGKILL)
-                except OSError:
-                    process.kill()
-        except Exception:
-            logger.debug("ending a worker process failed", exc_info=True)
+            except Exception:
+                logger.debug("ending a worker process failed", exc_info=True)
+            finally:
+                slot.ended = True
 
     def _terminate_now(self, slot):
         """End the worker's whole tree without a polite shutdown frame."""
         session = slot.session
-        if session is not None:
-            self._end_process(session.process, 0.5)
+        if session is None:
+            return
+        process = session.process
+        if callable(getattr(process, "stop", None)):
+            self._end_process(slot, 0.5)
+        else:
+            try:
+                session.close(grace=0)
+            except Exception:
+                logger.debug("ending a worker failed", exc_info=True)
 
     def _polite_close(self, slot, grace):
         """Shutdown frame, wait, SIGTERM, and then the launcher's own cleanup.
@@ -1547,8 +1627,8 @@ class WorkerPool:
         session = slot.session
         process = session.process
         timer = None
-        if callable(getattr(process, "close_lifeline", None)):
-            timer = threading.Timer(grace + 0.25, self._end_process, (process, 0.5))
+        if callable(getattr(process, "stop", None)):
+            timer = threading.Timer(grace + 0.25, self._end_process, (slot, 0.5))
             timer.daemon = True
             timer.start()
         try:
@@ -1557,31 +1637,74 @@ class WorkerPool:
             if timer is not None:
                 timer.cancel()
                 timer.join()
-            self._end_process(process, 0.5)
+            self._end_process(slot, 0.5)
 
     def _run_close(self, job):
         slot, entry, mode, grace = job
+        gone = False
         try:
             session = slot.session
             if session is not None:
                 if mode == "kill":
-                    self._end_process(session.process, 0.5)
+                    self._terminate_now(slot)
                     session.close(grace=0)
                 elif mode == "reap":
                     session.close(grace=0)
-                    self._end_process(session.process, 0.5)
+                    self._end_process(slot, 0.5)
                 else:
                     self._polite_close(slot, grace)
+            gone = self._confirmed_gone(slot)
+            if not gone and session is not None:
+                # One more, harder attempt before the worker is declared stuck.
+                self._end_process(slot, 0.5, again=True)
+                session.close(grace=0)
+                gone = self._confirmed_gone(slot)
         except Exception:
             logger.debug("worker close failed", exc_info=True)
+            try:
+                gone = self._confirmed_gone(slot)
+            except Exception:
+                gone = False
         finally:
             with self._cond:
                 if mode != "reap":
                     self._closing = max(0, self._closing - 1)
-                if entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None:
+                if not gone:
+                    # Its process is still there: it keeps its place in the process
+                    # cap, and its entry stays stopping, until a later pass ends it.
+                    self._stuck.append((slot, entry, None))
+                    self._events.append((slot.definition.key, "stuck", {}))
+                    logger.warning("%s: worker process could not be confirmed gone", slot.definition.key)
+                elif entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None:
                     self._set_state(entry, WorkerState.STOPPED, "stopped")
                 self._close_threads.discard(threading.current_thread())
                 self._cond.notify_all()
+            self._deliver_events()
+
+    def _retry_stuck(self):
+        """End again the workers that survived a stop, and release what they held once they are gone."""
+        with self._cond:
+            items = list(self._stuck)
+        for item in items:
+            slot, entry, release = item
+            try:
+                self._end_process(slot, 0.5, again=True)
+                if slot.session is not None:
+                    slot.session.close(grace=0)
+                gone = self._confirmed_gone(slot)
+            except Exception:
+                logger.debug("retrying a stuck worker failed", exc_info=True)
+                gone = False
+            if not gone:
+                continue
+            with self._cond:
+                if item in self._stuck:
+                    self._stuck.remove(item)
+                if entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None:
+                    self._set_state(entry, WorkerState.STOPPED, "stopped")
+                self._cond.notify_all()
+            if release is not None:
+                release()
             self._deliver_events()
 
     def _flush(self, wait=False):
