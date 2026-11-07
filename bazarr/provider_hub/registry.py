@@ -1,6 +1,7 @@
 # coding=utf-8
 from __future__ import annotations
 
+import contextlib
 import logging
 import json
 import sys
@@ -76,6 +77,11 @@ def _global_worker_timeout():
     return value or _DEFAULT_GLOBAL_WORKER_TIMEOUT
 
 
+# Guards the retired mark and the operation count of every proxy. The sections
+# are a few assignments, so one lock for all of them is enough.
+_PROXY_LOCK = threading.Lock()
+
+
 class HubProxyProvider(Provider):
     provider_name = "providerhub"
     languages = set()
@@ -89,6 +95,10 @@ class HubProxyProvider(Provider):
     #: the pool may still call this provider. Searches and downloads recheck it
     #: once they get their turn on the worker; None sends them ungated.
     admit = None
+    #: Set once the pool has dropped this instance for a replacement. A retired
+    #: proxy admits no new operation and never starts a worker.
+    _retired = False
+    _active_operations = 0
 
     def __init__(self, timeout=None, worker_client=None, **config):
         # An explicit per-instance timeout override is optional; when absent the
@@ -100,6 +110,41 @@ class HubProxyProvider(Provider):
 
     def initialize(self):
         return True
+
+    def retire(self) -> None:
+        """Refuse every operation that has not been admitted yet."""
+        with _PROXY_LOCK:
+            self._retired = True
+
+    @contextlib.contextmanager
+    def _operation(self):
+        """One admitted call: it holds the environment against cleanup for as long as it runs.
+
+        A retired proxy refuses it, so the caller asks the pool for the current
+        instance. When the last admitted call of a retired proxy ends, the worker
+        it may have started is stopped before the hold is released.
+        """
+        from subliminal_patch.core import ProviderRetiredError
+
+        with _PROXY_LOCK:
+            if self._retired:
+                raise ProviderRetiredError(self.provider_name)
+            env_dir = _instance_environment(self)
+            release = hold_environment(env_dir) if env_dir else (lambda: None)
+            self._active_operations += 1
+        try:
+            yield
+        finally:
+            with _PROXY_LOCK:
+                self._active_operations -= 1
+                last_of_retired = self._retired and self._active_operations == 0
+            try:
+                if last_of_retired and self.worker_client:
+                    self.worker_client.stop()
+            except Exception:
+                logger.exception("Provider Hub: could not stop the worker of a replaced %s", self.provider_name)
+            finally:
+                release()
 
     def terminate(self):
         if self.worker_client:
@@ -195,7 +240,8 @@ class HubProxyProvider(Provider):
             "video": video_to_payload(video),
             "languages": [language_to_payload(item) for item in languages],
         }
-        result = self._gated_request("search", request, timeout)
+        with self._operation():
+            result = self._gated_request("search", request, timeout)
         _consume_runtime_events(
             self.provider_name,
             result,
@@ -216,6 +262,12 @@ class HubProxyProvider(Provider):
         return subtitles
 
     def download_subtitle(self, subtitle):
+        # The archive member selection inside the download talks to the same
+        # worker, so the whole download is one admitted operation.
+        with self._operation():
+            return self._download_subtitle(subtitle)
+
+    def _download_subtitle(self, subtitle):
         timeout = self._request_timeout()
         status_generation = runtime_status.generation(self.provider_name)
         status_configuration_generation = runtime_status.configuration_generation(

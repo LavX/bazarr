@@ -473,6 +473,127 @@ def test_an_instance_under_construction_while_its_provider_is_replaced_is_not_st
     assert [type(item) for item in terminated] == [OldClass]
 
 
+def _pool_with_classes(hub_registry, old_python, new_python, *, new_search=None):
+    """A real pool holding an instance of the old class, and the registry
+    switched to a new class, as a repair leaves them."""
+    from provider_hub.registry import HubProxyProvider
+    from subliminal_patch.core import SZProviderPool
+
+    class OldClass(HubProxyProvider):
+        provider_name = "examplehub"
+        python_path = str(old_python)
+
+    class NewClass(HubProxyProvider):
+        provider_name = "examplehub"
+        python_path = str(new_python)
+
+        def list_subtitles(self, video, languages):
+            return new_search
+
+    hub_registry.register("examplehub", OldClass)
+    pool = SZProviderPool(providers=["examplehub"], provider_configs={})
+    stale = pool["examplehub"]
+    hub_registry.register("examplehub", NewClass)
+    return pool, stale, NewClass
+
+
+def test_a_retired_proxy_never_starts_its_worker_and_the_call_moves_to_the_current_instance(
+    hub, hub_registry, monkeypatch
+):
+    from provider_hub import registry
+    from provider_hub.registry import retire_provider_instances
+    from subliminal_patch.core import ProviderRetiredError
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    pool, stale, new_class = _pool_with_classes(
+        hub_registry, old / "bin" / "python", new / "bin" / "python", new_search=["found"]
+    )
+    started = []
+    monkeypatch.setattr(registry, "ProviderWorkerClient", lambda *args, **kwargs: started.append(args))
+    stale.manifest_json = "{}"
+    type(stale).bundle_path = str(hub)
+    type(stale).manifest_json = "{}"
+
+    for drain in retire_provider_instances("examplehub"):
+        drain.join(10)
+
+    # A search that fetched the proxy before the repair now reaches it.
+    with pytest.raises(ProviderRetiredError):
+        stale.list_subtitles(None, set())
+    assert started == []
+    assert stale.worker_client is None
+    # The pool answers the same call from the current class.
+    assert pool._call_current("examplehub", stale, lambda current: current.list_subtitles(None, set())) == ["found"]
+    assert type(pool.initialized_providers["examplehub"]) is new_class
+
+
+def test_an_admitted_call_holds_the_old_environment_until_it_ends(hub, hub_registry):
+    from provider_hub.registry import retire_provider_instances
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    state = load_state()
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    stale.worker_client = _BusyWorker(old / "bin" / "python")
+    stale.worker_client.finish.set()
+
+    with stale._operation():
+        for drain in retire_provider_instances("examplehub"):
+            drain.join(10)
+        # The drain is over and released its own hold; the call still runs.
+        assert env_registry.cleanup_environments(hub) == []
+        assert (old / "bin" / "python").exists()
+
+    # The last call of a retired proxy stops the worker it may have started, then frees the environment.
+    assert stale.worker_client.stopped.is_set()
+    assert env_registry.cleanup_environments(hub) == [str(old)]
+
+
+def test_a_pool_lookup_survives_the_instance_being_detached_around_it(hub, hub_registry):
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    pool, stale, new_class = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+
+    class DetachesAfterAnswering(dict):
+        def __init__(self, items, detach):
+            super().__init__(items)
+            self.detach = detach
+            self.armed = True
+
+        def _after(self, name):
+            if self.armed:
+                self.armed = False
+                self.detach(name)
+
+        def __contains__(self, name):
+            answer = super().__contains__(name)
+            self._after(name)
+            return answer
+
+        def get(self, name, default=None):
+            answer = super().get(name, default)
+            self._after(name)
+            return answer
+
+    holder = DetachesAfterAnswering(pool.initialized_providers, lambda name: dict.pop(holder, name, None))
+    pool.initialized_providers = holder
+
+    found = pool["examplehub"]
+
+    # Detached between the existence check and the lookup, and again right after
+    # the lookup: no KeyError either time, and the caller holds an instance.
+    assert found is stale
+    holder.armed = True
+    holder.pop("examplehub", None)
+    again = pool["examplehub"]
+    assert type(again) is new_class
+
+
 def test_a_connection_test_does_not_flag_an_installation_a_repair_has_moved(hub, tmp_path, monkeypatch):
     from provider_hub.service import test_provider_connection
 

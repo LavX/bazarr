@@ -428,6 +428,13 @@ class ProviderBusyError(Exception):
     records no backoff and no discard."""
 
 
+class ProviderRetiredError(Exception):
+    """The provider instance was replaced (its environment was repaired) before
+    the call reached its worker. Nothing was sent: the caller asks the pool for
+    the current instance and calls that one. Never a provider failure, so it
+    records no backoff and no discard."""
+
+
 class ListingStopped(Exception):
     """A listing's stop check raised, so the listing ended without asking any more provider.
 
@@ -743,11 +750,28 @@ class SZProviderPool(ProviderPool):
 
     def __getitem__(self, name):
         self.adopt_provider(name)
-        if name not in self.initialized_providers:
+        # Looked up under the lock a repair detaches under, and the instance
+        # that was found (or just built) is returned itself: a detach that
+        # follows never turns this call into a missing-key error.
+        with self._store_lock:
+            provider = self.initialized_providers.get(name)
+        if provider is None:
             logger.info('Initializing provider %s', name)
-            self._build_and_install(name, lambda: self.provider_configs.get(name, {}))
+            provider = self._build_and_install(name, lambda: self.provider_configs.get(name, {}))
 
-        return self.initialized_providers[name]
+        return provider
+
+    def _call_current(self, name, provider, call):
+        """Run ``call(provider)``; if the instance was replaced before the call
+        reached its worker, run it on the current one instead (once)."""
+        try:
+            return call(provider)
+        except ProviderRetiredError:
+            pass
+        try:
+            return call(self[name])
+        except ProviderRetiredError as error:
+            raise ProviderBusyError(f"{name} was being replaced") from error
 
     def _build_and_install(self, name, config):
         """Build an instance of the registered class and store it.
@@ -853,7 +877,7 @@ class SZProviderPool(ProviderPool):
         and the instance being discarded misbehaving on its way out is no
         reason to do that to the one replacing it.
         """
-        provider = self.initialized_providers.pop(name, None)
+        provider = self.detach_provider(name)
         if provider is None:
             return
 
@@ -871,15 +895,24 @@ class SZProviderPool(ProviderPool):
         from the registry the next time the name is used.
         """
         with self._store_lock:
-            return self.initialized_providers.pop(name, None)
+            provider = self.initialized_providers.pop(name, None)
+            if provider is not None:
+                # Marked in the same step, so a call that is already on its way
+                # to this instance is refused rather than starting its worker.
+                retire = getattr(provider, "retire", None)
+                if retire is not None:
+                    retire()
+            return provider
 
     def __delitem__(self, name):
-        if name not in self.initialized_providers:
+        with self._store_lock:
+            provider = self.initialized_providers.get(name)
+        if provider is None:
             raise KeyError(name)
 
         try:
             logger.info('Terminating provider %s', name)
-            self.initialized_providers[name].terminate()
+            provider.terminate()
         except (requests.Timeout, socket.timeout) as e:
             logger.error('Provider %r timed out, improperly terminated', name)
             self._notify_throttle(name, e)
@@ -887,7 +920,11 @@ class SZProviderPool(ProviderPool):
             logger.exception('Provider %r terminated unexpectedly', name)
             self._notify_throttle(name, e)
         finally:
-            del self.initialized_providers[name]
+            with self._store_lock:
+                # Only the instance that was terminated: a replacement stored
+                # in the meantime stays.
+                if self.initialized_providers.get(name) is provider:
+                    del self.initialized_providers[name]
 
     def list_subtitles_provider(self, provider, video, languages, detailed=False, discard_on_failure=False):
         """List subtitles with a single provider.
@@ -978,7 +1015,9 @@ class SZProviderPool(ProviderPool):
                             'throttled or discarded); not searching it', provider)
                 discard()
                 return finish(None, "skipped", "provider_excluded")
-            results = initialized_provider.list_subtitles(video, to_request)
+            results = self._call_current(
+                provider, initialized_provider, lambda current: current.list_subtitles(video, to_request)
+            )
             seen = []
             out = []
             for s in results:
@@ -1332,7 +1371,10 @@ class SZProviderPool(ProviderPool):
                                     subtitle.provider_name)
                         subtitle.skip_reason = 'provider_excluded'
                         return False
-                    initialized_provider.download_subtitle(subtitle)
+                    self._call_current(
+                        subtitle.provider_name, initialized_provider,
+                        lambda current: current.download_subtitle(subtitle),
+                    )
                     if self.post_download_hook:
                         self.post_download_hook(subtitle)
 
