@@ -155,7 +155,10 @@ def test_tini_is_installed_from_a_pinned_package_and_checked_at_build_time():
     dockerfile = _dockerfile()
     assert re.search(r'^ARG TINI_VERSION=\d+\.\d+\.\d+-\d+$', dockerfile, re.M), (
         'the tini package version is no longer pinned')
-    assert '"tini=${TINI_VERSION}*"' in dockerfile, 'the tini install no longer uses the pinned version'
+    assert '"tini=${tini_candidate}"' in dockerfile, 'the tini install no longer uses the checked candidate'
+    assert '"^${tini_re}(\\+b[0-9]+)?\\$"' in dockerfile, (
+        'the tini candidate is no longer matched exactly against TINI_VERSION plus an optional +bN')
+    assert 'tini=${TINI_VERSION}*' not in dockerfile, 'the tini pin is a prefix glob again (0.19.0-3 matches 0.19.0-30)'
     assert 'test -x /usr/bin/tini' in dockerfile, (
         'the build no longer checks that tini is where the entrypoint expects it')
 

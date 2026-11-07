@@ -119,14 +119,18 @@ RUN ln -s /usr/local/bin/alass-cli /usr/local/bin/alass
 # as the last step, after the PUID:PGID drop: tini then runs as the same user as
 # the supervisor, so forwarding a signal needs no CAP_KILL, which the hardened
 # compose files drop. Debian's package, not a downloaded binary, so it gets
-# security updates with the rest of the image. The version is pinned (the glob
-# only absorbs Debian's binary-only rebuild suffix) and the build fails if the
-# pin stops resolving or tini is not where entrypoint.sh expects it.
+# security updates with the rest of the image. The version is pinned: the
+# candidate must equal TINI_VERSION, optionally followed by Debian's
+# binary-only rebuild suffix (+bN), or the build fails, and it fails too if tini
+# is not where entrypoint.sh expects it.
 ARG TINI_VERSION=0.19.0-3
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    "tini=${TINI_VERSION}*" \
+    apt-get update \
+    && tini_re="$(printf '%s' "${TINI_VERSION}" | sed 's/\./\\./g')" \
+    && tini_candidate="$(apt-cache policy tini | sed -n 's/^  Candidate: //p')" \
+    && printf '%s\n' "${tini_candidate}" | grep -Eq "^${tini_re}(\+b[0-9]+)?\$" \
+    && apt-get install -y --no-install-recommends "tini=${tini_candidate}" \
     && test -x /usr/bin/tini \
     && /usr/bin/tini --version
 
