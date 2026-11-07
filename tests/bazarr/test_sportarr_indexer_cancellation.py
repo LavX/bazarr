@@ -164,8 +164,25 @@ def test_analysis_deadline_reaps_a_real_blocked_tree(indexed_library, monkeypatc
 
     _, path = indexed_library
     marker, release = blocked_probe(path, monkeypatch)
-    monkeypatch.setattr(analysis, "ANALYSIS_TIMEOUT", 2)
-    started = time.monotonic()
+    monkeypatch.setattr(analysis, "ANALYSIS_TIMEOUT", 60)
+    # The deadline is armed before the worker process boots, so on a loaded
+    # machine a short fixed deadline can expire before the probe is ever
+    # reached. The analysis clock runs on real time until the executable has
+    # reached its blocking boundary, and from then on it reads past the
+    # deadline: the real worker, probe and descendant are blocked when the
+    # deadline fires, and the reaping is still timed on the real clock.
+    reached = []
+
+    class DeadlineClock:
+        sleep = staticmethod(time.sleep)
+
+        @staticmethod
+        def monotonic():
+            if marker.exists() and not reached:
+                reached.append(time.monotonic())
+            return time.monotonic() + (analysis.ANALYSIS_TIMEOUT + 1 if reached else 0)
+
+    monkeypatch.setattr(analysis, "time", DeadlineClock)
     try:
         with pytest.raises(TimeoutError):
             analysis.parse_video_metadata(
@@ -173,7 +190,8 @@ def test_analysis_deadline_reaps_a_real_blocked_tree(indexed_library, monkeypatc
             )
     finally:
         release.touch()
-    assert time.monotonic() - started < 3
+    assert reached, "The actual executable must reach its blocking boundary"
+    assert time.monotonic() - reached[0] < 3
     assert marker.exists(), "The actual executable must reach its blocking boundary"
     processes = json.loads(marker.read_text())
     for pid in processes["probe"], processes["descendant"], processes["worker"]:
