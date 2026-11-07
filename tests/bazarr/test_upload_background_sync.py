@@ -147,6 +147,7 @@ def test_a_completed_upload_job_no_longer_holds_its_buffer(upload_flow, media_ty
     flow.submit(media_type)
     job, thread = flow.start()
     thread.join(60)
+    assert not thread.is_alive(), "thread did not finish"
 
     assert job.status == "completed"
     assert job.kwargs["subtitle"].closed
@@ -166,6 +167,7 @@ def test_a_failed_upload_job_no_longer_holds_its_buffer(upload_flow, monkeypatch
     flow.submit(media_type)
     job, thread = flow.start()
     thread.join(60)
+    assert not thread.is_alive(), "thread did not finish"
 
     assert job.status == "failed"
     assert job.kwargs["subtitle"].closed
@@ -225,6 +227,7 @@ def test_saved_upload_is_visible_and_upload_completes_before_sync(upload_flow, m
     upload_id = flow.submit(media_type)
     upload_job, upload_thread = flow.start()
     upload_thread.join(60)
+    assert not upload_thread.is_alive(), "upload_thread did not finish"
 
     assert (flow.video.parent / "Video.en.srt").is_file()
     assert upload_job.status != "failed"
@@ -1967,6 +1970,7 @@ def test_a_manual_upload_records_the_configured_local_score(upload_flow, monkeyp
     flow.submit(media_type)
     job, thread = flow.start()
     thread.join(60)
+    assert not thread.is_alive(), "thread did not finish"
 
     assert job.status == "completed"
     [(_, kwargs)] = flow.history

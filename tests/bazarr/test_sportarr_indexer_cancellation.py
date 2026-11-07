@@ -176,8 +176,15 @@ def test_analysis_deadline_reaps_a_real_blocked_tree(indexed_library, monkeypatc
     class DeadlineClock:
         sleep = staticmethod(time.sleep)
 
+        calls = []
+
         @staticmethod
         def monotonic():
+            # The first call arms the deadline and is never shifted, however
+            # early the probe got there. Only a later poll may read past it.
+            if not DeadlineClock.calls:
+                DeadlineClock.calls.append(True)
+                return time.monotonic()
             if marker.exists() and not reached:
                 reached.append(time.monotonic())
             return time.monotonic() + (analysis.ANALYSIS_TIMEOUT + 1 if reached else 0)
