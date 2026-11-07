@@ -78,6 +78,7 @@ OPEN = 'open'
 # Its tracks are the ones the forced search exists to get away from, so its
 # candidates are never downloaded and its answer counts for nothing.
 EXCLUDED_PROVIDER = 'embeddedsubtitles'
+WHISPER_PROVIDER = 'whisperai'
 
 _ANSWERED = ('success', 'empty')
 _CREDENTIAL_STATUSES = ('authentication_required', 'setup_required')
@@ -172,6 +173,28 @@ def _throttled_at_start():
     """Enabled providers on a recorded backoff, as ``{name: reason}``. Read only."""
     return {item['provider']: item['reason'] for item in snapshot_throttled_providers()['providers']
             if item['provider'] != EXCLUDED_PROVIDER}
+
+
+class _ListingPool:
+    """The profile pool as the forced listing sees it: without the excluded provider.
+
+    The listing walks ``providers``, so leaving the name out means the provider is never initialised,
+    never probes the video and never takes a throttle or a discard. Everything else, including the
+    shared discard set, goes to the real pool.
+    """
+
+    def __init__(self, pool):
+        self._pool = pool
+
+    @property
+    def providers(self):
+        return [name for name in self._pool.providers if name != EXCLUDED_PROVIDER]
+
+    def __getattr__(self, name):
+        return getattr(self._pool, name)
+
+    def __getitem__(self, name):
+        return self._pool[name]
 
 
 class _Run:
@@ -425,7 +448,7 @@ def _run(episode, *, profile_id, media_type, job_id, cancel, fallback_allowed):
     arr_instance_id = getattr(episode, 'arr_instance_id', None)
     video_path = path_mappings.path_replace_instance(episode.path, arr_instance_id, 'episode')
     pool = _get_pool(media_type, profile_id)
-    providers = pool.providers
+    providers = [name for name in pool.providers if name != EXCLUDED_PROVIDER]
     if not providers:
         logging.info('BAZARR All providers are throttled')
         return all_languages(OPEN, 'no_providers')
@@ -462,7 +485,7 @@ def _run(episode, *, profile_id, media_type, job_id, cancel, fallback_allowed):
 
     run = _Run(pool, video, _throttled_at_start())
     try:
-        listed = list_all_subtitles([video], language_set, pool, min_score=int(min_score), cancel=stop,
+        listed = list_all_subtitles([video], language_set, _ListingPool(pool), min_score=int(min_score), cancel=stop,
                                     on_outcome=run.collect)
     except ListingStopped as stopped:
         raise stopped.original from None
@@ -478,7 +501,11 @@ def _run(episode, *, profile_id, media_type, job_id, cancel, fallback_allowed):
             continue
 
         answered, holds, applicable = run.listing_verdict(language)
-        language_candidates = [subtitle for subtitle in candidates if _serves(subtitle, language)]
+        served = [subtitle for subtitle in candidates if _serves(subtitle, language)]
+        # Whisper's candidates are not a provider's answer. They never go through the ordinary download, so a
+        # low minimum score cannot start a transcription: only the gated fallback below tries them.
+        language_candidates = [subtitle for subtitle in served if subtitle.provider_name != WHISPER_PROVIDER]
+        fallback_candidates = [subtitle for subtitle in served if subtitle.provider_name == WHISPER_PROVIDER]
         run.discarded_before_download = set(pool.discarded_providers)
         download_options = dict(min_score=int(min_score),
                                 hearing_impaired=hearing_impaired_for(language),
@@ -490,12 +517,15 @@ def _run(episode, *, profile_id, media_type, job_id, cancel, fallback_allowed):
                 # Whisper is the costliest source and the one that is not a provider's answer: it runs only for
                 # a language every applicable provider answered cleanly, never in place of a candidate that was
                 # skipped and could still be fetched on the next run.
-                if fallback_allowed and answered and not holds:
-                    downloaded = pool.download_fallback_subtitles(language_candidates, video, {language},
+                if fallback_allowed and answered and not holds and fallback_candidates:
+                    downloaded = pool.download_fallback_subtitles(fallback_candidates, video, {language},
                                                                   hearing_impaired=download_options[
                                                                       'hearing_impaired'],
                                                                   use_original_format=download_options[
                                                                       'use_original_format'])
+                    if not downloaded:
+                        # A transcription that timed out or found the provider busy is not an answer either.
+                        holds = holds + run.download_holds(fallback_candidates)
         except JobCancelled as error:
             if error.job_id == job_id:
                 raise

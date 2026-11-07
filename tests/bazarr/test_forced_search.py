@@ -85,12 +85,15 @@ def run(monkeypatch):
         not_found=[],
         saved=[],
         stop=None,
+        listing_providers=[],
+        video_providers=[],
     )
     video = _Video()
     state.video = video
 
     def list_all(videos, languages, pool, min_score=0, cancel=None, on_outcome=None):
         state.listed.append(set(languages))
+        state.listing_providers.append(list(pool.providers))
         for outcome in state.outcomes:
             on_outcome(outcome)
         return {videos[0]: list(state.candidates)}
@@ -100,7 +103,11 @@ def run(monkeypatch):
     monkeypatch.setattr(forced, 'list_all_subtitles', list_all)
     monkeypatch.setattr(forced, '_get_pool', lambda media_type, profile_id: state.pool)
     monkeypatch.setattr(forced, 'get_providers', lambda: ['alpha', 'beta'])
-    monkeypatch.setattr(forced, 'get_video', lambda *args, **kwargs: state.video)
+    def get_video(*args, **kwargs):
+        state.video_providers.append(list(kwargs.get('providers') or []))
+        return state.video
+
+    monkeypatch.setattr(forced, 'get_video', get_video)
     monkeypatch.setattr(forced, 'desired_subtitles_for_profile', lambda profile_id, audio: list(state.items))
     monkeypatch.setattr(forced, 'get_profiles_list', lambda profile_id: {'originalFormat': 'False'})
     monkeypatch.setattr(forced, 'get_audio_profile_languages', lambda audio: [{'name': 'English'}])
@@ -310,7 +317,7 @@ def test_a_download_that_cannot_be_saved_keeps_the_language_open(run, monkeypatc
 
 def test_a_skipped_download_holds_the_request(run):
     candidate = _candidate('alpha')
-    run.candidates = [candidate]
+    run.candidates = [candidate, _candidate('whisperai')]
     run.outcomes = [_result('alpha', 'success')]
 
     def behaviour(pool, candidates, language):
@@ -447,6 +454,7 @@ def test_a_video_that_cannot_be_read_keeps_the_request(run, monkeypatch):
 def test_whisper_fallback_is_only_allowed_after_a_clean_answer(run, monkeypatch):
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    run.candidates = [_candidate('whisperai')]
     run.outcomes = [_result('alpha'), _result('beta', 'timeout')]
     run.go()
     assert run.pool.fallbacks == []
@@ -481,6 +489,7 @@ def test_a_whisper_fallback_that_delivers_is_a_download(run, monkeypatch):
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
     whisper = _candidate('whisperai')
+    run.candidates = [whisper]
     run.outcomes = [_result('alpha')]
     run.pool.fallback = lambda candidates, language: [whisper]
 
@@ -872,6 +881,7 @@ def test_a_stop_during_the_fallback_saves_and_records_nothing(run, monkeypatch):
 
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    run.candidates = [_candidate('whisperai')]
     run.outcomes = [_result('alpha')]
     pressed = []
 
@@ -942,6 +952,7 @@ def test_the_video_and_the_save_use_the_episodes_instance_mapping(run, monkeypat
 def test_the_series_whisper_switch_gates_the_fallback(run, monkeypatch):
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', False)
+    run.candidates = [_candidate('whisperai')]
     run.outcomes = [_result('alpha')]
     run.go()
     assert run.pool.fallbacks == []
@@ -959,6 +970,7 @@ def test_the_series_whisper_switch_gates_the_fallback(run, monkeypatch):
 def test_the_callers_fallback_permission_overrides_the_settings(run, monkeypatch):
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', False)
     monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', False)
+    run.candidates = [_candidate('whisperai')]
     run.outcomes = [_result('alpha')]
 
     run.go(fallback_allowed=True)
@@ -1094,3 +1106,75 @@ def test_a_mixed_profile_enforces_hearing_impaired_for_its_own_language_only(run
 
     assert _statuses(result) == {'en': 'downloaded', 'hu:hi': 'finished'}
     assert run.saved == [[english]]
+
+
+def test_whisper_candidates_never_enter_the_ordinary_download(run, monkeypatch):
+    """A low minimum score must not let a transcription start through the ordinary download."""
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', False)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', False)
+    ordinary = _candidate('alpha')
+    run.candidates = [ordinary, _candidate('whisperai')]
+    run.outcomes = [_result('alpha', 'success')]
+
+    run.go()
+
+    assert [[subtitle.provider_name for subtitle in candidates] for candidates, _, _ in run.pool.downloads] == [
+        ['alpha']]
+    assert run.pool.fallbacks == []
+
+
+def test_the_fallback_only_gets_whisper_candidates(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    run.candidates = [_candidate('alpha'), _candidate('whisperai')]
+    run.outcomes = [_result('alpha')]
+
+    run.go()
+
+    assert [[subtitle.provider_name for subtitle in candidates] for candidates, _, _ in run.pool.fallbacks] == [
+        ['whisperai']]
+
+
+def test_a_fallback_that_could_not_run_keeps_the_language_open(run, monkeypatch):
+    """A transcription that timed out or found Whisper busy is no answer: the request must stay."""
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    whisper = _candidate('whisperai')
+    run.candidates = [whisper]
+    run.outcomes = [_result('alpha')]
+
+    def fallback(candidates, language):
+        whisper.skip_reason = 'provider_busy'
+        return []
+
+    run.pool.fallback = fallback
+
+    result = run.go()
+
+    assert len(run.pool.fallbacks) == 1
+    assert _statuses(result) == {'en': 'open'}
+    assert not result.complete
+    assert run.not_found == []
+
+
+def test_a_fallback_that_ran_and_found_nothing_finishes_the_language(run, monkeypatch):
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback', True)
+    monkeypatch.setattr(run.forced.settings.general, 'use_whisper_fallback_series', True)
+    run.candidates = [_candidate('whisperai')]
+    run.outcomes = [_result('alpha')]
+
+    result = run.go()
+
+    assert _statuses(result) == {'en': 'finished'}
+
+
+def test_the_embedded_provider_is_not_in_the_pool_the_listing_walks(run):
+    run.pool.providers = ['alpha', 'embeddedsubtitles', 'beta']
+    run.outcomes = [_result('alpha')]
+
+    run.go()
+
+    assert run.listing_providers == [['alpha', 'beta']]
+    assert run.video_providers == [['alpha', 'beta']]
+    # The shared pool itself is left as it was.
+    assert run.pool.providers == ['alpha', 'embeddedsubtitles', 'beta']
