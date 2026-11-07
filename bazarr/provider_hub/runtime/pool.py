@@ -1680,23 +1680,24 @@ class WorkerPool:
 
     @staticmethod
     def _cleanup_confirmed(process) -> bool:
-        """A reaped launcher says its cleanup worked only if it exited by itself and reported no survivor.
+        """A reaped launcher vouches for its tree only if it exited by itself and said ``complete``.
 
-        The launcher exits non-zero after a failed cleanup (and says so over its
-        status pipe), and one that was killed from outside, as ``stop()`` does as
-        a last resort, never finished. Descendants that moved into new sessions
-        are out of reach of everything but that cleanup, so neither case may
-        release a worker's place in the pool.
+        The launcher writes a structured cleanup record on its status pipe when
+        its tree cleanup ends: ``complete``, or ``survivors`` when it gave up. A
+        launcher that was killed from outside (as ``stop()`` does as a last
+        resort), or that left without a record, never said its cleanup worked.
+        Descendants that moved into new sessions are out of reach of everything
+        but that cleanup, so none of those cases may release a worker's place in
+        the pool.
         """
         if not isinstance(process, LauncherProcess):
             return True
         if process.returncode < 0:
             return False
         try:
-            failure = process.launcher_failure()
+            return process.launcher_cleanup() == "complete"
         except Exception:
             return False
-        return failure is None or "survived" not in failure.message
 
     def _end_process(self, slot, grace, again=False):
         """End a launcher or anchored worker's whole tree, once.

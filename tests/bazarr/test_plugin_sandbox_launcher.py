@@ -149,6 +149,22 @@ def wait_exited_unreaped(process, seconds=10.0):
     raise AssertionError("the process did not exit")
 
 
+def status_records(raw):
+    """``(failure record, cleanup record)`` from what the launcher wrote on its status pipe."""
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    failure = cleanup = None
+    for line in raw.splitlines():
+        record = json.loads(line)
+        if "kind" in record:
+            assert failure is None, "more than one failure record"
+            failure = record
+        else:
+            assert cleanup is None, "more than one cleanup record"
+            cleanup = record
+    return failure, cleanup
+
+
 def kill_leftover_sleepers(pids):
     """Kill detached sleepers a test left on purpose. Only a pid still running a 300 s sleeper dies."""
     for pid in pids:
@@ -1859,9 +1875,10 @@ def test_a_launcher_child_drops_capabilities_before_the_filter_and_fails_closed(
         with pytest.raises(Boom):
             launcher._child(spec, FakeLandlock, FakeSeccomp, FakeCaps, 4242, (), write_fd)
         os.close(write_fd)
-        record = json.loads(os.read(read_fd, 4096))
+        record, cleanup = status_records(os.read(read_fd, 4096))
     finally:
         os.close(read_fd)
+    assert cleanup is None, "the child reports a failure; only the launcher reports the cleanup"
     assert order == ["caps"], "the filter must not go on after a failed drop"
     assert reports == [launcher.EXIT_SANDBOX_FAILED]
     assert record["kind"] == "sandbox" and "nope" in record["message"]
@@ -2875,8 +2892,9 @@ def test_the_launcher_reports_a_sandbox_failure_when_it_cannot_track_its_tree(tm
     os.close(status_w)
     try:
         assert process.returncode == 78, process.stderr
-        record = json.loads(os.read(status_r, 4096).decode())
+        record, cleanup = status_records(os.read(status_r, 4096))
         assert record["kind"] == "sandbox" and "descendants" in record["message"]
+        assert cleanup == {"cleanup": "complete"}
     finally:
         for fd in (status_r, spec_r, life_r, life_w):
             os.close(fd)
@@ -3037,8 +3055,8 @@ def run_emergency(leftovers, extra=""):
     try:
         pids = [int(p) for p in process.stdout.readline().split()]
         code = process.wait(timeout=30)
-        record = json.loads(os.read(status_r, 4096).decode())
-        return code, pids, record
+        record, cleanup = status_records(os.read(status_r, 4096))
+        return code, pids, record, cleanup
     finally:
         os.close(status_r)
         try:
@@ -3052,8 +3070,9 @@ def run_emergency(leftovers, extra=""):
 
 @linux_only
 def test_the_emergency_kill_reaches_detached_children_through_the_children_list(leftover_sleepers):
-    code, pids, record = run_emergency(leftover_sleepers)
+    code, pids, record, cleanup = run_emergency(leftover_sleepers)
     assert code == 78
+    assert cleanup == {"cleanup": "complete"}
     assert all(wait_dead(pid) for pid in pids), "a child survived the emergency kill"
     assert record["kind"] == "sandbox"
     assert "process tree" in record["message"] and "reaped every child" in record["message"]
@@ -3061,8 +3080,10 @@ def test_the_emergency_kill_reaches_detached_children_through_the_children_list(
 
 @linux_only
 def test_the_emergency_kill_ends_the_group_only_when_nothing_lists_the_children(leftover_sleepers):
-    code, pids, record = run_emergency(leftover_sleepers, "launcher._direct_children = lambda: None")
+    code, pids, record, cleanup = run_emergency(leftover_sleepers, "launcher._direct_children = lambda: None")
     assert code == -9
+    # Nothing proved the tree empty, so the launcher does not say it is clean.
+    assert cleanup == {"cleanup": "survivors"}
     assert wait_dead(pids[0]), "a member of the process group survived"
     assert record["kind"] == "sandbox" and "killed its process group" in record["message"]
     # The record is written before the group goes, so the host always learns why.
@@ -3070,12 +3091,13 @@ def test_the_emergency_kill_ends_the_group_only_when_nothing_lists_the_children(
 
 @linux_only
 def test_the_emergency_kill_reports_a_survivor_it_could_not_reap(leftover_sleepers):
-    code, _pids, record = run_emergency(
+    code, _pids, record, cleanup = run_emergency(
         leftover_sleepers,
         "launcher.CLEANUP_SECONDS = 0.3; launcher._children_remain = lambda: True; launcher._kill_own_children = lambda: True"
     )
     assert code == 78
     assert "survived" in record["message"]
+    assert cleanup == {"cleanup": "survivors"}
 
 
 DIRECT_ONLY = """
@@ -3215,8 +3237,9 @@ def test_the_launcher_reports_pipes_it_cannot_create_and_leaks_none(tmp_path):
     )
     assert process.returncode == 78, process.stderr
     assert "LEAKED []" in process.stdout.decode(), process.stdout
-    record = json.loads(status)
+    record, cleanup = status_records(status)
     assert record["kind"] == "sandbox" and "pipes" in record["message"]
+    assert cleanup == {"cleanup": "complete"}
 
 
 def test_a_failure_record_stays_under_the_atomic_pipe_write_size_after_escaping():
@@ -3469,3 +3492,67 @@ def test_the_require_flag_is_read_from_the_environment(monkeypatch):
     monkeypatch.delenv("BAZARR_REQUIRE_SANDBOX_TESTS")
     with pytest.raises(pytest.skip.Exception):
         cannot_enforce("no Landlock")
+
+
+# --- The cleanup record ----------------------------------------------------------
+
+
+@linux_only
+def test_a_launcher_that_cleaned_its_tree_says_so(tmp_path):
+    process = spawn_worker(make_spec(tmp_path, "pass"), probe=DECLARED)
+    try:
+        process.communicate(timeout=30)
+        assert process.wait(timeout=30) == 0
+        assert process.launcher_failure() is None
+        assert process.launcher_cleanup() == "complete"
+    finally:
+        process.stop(0.5)
+
+
+@linux_only
+def test_a_launcher_that_never_started_a_worker_still_reports_a_complete_cleanup(tmp_path):
+    spec = make_spec(tmp_path, "pass", cwd=tmp_path / "missing")
+    process = spawn_worker(spec, probe=DECLARED)
+    try:
+        process.communicate(timeout=30)
+        failure = process.launcher_failure()
+        assert failure is not None and failure.kind == "spec"
+        assert process.launcher_cleanup() == "complete"
+    finally:
+        process.stop(0.5)
+
+
+@linux_only
+def test_a_launcher_killed_before_its_cleanup_leaves_no_cleanup_record(tmp_path):
+    process = spawn_worker(make_spec(tmp_path, "import time; time.sleep(60)"), probe=DECLARED)
+    try:
+        time.sleep(0.5)
+        process.send_signal(signal.SIGKILL)
+        process.wait(timeout=30)
+        assert process.returncode == -signal.SIGKILL
+        assert process.launcher_cleanup() is None
+    finally:
+        process.stop(0.5)
+
+
+def test_the_cleanup_record_is_one_short_line_without_a_kind():
+    spec = importlib.util.spec_from_file_location("launcher_for_record", str(spawn.LAUNCHER_PATH))
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    read_fd, write_fd = os.pipe()
+    launcher._STATUS_FD = write_fd
+    try:
+        launcher._report_cleanup("survivors", 3)
+        launcher._report_cleanup("complete")
+        os.close(write_fd)
+        write_fd = None
+        raw = os.read(read_fd, 4096)
+    finally:
+        if write_fd is not None:
+            os.close(write_fd)
+        os.close(read_fd)
+        launcher._STATUS_FD = None
+    assert len(raw) < launcher._RECORD_LIMIT
+    lines = [json.loads(line) for line in raw.decode().splitlines()]
+    assert lines == [{"cleanup": "survivors", "count": 3}, {"cleanup": "complete"}]
+    assert all("kind" not in line for line in lines)

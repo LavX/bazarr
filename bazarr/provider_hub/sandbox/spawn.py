@@ -682,6 +682,19 @@ class LauncherProcess(WorkerProcess):
             except OSError:
                 pass
 
+    def _read_status(self) -> None:
+        fd = self._fds.get("status")
+        if fd is None:
+            return
+        try:
+            while True:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                self._status_text += chunk
+        except (BlockingIOError, OSError):
+            pass
+
     def launcher_failure(self) -> LauncherFailure | None:
         """The launcher's own report that the worker could not be started.
 
@@ -689,24 +702,34 @@ class LauncherProcess(WorkerProcess):
         worker that exits 78, or prints a line that looks like a launcher
         message, does not produce one. Exact once the process has exited.
         """
-        fd = self._fds.get("status")
-        if self._failure is None and fd is not None:
-            try:
-                while True:
-                    chunk = os.read(fd, 4096)
-                    if not chunk:
-                        break
-                    self._status_text += chunk
-            except (BlockingIOError, OSError):
-                pass
+        if self._failure is None:
+            self._read_status()
             for line in self._status_text.decode("utf-8", "replace").splitlines():
                 try:
                     record = json.loads(line)
                     self._failure = LauncherFailure(str(record["kind"]), str(record.get("message", "")))
                     break
-                except (ValueError, KeyError, TypeError):
+                except (ValueError, KeyError, TypeError, AttributeError):
                     continue
         return self._failure
+
+    def launcher_cleanup(self) -> str | None:
+        """How the launcher says its tree cleanup ended: ``"complete"``, ``"survivors"`` or None.
+
+        None means it wrote no cleanup record (it was killed, or it is still
+        running), which nobody may read as a clean tree. The last record wins.
+        Exact once the process has exited.
+        """
+        self._read_status()
+        state = None
+        for line in self._status_text.decode("utf-8", "replace").splitlines():
+            try:
+                value = json.loads(line)["cleanup"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if value in ("complete", "survivors"):
+                state = value
+        return state
 
     def raise_for_sandbox_failure(self) -> None:
         """Raise ``SandboxApplyError`` when the ruleset or limits could not be applied."""

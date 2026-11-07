@@ -1386,8 +1386,12 @@ def test_two_sweeps_release_a_stuck_one_off_permit_once(make_pool):
 # ------------------------------------------------- a launcher's exit is not its cleanup
 
 
-def _launcher_stub(how):
-    """A real ``LauncherProcess`` around a sleeper, inside a runtime that ends it as ``how``."""
+def _launcher_stub(how, record):
+    """A real ``LauncherProcess`` around a sleeper, inside a runtime that ends it as ``how``.
+
+    ``record`` is what the sleeper's status pipe holds when it is ended: the cleanup
+    record a launcher would have written, or None for a launcher that wrote none.
+    """
     import signal
 
     from provider_hub.sandbox import LauncherProcess
@@ -1400,13 +1404,18 @@ def _launcher_stub(how):
                     "signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))\n"
                     "print('ready', flush=True)\n"
                     "time.sleep(60)\n")
+            self.status_r, self.status_w = os.pipe()
+            os.set_blocking(self.status_r, False)
             self.process = LauncherProcess(
-                [sys.executable, "-c", code], lifeline=None, status=None, env={}, close_fds=True,
+                [sys.executable, "-c", code], lifeline=None, status=self.status_r, env={}, close_fds=True,
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             assert self.process.stdout.readline().strip() == b"ready"
 
         def close(self, grace=5.0):
             self.closed_with = grace
+            if record is not None:
+                os.write(self.status_w, record.encode() + b"\n")
+            os.close(self.status_w)
             if how == "killed":
                 self.process.send_signal(signal.SIGKILL)
             else:
@@ -1416,53 +1425,45 @@ def _launcher_stub(how):
     return Runtime
 
 
-@linux_only
-@pytest.mark.parametrize("how", ["killed", "reported-survivor"])
-def test_a_launcher_that_did_not_finish_its_cleanup_keeps_the_slot(make_pool, how):
-    from provider_hub.sandbox import LauncherFailure
+COMPLETE = json.dumps({"cleanup": "complete"})
+SURVIVORS = json.dumps({"cleanup": "survivors", "count": 2})
 
+
+def _launcher_pool(make_pool, cls):
     runtimes = []
-    cls = _launcher_stub("killed" if how == "killed" else "clean")
 
     def factory(definition, limits, host_calls, on_event, on_stderr):
         runtimes.append(cls())
-        if how == "reported-survivor":
-            runtimes[-1].process.launcher_failure = lambda: LauncherFailure(
-                "sandbox", "a descendant of the worker survived the launcher's cleanup")
         return runtimes[-1]
 
     pool = make_pool(fast_pool_limits(max_resident=1), use_clock=False)
     pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
     pool.warm("a")
+    return pool, runtimes
+
+
+@linux_only
+@pytest.mark.parametrize("how,record", [
+    ("clean", SURVIVORS),
+    ("clean", None),
+    ("killed", COMPLETE),
+    ("killed", None),
+], ids=["survivors", "no-record", "killed-after-record", "killed"])
+def test_a_launcher_without_a_complete_cleanup_record_keeps_the_slot(make_pool, how, record):
+    pool, runtimes = _launcher_pool(make_pool, _launcher_stub(how, record))
     pool.stop("a")
-    process = runtimes[0].process
-    assert process.returncode is not None
+    assert runtimes[0].process.returncode is not None
     # The launcher is gone but its descendants may not be: the place stays taken.
     assert pool.state("a") is WorkerState.STOPPING
     status = pool.status()
     assert status["processes"] == 1 and status["stuck"] == 1
     pool.sweep()
-    assert pool.status()["stuck"] == 1
-    if how == "reported-survivor":
-        # A later pass that finds the cleanup clean releases it.
-        process.launcher_failure = lambda: None
-        pool.sweep()
-        assert pool.status()["stuck"] == 0 and pool.status()["processes"] == 0
-        assert pool.state("a") is WorkerState.STOPPED
+    assert pool.status()["stuck"] == 1 and pool.status()["processes"] == 1
 
 
 @linux_only
-def test_a_launcher_that_exited_cleanly_releases_the_slot(make_pool):
-    runtimes = []
-    cls = _launcher_stub("clean")
-
-    def factory(definition, limits, host_calls, on_event, on_stderr):
-        runtimes.append(cls())
-        return runtimes[-1]
-
-    pool = make_pool(fast_pool_limits(max_resident=1), use_clock=False)
-    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
-    pool.warm("a")
+def test_a_launcher_that_exited_by_itself_and_said_complete_releases_the_slot(make_pool):
+    pool, runtimes = _launcher_pool(make_pool, _launcher_stub("clean", COMPLETE))
     pool.stop("a")
     assert pool.state("a") is WorkerState.STOPPED
     assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0

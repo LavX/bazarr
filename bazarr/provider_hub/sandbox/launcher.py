@@ -37,7 +37,10 @@ Exit codes: the worker's own code (128 + signal when it was killed by one);
 applied (the worker never ran); 127 when ``execve`` failed. The exit code alone
 proves nothing, since a worker can exit with any code and print any line: the
 authoritative record is the JSON line on ``status_fd``, written by the launcher
-(``{"kind": "spec" | "sandbox" | "exec", "message": "..."}``). The child reports
+(``{"kind": "spec" | "sandbox" | "exec", "message": "..."}``), followed by one
+cleanup record when the launcher has nothing left to clean or has given up
+(``{"cleanup": "complete"}`` or ``{"cleanup": "survivors", "count": n}``; a
+launcher that exits without one never finished). The child reports
 over a close-on-exec pipe that the worker never inherits and that closes
 silently when ``execve`` succeeds. A line starting with ``bazarr-sandbox:`` on
 stderr repeats the reason for logs.
@@ -116,6 +119,34 @@ def _report(kind, message):
         os.write(_STATUS_FD, _record(kind, message))
     except OSError:
         pass
+
+
+def _report_cleanup(state, count=None):
+    """Tell the host how the tree cleanup ended: ``complete`` or ``survivors``.
+
+    One short line (far under ``PIPE_BUF``, so the write is atomic) that is not
+    a failure record: it has no ``kind``. The host treats a launcher as having
+    cleaned up only when it exited by itself and wrote ``complete``; a missing
+    record, from a launcher that died first, means nobody knows. ``count`` is the
+    number of children still listed when the cleanup gave up, when known.
+    """
+    if _STATUS_FD is None:
+        return
+    record = {"cleanup": str(state)[:16]}
+    if isinstance(count, int) and count >= 0:
+        record["count"] = count
+    try:
+        os.write(_STATUS_FD, json.dumps(record).encode("ascii") + b"\n")
+    except OSError:
+        pass
+
+
+def _survivor_count():
+    try:
+        children = _direct_children()
+    except Exception:
+        return None
+    return None if children is None else len(children)
 
 
 def _say(message):
@@ -498,6 +529,8 @@ def _emergency_kill(reason):
         outcome = "could not list its children either and killed its process group"
     _report("sandbox", "launcher could not list its process tree (%s); %s" % (reason, outcome))
     _say("cannot list the process tree (%s); %s" % (reason, outcome))
+    # Only a proven empty tree (waitpid found no children) counts as cleaned up.
+    _report_cleanup("complete" if outcome.startswith("killed and reaped") else "survivors")
     if outcome.startswith("could not"):
         # Only when it really leads the group: a launcher run by hand inside a
         # shell's group must not take the shell down. The worker has a
@@ -682,6 +715,7 @@ def main(argv):
     except (OSError, ValueError) as exc:
         _say("bad spec: %s" % exc)
         _report("spec", "bad spec: %s" % exc)
+        _report_cleanup("complete")  # nothing was started
         return EXIT_BAD_SPEC
     try:
         landlock = _load_landlock()
@@ -691,6 +725,7 @@ def main(argv):
     except Exception as exc:
         _say("launcher setup failed: %s" % exc)
         _report("sandbox", "launcher setup failed: %s" % exc)
+        _report_cleanup("complete")
         return EXIT_SANDBOX_FAILED
 
     # A launcher that cannot see its own tree cannot clean it up: refuse to
@@ -700,12 +735,14 @@ def main(argv):
     except EnumerationError as exc:
         _say("cannot list processes: %s" % exc)
         _report("sandbox", "cannot list processes: %s" % exc)
+        _report_cleanup("complete")
         return EXIT_SANDBOX_FAILED
 
     unsafe = _tree_tracking_error()
     if unsafe:
         _say(unsafe)
         _report("sandbox", unsafe)
+        _report_cleanup("complete")
         return EXIT_SANDBOX_FAILED
 
     # Close-on-exec by default (os.pipe): the report's write end vanishes on a
@@ -722,6 +759,7 @@ def main(argv):
             os.close(fd)
         _say("launcher could not create its pipes: %s" % exc)
         _report("sandbox", "launcher could not create its pipes: %s" % exc)
+        _report_cleanup("complete")
         return EXIT_SANDBOX_FAILED
     os.set_blocking(wake_r, False)
     os.set_blocking(wake_w, False)
@@ -741,7 +779,9 @@ def main(argv):
         if not _cleanup_tree():
             _say("a descendant of the worker survived the cleanup")
             _report("sandbox", "a descendant of the worker survived the launcher's cleanup")
+            _report_cleanup("survivors", _survivor_count())
             return EXIT_SANDBOX_FAILED
+        _report_cleanup("complete")
     except BaseException:
         # No signal by the worker's pid here: it may be reaped already. It is
         # one of the children, so the cleanup reaches it when it is not.
@@ -751,6 +791,9 @@ def main(argv):
             survived = True
         if survived:
             _report("sandbox", "a descendant of the worker may have survived the launcher's cleanup")
+            _report_cleanup("survivors", _survivor_count())
+        else:
+            _report_cleanup("complete")
         raise
     return _exit_code(status)
 
