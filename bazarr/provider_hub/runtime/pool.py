@@ -609,6 +609,8 @@ class _Entry:
         self.last_error: str | None = None
         self.last_budget_check = -math.inf
         self.budget_problem: tuple[str, str] | None = None
+        # The slot being started for this entry, until the start finishes.
+        self.starting: _Slot | None = None
         self.starts = 0
         self.crashes = 0
         self.last_peak_bytes = 0
@@ -690,6 +692,10 @@ class WorkerPool:
         self._close_threads: set = set()
         # Workers whose process could not be confirmed gone after a stop. They
         # keep counting toward the process cap, and the sweep ends them again.
+        # Workers being started for an entry that was unregistered or whose pool was
+        # closed meanwhile: still a process in the making, counted until the start
+        # ends and its teardown is queued.
+        self._detached: set = set()
         self._stuck: list = []
         self._stuck_lock = threading.Lock()
         self._events: list[tuple[str, str, dict]] = []
@@ -712,6 +718,9 @@ class WorkerPool:
             entry = self._entries.pop(key, None)
             if entry is None:
                 return
+            if entry.starting is not None:
+                # Its start is still running and will find the entry gone.
+                self._detached.add(entry.starting)
             if entry.slot is not None:
                 self._queue_close(entry.slot, None, "kill")
                 entry.slot = None
@@ -720,6 +729,15 @@ class WorkerPool:
             entry.retiring = []
             entry.state = WorkerState.STOPPED
             self._cond.notify_all()
+        self._flush(wait=True)
+        self._wait_detached()
+
+    def _wait_detached(self):
+        """Wait (bounded) for starts that were cut off to end, and for the teardown they queued."""
+        deadline = time.monotonic() + self.limits.close_grace + 30.0
+        with self._cond:
+            while self._detached and time.monotonic() < deadline:
+                self._cond.wait(0.2)
         self._flush(wait=True)
 
     def definition(self, key: str) -> WorkerDefinition:
@@ -977,6 +995,8 @@ class WorkerPool:
             self._closed = True
             self._sampler_stop.set()
             for entry in self._entries.values():
+                if entry.starting is not None:
+                    self._detached.add(entry.starting)
                 if entry.slot is not None:
                     self._queue_close(entry.slot, None, "close")
                     entry.slot = None
@@ -988,6 +1008,7 @@ class WorkerPool:
                 self._queue_close(slot, None, "kill")
             self._cond.notify_all()
         self._flush(wait=True)
+        self._wait_detached()
         if self._stuck:
             self._retry_stuck()
         sampler = self._sampler
@@ -1175,6 +1196,7 @@ class WorkerPool:
                     definition = entry.definition
                     slot = _Slot(definition, now, self.limits)
                     slot.generation = entry.generation
+                    entry.starting = slot
                 break
         finally:
             self._flush()
@@ -1198,13 +1220,22 @@ class WorkerPool:
         except BaseException as caught:
             error = caught
         with self._cond:
-            if self._closed:
+            if entry.starting is slot:
+                entry.starting = None
+            # Taken off the detached list and queued for teardown in this one step,
+            # so the process never stops being counted in between.
+            detached = slot in self._detached
+            self._detached.discard(slot)
+            if self._closed or detached:
                 if slot.session is not None:
                     self._queue_close(slot, None, "kill")
                 if entry.state == WorkerState.STARTING:
                     self._set_state(entry, WorkerState.STOPPED, "pool closed")
                 self._cond.notify_all()
-                failed = PoolClosed("the worker pool is closed")
+                if self._closed:
+                    failed = PoolClosed("the worker pool is closed")
+                else:
+                    failed = UnknownWorker("worker %s was removed while it was starting" % slot.definition.key)
             elif refusal is not None:
                 entry.last_error = _public_text(refusal[1])
                 self._set_state(entry, WorkerState.STOPPED, refusal[0])
@@ -1340,7 +1371,7 @@ class WorkerPool:
     def _process_count(self) -> int:
         """Live worker processes: resident, draining and the ones still being stopped."""
         retiring = sum(len(entry.retiring) for entry in self._entries.values())
-        return self._resident_count() + retiring + self._closing + len(self._stuck)
+        return self._resident_count() + retiring + self._closing + len(self._stuck) + len(self._detached)
 
     def _idle_by_age(self, skip) -> list[_Entry]:
         idle = [
@@ -1793,13 +1824,12 @@ class WorkerPool:
         """
         with self._cond:
             jobs, self._closes = self._closes, []
-            threads = []
             for job in jobs:
                 thread = threading.Thread(target=self._run_close, args=(job,), name="worker-pool-close", daemon=True)
+                # Started before the lock is let go, so another caller that joins
+                # the registered threads never meets one that has not started.
                 self._close_threads.add(thread)
-                threads.append(thread)
-        for thread in threads:
-            thread.start()
+                thread.start()
         if wait:
             deadline = time.monotonic() + self.limits.close_grace + 30.0
             with self._cond:

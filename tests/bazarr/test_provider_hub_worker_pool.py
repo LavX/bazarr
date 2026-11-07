@@ -1507,3 +1507,61 @@ def test_a_dead_worker_still_counts_until_its_teardown_is_done(make_pool):
     assert wait_until(lambda: pool.status()["processes"] == 0)
     pool.warm("b")
     assert pool.state("b") is WorkerState.READY
+
+
+# --------------------------------------------- removal while a worker is starting
+
+
+@pytest.mark.parametrize("how", ["unregister", "close"])
+def test_a_worker_whose_registration_vanished_during_its_start_is_torn_down(make_pool, how):
+    import threading
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    runtimes = []
+
+    class SlowStart(StubProcessRuntime):
+        def start(self):
+            entered.set()
+            proceed.wait(10)
+            super().start()
+
+        def close(self, grace=5.0):
+            self.process.returncode = 0
+            super().close(grace)
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtimes.append(SlowStart())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    outcome = []
+
+    def starter():
+        try:
+            pool.warm("a")
+            outcome.append(None)
+        except BaseException as error:
+            outcome.append(error)
+
+    starting = threading.Thread(target=starter)
+    starting.start()
+    assert entered.wait(5)
+    remover = threading.Thread(target=pool.unregister if how == "unregister" else (lambda key: pool.close()),
+                               args=("a",))
+    remover.start()
+    # The process in the making still counts while its entry is gone.
+    assert wait_until(lambda: how == "close" or "a" not in pool._entries)
+    time.sleep(0.2)
+    assert pool.status()["processes"] == 1
+    proceed.set()
+    starting.join(10)
+    remover.join(10)
+    assert not starting.is_alive() and not remover.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], (UnknownWorker, PoolClosed))
+    # Never published, and its teardown ran to the end.
+    assert runtimes[0].closed_with is not None
+    assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0
+    if how == "unregister":
+        assert "a" not in pool._entries
