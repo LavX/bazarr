@@ -155,7 +155,8 @@ def _recorded_dir(envs: dict[str, Any], fingerprint: str, root: Path) -> Path | 
     entry = envs.get(fingerprint)
     if isinstance(entry, dict) and isinstance(entry.get("path"), str):
         recorded = Path(entry["path"])
-        if path_inside_hub(root, recorded) and python_executable(recorded).exists():
+        if path_inside_hub(root, recorded) and interpreter_inside_hub(root, python_executable(recorded)) \
+                and python_executable(recorded).exists():
             return recorded
     return None
 

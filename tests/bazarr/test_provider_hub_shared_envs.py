@@ -959,3 +959,78 @@ def test_an_interpreter_outside_the_hub_is_not_run_by_the_test_activation_or_reg
     service.activate_staged_installations()
     assert load_state()["installations"]["examplehub"]["python_path"] == str(outside / "bin" / "python")
     assert "hub's environments" in load_state()["installations"]["examplehub"]["last_error"]
+
+
+def _venv_like(env, target):
+    """An environment whose interpreter is a normal venv symlink chain: python -> python3 -> the base interpreter."""
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python3").symlink_to(target)
+    (env / "bin" / "python").symlink_to("python3")
+    return env
+
+
+def test_the_normal_venv_symlinks_of_an_interpreter_are_accepted(hub):
+    import os
+    import sys
+
+    from provider_hub.venv import interpreter_inside_hub
+
+    env = _venv_like(hub / "shared_envs" / "fp", os.path.realpath(getattr(sys, "_base_executable", sys.executable)))
+    assert interpreter_inside_hub(hub, env / "bin" / "python") is True
+
+    inside = hub / "shared_envs" / "inside"
+    (inside / "bin").mkdir(parents=True)
+    (inside / "bin" / "python3.14").write_text("", encoding="utf-8")
+    (inside / "bin" / "python").symlink_to("python3.14")
+    assert interpreter_inside_hub(hub, inside / "bin" / "python") is True
+
+
+def test_an_interpreter_symlink_leading_outside_the_hub_and_the_host_python_is_refused(hub, tmp_path):
+    from provider_hub.venv import interpreter_inside_hub
+
+    outside = tmp_path / "elsewhere" / "python"
+    outside.parent.mkdir()
+    outside.write_text("", encoding="utf-8")
+    env = hub / "shared_envs" / "fp"
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").symlink_to(outside)
+    assert interpreter_inside_hub(hub, env / "bin" / "python") is False
+
+    # A chain that detours through the outside before coming back is refused too.
+    detour = hub / "shared_envs" / "detour"
+    (detour / "bin").mkdir(parents=True)
+    hop = tmp_path / "elsewhere" / "hop"
+    hop.symlink_to(detour / "bin" / "real")
+    (detour / "bin" / "real").write_text("", encoding="utf-8")
+    (detour / "bin" / "python").symlink_to(hop)
+    assert interpreter_inside_hub(hub, detour / "bin" / "python") is False
+
+
+def test_a_symlinked_bin_directory_is_refused_everywhere_an_interpreter_would_run(hub, tmp_path, no_subprocess, monkeypatch):
+    from provider_hub.venv import interpreter_inside_hub
+
+    external = _plain_env(tmp_path / "elsewhere" / "env")
+    env = hub / "shared_envs" / "fp"
+    env.mkdir(parents=True)
+    (env / "bin").symlink_to(external / "bin", target_is_directory=True)
+    (env / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\nversion = {sys.version_info.major}.{sys.version_info.minor}.0\n", encoding="utf-8"
+    )
+    assert interpreter_inside_hub(hub, env / "bin" / "python") is False
+
+    # Boot reconcile neither adopts it nor probes it.
+    _state_with(_row("alpha", env, []))
+    summary = env_registry.reconcile_environments(validate=_validate, probe=_never_probe)
+    assert summary["adopted"] == [] and load_state()["plugin_envs"] == {}
+
+    # A recorded environment with such a bin is not reused: the install builds a new directory instead.
+    manifest = _manifest("alpha", [REQ_A])
+    state = load_state()
+    state["plugin_envs"] = {environment_fingerprint(manifest): {"path": str(env)}}
+    save_state(state)
+    calls = []
+    monkeypatch.setattr(venvmod.subprocess, "run", _fake_run_that_builds(calls))
+    built = PluginEnvironment(hub).install(manifest)
+    assert built != env
+    assert not any(str(external) in " ".join(call) for call in calls)
+    assert (external / "bin" / "python").exists()

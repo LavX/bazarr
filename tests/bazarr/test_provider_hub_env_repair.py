@@ -1346,3 +1346,44 @@ def test_every_pool_termination_keeps_the_environment_until_the_workers_survivor
         removed = env_registry.cleanup_environments(hub)
         time.sleep(0.05)
     assert removed == [str(old)]
+
+
+def test_a_worker_the_idle_reaper_stopped_still_protects_its_environment_through_a_repair(hub, hub_registry, monkeypatch):
+    import sys
+
+    from provider_hub.registry import retire_provider_instances
+    from provider_hub.worker import ProviderWorkerClient, reap_idle_workers
+
+    old = _env(hub / "shared_envs" / "old")
+    new = _env(hub / "shared_envs" / "new")
+    bundle = hub / "bundle"
+    bundle.mkdir()
+    pool, stale, _ = _pool_with_classes(hub_registry, old / "bin" / "python", new / "bin" / "python")
+    interpreter = old / "bin" / "python"
+    interpreter.write_text(f"#!{sys.executable}\n{WORKER_SCRIPT}", encoding="utf-8")
+    interpreter.chmod(0o755)
+    client = ProviderWorkerClient([str(interpreter)])
+    stale.worker_client = client
+    client.request("search", {}, timeout=10)
+    survivors = _SurvivorsAfterStop(monkeypatch)
+
+    # The reaper ends the idle worker; something it started is still running.
+    assert reap_idle_workers(idle_seconds=0) == 1
+    # The repair then replaces the environment: the pooled proxy is retired through the one termination path.
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, new / "bin" / "python")}
+    save_state(state)
+    drains = retire_provider_instances("examplehub")
+    for drain in drains:
+        drain.join(15)
+
+    assert env_registry.cleanup_environments(hub) == []
+    assert (old / "bin" / "python").exists()
+
+    survivors.emptied.set()
+    removed = []
+    deadline = time.monotonic() + 10
+    while not removed and time.monotonic() < deadline:
+        removed = env_registry.cleanup_environments(hub)
+        time.sleep(0.05)
+    assert removed == [str(old)]

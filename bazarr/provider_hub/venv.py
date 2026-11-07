@@ -243,9 +243,62 @@ def path_inside_hub(root: str | os.PathLike[str], path: str | os.PathLike[str]) 
     return True
 
 
+def _link_target_trusted(env_dir: Path, python_path: Path) -> bool:
+    """Follow the interpreter's symlinks hop by hop.
+
+    Every hop must be named inside the environment, or lead into the host's own
+    Python tree (the ``python -> python3.x -> /usr/bin/python3.x`` of a normal
+    venv; the host tree may itself be reached through directory links such as
+    ``/bin``). A hop that detours through anywhere else is refused even if the
+    chain comes back, because that place can be repointed after the check.
+    """
+    env_roots = {Path(os.path.realpath(env_dir)), Path(os.path.abspath(env_dir))}
+    host_roots = set()
+    for prefix in {sys.base_prefix, sys.base_exec_prefix}:
+        if prefix:
+            host_roots.add(Path(os.path.realpath(prefix)))
+            host_roots.add(Path(os.path.abspath(prefix)))
+
+    def trusted(path: Path) -> bool:
+        if any(path.is_relative_to(root) for root in env_roots | host_roots):
+            return True
+        real = Path(os.path.realpath(path))
+        return any(real.is_relative_to(root) for root in host_roots)
+
+    current = Path(os.path.abspath(python_path))
+    for _ in range(40):
+        if not os.path.islink(current):
+            return True
+        target = Path(os.path.abspath(os.path.join(os.path.dirname(current), os.readlink(current))))
+        if not trusted(target):
+            return False
+        current = target
+    return False
+
+
 def interpreter_inside_hub(root: str | os.PathLike[str], python_path: str | os.PathLike[str]) -> bool:
-    """Whether an interpreter path from the state belongs to an environment of the hub."""
-    return path_inside_hub(root, Path(python_path).parent.parent)
+    """Whether an interpreter path from the state is one the hub built and may run.
+
+    The environment directory must be the hub's own (see ``path_inside_hub``),
+    its ``bin`` or ``Scripts`` directory must be a real directory inside it, not
+    a symlink, and the interpreter must be a file there, or a symlink that stays
+    inside the environment or leads to the host's own Python tree, as the
+    ``python -> python3.x`` links of a normal venv do. Every place that runs an
+    interpreter named by the state asks this first.
+    """
+    interpreter = Path(os.path.abspath(python_path))
+    env_dir = interpreter.parent.parent
+    if not path_inside_hub(root, env_dir):
+        return False
+    try:
+        if not stat.S_ISDIR(os.lstat(interpreter.parent).st_mode):
+            return False
+    except FileNotFoundError:
+        # Nothing there to run; whoever uses the path finds that out itself.
+        return True
+    except OSError:
+        return False
+    return _link_target_trusted(env_dir, interpreter)
 
 
 class PluginEnvironment:
@@ -328,6 +381,11 @@ class PluginEnvironment:
             reusable = self._recorded_path(manifest)
             if reusable is None and self._inside_hub(canonical) and self._is_complete(canonical):
                 reusable = canonical
+            if reusable is not None and python_executable(reusable).exists() and not interpreter_inside_hub(
+                self.root, python_executable(reusable)
+            ):
+                # An interpreter that leads outside the hub is never reused or run for the check.
+                reusable = None
             if reusable is not None:
                 _pin(reusable)
             canonical_free = not os.path.lexists(canonical)
