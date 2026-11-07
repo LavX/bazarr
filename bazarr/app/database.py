@@ -412,6 +412,9 @@ class TableEpisodes(Base):
     episode = mapped_column(Integer, nullable=False)
     episode_file_id = mapped_column(Integer, index=True)
     failedAttempts = mapped_column(Text)
+    # When the user asked for a forced duplicate search of this episode; NULL
+    # means no request is pending. Only the search runs clear it.
+    forced_search_requested_at = mapped_column(DateTime)
     ffprobe_cache = mapped_column(LargeBinary)
     file_size = mapped_column(BigInteger)
     format = mapped_column(Text)

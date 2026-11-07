@@ -1,0 +1,148 @@
+# coding=utf-8
+"""POST and DELETE /api/episodes/forced-search, and the pending flag in the episodes listing.
+
+Setting the request only records it: the search runs elsewhere. Every case runs
+on SQLite and on PostgreSQL, both on an AUTOCOMMIT engine, the way the app runs.
+"""
+import pytest
+import sqlalchemy as sa
+from flask import Flask
+
+from app.database import TableEpisodes, TableShows
+from test_embedded_track_hidden import hidden_db  # noqa: F401
+
+HEADERS = {"X-API-KEY": "synthetic-bazarr-key"}
+ROOT = "/api/episodes/forced-search"
+
+
+@pytest.fixture
+def forced_api(hidden_db, monkeypatch):  # noqa: F811
+    from api import api_bp
+    from api.episodes import episodes as api_mod
+    from app.config import settings as app_settings
+
+    session = hidden_db
+    monkeypatch.setitem(app_settings.auth, "apikey", "synthetic-bazarr-key")
+    monkeypatch.setattr(api_mod, "database", session)
+    events = []
+    monkeypatch.setattr(api_mod, "event_stream", lambda **kw: events.append(kw))
+
+    # The same upstream series and episode ids in two instances, and one more
+    # episode that only exists once.
+    session.add_all([
+        TableShows(id=1, arr_instance_id=1, sonarrSeriesId=5, title="S", path="/tv"),
+        TableShows(id=2, arr_instance_id=2, sonarrSeriesId=5, title="S", path="/tv2"),
+    ])
+    session.flush()
+    for row_id, owner, series_id, upstream in ((1, 1, 1, 51), (2, 2, 2, 51), (3, 1, 1, 52)):
+        session.add(TableEpisodes(id=row_id, arr_instance_id=owner, series_id=series_id, sonarrSeriesId=5,
+                                  sonarrEpisodeId=upstream, title="E", path=f"/tv/e{row_id}.mkv",
+                                  season=1, episode=row_id))
+    session.commit()
+
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    return app.test_client(), session, events
+
+
+def _flags(session):
+    session.expire_all()
+    return dict(session.execute(sa.select(TableEpisodes.id, TableEpisodes.forced_search_requested_at)
+                                .order_by(TableEpisodes.id)).all())
+
+
+def _form(episode=52, **extra):
+    return {"seriesid": 5, "episodeid": episode, **extra}
+
+
+def test_requires_authentication(forced_api):
+    client, _session, _events = forced_api
+    assert client.post(ROOT, data=_form()).status_code == 401
+    assert client.delete(ROOT, data=_form()).status_code == 401
+
+
+def test_setting_and_clearing_the_request(forced_api):
+    client, session, events = forced_api
+    assert _flags(session) == {1: None, 2: None, 3: None}
+
+    assert client.post(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    flags = _flags(session)
+    assert flags[3] is not None and flags[1] is None and flags[2] is None
+    assert events == [{"type": "series", "action": "update", "payload": 5}]
+
+    assert client.delete(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    assert _flags(session) == {1: None, 2: None, 3: None}
+    assert len(events) == 2
+
+
+def test_asking_again_keeps_the_first_request_time(forced_api):
+    client, session, _events = forced_api
+    assert client.post(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    first = _flags(session)[3]
+    assert client.post(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    assert _flags(session)[3] == first
+
+
+def test_clearing_a_request_that_is_not_there_succeeds(forced_api):
+    client, session, _events = forced_api
+    assert client.delete(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    assert _flags(session) == {1: None, 2: None, 3: None}
+
+
+@pytest.mark.parametrize("verb", ["post", "delete"])
+@pytest.mark.parametrize("form", [_form(episode=999), {"seriesid": 6, "episodeid": 52}])
+def test_an_unknown_episode_is_not_found(forced_api, verb, form):
+    client, session, events = forced_api
+    assert getattr(client, verb)(ROOT, data=form, headers=HEADERS).status_code == 404
+    assert _flags(session) == {1: None, 2: None, 3: None}
+    assert events == []
+
+
+@pytest.mark.parametrize("verb", ["post", "delete"])
+@pytest.mark.parametrize("form", [{"seriesid": 5}, {"episodeid": 52}, {}])
+def test_both_ids_are_required(forced_api, verb, form):
+    client, _session, _events = forced_api
+    assert getattr(client, verb)(ROOT, data=form, headers=HEADERS).status_code == 400
+
+
+@pytest.mark.parametrize("verb", ["post", "delete"])
+def test_an_id_shared_by_two_instances_needs_an_owner(forced_api, verb):
+    client, session, events = forced_api
+    assert getattr(client, verb)(ROOT, data=_form(episode=51), headers=HEADERS).status_code == 409
+    assert _flags(session) == {1: None, 2: None, 3: None}
+    assert events == []
+
+
+def test_the_owner_picks_the_row_in_a_multi_instance_library(forced_api):
+    client, session, _events = forced_api
+    assert client.post(ROOT, data=_form(episode=51, arr_instance_id=2), headers=HEADERS).status_code == 204
+    flags = _flags(session)
+    assert flags[2] is not None and flags[1] is None
+
+    # The other instance's copy of the same upstream id is not touched.
+    assert client.delete(ROOT, data=_form(episode=51, arr_instance_id=1), headers=HEADERS).status_code == 204
+    assert _flags(session)[2] is not None
+    assert client.delete(ROOT, data=_form(episode=51, arr_instance_id=2), headers=HEADERS).status_code == 204
+    assert _flags(session)[2] is None
+
+
+def test_an_owner_that_does_not_have_the_episode_is_not_found(forced_api):
+    client, _session, _events = forced_api
+    assert client.post(ROOT, data=_form(episode=52, arr_instance_id=2), headers=HEADERS).status_code == 404
+
+
+def test_the_episodes_listing_reports_the_pending_request(forced_api):
+    client, _session, _events = forced_api
+    listing = "/api/episodes?id[]=1&id[]=3"
+
+    def pending():
+        body = client.get(listing, headers=HEADERS)
+        assert body.status_code == 200
+        return {row["id"]: row["forced_search_pending"] for row in body.json["data"]}
+
+    assert pending() == {1: False, 3: False}
+    assert client.post(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    assert pending() == {1: False, 3: True}
+    assert client.delete(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    assert pending() == {1: False, 3: False}
+

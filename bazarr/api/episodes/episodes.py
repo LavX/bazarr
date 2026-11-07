@@ -1,8 +1,12 @@
 # coding=utf-8
 
+from datetime import datetime
+
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
-from app.database import TableEpisodes, database, select
+from app.database import TableEpisodes, database, select, update
+from app.event_handler import event_stream
+from arr_instances.resolution import scoped
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model
 
 from ..utils import authenticate, postprocess
@@ -43,6 +47,7 @@ class Episodes(Resource):
         'subtitles': fields.Nested(get_subtitles_model),
         'title': fields.String(),
         'sceneName': fields.String(),
+        'forced_search_pending': fields.Boolean(),
     })
 
     @authenticate
@@ -73,6 +78,7 @@ class Episodes(Resource):
                 TableEpisodes.subtitles,
                 TableEpisodes.title,
                 TableEpisodes.sceneName,
+                TableEpisodes.forced_search_requested_at,
             )
 
         # Prefer the canonical local ids (#156); fall back to upstream ids.
@@ -116,4 +122,67 @@ class Episodes(Resource):
                 'subtitles': x.subtitles,
                 'title': x.title,
                 'sceneName': x.sceneName,
+                'forced_search_pending': x.forced_search_requested_at is not None,
                 }) for x in stmt_query], self.get_response_model, envelope='data')
+
+
+@api_ns_episodes.route('episodes/forced-search')
+class EpisodesForcedSearch(Resource):
+    """Ask for, or withdraw, a forced duplicate subtitle search of one episode.
+
+    Setting the request only records it: no search runs here. The next search
+    run that covers the episode picks it up and clears it once it has finished.
+    """
+    request_parser = reqparse.RequestParser()
+    request_parser.add_argument('seriesid', type=int, required=True,
+                                help='Upstream Sonarr series ID (legacy; not unique across instances)')
+    request_parser.add_argument('episodeid', type=int, required=True,
+                                help='Upstream Sonarr episode ID (legacy; not unique across instances)')
+    request_parser.add_argument('arr_instance_id', type=int, required=False,
+                                help='Owning Sonarr instance id; required when the ids exist in more than one')
+
+    @staticmethod
+    def _change(requested_at):
+        args = EpisodesForcedSearch.request_parser.parse_args()
+        episode_id = args.get('episodeid')
+        rows = database.execute(
+            scoped(select(TableEpisodes.id)
+                   .where(TableEpisodes.sonarrEpisodeId == episode_id,
+                          TableEpisodes.sonarrSeriesId == args.get('seriesid')),
+                   TableEpisodes.arr_instance_id, args.get('arr_instance_id')).limit(2)).all()
+        if not rows:
+            return 'Episode not found', 404
+        if len(rows) > 1:
+            return 'This episode exists in more than one instance; specify arr_instance_id', 409
+        row = rows[0]
+
+        # Asking again keeps the time of the first request, and withdrawing a
+        # request that is not there changes nothing: each write only touches a
+        # row that is in the other state, so both answer success.
+        flag = TableEpisodes.forced_search_requested_at
+        database.execute(update(TableEpisodes)
+                         .where(TableEpisodes.id == row.id,
+                                flag.is_(None) if requested_at is not None else flag.is_not(None))
+                         .values(forced_search_requested_at=requested_at))
+        event_stream(type='series', action='update', payload=args.get('seriesid'))
+        return '', 204
+
+    @authenticate
+    @api_ns_episodes.doc(parser=request_parser)
+    @api_ns_episodes.response(204, 'Forced search requested')
+    @api_ns_episodes.response(401, 'Not Authenticated')
+    @api_ns_episodes.response(404, 'Episode not found')
+    @api_ns_episodes.response(409, 'Owning instance is ambiguous')
+    def post(self):
+        """Request a forced duplicate search of an episode"""
+        return self._change(datetime.now())
+
+    @authenticate
+    @api_ns_episodes.doc(parser=request_parser)
+    @api_ns_episodes.response(204, 'Forced search request cleared')
+    @api_ns_episodes.response(401, 'Not Authenticated')
+    @api_ns_episodes.response(404, 'Episode not found')
+    @api_ns_episodes.response(409, 'Owning instance is ambiguous')
+    def delete(self):
+        """Withdraw the forced duplicate search request of an episode"""
+        return self._change(None)

@@ -904,6 +904,8 @@ jobs:
             tests/bazarr/test_arr_pg_cutover_migration.py \
             tests/bazarr/test_ai_translated_history_migration.py \
             tests/bazarr/test_media_server_external_url_migration.py \
+            tests/bazarr/test_episode_forced_search_migration.py \
+            tests/bazarr/test_episode_forced_search_api.py \
             tests/bazarr/test_sportarr_library_migration.py \
             tests/bazarr/test_sportarr_review_guards.py \
             tests/bazarr/test_sportarr_output.py \
