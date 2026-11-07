@@ -274,6 +274,71 @@ def validated_bundle_path(root: str | os.PathLike[str], path: str | os.PathLike[
     return _validated_below(root, path, (BUNDLE_DIR,), 2)
 
 
+def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/proc") -> bool | None:
+    """Whether any other live process runs from, has open, or maps something under ``directory``.
+
+    Looks at each process's executable, working directory, open files and
+    mapped files (Linux ``/proc``). This sees what the worker's process groups
+    cannot: a child that started its own session is in none of them. A process
+    that cannot be read but belongs to this user and began after this process
+    counts as using it. ``None``
+    when ``/proc`` is not there to look at, so the caller keeps its other
+    safeguards.
+    """
+    try:
+        entries = [name for name in os.listdir(proc) if name.isdigit()]
+    except OSError:
+        return None
+    roots = {os.path.abspath(directory), os.path.realpath(directory)}
+    prefixes = tuple(root.rstrip(os.sep) + os.sep for root in roots)
+
+    def under(path: str) -> bool:
+        path = path.removesuffix(" (deleted)")
+        return path in roots or path.startswith(prefixes)
+
+    def started_at(pid: str) -> int | None:
+        """The process's start time in clock ticks since boot, readable even when its other files are not."""
+        try:
+            with open(os.path.join(proc, pid, "stat"), encoding="utf-8", errors="replace") as handle:
+                return int(handle.read().rsplit(")", 1)[1].split()[19])
+        except (OSError, ValueError, IndexError):
+            return None
+
+    mine = os.getpid()
+    my_start = started_at(str(mine))
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    for name in entries:
+        if int(name) == mine:
+            continue
+        base = os.path.join(proc, name)
+        try:
+            owned = uid is not None and os.stat(base).st_uid == uid
+            for link in ("exe", "cwd"):
+                if under(os.readlink(os.path.join(base, link))):
+                    return True
+            for descriptor in os.listdir(os.path.join(base, "fd")):
+                try:
+                    if under(os.readlink(os.path.join(base, "fd", descriptor))):
+                        return True
+                except OSError:
+                    continue
+            with open(os.path.join(base, "maps"), encoding="utf-8", errors="replace") as maps:
+                for line in maps:
+                    fields = line.rstrip("\n").split(None, 5)
+                    if len(fields) == 6 and under(fields[5]):
+                        return True
+        except PermissionError:
+            # Unreadable, but ours: it may be something a worker started. Only a
+            # process that began after this one can be (the desktop session, the
+            # agents and the like that were already running cannot be).
+            began = started_at(name)
+            if owned and (began is None or my_start is None or began >= my_start):
+                return True
+        except OSError:
+            continue  # the process ended while it was being looked at
+    return False
+
+
 def path_inside_hub(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> bool:
     return validated_hub_path(root, path) is not None
 

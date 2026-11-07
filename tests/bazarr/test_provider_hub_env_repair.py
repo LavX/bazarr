@@ -2,6 +2,7 @@
 """Repairing a plugin's environment, and what a failed check leaves behind."""
 import threading
 import time
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ def _active_row(bundle, python_path, **extra):
     # The bundle is kept where the hub keeps bundles; a path elsewhere is refused.
     bundle = Path(os.environ["BAZARR_PROVIDER_HUB_STATE"]).parent / "bundles" / "examplehub" / "1.0.0" / "c"
     bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "provider.py").write_bytes(b"class ExampleProvider: pass\n")
     row = {
         "provider_id": "examplehub",
         "name": "Example Hub Provider",
@@ -1252,6 +1254,7 @@ def test_a_failed_probe_keeps_the_environment_while_its_worker_left_survivors(hu
     _exiting_interpreter(env / "bin" / "python")
     save_state(load_state())
     survivors = _SurvivorsAfterStop(monkeypatch)
+    monkeypatch.setattr("provider_hub.service.verify_bundle_tree", lambda _manifest, _path: None)
 
     with pytest.raises(Exception):
         service._smoke_validate_worker(SimpleNamespace(raw={}), bundle, env / "bin" / "python")
@@ -1583,3 +1586,42 @@ def test_a_retired_proxy_creates_no_worker_client(hub, hub_registry, monkeypatch
     with pytest.raises(ProviderRetiredError):
         stale._worker()
     assert made == [] and stale.worker_client is None
+
+
+def test_cleanup_skips_an_environment_a_detached_process_still_uses_until_it_exits(hub, tmp_path):
+    import signal
+    import subprocess
+    import sys
+
+    env = _env(hub / "shared_envs" / "orphan")
+    (env / "data.txt").write_text("in use", encoding="utf-8")
+    save_state(load_state())
+    ready = tmp_path / "ready"
+    # A child that started its own session (so no process group of a worker holds it) and keeps a file of the environment open.
+    script = (
+        "import sys, time\n"
+        "handle = open(sys.argv[1], 'rb')\n"
+        "open(sys.argv[2], 'w').write('up')\n"
+        "time.sleep(60)\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(env / "data.txt"), str(ready)], start_new_session=True
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists()
+
+        assert env_registry.cleanup_environments(hub) == []
+        assert env_registry.discard_if_unused(hub, env) is False
+        assert env.exists()
+
+        child.send_signal(signal.SIGKILL)
+        child.wait(10)
+        assert env_registry.cleanup_environments(hub) == [str(env)]
+        assert not env.exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(10)

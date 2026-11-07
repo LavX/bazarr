@@ -34,7 +34,7 @@ from .state import (
 )
 from .venv import (
     SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, has_parent_reference, is_pinned, path_key, pinned_paths,
-    python_executable, validated_bundle_path, validated_hub_path, validated_interpreter,
+    processes_using_directory, python_executable, validated_bundle_path, validated_hub_path, validated_interpreter,
 )
 
 logger = logging.getLogger(__name__)
@@ -406,6 +406,11 @@ def _remove_environment(root: str | Path, target: str | Path, protected) -> bool
     if located is None:
         return False
     if _overlaps(located, (*protected, *pinned_paths())):
+        return False
+    if processes_using_directory(located):
+        # A process the worker's groups do not cover (one that started its own
+        # session) still runs from it: leave it for a later run.
+        logger.info("Provider Hub: %s is still in use by a running process; not removed", located)
         return False
     shutil.rmtree(located, ignore_errors=True)
     return True
