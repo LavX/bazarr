@@ -941,6 +941,7 @@ jobs:
             tests/bazarr/test_translator_output_checks.py \
             tests/bazarr/test_translator_request_normalization.py \
             tests/bazarr/test_translator_runtime_jobs.py \
+            tests/bazarr/test_translator_runtime_lane.py \
             tests/bazarr/test_translator_runtime_usage.py \
             tests/bazarr/test_translator_field_schema.py \
             tests/bazarr/test_translation_api.py \
