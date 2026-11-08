@@ -827,6 +827,9 @@ class _Slot:
         self.cancel_reason: str | None = None
         # Whether this worker holds a unit of its key's unverified-teardown allowance.
         self.unverified_reserved = False
+        # Set when its end has been judged, so a second settlement (a close that
+        # overlaps a one-off run's own cleanup) cannot count it again.
+        self.unverified_noted = False
         # The entry this worker belongs to (None for a one-off run).
         self.entry: _Entry | None = None
         # Only one thread ends the process at a time, and once it has, nobody
@@ -2312,6 +2315,9 @@ class WorkerPool:
         on the group alone. That is accepted, but counted, reported once per key and
         capped, so a plugin that keeps leaking cannot do so without limit.
         """
+        if slot.unverified_noted:
+            return
+        slot.unverified_noted = True
         session = slot.session
         process = session.process if session is not None else None
         if process is None or isinstance(process, LauncherProcess):

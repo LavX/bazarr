@@ -2940,3 +2940,40 @@ def test_a_healthy_launcher_worker_with_an_empty_folder_is_not_killed_by_the_del
     slot = pool._entry("tr").slot
     usage, incomplete = pool._deleted_open_usage(slot, [FolderBudget(str(data), 1 * MIB)])
     assert incomplete is False and usage.get(str(data), 0) == 0
+
+
+def test_settling_the_same_worker_twice_counts_it_once(make_pool):
+    pool = make_pool(fast_pool_limits(unverified_limit=5), use_clock=False)
+    runtime = FallbackRuntime()
+    slot = pool_module._Slot(WorkerDefinition("a", kind="daemon", runtime=lambda *args: runtime), 0.0, pool.limits,
+                             ephemeral=True)
+    slot.session = runtime
+    with pool._cond:
+        pool._reserve_unverified("a", slot)
+        pool._teardown_confirmed(slot, None)
+        pool._teardown_confirmed(slot, None)
+    assert len(pool._unverified["a"]) == 1 and not pool._unverified_reserved
+
+
+def test_close_overlapping_a_one_off_run_counts_its_worker_once(make_pool):
+    import threading
+
+    gate = threading.Event()
+
+    class Runtime(BlockingFallback):
+        release = gate
+
+    pool = make_pool(fast_pool_limits(unverified_limit=20), use_clock=False)
+    runner = threading.Thread(
+        target=lambda: _quiet(pool.run_once, WorkerDefinition("a", kind="daemon", runtime=lambda *a: Runtime()), "echo"),
+        daemon=True)
+    runner.start()
+    assert wait_until(lambda: bool(pool._ephemeral))
+    time.sleep(0.2)
+    closer = threading.Thread(target=pool.close, daemon=True)
+    closer.start()
+    closer.join(15)
+    gate.set()
+    runner.join(15)
+    assert not closer.is_alive() and not runner.is_alive()
+    assert len(pool._unverified.get("a", ())) == 1 and not pool._unverified_reserved
