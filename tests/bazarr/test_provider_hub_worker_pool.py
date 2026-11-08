@@ -1930,3 +1930,174 @@ def test_a_stuck_retry_and_a_failed_close_are_logged_by_type_only(make_pool, cap
     pool.sweep()
     assert "worker close failed (RuntimeError)" in caplog.text
     _assert_nothing_leaked(caplog)
+
+
+# ------------------------------------------------ stop() reaches every worker of a plugin
+
+
+def test_stop_during_a_start_cancels_it_and_nothing_becomes_ready(make_pool):
+    import threading
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    runtimes = []
+
+    class SlowStart(StubProcessRuntime):
+        def start(self):
+            entered.set()
+            proceed.wait(10)
+            super().start()
+
+        def close(self, grace=5.0):
+            self.process.returncode = 0
+            super().close(grace)
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtimes.append(SlowStart())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    outcome = []
+
+    def starter():
+        try:
+            pool.warm("a")
+            outcome.append(None)
+        except BaseException as error:
+            outcome.append(error)
+
+    starting = threading.Thread(target=starter)
+    starting.start()
+    assert entered.wait(5)
+    stopper = threading.Thread(target=pool.stop, args=("a",))
+    stopper.start()
+    time.sleep(0.2)
+    assert stopper.is_alive(), "stop() returned before the cancelled start had ended"
+    proceed.set()
+    starting.join(10)
+    stopper.join(10)
+    assert not starting.is_alive() and not stopper.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], PoolUnavailable)
+    assert pool.state("a") is WorkerState.STOPPED
+    assert runtimes[0].closed_with is not None
+    assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0
+    # The next request simply starts a new worker.
+    proceed.set()
+    pool.warm("a")
+    assert pool.state("a") is WorkerState.READY
+
+
+def test_stop_after_restart_after_drain_ends_the_draining_request_too(make_pool):
+    pool = make_pool()
+    pool.register(definition())
+    retired = pool.submit("tr", "sleep", {"seconds": 30})
+    first = pid_of(pool, "tr")
+    pool.restart_after_drain("tr", definition())
+    # The replacement is ready and serving; the retired worker still holds its request.
+    pool.run("tr", "echo")
+    second = pid_of(pool, "tr")
+    assert second != first and pid_alive(first)
+    pool.stop("tr")
+    assert pool.state("tr") is WorkerState.STOPPED
+    assert wait_until(lambda: not pid_alive(first)) and wait_until(lambda: not pid_alive(second))
+    with pytest.raises((SessionError, RequestCancelled, WorkerKilled)):
+        retired.wait(10)
+    assert pool.status()["processes"] == 0
+
+
+def test_stop_with_only_draining_workers_ends_them(make_pool):
+    pool = make_pool()
+    pool.register(definition())
+    retired = pool.submit("tr", "sleep", {"seconds": 30})
+    first = pid_of(pool, "tr")
+    pool.restart_after_drain("tr", definition())
+    assert pool.state("tr") is WorkerState.DRAINING
+    pool.stop("tr")
+    assert pool.state("tr") is WorkerState.STOPPED
+    assert wait_until(lambda: not pid_alive(first))
+    with pytest.raises((SessionError, RequestCancelled, WorkerKilled)):
+        retired.wait(10)
+
+
+# ---------------------------------------------- the table in the module docstring
+
+
+def test_unregister_kills_a_draining_worker_too(make_pool):
+    pool = make_pool()
+    pool.register(definition())
+    retired = pool.submit("tr", "sleep", {"seconds": 30})
+    first = pid_of(pool, "tr")
+    pool.restart_after_drain("tr", definition())
+    pool.run("tr", "echo")
+    second = pid_of(pool, "tr")
+    pool.unregister("tr")
+    assert wait_until(lambda: not pid_alive(first)) and wait_until(lambda: not pid_alive(second))
+    with pytest.raises((SessionError, RequestCancelled, WorkerKilled)):
+        retired.wait(10)
+    assert pool.status()["processes"] == 0
+
+
+def test_a_restart_during_a_start_lets_the_start_finish_and_then_drains_it(make_pool):
+    import threading
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    runtimes = []
+
+    class SlowStart(StubProcessRuntime):
+        def start(self):
+            entered.set()
+            proceed.wait(10)
+            super().start()
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtimes.append(SlowStart())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    starter = threading.Thread(target=pool.warm, args=("a",))
+    starter.start()
+    assert entered.wait(5)
+    pool.restart_after_drain("a", WorkerDefinition("a", kind="daemon", runtime=factory))
+    proceed.set()
+    starter.join(10)
+    # It came up for the request that asked for it and drains, rather than serving others.
+    assert pool.state("a") is WorkerState.DRAINING
+    assert runtimes[0].closed_with is None
+
+
+def test_a_stuck_worker_is_ended_again_by_stop_unregister_and_close(make_pool):
+    for how in ("stop", "unregister", "close"):
+        holder = []
+
+        def factory(definition, limits, host_calls, on_event, on_stderr, holder=holder):
+            holder.append(StubProcessRuntime())
+            return holder[-1]
+
+        pool = make_pool(fast_pool_limits(), use_clock=False)
+        pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+        pool.warm("a")
+        pool.stop("a")
+        assert pool.status()["stuck"] == 1, how
+        holder[0].process.returncode = 0
+        if how == "stop":
+            pool.stop("a")
+        elif how == "unregister":
+            pool.unregister("a")
+        else:
+            pool.close()
+        assert pool.status()["stuck"] == 0 and pool.status()["processes"] == 0, how
+
+
+def test_lowering_the_cap_leaves_busy_and_draining_workers_alone(make_pool):
+    pool = make_pool(fast_pool_limits(max_resident=3))
+    for key in "ab":
+        pool.register(definition(key))
+    busy = pool.submit("a", "sleep", {"seconds": 0.8})
+    retired = pool.submit("b", "sleep", {"seconds": 0.8})
+    pool.restart_after_drain("b", definition("b"))
+    pool.set_max_resident(1)
+    assert pool.state("a") is WorkerState.BUSY and pool.state("b") is WorkerState.DRAINING
+    assert busy.wait(10).result == {"slept": 0.8} and retired.wait(10).result == {"slept": 0.8}

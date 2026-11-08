@@ -19,6 +19,30 @@ Worker states (``WorkerState``)::
     broken     too many failures in a row (the crash loop breaker); one probe start
                is allowed once the open period ends, and a clean answer closes the breaker.
 
+What each public call does to a worker in each state (a worker is ``starting``
+while its session is being created; ``ready`` is the entry's current worker;
+``draining`` ones were retired and finish what they hold; ``closing`` ones are
+being torn down; ``stuck`` ones were torn down but their process is not confirmed
+gone; ``detached`` ones are starts whose entry was removed, stopped or closed)::
+
+    call               starting         ready            draining         closing       stuck           detached
+    stop(key)          cancel: never    polite stop,     polite stop      wait for it   end it again    wait for it
+                       published, torn  kill at grace    (kill at grace)  (bounded)     (once)          to end
+                       down, caller
+                       gets Unavailable
+    restart_after_     start finishes   retire: drains   unchanged        unchanged     unchanged       unchanged
+    drain(key)         then retires
+    unregister(key)    cancel: never    kill             kill             wait for it   end it again    wait for it
+                       published                                                       (once)
+    close()            cancel           polite stop      polite stop      wait for it   end it again    wait for it
+    set_max_resident   untouched        idle ones are    untouched        untouched     untouched       untouched
+                                        stopped
+    run_once()         not related: a one-off worker is its own slot, held by a permit until its
+                       process is confirmed gone; close() waits for its start and then kills it;
+                       stop, unregister and restart_after_drain never touch it
+    LRU eviction       only an idle ready worker is ever evicted; the others cannot be, but every
+    (internal)         state above counts toward the process cap until it is confirmed gone
+
 Limits and what enforces them:
 
 * Worker processes are capped (default 8). Starting one more stops the least
@@ -219,7 +243,7 @@ _TRANSITIONS: dict[WorkerState, frozenset] = {
     _S.STOPPED: frozenset({_S.STARTING}),
     _S.STARTING: frozenset({_S.READY, _S.BACKOFF, _S.BROKEN, _S.STOPPED}),
     _S.READY: frozenset({_S.DRAINING, _S.STOPPING, _S.STOPPED, _S.BACKOFF, _S.BROKEN}),
-    _S.DRAINING: frozenset({_S.STARTING, _S.STOPPED}),
+    _S.DRAINING: frozenset({_S.STARTING, _S.STOPPING, _S.STOPPED}),
     _S.STOPPING: frozenset({_S.STOPPED}),
     _S.BACKOFF: frozenset({_S.STARTING, _S.STOPPED}),
     _S.BROKEN: frozenset({_S.STARTING, _S.STOPPED}),
@@ -603,6 +627,8 @@ class _Slot:
         self.peak_bytes = 0
         self.ephemeral = ephemeral
         self.closing = False
+        # Why a start was cut short ("stopped"), when it was.
+        self.cancel_reason: str | None = None
         # Only one thread ends the process at a time, and once it has, nobody
         # signals it again unless the pool is retrying a worker it could not confirm gone.
         self.end_lock = threading.Lock()
@@ -787,6 +813,8 @@ class WorkerPool:
             self._cond.notify_all()
         self._flush(wait=True)
         self._wait_detached()
+        if self._stuck:
+            self._retry_stuck()
 
     def _wait_ephemeral_starts(self):
         """Wait (bounded) for one-off workers that are still being started."""
@@ -794,6 +822,14 @@ class WorkerPool:
         with self._cond:
             while self._ephemeral_starting and time.monotonic() < deadline:
                 self._cond.wait(0.2)
+
+    def _wait_start_cancelled(self, slot):
+        """Wait (bounded) until a start that was cancelled has ended and queued its teardown."""
+        deadline = time.monotonic() + self.limits.close_grace + 30.0
+        with self._cond:
+            while slot in self._detached and time.monotonic() < deadline:
+                self._cond.wait(0.2)
+        self._flush(wait=True)
 
     def _wait_detached(self):
         """Wait (bounded) for starts that were cut off to end, and for the teardown they queued."""
@@ -1046,12 +1082,32 @@ class WorkerPool:
     # --------------------------------------------------------------- operations
 
     def stop(self, key: str) -> None:
-        """Stop an idle or busy worker on purpose. A worker in backoff stays in backoff."""
+        """Stop the plugin's workers on purpose: the current one, every draining one, a start in progress.
+
+        A start that has not finished is cancelled: its worker is never
+        published and its caller gets ``PoolUnavailable``. Busy workers are
+        stopped politely and killed when the grace ends. Returns when the
+        teardown is over (bounded); a worker in backoff stays in backoff.
+        """
         with self._cond:
             entry = self._entry(key)
-            if entry.state == WorkerState.READY:
+            starting = entry.starting
+            if starting is not None and starting not in self._detached:
+                starting.cancel_reason = "stopped"
+                self._detached.add(starting)
+            if entry.state == WorkerState.READY and entry.slot is not None:
                 self._begin_stop(entry, "stopped")
+            retiring, entry.retiring = entry.retiring, []
+            for slot in retiring:
+                self._queue_close(slot, entry, "stop")
+            if retiring and entry.state == WorkerState.DRAINING and entry.slot is None and starting is None:
+                self._set_state(entry, WorkerState.STOPPING, "stopped")
+            self._cond.notify_all()
         self._flush(wait=True)
+        if starting is not None:
+            self._wait_start_cancelled(starting)
+        if self._stuck:
+            self._retry_stuck()
 
     def reset(self, key: str) -> None:
         """Forget the failure history and end backoff or an open breaker."""
@@ -1315,6 +1371,9 @@ class WorkerPool:
                 self._cond.notify_all()
                 if self._closed:
                     failed = PoolClosed("the worker pool is closed")
+                elif slot.cancel_reason == "stopped":
+                    failed = PoolUnavailable("worker %s was stopped while it was starting" % slot.definition.key,
+                                             code=PoolCodes.UNAVAILABLE)
                 else:
                     failed = UnknownWorker("worker %s was removed while it was starting" % slot.definition.key)
             elif refusal is not None:
@@ -1868,7 +1927,8 @@ class WorkerPool:
                     self._add_stuck(slot, entry, None)
                     self._events.append((slot.definition.key, "stuck", {}))
                     logger.warning("%s: worker process could not be confirmed gone", slot.definition.key)
-                elif entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None:
+                elif (entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None
+                      and not entry.retiring):
                     self._set_state(entry, WorkerState.STOPPED, "stopped")
                 self._close_threads.discard(threading.current_thread())
                 self._cond.notify_all()
