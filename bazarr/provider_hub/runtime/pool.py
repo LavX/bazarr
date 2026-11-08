@@ -116,22 +116,34 @@ end is accepted as evidence, and the gap is kept visible and bounded::
     with no local process        without a process has none to detach from
 
 Memory counts each process's Pss, plus the memfds and ``/dev/shm`` files the tree holds
-open (by blocks). A shared-memory object that is only mapped (its descriptor closed)
-cannot be measured, so it makes the sample incomplete, which counts as over the limit:
-a plugin may not keep shared memory mapped after closing it.
+open (by blocks).
 
-A shared anonymous mapping (MAP_SHARED|MAP_ANONYMOUS, which includes Python's
-``mmap.mmap(-1, n)`` and multiprocessing's raw shared arrays) is shared memory with no
-descriptor at all. Unmapping every page but one of a big one leaves the rest allocated
-and invisible: the remaining mapping shows one page in Pss, ``maps`` shows the same
-offset and device as for an untouched mapping, and the object's size is unreachable
-without privileges (``map_files``). The only rule that can be checked is the strict
-one: any shared anonymous mapping in the worker's tree makes the memory sample
-incomplete, so the worker counts as over its limit. False positives are real: a
-plugin that uses ``mmap.mmap(-1, n)`` or a shared multiprocessing array is stopped
-for it. What works instead: a private anonymous mapping (``MAP_PRIVATE``, plain
-allocation, ``mmap.mmap(-1, n, flags=mmap.MAP_PRIVATE)``), or a memfd it keeps open
-(measured by blocks).
+``/dev/shm`` is a host-bounded pool, not per-worker memory. It is a size-limited tmpfs
+the host sets (64 MiB by default in Docker), so what all workers put there together is
+bounded outside any of them, and what one worker keeps there through a mapping alone
+(the descriptor closed or the file unlinked: a multiprocessing lock's semaphore, a
+sharedctypes array's arena) cannot be attributed to it without privilege. Each such
+mapping is charged one page, and nothing more is claimed. A ``/dev/shm`` that is
+small and separate (at most 1 GiB, a filesystem of its own) is guarded instead: at each
+sweep its free space is read, and below a reserve (``shm_reserve_bytes``; by default
+the larger of 8 MiB and a tenth of its size) the pool admits no new start or request
+(``shm_low``), logs once, and stops the worker whose tree holds the most ``/dev/shm``
+mappings, one per sweep, until the space recovers. Where ``/dev/shm`` is not small and
+separate there is nothing to guard, and the sandbox limitations say so: "shared memory
+under /dev/shm is not limited per plugin on this host".
+
+The other two kinds of shared memory are refused when they cannot be measured, because
+no host limit bounds them. A memfd that is only mapped (its descriptor closed), and a
+shared anonymous mapping (MAP_SHARED|MAP_ANONYMOUS, which includes Python's
+``mmap.mmap(-1, n)``), make the sample incomplete, so the worker counts as over its
+limit. Unmapping every page but one of a big shared anonymous mapping leaves the rest
+allocated and invisible: the remaining mapping shows one page in Pss, ``maps`` shows the
+same offset and device as for an untouched one, and the object's size is unreachable
+without privileges (``map_files``). The rule that can be checked is the strict one; a
+plugin that uses ``mmap.mmap(-1, n)`` is stopped for it and should use a private
+mapping (``flags=mmap.MAP_PRIVATE``) or a memfd it keeps open (measured by blocks).
+Python's multiprocessing Lock, Queue, ProcessPoolExecutor and sharedctypes arrays use
+``/dev/shm`` objects and are fine.
 
 Folder budgets count what is on disk under the folder, plus files the worker tree
 unlinked but still holds open (found through its descriptors, charged by blocks).
@@ -205,7 +217,15 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from ..sandbox import LauncherProcess, SandboxApplyError, SandboxRefused, WorkerProcess, spawn_worker
+from ..sandbox import (
+    LauncherProcess,
+    SandboxApplyError,
+    SandboxRefused,
+    WorkerProcess,
+    shm_guardable,
+    shm_state,
+    spawn_worker,
+)
 from .errors import HandshakeError, RequestError, SessionError
 from .frames import Codes, is_secrets
 from .session import HostCall, RequestHandle, RequestResult, SessionLimits, WorkerSession
@@ -267,6 +287,7 @@ class PoolCodes:
     POOL_CLOSED = "pool_closed"
     UNKNOWN_WORKER = "unknown_worker"
     UNVERIFIED_LIMIT = "unverified_limit"
+    SHM_LOW = "shm_low"
 
 
 class PoolError(Exception):
@@ -464,6 +485,9 @@ class PoolLimits:
     budget_max_entries: int = 100_000
     # How long one folder scan may take before it counts as incomplete.
     budget_scan_seconds: float = FOLDER_SCAN_SECONDS
+    # Free space in /dev/shm under which nothing new is admitted and the heaviest user is
+    # stopped; None means the larger of 8 MiB and a tenth of its size.
+    shm_reserve_bytes: int | None = None
     # Draft ``options`` and ``test`` runs outside the resident set.
     max_oneshot: int = 2
     close_grace: float = 2.0
@@ -774,6 +798,7 @@ def _allocated(info) -> int:
 
 
 _SHM_DIR = "/dev/shm/"
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
 # How a shared anonymous mapping (MAP_SHARED|MAP_ANONYMOUS, Python's ``mmap.mmap(-1, n)``)
 # appears in ``maps``: an unnamed tmpfs file, "/dev/zero (deleted)" on current kernels.
 _SHARED_ANONYMOUS = ("/dev/zero", "[anon_shmem]")
@@ -801,10 +826,10 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
 
     A memfd that is also mapped is in Pss_Shmem as well, so it can be counted twice;
     that errs towards stopping the worker and is accepted. Incomplete when the
-    descriptors or mappings of a live process cannot be read, and when a memory
-    object (memfd, ``/dev/shm`` file, System V segment) is mapped but no descriptor
-    in the tree measures it: a plugin may not keep shared memory mapped after
-    closing it. A shared *anonymous* mapping has no descriptor to measure at all, so
+    descriptors or mappings of a live process cannot be read, and when a memfd or a
+    System V segment is mapped but no descriptor in the tree measures it: a plugin
+    may not keep a memfd mapped after closing it. An unmeasured ``/dev/shm`` mapping
+    is charged one page instead (see the pool docstring). A shared *anonymous* mapping has no descriptor to measure at all, so
     any in the tree makes the sample incomplete (see the pool docstring for why, and
     for what it costs). Not covered: pipe and socket
     buffers, eventfds and the like (small or bounded by system limits), and tmpfs
@@ -884,9 +909,35 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
             except ValueError:
                 incomplete = True
                 continue
-            if (path, inode) not in measured:
-                incomplete = True
+            if (path, inode) in measured:
+                continue
+            if path.startswith(_SHM_DIR):
+                # An unlinked or descriptor-less /dev/shm object (a POSIX semaphore of a
+                # multiprocessing lock, say). /dev/shm is a size-limited tmpfs the host sets,
+                # so what all workers put there together is bounded outside any of them, and
+                # what one worker keeps there cannot be attributed to it without privilege.
+                # Each such mapping is charged a page, and ``WorkerPool`` guards the total.
+                total += _PAGE_SIZE
+                continue
+            incomplete = True
     return total, incomplete
+
+
+def shm_mapping_count(pids, skip=()) -> int:
+    """How many mappings of ``/dev/shm`` objects these processes hold (the guard's measure of who uses it)."""
+    count = 0
+    for pid in pids:
+        if pid in skip:
+            continue
+        try:
+            with open("/proc/%d/maps" % pid, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    parts = line.split(None, 5)
+                    if len(parts) >= 6 and parts[5].startswith(_SHM_DIR):
+                        count += 1
+        except OSError:
+            continue
+    return count
 
 
 def _under(path: str, folder: str) -> bool:
@@ -1170,6 +1221,7 @@ class WorkerPool:
         event_sink: Callable[[str, str, dict], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         disk_free: Callable[[], int | None] | None = None,
+        shm_reader: Callable[[], Any] | None = None,
         memory_reader: Callable[[int], MemorySample | None] | None = None,
         autostart: bool = True,
     ):
@@ -1177,6 +1229,9 @@ class WorkerPool:
         self._config_dir = os.fspath(config_dir) if config_dir else None
         self._disk_free = disk_free or self._default_disk_free
         self._memory_reader = memory_reader or read_process_tree_memory
+        self._shm_reader = shm_reader or shm_state
+        # Set by the sweep while /dev/shm is under its reserve; admissions are refused meanwhile.
+        self._shm_low = False
         self._event_sink = event_sink
         self._clock = clock
         self._autostart = autostart
@@ -1366,6 +1421,7 @@ class WorkerPool:
                 "resident": self._resident_count(),
                 "processes": self._process_count(),
                 "stuck": len(self._stuck),
+                "shm_low": self._shm_low,
                 "unverified_teardowns": self._unverified_status(now),
                 "workers": workers,
             }
@@ -1691,6 +1747,10 @@ class WorkerPool:
         with self._cond:
             if self._closed:
                 return
+        self._guard_shm()
+        with self._cond:
+            if self._closed:
+                return
             current = [(entry, entry.slot) for entry in self._entries.values() if entry.slot is not None]
             retiring = [(entry, slot) for entry in self._entries.values() for slot in entry.retiring]
             ephemeral = list(self._ephemeral)
@@ -1714,6 +1774,62 @@ class WorkerPool:
                         self._set_state(entry, WorkerState.STOPPED, "drained")
             self._cond.notify_all()
         self._flush()
+
+    def _guard_shm(self):
+        """Watch the free space of /dev/shm, a size-limited tmpfs shared by every worker.
+
+        Under the reserve: no new start or request is admitted (``_violation``), once is
+        logged, and the worker whose tree holds the most /dev/shm mappings is stopped,
+        one per sweep, until the space is back above the reserve. A /dev/shm that is not
+        small and separate cannot be guarded; the sandbox limitations say so.
+        """
+        try:
+            state = self._shm_reader()
+        except Exception as error:
+            _log_failure("reading /dev/shm failed", error)
+            state = None
+        if not shm_guardable(state):
+            with self._cond:
+                self._shm_low = False
+            return
+        total, free, _separate = state
+        reserve = self.limits.shm_reserve_bytes
+        if reserve is None:
+            reserve = max(8 * MIB, total // 10)
+        low = free < reserve
+        with self._cond:
+            was = self._shm_low
+            self._shm_low = low
+            workers = []
+            if low:
+                workers = [(entry, entry.slot) for entry in self._entries.values() if entry.slot is not None]
+                workers += [(entry, slot) for entry in self._entries.values() for slot in entry.retiring]
+                workers += [(None, slot) for slot in self._ephemeral]
+        if low and not was:
+            logger.warning("/dev/shm has %d MiB free, under its %d MiB reserve: nothing new is admitted and the "
+                           "heaviest user is stopped", free // MIB, reserve // MIB)
+        if not low:
+            return
+        heaviest = None
+        for entry, slot in workers:
+            session = slot.session
+            process = session.process if session is not None else None
+            if process is None or process.returncode is not None:
+                continue
+            pids, _incomplete = _process_tree(process.pid, 256)
+            skip = {process.pid} if isinstance(process, LauncherProcess) else set()
+            count = shm_mapping_count(pids, skip)
+            if count and (heaviest is None or count > heaviest[0]):
+                heaviest = (count, entry, slot)
+        if heaviest is None:
+            return
+        count, entry, slot = heaviest
+        problem = (PoolCodes.SHM_LOW, "worker holds %d of the mappings in /dev/shm, which is nearly full" % count)
+        if entry is not None:
+            self._kill_current(entry, slot, problem)
+        else:
+            slot.kill_reason = problem
+            self._terminate_now(slot)
 
     def _sweep_current(self, entry, slot, now):
         with self._cond:
@@ -2215,6 +2331,8 @@ class WorkerPool:
 
     def _violation(self, definition, holder, fresh=False, tree=None) -> tuple[str, str] | None:
         """Why this worker must not start or take a request, or None."""
+        if self._shm_low:
+            return (PoolCodes.SHM_LOW, "shared memory (/dev/shm) is nearly full; nothing new is admitted until it recovers")
         free = self._free_space()
         if definition.writes_data and free is not None and free < self.limits.config_reserve_bytes:
             return (PoolCodes.DISK_RESERVE,
@@ -2267,8 +2385,9 @@ class WorkerPool:
         problem = self._violation(slot.definition, slot)
         if problem is None:
             return
-        if problem[0] != PoolCodes.DISK_RESERVE:
-            # A worker over its folder budget is ended. A short disk only refuses work.
+        if problem[0] not in (PoolCodes.DISK_RESERVE, PoolCodes.SHM_LOW):
+            # A worker over its folder budget is ended. A short disk or full shared memory
+            # only refuses work (the guard stops the heaviest /dev/shm user on its own).
             self._kill_current(entry, slot, problem, requested=True)
         raise PoolUnavailable(problem[1], code=problem[0])
 

@@ -3459,3 +3459,154 @@ def test_shared_anonymous_mappings_are_unmeasurable_and_private_ones_are_fine():
         assert pool_module.memfd_usage([os.getpid()]) == (0, False)
     finally:
         private.close()
+
+
+# ----------------------------------- /dev/shm is a host-bounded pool: a page per mapping, and a guard
+
+
+@needs_smaps
+def test_a_worker_using_multiprocessing_primitives_is_not_killed(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition(memory_limit_bytes=512 * MIB, session=fast_session(handshake_timeout=20.0)))
+    ready = []
+    handle = pool.submit("tr", "multiprocessing", {"seconds": 1.5}, on_progress=lambda message: ready.append(message))
+    assert wait_until(lambda: bool(ready), timeout=30)
+    for _ in range(3):
+        pool.sweep()
+        time.sleep(0.1)
+    slot = pool._entry("tr").slot
+    # A lock, a queue and a process pool are all held: their semaphores are /dev/shm objects
+    # kept by mappings alone, charged a page each, and the sample is complete.
+    assert slot.memory_truncated is False
+    result = handle.wait(30).result
+    assert result["doubled"] == [0, 2, 4, 6] and result["got"] == 1
+    assert pool.state("tr") is WorkerState.READY
+
+
+@needs_smaps
+def test_an_unlinked_dev_shm_mapping_is_charged_a_page_not_refused(tmp_path):
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    page = os.sysconf("SC_PAGE_SIZE")
+    addresses = []
+    for index in range(3):
+        path = "/dev/shm/bazarr-test-map-%d-%d" % (os.getpid(), index)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.ftruncate(fd, 64 * MIB)
+            addresses.append(libc.mmap(None, page, 3, 1, fd, 0))
+        finally:
+            os.close(fd)
+            os.unlink(path)
+    try:
+        held, incomplete = pool_module.memfd_usage([os.getpid()])
+        assert incomplete is False and held == 3 * page
+        assert pool_module.shm_mapping_count([os.getpid()]) == 3
+        assert pool_module.shm_mapping_count([os.getpid()], skip={os.getpid()}) == 0
+    finally:
+        for address in addresses:
+            libc.munmap(ctypes.c_void_p(address), ctypes.c_size_t(page))
+    assert pool_module.shm_mapping_count([os.getpid()]) == 0
+
+
+@needs_smaps
+def test_the_shm_guard_stops_the_heaviest_user_and_admits_nothing_until_it_recovers(make_pool, caplog):
+    caplog.set_level(logging.INFO)
+    state = {"free": 40 * MIB}
+
+    def reader():
+        return 64 * MIB, state["free"], True
+
+    pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False, shm_reader=reader)
+    for key in ("light", "heavy", "other"):
+        pool.register(definition(key))
+    light = pool.submit("light", "shm_maps", {"count": 1})
+    heavy = pool.submit("heavy", "shm_maps", {"count": 5})
+    other = pool.submit("other", "sleep", {"seconds": 30})
+    pool.sweep()
+    time.sleep(0.3)
+    pool.sweep()
+    # Plenty free: nobody is stopped, nobody is refused.
+    assert pool.state("heavy") is WorkerState.BUSY and not pool.status()["shm_low"]
+    state["free"] = 1 * MIB
+    pool.sweep()
+    with pytest.raises(WorkerKilled) as killed:
+        heavy.wait(10)
+    assert killed.value.code == "shm_low"
+    assert pool.state("light") is WorkerState.BUSY and pool.state("other") is WorkerState.BUSY
+    assert pool.status()["shm_low"] is True
+    # Nothing new while it is low: a start and a request are refused with a clear error.
+    pool.register(definition("fresh"))
+    with pytest.raises(PoolUnavailable) as refused:
+        pool.warm("fresh")
+    assert refused.value.code == "shm_low"
+    with pytest.raises(PoolUnavailable) as refused:
+        pool.submit("other", "echo")
+    assert refused.value.code == "shm_low"
+    pool.sweep()
+    pool.sweep()
+    lines = [r for r in caplog.records if "under its" in r.getMessage() and "/dev/shm" in r.getMessage()]
+    assert len(lines) == 1, "the low-space line is logged once per episode"
+    # The next sweep takes the next heaviest, one per sweep, while space stays short.
+    with pytest.raises(WorkerKilled):
+        light.wait(10)
+    state["free"] = 40 * MIB
+    pool.sweep()
+    assert pool.status()["shm_low"] is False
+    pool.warm("fresh")
+    assert pool.state("fresh") is WorkerState.READY
+    other.cancel()
+
+
+def test_the_shm_guard_is_off_where_dev_shm_is_not_small_and_separate(make_pool):
+    calls = []
+
+    def reader():
+        calls.append(1)
+        return state_box["value"]
+
+    state_box = {"value": (30 * GIB, 1 * MIB, True)}  # huge
+    pool = make_pool(fast_pool_limits(), use_clock=False, shm_reader=reader)
+    pool.register(definition())
+    pool.run("tr", "echo")
+    pool.sweep()
+    assert pool.status()["shm_low"] is False
+    state_box["value"] = (64 * MIB, 1 * MIB, False)  # a directory of the root filesystem
+    pool.sweep()
+    assert pool.status()["shm_low"] is False
+    state_box["value"] = None  # no /dev/shm at all
+    pool.sweep()
+    assert pool.status()["shm_low"] is False and calls
+    pool.run("tr", "echo")
+
+
+def test_the_reserve_defaults_to_a_tenth_of_dev_shm_and_can_be_set(make_pool):
+    pool = make_pool(fast_pool_limits(), use_clock=False, shm_reader=lambda: (640 * MIB, 70 * MIB, True))
+    pool.sweep()
+    assert pool.status()["shm_low"] is False  # 70 MiB free, reserve 64 MiB
+    pool = make_pool(fast_pool_limits(), use_clock=False, shm_reader=lambda: (640 * MIB, 60 * MIB, True))
+    pool.sweep()
+    assert pool.status()["shm_low"] is True
+    pool = make_pool(fast_pool_limits(shm_reserve_bytes=10 * MIB), use_clock=False,
+                     shm_reader=lambda: (640 * MIB, 60 * MIB, True))
+    pool.sweep()
+    assert pool.status()["shm_low"] is False
+
+
+def test_the_limitations_say_when_dev_shm_is_not_limited_per_plugin(monkeypatch):
+    from provider_hub.sandbox import spawn as spawn_module
+
+    monkeypatch.setattr(spawn_module, "shm_state", lambda: (30 * GIB, 30 * GIB, True))
+    from provider_hub.sandbox import SandboxProbe, sandbox_limitations
+
+    notes = " ".join(sandbox_limitations(SandboxProbe(abi=9, verified=True, network_verified=True,
+                                                      signal_scope_verified=True, capabilities_dropped=True)))
+    assert "shared memory under /dev/shm is not limited per plugin on this host" in notes.lower()
+    monkeypatch.setattr(spawn_module, "shm_state", lambda: (64 * MIB, 60 * MIB, True))
+    notes = " ".join(sandbox_limitations(SandboxProbe(abi=9, verified=True, network_verified=True,
+                                                      signal_scope_verified=True, capabilities_dropped=True)))
+    assert "/dev/shm is not limited" not in notes

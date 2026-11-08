@@ -126,6 +126,35 @@ class SandboxProbe:
         return self.enforced and self.abi >= 6 and self.signal_scope_verified
 
 
+# Largest /dev/shm the pool is willing to treat as a host-bounded pool it can guard.
+SHM_GUARD_MAX_BYTES = 1024 * 1024 * 1024
+
+
+def shm_state() -> "tuple[int, int, bool] | None":
+    """``(total bytes, free bytes, separate)`` for ``/dev/shm``, or None where there is none.
+
+    ``separate`` is whether it is a filesystem of its own (a tmpfs), not a directory of
+    the root filesystem.
+    """
+    try:
+        info = os.statvfs("/dev/shm")
+        separate = os.stat("/dev/shm").st_dev != os.stat("/").st_dev
+    except OSError:
+        return None
+    return info.f_blocks * info.f_frsize, info.f_bavail * info.f_frsize, separate
+
+
+def shm_guardable(state: "tuple[int, int, bool] | None") -> bool:
+    """Whether ``/dev/shm`` is small and separate enough for its total use to be bounded outside any worker."""
+    return state is not None and state[2] and 0 < state[0] <= SHM_GUARD_MAX_BYTES
+
+
+def _shm_note() -> str:
+    if shm_guardable(shm_state()):
+        return ""
+    return " Shared memory under /dev/shm is not limited per plugin on this host."
+
+
 def sandbox_limitations(probe: SandboxProbe) -> list[str]:
     """Plain statements of what the sandbox does not cover on this host."""
     if not landlock.is_supported_platform():
@@ -133,13 +162,13 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
             "Workers run with a clean environment, but this platform applies no resource limits "
             "and nothing confines their files, network or signals. Detached processes cannot be "
             "tracked on this platform: only a worker's process group is ended. A plugin may not "
-            "keep deleted files mapped inside its folders."
+            "keep deleted files mapped inside its folders." + _shm_note()
         ]
     if not probe.enforced:
         return [
             "Workers run with resource limits and a clean environment, but nothing confines "
             "their files, network or signals. A plugin may not keep deleted files mapped inside "
-            "its folders."
+            "its folders." + _shm_note()
         ]
     notes = ["Workers cannot change file modes, owners, times or extended attributes anywhere."]
     if probe.abi < 4 or not probe.network_enforced:
@@ -156,10 +185,12 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
         "measured, so the folder counts as over its limit."
     )
     notes.append(
-        "A plugin may not keep shared memory mapped after closing it, or use shared anonymous "
+        "A plugin may not keep a memfd mapped after closing it, or use shared anonymous "
         "mappings (MAP_SHARED|MAP_ANONYMOUS, as Python's mmap.mmap(-1, n) makes): their size "
         "cannot be measured, so the worker counts as over its memory limit."
     )
+    if not shm_guardable(shm_state()):
+        notes.append("Shared memory under /dev/shm is not limited per plugin on this host.")
     return notes
 
 

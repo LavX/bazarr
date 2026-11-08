@@ -398,6 +398,45 @@ def _handle(operation):
             if operation.cancelled.wait(0.02):
                 raise worker_channel.OperationCancelled()
         return {"memfds": len(held)}
+    if name == "multiprocessing":
+        # What a plugin that parallelises does: a lock, a queue and a process pool, all held.
+        import concurrent.futures
+        import multiprocessing
+
+        lock = multiprocessing.Lock()
+        queue = multiprocessing.Queue()
+        queue.put(1)
+        got = queue.get(timeout=10)
+        with concurrent.futures.ProcessPoolExecutor(2) as pool:
+            doubled = list(pool.map(_double, range(4)))
+            operation.progress(message="ready")
+            deadline = time.monotonic() + float(params.get("seconds", 30.0))
+            while time.monotonic() < deadline:
+                if operation.cancelled.wait(0.02):
+                    raise worker_channel.OperationCancelled()
+        return {"got": got, "doubled": doubled, "lock": lock is not None}
+    if name == "shm_maps":
+        # Maps ``count`` /dev/shm objects by one page each, closes the descriptors and unlinks
+        # the names: the objects live on through their mappings alone, as a semaphore's does.
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mmap.restype = ctypes.c_void_p
+        libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                              ctypes.c_long]
+        for index in range(int(params.get("count", 1))):
+            path = "/dev/shm/bazarr-fake-%d-%d" % (os.getpid(), index)
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.ftruncate(fd, 4096)
+            libc.mmap(None, 4096, 3, 1, fd, 0)
+            os.close(fd)
+            os.unlink(path)
+        operation.progress(message="written")
+        deadline = time.monotonic() + float(params.get("seconds", 30.0))
+        while time.monotonic() < deadline:
+            if operation.cancelled.wait(0.02):
+                raise worker_channel.OperationCancelled()
+        return {"mapped": int(params.get("count", 1))}
     if name == "shared_anonymous":
         # Maps ``mb`` megabytes MAP_SHARED|MAP_ANONYMOUS, dirties them all and unmaps every page
         # but the last: the tmpfs pages stay allocated, with one page left mapped to show for them.
@@ -482,6 +521,10 @@ def _handle(operation):
     if name == "raise":
         raise ValueError(params.get("message", "boom"))
     raise worker_channel.OperationError("unknown_op", "no operation named %s" % name)
+
+
+def _double(value):
+    return value * 2
 
 
 def main():
