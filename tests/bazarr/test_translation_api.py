@@ -874,6 +874,36 @@ def test_a_stored_secret_is_checked_against_the_present_limits_unless_the_save_r
     assert fixed.status_code == 200 and fixed.json["connection"]["secrets"]["api_keys"]["count"] == 1
 
 
+def test_an_empty_secret_input_keeps_the_stored_secret_and_its_content_is_still_checked(world):
+    fields = world.plugins[PLUGIN].manifest["settings"]["backend_types"]["gemini"]["fields"]
+    keys = ["gem-key-one-0123456789", "gem-key-two-0123456789"]  # pragma: allowlist secret
+    created = _new_connection(world, backend_type="gemini", values={"api_keys": keys}).json["connection"]
+    path = f"connections/{created['id']}"
+    assert world.call("patch", path, {"enabled": False}).status_code == 200
+    for field in fields:
+        if field["key"] == "api_keys":
+            field["max_items"] = 1
+    # An empty list is "keep what is stored": the stored keys no longer fit, so it cannot be turned on.
+    for empty in ([], None, ""):
+        refused = world.call("patch", path, {"values": {"api_keys": empty}, "enabled": True})
+        assert refused.status_code == 400 and list(refused.json["field_errors"]) == ["api_keys"]
+    assert world.store.get_connection(created["id"]).enabled == 0
+    # A non-empty replacement that fits, or an explicit clear, is judged by what it says instead.
+    assert world.call("patch", path, {"values": {"api_keys": keys[:1]}, "enabled": True}).status_code == 200
+
+
+def test_an_empty_secret_input_on_an_engine_keeps_the_stored_secret_and_its_content_is_still_checked(world):
+    path = f"engines/{world.instance.id}"
+    assert world.call("patch", path, {"values": {"service_token": "abcdefghij"}}).status_code == 200
+    for field in world.plugins[PLUGIN].manifest["settings"]["fields"]:
+        if field["key"] == "service_token":
+            field["max_length"] = 5
+    refused = world.call("patch", path, {"values": {"service_token": ""}})
+    assert refused.status_code == 400 and refused.json["field_errors"] == {
+        "service_token": "must be at most 5 characters"}
+    assert world.call("patch", path, {"values": {"service_token": "short"}}).status_code == 200
+
+
 def test_a_flag_that_is_not_a_boolean_is_refused(world):
     assert _new_connection(world, enabled="false", values={"api_key": "k"}).status_code == 400
     created = _new_connection(world, values={"api_key": "k"}).json["connection"]

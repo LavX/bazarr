@@ -359,7 +359,9 @@ class TranslatorSettingsService:
         self._check_clear(clear, schema)
         # Every save is checked, one that only clears a secret included: the stored settings, with the values
         # sent laid over them and the secrets that remain after the clear, must still satisfy the manifest.
-        replaced = set(values or {}) | set(clear)
+        # Only a non-empty replacement or an explicit clear takes a stored secret out of the content check; an
+        # empty input keeps the stored one, which is then checked like any other that stays.
+        replaced = {key for key, value in (values or {}).items() if value not in (None, "", [])} | set(clear)
         validated = self._validate(schema, self._merged(before, values or {}, schema), stored, plugin.plugin_id,
                                    "engine", "", contents=self._store.secret_contents(owner, schema.fields, replaced))
         after = validated.settings
@@ -445,7 +447,9 @@ class TranslatorSettingsService:
             validated = self._validate(
                 schema, self._merged(before, plain, schema), stored, plugin.plugin_id, "connection",
                 connection.backend_type, host=host,
-                contents=self._store.secret_contents(owner, schema.fields, set(plain) | set(clear)))
+                contents=self._store.secret_contents(
+                    owner, schema.fields,
+                    {key for key, value in plain.items() if value not in (None, "", [])} | set(clear)))
         after = validated.settings if checked else before
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)

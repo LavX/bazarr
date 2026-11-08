@@ -84,6 +84,9 @@ SETTING_TYPES = frozenset({
 # JSON, and treats them as plain values. A manifest may declare one to label it or set its limits, but not
 # as a secret or an address, which would need the handling the host does not give them.
 BACKEND_HOST_FIELD_KEYS = frozenset({"model", "price_input_per_million", "price_output_per_million"})
+# The types a field may carry the ``secret`` flag on: the host draws exactly these as a masked secret. Any other
+# type marked secret would be drawn as a plain input, so a manifest that does that is refused.
+SECRET_FLAG_TYPES = frozenset({"text", "secret", "key_list"})
 HOST_CAPABILITY_PREFIX = "host."
 # CPython compatibility tags of the wheels an entry's closure ships (cp312,
 # cp313, cp314), or py3 when every wheel is pure Python.
@@ -309,6 +312,9 @@ def _field_list(fields: Any, where: str, *, host_keys: frozenset[str] = frozense
         seen.add(key)
         if item.get("type") not in SETTING_TYPES:
             raise ManifestValidationError(f"settings field {key} has an unsupported type")
+        if item.get("secret") is True and item.get("type") not in SECRET_FLAG_TYPES:
+            raise ManifestValidationError(
+                f"settings field {key} is marked secret, which only a text or key list field can be")
         if key in host_keys and (item.get("type") == "secret" or item.get("secret") is True
                                  or item.get("destination") is True):
             raise ManifestValidationError(

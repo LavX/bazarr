@@ -272,6 +272,24 @@ def test_a_back_end_may_still_label_a_host_field_and_other_keys_may_be_secrets()
     _parse(service_manifest("single", settings_version=1, settings={"fields": [{"key": "model", "type": "secret"}]}))
 
 
+@pytest.mark.parametrize("kind", ["options", "number", "integer", "toggle", "choice", "list", "orderable_list"])
+def test_the_secret_flag_is_refused_on_a_field_type_the_host_would_draw_as_plain(kind):
+    from provider_hub.manifest import ManifestValidationError
+
+    with pytest.raises(ManifestValidationError, match="marked secret"):
+        _parse(_multi_backend(gemini={"fields": [{"key": "thing", "type": kind, "secret": True}]}))
+    manifest = service_manifest("single", settings_version=1,
+                                settings={"fields": [{"key": "thing", "type": kind, "secret": True}]})
+    with pytest.raises(ManifestValidationError, match="marked secret"):
+        _parse(manifest)
+
+
+@pytest.mark.parametrize("kind", ["text", "secret", "key_list"])
+def test_the_secret_flag_is_kept_on_the_types_the_host_draws_masked(kind):
+    plugin = _parse(_multi_backend(gemini={"fields": [{"key": "thing", "type": kind, "secret": True}]}))
+    assert dict(plugin.backend_fields)["gemini"][0]["secret"] is True
+
+
 def test_a_schema_2_secret_field_is_known_to_the_secret_registry():
     from secret_store.registry import manifest_secret_fields
 
