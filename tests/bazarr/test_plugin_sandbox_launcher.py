@@ -3959,3 +3959,81 @@ def test_the_limitations_say_that_a_memfd_may_not_stay_mapped_after_it_is_closed
                                                signal_scope_verified=True, capabilities_dropped=True))["limitations"])
     assert "may not keep a memfd mapped after closing it" in text
     assert "shared anonymous mappings" in text
+
+
+# --- Ownership where there is no waitid ------------------------------------------------
+
+
+@linux_only
+def test_an_anchor_reaped_by_somebody_else_is_not_signalled_even_without_waitid(monkeypatch):
+    monkeypatch.delattr(os, "waitid", raising=False)
+    plain = spawn._start_plain([sys.executable, "-c", "import time; time.sleep(60)"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    anchor = plain._anchor
+    if anchor is None:
+        plain.stop(0.5)
+        pytest.skip("no process group anchor on this interpreter")
+    sent = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (sent.append((pgid, sig)), real_killpg(pgid, sig))[1])
+    try:
+        # While it is ours, /proc says so and the signal goes.
+        assert plain.signal_group(signal.SIGCONT) is True
+        os.kill(anchor.pid, signal.SIGKILL)
+        os.waitpid(anchor.pid, 0)
+        assert anchor.returncode is None  # Popen was not told
+        sent.clear()
+        assert plain.signal_group(signal.SIGCONT) is None
+        assert plain._anchor_lost is True
+        plain.stop(0.5)
+        assert sent == [], sent
+        assert plain.group_cleaned is False
+    finally:
+        monkeypatch.undo()
+        plain.stop(0.5)
+
+
+@linux_only
+def test_a_leader_reaped_by_somebody_else_is_not_signalled_even_without_waitid(monkeypatch):
+    monkeypatch.delattr(os, "waitid", raising=False)
+    sent = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (sent.append((pgid, sig)), real_killpg(pgid, sig))[1])
+    process = WorkerProcess([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        os.kill(process.pid, signal.SIGKILL)
+        os.waitpid(process.pid, 0)
+        assert process.returncode is None
+        assert process.signal_group(signal.SIGCONT) is None
+        assert process._leader_lost is True
+        assert sent == []
+    finally:
+        monkeypatch.undo()
+
+
+def test_ownership_is_unknown_when_neither_waitid_nor_proc_can_tell(monkeypatch):
+    monkeypatch.setattr(spawn.os.path, "isdir", lambda path: False if path == "/proc/self" else os.path.exists(path))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)  # something answers to the pid
+    assert spawn._owned_without_waitid(424242, None) is None
+
+    def gone(pid, sig):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(os, "kill", gone)
+    assert spawn._owned_without_waitid(424242, None) is False
+
+
+@linux_only
+def test_a_pid_taken_by_a_later_process_is_not_ours_without_waitid(monkeypatch):
+    mark = spawn._start_mark(os.getpid())
+    assert mark is not None
+    assert spawn._owned_without_waitid(os.getpid(), mark) is True
+    assert spawn._owned_without_waitid(os.getpid(), str(int(mark) + 1)) is False
+
+
+def test_the_shm_state_is_none_where_there_is_no_statvfs(monkeypatch):
+    monkeypatch.delattr(os, "statvfs", raising=False)
+    assert spawn.shm_state() is None
+    assert spawn.shm_guardable(spawn.shm_state()) is False
+    assert "not limited per plugin" in " ".join(sandbox_status(DECLARED)["limitations"])

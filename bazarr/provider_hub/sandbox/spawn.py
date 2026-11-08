@@ -139,7 +139,7 @@ def shm_state() -> "tuple[int, int, bool] | None":
     try:
         info = os.statvfs("/dev/shm")
         separate = os.stat("/dev/shm").st_dev != os.stat("/").st_dev
-    except OSError:
+    except (OSError, AttributeError):  # AttributeError: no os.statvfs (Windows)
         return None
     return info.f_blocks * info.f_frsize, info.f_bavail * info.f_frsize, separate
 
@@ -572,7 +572,54 @@ def _start_plain(command: list, **kwargs: Any) -> "WorkerProcess":
             _finish_anchor(anchor)
         raise
     process._anchor = anchor
+    if anchor is not None:
+        process._anchor_mark = _start_mark(anchor.pid)
     return process
+
+
+def _stat_fields(pid: int) -> "tuple[str, str]":
+    """``(state, start time)`` of a process from ``/proc/<pid>/stat``. Raises ``FileNotFoundError`` if it is gone."""
+    with open("/proc/%d/stat" % pid, "rb") as handle:
+        data = handle.read(4096)
+    rest = data.rsplit(b")", 1)[1].split()
+    return rest[0].decode("ascii", "replace"), rest[19].decode("ascii", "replace")
+
+
+def _start_mark(pid: int) -> "str | None":
+    """When the process started, as ``/proc`` says: what tells a pid's owner from a stranger that reused it."""
+    try:
+        return _stat_fields(pid)[1]
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _owned_without_waitid(pid: int, started: "str | None") -> "bool | None":
+    """Whether a child that has not been reaped by us is still there, where ``waitid`` cannot say.
+
+    True: its entry in ``/proc`` is there with the start time it had (alive, or a zombie,
+    which keeps its pid). False: the entry is gone or belongs to a process that started
+    later: somebody else reaped it and the pid may be a stranger's. None: nothing can
+    tell, so ownership is unknown and the caller must not signal.
+    """
+    if os.path.isdir("/proc/self"):
+        try:
+            _state, start = _stat_fields(pid)
+        except FileNotFoundError:
+            return False
+        except (OSError, IndexError, ValueError):
+            return None
+        if started is not None and start != started:
+            return False
+        return True
+    if os.name == "posix":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return None
+    # Something answers to the pid, but a zombie and a stranger look the same from here.
+    return None
 
 
 class WorkerProcess(subprocess.Popen):
@@ -596,6 +643,8 @@ class WorkerProcess(subprocess.Popen):
     _anchor: "subprocess.Popen | None" = None
     _leader_lost = False
     _anchor_lost = False
+    _started_mark: "str | None" = None
+    _anchor_mark: "str | None" = None
     # None until a ``stop`` has run. True: this object ended the worker's process
     # group itself. False: it could not, because the leader (and with it the group
     # id) was reaped before the group was ended, so what the worker left behind is
@@ -617,6 +666,7 @@ class WorkerProcess(subprocess.Popen):
         self._leader_lost = False
         self._anchor_lost = False
         super().__init__(*args, **kwargs)
+        self._started_mark = _start_mark(self.pid)
 
     def launcher_failure(self) -> "LauncherFailure | None":
         return None
@@ -676,10 +726,17 @@ class WorkerProcess(subprocess.Popen):
         if self.returncode is not None or self._leader_lost:
             return False
         waitid = getattr(os, "waitid", None)
-        if waitid is None:
-            return True
+        flag = getattr(os, "WNOWAIT", None)
+        if waitid is None or flag is None:
+            # No non-reaping wait: ``returncode`` stays None after somebody else's reap, so
+            # ask ``/proc``; where that cannot tell either, ownership is unknown and refused.
+            owned = _owned_without_waitid(self.pid, self._started_mark)
+            if not owned:
+                self._leader_lost = True
+                return False
+            return self.returncode is None
         try:
-            waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | flag)
         except ChildProcessError:
             self._leader_lost = True
             return False
@@ -701,10 +758,15 @@ class WorkerProcess(subprocess.Popen):
             self._anchor_lost = True
             return False
         waitid = getattr(os, "waitid", None)
-        if waitid is None:
+        flag = getattr(os, "WNOWAIT", None)
+        if waitid is None or flag is None:
+            owned = _owned_without_waitid(anchor.pid, self._anchor_mark)
+            if not owned:
+                self._anchor_lost = True
+                return False
             return True
         try:
-            waitid(os.P_PID, anchor.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            waitid(os.P_PID, anchor.pid, os.WEXITED | os.WNOHANG | flag)
         except ChildProcessError:
             self._anchor_lost = True
             return False
@@ -1080,8 +1142,8 @@ class LauncherProcess(WorkerProcess):
                     with self._own_lock:
                         if self._still_ours():
                             try:
-                                os.killpg(self.pid, signal.SIGKILL)
-                            except OSError:
+                                getattr(os, "killpg")(self.pid, signal.SIGKILL)
+                            except (AttributeError, OSError):
                                 pass
                     try:
                         super().wait(timeout=5)
