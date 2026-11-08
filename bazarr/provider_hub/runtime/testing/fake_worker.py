@@ -382,6 +382,37 @@ def _handle(operation):
             if operation.cancelled.wait(0.02):
                 raise worker_channel.OperationCancelled()
         return {"held": len(held)}
+    if name == "write_deleted":
+        # Creates ``path``, unlinks it and keeps writing through the open descriptor, so
+        # the bytes are on disk with no directory entry to find. With ``child`` a
+        # descendant does it instead; the worker only waits.
+        path, megabytes = params["path"], int(params.get("mb", 4))
+        code = (
+            "import os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_CREAT | os.O_WRONLY, 0o600)\n"
+            "os.unlink(sys.argv[1])\n"
+            "for _ in range(int(sys.argv[2])):\n"
+            "    os.write(fd, b'x' * (1024 * 1024))\n"
+            "os.fsync(fd)\n"
+            "print('written', flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        if params.get("child"):
+            child = subprocess.Popen([sys.executable, "-c", code, path, str(megabytes)],
+                                     stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
+            child.stdout.readline()
+        else:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.unlink(path)
+            for _ in range(megabytes):
+                os.write(fd, b"x" * (1024 * 1024))
+            os.fsync(fd)
+        operation.progress(message="written")
+        deadline = time.monotonic() + float(params.get("seconds", 30.0))
+        while time.monotonic() < deadline:
+            if operation.cancelled.wait(0.02):
+                raise worker_channel.OperationCancelled()
+        return {"written": megabytes}
     if name == "exit":
         os._exit(int(params.get("code", 1)))
     if name == "raise":

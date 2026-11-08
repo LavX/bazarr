@@ -172,6 +172,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 from collections import deque
@@ -665,6 +666,102 @@ def folder_usage(path: str, max_entries: int = 100_000) -> tuple[int, bool]:
         except OSError:
             return total, True
     return total, False
+
+
+_DELETED = " (deleted)"
+
+
+def _under(path: str, folder: str) -> bool:
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
+    """Bytes held by files that were unlinked but are still open, per folder: ``({folder: bytes}, incomplete)``.
+
+    A worker can create a file in its folder, unlink it and keep writing through
+    the open descriptor: the bytes are on disk and no directory scan finds them.
+    For every process given, each descriptor (and each mapping) whose link target
+    ends in "(deleted)" and whose original path lies under a folder, or that sits
+    on the folder's filesystem, is stat'ed through its ``/proc`` link and counted
+    by allocated size, once per (device, inode) however many processes hold it.
+
+    Incomplete when the descriptors of a live process cannot be listed or read, or
+    a candidate cannot be stat'ed: what it holds is then unknown. A process that
+    vanished, or a descriptor closed meanwhile, is not an omission.
+    """
+    roots = []
+    for folder in folders:
+        real = os.path.realpath(folder)
+        try:
+            device = os.stat(real).st_dev
+        except OSError:
+            device = None
+        roots.append((folder, {folder, real}, device))
+    usage = {folder: 0 for folder, _names, _dev in roots}
+    seen: set = set()
+    incomplete = False
+
+    def account(path, link):
+        nonlocal incomplete
+        try:
+            info = os.stat(link)
+        except (FileNotFoundError, ProcessLookupError):
+            return
+        except OSError:
+            incomplete = True
+            return
+        if not stat.S_ISREG(info.st_mode):
+            return
+        size = getattr(info, "st_blocks", 0) * 512 or info.st_size
+        identity = (info.st_dev, info.st_ino)
+        if identity in seen:
+            return
+        mine = [folder for folder, names, device in roots
+                if any(_under(path, name) for name in names) or (device is not None and device == info.st_dev)]
+        if mine:
+            seen.add(identity)
+            for folder in mine:
+                usage[folder] += size
+
+    for pid in pids:
+        directory = "/proc/%d/fd" % pid
+        try:
+            descriptors = os.listdir(directory)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            incomplete = True
+            continue
+        for name in descriptors:
+            link = "%s/%s" % (directory, name)
+            try:
+                target = os.readlink(link)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                incomplete = True
+                continue
+            if target.endswith(_DELETED):
+                account(target[: -len(_DELETED)], link)
+        # Deleted files that are only mapped (and written through the mapping).
+        try:
+            with open("/proc/%d/maps" % pid, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            incomplete = True
+            continue
+        for line in lines:
+            if not line.endswith(_DELETED):
+                continue
+            parts = line.split(None, 5)
+            if len(parts) < 6:
+                continue
+            path = parts[5][: -len(_DELETED)]
+            if any(_under(path, name) for _folder, names, _dev in roots for name in names):
+                account(path, "/proc/%d/map_files/%s" % (pid, parts[0]))
+    return usage, incomplete
 
 
 def launcher_spawn(build_spec: Callable[[], Any], *, probe=None, require_sandbox: bool = False) -> Callable[[], Any]:
@@ -1169,7 +1266,7 @@ class WorkerPool:
                 self._check_open()
             # Starting the worker can fill its folders or its memory; the checks that
             # held before it started are repeated before it is given any work.
-            problem = self._violation(definition, None)
+            problem = self._violation(definition, None, tree=slot)
             if problem:
                 raise PoolUnavailable(problem[1], code=problem[0])
             self._sample(slot)
@@ -1437,7 +1534,7 @@ class WorkerPool:
         if now - slot.last_budget_at < self.limits.budget_interval:
             return None
         slot.last_budget_at = now
-        return self._budget_problem(None, now, definition=slot.definition, force=True)
+        return self._budget_problem(None, now, definition=slot.definition, force=True, tree=slot)
 
     # ------------------------------------------------------------ lease / start
 
@@ -1845,24 +1942,31 @@ class WorkerPool:
         except Exception:
             return None
 
-    def _violation(self, definition, holder, fresh=False) -> tuple[str, str] | None:
+    def _violation(self, definition, holder, fresh=False, tree=None) -> tuple[str, str] | None:
         """Why this worker must not start or take a request, or None."""
         free = self._free_space()
         if definition.writes_data and free is not None and free < self.limits.config_reserve_bytes:
             return (PoolCodes.DISK_RESERVE,
                     "free space on the config volume (%d MiB) is under the %d MiB reserve" % (
                         free // MIB, self.limits.config_reserve_bytes // MIB))
-        return self._budget_problem(holder, self._clock(), definition, force=fresh or holder is None)
+        return self._budget_problem(holder, self._clock(), definition, force=fresh or holder is None, tree=tree)
 
-    def _budget_problem(self, holder, now, definition, force=False):
-        """The folder-budget problem of ``definition``, cached on ``holder`` (a slot) when given."""
+    def _budget_problem(self, holder, now, definition, force=False, tree=None):
+        """The folder-budget problem of ``definition``, cached on ``holder`` (a slot) when given.
+
+        ``tree`` is the slot whose process tree is also searched for files that were
+        unlinked but are still held open (and so still use the folder's disk).
+        """
         if not definition.budgets:
             return None
         if holder is not None and not force and now - holder.last_budget_check < self.limits.budget_interval:
             return holder.budget_problem
         problem = None
+        held, held_incomplete = self._deleted_open_usage(tree or holder, definition.budgets)
         for budget in definition.budgets:
             used, truncated = folder_usage(budget.path, self.limits.budget_max_entries)
+            used += held.get(budget.path, 0)
+            truncated = truncated or held_incomplete
             if truncated or used > budget.max_bytes:
                 problem = (PoolCodes.FOLDER_BUDGET, "%s is over its %d MiB budget" % (
                     budget.label or "a worker folder", budget.max_bytes // MIB))
@@ -1871,6 +1975,16 @@ class WorkerPool:
             holder.last_budget_check = now
             holder.budget_problem = problem
         return problem
+
+    def _deleted_open_usage(self, slot, budgets):
+        """``deleted_open_usage`` for the worker's whole tree; ``({}, False)`` when there is no tree to look at."""
+        session = getattr(slot, "session", None)
+        process = session.process if session is not None else None
+        if process is None or process.returncode is not None or not os.path.isdir("/proc/self/fd"):
+            return {}, False
+        pids, incomplete = _process_tree(process.pid, 256)
+        usage, partial = deleted_open_usage(pids, [budget.path for budget in budgets])
+        return usage, incomplete or partial
 
     def _preflight_running(self, entry, slot):
         """Before a request on a running worker: disk reserve and folder budgets."""

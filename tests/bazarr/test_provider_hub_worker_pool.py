@@ -2649,3 +2649,72 @@ def test_the_sandbox_status_says_detached_processes_cannot_be_tracked_where_that
     monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
     notes = " ".join(sandbox_limitations(SandboxProbe(abi=0, verified=False)))
     assert "Detached processes cannot be tracked on this platform" in notes
+
+
+# ----------------------------------- files unlinked but still open count against the folder
+
+
+@needs_smaps
+def test_deleted_open_usage_counts_an_unlinked_file_once_and_only_for_its_folder(tmp_path):
+    data = tmp_path / "data"
+    other = tmp_path / "other"
+    data.mkdir()
+    other.mkdir()
+    path = data / "gone"
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, b"x" * (2 * MIB))
+        os.fsync(fd)
+        os.unlink(path)
+        second = os.dup(fd)
+        try:
+            # The same pid listed twice and a duplicated descriptor: one file, counted once.
+            usage, incomplete = pool_module.deleted_open_usage([os.getpid(), os.getpid()], [str(data)])
+            assert incomplete is False
+            assert 2 * MIB <= usage[str(data)] < 3 * MIB
+        finally:
+            os.close(second)
+        # A folder the file was not under, on another path: attributed only where it belongs
+        # (the same filesystem counts too, so compare against a path-only match).
+        usage, _ = pool_module.deleted_open_usage([os.getpid()], [str(other)])
+        assert set(usage) == {str(other)}
+    finally:
+        os.close(fd)
+    usage, _ = pool_module.deleted_open_usage([os.getpid()], [str(data)])
+    assert usage[str(data)] == 0
+
+
+@needs_smaps
+def test_an_unreadable_descriptor_directory_of_a_live_process_is_an_incomplete_scan(tmp_path, monkeypatch):
+    real = os.listdir
+
+    def denying(path):
+        if str(path) == "/proc/%d/fd" % os.getpid():
+            raise PermissionError(13, "Permission denied")
+        return real(path)
+
+    monkeypatch.setattr(os, "listdir", denying)
+    usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(tmp_path)])
+    assert incomplete is True
+    monkeypatch.undo()
+    gone = 2 ** 22 + 99
+    assert pool_module.deleted_open_usage([gone], [str(tmp_path)]) == ({str(tmp_path): 0}, False)
+
+
+@needs_smaps
+@pytest.mark.parametrize("where", ["worker", "child"])
+def test_a_worker_that_writes_through_an_unlinked_file_is_killed_for_its_folder(make_pool, tmp_path, where):
+    data = tmp_path / "data"
+    data.mkdir()
+    pool = make_pool(use_clock=False)
+    pool.register(definition(budgets=[FolderBudget(str(data), 1 * MIB, "plugin data")]))
+    written = []
+    handle = pool.submit("tr", "write_deleted", {"path": str(data / "hidden"), "mb": 4, "child": where == "child"},
+                         on_progress=lambda message: written.append(message))
+    assert wait_until(lambda: bool(written), timeout=10)
+    # The folder looks empty to a directory scan.
+    assert folder_usage(str(data)) == (0, False) or folder_usage(str(data))[0] < MIB
+    pool.sweep()
+    with pytest.raises(WorkerKilled) as killed:
+        handle.wait(10)
+    assert killed.value.code == "folder_budget"
