@@ -3921,3 +3921,40 @@ def test_the_permissions_decide_whether_a_named_mapping_is_shared():
     assert pool_module._is_shared_anonymous("[anon_shmem:x]", "rw-s")
     assert not pool_module._is_shared_anonymous("[anon_shmem:x]", "rw-p")
     assert not pool_module._is_shared_anonymous("[anon:x]", "rw-s")
+
+
+# ------------------------------------------- the /dev/shm reserve never exceeds what the filesystem can free
+
+
+def test_an_empty_tiny_dev_shm_does_not_latch_the_guard(make_pool):
+    pool = make_pool(fast_pool_limits(), use_clock=False, shm_reader=lambda: (4 * MIB, 4 * MIB, True))
+    pool.register(definition())
+    pool.sweep()
+    # The default reserve (8 MiB) is more than the whole filesystem; it is held to half of it.
+    assert pool.status()["shm_low"] is False
+    pool.run("tr", "echo")
+    assert pool._shm_reserve(4 * MIB) == 2 * MIB
+    low = make_pool(fast_pool_limits(), use_clock=False, shm_reader=lambda: (4 * MIB, 1 * MIB, True))
+    low.sweep()
+    assert low.status()["shm_low"] is True
+
+
+def test_the_default_reserve_for_bigger_filesystems_is_unchanged_and_never_above_half(make_pool):
+    pool = make_pool(fast_pool_limits(), use_clock=False, shm_reader=lambda: (64 * MIB, 64 * MIB, True))
+    assert pool._shm_reserve(64 * MIB) == 8 * MIB
+    assert pool._shm_reserve(640 * MIB) == 64 * MIB
+    assert pool._shm_reserve(10 * MIB) == 5 * MIB
+
+
+def test_a_configured_reserve_above_the_whole_dev_shm_is_refused(make_pool):
+    with pytest.raises(ValueError) as refused:
+        WorkerPool(fast_pool_limits(shm_reserve_bytes=10 * MIB), autostart=False,
+                   shm_reader=lambda: (4 * MIB, 4 * MIB, True))
+    assert "shm_reserve_bytes" in str(refused.value) and "/dev/shm" in str(refused.value)
+    for bad in (-1, True, 1.5):
+        with pytest.raises(ValueError):
+            WorkerPool(fast_pool_limits(shm_reserve_bytes=bad), autostart=False,
+                       shm_reader=lambda: (4 * MIB, 4 * MIB, True))
+    # Within the size it is accepted, and a /dev/shm that cannot be guarded accepts anything.
+    make_pool(fast_pool_limits(shm_reserve_bytes=3 * MIB), shm_reader=lambda: (4 * MIB, 4 * MIB, True))
+    make_pool(fast_pool_limits(shm_reserve_bytes=10 * MIB), shm_reader=lambda: (30 * GIB, 30 * GIB, True))

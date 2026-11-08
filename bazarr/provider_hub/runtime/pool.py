@@ -1435,6 +1435,18 @@ class WorkerPool:
         self._disk_free = disk_free or self._default_disk_free
         self._memory_reader = memory_reader or read_process_tree_memory
         self._shm_reader = shm_reader or shm_state
+        configured = self.limits.shm_reserve_bytes
+        if configured is not None:
+            if isinstance(configured, bool) or not isinstance(configured, int) or configured < 0:
+                raise ValueError("shm_reserve_bytes must be a non-negative whole number of bytes")
+            try:
+                state = self._shm_reader()
+            except Exception:
+                state = None
+            if shm_guardable(state) and configured > state[0]:
+                raise ValueError(
+                    "shm_reserve_bytes (%d) is more than all of /dev/shm (%d bytes): the guard could never recover"
+                    % (configured, state[0]))
         # Set by the sweep while /dev/shm is under its reserve; admissions are refused meanwhile.
         self._shm_low = False
         self._event_sink = event_sink
@@ -1980,6 +1992,19 @@ class WorkerPool:
             self._cond.notify_all()
         self._flush()
 
+    def _shm_reserve(self, total: int) -> int:
+        """Free space under which /dev/shm counts as nearly full, never more than half of it.
+
+        The default is the larger of 8 MiB and a tenth of the filesystem, which on a small one
+        (a 4 MiB /dev/shm) would be more than it can ever have free: the guard would latch for
+        good. So it is held to half the size. A configured value above the size is refused when
+        the pool is built (``__init__``); if the filesystem later turns out smaller, it is held
+        to half of it as well.
+        """
+        configured = self.limits.shm_reserve_bytes
+        wanted = max(8 * MIB, total // 10) if configured is None else configured
+        return min(wanted, total // 2) if (configured is None or configured > total) else wanted
+
     def _guard_shm(self):
         """Watch the free space of /dev/shm, a size-limited tmpfs shared by every worker.
 
@@ -1998,9 +2023,7 @@ class WorkerPool:
                 self._shm_low = False
             return
         total, free, _separate = state
-        reserve = self.limits.shm_reserve_bytes
-        if reserve is None:
-            reserve = max(8 * MIB, total // 10)
+        reserve = self._shm_reserve(total)
         low = free < reserve
         with self._cond:
             was = self._shm_low
