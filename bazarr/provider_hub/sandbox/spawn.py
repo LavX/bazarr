@@ -551,12 +551,19 @@ class WorkerProcess(subprocess.Popen):
     enforcement: str = "declared"
     # The process that keeps the worker's group id reserved; see ``_start_plain``.
     _anchor: "subprocess.Popen | None" = None
+    _leader_lost = False
+    _anchor_lost = False
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         # Before the child exists, so every override below is safe to call from
         # Popen's own code.
         self._own_lock = threading.RLock()
         self._stop_running: "threading.Event | None" = None
+        # Sticky: set the moment a probe or a wait finds the leader or the anchor
+        # was reaped by somebody else. Its pid may belong to a stranger from then
+        # on, so nothing is ever signalled by it again.
+        self._leader_lost = False
+        self._anchor_lost = False
         super().__init__(*args, **kwargs)
 
     def launcher_failure(self) -> "LauncherFailure | None":
@@ -614,7 +621,7 @@ class WorkerProcess(subprocess.Popen):
         False once it was reaped, by this object or by anything else (``waitid``
         finds no such child). A zombie is still ours: it keeps its pid.
         """
-        if self.returncode is not None:
+        if self.returncode is not None or self._leader_lost:
             return False
         waitid = getattr(os, "waitid", None)
         if waitid is None:
@@ -622,10 +629,36 @@ class WorkerProcess(subprocess.Popen):
         try:
             waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
+            self._leader_lost = True
             return False
         except OSError:
             return True
         return self.returncode is None
+
+    def _anchor_ours(self) -> bool:
+        """Whether the group anchor is still unreaped. Call with ``_own_lock`` held.
+
+        The same rule as for the leader: a non-reaping probe immediately before a
+        signal, and a sticky flag once anything found it gone. ``returncode`` alone
+        is not enough, since a direct ``waitpid`` elsewhere never updates it.
+        """
+        anchor = self._anchor
+        if anchor is None or self._anchor_lost:
+            return False
+        if anchor.returncode is not None:
+            self._anchor_lost = True
+            return False
+        waitid = getattr(os, "waitid", None)
+        if waitid is None:
+            return True
+        try:
+            waitid(os.P_PID, anchor.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            self._anchor_lost = True
+            return False
+        except OSError:
+            return True
+        return True
 
     def signal_group(self, sig: int) -> "bool | None":
         """Signal the worker's process group while it is certainly ours.
@@ -641,7 +674,10 @@ class WorkerProcess(subprocess.Popen):
         with self._own_lock:
             anchor = self._anchor
             try:
-                if anchor is not None and anchor.returncode is None:
+                if anchor is not None:
+                    if not self._anchor_ours():
+                        # The group id was the anchor's; nobody holds it any more.
+                        return None
                     killpg(anchor.pid, sig)
                     return True
                 if not self._still_ours():
@@ -740,10 +776,11 @@ class WorkerProcess(subprocess.Popen):
             # the anchor is reaped its pid cannot be reused, and from then on
             # ``signal_group`` must not find it, so nobody can slip in between.
             with self._own_lock:
-                try:
-                    killpg(anchor.pid, signal.SIGKILL)
-                except OSError:
-                    pass
+                if self._anchor_ours():
+                    try:
+                        killpg(anchor.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
                 _finish_anchor(anchor)
                 self._anchor = None
             if timed_out:

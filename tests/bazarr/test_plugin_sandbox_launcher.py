@@ -3839,3 +3839,30 @@ def test_the_anchor_and_launcher_channels_are_sockets(tmp_path):
             assert os.readlink("/proc/self/fd/%d" % plain._anchor.stdin.fileno()).startswith("socket:")
     finally:
         plain.stop(0.5)
+
+
+@linux_only
+def test_an_anchor_reaped_by_somebody_else_is_never_signalled(monkeypatch):
+    """A direct waitpid elsewhere never updates the anchor's returncode: the probe must catch it."""
+    plain = spawn._start_plain([sys.executable, "-c", "import time; time.sleep(60)"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    anchor = plain._anchor
+    if anchor is None:
+        plain.stop(0.5)
+        pytest.skip("no process group anchor on this interpreter")
+    sent = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (sent.append((pgid, sig)), real_killpg(pgid, sig))[1])
+    try:
+        os.kill(anchor.pid, signal.SIGKILL)
+        os.waitpid(anchor.pid, 0)
+        # Popen was not told: it still thinks the anchor is running.
+        assert anchor.returncode is None
+        assert plain.signal_group(signal.SIGCONT) is None
+        assert plain._anchor_lost is True
+        plain.stop(0.5)
+        assert sent == [], sent
+        assert plain.returncode is not None
+    finally:
+        monkeypatch.undo()
+        plain.stop(0.5)
