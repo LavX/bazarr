@@ -1188,7 +1188,9 @@ class WorkerSession:
                     cut()
                 stop(self.limits.kill_grace)
                 with self._group_lock:
-                    self._teardown_ok = True
+                    # A process that says it could not end the group (its leader was
+                    # reaped first) has not done the teardown, however cleanly it returned.
+                    self._teardown_ok = getattr(process, "group_cleaned", None) is not False
             except Exception as error:
                 logger.warning("%s: stopping the worker failed: %s", self.name, type(error).__name__)
             finally:

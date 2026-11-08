@@ -2180,7 +2180,8 @@ class WorkerPool:
         the pool.
         """
         if isinstance(process, WorkerProcess) and (
-                process._anchor is not None or process._anchor_lost or process._leader_lost):
+                process._anchor is not None or process._anchor_lost or process._leader_lost
+                or process.group_cleaned is False):
             # An anchored worker's group is ended when its anchor is let go; a leader or
             # anchor that somebody else reaped leaves a group nobody can vouch for.
             return False

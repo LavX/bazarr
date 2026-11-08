@@ -3883,3 +3883,61 @@ def test_a_launcher_that_cannot_fork_says_so_and_that_nothing_was_created(tmp_pa
     record, cleanup = status_records(status)
     assert record["kind"] == "sandbox" and "fork" in record["message"]
     assert cleanup == {"cleanup": "complete"}
+
+
+# --- A fallback worker (no anchor, no waitid) keeps its leader until the group is ended -----
+
+LEADER_WITH_CHILD = """
+import os, signal, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL)
+print(child.pid, flush=True)
+{body}
+"""
+
+
+def _fallback_leader(body):
+    process = WorkerProcess(
+        [sys.executable, "-c", LEADER_WITH_CHILD.format(body=body)], start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    child = int(process.stdout.readline())
+    return process, child
+
+
+@linux_only
+def test_a_worker_that_leaves_while_being_asked_to_does_not_leave_its_group_behind(monkeypatch):
+    monkeypatch.delattr(os, "waitid", raising=False)
+    process, child = _fallback_leader("signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))\ntime.sleep(60)")
+    try:
+        time.sleep(0.3)  # the handler is installed
+        process.stop(2.0)
+        assert wait_dead(child), "a same-group child outlived the stop"
+        assert process.returncode is not None
+        assert process.group_cleaned is True
+    finally:
+        monkeypatch.undo()
+        try:
+            os.kill(child, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+@linux_only
+def test_a_leader_reaped_before_the_group_was_ended_is_reported_unconfirmed(monkeypatch):
+    monkeypatch.delattr(os, "waitid", raising=False)
+    sent = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (sent.append((pgid, sig)), real_killpg(pgid, sig))[1])
+    process, child = _fallback_leader("pass")
+    try:
+        process.wait(timeout=10)  # the leader left on its own and was reaped
+        process.stop(0.5)
+        # The group number may be somebody else's now: nothing was sent, nothing is claimed.
+        assert sent == []
+        assert process.group_cleaned is False
+        assert not wait_dead(child, seconds=0.3)
+    finally:
+        monkeypatch.undo()
+        try:
+            os.kill(child, signal.SIGKILL)
+        except OSError:
+            pass

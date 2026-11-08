@@ -2977,3 +2977,15 @@ def test_close_overlapping_a_one_off_run_counts_its_worker_once(make_pool):
     runner.join(15)
     assert not closer.is_alive() and not runner.is_alive()
     assert len(pool._unverified.get("a", ())) == 1 and not pool._unverified_reserved
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid") or os.name != "posix", reason="needs POSIX process groups")
+def test_a_worker_handle_that_could_not_end_its_group_is_not_confirmed_gone():
+    from provider_hub.sandbox import WorkerProcess
+
+    process = WorkerProcess([sys.executable, "-c", "pass"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    process.wait(timeout=10)  # reaped before anyone ended its group
+    process.stop(0.5)
+    assert process.group_cleaned is False
+    assert WorkerPool._cleanup_confirmed(process) is False

@@ -554,6 +554,15 @@ class WorkerProcess(subprocess.Popen):
     _anchor: "subprocess.Popen | None" = None
     _leader_lost = False
     _anchor_lost = False
+    # None until a ``stop`` has run. True: this object ended the worker's process
+    # group itself. False: it could not, because the leader (and with it the group
+    # id) was reaped before the group was ended, so what the worker left behind is
+    # unknown. A launcher, which proves its tree some other way, leaves it None.
+    _group_cleaned: "bool | None" = None
+
+    @property
+    def group_cleaned(self) -> "bool | None":
+        return self._group_cleaned
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         # Before the child exists, so every override below is safe to call from
@@ -745,7 +754,14 @@ class WorkerProcess(subprocess.Popen):
             pass
 
     def _do_stop(self, grace: float) -> None:
-        """Terminate the worker, then kill its whole process group.
+        cleaned = self._end_tree(grace)
+        if cleaned:
+            self._group_cleaned = True
+        elif self._group_cleaned is None:
+            self._group_cleaned = False
+
+    def _end_tree(self, grace: float) -> bool:
+        """Terminate the worker, then kill its whole process group. True if the group was ended.
 
         The group is cleaned up whether or not the worker is still running, and
         whether or not something already reaped it (``poll``, ``wait`` and
@@ -755,24 +771,27 @@ class WorkerProcess(subprocess.Popen):
         this object has not reaped, so the kernel cannot hand that pid out
         again and the kill always reaches the right group. Without an anchor
         the group id is the worker's own pid, which is safe to signal only
-        while the worker is not reaped: the check and the signal happen under
-        the lock, the exit is seen with ``waitid`` (which does not consume it)
-        and nothing is sent when something else reaped it first. Where
-        ``waitid`` does not exist the group is signalled only when the worker
-        outlived its grace, since waiting for it would reap it.
+        while the worker is not reaped: the leader is kept unreaped until the
+        group has been signalled, the check and the signal happen under the
+        lock, and nothing is sent when something else reaped it first. A leader
+        that was reaped before the group was ended leaves the answer False: the
+        group number may belong to someone else, so nothing can be said of what
+        the worker left behind.
         """
         killpg = getattr(os, "killpg", None)
         if killpg is None:
+            # No process groups on this platform: the reap is all there is to end.
             if self._terminate_and_wait(grace):
                 try:
                     self.kill()
                 except OSError:
                     pass
                 self._reap_quietly()
-            return
+            return True
         anchor = self._anchor
         if anchor is not None:
             timed_out = self._terminate_and_wait(grace)
+            cleaned = False
             # Kill the group, reap the anchor and let go of it in one step: until
             # the anchor is reaped its pid cannot be reused, and from then on
             # ``signal_group`` must not find it, so nobody can slip in between.
@@ -780,17 +799,21 @@ class WorkerProcess(subprocess.Popen):
                 if self._anchor_ours():
                     try:
                         killpg(anchor.pid, signal.SIGKILL)
+                        cleaned = True
+                    except ProcessLookupError:
+                        cleaned = True  # nobody left in it
                     except OSError:
                         pass
                 _finish_anchor(anchor)
                 self._anchor = None
             if timed_out:
                 self._reap_quietly()
-            return
+            return cleaned
         if self.returncode is not None:
-            # Reaped by an earlier poll, wait or communicate: the pid may be
-            # someone else's now.
-            return
+            # Reaped by an earlier poll, wait or communicate before the group was
+            # ended: the pid may be someone else's now.
+            return False
+        cleaned = False
         if hasattr(os, "waitid"):
             try:
                 # Not self.terminate(): it polls first and would reap an
@@ -806,18 +829,45 @@ class WorkerProcess(subprocess.Popen):
                 with self._own_lock:
                     if self._still_ours():
                         killpg(self.pid, signal.SIGKILL)
+                        cleaned = True
+            except ProcessLookupError:
+                cleaned = True
             except (ChildProcessError, OSError):
                 pass
             self._reap_quietly()
-            return
-        if self._terminate_and_wait(grace):
-            with self._own_lock:
-                if self._still_ours():
-                    try:
-                        killpg(self.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-            self._reap_quietly()
+            return cleaned
+        # No waitid: the exit cannot be seen without consuming it, so the worker is not
+        # waited for. It gets its grace to leave (seen as a zombie where /proc says so;
+        # otherwise the whole grace passes), and the group is signalled while the leader
+        # is still there, alive or a zombie. Only then is it reaped.
+        with self._own_lock:
+            if self._still_ours():
+                try:
+                    os.kill(self.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+        end = time.monotonic() + max(grace, 0.0)
+        while time.monotonic() < end and not self._zombie():
+            time.sleep(0.01)
+        with self._own_lock:
+            if self._still_ours():
+                try:
+                    killpg(self.pid, signal.SIGKILL)
+                    cleaned = True
+                except ProcessLookupError:
+                    cleaned = True
+                except OSError:
+                    pass
+        self._reap_quietly()
+        return cleaned
+
+    def _zombie(self) -> bool:
+        """Whether ``/proc`` says the child has exited and is waiting to be reaped."""
+        try:
+            with open("/proc/%d/stat" % self.pid, "rb") as handle:
+                return handle.read().rsplit(b")", 1)[1].split()[0] in (b"Z", b"X")
+        except (OSError, IndexError):
+            return False
 
 
 class LauncherProcess(WorkerProcess):
