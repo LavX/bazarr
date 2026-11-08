@@ -1,3 +1,4 @@
+import errno
 import io
 import json
 import os
@@ -4349,3 +4350,71 @@ def test_exited_and_ours_both_record_an_unknown_answer_the_same_way(monkeypatch)
                 assert session._ours(process) is False
         # Gone is lost without being unknown: somebody else reaped it, and there is nothing to end.
         assert session._group_lost is True and session._ownership_unknown is False, how
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+@pytest.mark.parametrize("mode", ["waitid-missing", "waitid-fails"])
+def test_a_stop_during_the_proc_probe_is_not_read_as_somebody_elses_reap(monkeypatch, mode):
+    import builtins
+
+    from provider_hub.sandbox import WorkerProcess
+
+    process = WorkerProcess([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    session = WorkerSession(["worker"])
+    session.process = process
+    session._process_mark = session_module._start_mark(process.pid)
+    if mode == "waitid-missing":
+        monkeypatch.delattr(os, "waitid", raising=False)
+    else:
+        def failing(*args, **kwargs):
+            raise OSError(errno.EPERM, "Operation not permitted")
+
+        monkeypatch.setattr(os, "waitid", failing)
+    real_open = builtins.open
+    inside = threading.Event()
+    first = []
+
+    def pausing_open(path, *args, **kwargs):
+        # The probe is about to read the child's /proc entry; the pool's stop() reaps it in this window.
+        if str(path) == "/proc/%d/stat" % process.pid and threading.current_thread().name == "prober":
+            first.append(True)
+            inside.set()
+            time.sleep(0.4)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", pausing_open)
+    results = []
+    prober = threading.Thread(target=lambda: results.append(session._exited(process)), name="prober")
+    prober.start()
+    assert inside.wait(5)
+    stopper = threading.Thread(target=process.stop, args=(0.5,))
+    stopper.start()
+    prober.join(10)
+    stopper.join(15)
+    monkeypatch.undo()
+    assert not prober.is_alive() and not stopper.is_alive()
+    # The object reaped it itself: that is not somebody else's, and the slot must not stay stuck.
+    assert session._group_lost is False
+    assert process.returncode is not None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_contract_process_that_cannot_tell_is_unknown_to_the_session_not_asked_again(monkeypatch):
+    from provider_hub.sandbox import WorkerProcess, spawn as sandbox_spawn
+
+    process = WorkerProcess([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        monkeypatch.delattr(os, "waitid", raising=False)
+
+        def unreadable(pid):
+            raise OSError(errno.EIO, "I/O error")
+
+        monkeypatch.setattr(sandbox_spawn, "_stat_fields", unreadable)
+        assert process.probe_exit() is None
+        assert session_module._probe(process) == session_module._UNKNOWN
+    finally:
+        monkeypatch.undo()
+        process.kill()
+        process.wait()

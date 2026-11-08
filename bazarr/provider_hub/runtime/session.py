@@ -340,6 +340,10 @@ def _probe(process, mark=None):
         answer = own()
         if answer in (_RUNNING, _EXITED, _GONE):
             return answer
+        if _is_posix():
+            # It could not tell either (no waitid and no /proc): asking again out here, outside
+            # its lock, would be overtaken by its own reap. Unknown is the answer.
+            return _UNKNOWN
     if process.returncode is not None:
         return _EXITED
     if not _is_posix():

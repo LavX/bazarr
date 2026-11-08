@@ -784,33 +784,58 @@ class WorkerProcess(subprocess.Popen):
         """What the child is doing, without reaping it, judged under this object's lock.
 
         ``"running"``; ``"exited"`` (a zombie, or reaped by this object itself); ``"gone"``
-        (reaped by somebody else, so the pid is no longer ours). ``None`` where the
-        platform cannot tell without consuming the exit.
+        (reaped by somebody else, so the pid is no longer ours). ``None`` when it cannot
+        be told at all: no ``waitid`` that can leave an exit unconsumed and no ``/proc``.
 
-        A caller that reads ``returncode`` and then asks ``waitid`` on its own can be
-        overtaken by this object's own reap in between and take it for somebody else's.
-        Here the check and the question are one step against every reap this object does.
+        A caller that reads ``returncode`` and then asks ``waitid`` (or ``/proc``) on its
+        own can be overtaken by this object's own reap in between and take it for somebody
+        else's. Here the check and the question are one step against every reap this object
+        does, ``/proc`` fallback included, so a session asks only this and never repeats the
+        question outside the lock.
         """
         with self._own_lock:
             if self.returncode is not None:
                 return "exited"
             if self._leader_lost:
                 return "gone"
+            if os.name != "posix":
+                return None
             waitid = getattr(os, "waitid", None)
             flag = getattr(os, "WNOWAIT", None)
-            if os.name != "posix" or waitid is None or flag is None:
-                return None
+            if waitid is not None and flag is not None:
+                try:
+                    found = waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | flag)
+                except ChildProcessError:
+                    self._leader_lost = True
+                    return "gone"
+                except OSError:
+                    pass  # says nothing about the pid: ask /proc below
+                else:
+                    return "running" if found is None else "exited"
+            return self._proc_answer()
+
+    def _proc_answer(self) -> "str | None":
+        """``probe_exit`` from ``/proc`` and the start time. Call with ``_own_lock`` held."""
+        if not os.path.isdir("/proc/self"):
             try:
-                found = waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | flag)
-            except ChildProcessError:
+                os.kill(self.pid, 0)
+            except ProcessLookupError:
                 self._leader_lost = True
                 return "gone"
             except OSError:
-                if _owned_without_waitid(self.pid, self._started_mark) is False:
-                    self._leader_lost = True
-                    return "gone"
                 return None
-            return "running" if found is None else "exited"
+            return None  # a zombie and a stranger look the same from here
+        try:
+            state, start = _stat_fields(self.pid)
+        except FileNotFoundError:
+            self._leader_lost = True
+            return "gone"
+        except (OSError, IndexError, ValueError):
+            return None
+        if self._started_mark is not None and start != self._started_mark:
+            self._leader_lost = True
+            return "gone"
+        return "exited" if state in ("Z", "X") else "running"
 
     def signal_group(self, sig: int) -> "bool | None":
         """Signal the worker's process group while it is certainly ours.
