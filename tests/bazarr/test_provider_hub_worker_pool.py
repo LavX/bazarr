@@ -3054,3 +3054,77 @@ def test_a_worker_handle_that_could_not_end_its_group_is_not_confirmed_gone():
     process.stop(0.5)
     assert process.group_cleaned is False
     assert WorkerPool._cleanup_confirmed(process) is False
+
+
+# ---------------------------------------- the last teardown of a key settles its entry
+
+
+def _resident_and_one_off_stuck(make_pool, order):
+    """A resident and a one-off run of one key, both torn down, finishing in ``order`` (last one is named)."""
+    import threading
+
+    gate = threading.Event()
+    running = threading.Event()
+    runtimes = {}
+
+    class Resident(StubProcessRuntime):
+        pass
+
+    class OneOff(StubProcessRuntime):
+        def submit(self, op, params=None, **kwargs):
+            from provider_hub.runtime.session import RequestResult
+
+            running.set()
+
+            class Handle:
+                id = 1
+
+                def done(self):
+                    return gate.is_set()
+
+                def wait(self, timeout=None):
+                    if not gate.wait(timeout):
+                        raise TimeoutError("still running")
+                    return RequestResult({"op": op})
+
+            return Handle()
+
+    def resident_factory(*args):
+        runtimes["resident"] = Resident()
+        return runtimes["resident"]
+
+    def one_off_factory(*args):
+        runtimes["one-off"] = OneOff()
+        return runtimes["one-off"]
+
+    pool = make_pool(fast_pool_limits(max_oneshot=2, acquire_timeout=2.0), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=resident_factory))
+    pool.warm("a")
+    runner = threading.Thread(
+        target=lambda: _quiet(pool.run_once, WorkerDefinition("a", kind="daemon", runtime=one_off_factory), "echo"),
+        daemon=True)
+    runner.start()
+    assert running.wait(5)
+    # The resident is stopped (its process stays: stuck) while the one-off still runs;
+    # then the one-off ends (its process stays too: stuck).
+    pool.stop("a")
+    gate.set()
+    runner.join(10)
+    assert pool.status()["stuck"] == 2 and pool.state("a") is WorkerState.STOPPING
+    return pool, runtimes
+
+
+@pytest.mark.parametrize("last", ["one-off", "resident"])
+def test_the_entry_is_stopped_when_the_last_teardown_of_its_key_is_confirmed(make_pool, last):
+    pool, runtimes = _resident_and_one_off_stuck(make_pool, last)
+    first = "resident" if last == "one-off" else "one-off"
+    runtimes[first].process.returncode = 0
+    pool.sweep()
+    # One survivor is left: the plugin is still stopping.
+    assert pool.status()["stuck"] == 1 and pool.state("a") is WorkerState.STOPPING
+    runtimes[last].process.returncode = 0
+    pool.sweep()
+    assert pool.status()["stuck"] == 0
+    assert pool.state("a") is WorkerState.STOPPED
+    pool.warm("a")
+    assert pool.state("a") is WorkerState.READY

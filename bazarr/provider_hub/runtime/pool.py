@@ -2376,12 +2376,16 @@ class WorkerPool:
             pending.discard(slot)
             if not pending:
                 del self._tearing[key]
-        owner = slot.entry or entry
-        if owner is None:
+        if self._tearing.get(key):
             return
-        if (owner.state == WorkerState.STOPPING and owner.slot is None and not owner.retiring
-                and not self._tearing.get(key)):
-            self._set_state(owner, WorkerState.STOPPED, "stopped")
+        # The last teardown of this key is confirmed, whichever worker it was (a one-off
+        # run has no entry of its own): the plugin registered under the key, and the
+        # entry this worker belonged to, read as stopped if nothing is left of them.
+        owner = slot.entry or entry
+        for candidate in (self._entries.get(key), owner):
+            if (candidate is not None and candidate.state == WorkerState.STOPPING and candidate.slot is None
+                    and not candidate.retiring):
+                self._set_state(candidate, WorkerState.STOPPED, "stopped")
 
     def _add_stuck(self, slot, entry, release):
         """Put a worker on the stuck list once; a second report of it only adds what it must release.
