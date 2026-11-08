@@ -947,7 +947,7 @@ class WorkerProcess(subprocess.Popen):
             # ended: the pid may be someone else's now.
             return False
         cleaned = False
-        if hasattr(os, "waitid"):
+        if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
             try:
                 # Not self.terminate(): it polls first and would reap an
                 # exited worker. The worker is unreaped here (zombies take

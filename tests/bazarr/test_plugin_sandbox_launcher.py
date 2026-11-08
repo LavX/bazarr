@@ -4037,3 +4037,12 @@ def test_the_shm_state_is_none_where_there_is_no_statvfs(monkeypatch):
     assert spawn.shm_state() is None
     assert spawn.shm_guardable(spawn.shm_state()) is False
     assert "not limited per plugin" in " ".join(sandbox_status(DECLARED)["limitations"])
+
+
+@linux_only
+def test_stop_works_where_waitid_exists_but_cannot_leave_an_exit_unconsumed(monkeypatch):
+    monkeypatch.delattr(os, "WNOWAIT", raising=False)
+    process = WorkerProcess([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    process.stop(1.0)
+    assert process.returncode is not None and process.group_cleaned is True
