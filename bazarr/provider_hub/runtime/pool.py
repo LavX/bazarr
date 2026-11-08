@@ -232,6 +232,7 @@ DEFAULT_MAX_RESIDENT = 8
 TRANSLATOR_MEMORY_BYTES = 1 * GIB
 DEFAULT_MEMORY_BYTES = 512 * MIB
 CONFIG_RESERVE_BYTES = 1 * GIB
+FOLDER_SCAN_SECONDS = 5.0
 
 # Longest polite window a stop may ask for: the shutdown frame cannot carry more.
 MAX_CLOSE_GRACE = 600
@@ -448,6 +449,8 @@ class PoolLimits:
     tick: float = 1.0
     budget_interval: float = 10.0
     budget_max_entries: int = 100_000
+    # How long one folder scan may take before it counts as incomplete.
+    budget_scan_seconds: float = FOLDER_SCAN_SECONDS
     # Draft ``options`` and ``test`` runs outside the resident set.
     max_oneshot: int = 2
     close_grace: float = 2.0
@@ -656,40 +659,92 @@ def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=()) ->
     return MemorySample(bytes=total, rss_bytes=rss_total, processes=counted, source=source, truncated=truncated)
 
 
-def folder_usage(path: str, max_entries: int = 100_000) -> tuple[int, bool]:
+_MAX_SCAN_DEPTH = 256
+
+
+def folder_usage(path: str, max_entries: int = 100_000, max_seconds: float | None = FOLDER_SCAN_SECONDS
+                 ) -> tuple[int, bool]:
     """Allocated bytes under ``path`` without following links.
 
-    Returns ``(bytes, truncated)``; ``truncated`` means the walk stopped at
-    ``max_entries`` and the caller should treat the folder as over any budget.
-    So does a subtree that cannot be read (a directory without permission to
-    list it or to stat what is in it): its content is unknown, so the scan is
-    incomplete. A missing folder is empty.
+    Returns ``(bytes, truncated)``; ``truncated`` means the scan is incomplete and
+    the caller should treat the folder as over any budget. That is so when the
+    walk stopped at ``max_entries`` or after ``max_seconds`` (so one slow tree
+    cannot hold up the supervision of others), when a subtree cannot be read (a
+    directory without permission to list it or to stat what is in it), and when a
+    directory was swapped for something else while the scan was under way. A
+    missing folder is empty.
+
+    The walk holds directory descriptors: every directory is opened without
+    following links, relative to the descriptor of its parent, and listed and
+    stat'ed through that descriptor. A path is never looked up a second time, so
+    swapping a directory for a symlink between the listing and the visit cannot
+    send the scan outside the folder.
     """
+    deadline = None if max_seconds is None else time.monotonic() + max_seconds
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    nofollow = flags | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        # The configured folder itself may be a link the host set up; only what is inside it is untrusted.
+        root = os.open(os.path.realpath(path), flags)
+    except (FileNotFoundError, NotADirectoryError):
+        return 0, False
+    except OSError:
+        return 0, True
     total = 0
     seen = 0
-    stack = [path]
-    while stack:
-        current = stack.pop()
-        try:
-            with os.scandir(current) as scan:
-                for entry in scan:
-                    seen += 1
-                    if seen > max_entries:
-                        return total, True
-                    try:
-                        info = entry.stat(follow_symlinks=False)
-                        if entry.is_dir(follow_symlinks=False):
-                            stack.append(entry.path)
-                        total += _allocated(info)
-                    except FileNotFoundError:
-                        continue
-                    except OSError:
-                        return total, True
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        except OSError:
-            return total, True
-    return total, False
+    frames: list = []  # (directory descriptor, scandir iterator)
+    try:
+        frames.append((root, os.scandir(root)))
+        while frames:
+            if deadline is not None and time.monotonic() > deadline:
+                return total, True
+            descriptor, entries = frames[-1]
+            try:
+                entry = next(entries)
+            except StopIteration:
+                entries.close()
+                os.close(descriptor)
+                frames.pop()
+                continue
+            seen += 1
+            if seen > max_entries:
+                return total, True
+            try:
+                info = entry.stat(follow_symlinks=False)
+                total += _allocated(info)
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return total, True
+            if len(frames) >= _MAX_SCAN_DEPTH:
+                return total, True
+            try:
+                child = os.open(entry.name, nofollow, dir_fd=descriptor)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                # Swapped for a link or a file since it was listed, or unreadable: not scanned.
+                return total, True
+            try:
+                frames.append((child, os.scandir(child)))
+            except OSError:
+                os.close(child)
+                return total, True
+        return total, False
+    except OSError:
+        return total, True
+    finally:
+        for descriptor, entries in frames:
+            try:
+                entries.close()
+            except OSError:
+                pass
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 _DELETED = " (deleted)"
@@ -2156,7 +2211,8 @@ class WorkerPool:
         problem = None
         held, held_incomplete = self._deleted_open_usage(tree or holder, definition.budgets)
         for budget in definition.budgets:
-            used, truncated = folder_usage(budget.path, self.limits.budget_max_entries)
+            used, truncated = folder_usage(budget.path, self.limits.budget_max_entries,
+                                           self.limits.budget_scan_seconds)
             used += held.get(budget.path, 0)
             truncated = truncated or held_incomplete
             if truncated or used > budget.max_bytes:

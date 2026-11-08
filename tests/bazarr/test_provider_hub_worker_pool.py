@@ -1312,14 +1312,14 @@ def test_a_worker_whose_tree_is_too_big_to_measure_is_killed_as_over_its_limit(m
 def test_a_folder_scan_that_cannot_read_a_subtree_is_incomplete(tmp_path, monkeypatch):
     (tmp_path / "sealed").mkdir()
     (tmp_path / "sealed" / "big").write_bytes(b"x" * 100_000)
-    real = os.scandir
+    real = os.open
 
-    def denying(path):
+    def denying(path, *args, **kwargs):
         if os.fspath(path).endswith("sealed"):
             raise PermissionError(13, "Permission denied")
-        return real(path)
+        return real(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "scandir", denying)
+    monkeypatch.setattr(os, "open", denying)
     used, truncated = folder_usage(str(tmp_path))
     assert truncated is True
     # A path that is simply not there is empty, not unknown.
@@ -3357,3 +3357,64 @@ def test_memfd_usage_refuses_a_mapped_only_memfd_and_counts_an_open_one(tmp_path
     finally:
         unmap()
     assert pool_module.memfd_usage([os.getpid()]) == (0, False)
+
+
+# ------------------------------------ the folder scan holds directory descriptors and a time budget
+
+
+def test_a_directory_swapped_for_a_link_during_the_scan_is_not_followed(tmp_path, monkeypatch):
+    folder = tmp_path / "data"
+    outside = tmp_path / "outside"
+    (folder / "sub").mkdir(parents=True)
+    outside.mkdir()
+    (outside / "big").write_bytes(b"x" * (5 * MIB))
+    (folder / "sub" / "small").write_bytes(b"y" * 10)
+    real_open = os.open
+    swapped = []
+
+    def swapping(path, flags, *args, **kwargs):
+        # Between the listing that named ``sub`` and the visit to it, an attacker swaps it for a link.
+        if os.fspath(path) == "sub" and not swapped:
+            swapped.append(True)
+            (folder / "sub" / "small").unlink()
+            (folder / "sub").rmdir()
+            os.symlink(outside, folder / "sub")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping)
+    used, truncated = folder_usage(str(folder))
+    assert swapped
+    # Not followed: nothing of the outside tree is counted, and the swap fails the scan closed.
+    assert used < 1 * MIB
+    assert truncated is True
+
+
+def test_a_folder_scan_over_its_time_budget_is_incomplete(tmp_path):
+    for index in range(50):
+        (tmp_path / ("f%d" % index)).write_bytes(b"x")
+    assert folder_usage(str(tmp_path), max_seconds=30) == (folder_usage(str(tmp_path), max_seconds=None))
+    used, truncated = folder_usage(str(tmp_path), max_seconds=0.0)
+    assert truncated is True
+
+
+def test_a_slow_tree_cannot_stall_the_scan_of_the_next_budget(make_pool, tmp_path):
+    slow = tmp_path / "slow"
+    slow.mkdir()
+    (slow / "f").write_bytes(b"x")
+    pool = make_pool(fast_pool_limits(budget_scan_seconds=0.0), use_clock=False)
+    pool.register(definition(budgets=[FolderBudget(str(slow), 100 * MIB, "plugin data")]))
+    with pytest.raises(PoolUnavailable) as refused:
+        pool.run("tr", "echo")
+    assert refused.value.code == "folder_budget"
+
+
+def test_a_very_deep_tree_is_incomplete_not_a_crash(tmp_path):
+    current = tmp_path
+    for _ in range(300):
+        current = current / "d"
+        try:
+            current.mkdir()
+        except OSError:
+            pytest.skip("the filesystem refuses such a deep tree")
+    used, truncated = folder_usage(str(tmp_path))
+    assert truncated is True
