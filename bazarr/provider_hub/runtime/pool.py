@@ -1375,6 +1375,10 @@ class WorkerPool:
             if starting is not None and starting not in self._detached:
                 starting.cancel_reason = "stopped"
                 self._detach(starting)
+                # The start is counted as a detached one from here on; the entry stops
+                # counting it as resident in the same hold, so it is counted once.
+                if entry.state == WorkerState.STARTING:
+                    self._set_state(entry, WorkerState.STOPPED, "stopped")
             if entry.state == WorkerState.READY and entry.slot is not None:
                 self._begin_stop(entry, "stopped")
             retiring, entry.retiring = entry.retiring, []

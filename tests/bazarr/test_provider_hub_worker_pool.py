@@ -2802,3 +2802,42 @@ def test_a_reserved_unit_is_given_back_when_nothing_was_spawned_or_the_launcher_
     with pytest.raises(PoolUnavailable):
         pool.warm("f")
     assert not pool._unverified_reserved
+
+
+def test_a_cancelled_start_is_counted_once_while_it_is_still_running(make_pool):
+    import threading
+
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    class SlowStart(StubProcessRuntime):
+        def start(self):
+            entered.set()
+            proceed.wait(10)
+            super().start()
+
+        def close(self, grace=5.0):
+            self.process.returncode = 0
+            super().close(grace)
+
+    pool = make_pool(fast_pool_limits(max_resident=2, acquire_timeout=0.5), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=lambda *args: SlowStart()))
+    pool.register(WorkerDefinition("b", kind="daemon", runtime=lambda *args: StubProcessRuntime()))
+    starter = threading.Thread(target=lambda: _quiet(pool.warm, "a"))
+    starter.start()
+    assert entered.wait(5)
+    assert pool.status()["processes"] == 1
+    stopper = threading.Thread(target=pool.stop, args=("a",))
+    stopper.start()
+    try:
+        assert wait_until(lambda: pool._entry("a").state is WorkerState.STOPPED)
+        # One start in the making, however it is looked at: a cap of two leaves room for another.
+        assert pool.status()["processes"] == 1
+        pool.warm("b")
+        assert pool.state("b") is WorkerState.READY and pool.status()["processes"] == 2
+    finally:
+        proceed.set()
+    starter.join(10)
+    stopper.join(10)
+    assert not starter.is_alive() and not stopper.is_alive()
+    assert pool.status()["processes"] == 1
