@@ -49,6 +49,9 @@ class EpisodesWanted(Resource):
     get_response_model = api_ns_episodes_wanted.model('EpisodeWantedGetResponse', {
         'data': fields.Nested(data_model),
         'total': fields.Integer(),
+        # Episodes with a pending forced duplicate search, under the same exclusions as the list. They are
+        # not in `data` unless something is also missing: it only tells the page that a search has work.
+        'forced_pending': fields.Integer(),
     })
 
     @authenticate
@@ -119,4 +122,13 @@ class EpisodesWanted(Resource):
             .where(wanted_condition)) \
             .scalar()
 
-        return marshal({'data': results, 'total': count}, self.get_response_model)
+        forced_pending = database.execute(
+            select(func.count())
+            .select_from(TableEpisodes)
+            .join(TableShows)
+            .where(reduce(operator.and_, [TableEpisodes.forced_search_requested_at.is_not(None)]
+                          + get_exclusion_clause('series')))) \
+            .scalar()
+
+        return marshal({'data': results, 'total': count, 'forced_pending': forced_pending},
+                       self.get_response_model)

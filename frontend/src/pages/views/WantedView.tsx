@@ -62,6 +62,9 @@ interface Props<T extends Wanted.Base> {
   langOptions?: LangOption[];
   missingLangOptions?: LangOption[];
   dataFilter?: (item: T) => boolean;
+  // Work Search All has although nothing is listed, e.g. pending duplicate
+  // searches. It enables the button and never changes the list.
+  pendingSearchCount?: number;
   searchAll: () => Promise<void>;
   scanAll: () => Promise<void>;
   getWantedItem: (row: T) => WantedItem;
@@ -84,6 +87,7 @@ function WantedView<T extends Wanted.Base>({
   langOptions = [],
   missingLangOptions = [],
   dataFilter,
+  pendingSearchCount = 0,
   searchAll,
   scanAll,
   getWantedItem,
@@ -258,7 +262,7 @@ function WantedView<T extends Wanted.Base>({
       <Toolbox wrapOnPhone className={styles.band}>
         <Group gap="xs" className={styles.actions}>
           <Toolbox.Button
-            disabled={hasTask || dataCount === 0}
+            disabled={hasTask || (dataCount === 0 && pendingSearchCount === 0)}
             onClick={searchAll}
             icon={faSearch}
           >

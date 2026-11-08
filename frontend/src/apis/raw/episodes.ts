@@ -23,10 +23,7 @@ class EpisodeApi extends BaseApi {
   }
 
   async wanted(params: Parameter.Range) {
-    const response = await this.get<DataWrapperWithTotal<Wanted.Episode>>(
-      "/wanted",
-      params,
-    );
+    const response = await this.get<Wanted.EpisodePage>("/wanted", params);
     return response;
   }
 

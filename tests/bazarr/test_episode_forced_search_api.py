@@ -199,3 +199,65 @@ def test_a_reused_local_id_is_not_written(forced_api, monkeypatch, verb):
     flag = _flags(session)[3]
     # The new episode that took the id is exactly as it was inserted.
     assert (flag is None) if verb == "post" else (flag is not None)
+
+
+WANTED = "/api/episodes/wanted"
+
+
+@pytest.fixture
+def wanted_api(forced_api, monkeypatch):
+    from api.episodes import wanted as wanted_mod
+
+    client, session, events = forced_api
+    monkeypatch.setattr(wanted_mod, "database", session)
+    return client, session, events
+
+
+def _wanted(client):
+    body = client.get(WANTED, headers=HEADERS)
+    assert body.status_code == 200
+    return body.json
+
+
+def test_the_wanted_list_stays_as_it_is_and_reports_pending_requests_apart(wanted_api):
+    client, session, _events = wanted_api
+
+    # Nothing is missing anywhere: the list is empty before and after the request, and only the count moves.
+    before = _wanted(client)
+    assert before["data"] == [] and before["total"] == 0 and before["forced_pending"] == 0
+
+    assert client.post(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    assert client.post(ROOT, data=_form(episode=51, arr_instance_id=2), headers=HEADERS).status_code == 204
+    pending = _wanted(client)
+    assert pending["data"] == [] and pending["total"] == 0
+    assert pending["forced_pending"] == 2
+
+    assert client.delete(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    assert _wanted(client)["forced_pending"] == 1
+
+
+@pytest.mark.usefixtures("languages_loaded")
+def test_a_pending_request_on_an_episode_that_is_also_missing_something_is_listed_once(wanted_api):
+    client, session, _events = wanted_api
+    session.execute(sa.update(TableEpisodes).where(TableEpisodes.id == 3).values(
+        missing_subtitles="['fr']", audio_language="[]", subtitles="[]"))
+    session.commit()
+    assert client.post(ROOT, data=_form(), headers=HEADERS).status_code == 204
+
+    body = _wanted(client)
+
+    assert body["total"] == 1 and len(body["data"]) == 1
+    assert body["forced_pending"] == 1
+
+
+def test_wanted_pending_count_follows_the_wanted_exclusions(wanted_api, monkeypatch):
+    from app.config import settings as app_settings
+
+    client, session, _events = wanted_api
+    session.execute(sa.update(TableEpisodes).where(TableEpisodes.id == 3).values(monitored="False"))
+    session.commit()
+    assert client.post(ROOT, data=_form(), headers=HEADERS).status_code == 204
+    assert _wanted(client)["forced_pending"] == 1
+
+    monkeypatch.setattr(app_settings.sonarr, "only_monitored", True)
+    assert _wanted(client)["forced_pending"] == 0

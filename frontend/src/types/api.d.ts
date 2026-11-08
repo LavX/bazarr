@@ -243,6 +243,12 @@ declare namespace Wanted {
     };
 
   type Movie = Base & MovieIdType & TitleType & AudioLanguageType;
+
+  // The wanted episodes page. `forced_pending` counts episodes with a pending
+  // duplicate search; they are not in `data` unless something is also missing.
+  type EpisodePage = DataWrapperWithTotal<Episode> & {
+    forced_pending?: number;
+  };
 }
 
 declare namespace Blacklist {

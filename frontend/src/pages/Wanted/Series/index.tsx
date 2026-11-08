@@ -47,6 +47,9 @@ const WantedSeriesView: FunctionComponent = () => {
     defaultId: instanceDefaultId,
   } = useArrInstanceLabels("sonarr");
   const query = useEpisodeWantedPagination(hasActiveFilter);
+  // The query is typed for the paging wrapper only; this page's endpoint adds the pending count.
+  const forcedPending =
+    (query.data as Wanted.EpisodePage | undefined)?.forced_pending ?? 0;
 
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
@@ -289,6 +292,7 @@ const WantedSeriesView: FunctionComponent = () => {
       langOptions={langOptions}
       missingLangOptions={langOptions}
       dataFilter={hasActiveFilter ? dataFilter : undefined}
+      pendingSearchCount={forcedPending}
       searchAll={async () => {
         await mutateAsync({ action: "search-wanted" });
       }}
