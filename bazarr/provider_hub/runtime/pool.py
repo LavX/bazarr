@@ -120,6 +120,19 @@ open (by blocks). A shared-memory object that is only mapped (its descriptor clo
 cannot be measured, so it makes the sample incomplete, which counts as over the limit:
 a plugin may not keep shared memory mapped after closing it.
 
+A shared anonymous mapping (MAP_SHARED|MAP_ANONYMOUS, which includes Python's
+``mmap.mmap(-1, n)`` and multiprocessing's raw shared arrays) is shared memory with no
+descriptor at all. Unmapping every page but one of a big one leaves the rest allocated
+and invisible: the remaining mapping shows one page in Pss, ``maps`` shows the same
+offset and device as for an untouched mapping, and the object's size is unreachable
+without privileges (``map_files``). The only rule that can be checked is the strict
+one: any shared anonymous mapping in the worker's tree makes the memory sample
+incomplete, so the worker counts as over its limit. False positives are real: a
+plugin that uses ``mmap.mmap(-1, n)`` or a shared multiprocessing array is stopped
+for it. What works instead: a private anonymous mapping (``MAP_PRIVATE``, plain
+allocation, ``mmap.mmap(-1, n, flags=mmap.MAP_PRIVATE)``), or a memfd it keeps open
+(measured by blocks).
+
 Folder budgets count what is on disk under the folder, plus files the worker tree
 unlinked but still holds open (found through its descriptors, charged by blocks).
 A deleted file referenced only by a mapping cannot be measured without privileges
@@ -761,6 +774,9 @@ def _allocated(info) -> int:
 
 
 _SHM_DIR = "/dev/shm/"
+# How a shared anonymous mapping (MAP_SHARED|MAP_ANONYMOUS, Python's ``mmap.mmap(-1, n)``)
+# appears in ``maps``: an unnamed tmpfs file, "/dev/zero (deleted)" on current kernels.
+_SHARED_ANONYMOUS = ("/dev/zero", "[anon_shmem]")
 
 
 def _holds_memory(target: str) -> bool:
@@ -788,7 +804,9 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
     descriptors or mappings of a live process cannot be read, and when a memory
     object (memfd, ``/dev/shm`` file, System V segment) is mapped but no descriptor
     in the tree measures it: a plugin may not keep shared memory mapped after
-    closing it. Not covered: pipe and socket
+    closing it. A shared *anonymous* mapping has no descriptor to measure at all, so
+    any in the tree makes the sample incomplete (see the pool docstring for why, and
+    for what it costs). Not covered: pipe and socket
     buffers, eventfds and the like (small or bounded by system limits), and tmpfs
     files outside ``/dev/shm`` (the folder budgets cover the folders a plugin has).
     """
@@ -853,6 +871,12 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
             if len(parts) < 6:
                 continue
             path = parts[5][: -len(_DELETED)] if parts[5].endswith(_DELETED) else parts[5]
+            if path in _SHARED_ANONYMOUS:
+                # MAP_SHARED|MAP_ANONYMOUS: tmpfs pages behind a file nobody has a descriptor
+                # to. Unmap all but a page of a big one and the rest stays allocated with
+                # no mapping to show it, and nothing unprivileged says how big the object is.
+                incomplete = True
+                continue
             if not (_holds_memory(path) or path.startswith("/SYSV")):
                 continue
             try:

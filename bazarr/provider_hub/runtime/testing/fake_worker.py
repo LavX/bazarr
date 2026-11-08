@@ -398,6 +398,29 @@ def _handle(operation):
             if operation.cancelled.wait(0.02):
                 raise worker_channel.OperationCancelled()
         return {"memfds": len(held)}
+    if name == "shared_anonymous":
+        # Maps ``mb`` megabytes MAP_SHARED|MAP_ANONYMOUS, dirties them all and unmaps every page
+        # but the last: the tmpfs pages stay allocated, with one page left mapped to show for them.
+        import ctypes
+
+        length = int(params.get("mb", 200)) * 1024 * 1024
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mmap.restype = ctypes.c_void_p
+        libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                              ctypes.c_long]
+        libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        address = libc.mmap(None, length, 3, 0x01 | 0x20, -1, 0)  # RW, MAP_SHARED|MAP_ANONYMOUS
+        ctypes.memset(address, 1, length)
+        if params.get("keep_all"):
+            pass
+        else:
+            libc.munmap(address, length - 4096)
+        operation.progress(message="written")
+        deadline = time.monotonic() + float(params.get("seconds", 30.0))
+        while time.monotonic() < deadline:
+            if operation.cancelled.wait(0.02):
+                raise worker_channel.OperationCancelled()
+        return {"mapped": address is not None}
     if name == "memfd_mapped":
         # Fills one memfd, maps a single page of it with the C call and closes the
         # descriptor: the object lives on through the mapping alone, and Pss shows one page.

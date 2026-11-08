@@ -3418,3 +3418,44 @@ def test_a_very_deep_tree_is_incomplete_not_a_crash(tmp_path):
             pytest.skip("the filesystem refuses such a deep tree")
     used, truncated = folder_usage(str(tmp_path))
     assert truncated is True
+
+
+# ------------------------------ shared anonymous mappings cannot be measured, so they fail closed
+
+
+@needs_smaps
+def test_a_worker_that_unmaps_all_but_a_page_of_a_big_shared_anonymous_mapping_is_killed_for_memory(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition(memory_limit_bytes=100 * MIB))
+    written = []
+    handle = pool.submit("tr", "shared_anonymous", {"mb": 200}, on_progress=lambda message: written.append(message))
+    assert wait_until(lambda: bool(written), timeout=20)
+    pid = pid_of(pool, "tr")
+    plain = 0
+    with open("/proc/%d/smaps_rollup" % pid) as handle_file:
+        for line in handle_file:
+            if line.startswith("Pss:"):
+                plain = int(line.split()[1]) * 1024
+    # 200 MiB of tmpfs pages are still allocated; the one remaining page is all that Pss shows.
+    assert plain < 100 * MIB
+    pool.sweep()
+    with pytest.raises(WorkerKilled) as killed:
+        handle.wait(10)
+    assert killed.value.code == "memory_limit"
+
+
+@needs_smaps
+def test_shared_anonymous_mappings_are_unmeasurable_and_private_ones_are_fine():
+    import mmap
+
+    shared = mmap.mmap(-1, 4 * MIB)  # MAP_SHARED|MAP_ANONYMOUS on Unix
+    try:
+        assert pool_module.memfd_usage([os.getpid()])[1] is True
+    finally:
+        shared.close()
+    private = mmap.mmap(-1, 4 * MIB, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    try:
+        private[0:1] = b"x"
+        assert pool_module.memfd_usage([os.getpid()]) == (0, False)
+    finally:
+        private.close()

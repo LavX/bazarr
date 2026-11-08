@@ -156,8 +156,9 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
         "measured, so the folder counts as over its limit."
     )
     notes.append(
-        "A plugin may not keep shared memory mapped after closing it: its size cannot be "
-        "measured, so the worker counts as over its memory limit."
+        "A plugin may not keep shared memory mapped after closing it, or use shared anonymous "
+        "mappings (MAP_SHARED|MAP_ANONYMOUS, as Python's mmap.mmap(-1, n) makes): their size "
+        "cannot be measured, so the worker counts as over its memory limit."
     )
     return notes
 
