@@ -1082,6 +1082,16 @@ class WorkerPool:
                     self._cond.notify_all()
             with self._cond:
                 self._check_open()
+            # Starting the worker can fill its folders or its memory; the checks that
+            # held before it started are repeated before it is given any work.
+            problem = self._violation(definition, None)
+            if problem:
+                raise PoolUnavailable(problem[1], code=problem[0])
+            self._sample(slot)
+            problem = self._memory_problem(slot, definition.memory_limit())
+            if problem is not None:
+                slot.kill_reason = problem
+                raise WorkerKilled(problem[1], code=problem[0])
             try:
                 with self._cond:
                     slot.pending += 1
@@ -1098,7 +1108,12 @@ class WorkerPool:
                     if context is not None:
                         slot.contexts[handle.id] = context
                     self._cond.notify_all()
-                return handle.wait()
+                result = self._wait_watched(slot, handle)
+                # One more reading once it is done, so its peak is not lost. As for a
+                # resident worker that finishes and then proves too big, the answer it
+                # produced stands; the worker is torn down either way.
+                self._sample(slot)
+                return result
             except (SessionError, RequestError) as error:
                 raise self._translate(slot, error)
         finally:
@@ -1116,6 +1131,20 @@ class WorkerPool:
                     self._add_stuck(slot, None, self._oneshot.release)
             if gone:
                 self._oneshot.release()
+
+    def _wait_watched(self, slot, handle):
+        """Wait for a one-off request, checking its worker's memory and folders as time passes.
+
+        The sampler thread does the same for resident workers; a one-off run
+        carries its own checks so that it is policed even when the pool runs
+        without one.
+        """
+        interval = max(0.05, self.limits.heartbeat_interval)
+        while True:
+            try:
+                return handle.wait(interval)
+            except TimeoutError:
+                self._sweep_ephemeral(slot, self._clock())
 
     # --------------------------------------------------------------- operations
 

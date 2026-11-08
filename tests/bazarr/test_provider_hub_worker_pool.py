@@ -2205,3 +2205,73 @@ def test_a_missing_smaps_rollup_falls_back_to_status_instead_of_dropping_the_pro
     monkeypatch.setattr(pool_module, "_read_kb", no_smaps)
     sample = read_process_tree_memory(os.getpid())
     assert sample is not None and sample.source == "status" and sample.bytes > 0 and not sample.truncated
+
+
+# ---------------------------------------- a one-off run is policed like a resident worker
+
+
+def test_a_one_off_worker_that_fills_its_folder_while_starting_is_refused_work(make_pool, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+
+    class FillsOnStart(StubProcessRuntime):
+        def start(self):
+            (data / "big").write_bytes(os.urandom(3 * MIB))
+            super().start()
+
+    submitted = []
+
+    class Counting(FillsOnStart):
+        def submit(self, op, params=None, **kwargs):
+            submitted.append(op)
+            return super().submit(op, params, **kwargs)
+
+    pool = make_pool(fast_pool_limits(), use_clock=False)
+    draft = WorkerDefinition("draft", kind="daemon", runtime=lambda *args: Counting(),
+                             budgets=[FolderBudget(str(data), 1 * MIB, "plugin data")])
+    with pytest.raises(PoolUnavailable) as refused:
+        pool.run_once(draft, "echo")
+    assert refused.value.code == "folder_budget"
+    assert submitted == []
+
+
+def test_a_one_off_worker_that_is_too_big_after_init_gets_no_work(make_pool):
+    calls = []
+
+    def reader(pid):
+        calls.append(pid)
+        return MemorySample(500 * MIB, 500 * MIB, 1, "test")
+
+    pool = make_pool(memory_reader=reader, use_clock=False)
+    with pytest.raises(WorkerKilled) as killed:
+        pool.run_once(definition("draft", memory_limit_bytes=100 * MIB), "sleep", {"seconds": 5})
+    assert killed.value.code == "memory_limit" and calls
+
+
+def test_a_long_one_off_run_is_sampled_while_it_runs(make_pool):
+    calls = []
+
+    def reader(pid):
+        calls.append(pid)
+        # Fine at first, then it balloons while the request is still running.
+        return MemorySample((10 if len(calls) < 4 else 500) * MIB, 10 * MIB, 1, "test")
+
+    pool = make_pool(fast_pool_limits(heartbeat_interval=0.1), memory_reader=reader, use_clock=False)
+    started = time.monotonic()
+    with pytest.raises(WorkerKilled) as killed:
+        pool.run_once(definition("draft", memory_limit_bytes=100 * MIB), "sleep", {"seconds": 20}, timeout=20)
+    assert killed.value.code == "memory_limit"
+    assert time.monotonic() - started < 10 and len(calls) >= 4
+
+
+def test_a_one_off_run_is_sampled_once_more_when_it_finishes(make_pool):
+    calls = []
+
+    def reader(pid):
+        calls.append(pid)
+        return MemorySample(10 * MIB, 10 * MIB, 1, "test")
+
+    pool = make_pool(memory_reader=reader, use_clock=False)
+    pool.run_once(definition("draft"), "echo")
+    # Before the work, and after it.
+    assert len(calls) >= 2
