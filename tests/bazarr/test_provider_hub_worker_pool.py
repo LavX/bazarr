@@ -3610,3 +3610,156 @@ def test_the_limitations_say_when_dev_shm_is_not_limited_per_plugin(monkeypatch)
     notes = " ".join(sandbox_limitations(SandboxProbe(abi=9, verified=True, network_verified=True,
                                                       signal_scope_verified=True, capabilities_dropped=True)))
     assert "/dev/shm is not limited" not in notes
+
+
+# --------------------------------- named shared anonymous mappings, and bounded /proc reads
+
+
+def _shared_anonymous_mapping(pages=1, name=None, private=False):
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    length = pages * 4096
+    flags = (0x02 if private else 0x01) | 0x20
+    address = libc.mmap(None, length, 3, flags, -1, 0)
+    assert address not in (None, ctypes.c_void_p(-1).value)
+    if name is not None:
+        # PR_SET_VMA (0x53564d41), PR_SET_VMA_ANON_NAME (0)
+        libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_char_p]
+        if libc.prctl(0x53564D41, 0, address, length, name.encode()) != 0:
+            libc.munmap(address, length)
+            pytest.skip("this kernel cannot name anonymous mappings")
+    return address, length, lambda: libc.munmap(ctypes.c_void_p(address), ctypes.c_size_t(length))
+
+
+@needs_smaps
+@pytest.mark.parametrize("name", [None, "worker data"], ids=["unnamed", "named"])
+def test_a_shared_anonymous_mapping_is_refused_named_or_not(name):
+    address, _length, unmap = _shared_anonymous_mapping(name=name)
+    try:
+        # Whatever the kernel calls it ("/dev/zero (deleted)", "[anon_shmem]", "[anon_shmem:name]").
+        shown = [line.split(None, 5)[5].strip() for line in open("/proc/self/maps")
+                 if line.startswith("%x-" % address)]
+        assert shown and (shown[0].startswith("/dev/zero") or shown[0].startswith("[anon_shmem"))
+        assert pool_module.memfd_usage([os.getpid()])[1] is True
+    finally:
+        unmap()
+
+
+@needs_smaps
+def test_a_private_anonymous_mapping_is_fine_even_when_named():
+    address, _length, unmap = _shared_anonymous_mapping(name="scratch", private=True)
+    try:
+        shown = [line.split(None, 5)[5].strip() for line in open("/proc/self/maps")
+                 if line.startswith("%x-" % address)]
+        assert shown and shown[0].startswith("[anon:")
+        assert pool_module.memfd_usage([os.getpid()]) == (0, False)
+    finally:
+        unmap()
+
+
+def test_the_name_rule_matches_every_shared_anonymous_spelling():
+    for shared in ("/dev/zero", "[anon_shmem]", "[anon_shmem:plugin cache]"):
+        assert pool_module._is_shared_anonymous(shared)
+    for other in ("[anon:scratch]", "[heap]", "/dev/shm/sem.x", "/memfd:x", "/usr/lib/libc.so.6", ""):
+        assert not pool_module._is_shared_anonymous(other)
+
+
+class _FakeMaps:
+    """A /proc/<pid>/maps that a hostile worker has made enormous."""
+
+    def __init__(self, lines, payload):
+        self.lines = lines
+        self.payload = payload
+        self.served = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def readline(self, limit=-1):
+        if self.served >= self.lines:
+            return b""
+        self.served += 1
+        line = self.payload
+        return line[:limit] if limit and limit > 0 else line
+
+
+def _with_fake_maps(monkeypatch, fake):
+    import builtins
+
+    real_open = builtins.open
+    pid_maps = "/proc/%d/maps" % os.getpid()
+
+    def fake_open(path, *args, **kwargs):
+        if str(path) == pid_maps:
+            return fake
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+
+
+@needs_smaps
+@pytest.mark.parametrize("lines,payload,why", [
+    (PROC_LINES := 70000, b"7f0000000000-7f0000001000 rw-p 00000000 00:00 0 [heap]\n", "too many entries"),
+    (3, b"7f0000000000-7f0000001000 rw-p 00000000 00:00 0 " + b"x" * 40000 + b"\n", "one enormous line"),
+    (1000, b"7f0000000000-7f0000001000 rw-p 00000000 00:00 0 /" + b"y" * 15000 + b"\n", "too many bytes"),
+])
+def test_an_enormous_maps_listing_makes_the_samples_incomplete_and_is_not_read_to_the_end(
+        monkeypatch, lines, payload, why):
+    fake = _FakeMaps(lines, payload)
+    _with_fake_maps(monkeypatch, fake)
+    held, incomplete = pool_module.memfd_usage([os.getpid()])
+    assert incomplete is True, why
+    assert fake.served < lines or lines <= 1000, why  # stopped early where a bound was hit before the end
+    fake.served = 0
+    usage, incomplete = pool_module.deleted_open_usage([os.getpid()], ["/nonexistent-folder"])
+    assert incomplete is True, why
+    fake.served = 0
+    assert pool_module.shm_mapping_count([os.getpid()]) >= pool_module.PROC_MAX_LINES, why
+
+
+@needs_smaps
+def test_a_maps_listing_within_bounds_is_read_in_full(monkeypatch):
+    fake = _FakeMaps(500, b"7f0000000000-7f0000001000 rw-p 00000000 00:00 0 /dev/shm/sem.x (deleted)\n")
+    _with_fake_maps(monkeypatch, fake)
+    held, incomplete = pool_module.memfd_usage([os.getpid()])
+    assert incomplete is False and held == 500 * pool_module._PAGE_SIZE
+    assert fake.served == 500
+
+
+def test_status_and_smaps_rollup_readers_are_bounded(monkeypatch):
+    import builtins
+
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):
+        if str(path).endswith("/smaps_rollup") and "/proc/" in str(path):
+            return _FakeMaps(10 ** 6, b"Pss:               4 kB\n")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    with pytest.raises(OSError):
+        pool_module._read_kb("/proc/%d/smaps_rollup" % os.getpid(), "Pss")
+
+
+@needs_smaps
+@pytest.mark.parametrize("spelled", [
+    b"7f0000000000-7f0000001000 rw-s 00000000 00:01 77 /dev/zero (deleted)\n",
+    b"7f0000000000-7f0000001000 rw-s 00000000 00:01 77 [anon_shmem]\n",
+    b"7f0000000000-7f0000001000 rw-s 00000000 00:01 77 [anon_shmem:plugin cache]\n",
+], ids=["unnamed", "bare", "named"])
+def test_every_spelling_of_a_shared_anonymous_mapping_in_maps_is_refused(monkeypatch, spelled):
+    _with_fake_maps(monkeypatch, _FakeMaps(2, spelled))
+    assert pool_module.memfd_usage([os.getpid()])[1] is True
+
+
+@needs_smaps
+def test_a_named_private_anonymous_mapping_in_maps_is_not_refused(monkeypatch):
+    _with_fake_maps(monkeypatch, _FakeMaps(2, b"7f0000000000-7f0000001000 rw-p 00000000 00:00 0 [anon:scratch]\n"))
+    assert pool_module.memfd_usage([os.getpid()]) == (0, False)

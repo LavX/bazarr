@@ -521,17 +521,54 @@ class MemorySample:
 # ----------------------------------------------------------------- /proc readers
 
 
+class _ProcOverflow(OSError):
+    """A /proc file or directory of a worker's process is bigger than any honest one: not read to the end."""
+
+
+# What one /proc file of a worker's process may cost before it counts as unreadable. A worker
+# controls how many mappings, descriptors and threads it has, so none of these listings is
+# trusted to be small.
+PROC_MAX_BYTES = 8 * 1024 * 1024
+PROC_MAX_LINES = 65536
+PROC_LINE_LIMIT = 16 * 1024
+PROC_MAX_ENTRIES = 65536
+
+
+def _bounded_lines(path: str, max_bytes: int = PROC_MAX_BYTES, max_lines: int = PROC_MAX_LINES,
+                   max_seconds: float = FOLDER_SCAN_SECONDS):
+    """Lines of a /proc file one at a time, never holding more than a line.
+
+    Raises ``_ProcOverflow`` (an ``OSError``) when the file passes ``max_bytes``,
+    ``max_lines`` or ``max_seconds``, or has one line longer than ``PROC_LINE_LIMIT``:
+    callers already treat an unreadable file of a live process as an incomplete sample.
+    """
+    deadline = time.monotonic() + max_seconds
+    total = 0
+    count = 0
+    with open(path, "rb") as handle:
+        while True:
+            raw = handle.readline(PROC_LINE_LIMIT + 1)
+            if not raw:
+                return
+            total += len(raw)
+            count += 1
+            if (len(raw) > PROC_LINE_LIMIT or total > max_bytes or count > max_lines
+                    or time.monotonic() > deadline):
+                raise _ProcOverflow(path)
+            yield raw.decode("utf-8", "replace").rstrip("\n")
+
+
 def _read_kb(path: str, *names: str) -> dict:
     found: dict = {}
     wanted = set(names)
-    with open(path, "r", encoding="ascii", errors="replace") as handle:
-        for line in handle:
-            name, _, rest = line.partition(":")
-            if name in wanted:
-                try:
-                    found[name] = int(rest.split()[0]) * 1024
-                except (ValueError, IndexError):
-                    continue
+    # status and smaps_rollup are a few kilobytes; an enormous one is not honest.
+    for line in _bounded_lines(path, max_bytes=256 * 1024, max_lines=4096):
+        name, _, rest = line.partition(":")
+        if name in wanted:
+            try:
+                found[name] = int(rest.split()[0]) * 1024
+            except (ValueError, IndexError):
+                continue
     return found
 
 
@@ -554,11 +591,17 @@ def _children_of(pid: int) -> tuple[list[int] | None, bool]:
     except OSError:
         return None, False
     readable = False
+    if len(threads) > PROC_MAX_ENTRIES:
+        incomplete = True
+        threads = threads[:PROC_MAX_ENTRIES]
     for tid in threads:
         try:
             with open("/proc/%d/task/%s/children" % (pid, tid), "r", encoding="ascii") as handle:
-                text = handle.read()
+                text = handle.read(PROC_MAX_BYTES + 1)
             readable = True
+            if len(text) > PROC_MAX_BYTES:
+                incomplete = True
+                continue
             found.extend(int(p) for p in text.split())
         except FileNotFoundError:
             continue
@@ -587,7 +630,10 @@ def _parent_map(limit: int = PARENT_MAP_LIMIT) -> tuple[dict[int, list[int]], bo
             continue
         try:
             with open("/proc/%s/stat" % name, "r", encoding="ascii", errors="replace") as handle:
-                text = handle.read()
+                text = handle.read(PROC_LINE_LIMIT + 1)
+            if len(text) > PROC_LINE_LIMIT:
+                complete = False
+                continue
             ppid = int(text.rsplit(")", 1)[1].split()[1])
         except FileNotFoundError:
             continue
@@ -801,7 +847,6 @@ _SHM_DIR = "/dev/shm/"
 _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
 # How a shared anonymous mapping (MAP_SHARED|MAP_ANONYMOUS, Python's ``mmap.mmap(-1, n)``)
 # appears in ``maps``: an unnamed tmpfs file, "/dev/zero (deleted)" on current kernels.
-_SHARED_ANONYMOUS = ("/dev/zero", "[anon_shmem]")
 
 
 def _holds_memory(target: str) -> bool:
@@ -845,6 +890,9 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
         directory = "/proc/%d/fd" % pid
         try:
             descriptors = os.listdir(directory)
+            if len(descriptors) > PROC_MAX_ENTRIES:
+                incomplete = True
+                descriptors = descriptors[:PROC_MAX_ENTRIES]
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError:
@@ -884,19 +932,15 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
         if pid in skip:
             continue
         try:
-            with open("/proc/%d/maps" % pid, "r", encoding="utf-8", errors="replace") as handle:
-                lines = handle.read().splitlines()
+            lines = list(_mapped_objects("/proc/%d/maps" % pid))
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError:
             incomplete = True
             continue
-        for line in lines:
-            parts = line.split(None, 5)
-            if len(parts) < 6:
-                continue
+        for parts in lines:
             path = parts[5][: -len(_DELETED)] if parts[5].endswith(_DELETED) else parts[5]
-            if path in _SHARED_ANONYMOUS:
+            if _is_shared_anonymous(path):
                 # MAP_SHARED|MAP_ANONYMOUS: tmpfs pages behind a file nobody has a descriptor
                 # to. Unmap all but a page of a big one and the rest stays allocated with
                 # no mapping to show it, and nothing unprivileged says how big the object is.
@@ -923,6 +967,23 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
     return total, incomplete
 
 
+def _mapped_objects(path: str):
+    """The mappings of a ``maps`` file that have a name, as ``line.split(None, 5)``: read within bounds."""
+    for line in _bounded_lines(path):
+        parts = line.split(None, 5)
+        if len(parts) >= 6:
+            yield parts
+
+
+def _is_shared_anonymous(path: str) -> bool:
+    """Whether a mapping's name is that of a shared anonymous one: unnamed, or named with ``PR_SET_VMA_ANON_NAME``.
+
+    A private anonymous mapping, named or not, shows no file or ``[anon:name]``; a shared
+    one shows ``/dev/zero`` or ``[anon_shmem]`` or ``[anon_shmem:name]``.
+    """
+    return path == "/dev/zero" or path.startswith("[anon_shmem")
+
+
 def shm_mapping_count(pids, skip=()) -> int:
     """How many mappings of ``/dev/shm`` objects these processes hold (the guard's measure of who uses it)."""
     count = 0
@@ -930,11 +991,12 @@ def shm_mapping_count(pids, skip=()) -> int:
         if pid in skip:
             continue
         try:
-            with open("/proc/%d/maps" % pid, "r", encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    parts = line.split(None, 5)
-                    if len(parts) >= 6 and parts[5].startswith(_SHM_DIR):
-                        count += 1
+            for parts in _mapped_objects("/proc/%d/maps" % pid):
+                if parts[5].startswith(_SHM_DIR):
+                    count += 1
+        except _ProcOverflow:
+            # More mappings than any honest process has: the heaviest user by far.
+            count += PROC_MAX_LINES
         except OSError:
             continue
     return count
@@ -986,6 +1048,9 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
         directory = "/proc/%d/fd" % pid
         try:
             descriptors = os.listdir(directory)
+            if len(descriptors) > PROC_MAX_ENTRIES:
+                incomplete = True
+                descriptors = descriptors[:PROC_MAX_ENTRIES]
         except FileNotFoundError:
             continue
         except OSError:
@@ -1019,19 +1084,13 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
             held_names.add((path, info.st_ino))
     for pid in pids:
         try:
-            with open("/proc/%d/maps" % pid, "r", encoding="utf-8", errors="replace") as handle:
-                lines = handle.read().splitlines()
+            lines = [parts for parts in _mapped_objects("/proc/%d/maps" % pid) if parts[5].endswith(_DELETED)]
         except FileNotFoundError:
             continue
         except OSError:
             incomplete = True
             continue
-        for line in lines:
-            if not line.endswith(_DELETED):
-                continue
-            parts = line.split(None, 5)
-            if len(parts) < 6:
-                continue
+        for parts in lines:
             path = parts[5][: -len(_DELETED)]
             if not folders_of(path):
                 continue
