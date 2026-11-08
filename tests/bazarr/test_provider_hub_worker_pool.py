@@ -2380,3 +2380,35 @@ def test_a_plugin_registered_again_does_not_start_beside_a_survivor(make_pool):
     assert pool.status()["stuck"] == 0
     pool.warm("a")
     assert len(runtimes) == 2 and pool.state("a") is WorkerState.READY
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid") or os.name != "posix", reason="needs POSIX process groups")
+def test_a_leader_reaped_by_somebody_else_does_not_prove_its_descendants_gone(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition())
+    child = pool.run("tr", "fork", {}).result["child"]
+    leader = pid_of(pool, "tr")
+    assert pid_alive(child)
+    try:
+        # An outside reaper takes the leader while its descendant lives on.
+        os.kill(leader, 9)
+        os.waitpid(leader, 0)
+        pool.stop("tr")
+        assert pid_alive(child), "the session had no group to signal and signalled none"
+        # Nothing vouches for the descendant: the worker is stuck, not stopped.
+        assert pool.state("tr") is WorkerState.STOPPING
+        assert pool.status()["stuck"] == 1 and pool.status()["processes"] == 1
+    finally:
+        try:
+            os.kill(child, 9)
+        except OSError:
+            pass
+
+
+def test_a_session_that_ended_its_own_group_is_confirmed(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition())
+    child = pool.run("tr", "fork", {}).result["child"]
+    pool.stop("tr")
+    assert pool.state("tr") is WorkerState.STOPPED and pool.status()["stuck"] == 0
+    assert wait_until(lambda: not pid_alive(child))

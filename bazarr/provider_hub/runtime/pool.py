@@ -1915,6 +1915,10 @@ class WorkerPool:
             return not session.alive
         if process.returncode is None:
             return False
+        # The session says whether it ended the group itself; a runtime that does not
+        # say is trusted on its process alone.
+        if getattr(session, "teardown_confirmed", True) is not True:
+            return False
         return self._cleanup_confirmed(process)
 
     @staticmethod

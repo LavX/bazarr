@@ -373,6 +373,10 @@ class WorkerSession:
         # makes ``stop()`` skip the group cleanup it was in the middle of.
         self._handover_started = False
         self._handover_done = threading.Event()
+        # Set only when the session itself ended the worker's group (or its hand-over
+        # returned cleanly). A leader that vanished some other way proves nothing
+        # about what it left behind.
+        self._teardown_ok = False
         # Set when the leader was reaped by someone else: its number is not ours.
         self._group_lost = False
         self.last_heartbeat: dict | None = None
@@ -1183,6 +1187,8 @@ class WorkerSession:
                 if callable(cut):
                     cut()
                 stop(self.limits.kill_grace)
+                with self._group_lock:
+                    self._teardown_ok = True
             except Exception as error:
                 logger.warning("%s: stopping the worker failed: %s", self.name, type(error).__name__)
             finally:
@@ -1198,6 +1204,19 @@ class WorkerSession:
             return True
         return self._handover_done.wait(timeout)
 
+    @property
+    def teardown_confirmed(self):
+        """Whether the session ended the worker's whole group (or its process did, on request).
+
+        False after an outside reaper took the leader: its group number is not
+        ours, nothing was signalled, and descendants may live on. Where there are
+        no process groups the reap is all there is to confirm.
+        """
+        if not _is_posix():
+            return True
+        with self._group_lock:
+            return self._teardown_ok and not self._group_lost
+
     def _end_group(self, process):
         """Kill what the worker forked, once, while its leader is still unreaped."""
         if self._hand_over(process):
@@ -1207,8 +1226,8 @@ class WorkerSession:
                 return
             ours = self._ours(process)
             self._group_ended = True
-            if ours:
-                _signal_group(process, _SIGKILL)
+            if ours and _signal_group(process, _SIGKILL):
+                self._teardown_ok = True
 
     def _reap(self, process, timeout):
         """Wait for the exit, end the group, then reap the leader. Returns the exit code.
@@ -1415,7 +1434,9 @@ class WorkerSession:
                 # the group is ended, and an outside reaper is checked for), so its
                 # group number is still ours.
                 self._group_ended = True
-                if not _signal_group(process, _SIGKILL):
+                if _signal_group(process, _SIGKILL):
+                    self._teardown_ok = True
+                else:
                     try:
                         process.kill()
                     except OSError:
