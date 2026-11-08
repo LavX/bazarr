@@ -305,6 +305,14 @@ def _probe(process):
     unavailable or fails, with the zombie check above. ``gone`` means somebody
     else already collected the leader (``ECHILD``): the pid is no longer ours.
     """
+    # A process that owns its reaps (a launcher, an anchored worker) answers under its
+    # own lock: reading ``returncode`` here and asking ``waitid`` afterwards could be
+    # overtaken by its own ``stop()`` and read as a reap by somebody else.
+    own = getattr(process, "probe_exit", None)
+    if callable(own):
+        answer = own()
+        if answer in (_RUNNING, _EXITED, _GONE):
+            return answer
     if process.returncode is not None:
         return _EXITED
     if not _is_posix():

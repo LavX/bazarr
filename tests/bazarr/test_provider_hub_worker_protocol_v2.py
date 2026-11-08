@@ -4122,3 +4122,42 @@ def test_a_reap_that_cannot_wait_out_the_teardown_gives_up_instead_of_reaping():
     finally:
         process.release.set()
         tearer.join(10)
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid") or os.name != "posix", reason="needs waitid")
+def test_a_probe_overtaken_by_the_process_objects_own_reap_does_not_lose_the_group(monkeypatch):
+    from provider_hub.sandbox import WorkerProcess
+
+    process = WorkerProcess([sys.executable, "-c", "pass"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    while os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+        time.sleep(0.01)
+    session = WorkerSession(["worker"])
+    session.process = process
+    real_waitid = os.waitid
+    inside = threading.Event()
+    first = []
+
+    def pausing(*args, **kwargs):
+        # The probe has read returncode (None) and is about to ask the kernel; the
+        # pool's own stop() reaps the child in this window.
+        if not first:
+            first.append(True)
+            inside.set()
+            time.sleep(0.4)
+        return real_waitid(*args, **kwargs)
+
+    monkeypatch.setattr(os, "waitid", pausing)
+    results = []
+    prober = threading.Thread(target=lambda: results.append(session._exited(process)))
+    prober.start()
+    assert inside.wait(5)
+    stopper = threading.Thread(target=process.stop, args=(0.5,))
+    stopper.start()
+    prober.join(10)
+    stopper.join(10)
+    monkeypatch.undo()
+    assert results == [True]
+    # The process object did the reap itself: that is not somebody else's.
+    assert session._group_lost is False
+    assert process.returncode is not None

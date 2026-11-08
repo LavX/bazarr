@@ -681,6 +681,35 @@ class WorkerProcess(subprocess.Popen):
             return True
         return True
 
+    def probe_exit(self) -> "str | None":
+        """What the child is doing, without reaping it, judged under this object's lock.
+
+        ``"running"``; ``"exited"`` (a zombie, or reaped by this object itself); ``"gone"``
+        (reaped by somebody else, so the pid is no longer ours). ``None`` where the
+        platform cannot tell without consuming the exit.
+
+        A caller that reads ``returncode`` and then asks ``waitid`` on its own can be
+        overtaken by this object's own reap in between and take it for somebody else's.
+        Here the check and the question are one step against every reap this object does.
+        """
+        with self._own_lock:
+            if self.returncode is not None:
+                return "exited"
+            if self._leader_lost:
+                return "gone"
+            waitid = getattr(os, "waitid", None)
+            flag = getattr(os, "WNOWAIT", None)
+            if os.name != "posix" or waitid is None or flag is None:
+                return None
+            try:
+                found = waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | flag)
+            except ChildProcessError:
+                self._leader_lost = True
+                return "gone"
+            except OSError:
+                return None
+            return "running" if found is None else "exited"
+
     def signal_group(self, sig: int) -> "bool | None":
         """Signal the worker's process group while it is certainly ours.
 
