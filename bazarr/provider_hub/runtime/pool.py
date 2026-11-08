@@ -127,8 +127,10 @@ mapping is charged one page, and nothing more is claimed. A ``/dev/shm`` that is
 small and separate (at most 1 GiB, a filesystem of its own) is guarded instead: at each
 sweep its free space is read, and below a reserve (``shm_reserve_bytes``; by default
 the larger of 8 MiB and a tenth of its size) the pool admits no new start or request
-(``shm_low``), logs once, and stops the worker whose tree holds the most ``/dev/shm``
-mappings, one per sweep, until the space recovers. Where ``/dev/shm`` is not small and
+(``shm_low``), logs once, and stops the worker holding the most ``/dev/shm`` (the
+allocated size of the objects its descriptors hold, each counted once, plus a page for
+each mapping no descriptor measures; ties by mapping count), one per sweep, until the
+space recovers. Where ``/dev/shm`` is not small and
 separate there is nothing to guard, and the sandbox limitations say so: "shared memory
 under /dev/shm is not limited per plugin on this host".
 
@@ -1080,6 +1082,69 @@ def shm_mapping_count(pids, skip=()) -> int:
     return count
 
 
+def shm_usage(pids, skip=()) -> tuple[int, int]:
+    """What these processes hold of ``/dev/shm``: ``(bytes, mappings)``. The guard's measure of who uses it.
+
+    Bytes are the allocated size (blocks) of every ``/dev/shm`` object a descriptor
+    holds open, each counted once across the tree, plus one page for every mapping
+    that no descriptor measures (an unlinked semaphore, a closed arena). Mappings are
+    all mappings of ``/dev/shm`` objects. A listing too big to read counts as the most
+    an honest process could have, so a worker that tries it is the first to go.
+    """
+    total = 0
+    mappings = 0
+    seen: set = set()
+    measured: set = set()
+    for pid in pids:
+        if pid in skip:
+            continue
+        directory = "/proc/%d/fd" % pid
+        try:
+            descriptors = os.listdir(directory)
+            if len(descriptors) > PROC_MAX_ENTRIES:
+                total += PROC_MAX_ENTRIES * _PAGE_SIZE
+                descriptors = descriptors[:PROC_MAX_ENTRIES]
+        except OSError:
+            continue
+        for name in descriptors:
+            link = "%s/%s" % (directory, name)
+            try:
+                target = os.readlink(link)
+                held = target[: -len(_DELETED)] if target.endswith(_DELETED) else target
+                if not held.startswith(_SHM_DIR):
+                    continue
+                info = os.stat(link)
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            measured.add((held, info.st_ino))
+            if (info.st_dev, info.st_ino) not in seen:
+                seen.add((info.st_dev, info.st_ino))
+                total += _allocated(info)
+    for pid in pids:
+        if pid in skip:
+            continue
+        try:
+            for parts in _mapped_objects("/proc/%d/maps" % pid):
+                path = parts[5][: -len(_DELETED)] if parts[5].endswith(_DELETED) else parts[5]
+                if not path.startswith(_SHM_DIR):
+                    continue
+                mappings += 1
+                try:
+                    inode = int(parts[4])
+                except ValueError:
+                    inode = None
+                if (path, inode) not in measured:
+                    total += _PAGE_SIZE
+        except _ProcOverflow:
+            mappings += PROC_MAX_LINES
+            total += PROC_MAX_LINES * _PAGE_SIZE
+        except OSError:
+            continue
+    return total, mappings
+
+
 def _under(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
@@ -1955,13 +2020,15 @@ class WorkerPool:
                 continue
             pids, _incomplete = _process_tree(process.pid, 256)
             skip = {process.pid} if isinstance(process, LauncherProcess) else set()
-            count = shm_mapping_count(pids, skip)
-            if count and (heaviest is None or count > heaviest[0]):
-                heaviest = (count, entry, slot)
+            held, count = shm_usage(pids, skip)
+            score = (held, count)
+            if (held or count) and (heaviest is None or score > heaviest[0]):
+                heaviest = (score, entry, slot)
         if heaviest is None:
             return
-        count, entry, slot = heaviest
-        problem = (PoolCodes.SHM_LOW, "worker holds %d of the mappings in /dev/shm, which is nearly full" % count)
+        (held, count), entry, slot = heaviest
+        problem = (PoolCodes.SHM_LOW, "worker holds %d MiB (%d mappings) of /dev/shm, which is nearly full" % (
+            held // MIB, count))
         if entry is not None:
             self._kill_current(entry, slot, problem)
         else:

@@ -3839,3 +3839,50 @@ def test_the_path_walk_refuses_a_directory_swapped_for_a_link_before_it_is_liste
 
 def test_the_descriptor_walk_is_what_runs_where_it_is_supported():
     assert pool_module._fd_walk_available() is (os.name == "posix")
+
+
+# ------------------------------- the /dev/shm guard picks its victim by bytes, not by mapping count
+
+
+@needs_smaps
+def test_shm_usage_is_bytes_held_by_descriptors_plus_a_page_per_unmeasured_mapping():
+    page = os.sysconf("SC_PAGE_SIZE")
+    path = "/dev/shm/bazarr-test-usage-%d" % os.getpid()
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.write(fd, b"s" * (3 * MIB))
+        os.unlink(path)
+        duplicate = os.dup(fd)
+        try:
+            held, mappings = pool_module.shm_usage([os.getpid(), os.getpid()])
+            # One file however many descriptors and listings; no mapping.
+            assert 3 * MIB <= held < 3 * MIB + 256 * 1024 and mappings == 0
+        finally:
+            os.close(duplicate)
+        assert pool_module.shm_usage([os.getpid()], skip={os.getpid()}) == (0, 0)
+    finally:
+        os.close(fd)
+    assert pool_module.shm_usage([os.getpid()]) == (0, 0)
+    assert page > 0
+
+
+@needs_smaps
+def test_the_shm_guard_stops_the_worker_holding_the_most_bytes_not_the_most_mappings(make_pool):
+    state = {"free": 400 * MIB}
+    pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False,
+                     shm_reader=lambda: (512 * MIB, state["free"], True))
+    for key in ("semaphores", "big"):
+        pool.register(definition(key, session=fast_session(handshake_timeout=20.0)))
+    seen = []
+    semaphores = pool.submit("semaphores", "shm_maps", {"count": 5}, on_progress=lambda message: seen.append("a"))
+    big = pool.submit("big", "shm_file", {"mb": 60}, on_progress=lambda message: seen.append("b"))
+    assert wait_until(lambda: "a" in seen and "b" in seen, timeout=30)
+    pool.sweep()
+    state["free"] = 1 * MIB
+    pool.sweep()
+    # Five semaphore-sized mappings are 20 KiB; the unlinked, unmapped 60 MiB file is the victim.
+    with pytest.raises(WorkerKilled) as killed:
+        big.wait(10)
+    assert killed.value.code == "shm_low" and "60 MiB" in str(killed.value)
+    assert pool.state("semaphores") is WorkerState.BUSY
+    semaphores.cancel()

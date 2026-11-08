@@ -415,6 +415,21 @@ def _handle(operation):
                 if operation.cancelled.wait(0.02):
                     raise worker_channel.OperationCancelled()
         return {"got": got, "doubled": doubled, "lock": lock is not None}
+    if name == "shm_file":
+        # Fills an unlinked /dev/shm file of ``mb`` megabytes and keeps its descriptor: no
+        # mapping at all, but that much shared memory held.
+        path = "/dev/shm/bazarr-fake-file-%d" % os.getpid()
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.unlink(path)
+        block = b"f" * (1024 * 1024)
+        for _ in range(int(params.get("mb", 60))):
+            os.write(fd, block)
+        operation.progress(message="written")
+        deadline = time.monotonic() + float(params.get("seconds", 30.0))
+        while time.monotonic() < deadline:
+            if operation.cancelled.wait(0.02):
+                raise worker_channel.OperationCancelled()
+        return {"held": fd}
     if name == "shm_maps":
         # Maps ``count`` /dev/shm objects by one page each, closes the descriptors and unlinks
         # the names: the objects live on through their mappings alone, as a semaphore's does.
