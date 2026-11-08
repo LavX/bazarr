@@ -326,7 +326,8 @@ def _save_and_process(video, subtitles, episode, video_path, language, audio_lan
             subtitle.matches = {match for match in subtitle.matches if match in ("hash", "hearing_impaired")}
         result = process_subtitle(subtitle=subtitle, media_type='series', audio_language=audio_language,
                                   is_upgrade=False, is_manual=False, path=video_path,
-                                  max_score=max_score, job_id=job_id, arr_instance_id=arr_instance_id)
+                                  max_score=max_score, job_id=job_id, arr_instance_id=arr_instance_id,
+                                  auto_translate=False)
         if not result:
             logging.debug('BAZARR forced search: unable to process this subtitle: %s', subtitle)
             continue

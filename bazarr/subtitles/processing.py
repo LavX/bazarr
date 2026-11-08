@@ -297,7 +297,7 @@ def _postprocessing_config(media_type, arr_instance_id):
 
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
-                     context=None, validate=None, cancel=None, publication_guard=None):
+                     context=None, validate=None, cancel=None, publication_guard=None, auto_translate=True):
     if media_type == 'sports' and (context is None or validate is None or publication_guard is None):
         raise ValueError('Sports processing requires its owned publication guard')
     if context is not None and media_type != 'sports':
@@ -487,20 +487,23 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     )
 
     if media_type != 'sports':
-        # Auto-translate: trigger translation to any profile language configured with translate_from
-        _trigger_auto_translation(
-            downloaded_lang=downloaded_language_code2,
-            subtitle_path=downloaded_path,
-            video_path=path,
-            media_type=media_type,
-            series_id=series_id if media_type == 'series' else None,
-            episode_id=episode_id if media_type == 'series' else None,
-            radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
-            source_score_percent=percent_score,
-            forced=subtitle.language.forced,
-            arr_instance_id=(episode_metadata.arr_instance_id if media_type == 'series'
-                             else movie_metadata.arr_instance_id),
-        )
+        # Auto-translate: trigger translation to any profile language configured with translate_from.
+        # A caller that downloads on purpose to replace a source it distrusts (the forced duplicate search)
+        # turns it off, so the new file is not turned into translations of other languages.
+        if auto_translate:
+            _trigger_auto_translation(
+                downloaded_lang=downloaded_language_code2,
+                subtitle_path=downloaded_path,
+                video_path=path,
+                media_type=media_type,
+                series_id=series_id if media_type == 'series' else None,
+                episode_id=episode_id if media_type == 'series' else None,
+                radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
+                source_score_percent=percent_score,
+                forced=subtitle.language.forced,
+                arr_instance_id=(episode_metadata.arr_instance_id if media_type == 'series'
+                                 else movie_metadata.arr_instance_id),
+            )
 
         # Combined subtitle: if the profile defines a combine rule and all sources
         # are now on disk, build or refresh the combined file.

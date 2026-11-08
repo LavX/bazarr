@@ -1249,3 +1249,80 @@ def test_an_error_outcome_without_a_credential_throttle_still_holds(run):
     run.outcomes = [_result('alpha'), _result('beta', 'error', 'error')]
 
     assert _statuses(run.go()) == {'en': 'open'}
+
+
+def test_a_forced_download_is_processed_without_auto_translation(monkeypatch):
+    import contextlib
+    import subtitles.wanted.forced as forced
+
+    subtitle = SimpleNamespace(format='srt', storage_path='/series/fixture/s01e01.en.srt',
+                               language=Language('eng'), matches={'series'})
+    calls = []
+
+    monkeypatch.setattr(forced, 'get_target_folder', lambda path: None)
+    monkeypatch.setattr(forced, 'subtitle_write_locks', lambda *args: contextlib.nullcontext())
+    monkeypatch.setattr(forced, 'save_subtitles',
+                        lambda *args, **kwargs: (kwargs['write_subtitle'].keywords['written_paths'].append(
+                            subtitle.storage_path), [subtitle])[1])
+    monkeypatch.setattr(forced.os.path, 'isfile', lambda path: True)
+    monkeypatch.setattr(forced, 'process_subtitle', lambda **kwargs: calls.append(kwargs) or SimpleNamespace())
+    monkeypatch.setattr(forced, 'clear_mismatch_for_video', lambda *args, **kwargs: None)
+
+    forced._save_and_process(SimpleNamespace(original_path='/series/fixture/s01e01.mkv'), [subtitle], _episode(),
+                             '/series/fixture/s01e01.mkv', Language('eng'), 'English', 100, None, [])
+
+    assert len(calls) == 1
+    assert calls[0]['auto_translate'] is False
+
+
+def _process_series_subtitle(monkeypatch, **options):
+    """Run ``process_subtitle`` for a series download with the database, disk and queue replaced."""
+    import subtitles.processing as processing
+
+    translations = []
+    combines = []
+    subtitle = SimpleNamespace(provider_name='alpha', uploader=None, release_info='rel', id='s1', score=90,
+                               language=Language('eng'), storage_path='/series/fixture/s01e01.en.srt',
+                               matches={'series'}, ai_translated=False)
+    metadata = SimpleNamespace(imdbId='tt1', tvdbId='1', sonarrSeriesId=10, sonarrEpisodeId=20, season=1,
+                               episode=1, arr_instance_id=1)
+
+    monkeypatch.setattr(processing, 'database',
+                        SimpleNamespace(execute=lambda query: SimpleNamespace(first=lambda: metadata)))
+    monkeypatch.setattr(processing, 'scoped', lambda query, *args: query)
+    monkeypatch.setattr(processing, 'select', lambda *args, **kwargs: SimpleNamespace(
+        join=lambda *a: SimpleNamespace(where=lambda *b: None)))
+    monkeypatch.setattr(processing, '_defaul_sync_checker', lambda sub: False)
+    monkeypatch.setattr(processing, '_postprocessing_config', lambda media_type, owner: (False, None, False, 0))
+    monkeypatch.setattr(processing, 'notify_sonarr', lambda *args, **kwargs: None)
+    monkeypatch.setattr(processing, 'client_for_instance', lambda *args, **kwargs: None)
+    monkeypatch.setattr(processing, 'event_stream', lambda **kwargs: None)
+    monkeypatch.setattr(processing, 'call_external_webhook', lambda **kwargs: None)
+    monkeypatch.setattr(processing, '_get_not_matched', lambda sub, media_type: [])
+    monkeypatch.setattr(processing, 'settings', SimpleNamespace(
+        general=SimpleNamespace(use_plex=False), plex=SimpleNamespace(set_episode_added=False)))
+    monkeypatch.setattr(processing.path_mappings, 'path_replace_reverse_instance',
+                        lambda path, instance, media: path)
+    monkeypatch.setattr(processing, '_trigger_auto_translation', lambda **kwargs: translations.append(kwargs))
+    monkeypatch.setattr(processing, '_trigger_combine', lambda **kwargs: combines.append(kwargs))
+
+    result = processing.process_subtitle(subtitle=subtitle, media_type='series', audio_language='English',
+                                         path='/series/fixture/s01e01.mkv', max_score=100, arr_instance_id=1,
+                                         **options)
+    return result, translations, combines
+
+
+def test_a_downloaded_subtitle_still_queues_auto_translation_by_default(monkeypatch):
+    result, translations, combines = _process_series_subtitle(monkeypatch)
+
+    assert result is not None
+    assert len(translations) == 1
+    assert len(combines) == 1
+
+
+def test_process_subtitle_skips_auto_translation_when_told_to_but_still_combines(monkeypatch):
+    result, translations, combines = _process_series_subtitle(monkeypatch, auto_translate=False)
+
+    assert result is not None
+    assert translations == []
+    assert len(combines) == 1
