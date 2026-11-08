@@ -2101,3 +2101,43 @@ def test_lowering_the_cap_leaves_busy_and_draining_workers_alone(make_pool):
     pool.set_max_resident(1)
     assert pool.state("a") is WorkerState.BUSY and pool.state("b") is WorkerState.DRAINING
     assert busy.wait(10).result == {"slept": 0.8} and retired.wait(10).result == {"slept": 0.8}
+
+
+# ------------------------------------- a plugin is stopped only when every generation is
+
+
+def test_an_entry_is_not_stopped_while_one_generation_is_stuck(make_pool):
+    runtimes = []
+
+    class Survivor(StubProcessRuntime):
+        """Its close never gets the process out of the way."""
+
+    class Obedient(StubProcessRuntime):
+        def close(self, grace=5.0):
+            self.process.returncode = 0
+            super().close(grace)
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtimes.append(Survivor() if not runtimes else Obedient())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(max_resident=8, acquire_timeout=0.4), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    pool.warm("a")
+    pool.restart_after_drain("a", WorkerDefinition("a", kind="daemon", runtime=factory))
+    pool.warm("a")
+    assert len(runtimes) == 2 and pool.state("a") is WorkerState.READY
+    pool.stop("a")
+    # The second generation is gone, the first is stuck: the plugin is still stopping.
+    assert runtimes[1].process.returncode == 0 and runtimes[0].process.returncode is None
+    assert pool.state("a") is WorkerState.STOPPING
+    assert pool.status()["stuck"] == 1
+    # With plenty of spare capacity, no second instance starts beside the survivor.
+    with pytest.raises(PoolUnavailable):
+        pool.warm("a")
+    assert len(runtimes) == 2
+    runtimes[0].process.returncode = 0
+    pool.sweep()
+    assert pool.state("a") is WorkerState.STOPPED
+    pool.warm("a")
+    assert len(runtimes) == 3 and pool.state("a") is WorkerState.READY

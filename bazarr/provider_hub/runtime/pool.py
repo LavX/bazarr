@@ -629,6 +629,8 @@ class _Slot:
         self.closing = False
         # Why a start was cut short ("stopped"), when it was.
         self.cancel_reason: str | None = None
+        # The entry this worker belongs to (None for a one-off run).
+        self.entry: _Entry | None = None
         # Only one thread ends the process at a time, and once it has, nobody
         # signals it again unless the pool is retrying a worker it could not confirm gone.
         self.end_lock = threading.Lock()
@@ -673,6 +675,10 @@ class _Entry:
         self.state = WorkerState.STOPPED
         self.slot: _Slot | None = None
         self.retiring: list[_Slot] = []
+        # Every worker of this plugin whose teardown has been queued and is not yet
+        # confirmed gone (running, or stuck), whatever its generation. No new
+        # worker starts, and the entry does not read as stopped, until it is empty.
+        self.tearing: set = set()
         self.failures: deque = deque()
         self.backoff_until = 0.0
         self.open_until = 0.0
@@ -1323,6 +1329,12 @@ class WorkerPool:
                             "worker keeps failing and is paused: %s" % (entry.last_error or "no detail"),
                             code=PoolCodes.CIRCUIT_OPEN, retry_after=entry.open_until - now)
                     # stopped, draining, or a backoff or breaker period that has ended
+                    if entry.tearing:
+                        # A worker of this plugin is still being torn down (or stuck):
+                        # a new one does not start beside it.
+                        self._wait(deadline, "the previous worker is still being stopped",
+                                   code=PoolCodes.UNAVAILABLE)
+                        continue
                     if not self._claim_capacity(entry):
                         self._wait(deadline, "no free worker slot", code=PoolCodes.POOL_FULL)
                         continue
@@ -1330,6 +1342,7 @@ class WorkerPool:
                     entry.starts += 1
                     definition = entry.definition
                     slot = _Slot(definition, now, self.limits)
+                    slot.entry = entry
                     slot.generation = entry.generation
                     entry.starting = slot
                 break
@@ -1785,6 +1798,9 @@ class WorkerPool:
             return
         slot.closing = True
         self._closing += 1
+        owner = slot.entry or entry
+        if owner is not None:
+            owner.tearing.add(slot)
         self._closes.append((slot, entry, mode, self.limits.close_grace if grace is None else grace))
 
     def _live_pid(self, session):
@@ -1927,12 +1943,25 @@ class WorkerPool:
                     self._add_stuck(slot, entry, None)
                     self._events.append((slot.definition.key, "stuck", {}))
                     logger.warning("%s: worker process could not be confirmed gone", slot.definition.key)
-                elif (entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None
-                      and not entry.retiring):
-                    self._set_state(entry, WorkerState.STOPPED, "stopped")
+                else:
+                    self._teardown_confirmed(slot, entry)
                 self._close_threads.discard(threading.current_thread())
                 self._cond.notify_all()
             self._deliver_events()
+
+    def _teardown_confirmed(self, slot, entry):
+        """A worker's teardown is confirmed. Caller holds the lock.
+
+        The entry reads as stopped only when no other worker of it is still
+        being torn down or stuck, and no new worker starts before that.
+        """
+        owner = slot.entry or entry
+        if owner is None:
+            return
+        owner.tearing.discard(slot)
+        if (owner.state == WorkerState.STOPPING and owner.slot is None and not owner.retiring
+                and not owner.tearing):
+            self._set_state(owner, WorkerState.STOPPED, "stopped")
 
     def _add_stuck(self, slot, entry, release):
         """Put a worker on the stuck list once; a second report of it only adds what it must release.
@@ -1976,8 +2005,7 @@ class WorkerPool:
                 if item not in self._stuck:
                     continue
                 self._stuck.remove(item)
-                if entry is not None and entry.state == WorkerState.STOPPING and entry.slot is None:
-                    self._set_state(entry, WorkerState.STOPPED, "stopped")
+                self._teardown_confirmed(slot, entry)
                 self._cond.notify_all()
             if release is not None:
                 release()
