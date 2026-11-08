@@ -46,14 +46,21 @@ def run_flagged_search(episode, job_id=None, fallback_allowed=None):
     ``fallback_allowed`` is the caller's Whisper fallback permission, the same value its normal search
     passes; ``None`` leaves the choice to the forced search.
 
-    A stop (``JobCancelled``) propagates with the request still set. Any other error is logged and also
-    leaves the request set, so one broken episode does not end the run for the rest.
+    A stop of this job (``JobCancelled``) propagates with the request still set. The stop of another job does
+    not: like any other error it is logged, leaves the request set and ends only this episode, so one broken
+    episode does not end the run for the rest.
     """
     cancel = _JobStop(job_id) if job_id else None
     try:
         result = run_forced_search(episode, job_id=job_id, cancel=cancel, fallback_allowed=fallback_allowed)
-    except JobCancelled:
-        raise
+    except JobCancelled as error:
+        if error.job_id is None or job_id is None or error.job_id == job_id:
+            raise
+        # Another job's Stop reached this run through shared state. It is not this job's stop, so it ends
+        # this episode like any other error and leaves the request set.
+        logging.warning('BAZARR forced search for %s was interrupted by the stop of job %s; the request stays set',
+                        getattr(episode, 'path', episode), error.job_id)
+        return None
     except Exception:
         logging.exception('BAZARR forced search failed for %s; the request stays set',
                           getattr(episode, 'path', episode))

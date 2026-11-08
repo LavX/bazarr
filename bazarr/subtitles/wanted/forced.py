@@ -48,7 +48,7 @@ from app.database import TableEpisodes, database, get_audio_profile_languages, g
 from app.event_handler import event_stream
 from app.get_providers import (get_providers, is_credential_throttle_reason, provider_is_throttled,
                                snapshot_throttled_providers)
-from app.jobs_queue import JobCancelled
+from app.jobs_queue import JobCancelled, jobs_queue
 from app.notifier import send_notifications
 from media_servers.events import publication_callback
 from sonarr.history import history_log
@@ -181,10 +181,30 @@ class _ListingPool:
     The listing walks ``providers``, so leaving the name out means the provider is never initialised,
     never probes the video and never takes a throttle or a discard. Everything else, including the
     shared discard set, goes to the real pool.
+
+    The progress callback is the exception. The real pool is shared between the jobs of a profile and
+    holds whatever callback the last normal search bound to its own job, which raises ``JobCancelled`` for
+    that job when Stop is pressed on it. Reading it here would let another job's Stop abort this listing,
+    so the listing reports to this run's job instead.
     """
 
-    def __init__(self, pool):
+    def __init__(self, pool, job_id=None):
         self._pool = pool
+        self._job_id = job_id
+
+    @property
+    def provider_progress_callback(self):
+        job_id = self._job_id
+        if not job_id:
+            return None
+
+        def on_provider(provider_name):
+            names = self.providers
+            position = names.index(provider_name) + 1 if provider_name in names else 0
+            jobs_queue.update_job_progress(job_id=job_id,
+                                           progress_message=f"Searching {provider_name} ({position}/{len(names)})")
+
+        return on_provider
 
     @property
     def providers(self):
@@ -491,8 +511,8 @@ def _run(episode, *, profile_id, media_type, job_id, cancel, fallback_allowed):
 
     run = _Run(pool, video, _throttled_at_start())
     try:
-        listed = list_all_subtitles([video], language_set, _ListingPool(pool), min_score=int(min_score), cancel=stop,
-                                    on_outcome=run.collect)
+        listed = list_all_subtitles([video], language_set, _ListingPool(pool, job_id), min_score=int(min_score),
+                                    cancel=stop, on_outcome=run.collect)
     except ListingStopped as stopped:
         raise stopped.original from None
     candidates = [subtitle for subtitle in listed[video] if subtitle.provider_name != EXCLUDED_PROVIDER]

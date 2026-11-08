@@ -414,6 +414,18 @@ def test_stop_propagates_and_keeps_the_request(flag_runs, library, monkeypatch):
     assert _flag(library, 101) == REQUESTED_AT
 
 
+def test_another_jobs_stop_ends_only_this_episode_and_keeps_the_request(flag_runs, library, monkeypatch):
+    from app.jobs_queue import JobCancelled
+
+    def foreign_stop(*args, **kwargs):
+        raise JobCancelled('stopped', job_id=99)
+
+    monkeypatch.setattr(flag_runs, 'run_forced_search', foreign_stop)
+
+    assert flag_runs.run_flagged_search(_flagged_episode(), job_id=3) is None
+    assert _flag(library, 101) == REQUESTED_AT
+
+
 def test_a_newer_request_made_during_the_run_stays(flag_runs, library, monkeypatch):
     # The run started from an older request than the one now stored.
     older = REQUESTED_AT - datetime.timedelta(hours=1)

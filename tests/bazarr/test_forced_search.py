@@ -1326,3 +1326,73 @@ def test_process_subtitle_skips_auto_translation_when_told_to_but_still_combines
     assert result is not None
     assert translations == []
     assert len(combines) == 1
+
+
+class _Queue:
+    """The job queue seen by two jobs that share one pool: Stop on a job makes its progress report raise."""
+
+    def __init__(self, cancelled=()):
+        self.cancelled = set(cancelled)
+        self.reports = []
+
+    def update_job_progress(self, job_id, progress_message=None, **kwargs):
+        from app.jobs_queue import JobCancelled
+
+        if job_id in self.cancelled:
+            raise JobCancelled(f'Job {job_id} was cancelled', job_id=job_id)
+        self.reports.append((job_id, progress_message))
+        return True
+
+
+def _share_the_pool_with_a_normal_search(run, monkeypatch, queue, normal_job=99):
+    """Leave the shared pool holding the callback a normal search bound to ``normal_job``, as the real one does,
+    and make the listing report each provider through whatever callback the pool it is given exposes."""
+    monkeypatch.setattr(run.forced, 'jobs_queue', queue)
+
+    def bound_to_the_normal_search(provider):
+        queue.update_job_progress(job_id=normal_job, progress_message=f'Searching {provider}')
+
+    run.pool.provider_progress_callback = bound_to_the_normal_search
+    reached = []
+
+    def list_all(videos, languages, pool, min_score=0, cancel=None, on_outcome=None):
+        callback = pool.provider_progress_callback
+        for name in pool.providers:
+            if callback:
+                callback(name)
+            reached.append(name)
+        for outcome in run.outcomes:
+            on_outcome(outcome)
+        return {videos[0]: list(run.candidates)}
+
+    monkeypatch.setattr(run.forced, 'list_all_subtitles', list_all)
+    return reached
+
+
+def test_stopping_a_normal_search_does_not_reach_the_forced_run_that_shares_its_pool(run, monkeypatch):
+    queue = _Queue(cancelled={99})
+    reached = _share_the_pool_with_a_normal_search(run, monkeypatch, queue)
+    run.outcomes = [_result('alpha'), _result('beta')]
+
+    result = run.go(job_id=7)
+
+    assert _statuses(result) == {'en': 'finished'}
+    assert reached == ['alpha', 'beta']
+    assert [job for job, _ in queue.reports] == [7, 7]
+    assert queue.reports[0][1] == 'Searching alpha (1/2)'
+    # The shared pool still holds the normal search's callback.
+    assert run.pool.provider_progress_callback.__name__ == 'bound_to_the_normal_search'
+
+
+def test_stopping_the_forced_job_itself_still_ends_its_listing(run, monkeypatch):
+    from app.jobs_queue import JobCancelled
+
+    queue = _Queue(cancelled={7})
+    _share_the_pool_with_a_normal_search(run, monkeypatch, queue)
+    run.outcomes = [_result('alpha')]
+
+    with pytest.raises(JobCancelled) as raised:
+        run.go(job_id=7)
+
+    assert raised.value.job_id == 7
+    assert run.not_found == [] and run.recorded == []
