@@ -908,7 +908,18 @@ class WorkerProcess(subprocess.Popen):
         """
         end = time.monotonic() + max(timeout, 0.0)
         while True:
-            if os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+            try:
+                found = os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                raise
+            except OSError:
+                # waitid fails here for some other reason (EPERM, ENOSYS...): it cannot be
+                # asked again. Wait out the rest of the grace, seeing the exit through /proc
+                # where it can be seen; the caller then checks ownership again and goes on.
+                while time.monotonic() < end and not self._zombie():
+                    time.sleep(0.01)
+                return self._zombie()
+            if found is not None:
                 return True
             if time.monotonic() >= end:
                 return False

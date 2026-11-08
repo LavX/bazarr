@@ -4123,3 +4123,33 @@ def test_ownership_stays_unknown_and_refused_when_waitid_fails_and_nothing_else_
         monkeypatch.undo()
         process.kill()
         process.wait()
+
+
+@linux_only
+@pytest.mark.parametrize("code", [errno.EPERM, errno.ENOSYS])
+def test_a_sigterm_ignoring_worker_is_still_killed_when_waitid_fails(monkeypatch, code):
+    script = (
+        "import signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdin=subprocess.DEVNULL)\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    process = WorkerProcess([sys.executable, "-c", script], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    child = int(process.stdout.readline())
+    time.sleep(0.3)  # SIGTERM is ignored from here on
+    monkeypatch.setattr(os, "waitid", _failing_waitid(code))
+    try:
+        started = time.monotonic()
+        process.stop(0.5)
+        assert time.monotonic() - started < 4
+        assert process.returncode is not None, "a worker that ignores SIGTERM outlived stop()"
+        assert wait_dead(child), "its same-group child outlived stop()"
+        assert process.group_cleaned is True
+    finally:
+        monkeypatch.undo()
+        try:
+            os.kill(child, signal.SIGKILL)
+        except OSError:
+            pass
