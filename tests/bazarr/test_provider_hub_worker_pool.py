@@ -2726,20 +2726,29 @@ def test_a_deleted_file_both_open_and_mapped_is_counted_once(tmp_path):
         os.close(fd)
 
 
-@needs_smaps
-def test_a_deleted_file_that_is_only_mapped_is_charged_by_its_extent(tmp_path, monkeypatch):
+def _map_with_c_mmap(fd, length):
+    """Map ``fd`` with the C call, so the mapping can outlive the descriptor (Python's mmap keeps a dup)."""
     import ctypes
 
-    folder = tmp_path / "data"
-    folder.mkdir()
-    fd = _unlinked_file(folder, "mapped", 2 * MIB)
-    # Python's mmap keeps a duplicate descriptor open; the C call lets the only
-    # reference to the deleted file be the mapping itself.
     libc = ctypes.CDLL(None, use_errno=True)
     libc.mmap.restype = ctypes.c_void_p
     libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
-    address = libc.mmap(None, 2 * MIB, 3, 1, fd, 0)  # PROT_READ|PROT_WRITE, MAP_SHARED
+    address = libc.mmap(None, length, 3, 1, fd, 0)  # PROT_READ|PROT_WRITE, MAP_SHARED
     assert address not in (None, ctypes.c_void_p(-1).value)
+
+    def unmap():
+        libc.munmap(ctypes.c_void_p(address), ctypes.c_size_t(length))
+
+    return unmap
+
+
+@needs_smaps
+@pytest.mark.parametrize("pages", [1, 512], ids=["one-page-of-a-large-file", "the-whole-file"])
+def test_a_deleted_file_referenced_only_by_a_mapping_fails_the_scan_closed(tmp_path, monkeypatch, pages):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    fd = _unlinked_file(folder, "mapped", 2 * MIB)
+    unmap = _map_with_c_mmap(fd, pages * 4096)
     os.close(fd)
     real_stat = os.stat
 
@@ -2748,14 +2757,54 @@ def test_a_deleted_file_that_is_only_mapped_is_charged_by_its_extent(tmp_path, m
             raise PermissionError(1, "Operation not permitted")
         return real_stat(path, *args, **kwargs)
 
-    # An ordinary host cannot dereference map_files; that must neither matter nor look like a gap.
+    # An ordinary host cannot dereference map_files, and its extent would say nothing
+    # reliable (one page of a huge file; a sparse map): so the folder cannot be vouched for.
     monkeypatch.setattr(os, "stat", no_map_files)
     try:
         usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
-        assert incomplete is False
-        assert usage[str(folder)] == 2 * MIB
+        assert incomplete is True
+        assert usage[str(folder)] == 0
     finally:
-        libc.munmap(ctypes.c_void_p(address), ctypes.c_size_t(2 * MIB))
+        unmap()
+
+
+@needs_smaps
+def test_a_mapped_only_deleted_file_makes_the_budget_check_fail(make_pool, tmp_path):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    fd = _unlinked_file(folder, "mapped", 2 * MIB)
+    unmap = _map_with_c_mmap(fd, 4096)
+    os.close(fd)
+    try:
+        class Here(StubProcessRuntime):
+            def __init__(self):
+                super().__init__()
+                self.process.pid = os.getpid()
+
+        pool = make_pool(use_clock=False)
+        pool.register(WorkerDefinition("a", kind="daemon", runtime=lambda *a: Here(),
+                                       budgets=[FolderBudget(str(folder), 100 * MIB, "plugin data")]))
+        pool.warm("a")
+        slot = pool._entry("a").slot
+        problem = pool._budget_problem(slot, 0.0, slot.definition, force=True, tree=slot)
+        assert problem is not None and problem[0] == "folder_budget"
+    finally:
+        unmap()
+
+
+@needs_smaps
+def test_a_deleted_file_that_is_open_and_mapped_is_charged_by_its_blocks_not_its_mapping(tmp_path):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    fd = _unlinked_file(folder, "both", 4 * MIB)
+    unmap = _map_with_c_mmap(fd, 4096)
+    try:
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
+        assert incomplete is False
+        assert 4 * MIB <= usage[str(folder)] < 4 * MIB + 256 * 1024
+    finally:
+        unmap()
+        os.close(fd)
 
 
 @needs_smaps
@@ -2769,7 +2818,7 @@ def test_memfds_and_anonymous_mappings_are_never_charged_to_a_folder(tmp_path):
     anonymous = mmap.mmap(-1, 4 * MIB)
     mapped = mmap.mmap(fd, 4 * MIB)
     try:
-        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder), "/memfd:scratch", "/"])
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder), "/memfd:scratch"])
         assert incomplete is False
         assert usage[str(folder)] == 0
     finally:

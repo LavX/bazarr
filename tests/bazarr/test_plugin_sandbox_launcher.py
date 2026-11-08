@@ -3942,3 +3942,13 @@ def test_a_leader_reaped_before_the_group_was_ended_is_reported_unconfirmed(monk
             os.kill(child, signal.SIGKILL)
         except OSError:
             pass
+
+
+def test_the_limitations_say_that_deleted_files_may_not_stay_mapped_in_a_plugin_folder(monkeypatch):
+    text = " ".join(sandbox_status(SandboxProbe(abi=9, verified=True, network_verified=True,
+                                               signal_scope_verified=True, capabilities_dropped=True))["limitations"])
+    assert "may not keep deleted files mapped inside its folders" in text
+    assert "may not keep deleted files mapped inside its folders" in " ".join(sandbox_status(DECLARED)["limitations"])
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    assert "may not keep deleted files mapped inside its folders" in " ".join(
+        sandbox_status(DECLARED)["limitations"])

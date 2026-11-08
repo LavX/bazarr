@@ -115,6 +115,14 @@ end is accepted as evidence, and the gap is kept visible and bounded::
     launcher workers, runtimes   never counted: the launcher proves its tree, a runtime
     with no local process        without a process has none to detach from
 
+Folder budgets count what is on disk under the folder, plus files the worker tree
+unlinked but still holds open (found through its descriptors, charged by blocks).
+A deleted file referenced only by a mapping cannot be measured without privileges
+(its mapping's extent says nothing reliable about what it allocates), so that one
+case fails closed: a plugin may not keep deleted files mapped inside its folders, and
+doing so makes the folder scan incomplete, which fails its budget. memfds and
+anonymous mappings are not under any folder and are never charged.
+
 Nothing forgets a teardown that is not confirmed: the pool keeps, per plugin key and
 outside the entry, every worker of that key that is being torn down or is stuck
 (``_tearing``), including a start that was cut loose (``_detach``). Unregistering,
@@ -683,12 +691,15 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
 
     For every process given, a descriptor whose link target ends in "(deleted)"
     and whose original path lies under a folder is stat'ed through its ``/proc``
-    link and counted by allocated size. A file that is only *mapped* is charged by
-    the extent of its mapping (``/proc/<pid>/map_files`` needs privileges an
-    ordinary host lacks and is never touched); a file that is both open and mapped
-    is charged once, by its size. Identity is (device, inode), from the stat for a
-    descriptor and from the ``maps`` line for a mapping, so it is counted once
-    however many processes hold it.
+    link and counted by allocated size. A file that is only *mapped*, with no
+    descriptor anywhere in the tree to stat, cannot be measured without privileges
+    an ordinary host lacks (``/proc/<pid>/map_files`` is never touched), and the
+    extent of a mapping says nothing reliable about what the file allocates (one
+    page of a huge file; a sparse map). So that one case fails closed: the folder
+    scan is incomplete and the budget fails. A file that is both open and mapped is
+    charged once, by its blocks. Identity is (device, inode) for a descriptor, and
+    a mapping is recognised as the same file by its path and inode, so a file is
+    counted once however many processes hold it.
 
     Attribution is by ancestry only: the deleted file's original directory under a
     budgeted folder. Its device plays no part, and a file with no path under any
@@ -703,9 +714,11 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
     incomplete = False
     held: dict = {}  # (device, inode) -> (original path, size from a descriptor)
     held_names: set = set()  # (original path, inode): how a mapping recognises a file a descriptor holds
-    mapped: dict = {}  # (major:minor, inode) -> (original path, extent of the largest mapping)
 
     def folders_of(path):
+        if path.startswith("/memfd:") or not path.startswith(os.sep):
+            # Not a file in any directory: a memfd, or something with no path at all.
+            return []
         return [folder for folder, names in roots if any(_under(path, name) for name in names)]
 
     for pid in pids:
@@ -762,25 +775,20 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
             if not folders_of(path):
                 continue
             try:
-                start, end = (int(part, 16) for part in parts[0].split("-"))
-                offset = int(parts[2], 16)
-                major, minor = (int(part, 16) for part in parts[3].split(":"))
                 inode = int(parts[4])
             except ValueError:
                 incomplete = True
                 continue
             if inode == 0:
                 continue
-            # ``stat`` and ``maps`` do not always agree on the device number (a btrfs
-            # subvolume has its own for stat), so a descriptor's file is recognised by
-            # its path and inode, and mappings among themselves by what ``maps`` says.
+            # A descriptor's file is recognised by its path and inode (``stat`` and
+            # ``maps`` do not always agree on the device number, a btrfs subvolume
+            # for one); its size is then known from the descriptor.
             if (path, inode) in held_names:
                 continue
-            identity = (major, minor, inode)
-            extent = offset + (end - start)
-            if identity not in mapped or extent > mapped[identity][1]:
-                mapped[identity] = (path, extent)
-    for path, size in list(held.values()) + list(mapped.values()):
+            # Referenced by a mapping alone: no descriptor to stat, so its size is unknown.
+            incomplete = True
+    for path, size in held.values():
         for folder in folders_of(path):
             usage[folder] += size
     return usage, incomplete

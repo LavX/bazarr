@@ -132,12 +132,14 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
         return [
             "Workers run with a clean environment, but this platform applies no resource limits "
             "and nothing confines their files, network or signals. Detached processes cannot be "
-            "tracked on this platform: only a worker's process group is ended."
+            "tracked on this platform: only a worker's process group is ended. A plugin may not "
+            "keep deleted files mapped inside its folders."
         ]
     if not probe.enforced:
         return [
             "Workers run with resource limits and a clean environment, but nothing confines "
-            "their files, network or signals."
+            "their files, network or signals. A plugin may not keep deleted files mapped inside "
+            "its folders."
         ]
     notes = ["Workers cannot change file modes, owners, times or extended attributes anywhere."]
     if probe.abi < 4 or not probe.network_enforced:
@@ -149,6 +151,10 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
     notes.append("A listening TCP socket that was never bound gets a port without a bind check.")
     notes.append("UDP and DNS are not restricted.")
     notes.append("The number of processes is not limited.")
+    notes.append(
+        "A plugin may not keep deleted files mapped inside its folders: their size cannot be "
+        "measured, so the folder counts as over its limit."
+    )
     return notes
 
 
