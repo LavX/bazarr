@@ -803,6 +803,8 @@ class _Slot:
         self.closing = False
         # Why a start was cut short ("stopped"), when it was.
         self.cancel_reason: str | None = None
+        # Whether this worker holds a unit of its key's unverified-teardown allowance.
+        self.unverified_reserved = False
         # The entry this worker belongs to (None for a one-off run).
         self.entry: _Entry | None = None
         # Only one thread ends the process at a time, and once it has, nobody
@@ -960,6 +962,10 @@ class WorkerPool:
         # Plugin key -> when (pool clock) its workers were ended without proof that the
         # whole tree went (no subreaper launcher here): see ``_note_unverified``.
         self._unverified: dict[str, deque] = {}
+        # Plugin key -> workers admitted whose end has not been judged yet. An admission
+        # takes one unit of the allowance before the check can be raced, and the unit
+        # is turned into a record or given back when the worker's end is known.
+        self._unverified_reserved: dict[str, int] = {}
         self._unverified_logged: set = set()
         # One-off workers whose session is still being created or started. Close
         # waits for them, and none begins once the pool is closing.
@@ -1248,7 +1254,7 @@ class WorkerPool:
                 self._check_open()
                 # The check at the top was made before the permit was waited for; a
                 # resident of this key may have become stuck since.
-                self._check_key_free(definition.key)
+                self._check_key_free(definition.key, slot)
                 self._ephemeral.add(slot)
                 self._ephemeral_starting.add(slot)
             self._ensure_sampler()
@@ -1320,8 +1326,12 @@ class WorkerPool:
             if gone:
                 self._oneshot.release()
 
-    def _check_key_free(self, key):
-        """Refuse a start of ``key`` while a worker of it is being torn down, or the cap is spent. Lock held."""
+    def _check_key_free(self, key, slot=None):
+        """Refuse a start of ``key`` while a worker of it is being torn down, or the cap is spent. Lock held.
+
+        With ``slot``, the check and the reservation of one unit of the allowance for
+        it are one step: concurrent admissions cannot all pass a check that only one fits.
+        """
         if self._tearing.get(key):
             raise PoolUnavailable("the previous worker of %s is still being stopped" % key,
                                   code=PoolCodes.UNAVAILABLE, retry_after=1.0)
@@ -1331,6 +1341,9 @@ class WorkerPool:
                 "%s has had %d workers ended without whole-tree cleanup within the last hour; "
                 "detached processes cannot be tracked on this platform, so starts are paused"
                 % (key, self.limits.unverified_limit), code=PoolCodes.UNVERIFIED_LIMIT, retry_after=wait)
+        if slot is not None:
+            self._unverified_reserved[key] = self._unverified_reserved.get(key, 0) + 1
+            slot.unverified_reserved = True
 
     def _wait_watched(self, slot, handle):
         """Wait for a one-off request, checking its worker's memory and folders as time passes.
@@ -1606,6 +1619,8 @@ class WorkerPool:
                     slot = _Slot(definition, now, self.limits)
                     slot.entry = entry
                     slot.generation = entry.generation
+                    # Admitted: the unit is taken here, in the hold that checked the cap.
+                    self._reserve_unverified(key, slot)
                     entry.starting = slot
                 break
         finally:
@@ -1655,6 +1670,7 @@ class WorkerPool:
                 else:
                     failed = UnknownWorker("worker %s was removed while it was starting" % slot.definition.key)
             elif refusal is not None:
+                self._settle_unverified(slot)
                 entry.last_error = _public_text(refusal[1])
                 self._set_state(entry, WorkerState.STOPPED, refusal[0])
                 self._cond.notify_all()
@@ -1764,6 +1780,8 @@ class WorkerPool:
         mapped = self._start_error(slot, error)
         if slot.session is not None:
             self._queue_close(slot, None, "reap")
+        else:
+            self._settle_unverified(slot)
         if mapped.code == PoolCodes.SANDBOX_REFUSED:
             # A policy answer, not a crash: nothing to back off from.
             self._set_state(entry, WorkerState.STOPPED, mapped.code)
@@ -2240,6 +2258,22 @@ class WorkerPool:
                 self._cond.notify_all()
             self._deliver_events()
 
+    def _reserve_unverified(self, key, slot):
+        self._unverified_reserved[key] = self._unverified_reserved.get(key, 0) + 1
+        slot.unverified_reserved = True
+
+    def _settle_unverified(self, slot):
+        """Give back the unit a worker held (it ended without a record, or the record replaces it). Lock held."""
+        if not slot.unverified_reserved:
+            return
+        slot.unverified_reserved = False
+        key = slot.definition.key
+        left = self._unverified_reserved.get(key, 0) - 1
+        if left > 0:
+            self._unverified_reserved[key] = left
+        else:
+            self._unverified_reserved.pop(key, None)
+
     def _note_unverified(self, slot):
         """Count a worker whose tree could only be ended by its process group. Lock held.
 
@@ -2251,11 +2285,14 @@ class WorkerPool:
         session = slot.session
         process = session.process if session is not None else None
         if process is None or isinstance(process, LauncherProcess):
+            self._settle_unverified(slot)
             return
         key = slot.definition.key
         now = self._clock()
         stamps = self._unverified.setdefault(key, deque())
         stamps.append(now)
+        # The record replaces the unit that was held for it: same place, counted once.
+        self._settle_unverified(slot)
         self._prune_unverified(stamps, now)
         if key not in self._unverified_logged:
             self._unverified_logged.add(key)
@@ -2269,13 +2306,17 @@ class WorkerPool:
     def _unverified_wait(self, key) -> float:
         """Seconds until a capped key may start again, or 0. Lock held."""
         stamps = self._unverified.get(key)
-        if not stamps:
-            return 0.0
+        reserved = self._unverified_reserved.get(key, 0)
         now = self._clock()
-        self._prune_unverified(stamps, now)
-        if len(stamps) < self.limits.unverified_limit:
+        if stamps:
+            self._prune_unverified(stamps, now)
+        recorded = len(stamps) if stamps else 0
+        if recorded + reserved < self.limits.unverified_limit:
             return 0.0
-        return max(0.0, stamps[0] + self.limits.unverified_window - now)
+        if stamps and recorded >= self.limits.unverified_limit:
+            return max(0.0, stamps[0] + self.limits.unverified_window - now)
+        # Held up by admitted workers whose end is not known yet: try again shortly.
+        return 1.0
 
     def _teardown_confirmed(self, slot, entry):
         """A worker's teardown is confirmed. Caller holds the lock.

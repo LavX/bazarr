@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -2718,3 +2719,86 @@ def test_a_worker_that_writes_through_an_unlinked_file_is_killed_for_its_folder(
     with pytest.raises(WorkerKilled) as killed:
         handle.wait(10)
     assert killed.value.code == "folder_budget"
+
+
+# ------------------------------------- the unverified allowance is reserved at admission
+
+
+class BlockingFallback(FallbackRuntime):
+    release = None
+
+    def submit(self, op, params=None, **kwargs):
+        from provider_hub.runtime.session import RequestResult
+
+        gate = type(self).release
+
+        class Handle:
+            id = 1
+
+            def done(self):
+                return gate.is_set()
+
+            def wait(self, timeout=None):
+                if not gate.wait(timeout):
+                    raise TimeoutError("still running")
+                return RequestResult({"op": op})
+
+        return Handle()
+
+
+def test_simultaneous_admissions_cannot_spend_more_than_the_allowance(make_pool):
+    import threading
+
+    gate = threading.Event()
+
+    class Runtime(BlockingFallback):
+        release = gate
+
+    pool = make_pool(fast_pool_limits(unverified_limit=20, max_oneshot=2, acquire_timeout=5.0), use_clock=False)
+    now = time.monotonic()
+    with pool._cond:
+        pool._unverified["a"] = deque([now] * 19)
+    start = threading.Barrier(2)
+    outcomes = []
+
+    def attempt():
+        start.wait(5)
+        try:
+            pool.run_once(WorkerDefinition("a", kind="daemon", runtime=lambda *args: Runtime()), "echo")
+            outcomes.append("admitted")
+        except PoolUnavailable as error:
+            outcomes.append(error.code)
+
+    threads = [threading.Thread(target=attempt, daemon=True) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    try:
+        # One is admitted and runs (blocked on the gate); the other is turned away.
+        assert wait_until(lambda: "unverified_limit" in outcomes, timeout=5), outcomes
+        assert pool._unverified_reserved.get("a") == 1
+    finally:
+        gate.set()
+    for thread in threads:
+        thread.join(10)
+    assert sorted(outcomes) == ["admitted", "unverified_limit"]
+    # The admitted one ended without proof: its unit became the 20th record.
+    assert len(pool._unverified["a"]) == 20 and not pool._unverified_reserved
+
+
+def test_a_reserved_unit_is_given_back_when_nothing_was_spawned_or_the_launcher_proved_the_tree(make_pool):
+    pool = make_pool(fast_pool_limits(unverified_limit=5))
+    # A runtime with no local process: nothing to detach from, the unit goes back.
+    pool.register(WorkerDefinition("d", kind="daemon", runtime=lambda *args: StubRuntime()))
+    for _ in range(3):
+        pool.warm("d")
+        pool.stop("d")
+    assert not pool._unverified_reserved and not pool._unverified.get("d")
+
+    # A start that fails before a session exists gives its unit back too.
+    def broken(*args):
+        raise RuntimeError("no runtime")
+
+    pool.register(WorkerDefinition("f", kind="daemon", runtime=broken))
+    with pytest.raises(PoolUnavailable):
+        pool.warm("f")
+    assert not pool._unverified_reserved
