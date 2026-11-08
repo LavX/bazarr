@@ -730,8 +730,10 @@ def test_restart_after_drain_on_an_idle_worker_stops_it_at_once(make_pool):
     first = pid_of(pool, "tr")
     pool.restart_after_drain("tr")
     pool.sweep()
-    assert pool.state("tr") is WorkerState.STOPPED
+    # Stopped once the teardown of its worker is confirmed, not when it is merely queued.
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED)
     assert wait_until(lambda: not pid_alive(first))
+    assert pool.status()["processes"] == 0
     with pytest.raises(ValueError):
         pool.restart_after_drain("tr", definition("other"))
 
@@ -3270,3 +3272,32 @@ def test_a_sparse_deleted_file_counts_as_what_it_allocates_in_the_open_file_scan
         assert incomplete is False and usage[str(folder)] < 1 * MIB
     finally:
         os.close(fd)
+
+
+def test_a_drained_entry_reads_stopping_until_its_teardown_is_confirmed(make_pool):
+    runtimes = []
+
+    class Survivor(StubProcessRuntime):
+        pass
+
+    def factory(*args):
+        runtimes.append(Survivor())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(max_resident=8, acquire_timeout=0.4), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    pool.warm("a")
+    pool.restart_after_drain("a")
+    assert pool.state("a") is WorkerState.DRAINING
+    pool.sweep()  # the idle retiring worker is queued for teardown; its process stays
+    assert wait_until(lambda: pool.status()["stuck"] == 1)
+    pool.sweep()
+    assert pool.state("a") is WorkerState.STOPPING
+    with pytest.raises(PoolUnavailable):
+        pool.warm("a")
+    assert len(runtimes) == 1
+    runtimes[0].process.returncode = 0
+    pool.sweep()
+    assert pool.state("a") is WorkerState.STOPPED
+    pool.warm("a")
+    assert len(runtimes) == 2 and pool.state("a") is WorkerState.READY

@@ -1585,9 +1585,15 @@ class WorkerPool:
         if self._stuck:
             self._retry_stuck()
         with self._cond:
-            for entry in self._entries.values():
+            for key, entry in self._entries.items():
                 if entry.state == WorkerState.DRAINING and not entry.retiring and entry.slot is None:
-                    self._set_state(entry, WorkerState.STOPPED, "drained")
+                    # Its last draining worker has been queued for teardown, not torn down:
+                    # the entry reads as stopped only once every teardown of the key is
+                    # confirmed (``_teardown_confirmed`` does that).
+                    if self._tearing.get(key):
+                        self._set_state(entry, WorkerState.STOPPING, "drained")
+                    else:
+                        self._set_state(entry, WorkerState.STOPPED, "drained")
             self._cond.notify_all()
         self._flush()
 
