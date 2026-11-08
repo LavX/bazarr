@@ -3886,3 +3886,38 @@ def test_the_shm_guard_stops_the_worker_holding_the_most_bytes_not_the_most_mapp
     assert killed.value.code == "shm_low" and "60 MiB" in str(killed.value)
     assert pool.state("semaphores") is WorkerState.BUSY
     semaphores.cancel()
+
+
+@needs_smaps
+def test_a_private_mapping_of_dev_zero_is_measured_normally_and_a_shared_one_is_refused():
+    import mmap
+
+    fd = os.open("/dev/zero", os.O_RDWR)
+    try:
+        private = mmap.mmap(fd, 4 * MIB, flags=mmap.MAP_PRIVATE)
+        try:
+            private[0:1] = b"x"
+            shown = [line.split()[:2] + [line.split(None, 5)[5].strip()] for line in open("/proc/self/maps")
+                     if "/dev/zero" in line]
+            assert shown and shown[0][1] == "rw-p"
+            # Private memory is in Pss like any other: nothing to refuse.
+            assert pool_module.memfd_usage([os.getpid()]) == (0, False)
+        finally:
+            private.close()
+        shared = mmap.mmap(fd, 4 * MIB, flags=mmap.MAP_SHARED)
+        try:
+            assert any(line.split()[1] == "rw-s" and "/dev/zero" in line for line in open("/proc/self/maps"))
+            assert pool_module.memfd_usage([os.getpid()])[1] is True
+        finally:
+            shared.close()
+    finally:
+        os.close(fd)
+
+
+def test_the_permissions_decide_whether_a_named_mapping_is_shared():
+    assert pool_module._is_shared_anonymous("/dev/zero", "rw-s")
+    assert not pool_module._is_shared_anonymous("/dev/zero", "rw-p")
+    assert not pool_module._is_shared_anonymous("/dev/zero", "r--p")
+    assert pool_module._is_shared_anonymous("[anon_shmem:x]", "rw-s")
+    assert not pool_module._is_shared_anonymous("[anon_shmem:x]", "rw-p")
+    assert not pool_module._is_shared_anonymous("[anon:x]", "rw-s")

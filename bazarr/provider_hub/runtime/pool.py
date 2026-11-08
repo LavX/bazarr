@@ -1020,7 +1020,7 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
             continue
         for parts in lines:
             path = parts[5][: -len(_DELETED)] if parts[5].endswith(_DELETED) else parts[5]
-            if _is_shared_anonymous(path):
+            if _is_shared_anonymous(path, parts[1]):
                 # MAP_SHARED|MAP_ANONYMOUS: tmpfs pages behind a file nobody has a descriptor
                 # to. Unmap all but a page of a big one and the rest stays allocated with
                 # no mapping to show it, and nothing unprivileged says how big the object is.
@@ -1055,13 +1055,16 @@ def _mapped_objects(path: str):
             yield parts
 
 
-def _is_shared_anonymous(path: str) -> bool:
+def _is_shared_anonymous(path: str, perms: str = "rw-s") -> bool:
     """Whether a mapping's name is that of a shared anonymous one: unnamed, or named with ``PR_SET_VMA_ANON_NAME``.
 
     A private anonymous mapping, named or not, shows no file or ``[anon:name]``; a shared
-    one shows ``/dev/zero`` or ``[anon_shmem]`` or ``[anon_shmem:name]``.
+    one shows ``/dev/zero`` or ``[anon_shmem]`` or ``[anon_shmem:name]``. The name is not
+    enough: a ``MAP_PRIVATE`` mapping of an opened ``/dev/zero`` carries the same name and
+    is measured like any private memory, so the permissions decide ("rw-s" shared, "rw-p"
+    private).
     """
-    return path == "/dev/zero" or path.startswith("[anon_shmem")
+    return (path == "/dev/zero" or path.startswith("[anon_shmem")) and perms[3:4] == "s"
 
 
 def shm_mapping_count(pids, skip=()) -> int:
