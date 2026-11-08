@@ -436,33 +436,53 @@ def _read_kb(path: str, *names: str) -> dict:
     return found
 
 
-def _children_of(pid: int) -> list[int] | None:
-    """Direct children from the kernel's per-thread children lists, or None."""
+PARENT_MAP_LIMIT = 32768
+
+
+def _children_of(pid: int) -> tuple[list[int] | None, bool]:
+    """Direct children from the kernel's per-thread children lists: ``(children or None, incomplete)``.
+
+    None means the lists are not available here (the caller scans ``/proc``
+    instead). ``incomplete`` is set when a list that exists could not be read
+    or parsed: the children it held are then unknown.
+    """
     found: list[int] = []
+    incomplete = False
     try:
         threads = os.listdir("/proc/%d/task" % pid)
+    except FileNotFoundError:
+        return [], False  # gone
     except OSError:
-        return None
+        return None, False
     readable = False
     for tid in threads:
         try:
             with open("/proc/%d/task/%s/children" % (pid, tid), "r", encoding="ascii") as handle:
-                readable = True
-                found.extend(int(p) for p in handle.read().split())
+                text = handle.read()
+            readable = True
+            found.extend(int(p) for p in text.split())
         except FileNotFoundError:
             continue
         except (OSError, ValueError):
-            continue
-    return found if readable else None
+            incomplete = True
+    return (found if readable else None), incomplete
 
 
-def _parent_map(limit: int = 8192) -> dict[int, list[int]]:
-    """pid -> children by scanning /proc. The fallback when children lists are off."""
+def _parent_map(limit: int = PARENT_MAP_LIMIT) -> tuple[dict[int, list[int]], bool]:
+    """pid -> children by scanning /proc: ``(map, complete)``. The fallback when children lists are off.
+
+    Not complete when the listing is cut at ``limit`` entries, cannot be read, or a
+    process record that is there cannot be read or understood. A process that
+    vanishes during the scan is not an omission.
+    """
     tree: dict[int, list[int]] = {}
+    complete = True
     try:
         names = os.listdir("/proc")
     except OSError:
-        return tree
+        return tree, False
+    if len(names) > limit:
+        complete = False
     for name in names[:limit]:
         if not name.isdigit():
             continue
@@ -470,25 +490,37 @@ def _parent_map(limit: int = 8192) -> dict[int, list[int]]:
             with open("/proc/%s/stat" % name, "r", encoding="ascii", errors="replace") as handle:
                 text = handle.read()
             ppid = int(text.rsplit(")", 1)[1].split()[1])
+        except FileNotFoundError:
+            continue
         except (OSError, ValueError, IndexError):
+            complete = False
             continue
         tree.setdefault(ppid, []).append(int(name))
-    return tree
+    return tree, complete
 
 
 def _process_tree(root: int, max_processes: int) -> tuple[list[int], bool]:
-    """The root and its descendants, and whether the walk stopped at ``max_processes``."""
-    overflow = False
+    """The root and its descendants, and whether that list may be incomplete.
+
+    Incomplete when the walk stopped at ``max_processes``, when a children list
+    could not be read, or when the ``/proc`` scan used instead was cut short or
+    skipped a record: a descendant could be missing from the answer.
+    """
+    incomplete = False
     seen = [root]
     index = 0
     fallback: dict[int, list[int]] | None = None
     while index < len(seen):
         current = seen[index]
         index += 1
-        kids = _children_of(current)
+        kids, partial = _children_of(current)
+        if partial:
+            incomplete = True
         if kids is None:
             if fallback is None:
-                fallback = _parent_map()
+                fallback, complete = _parent_map()
+                if not complete:
+                    incomplete = True
             kids = fallback.get(current, [])
         for kid in kids:
             if kid in seen:
@@ -496,8 +528,8 @@ def _process_tree(root: int, max_processes: int) -> tuple[list[int], bool]:
             if len(seen) < max_processes:
                 seen.append(kid)
             else:
-                overflow = True
-    return seen, overflow
+                incomplete = True
+    return seen, incomplete
 
 
 def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample | None:
@@ -524,10 +556,10 @@ def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample
             rss = values.get("Rss", used)
             if used is None:
                 raise OSError("no memory figure")
-        except (FileNotFoundError, ProcessLookupError):
-            # Gone between the listing and the read: not part of the tree any more.
-            continue
         except OSError:
+            # No smaps_rollup (an older kernel, or none for this process) says
+            # nothing about the process being gone: ask status. Only a process
+            # whose own /proc entry has vanished is not part of the tree any more.
             try:
                 values = _read_kb("/proc/%d/status" % member, "VmRSS")
             except (FileNotFoundError, ProcessLookupError):

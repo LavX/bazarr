@@ -1278,7 +1278,7 @@ def test_the_pool_never_signals_a_process_group_itself():
 
 def test_a_process_tree_larger_than_the_read_limit_is_reported_truncated(monkeypatch):
     fake = list(range(2 ** 22 + 100, 2 ** 22 + 400))
-    monkeypatch.setattr(pool_module, "_children_of", lambda pid: fake if pid == os.getpid() else [])
+    monkeypatch.setattr(pool_module, "_children_of", lambda pid: (fake if pid == os.getpid() else [], False))
     sample = read_process_tree_memory(os.getpid(), max_processes=256)
     if sample is not None:
         assert sample.truncated
@@ -2141,3 +2141,67 @@ def test_an_entry_is_not_stopped_while_one_generation_is_stuck(make_pool):
     assert pool.state("a") is WorkerState.STOPPED
     pool.warm("a")
     assert len(runtimes) == 3 and pool.state("a") is WorkerState.READY
+
+
+# --------------------------------- an enumeration or a read that falls short is incomplete
+
+
+def test_a_capped_proc_scan_marks_the_tree_incomplete(monkeypatch):
+    real_listdir = os.listdir
+    monkeypatch.setattr(os, "listdir", lambda path: [str(n) for n in range(1, 50)] if path == "/proc" else real_listdir(path))
+    tree, complete = pool_module._parent_map(limit=10)
+    assert complete is False
+    # Children lists unavailable and the scan falls short: the sample cannot be called complete.
+    monkeypatch.undo()
+    monkeypatch.setattr(pool_module, "_children_of", lambda pid: (None, False))
+    monkeypatch.setattr(pool_module, "_parent_map", lambda limit=0: ({}, False))
+    members, incomplete = pool_module._process_tree(os.getpid(), 256)
+    assert incomplete is True and members == [os.getpid()]
+    monkeypatch.setattr(pool_module, "_parent_map", lambda limit=0: ({}, True))
+    assert pool_module._process_tree(os.getpid(), 256) == ([os.getpid()], False)
+
+
+def test_a_proc_record_that_cannot_be_read_marks_the_scan_incomplete(monkeypatch):
+    real_open = open
+
+    def denying(path, *args, **kwargs):
+        if str(path).startswith("/proc/") and str(path).endswith("/stat") and "/task/" not in str(path):
+            if str(path).split("/")[2] == str(os.getpid()):
+                raise PermissionError(13, "Permission denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", denying)
+    tree, complete = pool_module._parent_map()
+    assert complete is False
+    monkeypatch.undo()
+    tree, complete = pool_module._parent_map()
+    assert complete is True and os.getpid() in [p for kids in tree.values() for p in kids]
+
+
+def test_an_unreadable_children_list_marks_the_walk_incomplete(monkeypatch):
+    real_open = open
+
+    def broken(path, *args, **kwargs):
+        if str(path).endswith("/children"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", broken)
+    kids, incomplete = pool_module._children_of(os.getpid())
+    assert incomplete is True
+    # Every list unreadable: the kernel's lists are as good as absent, and the scan takes over.
+    assert kids is None
+
+
+@needs_smaps
+def test_a_missing_smaps_rollup_falls_back_to_status_instead_of_dropping_the_process(monkeypatch):
+    real = pool_module._read_kb
+
+    def no_smaps(path, *names):
+        if path.endswith("/smaps_rollup"):
+            raise FileNotFoundError(2, "No such file or directory")
+        return real(path, *names)
+
+    monkeypatch.setattr(pool_module, "_read_kb", no_smaps)
+    sample = read_process_tree_memory(os.getpid())
+    assert sample is not None and sample.source == "status" and sample.bytes > 0 and not sample.truncated
