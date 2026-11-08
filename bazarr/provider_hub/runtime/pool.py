@@ -680,48 +680,33 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
 
     A worker can create a file in its folder, unlink it and keep writing through
     the open descriptor: the bytes are on disk and no directory scan finds them.
-    For every process given, each descriptor (and each mapping) whose link target
-    ends in "(deleted)" and whose original path lies under a folder, or that sits
-    on the folder's filesystem, is stat'ed through its ``/proc`` link and counted
-    by allocated size, once per (device, inode) however many processes hold it.
 
-    Incomplete when the descriptors of a live process cannot be listed or read, or
-    a candidate cannot be stat'ed: what it holds is then unknown. A process that
-    vanished, or a descriptor closed meanwhile, is not an omission.
+    For every process given, a descriptor whose link target ends in "(deleted)"
+    and whose original path lies under a folder is stat'ed through its ``/proc``
+    link and counted by allocated size. A file that is only *mapped* is charged by
+    the extent of its mapping (``/proc/<pid>/map_files`` needs privileges an
+    ordinary host lacks and is never touched); a file that is both open and mapped
+    is charged once, by its size. Identity is (device, inode), from the stat for a
+    descriptor and from the ``maps`` line for a mapping, so it is counted once
+    however many processes hold it.
+
+    Attribution is by ancestry only: the deleted file's original directory under a
+    budgeted folder. Its device plays no part, and a file with no path under any
+    folder (an anonymous mapping, ``/memfd:...``) is charged to none.
+
+    Incomplete when the descriptors or mappings of a live process cannot be read,
+    or a candidate descriptor cannot be stat'ed. A process that vanished, or a
+    descriptor closed meanwhile, is not an omission.
     """
-    roots = []
-    for folder in folders:
-        real = os.path.realpath(folder)
-        try:
-            device = os.stat(real).st_dev
-        except OSError:
-            device = None
-        roots.append((folder, {folder, real}, device))
-    usage = {folder: 0 for folder, _names, _dev in roots}
-    seen: set = set()
+    roots = [(folder, {folder, os.path.realpath(folder)}) for folder in folders]
+    usage = {folder: 0 for folder, _names in roots}
     incomplete = False
+    held: dict = {}  # (device, inode) -> (original path, size from a descriptor)
+    held_names: set = set()  # (original path, inode): how a mapping recognises a file a descriptor holds
+    mapped: dict = {}  # (major:minor, inode) -> (original path, extent of the largest mapping)
 
-    def account(path, link):
-        nonlocal incomplete
-        try:
-            info = os.stat(link)
-        except (FileNotFoundError, ProcessLookupError):
-            return
-        except OSError:
-            incomplete = True
-            return
-        if not stat.S_ISREG(info.st_mode):
-            return
-        size = getattr(info, "st_blocks", 0) * 512 or info.st_size
-        identity = (info.st_dev, info.st_ino)
-        if identity in seen:
-            return
-        mine = [folder for folder, names, device in roots
-                if any(_under(path, name) for name in names) or (device is not None and device == info.st_dev)]
-        if mine:
-            seen.add(identity)
-            for folder in mine:
-                usage[folder] += size
+    def folders_of(path):
+        return [folder for folder, names in roots if any(_under(path, name) for name in names)]
 
     for pid in pids:
         directory = "/proc/%d/fd" % pid
@@ -741,9 +726,24 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
             except OSError:
                 incomplete = True
                 continue
-            if target.endswith(_DELETED):
-                account(target[: -len(_DELETED)], link)
-        # Deleted files that are only mapped (and written through the mapping).
+            if not target.endswith(_DELETED):
+                continue
+            path = target[: -len(_DELETED)]
+            if not folders_of(path):
+                continue
+            try:
+                info = os.stat(link)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                incomplete = True
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            held.setdefault((info.st_dev, info.st_ino),
+                            (path, getattr(info, "st_blocks", 0) * 512 or info.st_size))
+            held_names.add((path, info.st_ino))
+    for pid in pids:
         try:
             with open("/proc/%d/maps" % pid, "r", encoding="utf-8", errors="replace") as handle:
                 lines = handle.read().splitlines()
@@ -759,8 +759,30 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
             if len(parts) < 6:
                 continue
             path = parts[5][: -len(_DELETED)]
-            if any(_under(path, name) for _folder, names, _dev in roots for name in names):
-                account(path, "/proc/%d/map_files/%s" % (pid, parts[0]))
+            if not folders_of(path):
+                continue
+            try:
+                start, end = (int(part, 16) for part in parts[0].split("-"))
+                offset = int(parts[2], 16)
+                major, minor = (int(part, 16) for part in parts[3].split(":"))
+                inode = int(parts[4])
+            except ValueError:
+                incomplete = True
+                continue
+            if inode == 0:
+                continue
+            # ``stat`` and ``maps`` do not always agree on the device number (a btrfs
+            # subvolume has its own for stat), so a descriptor's file is recognised by
+            # its path and inode, and mappings among themselves by what ``maps`` says.
+            if (path, inode) in held_names:
+                continue
+            identity = (major, minor, inode)
+            extent = offset + (end - start)
+            if identity not in mapped or extent > mapped[identity][1]:
+                mapped[identity] = (path, extent)
+    for path, size in list(held.values()) + list(mapped.values()):
+        for folder in folders_of(path):
+            usage[folder] += size
     return usage, incomplete
 
 
@@ -2005,6 +2027,10 @@ class WorkerPool:
         if process is None or process.returncode is not None or not os.path.isdir("/proc/self/fd"):
             return {}, False
         pids, incomplete = _process_tree(process.pid, 256)
+        if isinstance(process, LauncherProcess):
+            # The launcher is the pool's own, trusted and non-dumpable: its descriptors
+            # are closed to us by design and are not the worker's. Its descendants are.
+            pids = [pid for pid in pids if pid != process.pid]
         usage, partial = deleted_open_usage(pids, [budget.path for budget in budgets])
         return usage, incomplete or partial
 

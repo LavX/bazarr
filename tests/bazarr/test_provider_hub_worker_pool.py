@@ -2655,34 +2655,111 @@ def test_the_sandbox_status_says_detached_processes_cannot_be_tracked_where_that
 # ----------------------------------- files unlinked but still open count against the folder
 
 
+def _unlinked_file(folder, name, size):
+    """An open descriptor on a file of ``size`` bytes that no longer has a directory entry."""
+    path = folder / name
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    os.write(fd, b"x" * size)
+    os.fsync(fd)
+    os.unlink(path)
+    return fd
+
+
 @needs_smaps
-def test_deleted_open_usage_counts_an_unlinked_file_once_and_only_for_its_folder(tmp_path):
-    data = tmp_path / "data"
-    other = tmp_path / "other"
-    data.mkdir()
-    other.mkdir()
-    path = data / "gone"
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+def test_deleted_open_usage_totals_are_per_folder_by_ancestry_not_by_filesystem(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    elsewhere = tmp_path / "elsewhere"
+    for folder in (first, second, elsewhere):
+        folder.mkdir()
+    # Three folders on one filesystem; a file is charged to the folder it was in, and only that.
+    held = [_unlinked_file(first, "a", 2 * MIB), _unlinked_file(second, "b", 1 * MIB),
+            _unlinked_file(elsewhere, "c", 3 * MIB)]
     try:
-        os.write(fd, b"x" * (2 * MIB))
-        os.fsync(fd)
-        os.unlink(path)
-        second = os.dup(fd)
-        try:
-            # The same pid listed twice and a duplicated descriptor: one file, counted once.
-            usage, incomplete = pool_module.deleted_open_usage([os.getpid(), os.getpid()], [str(data)])
-            assert incomplete is False
-            assert 2 * MIB <= usage[str(data)] < 3 * MIB
-        finally:
-            os.close(second)
-        # A folder the file was not under, on another path: attributed only where it belongs
-        # (the same filesystem counts too, so compare against a path-only match).
-        usage, _ = pool_module.deleted_open_usage([os.getpid()], [str(other)])
-        assert set(usage) == {str(other)}
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid(), os.getpid()], [str(first), str(second)])
+        assert incomplete is False
+        assert 2 * MIB <= usage[str(first)] < 2 * MIB + 256 * 1024
+        assert 1 * MIB <= usage[str(second)] < 1 * MIB + 256 * 1024
+        # The file in the third folder is on the same device and charged to neither.
+        usage, _ = pool_module.deleted_open_usage([os.getpid()], [str(first)])
+        assert usage[str(first)] < 3 * MIB
+        # A parent folder includes its children's files.
+        usage, _ = pool_module.deleted_open_usage([os.getpid()], [str(tmp_path)])
+        assert usage[str(tmp_path)] >= 6 * MIB
     finally:
+        for fd in held:
+            os.close(fd)
+    usage, _ = pool_module.deleted_open_usage([os.getpid()], [str(first), str(second)])
+    assert usage == {str(first): 0, str(second): 0}
+
+
+@needs_smaps
+def test_a_deleted_file_both_open_and_mapped_is_counted_once(tmp_path):
+    import mmap
+
+    folder = tmp_path / "data"
+    folder.mkdir()
+    fd = _unlinked_file(folder, "both", 2 * MIB)
+    mapping = mmap.mmap(fd, 2 * MIB)
+    try:
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
+        assert incomplete is False
+        assert 2 * MIB <= usage[str(folder)] < 2 * MIB + 256 * 1024
+    finally:
+        mapping.close()
         os.close(fd)
-    usage, _ = pool_module.deleted_open_usage([os.getpid()], [str(data)])
-    assert usage[str(data)] == 0
+
+
+@needs_smaps
+def test_a_deleted_file_that_is_only_mapped_is_charged_by_its_extent(tmp_path, monkeypatch):
+    import ctypes
+
+    folder = tmp_path / "data"
+    folder.mkdir()
+    fd = _unlinked_file(folder, "mapped", 2 * MIB)
+    # Python's mmap keeps a duplicate descriptor open; the C call lets the only
+    # reference to the deleted file be the mapping itself.
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    address = libc.mmap(None, 2 * MIB, 3, 1, fd, 0)  # PROT_READ|PROT_WRITE, MAP_SHARED
+    assert address not in (None, ctypes.c_void_p(-1).value)
+    os.close(fd)
+    real_stat = os.stat
+
+    def no_map_files(path, *args, **kwargs):
+        if "/map_files/" in str(path):
+            raise PermissionError(1, "Operation not permitted")
+        return real_stat(path, *args, **kwargs)
+
+    # An ordinary host cannot dereference map_files; that must neither matter nor look like a gap.
+    monkeypatch.setattr(os, "stat", no_map_files)
+    try:
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
+        assert incomplete is False
+        assert usage[str(folder)] == 2 * MIB
+    finally:
+        libc.munmap(ctypes.c_void_p(address), ctypes.c_size_t(2 * MIB))
+
+
+@needs_smaps
+def test_memfds_and_anonymous_mappings_are_never_charged_to_a_folder(tmp_path):
+    import mmap
+
+    folder = tmp_path / "data"
+    folder.mkdir()
+    fd = os.memfd_create("scratch")
+    os.write(fd, b"x" * (4 * MIB))
+    anonymous = mmap.mmap(-1, 4 * MIB)
+    mapped = mmap.mmap(fd, 4 * MIB)
+    try:
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder), "/memfd:scratch", "/"])
+        assert incomplete is False
+        assert usage[str(folder)] == 0
+    finally:
+        mapped.close()
+        anonymous.close()
+        os.close(fd)
 
 
 @needs_smaps
@@ -2841,3 +2918,25 @@ def test_a_cancelled_start_is_counted_once_while_it_is_still_running(make_pool):
     stopper.join(10)
     assert not starter.is_alive() and not stopper.is_alive()
     assert pool.status()["processes"] == 1
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="launcher is Linux only")
+@needs_smaps
+def test_a_healthy_launcher_worker_with_an_empty_folder_is_not_killed_by_the_deleted_file_scan(make_pool, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    build, declared = launcher_definition(tmp_path)
+    pool = make_pool(use_clock=False)
+    pool.register(WorkerDefinition("tr", kind="translator", spawn=launcher_spawn(build, probe=declared),
+                                   session_limits=fast_session(),
+                                   budgets=[FolderBudget(str(data), 1 * MIB, "plugin data")]))
+    slow = pool.submit("tr", "sleep", {"seconds": 1.0})
+    for _ in range(3):
+        pool.sweep()
+        time.sleep(0.1)
+    assert slow.wait(10).result == {"slept": 1.0}
+    assert pool.state("tr") is WorkerState.READY
+    # The scan of the worker's own tree sees nothing and is complete.
+    slot = pool._entry("tr").slot
+    usage, incomplete = pool._deleted_open_usage(slot, [FolderBudget(str(data), 1 * MIB)])
+    assert incomplete is False and usage.get(str(data), 0) == 0
