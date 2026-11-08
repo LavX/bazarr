@@ -4066,3 +4066,59 @@ def test_a_done_callback_runs_once_whether_it_was_added_before_or_after_the_fini
     with pytest.raises(RequestFailed):
         failing.wait(10)
     assert wait_until(lambda: len(seen) == 1 and isinstance(seen[0], RequestFailed))
+
+
+class _SlowStopProcess(_OwnTreeProcess):
+    """A contract process whose ``stop()`` takes a while; records the order of reap and cleanup."""
+
+    def __init__(self):
+        super().__init__()
+        self.release = threading.Event()
+        self.started = threading.Event()
+        self.order = []
+
+    def stop(self, grace=3.0):
+        self.order.append("stop-start")
+        self.started.set()
+        self.release.wait(10)
+        self.order.append("stop-done")
+        self.returncode = None
+
+    def wait(self, timeout=None):
+        self.order.append("wait")
+        self.returncode = 0
+        return 0
+
+
+def test_nothing_reaps_the_leader_while_its_teardown_is_still_running():
+    session = WorkerSession(["worker"], limits=fast_limits(kill_grace=5.0))
+    process = _SlowStopProcess()
+    tearer = threading.Thread(target=session._kill_tree, args=(process,))
+    tearer.start()
+    assert process.started.wait(5)
+    reaped = []
+    reaper = threading.Thread(target=lambda: reaped.append(session._reap(process, 8.0)))
+    reaper.start()
+    time.sleep(0.4)
+    # The reaper is held back: reaping now would make stop() skip the group cleanup.
+    assert "wait" not in process.order
+    process.release.set()
+    tearer.join(10)
+    reaper.join(10)
+    assert process.order.index("stop-done") < process.order.index("wait")
+    assert reaped == [0]
+
+
+def test_a_reap_that_cannot_wait_out_the_teardown_gives_up_instead_of_reaping():
+    session = WorkerSession(["worker"], limits=fast_limits(kill_grace=5.0))
+    process = _SlowStopProcess()
+    tearer = threading.Thread(target=session._kill_tree, args=(process,))
+    tearer.start()
+    assert process.started.wait(5)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            session._reap(process, 0.3)
+        assert "wait" not in process.order
+    finally:
+        process.release.set()
+        tearer.join(10)

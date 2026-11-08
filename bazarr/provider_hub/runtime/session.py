@@ -74,6 +74,9 @@ _STDERR_READ_LIMIT = 64 * 1024
 _STDERR_LINES_PER_SECOND = 100
 # How long a queued reject may take to reach the worker before it is ended anyway.
 _REJECT_FLUSH_WAIT = 2.0
+# How long a second caller waits for a teardown that another thread is running, on
+# top of the session's kill grace (``stop()`` bounds itself well inside this).
+_HANDOVER_WAIT = 30.0
 
 
 @dataclass(frozen=True)
@@ -363,6 +366,12 @@ class WorkerSession:
         # that no signal is ever sent to the group (its number may be reused).
         self._group_lock = threading.Lock()
         self._group_ended = False
+        # A contract process's teardown (cut the lifeline, ``stop()``) takes time.
+        # ``_group_ended`` says it started, so nobody signals the group; this says
+        # it finished, and nothing reaps the leader before that: a reaped leader
+        # makes ``stop()`` skip the group cleanup it was in the middle of.
+        self._handover_started = False
+        self._handover_done = threading.Event()
         # Set when the leader was reaped by someone else: its number is not ours.
         self._group_lost = False
         self.last_heartbeat: dict | None = None
@@ -1165,6 +1174,8 @@ class WorkerSession:
         with self._group_lock:
             first = not self._group_ended
             self._group_ended = True
+            if first:
+                self._handover_started = True
         if first:
             try:
                 cut = getattr(process, "close_lifeline", None)
@@ -1173,7 +1184,18 @@ class WorkerSession:
                 stop(self.limits.kill_grace)
             except Exception as error:
                 logger.warning("%s: stopping the worker failed: %s", self.name, type(error).__name__)
+            finally:
+                self._handover_done.set()
+        else:
+            # Somebody else is tearing it down (or did): return only when that is over.
+            self._wait_handover(self.limits.kill_grace + _HANDOVER_WAIT)
         return True
+
+    def _wait_handover(self, timeout):
+        """Wait for a started hand-over to finish. False if it has not within ``timeout``."""
+        if not self._handover_started:
+            return True
+        return self._handover_done.wait(timeout)
 
     def _end_group(self, process):
         """Kill what the worker forked, once, while its leader is still unreaped."""
@@ -1200,6 +1222,9 @@ class WorkerSession:
             if not self._wait_exit(process, timeout):
                 raise subprocess.TimeoutExpired(process.args, timeout)
             self._end_group(process)
+        # Never reap the leader while its teardown is still running.
+        if not self._wait_handover(max(0.0, deadline - time.monotonic())):
+            raise subprocess.TimeoutExpired(process.args, timeout)
         return process.wait(timeout=max(0.0, deadline - time.monotonic()))
 
     def _signal_leader_group(self, process, sig):
