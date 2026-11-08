@@ -1289,9 +1289,11 @@ def test_a_process_tree_larger_than_the_read_limit_is_reported_truncated(monkeyp
 
 
 def test_a_worker_whose_tree_is_too_big_to_measure_is_killed_as_over_its_limit(make_pool):
-    pool = make_pool(memory_reader=lambda pid: MemorySample(1 * MIB, 1 * MIB, 256, "test", truncated=True))
+    late = {"bad": False}
+    pool = make_pool(memory_reader=lambda pid: MemorySample(1 * MIB, 1 * MIB, 256, "test", truncated=late["bad"]))
     pool.register(definition(memory_limit_bytes=100 * MIB))
     handle = pool.submit("tr", "sleep", {"seconds": 30})
+    late["bad"] = True
     pool.sweep()
     with pytest.raises(WorkerKilled) as killed:
         handle.wait(10)
@@ -1705,9 +1707,11 @@ def test_a_live_descendant_whose_memory_cannot_be_read_makes_the_sample_incomple
 
 
 def test_a_tree_with_an_unreadable_live_process_is_killed_as_over_its_limit(make_pool):
-    pool = make_pool(memory_reader=lambda pid: MemorySample(1 * MIB, 1 * MIB, 3, "test", truncated=True))
+    late = {"bad": False}
+    pool = make_pool(memory_reader=lambda pid: MemorySample(1 * MIB, 1 * MIB, 3, "test", truncated=late["bad"]))
     pool.register(definition(memory_limit_bytes=100 * MIB))
     handle = pool.submit("tr", "sleep", {"seconds": 30})
+    late["bad"] = True
     pool.sweep()
     with pytest.raises(WorkerKilled):
         handle.wait(10)
@@ -1825,10 +1829,10 @@ def test_a_worker_whose_every_process_denies_the_read_is_over_budget(make_pool, 
     def denying(path, *names):
         raise PermissionError(13, "Permission denied")
 
-    monkeypatch.setattr(pool_module, "_read_kb", denying)
     pool = make_pool(memory_reader=read_process_tree_memory)
     pool.register(definition(memory_limit_bytes=100 * MIB))
     handle = pool.submit("tr", "sleep", {"seconds": 30})
+    monkeypatch.setattr(pool_module, "_read_kb", denying)
     pool.sweep()
     with pytest.raises(WorkerKilled) as killed:
         handle.wait(10)
@@ -2307,9 +2311,17 @@ def test_a_memory_reader_that_fails_is_not_read_as_zero(make_pool):
     def broken(pid):
         raise RuntimeError("reader failed")
 
-    pool = make_pool(memory_reader=broken)
+    late = {"bad": False}
+
+    def reader(pid):
+        if late["bad"]:
+            return broken(pid)
+        return MemorySample(1 * MIB, 1 * MIB, 1, "test")
+
+    pool = make_pool(memory_reader=reader)
     pool.register(definition(memory_limit_bytes=100 * MIB))
     handle = pool.submit("tr", "sleep", {"seconds": 30})
+    late["bad"] = True
     pool.sweep()
     with pytest.raises(WorkerKilled) as killed:
         handle.wait(10)
