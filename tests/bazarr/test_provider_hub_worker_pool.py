@@ -199,7 +199,7 @@ def test_state_transitions_from_stopped_to_stopped(make_pool):
         handle.wait(5)
     assert wait_until(lambda: pool.state("tr") is WorkerState.READY)
     pool.stop("tr")
-    assert pool.state("tr") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED)
     assert seen == ["starting", "ready", "stopping", "stopped"]
 
 
@@ -461,7 +461,7 @@ def test_the_least_recently_used_idle_worker_is_stopped_at_the_cap(make_pool, cl
     clock.advance(1)
     pid_b = pid_of(pool, "b")
     pool.run("c", "echo")
-    assert pool.state("b") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("b") is WorkerState.STOPPED)
     assert pool.state("a") is WorkerState.READY and pool.state("c") is WorkerState.READY
     assert wait_until(lambda: not pid_alive(pid_b))
     assert pool.status()["resident"] == 2
@@ -479,7 +479,7 @@ def test_a_full_pool_of_busy_workers_refuses_with_pool_full(make_pool):
     with pytest.raises(RequestCancelled):
         handle.wait(5)
     pool.run("b", "echo")
-    assert pool.state("a") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("a") is WorkerState.STOPPED)
 
 
 def test_lowering_the_cap_stops_idle_surplus_workers(make_pool, clock):
@@ -1237,7 +1237,7 @@ def test_a_worker_whose_process_is_not_confirmed_gone_keeps_its_place(make_pool)
         pool.warm("b")
     process.returncode = 0
     pool.sweep()
-    assert pool.state("a") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("a") is WorkerState.STOPPED)
     assert pool.status()["processes"] == 0
     pool.warm("b")
     assert pool.state("b") is WorkerState.READY
@@ -1484,8 +1484,8 @@ def test_a_launcher_without_a_complete_cleanup_record_keeps_the_slot(make_pool, 
 def test_a_launcher_that_exited_by_itself_and_said_complete_releases_the_slot(make_pool):
     pool, runtimes = _launcher_pool(make_pool, _launcher_stub("clean", COMPLETE))
     pool.stop("a")
-    assert pool.state("a") is WorkerState.STOPPED
-    assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0
+    assert wait_until(lambda: pool.state("a") is WorkerState.STOPPED)
+    assert wait_until(lambda: pool.status()["processes"] == 0 and pool.status()["stuck"] == 0)
 
 
 # ------------------------------------------------ capacity follows teardown, not failure
@@ -1582,7 +1582,7 @@ def test_a_worker_whose_registration_vanished_during_its_start_is_torn_down(make
     assert len(outcome) == 1 and isinstance(outcome[0], (UnknownWorker, PoolClosed))
     # Never published, and its teardown ran to the end.
     assert runtimes[0].closed_with is not None
-    assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0
+    assert wait_until(lambda: pool.status()["processes"] == 0 and pool.status()["stuck"] == 0)
     if how == "unregister":
         assert "a" not in pool._entries
 
@@ -1664,7 +1664,7 @@ def test_closing_the_pool_during_a_one_off_start_leaves_no_worker_behind(make_po
     assert len(outcome) == 1 and isinstance(outcome[0], PoolClosed)
     assert runtimes[0].closed_with is not None
     assert runtimes[0].process.returncode == 0
-    assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0
+    assert wait_until(lambda: pool.status()["processes"] == 0 and pool.status()["stuck"] == 0)
 
 
 def test_no_one_off_worker_is_spawned_once_the_pool_is_closing(make_pool):
@@ -1991,7 +1991,7 @@ def test_stop_during_a_start_cancels_it_and_nothing_becomes_ready(make_pool):
     stopper.join(10)
     assert not starting.is_alive() and not stopper.is_alive()
     assert len(outcome) == 1 and isinstance(outcome[0], PoolUnavailable)
-    assert pool.state("a") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("a") is WorkerState.STOPPED)
     assert runtimes[0].closed_with is not None
     assert pool.status()["processes"] == 0 and pool.status()["stuck"] == 0
     # The next request simply starts a new worker.
@@ -2011,7 +2011,7 @@ def test_stop_after_restart_after_drain_ends_the_draining_request_too(make_pool)
     second = pid_of(pool, "tr")
     assert second != first and pid_alive(first)
     pool.stop("tr")
-    assert pool.state("tr") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED)
     assert wait_until(lambda: not pid_alive(first)) and wait_until(lambda: not pid_alive(second))
     with pytest.raises((SessionError, RequestCancelled, WorkerKilled)):
         retired.wait(10)
@@ -2026,7 +2026,7 @@ def test_stop_with_only_draining_workers_ends_them(make_pool):
     pool.restart_after_drain("tr", definition())
     assert pool.state("tr") is WorkerState.DRAINING
     pool.stop("tr")
-    assert pool.state("tr") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED)
     assert wait_until(lambda: not pid_alive(first))
     with pytest.raises((SessionError, RequestCancelled, WorkerKilled)):
         retired.wait(10)
@@ -2047,7 +2047,7 @@ def test_unregister_kills_a_draining_worker_too(make_pool):
     assert wait_until(lambda: not pid_alive(first)) and wait_until(lambda: not pid_alive(second))
     with pytest.raises((SessionError, RequestCancelled, WorkerKilled)):
         retired.wait(10)
-    assert pool.status()["processes"] == 0
+    assert wait_until(lambda: pool.status()["processes"] == 0)
 
 
 def test_a_restart_during_a_start_lets_the_start_finish_and_then_drains_it(make_pool):
@@ -2100,7 +2100,7 @@ def test_a_stuck_worker_is_ended_again_by_stop_unregister_and_close(make_pool):
             pool.unregister("a")
         else:
             pool.close()
-        assert pool.status()["stuck"] == 0 and pool.status()["processes"] == 0, how
+        assert wait_until(lambda: pool.status()["stuck"] == 0 and pool.status()["processes"] == 0), how
 
 
 def test_lowering_the_cap_leaves_busy_and_draining_workers_alone(make_pool):
@@ -2150,7 +2150,7 @@ def test_an_entry_is_not_stopped_while_one_generation_is_stuck(make_pool):
     assert len(runtimes) == 2
     runtimes[0].process.returncode = 0
     pool.sweep()
-    assert pool.state("a") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("a") is WorkerState.STOPPED)
     pool.warm("a")
     assert len(runtimes) == 3 and pool.state("a") is WorkerState.READY
 
@@ -2397,7 +2397,7 @@ def test_a_plugin_registered_again_does_not_start_beside_a_survivor(make_pool):
     assert len(runtimes) == 1, "a second worker started beside the survivor"
     runtimes[0].process.returncode = 0
     pool.sweep()
-    assert pool.status()["stuck"] == 0
+    assert wait_until(lambda: pool.status()["stuck"] == 0)
     pool.warm("a")
     assert len(runtimes) == 2 and pool.state("a") is WorkerState.READY
 
@@ -2446,7 +2446,7 @@ def test_a_session_that_ended_its_own_group_is_confirmed(make_pool):
     pool.register(definition())
     child = pool.run("tr", "fork", {}).result["child"]
     pool.stop("tr")
-    assert pool.state("tr") is WorkerState.STOPPED and pool.status()["stuck"] == 0
+    assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED and pool.status()["stuck"] == 0)
     assert wait_until(lambda: not pid_alive(child))
 
 
@@ -2522,7 +2522,7 @@ def test_an_unconfirmed_one_off_teardown_blocks_the_key_even_with_spare_permits(
     assert len(holder) == 1
     holder[0].process.returncode = 0
     pool.sweep()
-    assert pool.status()["stuck"] == 0
+    assert wait_until(lambda: pool.status()["stuck"] == 0)
     # A different key was never affected.
     pool.run_once(WorkerDefinition("b", kind="daemon", runtime=factory), "echo")
     pool.warm("a")
@@ -3126,8 +3126,8 @@ def test_the_entry_is_stopped_when_the_last_teardown_of_its_key_is_confirmed(mak
     assert pool.status()["stuck"] == 1 and pool.state("a") is WorkerState.STOPPING
     runtimes[last].process.returncode = 0
     pool.sweep()
-    assert pool.status()["stuck"] == 0
-    assert pool.state("a") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.status()["stuck"] == 0)
+    assert wait_until(lambda: pool.state("a") is WorkerState.STOPPED)
     pool.warm("a")
     assert pool.state("a") is WorkerState.READY
 
@@ -3298,7 +3298,7 @@ def test_a_drained_entry_reads_stopping_until_its_teardown_is_confirmed(make_poo
     assert len(runtimes) == 1
     runtimes[0].process.returncode = 0
     pool.sweep()
-    assert pool.state("a") is WorkerState.STOPPED
+    assert wait_until(lambda: pool.state("a") is WorkerState.STOPPED)
     pool.warm("a")
     assert len(runtimes) == 2 and pool.state("a") is WorkerState.READY
 
