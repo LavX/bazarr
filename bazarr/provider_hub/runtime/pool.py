@@ -228,6 +228,16 @@ _COUNTS_AS_RESIDENT = (_S.STARTING, _S.READY)
 _PATH_IN_TEXT = re.compile(r"(?<![\w:/.])/[\w.\-+@%~]+(?:/[\w.\-+@%~]*)*")
 
 
+def _log_failure(message: str, error: BaseException, level: int = logging.DEBUG) -> None:
+    """Log that something failed, with the exception's type and nothing else.
+
+    A callback, a sink or a close can fail with a message (and a traceback with
+    frame values) that holds a request's secret or worker output the session has
+    not scrubbed. Only the fixed text and the type name are safe to log.
+    """
+    logger.log(level, "%s (%s)", message, type(error).__name__)
+
+
 def _public_text(text) -> str:
     """Error text safe for a status page: filesystem paths removed, length bounded."""
     return _PATH_IN_TEXT.sub("<path>", str(text))[:300]
@@ -1022,8 +1032,8 @@ class WorkerPool:
             if slot.session is not None:
                 try:
                     self._polite_close(slot, 1.0)
-                except Exception:
-                    logger.debug("one-off worker close failed", exc_info=True)
+                except Exception as error:
+                    _log_failure("one-off worker close failed", error)
                 gone = self._confirmed_gone(slot)
             with self._cond:
                 self._ephemeral.discard(slot)
@@ -1793,8 +1803,8 @@ class WorkerPool:
                 if callable(cut):
                     cut()
                 stop(grace)
-            except Exception:
-                logger.debug("ending a worker process failed", exc_info=True)
+            except Exception as error:
+                _log_failure("ending a worker process failed", error)
             finally:
                 slot.ended = True
 
@@ -1809,8 +1819,8 @@ class WorkerPool:
         else:
             try:
                 session.close(grace=0)
-            except Exception:
-                logger.debug("ending a worker failed", exc_info=True)
+            except Exception as error:
+                _log_failure("ending a worker failed", error)
 
     def _polite_close(self, slot, grace):
         """Shutdown frame, wait, SIGTERM, and then the process's own cleanup.
@@ -1843,8 +1853,8 @@ class WorkerPool:
                 self._end_process(slot, 0.5, again=True)
                 session.close(grace=0)
                 gone = self._confirmed_gone(slot)
-        except Exception:
-            logger.debug("worker close failed", exc_info=True)
+        except Exception as error:
+            _log_failure("worker close failed", error)
             try:
                 gone = self._confirmed_gone(slot)
             except Exception:
@@ -1896,8 +1906,8 @@ class WorkerPool:
                 if slot.session is not None:
                     slot.session.close(grace=0)
                 gone = self._confirmed_gone(slot)
-            except Exception:
-                logger.debug("retrying a stuck worker failed", exc_info=True)
+            except Exception as error:
+                _log_failure("retrying a stuck worker failed", error)
                 gone = False
             if not gone:
                 continue
@@ -1947,8 +1957,8 @@ class WorkerPool:
             return
         try:
             sink(key, name, payload)
-        except Exception:
-            logger.debug("pool event sink failed", exc_info=True)
+        except Exception as error:
+            _log_failure("pool event sink failed", error)
 
     # ---------------------------------------------------------------- sampler
 
@@ -1965,5 +1975,5 @@ class WorkerPool:
         while not self._sampler_stop.wait(self.limits.tick):
             try:
                 self.sweep()
-            except Exception:
-                logger.exception("worker pool sweep failed")
+            except Exception as error:
+                _log_failure("worker pool sweep failed", error, level=logging.ERROR)

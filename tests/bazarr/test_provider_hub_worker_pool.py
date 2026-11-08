@@ -1871,3 +1871,62 @@ def test_a_caller_that_gets_its_result_finds_the_books_settled(make_pool, clock)
         slot = pool._entry("tr").slot
         # Settled by the time run() returns, whichever thread got there first.
         assert slot.active == 0 and not slot.contexts
+
+
+# --------------------------------------------- failures are logged without their text
+
+
+SECRET_TEXT = "hunter2-very-secret-token"
+
+
+def _assert_nothing_leaked(caplog):
+    assert SECRET_TEXT not in caplog.text
+    assert not any(record.exc_info for record in caplog.records), "a traceback was attached to a log record"
+
+
+def test_an_event_sink_that_fails_with_a_secret_is_logged_by_type_only(make_pool, caplog):
+    caplog.set_level(logging.DEBUG)
+
+    def sink(key, name, payload):
+        raise RuntimeError("credential %s in the callback" % SECRET_TEXT)
+
+    pool = make_pool(event_sink=sink)
+    pool.register(definition())
+    pool.run("tr", "echo")
+    pool.stop("tr")
+    assert "pool event sink failed (RuntimeError)" in caplog.text
+    _assert_nothing_leaked(caplog)
+
+
+def test_a_failing_sweep_is_logged_by_type_only(make_pool, caplog):
+    import threading
+
+    caplog.set_level(logging.DEBUG)
+    pool = make_pool(fast_pool_limits(tick=0.01), use_clock=False)
+
+    def broken():
+        pool._sampler_stop.set()
+        raise RuntimeError("token %s" % SECRET_TEXT)
+
+    pool.sweep = broken
+    thread = threading.Thread(target=pool._sampler_loop)
+    thread.start()
+    thread.join(5)
+    assert "worker pool sweep failed (RuntimeError)" in caplog.text
+    _assert_nothing_leaked(caplog)
+
+
+def test_a_stuck_retry_and_a_failed_close_are_logged_by_type_only(make_pool, caplog):
+    caplog.set_level(logging.DEBUG)
+
+    class Leaky(StubProcessRuntime):
+        def close(self, grace=5.0):
+            raise RuntimeError("close saw %s" % SECRET_TEXT)
+
+    pool = make_pool(fast_pool_limits(), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=lambda *args: Leaky()))
+    pool.warm("a")
+    pool.stop("a")
+    pool.sweep()
+    assert "worker close failed (RuntimeError)" in caplog.text
+    _assert_nothing_leaked(caplog)

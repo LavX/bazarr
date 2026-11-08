@@ -209,8 +209,9 @@ def _run_callbacks(callbacks):
     for callback in callbacks:
         try:
             callback()
-        except Exception:
-            logger.warning("a request completion callback failed", exc_info=True)
+        except Exception as error:
+            # The type only: a message or traceback may carry a request's secret.
+            logger.warning("a request completion callback failed (%s)", type(error).__name__)
 
 
 _REASON_LIMIT = 200
