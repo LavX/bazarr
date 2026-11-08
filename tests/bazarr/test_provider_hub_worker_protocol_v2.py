@@ -4161,3 +4161,47 @@ def test_a_probe_overtaken_by_the_process_objects_own_reap_does_not_lose_the_gro
     # The process object did the reap itself: that is not somebody else's.
     assert session._group_lost is False
     assert process.returncode is not None
+
+
+class _OrderedProcess:
+    """A plain child handle that records the order of group signals and of its reap."""
+
+    args = ["worker"]
+
+    def __init__(self, order):
+        self.pid = os.getpid()
+        self.returncode = None
+        self.order = order
+
+    def wait(self, timeout=None):
+        self.order.append("reap")
+        self.returncode = 0
+        return 0
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_the_leader_is_not_reaped_between_the_flag_and_the_group_signal(monkeypatch):
+    monkeypatch.delattr(os, "waitid", raising=False)
+    order = []
+    session = WorkerSession(["worker"])
+    process = _OrderedProcess(order)
+    in_step = threading.Event()
+
+    def pausing_signal(target, sig):
+        # The flag is set; the signal is about to go. A reader that sees the flag must not reap yet.
+        order.append("signal-start")
+        in_step.set()
+        time.sleep(0.4)
+        order.append("signal-sent")
+        return True
+
+    monkeypatch.setattr(session_module, "_signal_group", pausing_signal)
+    ender = threading.Thread(target=session._end_group, args=(process,))
+    ender.start()
+    assert in_step.wait(5)
+    assert session._group_ended is True
+    reaper = threading.Thread(target=lambda: session._reap(process, 5.0))
+    reaper.start()
+    ender.join(10)
+    reaper.join(10)
+    assert order == ["signal-start", "signal-sent", "reap"], order

@@ -1255,6 +1255,12 @@ class WorkerSession:
         # Never reap the leader while its teardown is still running.
         if not self._wait_handover(max(0.0, deadline - time.monotonic())):
             raise subprocess.TimeoutExpired(process.args, timeout)
+        # The flag that says the group is ended is set in the same locked step that sends
+        # the signal. Reading the flag without the lock can catch the step half done, so
+        # the reap waits for any such step to finish first: after this nothing signals the
+        # group any more, and the leader's number may be reused.
+        with self._group_lock:
+            pass
         return process.wait(timeout=max(0.0, deadline - time.monotonic()))
 
     def _signal_leader_group(self, process, sig):
