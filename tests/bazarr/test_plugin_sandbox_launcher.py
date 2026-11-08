@@ -3866,3 +3866,20 @@ def test_an_anchor_reaped_by_somebody_else_is_never_signalled(monkeypatch):
     finally:
         monkeypatch.undo()
         plain.stop(0.5)
+
+
+@linux_only
+def test_a_launcher_that_cannot_fork_says_so_and_that_nothing_was_created(tmp_path):
+    process, status = run_launcher_main(
+        tmp_path,
+        """
+        def refuse():
+            raise OSError(11, "Resource temporarily unavailable")
+
+        os.fork = refuse
+        """,
+    )
+    assert process.returncode == 78, process.stderr
+    record, cleanup = status_records(status)
+    assert record["kind"] == "sandbox" and "fork" in record["message"]
+    assert cleanup == {"cleanup": "complete"}

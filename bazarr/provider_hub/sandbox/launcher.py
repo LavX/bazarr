@@ -789,7 +789,24 @@ def main(argv):
 
     parent_pid = os.getpid()
     # One thread here, so this fork is safe. The host never forks itself.
-    pid = os.fork()
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        # Out of processes or memory: nothing was created, so there is nothing to
+        # clean up, and the host is told so instead of being left to guess.
+        _say("launcher could not fork the worker: %s" % exc)
+        _report("sandbox", "launcher could not fork the worker: %s" % exc)
+        _report_cleanup("complete")
+        try:
+            signal.set_wakeup_fd(-1)
+        except (ValueError, OSError):
+            pass
+        for fd in (wake_r, wake_w, report_r, report_w):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return EXIT_SANDBOX_FAILED
     if pid == 0:
         _child(spec, landlock, seccomp, capabilities, parent_pid, (lifeline_fd, wake_r, wake_w, report_r, _STATUS_FD), report_w)
     os.close(report_w)
