@@ -3301,3 +3301,59 @@ def test_a_drained_entry_reads_stopping_until_its_teardown_is_confirmed(make_poo
     assert pool.state("a") is WorkerState.STOPPED
     pool.warm("a")
     assert len(runtimes) == 2 and pool.state("a") is WorkerState.READY
+
+
+# --------------------------- shared memory kept alive only by a mapping cannot be measured
+
+
+@needs_smaps
+def test_a_worker_that_keeps_a_memfd_alive_by_one_mapped_page_is_killed_for_memory(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition(memory_limit_bytes=100 * MIB))
+    written = []
+    handle = pool.submit("tr", "memfd_mapped", {"mb": 200}, on_progress=lambda message: written.append(message))
+    assert wait_until(lambda: bool(written), timeout=20)
+    pid = pid_of(pool, "tr")
+    plain = 0
+    with open("/proc/%d/smaps_rollup" % pid) as handle_file:
+        for line in handle_file:
+            if line.startswith("Pss:"):
+                plain = int(line.split()[1]) * 1024
+    # 200 MiB of shared memory, and the process's own Pss shows nowhere near it.
+    assert plain < 100 * MIB
+    pool.sweep()
+    with pytest.raises(WorkerKilled) as killed:
+        handle.wait(10)
+    assert killed.value.code == "memory_limit"
+
+
+@needs_smaps
+def test_a_memfd_both_open_and_mapped_is_counted_not_refused(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition(memory_limit_bytes=1024 * MIB))
+    written = []
+    handle = pool.submit("tr", "memfd_mapped", {"mb": 40, "keep_fd": True, "seconds": 2},
+                         on_progress=lambda message: written.append(message))
+    assert wait_until(lambda: bool(written), timeout=20)
+    pool.sweep()
+    slot = pool._entry("tr").slot
+    assert slot.memory_truncated is False and slot.memory_bytes >= 40 * MIB
+    assert handle.wait(10).result["kept"] is True
+
+
+@needs_smaps
+def test_memfd_usage_refuses_a_mapped_only_memfd_and_counts_an_open_one(tmp_path):
+    fd = os.memfd_create("mapped-only")
+    os.write(fd, b"q" * (3 * MIB))
+    unmap = _map_with_c_mmap(fd, 4096)
+    try:
+        held, incomplete = pool_module.memfd_usage([os.getpid()])
+        assert incomplete is False and held >= 3 * MIB  # open and mapped: counted
+        os.close(fd)
+        held, incomplete = pool_module.memfd_usage([os.getpid()])
+        assert incomplete is True and held < 512 * 1024  # mapped only: cannot be measured
+        # The trusted launcher's own mappings are not read.
+        assert pool_module.memfd_usage([os.getpid()], skip={os.getpid()}) == (0, False)
+    finally:
+        unmap()
+    assert pool_module.memfd_usage([os.getpid()]) == (0, False)

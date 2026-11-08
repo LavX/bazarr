@@ -115,6 +115,11 @@ end is accepted as evidence, and the gap is kept visible and bounded::
     launcher workers, runtimes   never counted: the launcher proves its tree, a runtime
     with no local process        without a process has none to detach from
 
+Memory counts each process's Pss, plus the memfds and ``/dev/shm`` files the tree holds
+open (by blocks). A shared-memory object that is only mapped (its descriptor closed)
+cannot be measured, so it makes the sample incomplete, which counts as over the limit:
+a plugin may not keep shared memory mapped after closing it.
+
 Folder budgets count what is on disk under the folder, plus files the worker tree
 unlinked but still holds open (found through its descriptors, charged by blocks).
 A deleted file referenced only by a mapping cannot be measured without privileges
@@ -725,12 +730,16 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
 
     A memfd that is also mapped is in Pss_Shmem as well, so it can be counted twice;
     that errs towards stopping the worker and is accepted. Incomplete when the
-    descriptors of a live process cannot be read. Not covered: pipe and socket
+    descriptors or mappings of a live process cannot be read, and when a memory
+    object (memfd, ``/dev/shm`` file, System V segment) is mapped but no descriptor
+    in the tree measures it: a plugin may not keep shared memory mapped after
+    closing it. Not covered: pipe and socket
     buffers, eventfds and the like (small or bounded by system limits), and tmpfs
     files outside ``/dev/shm`` (the folder budgets cover the folders a plugin has).
     """
     total = 0
     seen: set = set()
+    measured: set = set()  # (target path, inode) of every memory object a descriptor measured
     incomplete = False
     for pid in pids:
         if pid in skip:
@@ -763,11 +772,41 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
+            measured.add((target[: -len(_DELETED)] if target.endswith(_DELETED) else target, info.st_ino))
             identity = (info.st_dev, info.st_ino)
             if identity in seen:
                 continue
             seen.add(identity)
             total += _allocated(info)
+    # Shared memory that is only mapped: the descriptor was closed, the mapping stays, and
+    # nothing unprivileged says how much the object holds (the mapped pages in Pss are
+    # only the resident part of the mapping). A mapping of such an object that no
+    # descriptor in the tree measures makes the sample incomplete.
+    for pid in pids:
+        if pid in skip:
+            continue
+        try:
+            with open("/proc/%d/maps" % pid, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            incomplete = True
+            continue
+        for line in lines:
+            parts = line.split(None, 5)
+            if len(parts) < 6:
+                continue
+            path = parts[5][: -len(_DELETED)] if parts[5].endswith(_DELETED) else parts[5]
+            if not (_holds_memory(path) or path.startswith("/SYSV")):
+                continue
+            try:
+                inode = int(parts[4])
+            except ValueError:
+                incomplete = True
+                continue
+            if (path, inode) not in measured:
+                incomplete = True
     return total, incomplete
 
 

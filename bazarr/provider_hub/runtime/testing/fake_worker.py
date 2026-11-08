@@ -398,6 +398,31 @@ def _handle(operation):
             if operation.cancelled.wait(0.02):
                 raise worker_channel.OperationCancelled()
         return {"memfds": len(held)}
+    if name == "memfd_mapped":
+        # Fills one memfd, maps a single page of it with the C call and closes the
+        # descriptor: the object lives on through the mapping alone, and Pss shows one page.
+        import ctypes
+
+        block = b"m" * (1024 * 1024)
+        fd = os.memfd_create("mapped")
+        for _ in range(int(params.get("mb", 200))):
+            os.write(fd, block)
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mmap.restype = ctypes.c_void_p
+        libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                              ctypes.c_long]
+        address = libc.mmap(None, 4096, 3, 1, fd, 0)
+        if params.get("keep_fd"):
+            held = fd
+        else:
+            os.close(fd)
+            held = None
+        operation.progress(message="written")
+        deadline = time.monotonic() + float(params.get("seconds", 30.0))
+        while time.monotonic() < deadline:
+            if operation.cancelled.wait(0.02):
+                raise worker_channel.OperationCancelled()
+        return {"mapped": address is not None, "kept": held is not None}
     if name == "write_deleted":
         # Creates ``path``, unlinks it and keeps writing through the open descriptor, so
         # the bytes are on disk with no directory entry to find. With ``child`` a

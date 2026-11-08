@@ -155,6 +155,10 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
         "A plugin may not keep deleted files mapped inside its folders: their size cannot be "
         "measured, so the folder counts as over its limit."
     )
+    notes.append(
+        "A plugin may not keep shared memory mapped after closing it: its size cannot be "
+        "measured, so the worker counts as over its memory limit."
+    )
     return notes
 
 
