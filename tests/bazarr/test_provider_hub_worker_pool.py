@@ -3128,3 +3128,145 @@ def test_the_entry_is_stopped_when_the_last_teardown_of_its_key_is_confirmed(mak
     assert pool.state("a") is WorkerState.STOPPED
     pool.warm("a")
     assert pool.state("a") is WorkerState.READY
+
+
+# ------------------------------------- memory held in open memfds and /dev/shm is counted
+
+
+@needs_smaps
+def test_a_worker_that_fills_unmapped_memfds_is_killed_for_memory(make_pool):
+    pool = make_pool(use_clock=False)
+    pool.register(definition(memory_limit_bytes=100 * MIB))
+    written = []
+    handle = pool.submit("tr", "memfds", {"count": 4, "mb": 40}, on_progress=lambda message: written.append(message))
+    assert wait_until(lambda: bool(written), timeout=15)
+    pid = pid_of(pool, "tr")
+    # Nothing is mapped: the process's own Pss and Rss show almost none of the 160 MiB.
+    plain = 0
+    with open("/proc/%d/smaps_rollup" % pid) as handle_file:
+        for line in handle_file:
+            if line.startswith("Pss:"):
+                plain = int(line.split()[1]) * 1024
+    assert plain < 100 * MIB
+    pool.sweep()
+    with pytest.raises(WorkerKilled) as killed:
+        handle.wait(10)
+    assert killed.value.code == "memory_limit"
+
+
+@needs_smaps
+def test_memfd_usage_counts_each_memfd_once_across_descriptors_and_ignores_closed_ones():
+    fd = os.memfd_create("one")
+    other = os.memfd_create("two")
+    try:
+        os.write(fd, b"z" * (3 * MIB))
+        os.write(other, b"z" * (1 * MIB))
+        duplicate = os.dup(fd)
+        try:
+            held, incomplete = pool_module.memfd_usage([os.getpid(), os.getpid()])
+            assert incomplete is False
+            assert 4 * MIB <= held < 4 * MIB + 512 * 1024
+            # The trusted launcher's own descriptors are not read.
+            assert pool_module.memfd_usage([os.getpid()], skip={os.getpid()}) == (0, False)
+        finally:
+            os.close(duplicate)
+    finally:
+        os.close(fd)
+        os.close(other)
+    assert pool_module.memfd_usage([os.getpid()])[0] < 512 * 1024
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/shm") or not os.access("/dev/shm", os.W_OK), reason="needs /dev/shm")
+@needs_smaps
+def test_a_shm_open_file_held_open_counts_like_a_memfd():
+    path = "/dev/shm/bazarr-test-%d" % os.getpid()
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.write(fd, b"s" * (2 * MIB))
+        held, _ = pool_module.memfd_usage([os.getpid()])
+        assert held >= 2 * MIB
+        os.unlink(path)  # still held, now unlinked
+        assert pool_module.memfd_usage([os.getpid()])[0] >= 2 * MIB
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+@needs_smaps
+def test_an_unreadable_descriptor_directory_makes_the_memory_sample_incomplete(monkeypatch):
+    real = os.listdir
+
+    def denying(path):
+        if str(path) == "/proc/%d/fd" % os.getpid():
+            raise PermissionError(13, "Permission denied")
+        return real(path)
+
+    monkeypatch.setattr(os, "listdir", denying)
+    assert read_process_tree_memory(os.getpid()).truncated is True
+    # The trusted launcher's directory is the one exception, by design.
+    assert read_process_tree_memory(os.getpid(), skip_fds={os.getpid()}).truncated is False
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="launcher is Linux only")
+@needs_smaps
+def test_a_launcher_worker_is_not_made_incomplete_by_its_hidden_descriptors(make_pool, tmp_path):
+    build, declared = launcher_definition(tmp_path)
+    pool = make_pool(use_clock=False)
+    pool.register(WorkerDefinition("tr", kind="translator", spawn=launcher_spawn(build, probe=declared),
+                                   session_limits=fast_session(), memory_limit_bytes=512 * MIB))
+    slow = pool.submit("tr", "sleep", {"seconds": 1.0})
+    for _ in range(3):
+        pool.sweep()
+        time.sleep(0.1)
+    assert slow.wait(10).result == {"slept": 1.0}
+    assert pool.state("tr") is WorkerState.READY
+    slot = pool._entry("tr").slot
+    assert slot.memory_truncated is False and slot.memory_bytes > 0
+
+
+# ----------------------------------------------- allocated size: blocks, even when zero
+
+
+def test_allocated_size_is_the_blocks_when_there_are_any_even_none():
+    class Info:
+        st_size = 100 * MIB
+        st_blocks = 0
+
+    assert pool_module._allocated(Info()) == 0
+    Info.st_blocks = 8
+    assert pool_module._allocated(Info()) == 4096
+
+    class NoBlocks:
+        st_size = 123
+
+    assert pool_module._allocated(NoBlocks()) == 123
+
+
+def test_a_sparse_file_counts_as_what_it_allocates_in_the_folder_scan(tmp_path):
+    path = tmp_path / "sparse"
+    with open(path, "wb") as handle:
+        handle.truncate(200 * MIB)
+    if os.stat(path).st_blocks * 512 > 1 * MIB:
+        pytest.skip("this filesystem allocates truncated files")
+    used, truncated = folder_usage(str(tmp_path))
+    assert truncated is False and used < 1 * MIB
+
+
+@needs_smaps
+def test_a_sparse_deleted_file_counts_as_what_it_allocates_in_the_open_file_scan(tmp_path):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    path = folder / "sparse"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.ftruncate(fd, 200 * MIB)
+        os.unlink(path)
+        if os.fstat(fd).st_blocks * 512 > 1 * MIB:
+            pytest.skip("this filesystem allocates truncated files")
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
+        assert incomplete is False and usage[str(folder)] < 1 * MIB
+    finally:
+        os.close(fd)

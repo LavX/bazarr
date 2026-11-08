@@ -382,6 +382,22 @@ def _handle(operation):
             if operation.cancelled.wait(0.02):
                 raise worker_channel.OperationCancelled()
         return {"held": len(held)}
+    if name == "memfds":
+        # Fills ``count`` memfds with ``mb`` megabytes each from one small reused buffer,
+        # closes none of them and maps nothing: the memory is in no process's Pss or Rss.
+        block = b"y" * (1024 * 1024)
+        held = []
+        for _ in range(int(params.get("count", 4))):
+            fd = os.memfd_create("scratch")
+            for _ in range(int(params.get("mb", 40))):
+                os.write(fd, block)
+            held.append(fd)
+        operation.progress(message="written")
+        deadline = time.monotonic() + float(params.get("seconds", 30.0))
+        while time.monotonic() < deadline:
+            if operation.cancelled.wait(0.02):
+                raise worker_channel.OperationCancelled()
+        return {"memfds": len(held)}
     if name == "write_deleted":
         # Creates ``path``, unlinks it and keeps writing through the open descriptor, so
         # the bytes are on disk with no directory entry to find. With ``child`` a

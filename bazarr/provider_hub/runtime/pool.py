@@ -586,8 +586,8 @@ def _process_tree(root: int, max_processes: int) -> tuple[list[int], bool]:
     return seen, incomplete
 
 
-def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample | None:
-    """Memory of a process and every descendant, from ``smaps_rollup``.
+def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=()) -> MemorySample | None:
+    """Memory of a process and every descendant, from ``smaps_rollup``, plus the memfds they hold open.
 
     The sum uses ``Pss`` so pages shared between workers are not counted in
     full by each. A process without ``smaps_rollup`` (older kernel, or a
@@ -595,6 +595,12 @@ def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample
     when the root process is gone or ``/proc`` is unavailable. A tree larger
     than ``max_processes``, or with a live process whose memory cannot be
     read, comes back with ``truncated`` set.
+
+    Memory held in open memfds and ``/dev/shm`` files is in no process's Pss or Rss
+    until it is mapped, so it is added from the descriptors (``memfd_usage``). One
+    that is also mapped is then counted twice, which errs towards stopping the
+    worker. ``skip_fds`` names processes whose descriptor directory is not read (the
+    pool's own non-dumpable launcher, which hides it from its own user by design).
     """
     if not os.path.isdir("/proc/self"):
         return None
@@ -631,6 +637,11 @@ def read_process_tree_memory(pid: int, max_processes: int = 256) -> MemorySample
         total += used
         rss_total += rss
         counted += 1
+    held, held_incomplete = memfd_usage(members, skip_fds)
+    if held:
+        total += held
+        rss_total += held
+    truncated = truncated or held_incomplete
     if not counted:
         # Nothing readable. If nothing was seen at all the process is gone; if
         # live processes denied the read, the answer is "unknown", not "none".
@@ -664,7 +675,7 @@ def folder_usage(path: str, max_entries: int = 100_000) -> tuple[int, bool]:
                         info = entry.stat(follow_symlinks=False)
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
-                        total += getattr(info, "st_blocks", 0) * 512 or info.st_size
+                        total += _allocated(info)
                     except FileNotFoundError:
                         continue
                     except OSError:
@@ -677,6 +688,87 @@ def folder_usage(path: str, max_entries: int = 100_000) -> tuple[int, bool]:
 
 
 _DELETED = " (deleted)"
+
+
+def _allocated(info) -> int:
+    """Bytes a file really allocates: its blocks whenever the platform reports them, even zero.
+
+    A sparse file allocates less than its size, down to nothing; ``st_size`` is the
+    answer only where there is no ``st_blocks`` at all.
+    """
+    blocks = getattr(info, "st_blocks", None)
+    return info.st_size if blocks is None else blocks * 512
+
+
+_SHM_DIR = "/dev/shm/"
+
+
+def _holds_memory(target: str) -> bool:
+    """Whether an open descriptor's link target is memory the kernel keeps for the holder.
+
+    A memfd, or a file in ``/dev/shm`` (``shm_open``), however it was unlinked: its
+    pages are tmpfs pages that no process's Pss or Rss shows until they are mapped.
+    """
+    if target.endswith(_DELETED):
+        target = target[: -len(_DELETED)]
+    return target.startswith("/memfd:") or target.startswith(_SHM_DIR)
+
+
+def memfd_usage(pids, skip=()) -> tuple[int, bool]:
+    """Bytes held by memfds and ``/dev/shm`` files that processes have open: ``(bytes, incomplete)``.
+
+    Memory in a memfd that is open but not mapped is in nobody's Pss or Rss, so a
+    worker can fill memory past its limit with them. Every descriptor of every
+    process given (but not those in ``skip``, the trusted launcher's own) whose
+    target is such an object is stat'ed through its ``/proc`` link and counted by
+    allocated size, once per (device, inode) across the tree.
+
+    A memfd that is also mapped is in Pss_Shmem as well, so it can be counted twice;
+    that errs towards stopping the worker and is accepted. Incomplete when the
+    descriptors of a live process cannot be read. Not covered: pipe and socket
+    buffers, eventfds and the like (small or bounded by system limits), and tmpfs
+    files outside ``/dev/shm`` (the folder budgets cover the folders a plugin has).
+    """
+    total = 0
+    seen: set = set()
+    incomplete = False
+    for pid in pids:
+        if pid in skip:
+            continue
+        directory = "/proc/%d/fd" % pid
+        try:
+            descriptors = os.listdir(directory)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            incomplete = True
+            continue
+        for name in descriptors:
+            link = "%s/%s" % (directory, name)
+            try:
+                target = os.readlink(link)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                incomplete = True
+                continue
+            if not _holds_memory(target):
+                continue
+            try:
+                info = os.stat(link)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                incomplete = True
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            identity = (info.st_dev, info.st_ino)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            total += _allocated(info)
+    return total, incomplete
 
 
 def _under(path: str, folder: str) -> bool:
@@ -754,7 +846,7 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
             if not stat.S_ISREG(info.st_mode):
                 continue
             held.setdefault((info.st_dev, info.st_ino),
-                            (path, getattr(info, "st_blocks", 0) * 512 or info.st_size))
+                            (path, _allocated(info)))
             held_names.add((path, info.st_ino))
     for pid in pids:
         try:
@@ -2092,7 +2184,10 @@ class WorkerPool:
             # Nothing local, or a leader that was reaped: its number may belong to someone else now.
             return
         try:
-            sample = self._memory_reader(process.pid)
+            if isinstance(process, LauncherProcess) and self._memory_reader is read_process_tree_memory:
+                sample = read_process_tree_memory(process.pid, skip_fds={process.pid})
+            else:
+                sample = self._memory_reader(process.pid)
         except Exception:
             # A reading that failed is not a reading of zero.
             sample = MemorySample(bytes=0, rss_bytes=0, processes=0, source="error", truncated=True)
