@@ -4296,3 +4296,56 @@ def test_a_started_session_records_its_childs_start_time():
         assert session._process_mark is not None
     finally:
         session.close(grace=1.0)
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_close_ends_a_stubborn_worker_where_ownership_cannot_be_established(make_session, monkeypatch):
+    # Neither waitid nor /proc, and a worker that ignores both the shutdown frame and SIGTERM:
+    # the group is not signalled, but close() must still end and reap the child itself.
+    monkeypatch.delattr(os, "waitid", raising=False)
+    monkeypatch.setattr(session_module, "_has_proc", lambda: False)
+    session = make_session({"stubborn": True}, limits=fast_limits(kill_grace=3.0, term_grace=0.3))
+    session.start()
+    process = session.process
+    child = session.request("fork", {"inherit": True}, timeout=5).result["child"]
+    try:
+        started = time.monotonic()
+        session.close(grace=0.4)
+        assert time.monotonic() - started < 10
+        assert process.returncode is not None, "the stubborn worker outlived close()"
+        # Marked once, whichever way the unknown answer first came: through exited() or ours().
+        assert session._group_lost is True and session._ownership_unknown is True
+        assert session.teardown_confirmed is False
+    finally:
+        monkeypatch.undo()
+        try:
+            os.kill(child, signal.SIGKILL)
+        except OSError:
+            pass
+    assert wait_until(lambda: not pid_alive(child), timeout=5)
+    ours = list(session._threads)
+    assert wait_until(lambda: not [t.name for t in ours if t.is_alive()])
+
+
+def test_exited_and_ours_both_record_an_unknown_answer_the_same_way(monkeypatch):
+    for how in ("exited", "ours"):
+        session = WorkerSession(["worker"])
+        process = _ReapingProcess()
+        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None: session_module._UNKNOWN)
+        if how == "exited":
+            session._exited(process)
+        else:
+            with session._group_lock:
+                assert session._ours(process) is False
+        assert session._group_lost is True and session._ownership_unknown is True, how
+    for how in ("exited", "ours"):
+        session = WorkerSession(["worker"])
+        process = _ReapingProcess()
+        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None: session_module._GONE)
+        if how == "exited":
+            session._exited(process)
+        else:
+            with session._group_lock:
+                assert session._ours(process) is False
+        # Gone is lost without being unknown: somebody else reaped it, and there is nothing to end.
+        assert session._group_lost is True and session._ownership_unknown is False, how

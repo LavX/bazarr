@@ -1165,6 +1165,10 @@ class WorkerSession:
                 # reaped by somebody else.
                 if not self._group_ended:
                     self._group_lost = True
+                    # Lost and unknown are two things: unknown also keeps the direct-child
+                    # fallback in ``_kill_group`` (Popen looks before it kills) available.
+                    if state == _UNKNOWN:
+                        self._ownership_unknown = True
         return state in (_EXITED, _GONE)
 
     def _ours(self, process):
