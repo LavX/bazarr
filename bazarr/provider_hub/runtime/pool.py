@@ -722,10 +722,6 @@ class _Entry:
         self.state = WorkerState.STOPPED
         self.slot: _Slot | None = None
         self.retiring: list[_Slot] = []
-        # Every worker of this plugin whose teardown has been queued and is not yet
-        # confirmed gone (running, or stuck), whatever its generation. No new
-        # worker starts, and the entry does not read as stopped, until it is empty.
-        self.tearing: set = set()
         self.failures: deque = deque()
         self.backoff_until = 0.0
         self.open_until = 0.0
@@ -828,6 +824,12 @@ class WorkerPool:
         # closed meanwhile: still a process in the making, counted until the start
         # ends and its teardown is queued.
         self._detached: set = set()
+        # Plugin key -> its workers whose teardown has been queued and is not yet
+        # confirmed gone (running, or stuck), whatever their generation. It lives
+        # here, not on the entry: unregistering and registering the key again must
+        # not forget a survivor. Nothing of that key starts, and its entry does not
+        # read as stopped, until its set is empty.
+        self._tearing: dict[str, set] = {}
         # One-off workers whose session is still being created or started. Close
         # waits for them, and none begins once the pool is closing.
         self._ephemeral_starting: set = set()
@@ -1079,6 +1081,9 @@ class WorkerPool:
         self._check_request(timeout, secrets)
         with self._cond:
             self._check_open()
+            if self._tearing.get(definition.key):
+                raise PoolUnavailable("the previous worker of %s is still being stopped" % definition.key,
+                                      code=PoolCodes.UNAVAILABLE, retry_after=1.0)
         if not self._oneshot.acquire(timeout=self.limits.acquire_timeout):
             raise PoolUnavailable("too many one-off runs in progress", code=PoolCodes.POOL_FULL, retry_after=1.0)
         slot = _Slot(definition, self._clock(), self.limits, ephemeral=True)
@@ -1411,7 +1416,7 @@ class WorkerPool:
                             "worker keeps failing and is paused: %s" % (entry.last_error or "no detail"),
                             code=PoolCodes.CIRCUIT_OPEN, retry_after=entry.open_until - now)
                     # stopped, draining, or a backoff or breaker period that has ended
-                    if entry.tearing:
+                    if self._tearing.get(key):
                         # A worker of this plugin is still being torn down (or stuck):
                         # a new one does not start beside it.
                         self._wait(deadline, "the previous worker is still being stopped",
@@ -1881,9 +1886,8 @@ class WorkerPool:
             return
         slot.closing = True
         self._closing += 1
-        owner = slot.entry or entry
-        if owner is not None:
-            owner.tearing.add(slot)
+        if (slot.entry or entry) is not None:
+            self._tearing.setdefault(slot.definition.key, set()).add(slot)
         self._closes.append((slot, entry, mode, self.limits.close_grace if grace is None else grace))
 
     def _live_pid(self, session):
@@ -2043,12 +2047,17 @@ class WorkerPool:
         The entry reads as stopped only when no other worker of it is still
         being torn down or stuck, and no new worker starts before that.
         """
+        key = slot.definition.key
+        pending = self._tearing.get(key)
+        if pending is not None:
+            pending.discard(slot)
+            if not pending:
+                del self._tearing[key]
         owner = slot.entry or entry
         if owner is None:
             return
-        owner.tearing.discard(slot)
         if (owner.state == WorkerState.STOPPING and owner.slot is None and not owner.retiring
-                and not owner.tearing):
+                and not self._tearing.get(key)):
             self._set_state(owner, WorkerState.STOPPED, "stopped")
 
     def _add_stuck(self, slot, entry, release):

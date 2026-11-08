@@ -2348,3 +2348,35 @@ def test_a_request_is_not_sent_to_a_worker_whose_latest_sample_fails(make_pool, 
     assert refused.value.code == "memory_limit"
     assert sent == []
     assert pool._entry("a").slot is not first
+
+
+# --------------------------- forgetting a plugin does not forget a teardown that is unconfirmed
+
+
+def test_a_plugin_registered_again_does_not_start_beside_a_survivor(make_pool):
+    runtimes = []
+
+    class Survivor(StubProcessRuntime):
+        """Its process stays until the test says it is gone."""
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtimes.append(Survivor())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(max_resident=8, acquire_timeout=0.4), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    pool.warm("a")
+    pool.unregister("a")
+    assert pool.status()["stuck"] == 1
+    # The key is registered again (new settings, same writable folders).
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    with pytest.raises(PoolUnavailable):
+        pool.warm("a")
+    with pytest.raises(PoolUnavailable):
+        pool.run_once(WorkerDefinition("a", kind="daemon", runtime=factory), "echo")
+    assert len(runtimes) == 1, "a second worker started beside the survivor"
+    runtimes[0].process.returncode = 0
+    pool.sweep()
+    assert pool.status()["stuck"] == 0
+    pool.warm("a")
+    assert len(runtimes) == 2 and pool.state("a") is WorkerState.READY
