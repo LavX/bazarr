@@ -709,30 +709,51 @@ def test_the_client_manager_stops_clients_in_parallel():
     assert inspect.signature(SportarrClientManager.stop).parameters['timeout'].default == 6
 
 
-def test_the_owner_enabled_lookup_is_cached():
+def test_the_owner_enabled_lookup_is_cached(monkeypatch):
     """is_set() is polled from tight wait loops, and each call issued a SELECT
     plus a job-progress update; a 60-second ffprobe cost about twelve thousand
     of each."""
+    from types import SimpleNamespace
+
+    from sportarr import workflows
     from sportarr.workflows import SportsJobSignal
 
     assert SportsJobSignal.OWNER_CACHE_SECONDS > 0
-    signal = SportsJobSignal.__new__(SportsJobSignal)
-    signal.owner, signal.job_id, signal.parent = 1, None, None
-    signal._owner_checked_at = None
-    signal._owner_enabled = True
+    monkeypatch.setattr(SportsJobSignal, 'OWNER_CACHE_SECONDS', 1.0)
 
-    calls = []
+    class RecordingDatabase:
+        """Stands in for the session and answers the owner's enabled flag."""
 
-    def _lookup():
-        calls.append(1)
-        return True
+        def __init__(self):
+            self.calls = []
+            self.enabled = 1
 
-    import time as _time
-    signal._owner_checked_at = _time.monotonic()
-    signal._owner_enabled = True
-    # Inside the window the cached answer is used, with no query at all.
+        def execute(self, statement):
+            self.calls.append(statement)
+            return SimpleNamespace(scalar_one_or_none=lambda: self.enabled)
+
+    spy = RecordingDatabase()
+    clock = [100.0]
+    monkeypatch.setattr(workflows, 'database', spy)
+    monkeypatch.setattr(workflows, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    signal = SportsJobSignal(1)
+
+    # The first answer has nothing cached, so it queries once.
     assert signal._owner_is_enabled() is True
-    assert calls == []
+    assert len(spy.calls) == 1
+
+    # Inside the window the cached answer is used with no query at all, even
+    # though the stored flag has changed since. The clock is ours, so a slow
+    # machine cannot age the entry out.
+    spy.enabled = 0
+    clock[0] = 100.9
+    assert signal._owner_is_enabled() is True
+    assert len(spy.calls) == 1
+
+    # Past the window it asks again and sees the change.
+    clock[0] = 101.1
+    assert signal._owner_is_enabled() is False
+    assert len(spy.calls) == 2
 
 
 def test_the_analysis_poll_is_not_a_hundred_hertz():

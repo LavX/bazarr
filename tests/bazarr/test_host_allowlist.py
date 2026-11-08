@@ -86,12 +86,21 @@ def root_log():
 
 @pytest.fixture
 def fresh_state(monkeypatch):
-    """A fresh refusal record and approval code for one test."""
+    """A fresh refusal record and approval code for one test.
+
+    The summary timer a test arms is ended, and its turn finished, when the
+    test ends and before the environment the test pointed the shared records
+    at is restored. A timer left running pays its summary a moment after the
+    test saw the line, and the records it then writes resolve their path from
+    the environment at that moment: they would land in the next test's
+    configuration directory and read there as a line the pair had just spent.
+    """
     from app import host_allowlist
 
     monkeypatch.setattr(host_allowlist, "_refusals", host_allowlist.BoundedRefusalRecorder())
     monkeypatch.setattr(host_allowlist, "_approval_code", host_allowlist._ApprovalCode())
-    return host_allowlist
+    yield host_allowlist
+    host_allowlist.stop_summary_flushes()
 
 
 def _app_with_check(config):

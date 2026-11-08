@@ -48,6 +48,14 @@ def indexed_library(migration_engine, monkeypatch, tmp_path):  # noqa: F811
         monkeypatch.setattr(module, "database", session)
     manager = sse_client.SportarrClientManager()
     monkeypatch.setattr(sse_client, "_manager", manager)
+    # Tests import app.scheduler lazily, after the patch loop above, so its
+    # module binds this fixture's session. Left running, the real scheduler fires
+    # its start-up jobs (sportarr_clients, recording index refreshes) from
+    # another thread on that same session, which SQLAlchemy rejects with "This
+    # session is provisioning a new connection". Construct it without starting.
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    monkeypatch.setattr(BackgroundScheduler, "start", lambda self, *a, **k: None)
     db.update_profile_id_list.invalidate()
     monkeypatch.setattr(events, "notify", lambda *a: None)
     # A Sports library in use: the manual file operations refuse to run while
