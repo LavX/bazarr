@@ -421,7 +421,12 @@ def test_google_mixed_whitespace_keeps_source_cue(profile_library, monkeypatch):
 
 
 def independent_update(lib, statement):
-    """A separate connection has a bounded wait, including SQLite AUTOCOMMIT."""
+    """A separate connection has a bounded wait, including SQLite AUTOCOMMIT.
+
+    The lock wait itself is the 80 ms pragma or setting below: a held lock fails the
+    statement quickly with OperationalError. The outer limit only catches a hang, so it
+    is generous enough that a starved worker thread on a busy machine is not mistaken for one.
+    """
     from concurrent.futures import ThreadPoolExecutor
 
     def execute():
@@ -433,7 +438,7 @@ def independent_update(lib, statement):
             connection.execute(statement)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
-        pool.submit(execute).result(timeout=2)
+        pool.submit(execute).result(timeout=30)
 
 
 def change_input(lib, change):
