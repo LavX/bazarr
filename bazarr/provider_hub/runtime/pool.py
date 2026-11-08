@@ -1000,6 +1000,12 @@ class WorkerPool:
             try:
                 self._preflight_running(entry, slot)
                 self._sample(slot)
+                problem = self._memory_problem(slot, slot.definition.memory_limit())
+                if problem is not None:
+                    # Over its limit, or too big to measure, before it has been given
+                    # anything: end it and send nothing.
+                    self._kill_current(entry, slot, problem, requested=True)
+                    raise WorkerKilled(problem[1], code=problem[0])
                 handle = slot.session.submit(
                     op, params, timeout=timeout, max_result_bytes=max_result_bytes,
                     secrets=secrets, on_progress=on_progress)

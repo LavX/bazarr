@@ -2314,3 +2314,37 @@ def test_a_memory_reader_that_fails_is_not_read_as_zero(make_pool):
     with pytest.raises(WorkerKilled) as killed:
         handle.wait(10)
     assert killed.value.code == "memory_limit"
+
+
+# --------------------------------------------- nothing is sent to a worker that is over its limit
+
+
+@pytest.mark.parametrize("sample", [
+    MemorySample(500 * MIB, 500 * MIB, 1, "test"),
+    MemorySample(1 * MIB, 1 * MIB, 3, "test", truncated=True),
+], ids=["over-limit", "incomplete"])
+def test_a_request_is_not_sent_to_a_worker_whose_latest_sample_fails(make_pool, sample):
+    state = {"bad": False}
+
+    def reader(pid):
+        # Fine while it starts; the sample taken right before dispatch fails.
+        return sample if state["bad"] else MemorySample(10 * MIB, 10 * MIB, 1, "test")
+
+    sent = []
+
+    class Counting(StubProcessRuntime):
+        def submit(self, op, params=None, **kwargs):
+            sent.append(op)
+            return super().submit(op, params, **kwargs)
+
+    pool = make_pool(memory_reader=reader)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=lambda *args: Counting(),
+                                   memory_limit_bytes=100 * MIB))
+    pool.warm("a")
+    first = pool._entry("a").slot
+    state["bad"] = True
+    with pytest.raises(WorkerKilled) as refused:
+        pool.submit("a", "echo")
+    assert refused.value.code == "memory_limit"
+    assert sent == []
+    assert pool._entry("a").slot is not first
