@@ -131,7 +131,8 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
     if not landlock.is_supported_platform():
         return [
             "Workers run with a clean environment, but this platform applies no resource limits "
-            "and nothing confines their files, network or signals."
+            "and nothing confines their files, network or signals. Detached processes cannot be "
+            "tracked on this platform: only a worker's process group is ended."
         ]
     if not probe.enforced:
         return [

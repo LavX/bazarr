@@ -1250,9 +1250,14 @@ def test_run_once_holds_its_permit_until_the_process_is_gone(make_pool):
     pool = make_pool(fast_pool_limits(max_oneshot=1, acquire_timeout=0.3), use_clock=False)
     stuck = WorkerDefinition("draft", kind="daemon", runtime=factory)
     pool.run_once(stuck, "echo")
+    # Another plugin's one-off finds the only permit taken; the same plugin's is
+    # refused earlier, because its survivor is still on the same folders.
     with pytest.raises(PoolUnavailable) as full:
-        pool.run_once(stuck, "echo")
+        pool.run_once(WorkerDefinition("other", kind="daemon", runtime=factory), "echo")
     assert full.value.code == "pool_full"
+    with pytest.raises(PoolUnavailable) as same:
+        pool.run_once(stuck, "echo")
+    assert same.value.code == "worker_unavailable"
     holder[0].process.returncode = 0
     pool.sweep()
     assert pool.run_once(stuck, "echo").result == {"op": "echo"}
@@ -2473,3 +2478,174 @@ def _quiet(call, *args):
         call(*args)
     except BaseException:
         pass
+
+
+# ------------------------------- one-off teardowns count, and the key is rechecked when it publishes
+
+
+def test_an_unconfirmed_one_off_teardown_blocks_the_key_even_with_spare_permits(make_pool):
+    holder = []
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        holder.append(StubProcessRuntime())
+        return holder[-1]
+
+    pool = make_pool(fast_pool_limits(max_oneshot=2, acquire_timeout=0.4), use_clock=False)
+    draft = WorkerDefinition("a", kind="daemon", runtime=factory)
+    pool.run_once(draft, "echo")
+    assert pool.status()["stuck"] == 1
+    # One permit is free, but the survivor is on the same writable folders.
+    with pytest.raises(PoolUnavailable):
+        pool.run_once(draft, "echo")
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    with pytest.raises(PoolUnavailable):
+        pool.warm("a")
+    assert len(holder) == 1
+    holder[0].process.returncode = 0
+    pool.sweep()
+    assert pool.status()["stuck"] == 0
+    # A different key was never affected.
+    pool.run_once(WorkerDefinition("b", kind="daemon", runtime=factory), "echo")
+    pool.warm("a")
+    assert pool.state("a") is WorkerState.READY
+
+
+def test_a_resident_that_becomes_stuck_while_a_one_off_waits_for_its_permit_blocks_it(make_pool):
+    import threading
+
+    release = threading.Event()
+    running = threading.Event()
+    started = []
+
+    class Blocking(StubProcessRuntime):
+        def submit(self, op, params=None, **kwargs):
+            from provider_hub.runtime.session import RequestResult
+
+            running.set()
+
+            class Handle:
+                id = 1
+
+                def done(self):
+                    return release.is_set()
+
+                def wait(self, timeout=None):
+                    if not release.wait(timeout):
+                        raise TimeoutError("still running")
+                    return RequestResult({"op": op})
+
+            return Handle()
+
+        def close(self, grace=5.0):
+            self.process.returncode = 0
+            super().close(grace)
+
+    def draft_factory(definition, limits, host_calls, on_event, on_stderr):
+        started.append("draft")
+        return Blocking()
+
+    class Survivor(StubProcessRuntime):
+        pass
+
+    pool = make_pool(fast_pool_limits(max_oneshot=1, acquire_timeout=5.0), use_clock=False)
+    first = threading.Thread(
+        target=lambda: _quiet(pool.run_once, WorkerDefinition("a", kind="daemon", runtime=draft_factory), "echo"))
+    first.start()
+    assert running.wait(5)
+    outcome = []
+
+    def second():
+        try:
+            pool.run_once(WorkerDefinition("a", kind="daemon", runtime=draft_factory), "echo")
+            outcome.append(None)
+        except BaseException as error:
+            outcome.append(error)
+
+    waiter = threading.Thread(target=second)
+    waiter.start()
+    time.sleep(0.3)
+    assert waiter.is_alive(), "the second one-off should be waiting for the permit"
+    # Meanwhile a resident of the same key is started and left stuck.
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=lambda *args: Survivor()))
+    pool.warm("a")
+    pool.stop("a")
+    assert pool.status()["stuck"] == 1
+    release.set()
+    first.join(10)
+    waiter.join(10)
+    assert len(outcome) == 1 and isinstance(outcome[0], PoolUnavailable)
+    assert started == ["draft"], "a second one-off worker started beside the survivor"
+
+
+# ----------------------------- hosts without a launcher: unverified teardowns are counted and capped
+
+
+class FallbackProcess:
+    """A worker handle of a host with no subreaper launcher: ended by group, tree not provable."""
+
+    def __init__(self):
+        self.pid = 4242
+        self.returncode = None
+
+
+class FallbackRuntime(StubRuntime):
+    def __init__(self):
+        super().__init__()
+        self.process = FallbackProcess()
+
+    @property
+    def alive(self):
+        return self.started and self.process.returncode is None
+
+    def close(self, grace=5.0):
+        self.process.returncode = 0
+        super().close(grace)
+
+
+def test_workers_ended_without_whole_tree_proof_are_counted_logged_and_capped(make_pool, clock, caplog):
+    caplog.set_level(logging.INFO)
+    pool = make_pool(fast_pool_limits(unverified_limit=3, unverified_window=3600.0, max_resident=8))
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=lambda *args: FallbackRuntime()))
+    pool.register(WorkerDefinition("b", kind="daemon", runtime=lambda *args: FallbackRuntime()))
+    for _ in range(3):
+        pool.warm("a")
+        pool.stop("a")
+    status = pool.status()["unverified_teardowns"]
+    assert status["a"]["count"] == 3 and status["a"]["limit"] == 3
+    assert "detached processes cannot be tracked on this platform" in status["a"]["note"]
+    # One INFO line for the key, not one per teardown.
+    lines = [r for r in caplog.records if "cannot be tracked on this platform" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO
+    # The cap: no new start for the key, with a clear error, until the window passes.
+    with pytest.raises(PoolUnavailable) as capped:
+        pool.warm("a")
+    assert capped.value.code == "unverified_limit" and "cannot be tracked" in str(capped.value)
+    assert capped.value.retry_after and capped.value.retry_after > 3000
+    with pytest.raises(PoolUnavailable):
+        pool.run_once(WorkerDefinition("a", kind="daemon", runtime=lambda *args: FallbackRuntime()), "echo")
+    # Other keys are not affected.
+    pool.warm("b")
+    clock.advance(3601)
+    assert pool.status()["unverified_teardowns"].get("a") is None
+    pool.warm("a")
+    assert pool.state("a") is WorkerState.READY
+
+
+def test_a_launcher_worker_is_never_counted_as_unverified(make_pool):
+    pool = make_pool(fast_pool_limits(unverified_limit=1))
+    pool.register(definition("tr"))
+    # A plain child (no launcher) counts; the seam runtime with no local process does not.
+    pool.register(WorkerDefinition("daemon", kind="daemon", runtime=lambda *args: StubRuntime()))
+    for _ in range(3):
+        pool.warm("daemon")
+        pool.stop("daemon")
+    assert "daemon" not in pool.status()["unverified_teardowns"]
+
+
+def test_the_sandbox_status_says_detached_processes_cannot_be_tracked_where_that_is_so(monkeypatch):
+    from provider_hub.sandbox import landlock, sandbox_limitations
+    from provider_hub.sandbox.spawn import SandboxProbe
+
+    monkeypatch.setattr(landlock, "is_supported_platform", lambda: False)
+    notes = " ".join(sandbox_limitations(SandboxProbe(abi=0, verified=False)))
+    assert "Detached processes cannot be tracked on this platform" in notes

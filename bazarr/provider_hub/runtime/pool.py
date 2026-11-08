@@ -98,6 +98,23 @@ Evidence, and how each decision fails closed:
   that confirmed "process gone" reaches it, and the entry reads as stopped (and
   starts anything) only when none of its workers is still being torn down.
 
+Hosts without the subreaper launcher (any platform but Linux): a worker that detaches a
+child into a new session escapes the group kill, and the pool cannot see it. Making
+every such stop permanently stuck would make the pool unusable there, so the group's
+end is accepted as evidence, and the gap is kept visible and bounded::
+
+    what                         behaviour
+    status()["unverified_       per key: workers ended in the last window without whole-tree
+    teardowns"]                  proof, the limit, and the note "detached processes cannot be
+                                 tracked on this platform" (the sandbox status says the same)
+    log                          one INFO line per key, the first time it happens
+    cap                          at ``unverified_limit`` (20) such workers within
+                                 ``unverified_window`` (an hour) the key's starts, one-off
+                                 runs included, are refused with ``unverified_limit`` and a
+                                 retry time, until the oldest leaves the window
+    launcher workers, runtimes   never counted: the launcher proves its tree, a runtime
+    with no local process        without a process has none to detach from
+
 Nothing forgets a teardown that is not confirmed: the pool keeps, per plugin key and
 outside the entry, every worker of that key that is being torn down or is stuck
 (``_tearing``), including a start that was cut loose (``_detach``). Unregistering,
@@ -221,6 +238,7 @@ class PoolCodes:
     DISK_RESERVE = "disk_reserve"
     POOL_CLOSED = "pool_closed"
     UNKNOWN_WORKER = "unknown_worker"
+    UNVERIFIED_LIMIT = "unverified_limit"
 
 
 class PoolError(Exception):
@@ -421,6 +439,10 @@ class PoolLimits:
     close_grace: float = 2.0
     stderr_log_per_second: int = 20
     stderr_tail_lines: int = 50
+    # Workers of one plugin that may be ended without proof that their whole tree went
+    # (hosts without the launcher) per window, before new starts are refused.
+    unverified_limit: int = 20
+    unverified_window: float = 3600.0
 
     def __post_init__(self):
         # The grace goes into a shutdown frame, which only carries whole
@@ -838,6 +860,10 @@ class WorkerPool:
         # not forget a survivor. Nothing of that key starts, and its entry does not
         # read as stopped, until its set is empty.
         self._tearing: dict[str, set] = {}
+        # Plugin key -> when (pool clock) its workers were ended without proof that the
+        # whole tree went (no subreaper launcher here): see ``_note_unverified``.
+        self._unverified: dict[str, deque] = {}
+        self._unverified_logged: set = set()
         # One-off workers whose session is still being created or started. Close
         # waits for them, and none begins once the pool is closing.
         self._ephemeral_starting: set = set()
@@ -994,8 +1020,22 @@ class WorkerPool:
                 "resident": self._resident_count(),
                 "processes": self._process_count(),
                 "stuck": len(self._stuck),
+                "unverified_teardowns": self._unverified_status(now),
                 "workers": workers,
             }
+
+    def _unverified_status(self, now) -> dict:
+        """Per key: workers ended in the last window without whole-tree proof. Lock held."""
+        result = {}
+        for key, stamps in self._unverified.items():
+            self._prune_unverified(stamps, now)
+            if stamps:
+                result[key] = {
+                    "count": len(stamps),
+                    "limit": self.limits.unverified_limit,
+                    "note": "detached processes cannot be tracked on this platform",
+                }
+        return result
 
     # ---------------------------------------------------------------- requests
 
@@ -1099,9 +1139,7 @@ class WorkerPool:
         self._check_request(timeout, secrets)
         with self._cond:
             self._check_open()
-            if self._tearing.get(definition.key):
-                raise PoolUnavailable("the previous worker of %s is still being stopped" % definition.key,
-                                      code=PoolCodes.UNAVAILABLE, retry_after=1.0)
+            self._check_key_free(definition.key)
         if not self._oneshot.acquire(timeout=self.limits.acquire_timeout):
             raise PoolUnavailable("too many one-off runs in progress", code=PoolCodes.POOL_FULL, retry_after=1.0)
         slot = _Slot(definition, self._clock(), self.limits, ephemeral=True)
@@ -1111,6 +1149,9 @@ class WorkerPool:
                 raise PoolUnavailable(problem[1], code=problem[0])
             with self._cond:
                 self._check_open()
+                # The check at the top was made before the permit was waited for; a
+                # resident of this key may have become stuck since.
+                self._check_key_free(definition.key)
                 self._ephemeral.add(slot)
                 self._ephemeral_starting.add(slot)
             self._ensure_sampler()
@@ -1163,6 +1204,10 @@ class WorkerPool:
         finally:
             gone = True
             if slot.session is not None:
+                with self._cond:
+                    # Counted as a teardown of this key before anything is done to it, and
+                    # until it is confirmed: nothing of the key starts beside a survivor.
+                    self._tearing.setdefault(definition.key, set()).add(slot)
                 try:
                     self._polite_close(slot, 1.0)
                 except Exception as error:
@@ -1170,11 +1215,25 @@ class WorkerPool:
                 gone = self._confirmed_gone(slot)
             with self._cond:
                 self._ephemeral.discard(slot)
-                if not gone:
+                if gone:
+                    self._teardown_confirmed(slot, None)
+                else:
                     # The permit stays taken until the process is really gone.
                     self._add_stuck(slot, None, self._oneshot.release)
             if gone:
                 self._oneshot.release()
+
+    def _check_key_free(self, key):
+        """Refuse a start of ``key`` while a worker of it is being torn down, or the cap is spent. Lock held."""
+        if self._tearing.get(key):
+            raise PoolUnavailable("the previous worker of %s is still being stopped" % key,
+                                  code=PoolCodes.UNAVAILABLE, retry_after=1.0)
+        wait = self._unverified_wait(key)
+        if wait:
+            raise PoolUnavailable(
+                "%s has had %d workers ended without whole-tree cleanup within the last hour; "
+                "detached processes cannot be tracked on this platform, so starts are paused"
+                % (key, self.limits.unverified_limit), code=PoolCodes.UNVERIFIED_LIMIT, retry_after=wait)
 
     def _wait_watched(self, slot, handle):
         """Wait for a one-off request, checking its worker's memory and folders as time passes.
@@ -1440,6 +1499,7 @@ class WorkerPool:
                         self._wait(deadline, "the previous worker is still being stopped",
                                    code=PoolCodes.UNAVAILABLE)
                         continue
+                    self._check_key_free(key)
                     if not self._claim_capacity(entry):
                         self._wait(deadline, "no free worker slot", code=PoolCodes.POOL_FULL)
                         continue
@@ -2066,6 +2126,43 @@ class WorkerPool:
                 self._cond.notify_all()
             self._deliver_events()
 
+    def _note_unverified(self, slot):
+        """Count a worker whose tree could only be ended by its process group. Lock held.
+
+        Where there is no subreaper launcher (a platform without one), a descendant
+        that detached itself from the group cannot be seen or ended, so "gone" rests
+        on the group alone. That is accepted, but counted, reported once per key and
+        capped, so a plugin that keeps leaking cannot do so without limit.
+        """
+        session = slot.session
+        process = session.process if session is not None else None
+        if process is None or isinstance(process, LauncherProcess):
+            return
+        key = slot.definition.key
+        now = self._clock()
+        stamps = self._unverified.setdefault(key, deque())
+        stamps.append(now)
+        self._prune_unverified(stamps, now)
+        if key not in self._unverified_logged:
+            self._unverified_logged.add(key)
+            logger.info("%s: a worker was ended by process group only; detached processes cannot be "
+                        "tracked on this platform", key)
+
+    def _prune_unverified(self, stamps, now):
+        while stamps and now - stamps[0] > self.limits.unverified_window:
+            stamps.popleft()
+
+    def _unverified_wait(self, key) -> float:
+        """Seconds until a capped key may start again, or 0. Lock held."""
+        stamps = self._unverified.get(key)
+        if not stamps:
+            return 0.0
+        now = self._clock()
+        self._prune_unverified(stamps, now)
+        if len(stamps) < self.limits.unverified_limit:
+            return 0.0
+        return max(0.0, stamps[0] + self.limits.unverified_window - now)
+
     def _teardown_confirmed(self, slot, entry):
         """A worker's teardown is confirmed. Caller holds the lock.
 
@@ -2073,6 +2170,7 @@ class WorkerPool:
         being torn down or stuck, and no new worker starts before that.
         """
         key = slot.definition.key
+        self._note_unverified(slot)
         pending = self._tearing.get(key)
         if pending is not None:
             pending.discard(slot)
