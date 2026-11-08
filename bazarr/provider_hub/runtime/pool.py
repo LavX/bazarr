@@ -83,6 +83,21 @@ Limits and what enforces them:
   entry stays ``stopping``, until its process is confirmed gone; one that
   survives a stop is ended again on every sweep.
 
+Evidence, and how each decision fails closed:
+
+* "Process gone" (``_confirmed_gone``): the leader reaped (``returncode``), and for
+  an anchored worker its anchor let go, and for a launcher that it exited by itself
+  and wrote a ``complete`` cleanup record; a leader or anchor somebody else reaped,
+  a missing record or an overflowed status stream is "not confirmed".
+* "Sample complete" (``read_process_tree_memory``): every listed process read, the
+  listing itself complete (children lists readable, the ``/proc`` scan not capped
+  and no record skipped), under ``max_processes``. A live process that denies the
+  read, a cut listing or a reader that fails make the sample ``truncated``, which
+  counts as over the limit; only a root that vanished reads as no sample.
+* "Teardown complete" (``_teardown_confirmed``): only a close job or a stuck pass
+  that confirmed "process gone" reaches it, and the entry reads as stopped (and
+  starts anything) only when none of its workers is still being torn down.
+
 Accounting. A worker's process is counted, in one of these places, from the
 moment it can exist until its teardown is confirmed, and it moves between them
 inside a single lock hold so the count never dips:
@@ -138,7 +153,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from ..sandbox import LauncherProcess, SandboxApplyError, SandboxRefused, spawn_worker
+from ..sandbox import LauncherProcess, SandboxApplyError, SandboxRefused, WorkerProcess, spawn_worker
 from .errors import HandshakeError, RequestError, SessionError
 from .frames import Codes, is_secrets
 from .session import HostCall, RequestHandle, RequestResult, SessionLimits, WorkerSession
@@ -1814,7 +1829,8 @@ class WorkerPool:
         try:
             sample = self._memory_reader(process.pid)
         except Exception:
-            sample = None
+            # A reading that failed is not a reading of zero.
+            sample = MemorySample(bytes=0, rss_bytes=0, processes=0, source="error", truncated=True)
         now = self._clock()
         with self._cond:
             slot.last_sample_at = now
@@ -1903,6 +1919,11 @@ class WorkerPool:
         but that cleanup, so none of those cases may release a worker's place in
         the pool.
         """
+        if isinstance(process, WorkerProcess) and (
+                process._anchor is not None or process._anchor_lost or process._leader_lost):
+            # An anchored worker's group is ended when its anchor is let go; a leader or
+            # anchor that somebody else reaped leaves a group nobody can vouch for.
+            return False
         if not isinstance(process, LauncherProcess):
             return True
         if process.returncode < 0:

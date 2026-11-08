@@ -2275,3 +2275,42 @@ def test_a_one_off_run_is_sampled_once_more_when_it_finishes(make_pool):
     pool.run_once(definition("draft"), "echo")
     # Before the work, and after it.
     assert len(calls) >= 2
+
+
+# ---------------------------------------------------- evidence that fails closed
+
+
+@linux_only
+def test_an_anchored_worker_is_gone_only_when_its_anchor_has_been_let_go():
+    from provider_hub.sandbox import spawn as spawn_module
+
+    process = spawn_module._start_plain([sys.executable, "-c", "pass"], stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        process.wait(timeout=10)
+        assert process.returncode is not None
+        if process._anchor is None:
+            pytest.skip("no process group anchor on this interpreter")
+        # The leader is reaped, but its group is still held: not confirmed.
+        assert WorkerPool._cleanup_confirmed(process) is False
+    finally:
+        process.stop(0.5)
+    assert WorkerPool._cleanup_confirmed(process) is True
+    process._anchor_lost = True
+    assert WorkerPool._cleanup_confirmed(process) is False
+    process._anchor_lost = False
+    process._leader_lost = True
+    assert WorkerPool._cleanup_confirmed(process) is False
+
+
+def test_a_memory_reader_that_fails_is_not_read_as_zero(make_pool):
+    def broken(pid):
+        raise RuntimeError("reader failed")
+
+    pool = make_pool(memory_reader=broken)
+    pool.register(definition(memory_limit_bytes=100 * MIB))
+    handle = pool.submit("tr", "sleep", {"seconds": 30})
+    pool.sweep()
+    with pytest.raises(WorkerKilled) as killed:
+        handle.wait(10)
+    assert killed.value.code == "memory_limit"
