@@ -2404,19 +2404,35 @@ def test_a_plugin_registered_again_does_not_start_beside_a_survivor(make_pool):
 def test_a_leader_reaped_by_somebody_else_does_not_prove_its_descendants_gone(make_pool):
     pool = make_pool(use_clock=False)
     pool.register(definition())
+    import threading
+
+    from provider_hub.runtime.session import WorkerSession
+
     child = pool.run("tr", "fork", {}).result["child"]
     leader = pid_of(pool, "tr")
     assert pid_alive(child)
+    # The session's reader would race the outside reaper to the dead leader; hold it back.
+    outside_reaper_done = threading.Event()
+    real_reap = WorkerSession._reap_exit_code
+
+    def late_reap(self):
+        outside_reaper_done.wait(10)
+        return real_reap(self)
+
+    WorkerSession._reap_exit_code = late_reap
     try:
         # An outside reaper takes the leader while its descendant lives on.
         os.kill(leader, 9)
         os.waitpid(leader, 0)
+        outside_reaper_done.set()
         pool.stop("tr")
         assert pid_alive(child), "the session had no group to signal and signalled none"
         # Nothing vouches for the descendant: the worker is stuck, not stopped.
         assert pool.state("tr") is WorkerState.STOPPING
         assert pool.status()["stuck"] == 1 and pool.status()["processes"] == 1
     finally:
+        WorkerSession._reap_exit_code = real_reap
+        outside_reaper_done.set()
         try:
             os.kill(child, 9)
         except OSError:
