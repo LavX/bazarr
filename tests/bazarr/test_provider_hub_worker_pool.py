@@ -3958,3 +3958,79 @@ def test_a_configured_reserve_above_the_whole_dev_shm_is_refused(make_pool):
     # Within the size it is accepted, and a /dev/shm that cannot be guarded accepts anything.
     make_pool(fast_pool_limits(shm_reserve_bytes=3 * MIB), shm_reader=lambda: (4 * MIB, 4 * MIB, True))
     make_pool(fast_pool_limits(shm_reserve_bytes=10 * MIB), shm_reader=lambda: (30 * GIB, 30 * GIB, True))
+
+
+# ------------------------------- names with characters that maps escapes still match their descriptors
+
+
+def test_a_raw_name_is_put_in_the_form_maps_writes_never_the_reverse():
+    assert pool_module._maps_form("/dev/shm/a\nb") == "/dev/shm/a\\012b"
+    # A backslash is not escaped by maps, so a real "\\012" stays as it is.
+    assert pool_module._maps_form("/dev/shm/a\\012b") == "/dev/shm/a\\012b"
+    assert pool_module._maps_form("/plain/name with spaces") == "/plain/name with spaces"
+
+
+@pytest.mark.parametrize("name", ["with\nnewline", "back\\012slash", "back\\slash"], ids=["newline", "literal", "backslash"])
+@needs_smaps
+def test_a_deleted_file_with_an_escaped_name_that_is_open_and_mapped_is_charged_once(tmp_path, name):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    fd = _unlinked_file(folder, name, 2 * MIB)
+    unmap = _map_with_c_mmap(fd, 4096)
+    try:
+        assert any("(deleted)" in line and ("012" in line or "134" in line or "slash" in line)
+                   for line in open("/proc/self/maps")), "the kernel lists the mapping"
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
+        # Recognised as the file the descriptor holds: charged by its blocks, not refused as mapped-only.
+        assert incomplete is False and 2 * MIB <= usage[str(folder)] < 2 * MIB + 256 * 1024
+    finally:
+        unmap()
+        os.close(fd)
+
+
+@needs_smaps
+def test_a_memfd_with_a_newline_in_its_name_that_is_open_and_mapped_is_measured():
+    fd = os.memfd_create("scratch\nspace")
+    os.write(fd, b"m" * (3 * MIB))
+    unmap = _map_with_c_mmap(fd, 4096)
+    try:
+        held, incomplete = pool_module.memfd_usage([os.getpid()])
+        assert incomplete is False and 3 * MIB <= held < 3 * MIB + 256 * 1024
+    finally:
+        unmap()
+        os.close(fd)
+    # Closed with the mapping still there: now it is the unmeasurable case, name and all.
+    fd = os.memfd_create("scratch\nspace")
+    os.write(fd, b"m" * MIB)
+    unmap = _map_with_c_mmap(fd, 4096)
+    os.close(fd)
+    try:
+        assert pool_module.memfd_usage([os.getpid()])[1] is True
+    finally:
+        unmap()
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/shm") or not os.access("/dev/shm", os.W_OK), reason="needs /dev/shm")
+@needs_smaps
+def test_a_dev_shm_file_with_a_newline_in_its_name_is_charged_by_bytes_once_when_open_and_mapped():
+    path = "/dev/shm/bazarr-test-\nname-%d" % os.getpid()
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    unmap = None
+    try:
+        os.write(fd, b"s" * (2 * MIB))
+        unmap = _map_with_c_mmap(fd, 4096)
+        os.unlink(path)
+        held, mappings = pool_module.shm_usage([os.getpid()])
+        assert mappings == 1
+        # The file's blocks, and no extra page for a mapping its descriptor already measures.
+        assert 2 * MIB <= held < 2 * MIB + os.sysconf("SC_PAGE_SIZE")
+        usage, incomplete = pool_module.memfd_usage([os.getpid()])
+        assert incomplete is False and 2 * MIB <= usage < 2 * MIB + os.sysconf("SC_PAGE_SIZE")
+    finally:
+        if unmap:
+            unmap()
+        os.close(fd)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass

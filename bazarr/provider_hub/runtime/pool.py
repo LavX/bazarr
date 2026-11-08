@@ -557,7 +557,7 @@ def _bounded_lines(path: str, max_bytes: int = PROC_MAX_BYTES, max_lines: int = 
             if (len(raw) > PROC_LINE_LIMIT or total > max_bytes or count > max_lines
                     or time.monotonic() > deadline):
                 raise _ProcOverflow(path)
-            yield raw.decode("utf-8", "replace").rstrip("\n")
+            yield raw.decode("utf-8", "surrogateescape").rstrip("\n")
 
 
 def _read_kb(path: str, *names: str) -> dict:
@@ -998,7 +998,7 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
-            measured.add((target[: -len(_DELETED)] if target.endswith(_DELETED) else target, info.st_ino))
+            measured.add((_maps_form(target[: -len(_DELETED)] if target.endswith(_DELETED) else target), info.st_ino))
             identity = (info.st_dev, info.st_ino)
             if identity in seen:
                 continue
@@ -1047,8 +1047,25 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
     return total, incomplete
 
 
+def _maps_form(name: str) -> str:
+    """A path as ``/proc/<pid>/maps`` writes it.
+
+    ``readlink`` of a descriptor gives the raw name; ``maps`` writes a newline in it as
+    ``\\012`` (and nothing else: the kernel escapes only the characters it is told to, a
+    backslash is not one of them, so ``\\012`` there may also be a real backslash and the
+    digits). Comparing the two means putting the raw name in the ``maps`` form, never the
+    other way round: the reverse is ambiguous. Two names that differ only that way are the
+    same name here, which costs nothing, since an inode is compared too.
+    """
+    return name.replace("\n", "\\012") if "\n" in name else name
+
+
 def _mapped_objects(path: str):
-    """The mappings of a ``maps`` file that have a name, as ``line.split(None, 5)``: read within bounds."""
+    """The mappings of a ``maps`` file that have a name, as ``line.split(None, 5)``: read within bounds.
+
+    The name (the sixth field) is left as ``maps`` wrote it; compare it with ``_maps_form`` of a
+    ``readlink`` target.
+    """
     for line in _bounded_lines(path):
         parts = line.split(None, 5)
         if len(parts) >= 6:
@@ -1121,7 +1138,7 @@ def shm_usage(pids, skip=()) -> tuple[int, int]:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
-            measured.add((held, info.st_ino))
+            measured.add((_maps_form(held), info.st_ino))
             if (info.st_dev, info.st_ino) not in seen:
                 seen.add((info.st_dev, info.st_ino))
                 total += _allocated(info)
@@ -1178,7 +1195,7 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
     or a candidate descriptor cannot be stat'ed. A process that vanished, or a
     descriptor closed meanwhile, is not an omission.
     """
-    roots = [(folder, {folder, os.path.realpath(folder)}) for folder in folders]
+    roots = [(folder, {_maps_form(folder), _maps_form(os.path.realpath(folder))}) for folder in folders]
     usage = {folder: 0 for folder, _names in roots}
     incomplete = False
     held: dict = {}  # (device, inode) -> (original path, size from a descriptor)
@@ -1213,7 +1230,7 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
                 continue
             if not target.endswith(_DELETED):
                 continue
-            path = target[: -len(_DELETED)]
+            path = _maps_form(target[: -len(_DELETED)])
             if not folders_of(path):
                 continue
             try:
