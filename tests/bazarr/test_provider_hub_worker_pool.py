@@ -3763,3 +3763,79 @@ def test_every_spelling_of_a_shared_anonymous_mapping_in_maps_is_refused(monkeyp
 def test_a_named_private_anonymous_mapping_in_maps_is_not_refused(monkeypatch):
     _with_fake_maps(monkeypatch, _FakeMaps(2, b"7f0000000000-7f0000001000 rw-p 00000000 00:00 0 [anon:scratch]\n"))
     assert pool_module.memfd_usage([os.getpid()]) == (0, False)
+
+
+# --------------------- the folder scan where directories cannot be opened by descriptor (Windows)
+
+
+@pytest.fixture(params=["descriptors", "paths"])
+def scan_mode(request, monkeypatch):
+    if request.param == "paths":
+        monkeypatch.setattr(pool_module, "_fd_walk_available", lambda: False)
+    return request.param
+
+
+def test_the_folder_scan_counts_a_tree_in_either_mode(scan_mode, tmp_path):
+    (tmp_path / "sub" / "deep").mkdir(parents=True)
+    (tmp_path / "a").write_bytes(b"x" * 100_000)
+    (tmp_path / "sub" / "b").write_bytes(b"y" * 200_000)
+    (tmp_path / "sub" / "deep" / "c").write_bytes(b"z" * 300_000)
+    used, truncated = folder_usage(str(tmp_path))
+    assert truncated is False and 600_000 <= used < 600_000 + 256 * 1024
+    assert folder_usage(str(tmp_path / "missing")) == (0, False)
+    assert folder_usage(str(tmp_path / "a")) == (0, False)  # not a directory: nothing under it
+    assert folder_usage(str(tmp_path), max_entries=2)[1] is True
+    assert folder_usage(str(tmp_path), max_seconds=0.0)[1] is True
+
+
+def test_the_folder_scan_does_not_follow_or_enter_symlinks_in_either_mode(scan_mode, tmp_path):
+    outside = tmp_path / "outside"
+    folder = tmp_path / "data"
+    outside.mkdir()
+    folder.mkdir()
+    (outside / "big").write_bytes(b"x" * (5 * MIB))
+    (folder / "link").symlink_to(outside, target_is_directory=True)
+    (folder / "filelink").symlink_to(outside / "big")
+    used, truncated = folder_usage(str(folder))
+    assert truncated is False and used < 1 * MIB
+
+
+def test_the_path_walk_does_not_enter_a_reparse_point(tmp_path, monkeypatch):
+    monkeypatch.setattr(pool_module, "_fd_walk_available", lambda: False)
+    folder = tmp_path / "data"
+    (folder / "junction").mkdir(parents=True)
+    (folder / "junction" / "big").write_bytes(b"x" * (5 * MIB))
+    (folder / "plain").mkdir()
+    (folder / "plain" / "small").write_bytes(b"y" * 10)
+    real = pool_module._is_reparse
+    monkeypatch.setattr(pool_module, "_is_reparse", lambda entry, info: entry.name == "junction" or real(entry, info))
+    used, truncated = folder_usage(str(folder))
+    assert truncated is False and used < 1 * MIB
+
+
+def test_the_path_walk_refuses_a_directory_swapped_for_a_link_before_it_is_listed(tmp_path, monkeypatch):
+    monkeypatch.setattr(pool_module, "_fd_walk_available", lambda: False)
+    folder = tmp_path / "data"
+    outside = tmp_path / "outside"
+    (folder / "sub").mkdir(parents=True)
+    outside.mkdir()
+    (outside / "big").write_bytes(b"x" * (5 * MIB))
+    real_lstat = os.lstat
+    swapped = []
+
+    def swap_then_look(target, *args, **kwargs):
+        # Between the listing that queued ``sub`` and the visit to it, it becomes a link.
+        if str(target).endswith("sub") and not swapped:
+            swapped.append(True)
+            (folder / "sub").rmdir()
+            os.symlink(outside, folder / "sub")
+        return real_lstat(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", swap_then_look)
+    used, truncated = folder_usage(str(folder))
+    assert swapped
+    assert used < 1 * MIB and truncated is True
+
+
+def test_the_descriptor_walk_is_what_runs_where_it_is_supported():
+    assert pool_module._fd_walk_available() is (os.name == "posix")

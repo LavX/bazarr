@@ -745,6 +745,29 @@ def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=()) ->
 _MAX_SCAN_DEPTH = 256
 
 
+_REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT: a Windows symlink, junction or mount point
+
+
+# Decided once, from the real functions: a wrapper put around ``os.open`` later is not a reason to change walks.
+_FD_WALK = bool(hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+                and os.open in os.supports_dir_fd and os.scandir in os.supports_fd)
+
+
+def _fd_walk_available() -> bool:
+    """Whether directories can be opened and listed by descriptor here (POSIX; not Windows)."""
+    return _FD_WALK
+
+
+def _is_reparse(entry, info) -> bool:
+    """A link of any kind: a symlink, or on Windows a junction or other reparse point."""
+    if entry.is_symlink():
+        return True
+    junction = getattr(entry, "is_junction", None)
+    if callable(junction) and junction():
+        return True
+    return bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
 def folder_usage(path: str, max_entries: int = 100_000, max_seconds: float | None = FOLDER_SCAN_SECONDS
                  ) -> tuple[int, bool]:
     """Allocated bytes under ``path`` without following links.
@@ -757,13 +780,68 @@ def folder_usage(path: str, max_entries: int = 100_000, max_seconds: float | Non
     directory was swapped for something else while the scan was under way. A
     missing folder is empty.
 
-    The walk holds directory descriptors: every directory is opened without
-    following links, relative to the descriptor of its parent, and listed and
-    stat'ed through that descriptor. A path is never looked up a second time, so
-    swapping a directory for a symlink between the listing and the visit cannot
-    send the scan outside the folder.
+    Where directories can be opened by descriptor (POSIX) the walk holds them: every
+    directory is opened without following links, relative to the descriptor of its
+    parent, and listed and stat'ed through that descriptor. A path is never looked up a
+    second time, so swapping a directory for a symlink between the listing and the visit
+    cannot send the scan outside the folder. Elsewhere (Windows) it is a bounded
+    ``os.scandir(path)`` walk that does not follow or enter symlinks, junctions or other
+    reparse points, and looks at a directory once more just before listing it; without a
+    descriptor that window cannot be closed completely.
     """
     deadline = None if max_seconds is None else time.monotonic() + max_seconds
+    if not _fd_walk_available():
+        return _folder_usage_by_path(path, max_entries, deadline)
+    return _folder_usage_by_descriptor(path, max_entries, deadline)
+
+
+def _folder_usage_by_path(path: str, max_entries: int, deadline) -> tuple[int, bool]:
+    root = os.path.realpath(path)
+    try:
+        if not stat.S_ISDIR(os.stat(root).st_mode):
+            return 0, False
+    except FileNotFoundError:
+        return 0, False
+    except OSError:
+        return 0, True
+    total = 0
+    seen = 0
+    stack = [(root, 0)]
+    while stack:
+        if deadline is not None and time.monotonic() > deadline:
+            return total, True
+        current, depth = stack.pop()
+        if depth > _MAX_SCAN_DEPTH:
+            return total, True
+        try:
+            before = os.lstat(current)
+            if stat.S_ISLNK(before.st_mode) or getattr(before, "st_file_attributes", 0) & _REPARSE_POINT:
+                return total, True  # swapped for a link since it was listed
+            scan = os.scandir(current)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return total, True
+        with scan:
+            for entry in scan:
+                seen += 1
+                if seen > max_entries or (deadline is not None and time.monotonic() > deadline):
+                    return total, True
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                    total += _allocated(info)
+                    if _is_reparse(entry, info):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append((entry.path, depth + 1))
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    return total, True
+    return total, False
+
+
+def _folder_usage_by_descriptor(path: str, max_entries: int, deadline) -> tuple[int, bool]:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     nofollow = flags | getattr(os, "O_NOFOLLOW", 0)
     try:
