@@ -2865,17 +2865,30 @@ def test_a_healthy_worker_is_not_probed_with_signal_zero_where_that_would_kill_i
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
 def test_close_reaps_the_worker_where_a_zombie_cannot_be_told_from_a_live_process(make_session, monkeypatch):
-    # No waitid, and no /proc: kill(pid, 0) answers yes for a zombie, so the exit is never seen.
+    # No waitid, and no /proc: kill(pid, 0) answers yes for a zombie, and for a stranger that took
+    # the pid, so nothing can vouch that the pid is still the child's.
     monkeypatch.delattr(os, "waitid", raising=False)
     monkeypatch.setattr(session_module, "_has_proc", lambda: False)
     session = make_session(limits=fast_limits(kill_grace=3.0, term_grace=0.3))
     session.start()
     process = session.process
     child = session.request("fork", {"inherit": True}, timeout=5).result["child"]
-    started = time.monotonic()
-    session.close(grace=0.5)
-    assert time.monotonic() - started < 8
-    assert process.returncode is not None
+    try:
+        started = time.monotonic()
+        session.close(grace=0.5)
+        assert time.monotonic() - started < 8
+        # The worker itself is ended and reaped, the way Popen does it...
+        assert process.returncode is not None
+        # ...but its group is not signalled on a pid nobody can vouch for, so what it forked
+        # is not known to be gone: the teardown reads as unconfirmed.
+        assert session.teardown_confirmed is False
+        assert session._group_lost is True
+    finally:
+        monkeypatch.undo()
+        try:
+            os.kill(child, signal.SIGKILL)
+        except OSError:
+            pass
     assert wait_until(lambda: not pid_alive(child), timeout=5)
     ours = list(session._threads)
     assert wait_until(lambda: not [t.name for t in ours if t.is_alive()])
@@ -3916,7 +3929,7 @@ def test_a_group_found_gone_after_the_session_ended_it_is_not_reported_lost(monk
     process = _ReapingProcess()
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
     state = {"now": session_module._RUNNING}
-    monkeypatch.setattr(session_module, "_probe", lambda proc: state["now"])
+    monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None: state["now"])
     session._end_group(process)
     assert session._group_ended
     # The session's own reap: the leader is not there any more.

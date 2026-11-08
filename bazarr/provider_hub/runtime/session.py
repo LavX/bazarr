@@ -397,6 +397,8 @@ class WorkerSession:
 
         self.process: subprocess.Popen | None = None
         self._process_mark = None
+        # Set when neither waitid nor /proc could say whether the pid is still the child's.
+        self._ownership_unknown = False
         self.welcome: Welcome | None = None
         self.exit_code: int | None = None
         # Group teardown happens once, while the leader is still unreaped; after
@@ -1173,9 +1175,11 @@ class WorkerSession:
         """
         if self._group_ended or self._group_lost or process.returncode is not None:
             return False
-        if _probe(process, self._process_mark) in (_GONE, _UNKNOWN):
+        state = _probe(process, self._process_mark)
+        if state in (_GONE, _UNKNOWN):
             # Reaped by somebody else, or nothing can say the pid is still the child's: not signalled.
             self._group_lost = True
+            self._ownership_unknown = state == _UNKNOWN
             return False
         # Whatever the probe did, a leader that is reaped now is not ours.
         return process.returncode is None
@@ -1487,6 +1491,15 @@ class WorkerSession:
                         process.kill()
                     except OSError:
                         pass
+            elif self._ownership_unknown:
+                # The group cannot be signalled on a pid nobody can vouch for, but the child
+                # itself can still be ended the way Popen does it (it looks before it kills),
+                # so close() ends. What it forked is not known to be gone: the teardown stays
+                # unconfirmed.
+                try:
+                    process.kill()
+                except OSError:
+                    pass
 
     def close(self, grace=5.0):
         """Ask the worker to stop, then end its whole group. Idempotent.
