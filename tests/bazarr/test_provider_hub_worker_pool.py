@@ -2412,3 +2412,52 @@ def test_a_session_that_ended_its_own_group_is_confirmed(make_pool):
     pool.stop("tr")
     assert pool.state("tr") is WorkerState.STOPPED and pool.status()["stuck"] == 0
     assert wait_until(lambda: not pid_alive(child))
+
+
+def test_a_plugin_registered_again_while_its_cut_off_start_is_running_waits_for_it(make_pool):
+    import threading
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    runtimes = []
+
+    class SlowStart(StubProcessRuntime):
+        def start(self):
+            entered.set()
+            proceed.wait(10)
+            super().start()
+
+        def close(self, grace=5.0):
+            self.process.returncode = 0
+            super().close(grace)
+
+    def factory(definition, limits, host_calls, on_event, on_stderr):
+        runtimes.append(SlowStart())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(max_resident=8, acquire_timeout=0.4), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    starter = threading.Thread(target=lambda: _quiet(pool.warm, "a"))
+    starter.start()
+    assert entered.wait(5)
+    remover = threading.Thread(target=pool.unregister, args=("a",))
+    remover.start()
+    assert wait_until(lambda: "a" not in pool._entries)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    # The first start is still spawning; a second one must not begin beside it.
+    with pytest.raises(PoolUnavailable):
+        pool.warm("a")
+    assert len(runtimes) == 1
+    proceed.set()
+    starter.join(10)
+    remover.join(10)
+    assert not starter.is_alive() and not remover.is_alive()
+    pool.warm("a")
+    assert len(runtimes) == 2 and pool.state("a") is WorkerState.READY
+
+
+def _quiet(call, *args):
+    try:
+        call(*args)
+    except BaseException:
+        pass

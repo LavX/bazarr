@@ -98,6 +98,14 @@ Evidence, and how each decision fails closed:
   that confirmed "process gone" reaches it, and the entry reads as stopped (and
   starts anything) only when none of its workers is still being torn down.
 
+Nothing forgets a teardown that is not confirmed: the pool keeps, per plugin key and
+outside the entry, every worker of that key that is being torn down or is stuck
+(``_tearing``), including a start that was cut loose (``_detach``). Unregistering,
+registering the key again, restarting, stopping, closing and eviction all leave that
+map alone, and no worker or one-off run of the key starts until it is empty. Before a
+request is sent, the worker's memory is sampled again and judged, and its folders are
+checked against the slot's own definition (cached for ``budget_interval``).
+
 Accounting. A worker's process is counted, in one of these places, from the
 moment it can exist until its teardown is confirmed, and it moves between them
 inside a single lock hold so the count never dips:
@@ -857,7 +865,7 @@ class WorkerPool:
                 return
             if entry.starting is not None:
                 # Its start is still running and will find the entry gone.
-                self._detached.add(entry.starting)
+                self._detach(entry.starting)
             if entry.slot is not None:
                 self._queue_close(entry.slot, None, "kill")
                 entry.slot = None
@@ -870,6 +878,16 @@ class WorkerPool:
         self._wait_detached()
         if self._stuck:
             self._retry_stuck()
+
+    def _detach(self, slot):
+        """Cut a start loose from its entry. Caller holds the lock.
+
+        The worker may already be spawning, so from now on its plugin key has an
+        unconfirmed teardown: nothing of that key starts beside it, even if the key
+        is registered again, until the start has ended and its teardown is confirmed.
+        """
+        self._detached.add(slot)
+        self._tearing.setdefault(slot.definition.key, set()).add(slot)
 
     def _wait_ephemeral_starts(self):
         """Wait (bounded) for one-off workers that are still being started."""
@@ -1187,7 +1205,7 @@ class WorkerPool:
             starting = entry.starting
             if starting is not None and starting not in self._detached:
                 starting.cancel_reason = "stopped"
-                self._detached.add(starting)
+                self._detach(starting)
             if entry.state == WorkerState.READY and entry.slot is not None:
                 self._begin_stop(entry, "stopped")
             retiring, entry.retiring = entry.retiring, []
@@ -1221,7 +1239,7 @@ class WorkerPool:
             self._sampler_stop.set()
             for entry in self._entries.values():
                 if entry.starting is not None:
-                    self._detached.add(entry.starting)
+                    self._detach(entry.starting)
                 if entry.slot is not None:
                     self._queue_close(entry.slot, None, "close")
                     entry.slot = None
@@ -1466,6 +1484,9 @@ class WorkerPool:
             if self._closed or detached:
                 if slot.session is not None:
                     self._queue_close(slot, None, "kill")
+                else:
+                    # Nothing was ever spawned: nothing to wait for.
+                    self._teardown_confirmed(slot, None)
                 if entry.state == WorkerState.STARTING:
                     self._set_state(entry, WorkerState.STOPPED, "pool closed")
                 self._cond.notify_all()
