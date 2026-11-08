@@ -255,6 +255,8 @@ def _signal_group(process, sig):
 
 
 _RUNNING, _EXITED, _GONE = "running", "exited", "gone"
+# Nothing here can tell the child from a stranger that took its pid: no waitid, and no /proc.
+_UNKNOWN = "unknown"
 
 
 def _is_posix():
@@ -271,31 +273,56 @@ def _has_proc():
     return sys.platform.startswith("linux")
 
 
-def _zombie_or_gone(pid):
-    """Without ``waitid``: ``running`` (maybe alive), ``exited`` (a zombie) or ``gone``, never reaping.
+def _proc_fields(pid):
+    """``(state, start time)`` of a process from ``/proc/<pid>/stat``. Raises ``FileNotFoundError`` if it is gone."""
+    with open("/proc/%d/stat" % pid, "rb") as handle:
+        data = handle.read(4096)
+    rest = data.rsplit(b")", 1)[1].split()
+    return rest[0], rest[19]
 
-    ``kill(pid, 0)`` succeeds on a zombie, so on Linux the state in
-    ``/proc/<pid>/stat`` says whether it is one. Elsewhere a zombie reads as
-    running: the caller then ends the group anyway at its deadline.
+
+def _start_mark(pid):
+    """When the process started, as ``/proc`` says: what tells a pid's owner from a stranger that reused it."""
+    if not _has_proc():
+        return None
+    try:
+        return _proc_fields(pid)[1]
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _zombie_or_gone(pid, mark=None):
+    """Without ``waitid``: ``running``, ``exited`` (a zombie), ``gone`` or ``unknown``, never reaping.
+
+    ``kill(pid, 0)`` succeeds on a zombie, and on a stranger that reused the pid, so on
+    Linux ``/proc/<pid>/stat`` says what is there: its state (a zombie is ``exited``) and
+    when it started. A process that started after the child did (``mark`` is what
+    ``_start_mark`` recorded at spawn) is not the child: ``gone``. Where there is no
+    ``/proc`` either, a pid that answers might be the child or a stranger: ``unknown``,
+    and nothing is signalled on that word.
     """
     if _has_proc():
         try:
-            with open("/proc/%d/stat" % pid, "rb") as handle:
-                state = handle.read().rsplit(b")", 1)[1].split()[0]
-        except (OSError, IndexError):
-            state = None
+            state, start = _proc_fields(pid)
+        except FileNotFoundError:
+            return _GONE
+        except (OSError, IndexError, ValueError):
+            return _UNKNOWN
+        if mark is not None and start != mark:
+            return _GONE
         if state in (b"Z", b"X"):
             return _EXITED
+        return _RUNNING
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return _GONE
     except OSError:
-        return _RUNNING
-    return _RUNNING
+        return _UNKNOWN
+    return _UNKNOWN
 
 
-def _probe(process):
+def _probe(process, mark=None):
     """What the worker is doing, without reaping it: ``running``, ``exited`` or ``gone``.
 
     Nothing may collect the leader until its group has been dealt with: a
@@ -321,13 +348,13 @@ def _probe(process):
     waitid = getattr(os, "waitid", None)
     flag = getattr(os, "WNOWAIT", None)
     if waitid is None or flag is None:
-        return _zombie_or_gone(process.pid)
+        return _zombie_or_gone(process.pid, mark)
     try:
         found = waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | flag)
     except ChildProcessError:
         return _GONE
     except OSError:
-        return _zombie_or_gone(process.pid)
+        return _zombie_or_gone(process.pid, mark)
     return _RUNNING if found is None else _EXITED
 
 
@@ -369,6 +396,7 @@ class WorkerSession:
         self.name = name
 
         self.process: subprocess.Popen | None = None
+        self._process_mark = None
         self.welcome: Welcome | None = None
         self.exit_code: int | None = None
         # Group teardown happens once, while the leader is still unreaped; after
@@ -467,6 +495,7 @@ class WorkerSession:
                     start_new_session=True,
                 )
             self.process = process
+            self._process_mark = _start_mark(process.pid)
         started = []
         try:
             return self._run_handshake(process, started)
@@ -1126,15 +1155,15 @@ class WorkerSession:
 
     def _exited(self, process):
         """Whether the worker has exited. Notes (once and for good) if it was reaped elsewhere."""
-        state = _probe(process)
-        if state == _GONE:
+        state = _probe(process, self._process_mark)
+        if state in (_GONE, _UNKNOWN):
             with self._group_lock:
                 # Our own reap makes the leader vanish too, but only after the
                 # group was ended; a leader that vanishes before that was
                 # reaped by somebody else.
                 if not self._group_ended:
                     self._group_lost = True
-        return state != _RUNNING
+        return state in (_EXITED, _GONE)
 
     def _ours(self, process):
         """Whether the leader is still ours to signal. Call with ``_group_lock`` held.
@@ -1144,7 +1173,8 @@ class WorkerSession:
         """
         if self._group_ended or self._group_lost or process.returncode is not None:
             return False
-        if _probe(process) == _GONE:
+        if _probe(process, self._process_mark) in (_GONE, _UNKNOWN):
+            # Reaped by somebody else, or nothing can say the pid is still the child's: not signalled.
             self._group_lost = True
             return False
         # Whatever the probe did, a leader that is reaped now is not ours.

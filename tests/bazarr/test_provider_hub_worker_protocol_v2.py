@@ -4205,3 +4205,81 @@ def test_the_leader_is_not_reaped_between_the_flag_and_the_group_signal(monkeypa
     ender.join(10)
     reaper.join(10)
     assert order == ["signal-start", "signal-sent", "reap"], order
+
+
+# ---- A bare session child with no waitid: ownership comes from /proc and the start time -------
+
+
+def _bare_child():
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    session = WorkerSession(["worker"])
+    session.process = process
+    session._process_mark = session_module._start_mark(process.pid)
+    return session, process
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_bare_child_reaped_by_somebody_else_is_not_ours_without_waitid(monkeypatch):
+    monkeypatch.delattr(os, "waitid", raising=False)
+    session, process = _bare_child()
+    try:
+        assert session._process_mark is not None
+        with session._group_lock:
+            assert session._ours(process) is True
+        os.kill(process.pid, signal.SIGKILL)
+        os.waitpid(process.pid, 0)
+        assert process.returncode is None  # Popen was not told
+        with session._group_lock:
+            assert session._ours(process) is False
+        assert session._group_lost is True
+    finally:
+        monkeypatch.undo()
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_process_that_took_the_childs_pid_is_not_ours_without_waitid(monkeypatch):
+    monkeypatch.delattr(os, "waitid", raising=False)
+    session, process = _bare_child()
+    try:
+        # The pid is alive and a perfectly good process, but it started later than the child did.
+        monkeypatch.setattr(session_module, "_proc_fields", lambda pid: (b"S", b"999999999999"))
+        with session._group_lock:
+            assert session._ours(process) is False
+        assert session._group_lost is True
+    finally:
+        monkeypatch.undo()
+        process.kill()
+        process.wait()
+
+
+def test_ownership_is_unknown_and_refused_with_neither_waitid_nor_proc(monkeypatch):
+    monkeypatch.delattr(os, "waitid", raising=False)
+    monkeypatch.setattr(session_module, "_has_proc", lambda: False)
+    session = WorkerSession(["worker"])
+    process = _ReapingProcess()  # alive, a pid that answers signal 0
+    with session._group_lock:
+        assert session._ours(process) is False
+    assert session._group_lost is True
+    assert session_module._zombie_or_gone(os.getpid()) == session_module._UNKNOWN
+
+    def gone(pid, sig):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(os, "kill", gone)
+    assert session_module._zombie_or_gone(424242) == session_module._GONE
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_started_session_records_its_childs_start_time():
+    session = WorkerSession(fake_worker_command(), env=fake_worker_env(), kind="translator", limits=fast_limits())
+    session.start()
+    try:
+        assert session._process_mark == session_module._start_mark(session.process.pid)
+        assert session._process_mark is not None
+    finally:
+        session.close(grace=1.0)
