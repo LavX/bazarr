@@ -3954,7 +3954,8 @@ def test_the_limitations_say_that_deleted_files_may_not_stay_mapped_in_a_plugin_
         sandbox_status(DECLARED)["limitations"])
 
 
-def test_the_limitations_say_that_shared_memory_may_not_stay_mapped_after_it_is_closed():
+def test_the_limitations_say_that_a_memfd_may_not_stay_mapped_after_it_is_closed():
     text = " ".join(sandbox_status(SandboxProbe(abi=9, verified=True, network_verified=True,
                                                signal_scope_verified=True, capabilities_dropped=True))["limitations"])
-    assert "may not keep shared memory mapped after closing it" in text
+    assert "may not keep a memfd mapped after closing it" in text
+    assert "shared anonymous mappings" in text
