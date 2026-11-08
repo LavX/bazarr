@@ -4046,3 +4046,80 @@ def test_stop_works_where_waitid_exists_but_cannot_leave_an_exit_unconsumed(monk
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     process.stop(1.0)
     assert process.returncode is not None and process.group_cleaned is True
+
+
+# --- A waitid that fails for another reason than ECHILD says nothing about ownership -----------
+
+
+def _failing_waitid(errno_value):
+    def failing(*args, **kwargs):
+        raise OSError(errno_value, os.strerror(errno_value))
+
+    return failing
+
+
+@linux_only
+@pytest.mark.parametrize("code", [errno.EPERM, errno.EINVAL, errno.ENOSYS])
+def test_an_anchor_reaped_by_somebody_else_is_not_signalled_when_waitid_fails_oddly(monkeypatch, code):
+    plain = spawn._start_plain([sys.executable, "-c", "import time; time.sleep(60)"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    anchor = plain._anchor
+    if anchor is None:
+        plain.stop(0.5)
+        pytest.skip("no process group anchor on this interpreter")
+    sent = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (sent.append((pgid, sig)), real_killpg(pgid, sig))[1])
+    try:
+        monkeypatch.setattr(os, "waitid", _failing_waitid(code))
+        # While the identity check still finds it, it is ours.
+        assert plain.signal_group(signal.SIGCONT) is True
+        os.kill(anchor.pid, signal.SIGKILL)
+        os.waitpid(anchor.pid, 0)
+        sent.clear()
+        assert plain.signal_group(signal.SIGCONT) is None
+        assert plain._anchor_lost is True
+        plain.stop(0.5)
+        assert sent == []
+    finally:
+        monkeypatch.undo()
+        plain.stop(0.5)
+
+
+@linux_only
+@pytest.mark.parametrize("code", [errno.EPERM, errno.ENOSYS])
+def test_a_leader_that_a_stranger_now_holds_is_not_signalled_when_waitid_fails_oddly(monkeypatch, code):
+    process = WorkerProcess([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sent = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    try:
+        monkeypatch.setattr(os, "waitid", _failing_waitid(code))
+        with process._own_lock:
+            assert process._still_ours() is True
+        # Same pid, alive, but it started later than the child did: a stranger.
+        monkeypatch.setattr(spawn, "_stat_fields", lambda pid: ("S", "999999999999"))
+        assert process.signal_group(signal.SIGCONT) is None
+        assert process._leader_lost is True
+        assert sent == []
+        assert process.probe_exit() == "gone"
+    finally:
+        monkeypatch.undo()
+        process.kill()
+        process.wait()
+
+
+@linux_only
+def test_ownership_stays_unknown_and_refused_when_waitid_fails_and_nothing_else_can_tell(monkeypatch):
+    process = WorkerProcess([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        monkeypatch.setattr(os, "waitid", _failing_waitid(errno.EPERM))
+        monkeypatch.setattr(spawn.os.path, "isdir", lambda path: False if path == "/proc/self" else os.path.exists(path))
+        with process._own_lock:
+            assert process._still_ours() is False
+        assert process._leader_lost is True
+    finally:
+        monkeypatch.undo()
+        process.kill()
+        process.wait()

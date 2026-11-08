@@ -741,7 +741,11 @@ class WorkerProcess(subprocess.Popen):
             self._leader_lost = True
             return False
         except OSError:
-            return True
+            # Any other answer (EPERM, EINVAL, ENOSYS...) says nothing about the pid: the same
+            # identity check as without waitid decides, and unknown is refused.
+            if _owned_without_waitid(self.pid, self._started_mark) is not True:
+                self._leader_lost = True
+                return False
         return self.returncode is None
 
     def _anchor_ours(self) -> bool:
@@ -771,7 +775,9 @@ class WorkerProcess(subprocess.Popen):
             self._anchor_lost = True
             return False
         except OSError:
-            return True
+            if _owned_without_waitid(anchor.pid, self._anchor_mark) is not True:
+                self._anchor_lost = True
+                return False
         return True
 
     def probe_exit(self) -> "str | None":
@@ -800,6 +806,9 @@ class WorkerProcess(subprocess.Popen):
                 self._leader_lost = True
                 return "gone"
             except OSError:
+                if _owned_without_waitid(self.pid, self._started_mark) is False:
+                    self._leader_lost = True
+                    return "gone"
                 return None
             return "running" if found is None else "exited"
 
