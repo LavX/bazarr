@@ -11,18 +11,19 @@ Hosts that can tell nothing about a child (no ``waitid`` that leaves an exit unc
 and no ``/proc``): signal 0 proves nothing there, since a pid that answers may be the
 child, a zombie, or a stranger that took the number after an outside reap. The one proof
 only a parent can get is ``waitpid(pid, WNOHANG)`` on its own direct child (the leader and
-the anchor both are): 0 means it is ours, alive and unreaped, so the group is signalled
-and reaped by us afterwards; its own pid means this call reaped it (the status is recorded as
-``Popen`` would). The group id is held while any member lives, so the step that did the reaping
-may send the group one signal right then, in the same locked step, and only a teardown's step
-does: the permission is used up by that call, and any later call or stop finds the child
-reaped and refuses. A probe outside a teardown that reaps the child grants nothing, now or
-later; the group is then taken as gone (what the leader left behind is unknown, and the pool
-counts the teardown as unverified). ``ECHILD`` means somebody else reaped it, so ownership is
-lost and no group signal is sent. The window left: the child exits, an outside reaper collects
-it, and its pid is reused as a group leader, all between our ``WNOHANG`` and the signal that
-follows it. The host installs no ``SIGCHLD`` handler and calls no ``waitpid(-1)``, so nothing in this process reaps a worker behind
-``Popen``'s back; only a reaper outside it, or a thread of an embedding application, could.
+the anchor both are). 0 means it is ours, alive and unreaped: the group is signalled, and
+the child reaped by us afterwards. The child's own pid means this call collected it (the
+status is recorded as ``Popen`` would): its exit is proven, and that is all. Nothing is
+signalled after our own reap, because if the leader was the group's last member the group
+number is free the moment it is reaped and may already belong to somebody else. The teardown
+is taken as complete and recorded as unverified under the pool's cap; what the leader left
+behind is not known, and may survive. ``ECHILD`` means somebody else reaped it, so ownership
+is lost and nothing is signalled (the teardown stays stuck). The window left, on the live
+path: the child exits and is reaped by an outside reaper, and its pid is reused as a group
+leader, all between our ``WNOHANG`` and the signal that follows it. The host installs no
+``SIGCHLD`` handler and calls no ``waitpid(-1)``, so nothing in this process reaps a worker
+behind ``Popen``'s back; only a reaper outside it, or a thread of an embedding application,
+could.
 """
 from __future__ import annotations
 
@@ -694,10 +695,11 @@ class WorkerProcess(subprocess.Popen):
     _anchor: "subprocess.Popen | None" = None
     _leader_lost = False
     _anchor_lost = False
-    # Set when ``_waitpid_proof`` itself collected the leader on a host with nothing else to go
-    # by: its exit is proven, and that is all this says. It grants no signal: only the call that
-    # performed the reap may send one group signal, in the same locked step (see ``_still_ours``).
+    # Set when ``_waitpid_proof`` itself collected the leader (or the anchor) on a host with nothing
+    # else to go by: its exit is proven, and that is all this says. It grants no signal, ever: once
+    # the group's last member is reaped its number may be anybody's.
     _exit_proven = False
+    _anchor_exit_proven = False
     _started_mark: "str | None" = None
     _anchor_mark: "str | None" = None
     # None until a ``stop`` has run. True: this object ended the worker's process
@@ -721,6 +723,7 @@ class WorkerProcess(subprocess.Popen):
         self._leader_lost = False
         self._anchor_lost = False
         self._exit_proven = False
+        self._anchor_exit_proven = False
         super().__init__(*args, **kwargs)
         self._started_mark = _start_mark(self.pid)
 
@@ -804,10 +807,10 @@ class WorkerProcess(subprocess.Popen):
     def _leader_owned_without_waitid(self) -> bool:
         """``_still_ours`` where ``waitid`` cannot say. Call with ``_own_lock`` held.
 
-        Where ``waitpid`` is all there is and it collects the child in this very call, the answer
-        is True once, with ``returncode`` set: the caller signals the group in the same locked
-        step, while the group id is still held by whatever lives in it. The next call finds the
-        child reaped and says False, so the permission cannot outlive the step that earned it.
+        Where ``waitpid`` is all there is: 0 means ours and alive (True, and the caller signals
+        now). If it collects the child in this very call the answer is False, with ``returncode``
+        set and the exit proven (``_exit_proven``), not lost: nothing is signalled after our own
+        reap, since the group number may be free the moment its last member is reaped.
         """
         if _has_proc():
             if not _owned_without_waitid(self.pid, self._started_mark):
@@ -820,6 +823,7 @@ class WorkerProcess(subprocess.Popen):
             return False
         if proof == "reaped":
             self._exit_proven = True
+            return False
         return True
 
     def _anchor_owned_without_waitid(self, anchor) -> bool:
@@ -833,8 +837,10 @@ class WorkerProcess(subprocess.Popen):
         if proof == "lost":
             self._anchor_lost = True
             return False
-        # "reaped": this call collected the anchor, and the caller signals the group in the same
-        # locked step. The next call finds it reaped and refuses.
+        if proof == "reaped":
+            # This call collected the anchor: it exited, and nothing is signalled on its number now.
+            self._anchor_exit_proven = True
+            return False
         return True
 
     def _anchor_ours(self) -> bool:
@@ -848,7 +854,8 @@ class WorkerProcess(subprocess.Popen):
         if anchor is None or self._anchor_lost:
             return False
         if anchor.returncode is not None:
-            self._anchor_lost = True
+            if not self._anchor_exit_proven:
+                self._anchor_lost = True
             return False
         waitid = getattr(os, "waitid", None)
         flag = getattr(os, "WNOWAIT", None)
@@ -864,7 +871,7 @@ class WorkerProcess(subprocess.Popen):
                 return False
         return True
 
-    def probe_exit(self, teardown: bool = False) -> "str | None":
+    def probe_exit(self) -> "str | None":
         """What the child is doing, without reaping it, judged under this object's lock.
 
         ``"running"``; ``"exited"`` (a zombie, or reaped by this object itself); ``"gone"``
@@ -877,11 +884,9 @@ class WorkerProcess(subprocess.Popen):
         does, ``/proc`` fallback included, so a session asks only this and never repeats the
         question outside the lock.
 
-        ``teardown`` says the caller is ending the worker anyway. On a host with neither ``waitid``
-        nor ``/proc`` a probe can only see an exit by collecting the child; in a teardown, the
-        probe that does so sends the group its one signal right then, while the group id is still
-        held by whatever lives in it. A probe that is not part of a teardown grants no signal, now
-        or later.
+        On a host with neither ``waitid`` nor ``/proc`` a probe can only see an exit by collecting
+        the child. That proves the exit and grants no signal, now or later (see the module
+        docstring).
         """
         with self._own_lock:
             if self.returncode is not None:
@@ -902,9 +907,9 @@ class WorkerProcess(subprocess.Popen):
                     pass  # says nothing about the pid: ask /proc below
                 else:
                     return "running" if found is None else "exited"
-            return self._proc_answer(teardown)
+            return self._proc_answer()
 
-    def _proc_answer(self, teardown: bool = False) -> "str | None":
+    def _proc_answer(self) -> "str | None":
         """``probe_exit`` from ``/proc`` and the start time. Call with ``_own_lock`` held."""
         if not _has_proc():
             if self._anchor is not None:
@@ -918,11 +923,8 @@ class WorkerProcess(subprocess.Popen):
                 self._leader_lost = True
                 return "gone"
             if proof == "reaped":
-                # The exit is proven. Only a teardown's probe signals, once, in this same locked step.
+                # The exit is proven; nothing is signalled after our own reap.
                 self._exit_proven = True
-                killpg = getattr(os, "killpg", None)
-                if teardown and killpg is not None and not self._kill_group_now(killpg):
-                    self._exit_proven = False
                 return "exited"
             return "running"
         try:
@@ -1086,6 +1088,15 @@ class WorkerProcess(subprocess.Popen):
                         pass
                 _finish_anchor(anchor)
                 self._anchor = None
+            if not cleaned and self._anchor_exit_proven:
+                # Our own waitpid proved the anchor exited: nothing is signalled on its number, the
+                # group is taken as gone, and the leader (still ours and unreaped) is ended directly.
+                cleaned = True
+                if timed_out:
+                    try:
+                        self.kill()
+                    except OSError:
+                        pass
             if timed_out:
                 self._reap_quietly()
             return cleaned
@@ -1104,61 +1115,50 @@ class WorkerProcess(subprocess.Popen):
                 # signals as a no-op), so its pid is still its own.
                 with self._own_lock:
                     if self._still_ours():
-                        if self.returncode is None:
-                            try:
-                                os.kill(self.pid, signal.SIGTERM)
-                            except OSError:
-                                pass
-                        else:
-                            # ``waitid`` exists but failed (EPERM, ENOSYS...) and nothing else can
-                            # tell: this very call collected the leader. The one group signal goes
-                            # out now, as in the branch without ``waitid``; the next check refuses.
-                            cleaned = self._kill_group_now(killpg)
-                if not cleaned:
+                        try:
+                            os.kill(self.pid, signal.SIGTERM)
+                        except OSError:
+                            pass
+                if self.returncode is None:
                     self._wait_for_exit_unreaped(grace)
-                    with self._own_lock:
-                        if self._still_ours():
-                            killpg(self.pid, signal.SIGKILL)
-                            cleaned = True
+                with self._own_lock:
+                    if self._still_ours():
+                        killpg(self.pid, signal.SIGKILL)
+                        cleaned = True
             except ProcessLookupError:
                 cleaned = True
             except (ChildProcessError, OSError):
                 pass
             self._reap_quietly()
-            return cleaned
+            # ``waitid`` failed here and our own waitpid collected the leader: its exit is proven and
+            # nothing is signalled after it (see the module docstring).
+            return cleaned or (self.returncode is not None and self._exit_proven)
         # No waitid: the exit cannot be seen without consuming it, so the worker is not
         # waited for. It gets its grace to leave (seen as a zombie where /proc says so;
         # otherwise the whole grace passes), and the group is signalled while the leader
         # is still there, alive or a zombie. Only then is it reaped.
         with self._own_lock:
             if self._still_ours():
-                if self.returncode is None:
-                    try:
-                        os.kill(self.pid, signal.SIGTERM)
-                    except OSError:
-                        pass
-                else:
-                    # This very call collected it: the one group signal goes out now.
-                    cleaned = self._kill_group_now(killpg)
+                try:
+                    os.kill(self.pid, signal.SIGTERM)
+                except OSError:
+                    pass
         end = time.monotonic() + max(grace, 0.0)
-        while not cleaned and self.returncode is None and time.monotonic() < end and not self._zombie():
+        while self.returncode is None and time.monotonic() < end and not self._zombie():
             time.sleep(0.01)
-        if not cleaned:
-            with self._own_lock:
-                if self._still_ours():
-                    cleaned = self._kill_group_now(killpg)
+        with self._own_lock:
+            if self._still_ours():
+                try:
+                    killpg(self.pid, signal.SIGKILL)
+                    cleaned = True
+                except ProcessLookupError:
+                    cleaned = True
+                except OSError:
+                    pass
         self._reap_quietly()
-        return cleaned
-
-    def _kill_group_now(self, killpg) -> bool:
-        """SIGKILL the leader's group. Call with ``_own_lock`` held, in the step that proved it ours."""
-        try:
-            killpg(self.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return True
-        except OSError:
-            return False
-        return True
+        # Our own waitpid collected the leader (here or in a probe): its exit is proven and nothing
+        # is signalled after it (see the module docstring).
+        return cleaned or (self.returncode is not None and self._exit_proven)
 
     def _zombie(self) -> bool:
         """Whether ``/proc`` says the child has exited and is waiting to be reaped."""

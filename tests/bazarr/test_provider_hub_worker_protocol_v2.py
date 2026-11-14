@@ -3929,7 +3929,7 @@ def test_a_group_found_gone_after_the_session_ended_it_is_not_reported_lost(monk
     process = _ReapingProcess()
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
     state = {"now": session_module._RUNNING}
-    monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None, teardown=False: state["now"])
+    monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None: state["now"])
     session._end_group(process)
     assert session._group_ended
     # The session's own reap: the leader is not there any more.
@@ -4428,16 +4428,16 @@ def test_a_probe_that_collects_the_child_grants_no_group_signal_to_a_later_teard
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
-def test_a_teardown_probe_that_collects_the_child_signals_the_group_once_right_then(monkeypatch):
+def test_a_teardown_that_polls_and_collects_the_child_sends_no_group_signal(monkeypatch):
     session, process, member = _exited_leader_with_a_member(monkeypatch)
     sent = _record_group_signals(monkeypatch)
     try:
         time.sleep(0.8)  # the leader is a zombie now and nothing has looked
         assert session._poll() is not None
-        assert wait_until(lambda: not pid_alive(member), timeout=5), "a member of the group outlived the teardown"
         session.close(grace=0.3)
         session.close(grace=0.3)
-        assert [sig for pgid, sig in sent if pgid == process.pid] == [signal.SIGKILL], sent
+        # Our own reap proved the exit; the group number may be free, so nothing is signalled.
+        assert [sig for pgid, sig in sent if pgid == process.pid] == [], sent
         assert session.teardown_confirmed is True
     finally:
         monkeypatch.undo()
@@ -4445,19 +4445,48 @@ def test_a_teardown_probe_that_collects_the_child_signals_the_group_once_right_t
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
-def test_the_teardown_that_collects_the_child_sends_the_one_group_signal_right_then(monkeypatch):
+def test_the_teardown_that_collects_the_child_sends_no_group_signal(monkeypatch):
     session, process, member = _exited_leader_with_a_member(monkeypatch)
     sent = _record_group_signals(monkeypatch)
     try:
         time.sleep(0.8)  # the leader is a zombie now and nothing has looked
         session.close(grace=0.3)
-        assert wait_until(lambda: not pid_alive(member), timeout=5), "a member of the group outlived the teardown"
         session.close(grace=0.3)
-        assert [sig for pgid, sig in sent if pgid == process.pid] == [signal.SIGKILL], sent
+        assert process.returncode is not None
+        assert [sig for pgid, sig in sent if pgid == process.pid] == [], sent
         assert session.teardown_confirmed is True
+        assert session._group_lost is False
     finally:
         monkeypatch.undo()
         _kill_quietly(member)
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_reaped_last_member_is_not_signalled_even_when_its_group_number_is_reused(monkeypatch):
+    # The leader is the group's only member, so reaping it frees the group number at once. A stranger
+    # then takes it as a group leader; a group signal after our own reap would hit that stranger.
+    _blind_host(monkeypatch)
+    process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    session = WorkerSession(["worker"])
+    session.process = process
+    strangers = []
+    real_killpg = os.killpg
+
+    def reused(pgid, sig):
+        if pgid == process.pid:
+            strangers.append(sig)  # a group of somebody else's: this must never be reached
+            return None
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", reused)
+    try:
+        time.sleep(0.5)  # exited, a zombie, not looked at
+        session.close(grace=0.3)
+        assert strangers == []
+        assert session.teardown_confirmed is True
+    finally:
+        monkeypatch.undo()
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
@@ -4518,17 +4547,16 @@ def test_a_worker_handle_reaped_by_somebody_else_is_lost_with_neither_waitid_nor
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
-def test_a_teardown_probe_that_collects_a_worker_signals_its_group_once_right_then(monkeypatch):
+def test_a_probe_that_collects_a_worker_leaves_its_group_alone_and_proves_the_exit(monkeypatch):
     process, member = _exited_worker_with_a_member(monkeypatch)
     sent = _record_group_signals(monkeypatch)
     try:
         time.sleep(0.8)  # the leader is a zombie now and nothing has looked
-        assert process.probe_exit(teardown=True) == "exited"
-        assert wait_until(lambda: not pid_alive(member), timeout=5), "a member of the group outlived the probe"
-        assert process.probe_exit(teardown=True) == "exited"
+        assert process.probe_exit() == "exited"
+        assert process._exit_proven is True and process._leader_lost is False
+        assert process.probe_exit() == "exited"
         process.stop(0.3)
-        process.stop(0.3)
-        assert [sig for pgid, sig in sent if pgid == process.pid] == [signal.SIGKILL], sent
+        assert [sig for pgid, sig in sent if pgid == process.pid] == [], sent
         assert process.group_cleaned is True
     finally:
         monkeypatch.undo()
@@ -4545,7 +4573,7 @@ def test_an_exit_probe_does_not_run_while_another_thread_is_between_its_check_an
     holder_release = threading.Event()
     probed_while_held = []
 
-    def probe(proc, mark=None, teardown=False):
+    def probe(proc, mark=None):
         probed_while_held.append(not holder_release.is_set())
         return session_module._RUNNING
 
@@ -4570,7 +4598,7 @@ def test_an_exit_probe_does_not_run_while_another_thread_is_between_its_check_an
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
-def test_a_failed_waitid_and_no_proc_still_ends_the_group_of_an_exited_leader(monkeypatch):
+def test_a_failed_waitid_and_no_proc_sends_no_group_signal_after_collecting_the_leader(monkeypatch):
     from provider_hub.sandbox import spawn as sandbox_spawn
 
     _blind_host(monkeypatch)
@@ -4579,7 +4607,7 @@ def test_a_failed_waitid_and_no_proc_still_ends_the_group_of_an_exited_leader(mo
         raise OSError(errno.EPERM, "Operation not permitted")
 
     # waitid exists and answers with an error, and there is no /proc: the first ownership check is the
-    # one that collects the exited leader, and the group must be signalled in that same step.
+    # one that collects the exited leader. Nothing is signalled after our own reap.
     monkeypatch.setattr(os, "waitid", failing, raising=False)
     monkeypatch.setattr(sandbox_spawn, "_start_anchor", lambda: None)
     process = sandbox_spawn._start_plain(
@@ -4590,13 +4618,84 @@ def test_a_failed_waitid_and_no_proc_still_ends_the_group_of_an_exited_leader(mo
     try:
         time.sleep(0.8)  # the leader is a zombie now and nothing has looked
         process.stop(0.3)
-        assert wait_until(lambda: not pid_alive(member), timeout=5), "a member of the group outlived stop()"
         process.stop(0.3)
-        assert [sig for pgid, sig in sent if pgid == process.pid] == [signal.SIGKILL], sent
+        assert process.returncode is not None
+        assert [sig for pgid, sig in sent if pgid == process.pid] == [], sent
         assert process.group_cleaned is True
     finally:
         monkeypatch.undo()
         _kill_quietly(member)
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+@pytest.mark.parametrize("how", ["no-waitid", "failed-waitid"])
+def test_a_reaped_last_member_of_a_worker_is_not_signalled_even_when_its_group_number_is_reused(monkeypatch, how):
+    from provider_hub.sandbox import spawn as sandbox_spawn
+
+    _blind_host(monkeypatch)
+    if how == "failed-waitid":
+        def failing(*args, **kwargs):
+            raise OSError(errno.ENOSYS, "Function not implemented")
+
+        monkeypatch.setattr(os, "waitid", failing, raising=False)
+    monkeypatch.setattr(sandbox_spawn, "_start_anchor", lambda: None)
+    process = sandbox_spawn._start_plain([sys.executable, "-c", "pass"], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    strangers = []
+    real_killpg = os.killpg
+
+    def reused(pgid, sig):
+        if pgid == process.pid:
+            strangers.append(sig)  # a stranger's group on the freed number
+            return None
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", reused)
+    try:
+        time.sleep(0.5)  # exited, a zombie, not looked at
+        process.stop(0.3)
+        process.stop(0.3)
+        assert strangers == []
+        assert process.group_cleaned is True
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_reaped_anchor_is_not_signalled_and_the_teardown_is_not_stuck(monkeypatch):
+    from provider_hub.sandbox import spawn as sandbox_spawn
+
+    _blind_host(monkeypatch)
+    process = sandbox_spawn._start_plain(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    anchor = process._anchor
+    assert anchor is not None
+    strangers = []
+    real_killpg = os.killpg
+
+    def reused(pgid, sig):
+        if pgid == anchor.pid:
+            strangers.append(sig)  # a stranger's group on the freed number
+            return None
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", reused)
+    try:
+        # The anchor exits by itself (a zombie nobody has looked at); the group's members go with it.
+        real_kill = os.kill
+        real_kill(anchor.pid, signal.SIGKILL)
+        time.sleep(0.3)
+        process.stop(0.3)
+        assert strangers == []
+        assert process._anchor_lost is False and process.group_cleaned is True
+        assert process.returncode is not None
+    finally:
+        monkeypatch.undo()
+        try:
+            process.kill()
+        except OSError:
+            pass
 
 
 def _exited_worker_with_a_member(monkeypatch):
@@ -4629,16 +4728,16 @@ def test_a_worker_handle_collected_by_a_probe_is_never_signalled_by_a_later_stop
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
-def test_the_stop_that_collects_a_worker_signals_its_group_once_and_repeated_stops_send_nothing(monkeypatch):
+def test_the_stop_that_collects_a_worker_sends_no_group_signal_and_repeated_stops_send_nothing(monkeypatch):
     process, member = _exited_worker_with_a_member(monkeypatch)
     sent = _record_group_signals(monkeypatch)
     try:
         time.sleep(0.8)  # the leader is a zombie now and nothing has looked
         process.stop(0.3)
-        assert wait_until(lambda: not pid_alive(member), timeout=5), "a member of the group outlived stop()"
         process.stop(0.3)
         process.stop(0.3)
-        assert [sig for pgid, sig in sent if pgid == process.pid] == [signal.SIGKILL], sent
+        assert process.returncode is not None
+        assert [sig for pgid, sig in sent if pgid == process.pid] == [], sent
         assert process.group_cleaned is True
     finally:
         monkeypatch.undo()
@@ -4688,7 +4787,7 @@ def test_exited_and_ours_both_record_an_unknown_answer_the_same_way(monkeypatch)
     for how in ("exited", "ours"):
         session = WorkerSession(["worker"])
         process = _ReapingProcess()
-        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None, teardown=False: session_module._UNKNOWN)
+        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None: session_module._UNKNOWN)
         if how == "exited":
             session._exited(process)
         else:
@@ -4698,7 +4797,7 @@ def test_exited_and_ours_both_record_an_unknown_answer_the_same_way(monkeypatch)
     for how in ("exited", "ours"):
         session = WorkerSession(["worker"])
         process = _ReapingProcess()
-        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None, teardown=False: session_module._GONE)
+        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None: session_module._GONE)
         if how == "exited":
             session._exited(process)
         else:
