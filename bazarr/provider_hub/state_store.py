@@ -58,6 +58,15 @@ class StateConflictError(RuntimeError):
     """The state changed under two attempts in a row, so nothing was written."""
 
 
+class StateStoreError(RuntimeError):
+    """A database statement of the store failed.
+
+    Carries the kind of failure and nothing the driver reported: a constraint
+    error's DETAIL previews the failing row, which is the state document and
+    can hold a credential, and no engine option hides it.
+    """
+
+
 class _StaleRevision(Exception):
     """The row moved on since it was read: the compare-and-swap matched nothing."""
 
@@ -219,6 +228,9 @@ def write_transaction(bind):
     detects a competing writer, and under that level a concurrent update makes
     the UPDATE wait and then match nothing, instead of raising a serialization
     failure. SQLite takes the write lock up front.
+
+    Callers run it through ``_sanitized``: a database error here can quote the
+    document.
     """
     hide_parameters(bind)
     sqlite = bind.dialect.name == "sqlite"
@@ -229,6 +241,49 @@ def write_transaction(bind):
                 # The legacy driver does not begin a transaction on its own.
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
             yield connection
+
+
+def _sanitized(function):
+    """Run ``function``, replacing a database error with ``StateStoreError``.
+
+    The replacement is raised after the handler has finished, so it has no
+    ``__cause__`` and no ``__context__``: nothing that prints or walks the
+    exception chain reaches the driver's message, whose DETAIL can quote the
+    failing row, which is the state document.
+    """
+    failure = None
+    try:
+        return function()
+    except sa.exc.DBAPIError as error:
+        failure = _describe(error)
+    raise StateStoreError(failure)
+
+
+def _describe(error: sa.exc.DBAPIError) -> str:
+    original = error.orig
+    code = getattr(original, "pgcode", None) or getattr(original, "sqlite_errorname", None)
+    kind = type(original).__name__ if original is not None else type(error).__name__
+    return f"the Plugin Hub state could not be stored ({kind}{', ' + code if code else ''})"
+
+
+def _create_table(bind) -> None:
+    """Create the table if it is missing, tolerating another process creating it first.
+
+    ``checkfirst`` is a separate existence check, so two starts at once can both
+    see no table and one of them fails with a duplicate-table error. That one
+    is not a failure when the table is there now; any other error, or a table
+    that is still missing, is raised.
+    """
+    failure = None
+    try:
+        _state_table.create(bind, checkfirst=True)
+    except sa.exc.DBAPIError as error:
+        if sa.inspect(bind).has_table(TABLE_NAME):
+            logger.debug("The Plugin Hub state table was created by another process")
+            return
+        failure = _describe(error)
+    if failure is not None:
+        raise StateStoreError(failure)
 
 
 def ensure_ready(bind=None) -> None:
@@ -245,11 +300,15 @@ def ensure_ready(bind=None) -> None:
     with _ready_lock:
         if id(bind) in _ready:
             return
-        _state_table.create(bind, checkfirst=True)
-        with write_transaction(bind) as connection:
-            if import_legacy_state(connection, legacy_state_path()):
-                logger.info("Imported the Plugin Hub state from %s into the database",
-                            legacy_state_path())
+        _create_table(bind)
+
+        def import_row():
+            with write_transaction(bind) as connection:
+                if import_legacy_state(connection, legacy_state_path()):
+                    logger.info("Imported the Plugin Hub state from %s into the database",
+                                legacy_state_path())
+
+        _sanitized(import_row)
         _ready[id(bind)] = bind
 
 
@@ -298,12 +357,15 @@ def update_document(step: Callable[[str], tuple[str, Any]], bind=None, *,
     for attempt in ((1, 2) if retry_on_conflict else (1,)):
         revision, text = read_document(bind)
         new_text, result = step(text)
-        try:
+        def commit():
             with (around() if around is not None else nullcontext()) as held:
                 with write_transaction(bind) as connection:
                     _commit_document(connection, revision, new_text)
                 if after_commit is not None:
                     after_commit(held)
+
+        try:
+            _sanitized(commit)
         except _StaleRevision:
             logger.debug("The Plugin Hub state changed during a write (attempt %d)", attempt)
             continue

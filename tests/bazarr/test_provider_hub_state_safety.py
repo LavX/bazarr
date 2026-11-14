@@ -74,7 +74,7 @@ def test_a_failed_import_prints_no_credential(tmp_path, monkeypatch, caplog):
     state_store.use_engine(engine)
     try:
         with caplog.at_level(logging.DEBUG):
-            with pytest.raises(sa.exc.DBAPIError) as failure:
+            with pytest.raises(state_store.StateStoreError) as failure:
                 state_store.ensure_ready()
             logging.getLogger("provider_hub.test").error("import failed", exc_info=failure.value)
     finally:
@@ -84,7 +84,8 @@ def test_a_failed_import_prints_no_credential(tmp_path, monkeypatch, caplog):
     assert SECRET not in str(failure.value)
     assert SECRET not in rendered
     assert SECRET not in caplog.text
-    assert "SQL parameters hidden" in str(failure.value)
+    # The driver's error is not attached in any way a traceback or a log would print.
+    assert failure.value.__cause__ is None and failure.value.__context__ is None
 
 
 def test_a_failed_write_prints_no_credential(hub_store, hub_engine, caplog):
@@ -103,12 +104,16 @@ def test_a_failed_write_prints_no_credential(hub_store, hub_engine, caplog):
                 f"CHECK (length(document) <= {length})")
 
     def add_credential(state):
-        state["jobs"].append({"id": "later", "note": SECRET})
+        # A key that sorts first puts the secret at the very start of the stored
+        # text, where a constraint error's row preview would show it.
+        state["0credential"] = SECRET
 
     with caplog.at_level(logging.DEBUG):
-        with pytest.raises(sa.exc.DBAPIError) as failure:
+        with pytest.raises(hub_store.StateStoreError) as failure:
             mutate_state(add_credential)
         logging.getLogger("provider_hub.test").error("write failed", exc_info=failure.value)
+    assert failure.value.__cause__ is None and failure.value.__context__ is None
+    assert SECRET not in str(failure.value)
     assert SECRET not in "".join(traceback.format_exception(failure.value))
     assert SECRET not in caplog.text
 
@@ -632,3 +637,44 @@ def test_the_boot_credential_migration_survives_a_damaged_document(
     assert snapshot_file.read_bytes() == copy_before
     assert raw_row(hub_engine) == row_before
     assert [path.read_text(encoding="utf-8") for path in corrupt_copies()] == [damaged]
+
+
+# First use of the table ----------------------------------------------------
+
+
+def _create_losing_the_race(monkeypatch, hub_engine):
+    """The table is created by another process right after this one found it missing."""
+    from provider_hub import state_store
+    real = state_store._state_table.create
+    calls = []
+
+    def create(bind, checkfirst=True):
+        calls.append(1)
+        real(bind, checkfirst=True)  # the other process, between the check and the CREATE
+        raise sa.exc.ProgrammingError("CREATE TABLE provider_hub_state", {}, Exception("relation already exists"))
+
+    monkeypatch.setattr(state_store._state_table, "create", create)
+    return calls
+
+
+def test_a_table_created_by_another_process_in_the_meantime_is_not_a_failure(hub_store, hub_engine, monkeypatch):
+    from provider_hub.state import load_state, mutate_state
+    calls = _create_losing_the_race(monkeypatch, hub_engine)
+
+    mutate_state(lambda state: state["installations"].update(examplehub=_installation()))
+
+    assert calls == [1]
+    assert list(load_state()["installations"]) == ["examplehub"]
+    assert raw_row(hub_engine)[0] == 2
+
+
+def test_a_failed_table_creation_that_left_no_table_is_still_an_error(hub_store, hub_engine, monkeypatch):
+    def create(bind, checkfirst=True):
+        raise sa.exc.ProgrammingError("CREATE TABLE provider_hub_state", {}, Exception("permission denied"))
+
+    monkeypatch.setattr(hub_store._state_table, "create", create)
+
+    with pytest.raises(hub_store.StateStoreError) as failure:
+        hub_store.ensure_ready()
+
+    assert "permission denied" not in str(failure.value)
