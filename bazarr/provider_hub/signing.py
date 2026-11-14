@@ -74,6 +74,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import re
 
 from collections.abc import Iterable, Mapping
@@ -195,6 +196,20 @@ class SigningKey:
 
 
 @dataclass(frozen=True)
+class UnknownKey:
+    """A key entry for an algorithm this build does not know.
+
+    It never verifies anything, but it stays in the statement the root signed,
+    so a key file that lists a second algorithm still checks out.
+    """
+
+    key_id: str
+    algorithm: str
+    public_key: str
+    added: str
+
+
+@dataclass(frozen=True)
 class Revocation:
     key_id: str
     revoked_at: str
@@ -207,6 +222,7 @@ class KeyFile:
     signature: bytes
     keys: tuple[SigningKey, ...]
     revocations: tuple[Revocation, ...]
+    unknown_keys: tuple[UnknownKey, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -234,6 +250,9 @@ _KEY_FILE_CONTEXT = b"bazarr-catalog-key-file-v1\n"
 _ENVELOPE_SCHEMA_VERSION = 1
 _ALGORITHM = "ed25519"
 _MAX_COUNTER = 2**63
+_MAX_SIGNATURES = 16
+_MAX_FIELD = 256
+_MAX_DETAIL = 300
 _KEY_ID_RE = re.compile(r"[0-9a-f]{16}", re.ASCII)
 _TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
 
@@ -247,7 +266,8 @@ def key_file_statement(
     """The bytes a root key signs to vouch for a whole key file.
 
     Covers the root key id, the version, every signing key (``key_id``,
-    ``public_key`` as base64, ``added``) and every revocation (``key_id``,
+    ``public_key`` as base64, ``added``; ``algorithm`` defaults to ed25519) and
+    every revocation (``key_id``,
     ``revoked_at``). Entries are sorted by key id, so the order in the file does
     not matter, and the encoding is canonical JSON so whitespace does not
     matter either.
@@ -257,7 +277,7 @@ def key_file_statement(
         "key_file_version": key_file_version,
         "keys": sorted(
             (
-                {"added": k["added"], "algorithm": _ALGORITHM, "key_id": k["key_id"], "public_key": k["public_key"]}
+                {"added": k["added"], "algorithm": k.get("algorithm", _ALGORITHM), "key_id": k["key_id"], "public_key": k["public_key"]}
                 for k in keys
             ),
             key=lambda k: k["key_id"],
@@ -269,6 +289,24 @@ def key_file_statement(
     }
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return _KEY_FILE_CONTEXT + encoded.encode("ascii")
+
+
+def statement_for(key_file: KeyFile) -> bytes:
+    """The statement the root signed for a parsed key file, unknown algorithms included."""
+    keys = [
+        {"key_id": k.key_id, "public_key": base64.b64encode(k.public_key).decode("ascii"), "added": k.added}
+        for k in key_file.keys
+    ]
+    keys.extend(
+        {"key_id": k.key_id, "algorithm": k.algorithm, "public_key": k.public_key, "added": k.added}
+        for k in key_file.unknown_keys
+    )
+    return key_file_statement(
+        key_file.root_key_id,
+        key_file.version,
+        keys,
+        [{"key_id": r.key_id, "revoked_at": r.revoked_at} for r in key_file.revocations],
+    )
 
 
 def parse_wire_format(key_file: Any, envelope: Any, catalog: bytes) -> WireDocuments:
@@ -285,7 +323,9 @@ def parse_wire_format(key_file: Any, envelope: Any, catalog: bytes) -> WireDocum
     Key file: ``{"key_file_version": 1, "root_key_id", "signature", "keys":
     [{"key_id", "algorithm", "public_key", "added"}], "revocations":
     [{"key_id", "revoked_at"}]}``. ``revocations`` may be absent. Public keys
-    and the signature are base64. The root signs ``key_file_statement`` over the
+    and the signature are base64. A key entry with another algorithm is kept
+    for the signed statement but never used to verify, so a second algorithm
+    can be added later. The root signs ``key_file_statement`` over the
     whole file. Unknown extra fields are ignored (and so are not covered by the
     signature).
 
@@ -294,6 +334,7 @@ def parse_wire_format(key_file: Any, envelope: Any, catalog: bytes) -> WireDocum
     exact catalog bytes. Entries with any other algorithm are skipped so a
     second algorithm can be added later; an envelope with no ed25519 entry is
     malformed (deliberately not "unsigned", so it never takes the legacy path).
+    More than 16 entries, or two ed25519 entries for one key id, are malformed.
 
     All JSON is strict: UTF-8 only, duplicate object keys refused.
 
@@ -319,11 +360,24 @@ def _reject_constant(_name: str) -> Any:
     raise ValueError("non-finite number")
 
 
+def _parse_float(text: str) -> float:
+    # ``1e999`` is not a JSON constant, but Python reads it as infinity.
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("non-finite number")
+    return value
+
+
 def _loads(raw: Any, what: str) -> Any:
-    """Strict JSON: UTF-8 bytes only, no duplicate object keys, no NaN or Infinity."""
+    """Strict JSON: UTF-8 bytes only, no duplicate object keys, no NaN, Infinity or overflowing number."""
     try:
         text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant)
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+            parse_float=_parse_float,
+        )
     except (ValueError, RecursionError, TypeError) as exc:
         raise WireFormatError(f"{what} is not valid JSON") from exc
 
@@ -390,10 +444,22 @@ def _parse_key_file(document: Mapping[str, Any]) -> KeyFile:
     if not _is_counter(version):
         raise WireFormatError("key_file_version must be a positive integer below 2**63")
     keys: list[SigningKey] = []
+    unknown: list[UnknownKey] = []
     seen: set[str] = set()
     for entry in _object_list(document, "keys", "key file", required=True):
-        if entry.get("algorithm") != _ALGORITHM:
-            raise WireFormatError("each signing key must use ed25519")
+        algorithm = entry.get("algorithm")
+        if not isinstance(algorithm, str) or not algorithm:
+            raise WireFormatError("each signing key needs an algorithm")
+        if algorithm != _ALGORITHM:
+            # A future algorithm: kept for the signed statement, never used.
+            fields = {name: _text(entry, name, "signing key") for name in ("key_id", "public_key", "added")}
+            if not algorithm.isascii() or any(len(v) > _MAX_FIELD for v in (algorithm, *fields.values())):
+                raise WireFormatError("a signing key field is too long or not ASCII")
+            if fields["key_id"] in seen:
+                raise WireFormatError("a key is listed twice")
+            seen.add(fields["key_id"])
+            unknown.append(UnknownKey(algorithm=algorithm, **fields))
+            continue
         kid = _key_id_field(entry, "key_id", "signing key")
         public_key = _base64_field(entry, "public_key", "signing key", 32)
         if key_id(public_key) != kid:
@@ -413,6 +479,7 @@ def _parse_key_file(document: Mapping[str, Any]) -> KeyFile:
         signature=_base64_field(document, "signature", "key file", 64),
         keys=tuple(keys),
         revocations=tuple(revocations),
+        unknown_keys=tuple(unknown),
     )
 
 
@@ -423,19 +490,21 @@ def _parse_envelope(document: Mapping[str, Any]) -> tuple[SignatureEntry, ...]:
     entries = _object_list(document, "signatures", "signature envelope", required=True)
     if not entries:
         raise WireFormatError("a signature envelope needs at least one signature")
+    if len(entries) > _MAX_SIGNATURES:
+        raise WireFormatError(f"a signature envelope holds at most {_MAX_SIGNATURES} signatures")
     parsed = []
+    listed: set[str] = set()
     for entry in entries:
         algorithm = entry.get("algorithm")
         if not isinstance(algorithm, str) or not algorithm:
             raise WireFormatError("each signature needs an algorithm")
         if algorithm != _ALGORITHM:
             continue  # a future algorithm: skipped, never fatal
-        parsed.append(
-            SignatureEntry(
-                key_id=_key_id_field(entry, "key_id", "signature"),
-                signature=_base64_field(entry, "signature", "signature", 64),
-            )
-        )
+        kid = _key_id_field(entry, "key_id", "signature")
+        if kid in listed:
+            raise WireFormatError(f"key {kid} signs the catalog twice")
+        listed.add(kid)
+        parsed.append(SignatureEntry(key_id=kid, signature=_base64_field(entry, "signature", "signature", 64)))
     if not parsed:
         raise WireFormatError("the signature envelope has no ed25519 signature")
     return tuple(parsed)
@@ -478,8 +547,9 @@ def verify_catalog(
 
     ``data`` is the exact byte string that was signed: ``bytes``, ``bytearray``
     or ``memoryview``. Anything else, text included, is ``MALFORMED``. ``envelope`` is the
-    detached signature document (parsed, or JSON text or bytes), or ``None`` or
-    empty when the catalog came without one. ``key_file`` is the CI key file.
+    detached signature document (parsed, or JSON text or bytes). Only ``None``
+    or blank text means the catalog came without one (``UNSIGNED``); an empty
+    object or any other document that is not a valid envelope is ``MALFORMED``. ``key_file`` is the CI key file.
     ``roots`` maps root key ids to raw 32-byte public keys and is the only
     thing trusted without proof. ``channel`` is the channel the caller asked
     for; the signed document must name the same one. ``now`` and
@@ -525,16 +595,15 @@ def verify_catalog(
 
     root = roots.get(key_file_doc.root_key_id)
     try:
-        statement = key_file_statement(
-            key_file_doc.root_key_id,
-            key_file_doc.version,
-            [{"key_id": k.key_id, "public_key": base64.b64encode(k.public_key).decode("ascii"), "added": k.added} for k in key_file_doc.keys],
-            [{"key_id": r.key_id, "revoked_at": r.revoked_at} for r in key_file_doc.revocations],
-        )
+        statement = statement_for(key_file_doc)
     except (ValueError, TypeError, RecursionError) as exc:
         return early(Status.MALFORMED, f"the key file cannot be serialised: {exc.__class__.__name__}")
     if root is None or not _ed25519_verify(root, key_file_doc.signature, statement):
         return early(Status.BAD_SIGNATURE, "the key file is not signed by a trusted root")
+    listed_ids = {k.key_id for k in key_file_doc.keys} | {k.key_id for k in key_file_doc.unknown_keys}
+    root_publics = {value for value in roots.values() if isinstance(value, bytes)}
+    if listed_ids & set(roots) or any(k.public_key in root_publics for k in key_file_doc.keys):
+        return early(Status.MALFORMED, "a root key is listed as a signing key; root keys never sign catalogs")
     if stored_key_file_version is not None and key_file_doc.version < stored_key_file_version:
         return early(
             Status.KEY_FILE_ROLLBACK,
@@ -553,7 +622,7 @@ def verify_catalog(
                 root_key_id=key_file_doc.root_key_id,
                 key_file_version=key_file_doc.version,
             )
-        detail = "; ".join(problems) if problems else "no signature checked out"
+        detail = _bounded("; ".join(problems)) if problems else "no signature checked out"
         return early(
             Status.BAD_SIGNATURE,
             detail,
@@ -615,6 +684,10 @@ def verify_catalog(
             counter,
         )
     return result(Status.OK, counter=counter)
+
+
+def _bounded(text: str) -> str:
+    return text if len(text) <= _MAX_DETAIL else text[: _MAX_DETAIL - 3] + "..."
 
 
 def _require_aware(value: datetime, name: str) -> None:

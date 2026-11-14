@@ -290,7 +290,11 @@ def test_root_key_signs_only_when_listed(keys):
 
     bare = verify(keys, data, envelope_for(data, keys.root), keys.key_file())
     assert bare.status is Status.BAD_SIGNATURE
-    assert verify(keys, data, envelope_for(data, keys.root), listed).ok
+    # Listing a root as a signing key is refused, so a root never signs a catalog.
+    refused = verify(keys, data, envelope_for(data, keys.root), listed)
+    assert refused.status is Status.MALFORMED
+    assert "root key" in refused.detail
+    assert verify(keys, data, envelope_for(data, keys.ci), listed).status is Status.MALFORMED
 
 
 def test_either_trusted_root_may_sign_the_key_file(keys):
@@ -680,6 +684,51 @@ def test_malformed_envelope(keys, mutate):
     assert not result.usable
 
 
+def test_an_envelope_with_too_many_signatures_is_malformed(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    template = envelope["signatures"][0]
+    envelope["signatures"] = [
+        {**template, "key_id": "%016x" % number} for number in range(17)
+    ]
+
+    result = verify(keys, data, envelope)
+
+    assert result.status is Status.MALFORMED
+    assert "at most 16" in result.detail
+
+
+def test_sixteen_signatures_are_still_accepted(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    template = envelope["signatures"][0]
+    envelope["signatures"] = [
+        {**template, "key_id": "%016x" % number} for number in range(15)
+    ] + envelope["signatures"]
+
+    assert verify(keys, data, envelope).ok
+
+
+def test_two_signatures_for_one_key_id_are_malformed(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+    envelope["signatures"].append(dict(envelope["signatures"][0]))
+
+    assert verify(keys, data, envelope).status is Status.MALFORMED
+
+
+def test_the_failure_detail_stays_short(keys):
+    data = catalog_bytes()
+    stranger = Ed25519PrivateKey.generate()
+    envelope = envelope_for(data, *[Ed25519PrivateKey.generate() for _ in range(16)], stranger)
+    envelope["signatures"] = envelope["signatures"][:16]
+
+    result = verify(keys, data, envelope)
+
+    assert result.status is Status.BAD_SIGNATURE
+    assert 0 < len(result.detail) <= 300
+
+
 def test_envelope_that_is_not_json_or_not_an_object(keys):
     assert verify(keys, envelope="{not json").status is Status.MALFORMED
     assert verify(keys, envelope="[1, 2]").status is Status.MALFORMED
@@ -692,7 +741,14 @@ def test_envelope_that_is_not_json_or_not_an_object(keys):
         lambda f: f.pop("keys"),
         lambda f: f.update(keys={}),
         lambda f: f.update(revocations="x"),
-        lambda f: f["keys"][0].update(algorithm="rsa"),
+        lambda f: f["keys"][0].pop("algorithm"),
+        lambda f: f["keys"][0].update(algorithm=5),
+        lambda f: f["keys"].append({"algorithm": "ml-dsa-65", "key_id": "k1"}),
+        lambda f: f["keys"].append({"algorithm": "ml-dsa-65", "key_id": "k1", "public_key": "x" * 300, "added": "d"}),
+        lambda f: f["keys"].extend([
+            {"algorithm": "ml-dsa-65", "key_id": "k1", "public_key": "x", "added": "d"},
+            {"algorithm": "ml-dsa-65", "key_id": "k1", "public_key": "y", "added": "d"},
+        ]),
         lambda f: f["keys"][0].update(key_id="0" * 16),
         lambda f: f["keys"][0].update(public_key="***"),
         lambda f: f["keys"][0].update(public_key=b64(b"short")),
@@ -788,6 +844,22 @@ def test_extra_fields_in_the_key_file_and_envelope_are_ignored(keys):
 # Strict parsing and hostile input
 
 
+def test_a_key_entry_with_an_unknown_algorithm_is_skipped_but_stays_signed(keys):
+    data = catalog_bytes()
+    future = {"key_id": "ab" * 8, "algorithm": "ml-dsa-65", "public_key": "not-base64-at-all!", "added": "2026-11-01"}
+    key_file = keys.key_file(extra=[future])
+
+    assert verify(keys, data, key_file=key_file).ok
+    # It is covered by the root's signature: dropping it from the file breaks the file.
+    stripped = copy.deepcopy(key_file)
+    stripped["keys"] = [entry for entry in stripped["keys"] if entry["algorithm"] == "ed25519"]
+    assert verify(keys, data, key_file=stripped).status is Status.BAD_SIGNATURE
+    # And it can never verify a catalog: a signature naming it is not in the usable keys.
+    envelope = envelope_for(data, keys.ci)
+    envelope["signatures"] = [{"algorithm": "ed25519", "key_id": future["key_id"], "signature": b64(b"x" * 64)}]
+    assert verify(keys, data, envelope, key_file).status is Status.BAD_SIGNATURE
+
+
 def test_unknown_signature_algorithms_are_skipped(keys):
     data = catalog_bytes()
     envelope = envelope_for(data, keys.ci)
@@ -862,7 +934,7 @@ def test_non_finite_numbers_are_rejected(keys):
     assert verify(keys, data).status is Status.MALFORMED
 
 
-@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity", b"1e999", b"-1e999"])
 def test_non_finite_numbers_in_an_ignored_field_are_rejected(keys, constant):
     """Metadata is valid, so only strict JSON parsing can refuse this catalog."""
     data = b'{"channel": "main", "signed_version": 10, "not_before": "%s", "expires": "%s", "weight": %s}' % (
@@ -931,6 +1003,19 @@ def test_extreme_dates_do_not_overflow(keys):
     assert verify(keys, old, now=NOW, host_build_time=last).status is Status.CLOCK_WRONG
 
 
+GARBAGE_STATUSES = {Status.UNSIGNED, Status.MALFORMED, Status.BAD_SIGNATURE}
+
+
+def test_a_baked_catalog_still_needs_a_sane_validity_window(keys):
+    inverted = catalog_bytes(not_before=EXPIRES, expires=SIGNED_AT)
+    too_long = catalog_bytes(not_before=SIGNED_AT, expires=SIGNED_AT + timedelta(days=367))
+    longest = catalog_bytes(not_before=SIGNED_AT, expires=SIGNED_AT + timedelta(days=366))
+
+    assert verify(keys, inverted, baked=True).status is Status.MALFORMED
+    assert verify(keys, too_long, baked=True).status is Status.MALFORMED
+    assert verify(keys, longest, baked=True).status is Status.OK
+
+
 def test_garbage_never_raises(keys):
     data = catalog_bytes()
     envelope = envelope_for(data, keys.ci)
@@ -941,7 +1026,9 @@ def test_garbage_never_raises(keys):
             lambda v: verify_catalog(data, envelope, v, roots=keys.roots, channel="main", now=NOW),
             lambda v: verify_catalog(v if isinstance(v, (bytes, str)) else b"", envelope, keys.key_file(), roots=keys.roots, channel="main", now=NOW),
         ):
-            assert not call(sample).usable
+            result = call(sample)
+            assert not result.usable
+            assert result.status in GARBAGE_STATUSES
 
 
 @pytest.mark.parametrize(
