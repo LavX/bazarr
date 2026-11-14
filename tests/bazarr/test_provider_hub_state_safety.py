@@ -1114,3 +1114,28 @@ def test_every_rendered_form_of_a_credential_is_masked(hub_store, hub_engine, br
     seen = caplog.text + capfd.readouterr().err
     for form in _every_form(credential):
         assert form not in seen, f"the form {form!r} reached the log"
+
+
+def test_no_rendering_of_a_document_keeps_a_credential_after_masking(hub_store):
+    """Render a whole document every way a log could, with its own code, and look for what must be gone."""
+    credentials = {
+        "api_key": "uniqueAAAA'apostrophe",
+        "token": 'uniqueBBBB"quote',
+        "password": "uniqueCCCC\\backslash",
+        "secret": "uniqueDDDD-ünï-cödé",
+        "mixed": "uniqueEEEE'\"\\ü",
+    }
+    document = {"installations": {"examplehub": _installation(config=dict(credentials))}, "jobs": []}
+    hub_store.register_document_secrets(json.dumps(document, sort_keys=True))
+    as_json = json.dumps(document, sort_keys=True)
+    as_json_unicode = json.dumps(document, sort_keys=True, ensure_ascii=False)
+    renderings = [
+        str(document), repr(document), as_json, as_json_unicode,
+        repr(as_json), repr(as_json_unicode), ascii(as_json_unicode), str(repr(repr(document))),
+        f"Failing row contains (1, 1, 2, {as_json})", f"parameters: {[as_json]!r}",
+    ]
+    for rendering in renderings:
+        masked = hub_store._mask_local(rendering)
+        for name in credentials:
+            core = credentials[name][:10]  # the distinctive start survives every spelling unless masked
+            assert core not in masked, f"{name} survived in {rendering[:60]!r}"

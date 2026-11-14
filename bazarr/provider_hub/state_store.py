@@ -108,14 +108,25 @@ def rendered_forms(value: str) -> set[str]:
 
     The raw text; the JSON-escaped form with and without ``ensure_ascii`` (what
     a driver's DETAIL shows of the stored document), without the outer quotes;
-    and the repr and ascii-escaped form of each of those (what ``%r`` or an
-    exception's text shows of a string that holds them).
+    the repr and ascii-escaped form of each of those (what ``%r`` or an
+    exception's text shows of a string that holds them), and each of them with
+    either quote character escaped, for the quote context it ends up in.
     """
-    base = {value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}
-    forms = set(base)
-    for form in base:
-        forms.add(repr(form)[1:-1])
-        forms.add(ascii(form)[1:-1])
+    forms = {value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}
+    # A document can be quoted inside a message that is itself quoted, so the
+    # escaping is applied twice.
+    for _depth in range(2):
+        for form in set(forms):
+            forms.add(repr(form)[1:-1])
+            forms.add(ascii(form)[1:-1])
+            # repr picks its quote from the string itself, so a text that holds
+            # an apostrophe is shown with double quotes and its apostrophe bare,
+            # while the same text inside a larger string that repr quotes with
+            # single quotes shows it escaped. Both contexts are spelled.
+            for quote in ("'", '"'):
+                escaped = form.replace("\\", "\\\\").replace(quote, "\\" + quote)
+                forms.add(escaped)
+                forms.add(escaped.encode("ascii", "backslashreplace").decode("ascii"))
     return {form for form in forms if form}
 
 
