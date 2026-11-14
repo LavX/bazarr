@@ -167,7 +167,8 @@ def _insert_if_absent(values: dict[str, Any], dialect_name: str):
 def _legacy_document(path: Path | None) -> str:
     """The text to import from a state.json, or an empty object without one.
 
-    A file that is not valid JSON, or whose root is not an object, raises:
+    A file that is not valid JSON, whose root is not an object, or that has no
+    installation inventory raises:
     importing nothing in its place would start the Hub from an empty inventory,
     hide what is on disk, and let the next sync of the file copy replace the
     original. The file stays where it is either way.
@@ -178,6 +179,10 @@ def _legacy_document(path: Path | None) -> str:
         data = json.load(handle)
     if not isinstance(data, dict):
         raise ValueError("The Plugin Hub state file is not an object; it was not imported")
+    if not isinstance(data.get("installations"), dict):
+        # The file backend refuses such a document as damaged; the import does
+        # too, instead of starting from an empty inventory over it.
+        raise ValueError("The Plugin Hub state file has no installation inventory; it was not imported")
     return json.dumps(data, sort_keys=True)
 
 

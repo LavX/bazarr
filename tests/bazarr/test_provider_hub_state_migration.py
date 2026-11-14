@@ -97,12 +97,12 @@ def test_upgrade_imports_state_json_and_drops_the_unused_tables(hub_store, hub_e
 def test_upgrade_is_repeatable_and_never_overwrites_the_row(hub_store, hub_engine):
     path = hub_store.legacy_state_path()
     path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"jobs": [{"id": "first"}]}), encoding="utf-8")
+    path.write_text(json.dumps({"installations": {}, "jobs": [{"id": "first"}]}), encoding="utf-8")
     with hub_engine.connect() as connection:
         _run(connection, _migration(hub_store.legacy_state_path()).upgrade)
-        path.write_text(json.dumps({"jobs": [{"id": "second"}]}), encoding="utf-8")
+        path.write_text(json.dumps({"installations": {}, "jobs": [{"id": "second"}]}), encoding="utf-8")
         _run(connection, _migration(hub_store.legacy_state_path()).upgrade)
-    assert json.loads(raw_row(hub_engine)[1]) == {"jobs": [{"id": "first"}]}
+    assert json.loads(raw_row(hub_engine)[1]) == {"installations": {}, "jobs": [{"id": "first"}]}
 
 
 def test_upgrade_after_the_app_created_the_table_is_a_no_op(hub_store, hub_engine):
@@ -136,8 +136,8 @@ def test_an_unreadable_state_file_does_not_stop_the_upgrade(hub_store, hub_engin
     assert path.read_text(encoding="utf-8") == "{broken"
 
 
-@pytest.mark.parametrize("content", ["[]", "null"])
-def test_a_state_file_that_is_not_an_object_is_not_imported(hub_store, hub_engine, content):
+@pytest.mark.parametrize("content", ["[]", "null", '{"jobs": []}'])
+def test_a_state_file_that_is_not_a_state_document_is_not_imported(hub_store, hub_engine, content):
     path = hub_store.legacy_state_path()
     path.parent.mkdir(parents=True)
     path.write_text(content, encoding="utf-8")
@@ -154,7 +154,7 @@ def test_a_state_file_that_is_not_an_object_is_not_imported(hub_store, hub_engin
 def test_downgrade_drops_the_table_and_keeps_the_file(hub_store, hub_engine):
     path = hub_store.legacy_state_path()
     path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"jobs": []}), encoding="utf-8")
+    path.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
     with hub_engine.connect() as connection:
         _run(connection, _migration(hub_store.legacy_state_path()).upgrade)
         _run(connection, _migration().downgrade)
@@ -167,13 +167,13 @@ def test_upgrading_again_after_a_downgrade_imports_the_edited_file(hub_store, hu
     """An older build keeps editing state.json; the next upgrade reads it again."""
     path = hub_store.legacy_state_path()
     path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"jobs": [{"id": "before"}]}), encoding="utf-8")
+    path.write_text(json.dumps({"installations": {}, "jobs": [{"id": "before"}]}), encoding="utf-8")
     with hub_engine.connect() as connection:
         _run(connection, _migration(path).upgrade)
-        assert json.loads(raw_row(hub_engine)[1]) == {"jobs": [{"id": "before"}]}
+        assert json.loads(raw_row(hub_engine)[1]) == {"installations": {}, "jobs": [{"id": "before"}]}
         _run(connection, _migration().downgrade)
         assert state_table_exists(hub_engine) is False
-        path.write_text(json.dumps({"jobs": [{"id": "before"}, {"id": "edited"}]}), encoding="utf-8")
+        path.write_text(json.dumps({"installations": {}, "jobs": [{"id": "before"}, {"id": "edited"}]}), encoding="utf-8")
         _run(connection, _migration(path).upgrade)
     revision, stored, _version = raw_row(hub_engine)
     assert revision == 1

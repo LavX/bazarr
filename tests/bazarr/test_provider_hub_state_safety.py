@@ -485,8 +485,8 @@ def test_a_row_is_not_recorded_against_a_removed_environment(hub_store, hub_engi
 # Legacy files with a root that is not an object -------------------------------
 
 
-@pytest.mark.parametrize("content", ["[]", "null"])
-def test_a_state_file_with_a_non_object_root_is_not_imported(hub_store, hub_engine, content):
+@pytest.mark.parametrize("content", ["[]", "null", '{"jobs": []}'])
+def test_a_state_file_that_is_not_a_state_document_is_not_imported(hub_store, hub_engine, content):
     from provider_hub import state
     path = hub_store.legacy_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -499,3 +499,66 @@ def test_a_state_file_with_a_non_object_root_is_not_imported(hub_store, hub_engi
 
     assert raw_row(hub_engine) is None
     assert path.read_text(encoding="utf-8") == content
+
+
+DAMAGED_DOCUMENTS = ["[]", "null", '{"jobs": []}', '{"installations": []}', "{broken"]
+
+
+def _damage_the_row(engine, text):
+    with engine.connect() as connection:
+        connection.execute(sa.text("UPDATE provider_hub_state SET document = :d WHERE id = 1"), {"d": text})
+
+
+@pytest.mark.parametrize("damaged", DAMAGED_DOCUMENTS)
+def test_a_mutation_refuses_a_damaged_document_and_changes_neither_store(
+        hub_store, hub_engine, snapshot_file, damaged):
+    from provider_hub import env_registry
+    from provider_hub.state import StateCorruptError, corrupt_copies, mutate_state
+    mutate_state(lambda state: state["installations"].update(examplehub=_installation()))
+    _damage_the_row(hub_engine, damaged)
+    row_before = raw_row(hub_engine)
+    copy_before = snapshot_file.read_bytes()
+
+    with pytest.raises(StateCorruptError):
+        mutate_state(lambda state: state["jobs"].append({"id": "later"}))
+
+    assert raw_row(hub_engine) == row_before
+    assert snapshot_file.read_bytes() == copy_before
+    kept = corrupt_copies()
+    assert [path.read_text(encoding="utf-8") for path in kept] == [damaged]
+    # A kept copy pauses the cleanup, as on the file backend.
+    with pytest.raises(env_registry.StateUnreadable):
+        env_registry.validate_inventory({"installations": {}})
+
+
+@pytest.mark.parametrize("damaged", DAMAGED_DOCUMENTS)
+def test_the_strict_reader_refuses_a_damaged_document(hub_store, hub_engine, snapshot_file, damaged):
+    from provider_hub.state import StateCorruptError, load_state_strict, mutate_state
+    mutate_state(lambda state: state["installations"].update(examplehub=_installation()))
+    _damage_the_row(hub_engine, damaged)
+
+    with pytest.raises(StateCorruptError):
+        load_state_strict()
+
+
+def test_recovering_a_damaged_document_keeps_a_copy_and_starts_from_the_default(hub_store, hub_engine, snapshot_file):
+    from provider_hub.state import corrupt_copies, load_state, mutate_state
+    mutate_state(lambda state: state["installations"].update(examplehub=_installation()))
+    _damage_the_row(hub_engine, '{"jobs": []}')
+
+    mutate_state(lambda state: state["jobs"].append({"id": "after"}), recover_corrupt=True)
+
+    assert [path.read_text(encoding="utf-8") for path in corrupt_copies()] == ['{"jobs": []}']
+    assert load_state()["installations"] == {}
+    assert [job["id"] for job in load_state()["jobs"]] == ["after"]
+
+
+def test_the_first_start_still_mutates_an_empty_state(hub_store, hub_engine, snapshot_file):
+    """No row and no file is a hub that has not written anything, not a damaged one."""
+    from provider_hub.state import corrupt_copies, load_state_strict, mutate_state
+    assert load_state_strict()["installations"] == {}
+
+    mutate_state(lambda state: state["installations"].update(examplehub=_installation()))
+
+    assert list(json.loads(raw_row(hub_engine)[1])["installations"]) == ["examplehub"]
+    assert corrupt_copies() == []

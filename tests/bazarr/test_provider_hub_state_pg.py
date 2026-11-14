@@ -149,6 +149,7 @@ def _other_writer(engine, marker):
     with engine.connect() as connection:
         document = json.loads(connection.execute(sa.text(
             "SELECT document FROM provider_hub_state WHERE id = 1")).scalar_one())
+        document.setdefault("installations", {})
         document.setdefault("jobs", []).append({"id": marker})
         connection.execute(
             sa.text("UPDATE provider_hub_state SET document = :d, revision = revision + 1 WHERE id = 1"),

@@ -178,10 +178,16 @@ def corrupt_copies(path: str | os.PathLike[str] | None = None) -> list[Path]:
         return []
 
 
-def _keep_corrupt_copy(current: Path) -> Path | None:
-    """Copy an unreadable state document aside, once per distinct content. Never deletes or moves it."""
+def _keep_corrupt_copy(current: Path, content: bytes | None = None) -> Path | None:
+    """Copy an unreadable state document aside, once per distinct content. Never deletes or moves it.
+
+    ``content`` is the document itself when it is not the file at ``current``
+    (the database row); the copy is kept beside the state file either way, where
+    ``corrupt_copies`` looks for it.
+    """
     try:
-        content = current.read_bytes()
+        if content is None:
+            content = current.read_bytes()
         for existing in corrupt_copies(current):
             if existing.read_bytes() == content:
                 return existing
@@ -200,8 +206,8 @@ def _keep_corrupt_copy(current: Path) -> Path | None:
         return None
 
 
-def _unreadable(current: Path, reason: str) -> StateCorruptError:
-    kept = _keep_corrupt_copy(current)
+def _unreadable(current: Path, reason: str, content: bytes | None = None) -> StateCorruptError:
+    kept = _keep_corrupt_copy(current, content)
     logger.error(
         "Provider Hub: the state document %s is unreadable (%s). A copy was kept at %s and nothing was written.",
         current, reason, kept,
@@ -540,7 +546,7 @@ def mutate_state(
             raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
 
         def step(text: str) -> tuple[str, Any]:
-            data = _parse_document(text, strict=False)
+            data = _document_for_mutation(text, recover_corrupt)
             with _editing(target, data):
                 result = mutator(data)
             written.append(data)
@@ -609,21 +615,42 @@ def mutate_state_checked(
 
 
 def _stored_document(text: str) -> dict[str, Any]:
-    """The database document as stored, or an error: never a default."""
+    """The database document as stored, or an error: never a default.
+
+    The same rule the file backend applies. A document that is not JSON, whose
+    root is not an object, or that has no installation inventory is damaged:
+    a copy is kept beside the state file and ``StateCorruptError`` is raised,
+    because normalizing it would fill in an empty inventory that reads as
+    "nothing is installed" and then be stored over the damaged document. The
+    one empty document that is not damage is the empty object the first start
+    stores when there was no file to import: ``FileNotFoundError``, a state
+    that has not been written yet.
+    """
+    current = state_file()
+    content = text.encode("utf-8")
     try:
         data = json.loads(text)
     except ValueError as error:
-        raise StateCorruptError("the Provider Hub state document is unreadable (not valid JSON)") from error
+        raise _unreadable(current, "not valid JSON", content) from error
     if not isinstance(data, dict):
-        raise StateCorruptError("the Provider Hub state document is unreadable (the root is not an object)")
+        raise _unreadable(current, "the root is not an object", content)
     if not data:
-        # A hub that never wrote a state: the import stores an empty object.
         raise FileNotFoundError("the Provider Hub state has not been written yet")
     if not isinstance(data.get("installations"), dict):
-        raise StateCorruptError(
-            "the Provider Hub state document is unreadable (the installation inventory is missing or not an object)"
-        )
+        raise _unreadable(current, "the installation inventory is missing or not an object", content)
     return data
+
+
+def _document_for_mutation(text: str, recover_corrupt: bool) -> dict[str, Any]:
+    """The stored document ready to change: normalized, a default when nothing was written yet."""
+    try:
+        return _normalized_state(_stored_document(text))
+    except FileNotFoundError:
+        return default_state()
+    except StateCorruptError:
+        if not recover_corrupt:
+            raise
+        return default_state()
 
 
 def read_state_document(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
@@ -678,7 +705,10 @@ def load_state_strict(path: str | os.PathLike[str] | None = None) -> dict[str, A
         if _DATABASE_HELD:
             return _snapshot_state(strict=True)
         from . import state_store
-        return _parse_document(state_store.read_document()[1], strict=True)
+        try:
+            return _normalized_state(_stored_document(state_store.read_document()[1]))
+        except FileNotFoundError:
+            return default_state()
     current = Path(path) if path is not None else state_file()
     data = _read_document(current)
     return default_state() if data is None else _normalized_state(data)
