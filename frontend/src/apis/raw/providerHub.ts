@@ -16,6 +16,11 @@ export interface ProviderHubCatalogSource {
   official?: boolean;
   /** Why the source is trusted or not, for example "outside main and beta". */
   trust_reason?: string | null;
+  /**
+   * "bundled" while the catalog shown is the snapshot shipped in the release
+   * image, because the source has not refreshed successfully yet.
+   */
+  catalog_status?: string | null;
 }
 
 export interface ProviderHubCatalogEntry {
@@ -30,6 +35,8 @@ export interface ProviderHubCatalogEntry {
   resolved_commit?: string | null;
   /** Set when this entry cannot be installed from its source, with the reason. */
   blocked_reason?: string | null;
+  /** "bundled" for an entry read from the snapshot in the release image. */
+  origin?: string | null;
 }
 
 export interface ProviderHubCatalog {

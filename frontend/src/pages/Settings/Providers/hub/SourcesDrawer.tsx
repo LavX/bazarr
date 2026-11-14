@@ -154,6 +154,12 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
           )}
         </Group>
       </Group>
+      {source.catalog_status === "bundled" && (
+        <Text size="xs" c="dimmed" role="status">
+          Showing the catalog bundled with this release. It has not been
+          refreshed yet.
+        </Text>
+      )}
       {source.last_error && (
         <Stack gap="xs">
           <Text size="xs" c="dimmed" role="status">
