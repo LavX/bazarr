@@ -12,7 +12,7 @@ core; the core runs the same check directly.
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 if TYPE_CHECKING:
     from ..manifest import ValidatedManifest
@@ -40,8 +40,11 @@ class Kind:
     # merges a resolved capability into a consumer's runtime config.
     capability_delivery: Mapping[str, tuple[str, str]] = MappingProxyType({})
 
-    def on_installed(self, plugin_id: str) -> bool:
+    def on_installed(self, plugin_id: str, missing_required: Sequence[str] = ()) -> bool:
         """A first install of this plugin was staged.
+
+        ``missing_required`` names the ``config_schema.required`` fields that
+        hold no value yet, computed once by the install.
 
         True when the host's state holds what this kind needs, False when it
         could not be saved, which the core reports as a failed action. The

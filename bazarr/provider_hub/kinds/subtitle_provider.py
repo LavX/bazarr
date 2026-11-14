@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from typing import Any
+from typing import Any, Sequence
 
 from . import ATTACH_ON_RESTART, SUBTITLE_PROVIDER, Kind, kind_of, register_kind
 
@@ -233,10 +233,21 @@ class SubtitleProviderKind(Kind):
     attach_policy = ATTACH_ON_RESTART
     noun = "provider"
 
-    def on_installed(self, plugin_id: str) -> bool:
+    def on_installed(self, plugin_id: str, missing_required: Sequence[str] = ()) -> bool:
         # A first install opts the provider into enabled_providers, so the new
         # plugin is search-eligible without a separate toggle. False means the
         # list could not be saved, which the core reports.
+        #
+        # A provider whose manifest requires settings that are still empty
+        # (an API key, a login) is left out: enabled, it would search without
+        # credentials, fail and get throttled. It stays installed and the user
+        # adds it to the enabled list once the settings are filled in. A
+        # provider the user already had enabled (a built-in this install
+        # replaces) is never taken off the list.
+        if missing_required:
+            logger.info("Not enabling %s after install: required settings are empty (%s)",
+                        plugin_id, ", ".join(missing_required))
+            return True
         return set_bazarr_provider_enabled(plugin_id, True)
 
     def on_removed(self, plugin_id: str) -> bool:

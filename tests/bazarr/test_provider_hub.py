@@ -3328,6 +3328,146 @@ def test_stage_install_local_persists_plugin_secret_paths(tmp_path, monkeypatch)
         registry.reset_plugin_secret_paths(saved_paths)
 
 
+def _install_local_recording_enables(tmp_path, monkeypatch, *, required, seeded_config=None,
+                                     already_enabled=False):
+    """Install a provider from a local package and return what the install
+    asked Bazarr to enable, plus the job message."""
+    from provider_hub.service import stage_install_local
+    from provider_hub.state import load_state, save_state
+
+    provider_content = b"class LocalProvider: pass\n"
+    manifest = _manifest(
+        provider_id="needskeys",
+        name="Needs Keys",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    manifest["config_schema"]["properties"]["username"] = {"type": "string"}
+    if required:
+        manifest["config_schema"]["required"] = list(required)
+    package = _provider_zip(manifest, {"provider.py": provider_content}, prefix="needskeys/")
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+    if seeded_config is not None:
+        state = load_state()
+        state["installations"]["needskeys"] = {
+            "provider_id": "needskeys",
+            "name": "Needs Keys",
+            "active_version": None,
+            "state": "removed",
+            "config": seeded_config,
+        }
+        save_state(state)
+    enabled_calls = []
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: enabled_calls.append((provider_id, enabled)) or True)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers",
+                        lambda: (["needskeys"] if already_enabled else [])
+                        + [pid for pid, on in enabled_calls if on])
+
+    from secret_store import registry
+
+    saved_paths = set(registry.plugin_secret_paths())
+    registry.reset_plugin_secret_paths()
+    try:
+        installation = stage_install_local(package)
+    finally:
+        registry.reset_plugin_secret_paths(saved_paths)
+    job = load_state()["jobs"][-1]
+    return enabled_calls, installation, job
+
+
+def test_install_leaves_a_provider_with_empty_required_settings_disabled(tmp_path, monkeypatch):
+    enabled_calls, installation, job = _install_local_recording_enables(
+        tmp_path, monkeypatch, required=["api_key", "username"])
+
+    assert enabled_calls == []
+    assert installation["state"] == "staged"
+    assert installation["enabled"] is False
+    assert "required settings" in job["message"]
+
+
+def test_install_leaves_a_provider_disabled_when_only_some_required_settings_exist(tmp_path, monkeypatch):
+    enabled_calls, _installation, _job = _install_local_recording_enables(
+        tmp_path, monkeypatch, required=["api_key", "username"], seeded_config={"username": "someone"})
+
+    assert enabled_calls == []
+
+
+def test_install_enables_a_provider_whose_required_settings_are_already_stored(tmp_path, monkeypatch):
+    enabled_calls, installation, job = _install_local_recording_enables(
+        tmp_path, monkeypatch, required=["api_key"], seeded_config={"api_key": "enc-stored-value"})
+
+    assert enabled_calls == [("needskeys", True)]
+    assert installation["enabled"] is True
+    assert "required settings" not in job["message"]
+
+
+def test_install_enables_a_provider_with_no_required_settings(tmp_path, monkeypatch):
+    enabled_calls, installation, _job = _install_local_recording_enables(
+        tmp_path, monkeypatch, required=[])
+
+    assert enabled_calls == [("needskeys", True)]
+    assert installation["enabled"] is True
+
+
+def test_install_keeps_an_already_enabled_provider_enabled_despite_missing_settings(tmp_path, monkeypatch):
+    enabled_calls, installation, job = _install_local_recording_enables(
+        tmp_path, monkeypatch, required=["api_key"], already_enabled=True)
+
+    # Nothing removes the provider from enabled_providers, and the job does not
+    # claim it is off.
+    assert (("needskeys", False) not in enabled_calls)
+    assert installation["enabled"] is True
+    assert "required settings" not in job["message"]
+
+
+def test_missing_required_field_saved_empty_does_not_fall_back_to_its_default(monkeypatch):
+    from provider_hub import service
+
+    manifest = {
+        "config_schema": {
+            "properties": {"base_url": {"type": "string", "default": "https://example.test"}},
+            "required": ["base_url"],
+        }
+    }
+    monkeypatch.setattr(service, "_settings_section_supplies", lambda provider_id, field: False)
+    absent = {"provider_id": "needskeys", "manifest": manifest, "config": {}}
+    emptied = {"provider_id": "needskeys", "manifest": manifest, "config": {"base_url": ""}}
+
+    assert service.missing_required_fields(absent) == []
+    assert service.missing_required_fields(emptied) == ["base_url"]
+
+    monkeypatch.setattr(service, "_settings_section_supplies", lambda provider_id, field: True)
+    assert service.missing_required_fields(emptied) == []
+
+
+def test_missing_required_fields_counts_defaults_and_settings_section_values(monkeypatch):
+    from provider_hub import service
+
+    manifest = {
+        "config_schema": {
+            "properties": {
+                "api_key": {"type": "string", "secret": True},
+                "base_url": {"type": "string", "default": "https://example.test"},
+                "username": {"type": "string"},
+            },
+            "required": ["api_key", "base_url", "username"],
+        }
+    }
+    row = {"provider_id": "needskeys", "staged_manifest": manifest, "config": {}}
+    monkeypatch.setattr(service, "_settings_section_supplies", lambda provider_id, field: False)
+    assert service.missing_required_fields(row) == ["api_key", "username"]
+
+    monkeypatch.setattr(service, "_settings_section_supplies", lambda provider_id, field: field == "username")
+    assert service.missing_required_fields(row) == ["api_key"]
+
+    assert service.missing_required_fields({"provider_id": "x", "manifest": {"config_schema": {}}}) == []
+
+
 def test_stage_install_local_repairs_a_malformed_persisted_path_set(
         tmp_path, monkeypatch, isolated_plugin_registry):
     """A persisted plugin_secret_paths that is not a list survives a boot
