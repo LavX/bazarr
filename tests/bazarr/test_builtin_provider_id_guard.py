@@ -99,6 +99,7 @@ PINNED_RESERVED_SETTINGS_SECTIONS = frozenset({
     "deathbycaptcha",
     "discover",
     "emby",
+    "endpoints",
     "general",
     "jellyfin",
     "log",
