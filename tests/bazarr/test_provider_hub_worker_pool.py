@@ -2687,15 +2687,31 @@ def test_workers_ended_without_whole_tree_proof_are_counted_logged_and_capped(ma
     assert pool.state("a") is WorkerState.READY
 
 
-def test_a_launcher_worker_is_never_counted_as_unverified(make_pool):
+def test_a_runtime_with_no_local_process_is_never_counted_as_unverified(make_pool):
     pool = make_pool(fast_pool_limits(unverified_limit=1))
-    pool.register(definition("tr"))
-    # A plain child (no launcher) counts; the seam runtime with no local process does not.
+    # The seam runtime reports no process: it has nothing that could detach from a group.
     pool.register(WorkerDefinition("daemon", kind="daemon", runtime=lambda *args: StubRuntime()))
     for _ in range(3):
         pool.warm("daemon")
         pool.stop("daemon")
     assert "daemon" not in pool.status()["unverified_teardowns"]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="launcher is Linux only")
+def test_repeated_real_launcher_starts_and_stops_are_never_counted_as_unverified(make_pool, tmp_path):
+    build, declared = launcher_definition(tmp_path)
+    pool = make_pool(fast_pool_limits(unverified_limit=1, max_resident=1), use_clock=False)
+    pool.register(WorkerDefinition("tr", kind="translator", spawn=launcher_spawn(build, probe=declared),
+                                   session_limits=fast_session()))
+    for cycle in range(3):
+        # The limit is one: a launcher stop that were counted would refuse the second start.
+        assert pool.run("tr", "echo", {"n": cycle}).result["echo"] == {"n": cycle}
+        pid = pid_of(pool, "tr")
+        pool.stop("tr")
+        assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED), cycle
+        assert wait_until(lambda: not pid_alive(pid)), cycle
+        assert pool.status()["stuck"] == 0 and pool.status()["processes"] == 0, cycle
+        assert "tr" not in pool.status()["unverified_teardowns"], cycle
 
 
 def test_the_sandbox_status_says_detached_processes_cannot_be_tracked_where_that_is_so(monkeypatch):
