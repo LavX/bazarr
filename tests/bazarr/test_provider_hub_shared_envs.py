@@ -5,8 +5,11 @@ The environment key is a fingerprint of the dependency set. Environments built
 before sharing existed are adopted where they are, boot never runs pip, and an
 environment is removed only when no installation points at it.
 """
+import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +19,8 @@ import provider_hub.venv as venvmod
 from provider_hub import env_registry
 from provider_hub.state import load_state, save_state
 from provider_hub.venv import PluginEnvironment, environment_fingerprint, pin_scope
+
+pytestmark = pytest.mark.usefixtures("own_process_candidates")
 
 REQ_A = SimpleNamespace(pip_line="alpha==1.0 --hash=sha256:" + "a" * 64)
 REQ_B = SimpleNamespace(pip_line="beta==2.0 --hash=sha256:" + "b" * 64)
@@ -1221,3 +1226,612 @@ def test_boot_flags_an_installation_whose_bundle_is_outside_the_hub_and_register
     assert load_state()["installations"]["alpha"]["needs_repair"] is True
     assert register_active_provider_classes(active_installations()) == []
     assert (outside / "__pycache__").exists()
+
+
+def _fake_proc(tmp_path, pid=None):
+    """A /proc with one process of ours that runs from somewhere unrelated."""
+    pid = pid or str(os.getpid() + 1)
+    proc = tmp_path / "proc"
+    entry = proc / pid
+    (entry / "fd").mkdir(parents=True)
+    (entry / "exe").symlink_to("/usr/bin/true")
+    (entry / "cwd").symlink_to("/")
+    (entry / "maps").write_text("")
+    (entry / "cmdline").write_bytes(b"true\0")
+    (entry / "environ").write_bytes(b"HOME=/root\0")
+    (entry / "stat").write_text(f"{pid} (true) S " + "0 " * 18 + "99999999999999 0\n")
+    return proc, entry
+
+
+def _unreadable_reads(monkeypatch, entry, failures):
+    """Make the first ``failures`` reads of the fake process's exe link raise PermissionError."""
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0, "sleeps": []}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            if seen["count"] <= failures:
+                raise PermissionError(13, "Permission denied")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", seen["sleeps"].append)
+    return seen
+
+
+def test_a_process_unreadable_once_and_then_readable_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    seen = _unreadable_reads(monkeypatch, entry, failures=1)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert seen["count"] == 2
+
+
+def test_a_process_unreadable_once_and_then_gone_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            if seen["count"] == 1:
+                raise PermissionError(13, "Permission denied")
+            shutil.rmtree(entry)
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert not entry.exists()
+
+
+def test_a_process_unreadable_once_and_then_exited_with_a_lookup_error_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            if seen["count"] == 1:
+                raise PermissionError(13, "Permission denied")
+            shutil.rmtree(entry)
+            raise ProcessLookupError(3, "No such process")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert not entry.exists()
+
+
+def test_a_lookup_error_for_a_pid_whose_entry_is_still_there_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            raise PermissionError(13, "Permission denied") if seen["count"] == 1 else ProcessLookupError(3, "No such process")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_an_io_error_on_a_descriptor_after_a_denied_first_look_keeps_the_process_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "fd" / "7").symlink_to("/anywhere")
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            if seen["count"] == 1:
+                raise PermissionError(13, "Permission denied")
+        if str(path) == str(entry / "fd" / "7"):
+            raise OSError(5, "Input/output error")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_process_unreadable_once_and_then_failing_for_another_reason_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            raise PermissionError(13, "Permission denied") if seen["count"] == 1 else OSError(24, "Too many open files")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_missing_file_in_a_process_that_is_still_there_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            raise PermissionError(13, "Permission denied") if seen["count"] == 1 else FileNotFoundError(2, "No such file")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_process_that_turns_readable_and_uses_the_directory_still_blocks_cleanup(tmp_path, monkeypatch):
+    env = tmp_path / "env"
+    env.mkdir()
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "cwd").unlink()
+    (entry / "cwd").symlink_to(env)
+    _unreadable_reads(monkeypatch, entry, failures=1)
+
+    assert venvmod.processes_using_directory(env, proc=str(proc)) is True
+
+
+def test_a_denied_descriptor_is_unresolved_on_the_retry_and_keeps_the_process_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "fd" / "7").symlink_to("/anywhere")
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            if seen["count"] == 1:
+                raise PermissionError(13, "Permission denied")
+        if str(path) == str(entry / "fd" / "7"):
+            raise PermissionError(13, "Permission denied")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_descriptor_denied_on_the_first_look_is_retried_and_dropped_once_readable(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "fd" / "7").symlink_to("/anywhere")
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "fd" / "7"):
+            seen["count"] += 1
+            if seen["count"] == 1:
+                raise PermissionError(13, "Permission denied")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert seen["count"] == 2
+
+
+def test_a_process_whose_entry_cannot_be_checked_after_a_missing_file_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    real_lstat = venvmod.os.lstat
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            raise PermissionError(13, "Permission denied") if seen["count"] == 1 else FileNotFoundError(2, "No such file")
+        return real_readlink(path, *args, **kwargs)
+
+    def lstat(path, *args, **kwargs):
+        if str(path) == str(entry):
+            raise PermissionError(13, "Permission denied")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.os, "lstat", lstat)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def _failing_exe(monkeypatch, entry, errors):
+    """The exe link of the fake process raises the given errors in turn, then reads normally.
+
+    Returns a counter of all reads of that link.
+    """
+    real_readlink = venvmod.os.readlink
+    queue = list(errors)
+    reads = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            reads["count"] += 1
+            if queue:
+                raise queue.pop(0)
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    return reads
+
+
+def test_an_io_error_on_the_first_look_is_retried_and_dropped_once_readable(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    reads = _failing_exe(monkeypatch, entry, [OSError(5, "Input/output error")])
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert reads["count"] == 2
+
+
+def test_an_io_error_that_persists_keeps_the_process_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_exe(monkeypatch, entry, [OSError(5, "Input/output error")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_missing_file_on_the_first_look_in_a_live_process_keeps_it_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_process_whose_entry_vanished_on_the_first_look_is_dropped(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            shutil.rmtree(entry)
+            raise FileNotFoundError(2, "No such file")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def test_an_unreadable_process_that_began_before_this_one_is_not_counted(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    mine = proc / str(os.getpid())
+    mine.mkdir()
+    (mine / "stat").write_text(f"{os.getpid()} (pytest) S " + "0 " * 18 + "99999999999999999 0\n")
+    _failing_exe(monkeypatch, entry, [OSError(5, "Input/output error")] * 10)
+    (entry / "stat").write_text(f"{entry.name} (old) S " + "0 " * 18 + "1 0\n")
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def _zombie(entry, threads=()):
+    """Make the fake process a zombie leader, with the given other thread ids still listed."""
+    (entry / "stat").write_text(f"{entry.name} (true) Z " + "0 " * 18 + "99999999999999 0\n")
+    for tid in (entry.name, *threads):
+        (entry / "task" / tid).mkdir(parents=True)
+
+
+def test_a_fully_exited_zombie_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _zombie(entry)
+    reads = _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert reads["count"] == 1
+
+
+def test_a_zombie_leader_with_a_live_thread_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _zombie(entry, threads=(str(os.getpid() + 2),))
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_zombie_replaced_by_a_live_process_between_the_reads_keeps_the_pid_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _zombie(entry)
+    real_listdir = venvmod.os.listdir
+
+    def listdir(path, *args, **kwargs):
+        listed = real_listdir(path, *args, **kwargs)
+        if str(path) == str(entry / "task"):
+            # reaped, and the pid taken by a live single-threaded process
+            (entry / "stat").write_text(f"{entry.name} (python) S " + "0 " * 18 + "88888888888888 0\n")
+        return listed
+
+    monkeypatch.setattr(venvmod.os, "listdir", listdir)
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_pid_reused_again_and_again_by_other_zombies_keeps_the_pid_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _zombie(entry)
+    real_listdir = venvmod.os.listdir
+    looks = {"count": 0}
+
+    def listdir(path, *args, **kwargs):
+        listed = real_listdir(path, *args, **kwargs)
+        if str(path) == str(entry / "task"):
+            looks["count"] += 1  # a different zombie holds the pid after every task listing
+            (entry / "stat").write_text(f"{entry.name} (true) Z " + "0 " * 18 + f"{88888888888888 + looks['count']} 0\n")
+        return listed
+
+    monkeypatch.setattr(venvmod.os, "listdir", listdir)
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_failed_state_read_keeps_the_process_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _zombie(entry)
+    (entry / "stat").unlink()
+    (entry / "stat").mkdir()
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def _failing_entry_stat(monkeypatch, entry, error=None, uid=None):
+    """os.stat of the fake process entry raises ``error``, or reports another owner ``uid``."""
+    real_stat = venvmod.os.stat
+
+    def stat(path, *args, **kwargs):
+        if str(path) == str(entry):
+            if error is not None:
+                raise error
+            return SimpleNamespace(st_uid=uid)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "stat", stat)
+
+
+def test_a_failed_ownership_lookup_on_a_live_unreadable_process_keeps_it_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, error=OSError(5, "Input/output error"))
+    _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_failed_ownership_lookup_on_a_process_that_reads_clean_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, error=OSError(5, "Input/output error"))
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def test_a_first_entry_permission_error_is_retried_and_still_blocks_if_unreadable(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, error=PermissionError(13, "Permission denied"))
+    _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_first_entry_permission_error_on_a_process_that_then_reads_clean_is_dropped(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, error=PermissionError(13, "Permission denied"))
+    reads = _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")])
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert reads["count"] == 2
+
+
+def test_an_unreadable_process_confirmed_to_belong_to_someone_else_is_not_counted(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, uid=os.getuid() + 1)
+    _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def test_an_unreadable_start_time_counts_the_process_as_possibly_newer(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    mine = proc / str(os.getpid())
+    mine.mkdir()
+    (mine / "stat").write_text(f"{os.getpid()} (pytest) S " + "0 " * 18 + "100 0\n")
+    (entry / "stat").unlink()
+    (entry / "stat").mkdir()  # reading it fails
+    _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def _stat_line(pid, comm="true", state="S", flags=0, start=99999999999999):
+    after = [state, "1", "1", "1", "0", "-1", str(flags), *["0"] * 12, str(start), "0"]
+    return f"{pid} ({comm}) {' '.join(after)}\n"
+
+
+def test_a_newer_kernel_thread_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "stat").write_text(_stat_line(entry.name, comm="kworker/0:1", flags=0x00200040))
+    reads = _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert reads["count"] == 1
+
+
+def test_an_unreadable_stat_with_a_missing_exe_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "stat").unlink()
+    (entry / "stat").mkdir()
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_command_name_with_parentheses_does_not_confuse_the_flags(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    tricky = "x) S 1 1 1 0 -1 2097152 0 (y"
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 20)
+
+    # the name looks like it carries the kernel thread flag, the real flags say it does not
+    (entry / "stat").write_text(_stat_line(entry.name, comm=tricky, flags=0))
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+    # the name looks harmless, the real flags say kernel thread
+    (entry / "stat").write_text(_stat_line(entry.name, comm=tricky, flags=0x00200000))
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError(2, "No such file"), NotADirectoryError(20, "Not a directory")])
+def test_no_proc_at_all_leaves_the_decision_to_the_other_safeguards(tmp_path, monkeypatch, error):
+    def refuse(_proc):
+        raise error
+
+    monkeypatch.setattr(venvmod, "_candidate_pids", refuse)
+
+    assert venvmod.processes_using_directory(tmp_path / "env") is None
+
+
+@pytest.mark.parametrize("error", [OSError(24, "Too many open files"), OSError(12, "Out of memory"), PermissionError(13, "denied")])
+def test_a_proc_that_cannot_be_listed_right_now_counts_as_in_use(tmp_path, monkeypatch, error):
+    def refuse(_proc):
+        raise error
+
+    monkeypatch.setattr(venvmod, "_candidate_pids", refuse)
+
+    assert venvmod.processes_using_directory(tmp_path / "env") is True
+
+
+def test_a_process_that_stayed_unreadable_is_not_waited_for_again_in_the_same_pass(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    seen = _unreadable_reads(monkeypatch, entry, failures=10**6)
+    stuck = set()
+
+    assert venvmod.processes_using_directory(tmp_path / "one", proc=str(proc), stuck=stuck) is True
+    assert len(seen["sleeps"]) == venvmod._UNREADABLE_RETRIES and len(stuck) == 1
+    assert venvmod.processes_using_directory(tmp_path / "two", proc=str(proc), stuck=stuck) is True
+    assert len(seen["sleeps"]) == venvmod._UNREADABLE_RETRIES  # no new wait
+
+    # A fresh pass starts from nothing and looks again.
+    assert venvmod.processes_using_directory(tmp_path / "three", proc=str(proc), stuck=set()) is True
+    assert len(seen["sleeps"]) == 2 * venvmod._UNREADABLE_RETRIES
+
+
+def test_a_stuck_pid_that_became_readable_is_judged_afresh(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _unreadable_reads(monkeypatch, entry, failures=0)
+    stuck = {(entry.name, 99999999999999)}
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc), stuck=stuck) is False
+
+
+def test_a_cleanup_pass_shares_one_stuck_set_and_the_next_pass_starts_over(hub, monkeypatch):
+    seen = []
+
+    def scan(directory, proc="/proc", stuck=None):
+        seen.append(stuck)
+        return False
+
+    monkeypatch.setattr(env_registry, "processes_using_directory", scan)
+    save_state(load_state())
+    _legacy_env(hub, "alpha", [])
+    _legacy_env(hub, "beta", [])
+
+    assert len(env_registry.cleanup_environments(hub)) == 2
+    assert len(seen) == 2 and seen[0] is not None and seen[0] is seen[1]
+    _legacy_env(hub, "gamma", [])
+    _legacy_env(hub, "delta", [])
+    env_registry.cleanup_environments(hub)
+    assert seen[2] is seen[3] and seen[2] is not seen[0]
+
+
+def test_a_process_that_stays_unreadable_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    seen = _unreadable_reads(monkeypatch, entry, failures=10**6)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+    assert seen["count"] == 1 + venvmod._UNREADABLE_RETRIES
+    assert seen["sleeps"] == [venvmod._UNREADABLE_PAUSE] * venvmod._UNREADABLE_RETRIES
+
+
+_NON_DUMPABLE = (
+    "import ctypes, os, pathlib, sys, time\n"
+    "ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"  # PR_SET_DUMPABLE: its /proc files are unreadable to others
+    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+    "time.sleep(60)\n"
+)
+
+
+def _wait_for_pid(path):
+    deadline = time.monotonic() + 20
+    while True:
+        text = path.read_text() if path.exists() else ""
+        if text.isdigit():
+            return int(text)
+        assert time.monotonic() < deadline, "the helper process did not start"
+        time.sleep(0.05)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc")
+def test_the_real_scan_still_counts_an_unreadable_descendant_of_the_test_run(tmp_path):
+    ready = tmp_path / "ready"
+    child = subprocess.Popen([sys.executable, "-c", _NON_DUMPABLE, str(ready)])
+    try:
+        pid = _wait_for_pid(ready)
+        # The entry of a non-dumpable process of ours stays ours, but its files
+        # are unreadable to a runner without ptrace rights (root, or one with
+        # CAP_SYS_PTRACE, can read them, and then there is nothing to count).
+        try:
+            os.readlink(f"/proc/{pid}/exe")
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this runner can read the files of a non-dumpable process")
+        if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+            pytest.skip("the entry of a non-dumpable process is not owned by the runner here")
+        assert venvmod.processes_using_directory(tmp_path / "env") is True
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc")
+def test_an_unreadable_process_of_someone_elses_session_is_not_a_candidate(tmp_path):
+    ready = tmp_path / "ready"
+    # Started through a shell that exits at once, so nothing of ours is its parent.
+    subprocess.run(
+        ["sh", "-c", '"$0" -c "$1" "$2" >/dev/null 2>&1 &', sys.executable, _NON_DUMPABLE, str(ready)], check=True
+    )
+    stray = _wait_for_pid(ready)
+    try:
+        with open(f"/proc/{stray}/stat", encoding="utf-8", errors="replace") as handle:
+            parent = int(handle.read().rsplit(")", 1)[1].split()[1])
+        if parent == os.getpid():
+            pytest.skip("the helper was not reparented away from the test run here")
+        assert str(stray) not in venvmod._candidate_pids("/proc")
+        assert venvmod.processes_using_directory(tmp_path / "env") is False
+    finally:
+        try:
+            os.kill(stray, 9)  # not our child, so there is nothing to reap
+        except ProcessLookupError:
+            pass

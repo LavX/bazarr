@@ -171,3 +171,41 @@ def service_kind():
         yield kind
     finally:
         unregister_kind(SERVICE_KIND)
+
+
+@pytest.fixture
+def own_process_candidates(monkeypatch):
+    """Limit the Provider Hub's process scan to this test process and its descendants.
+
+    The scan counts any unreadable process of ours that is newer than the test
+    run as possibly using an environment, which is right in production and
+    wrong on a busy machine: another session's sandboxed process, running
+    beside the tests, would then block every cleanup. A fake ``/proc`` handed
+    in by a test is listed as it is.
+    """
+    import provider_hub.venv as venvmod
+
+    real = venvmod._candidate_pids
+
+    def own(proc):
+        names = real(proc)
+        if os.path.realpath(proc) != "/proc":
+            return names
+        parent_of = {}
+        for name in names:
+            try:
+                with open(f"/proc/{name}/stat", encoding="utf-8", errors="replace") as handle:
+                    parent_of[name] = handle.read().rsplit(")", 1)[1].split()[1]
+            except (OSError, IndexError):
+                continue
+        mine = {str(os.getpid())}
+        grew = True
+        while grew:
+            grew = False
+            for name, parent in parent_of.items():
+                if parent in mine and name not in mine:
+                    mine.add(name)
+                    grew = True
+        return [name for name in names if name in mine]
+
+    monkeypatch.setattr(venvmod, "_candidate_pids", own)

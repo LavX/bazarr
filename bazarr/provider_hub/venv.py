@@ -279,21 +279,50 @@ def _read_nul_separated(path: str) -> list[str]:
         return [item.decode("utf-8", "replace") for item in handle.read().split(b"\0") if item]
 
 
-def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/proc") -> bool | None:
+# A process in the middle of exec or exit is briefly unreadable; re-check such
+# processes a few times (about 100 ms in all) before treating them as in use.
+_UNREADABLE_RETRIES = 3
+_UNREADABLE_PAUSE = 0.033
+# The process flag of a kernel thread, field 9 of /proc/PID/stat.
+_PF_KTHREAD = 0x00200000
+
+
+def _candidate_pids(proc: str) -> list[str]:
+    """The process ids listed under ``proc``. Raises ``OSError`` when it cannot be listed.
+
+    A seam of its own so tests can narrow the scan to the processes they own.
+    """
+    return [name for name in os.listdir(proc) if name.isdigit()]
+
+
+def processes_using_directory(
+    directory: str | os.PathLike[str],
+    proc: str = "/proc",
+    stuck: set[tuple[str, int]] | None = None,
+) -> bool | None:
     """Whether any other live process runs from, has open, or maps something under ``directory``.
 
     Looks at each process's executable, working directory, open files, mapped
     files, command line and environment (Linux ``/proc``). This sees what the worker's process groups
     cannot: a child that started its own session is in none of them. A process
     that cannot be read but belongs to this user and began after this process
-    counts as using it. ``None``
-    when ``/proc`` is not there to look at, so the caller keeps its other
-    safeguards.
+    counts as using it, once a few short re-checks have not made it readable.
+    ``None`` when there is no ``/proc`` at all to look at, so the caller keeps
+    its other safeguards. A ``/proc`` that exists but cannot be listed right now
+    (too many open files, no memory) is not "nothing to look at": it counts as
+    in use.
+
+    ``stuck`` is for a caller that checks several directories in one pass: a
+    process that stayed unreadable through the re-checks is recorded in it as
+    (pid, start time), and a later call with the same set counts it as in use
+    at once instead of waiting through the re-checks again.
     """
     try:
-        entries = [name for name in os.listdir(proc) if name.isdigit()]
-    except OSError:
+        entries = _candidate_pids(proc)
+    except (FileNotFoundError, NotADirectoryError):
         return None
+    except OSError:
+        return True
     roots = {os.path.abspath(directory), os.path.realpath(directory)}
     prefixes = tuple(root.rstrip(os.sep) + os.sep for root in roots)
 
@@ -309,50 +338,126 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
         except (OSError, ValueError, IndexError):
             return None
 
+    def inspect(name: str) -> bool:
+        """Whether this process uses the directory. A ``PermissionError`` means it could not be read."""
+        base = os.path.join(proc, name)
+        for link in ("exe", "cwd"):
+            if under(os.readlink(os.path.join(base, link))):
+                return True
+        for descriptor in os.listdir(os.path.join(base, "fd")):
+            try:
+                if under(os.readlink(os.path.join(base, "fd", descriptor))):
+                    return True
+            except FileNotFoundError:
+                continue  # closed since the listing
+        with open(os.path.join(base, "maps"), encoding="utf-8", errors="replace") as maps:
+            for line in maps:
+                fields = line.rstrip("\n").split(None, 5)
+                if len(fields) == 6 and under(fields[5]):
+                    return True
+        # A symlinked venv's python is the host's python as far as the files
+        # above go, so look at how it was started as well: the path it was
+        # run by, and the environment it carries.
+        if any(under(argument) for argument in _read_nul_separated(os.path.join(base, "cmdline"))):
+            return True
+        for entry in _read_nul_separated(os.path.join(base, "environ")):
+            key, _, value = entry.partition("=")
+            if key in ("VIRTUAL_ENV", "PYTHONHOME") and under(value):
+                return True
+            if key in ("PATH", "PYTHONPATH") and any(under(item) for item in value.split(os.pathsep) if item):
+                return True
+        return False
+
     mine = os.getpid()
     my_start = started_at(str(mine))
     uid = os.getuid() if hasattr(os, "getuid") else None
+
+    def gone(name: str, error: OSError) -> bool:
+        """Whether the process is confirmed to have exited, given the error that its look ended with."""
+        if isinstance(error, (ProcessLookupError, FileNotFoundError)):
+            try:
+                os.lstat(os.path.join(proc, name))
+            except FileNotFoundError:
+                return True  # the entry is gone (a missing file alone is not a missing process, and a pid can be reused)
+            except OSError:
+                pass  # cannot tell, so it is not a confirmed exit
+        def stat_fields() -> list[str]:
+            """The stat fields after the command name, which may itself hold spaces and parentheses."""
+            with open(os.path.join(proc, name, "stat"), encoding="utf-8", errors="replace") as handle:
+                return handle.read().rsplit(")", 1)[1].split()
+
+        # A kernel thread has no executable, files or user memory to be using
+        # anything with, and its links read as missing.
+        try:
+            if int(stat_fields()[6]) & _PF_KTHREAD:
+                return True
+        except (OSError, IndexError, ValueError):
+            pass  # cannot tell, so it is not a confirmed kernel thread
+        # A zombie whose only thread is the leader has released its files and
+        # memory, but its entry stays until it is reaped and reads as missing.
+        # The state and start time are read before and after the task list, so
+        # a zombie that is reaped and whose pid is reused cannot be mixed up
+        # with the process that took its place.
+        def identity() -> tuple[str, str]:
+            fields = stat_fields()
+            return fields[0], fields[19]
+
+        try:
+            before = identity()
+            tasks = os.listdir(os.path.join(proc, name, "task"))
+            return before[0] == "Z" and tasks == [name] and identity() == before
+        except (OSError, IndexError):
+            return False
+
+    # Processes that could not be read, or not read through, and could be ours.
+    # A process in the middle of exec or exit is briefly unreadable too, so these
+    # are looked at again a few times before they count.
+    unreadable: list[str] = []
     for name in entries:
         if int(name) == mine:
             continue
-        base = os.path.join(proc, name)
+        owned: bool | None = None  # None: unknown, which is treated as possibly ours
         try:
-            owned = uid is not None and os.stat(base).st_uid == uid
-            for link in ("exe", "cwd"):
-                if under(os.readlink(os.path.join(base, link))):
-                    return True
-            for descriptor in os.listdir(os.path.join(base, "fd")):
-                try:
-                    if under(os.readlink(os.path.join(base, "fd", descriptor))):
-                        return True
-                except OSError:
-                    continue
-            with open(os.path.join(base, "maps"), encoding="utf-8", errors="replace") as maps:
-                for line in maps:
-                    fields = line.rstrip("\n").split(None, 5)
-                    if len(fields) == 6 and under(fields[5]):
-                        return True
-            # A symlinked venv's python is the host's python as far as the files
-            # above go, so look at how it was started as well: the path it was
-            # run by, and the environment it carries.
-            if any(under(argument) for argument in _read_nul_separated(os.path.join(base, "cmdline"))):
+            try:
+                if uid is not None:
+                    owned = os.stat(os.path.join(proc, name)).st_uid == uid
+            except OSError:
+                pass  # ownership stays unknown; the look below decides whether it matters
+            if inspect(name):
                 return True
-            for entry in _read_nul_separated(os.path.join(base, "environ")):
-                key, _, value = entry.partition("=")
-                if key in ("VIRTUAL_ENV", "PYTHONHOME") and under(value):
-                    return True
-                if key in ("PATH", "PYTHONPATH") and any(under(item) for item in value.split(os.pathsep) if item):
-                    return True
-        except PermissionError:
-            # Unreadable, but ours: it may be something a worker started. Only a
-            # process that began after this one can be (the desktop session, the
-            # agents and the like that were already running cannot be).
+        except OSError as error:
+            if gone(name, error):
+                continue  # the process ended while it was being looked at
+            # Whatever the error, it may be something a worker started. Only a
+            # process that is not confirmed foreign and not confirmed older than
+            # this one can be (a worker runs as this user and its children start
+            # later; the desktop session, the agents and the like that were
+            # already running cannot be). Unknown counts as possibly ours and newer.
             began = started_at(name)
-            if owned and (began is None or my_start is None or began >= my_start):
-                return True
-        except OSError:
-            continue  # the process ended while it was being looked at
-    return False
+            if owned is not False and (began is None or my_start is None or began >= my_start):
+                if stuck is not None and began is not None and (name, began) in stuck:
+                    return True  # unreadable through the re-checks a moment ago in this pass
+                unreadable.append(name)
+    for _ in range(_UNREADABLE_RETRIES):
+        if not unreadable:
+            break
+        time.sleep(_UNREADABLE_PAUSE)
+        still_unreadable = []
+        for name in unreadable:
+            try:
+                if inspect(name):
+                    return True
+            except OSError as error:
+                if not gone(name, error):
+                    still_unreadable.append(name)
+        unreadable = still_unreadable
+    # Still alive and still not readable: fail closed, it counts as in use.
+    if stuck is not None:
+        for name in unreadable:
+            began = started_at(name)
+            if began is not None:
+                stuck.add((name, began))
+    return bool(unreadable)
 
 
 def path_inside_hub(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> bool:
