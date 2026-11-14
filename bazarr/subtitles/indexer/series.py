@@ -345,6 +345,105 @@ def _log_embedded_history(series_id, episode_id, embedded_languages, reversed_pa
         logging.exception("BAZARR error writing embedded subtitle history for episode %s", episode_id)
 
 
+def _audio_matches(item, audio_language):
+    return any(x['code2'] == item['language'] for x in get_audio_profile_languages(audio_language))
+
+
+def desired_subtitles_for_profile(profile_id, audio_language):
+    """The profile's languages that apply to an episode with this audio, as ``{language, forced, hi}`` dicts.
+
+    A language the audio rules exclude for this audio is left out, and so is one whose rule requires audio the
+    episode does not have.
+    """
+    desired_subtitles_temp = get_profiles_list(profile_id=profile_id)
+    desired_subtitles_result = []
+    if desired_subtitles_temp:
+        for language in desired_subtitles_temp['items']:
+            # .get, not [...]: the optional audio keys are added to
+            # existing items by a startup migration, so an item saved
+            # between two startups can lack them entirely and every
+            # indexing pass then died on a KeyError. Absent means the
+            # user set no audio restriction, which is "False": the
+            # language stays desired.
+            if language.get('audio_exclude') == "True":
+                if _audio_matches(language, audio_language):
+                    continue
+            if language.get('audio_only_include') == "True":
+                if not _audio_matches(language, audio_language):
+                    continue
+            desired_subtitles_result.append({'language': language['language'],
+                                            'forced': language['forced'],
+                                            'hi': language['hi']})
+    return desired_subtitles_result
+
+
+def stored_subtitles_list(subtitles_text, include_embedded):
+    """The stored subtitles of an episode as ``{language, forced, hi}`` dicts.
+
+    ``subtitles_text`` is the episode's ``subtitles`` column. With ``include_embedded`` False only the entries
+    that have a file path (the external subtitles) are read.
+    """
+    stored_result = []
+    if subtitles_text is not None:
+        if include_embedded:
+            actual_subtitles_temp = ast.literal_eval(subtitles_text)
+        else:
+            actual_subtitles_temp = [x for x in ast.literal_eval(subtitles_text) if x[1]]
+
+        for subtitles in actual_subtitles_temp:
+            subtitles = subtitles[0].split(':')
+            lang = subtitles[0]
+            forced = False
+            hi = False
+            # A combined artifact (e.g. en:combined-hu) is a bilingual
+            # stacked file, not a standalone subtitle of its base language,
+            # so it must not count toward fulfilling that language. Without
+            # this, removing the plain en while a combined remains left
+            # Bazarr believing en was satisfied and it stopped searching.
+            if any(p.startswith('combined-') for p in subtitles[1:]):
+                continue
+            if len(subtitles) > 1:
+                if subtitles[1] == 'forced':
+                    forced = True
+                    hi = False
+                elif subtitles[1] == 'hi':
+                    forced = False
+                    hi = True
+            stored_result.append({'language': lang,
+                                           'forced': str(forced),
+                                           'hi': str(hi)})
+    return stored_result
+
+
+def profile_cutoff_met(profile_id, audio_language, actual_subtitles):
+    """Whether the profile's cutoff is satisfied by ``actual_subtitles`` (see :func:`stored_subtitles_list`)."""
+    cutoff_met = False
+    cutoff_temp_list = get_profile_cutoff(profile_id=profile_id)
+
+    if cutoff_temp_list:
+        for cutoff_temp in cutoff_temp_list:
+            cutoff_language = {'language': cutoff_temp['language'],
+                               'forced': cutoff_temp['forced'],
+                               'hi': cutoff_temp['hi']}
+            # Same items, same missing keys, same default.
+            if cutoff_temp.get('audio_only_include') == 'True' and not _audio_matches(cutoff_temp, audio_language):
+                # We don't want subs in this language unless it matches
+                # the audio. Don't use it to meet the cutoff.
+                continue
+            elif cutoff_temp.get('audio_exclude') == 'True' and _audio_matches(cutoff_temp, audio_language):
+                # The cutoff is met through one of the audio tracks.
+                cutoff_met = True
+            elif cutoff_language in actual_subtitles:
+                cutoff_met = True
+            # HI is considered as good as normal
+            elif (cutoff_language and
+                  {'language': cutoff_language['language'],
+                   'forced': 'False',
+                   'hi': 'True'} in actual_subtitles):
+                cutoff_met = True
+    return cutoff_met
+
+
 def list_missing_subtitles(no=None, epno=None, arr_instance_id=None, cancel=None):
     """Recalculate the missing subtitles of one episode, one series, or every episode.
 
@@ -376,91 +475,21 @@ def list_missing_subtitles(no=None, epno=None, arr_instance_id=None, cancel=None
 
     use_embedded_subs = settings.general.use_embedded_subs
 
-    matches_audio = lambda language: any(x['code2'] == language['language'] for x in get_audio_profile_languages(  # noqa: E731
-                                episode_subtitles.audio_language))
-
     for episode_subtitles in episodes_subtitles:
         if cancel is not None:
             cancel()
         missing_subtitles_text = '[]'
         if episode_subtitles.profileId:
             # get desired subtitles
-            desired_subtitles_temp = get_profiles_list(profile_id=episode_subtitles.profileId)
-            desired_subtitles_list = []
-            if desired_subtitles_temp:
-                for language in desired_subtitles_temp['items']:
-                    # .get, not [...]: the optional audio keys are added to
-                    # existing items by a startup migration, so an item saved
-                    # between two startups can lack them entirely and every
-                    # indexing pass then died on a KeyError. Absent means the
-                    # user set no audio restriction, which is "False": the
-                    # language stays desired.
-                    if language.get('audio_exclude') == "True":
-                        if matches_audio(language):
-                            continue
-                    if language.get('audio_only_include') == "True":
-                        if not matches_audio(language):
-                            continue
-                    desired_subtitles_list.append({'language': language['language'],
-                                                   'forced': language['forced'],
-                                                   'hi': language['hi']})
+            desired_subtitles_list = desired_subtitles_for_profile(episode_subtitles.profileId,
+                                                                   episode_subtitles.audio_language)
 
             # get existing subtitles
-            actual_subtitles_list = []
-            if episode_subtitles.subtitles is not None:
-                if use_embedded_subs:
-                    actual_subtitles_temp = ast.literal_eval(episode_subtitles.subtitles)
-                else:
-                    actual_subtitles_temp = [x for x in ast.literal_eval(episode_subtitles.subtitles) if x[1]]
-
-                for subtitles in actual_subtitles_temp:
-                    subtitles = subtitles[0].split(':')
-                    lang = subtitles[0]
-                    forced = False
-                    hi = False
-                    # A combined artifact (e.g. en:combined-hu) is a bilingual
-                    # stacked file, not a standalone subtitle of its base language,
-                    # so it must not count toward fulfilling that language. Without
-                    # this, removing the plain en while a combined remains left
-                    # Bazarr believing en was satisfied and it stopped searching.
-                    if any(p.startswith('combined-') for p in subtitles[1:]):
-                        continue
-                    if len(subtitles) > 1:
-                        if subtitles[1] == 'forced':
-                            forced = True
-                            hi = False
-                        elif subtitles[1] == 'hi':
-                            forced = False
-                            hi = True
-                    actual_subtitles_list.append({'language': lang,
-                                                  'forced': str(forced),
-                                                  'hi': str(hi)})
+            actual_subtitles_list = stored_subtitles_list(episode_subtitles.subtitles, use_embedded_subs)
 
             # check if cutoff is reached and skip any further check
-            cutoff_met = False
-            cutoff_temp_list = get_profile_cutoff(profile_id=episode_subtitles.profileId)
-
-            if cutoff_temp_list:
-                for cutoff_temp in cutoff_temp_list:
-                    cutoff_language = {'language': cutoff_temp['language'],
-                                       'forced': cutoff_temp['forced'],
-                                       'hi': cutoff_temp['hi']}
-                    # Same items, same missing keys, same default.
-                    if cutoff_temp.get('audio_only_include') == 'True' and not matches_audio(cutoff_temp):
-                        # We don't want subs in this language unless it matches
-                        # the audio. Don't use it to meet the cutoff.
-                        continue
-                    elif cutoff_temp.get('audio_exclude') == 'True' and matches_audio(cutoff_temp):
-                        # The cutoff is met through one of the audio tracks.
-                        cutoff_met = True
-                    elif cutoff_language in actual_subtitles_list:
-                        cutoff_met = True
-                    # HI is considered as good as normal
-                    elif (cutoff_language and
-                          {'language': cutoff_language['language'],
-                           'forced': 'False',
-                           'hi': 'True'} in actual_subtitles_list):
-                        cutoff_met = True
+            cutoff_met = profile_cutoff_met(episode_subtitles.profileId, episode_subtitles.audio_language,
+                                            actual_subtitles_list)
 
             if cutoff_met:
                 missing_subtitles_text = str([])

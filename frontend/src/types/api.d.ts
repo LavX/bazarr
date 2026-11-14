@@ -211,6 +211,9 @@ declare namespace Item {
     AudioLanguageType & {
       season: number;
       episode: number;
+      // True while a duplicate search is requested for this episode and no run
+      // has finished it yet. Absent from an older backend.
+      forced_search_pending?: boolean;
     };
 
   type RefTracks = {
@@ -240,6 +243,12 @@ declare namespace Wanted {
     };
 
   type Movie = Base & MovieIdType & TitleType & AudioLanguageType;
+
+  // The wanted episodes page. `forced_pending` counts episodes with a pending
+  // duplicate search; they are not in `data` unless something is also missing.
+  type EpisodePage = DataWrapperWithTotal<Episode> & {
+    forced_pending?: number;
+  };
 }
 
 declare namespace Blacklist {

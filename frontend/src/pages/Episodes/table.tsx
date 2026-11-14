@@ -9,10 +9,12 @@ import React, {
 import { Badge, Group, Popover, Text, Tooltip } from "@mantine/core";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
+  faBan,
   faBookmark,
   faHistory,
   faLayerGroup,
   faMagnifyingGlass,
+  faRotate,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -21,7 +23,13 @@ import {
   Row,
   Table as TableInstance,
 } from "@tanstack/react-table";
-import { useDownloadEpisodeSubtitles, useEpisodesProvider } from "@/apis/hooks";
+import {
+  useDownloadEpisodeSubtitles,
+  useEmbeddedHiddenTracks,
+  useEpisodeForcedSearch,
+  useEpisodesProvider,
+  useSystemSettings,
+} from "@/apis/hooks";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action, GroupTable } from "@/components";
 import { AudioList } from "@/components/bazarr";
@@ -33,7 +41,11 @@ import PlayOnMenu from "@/components/PlayOnMenu";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
 import { filterSubtitleBy } from "@/utilities";
-import { episodeCode } from "@/utilities/episodes";
+import {
+  canForceDuplicateSearch,
+  episodeCode,
+  wantedLanguagesForAudio,
+} from "@/utilities/episodes";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
@@ -140,11 +152,16 @@ function scoreInfoFromHistory(
 // an episode whose own subtitles had not changed.
 interface EpisodesTableValue {
   disabled?: boolean;
+  // "Treat Embedded Subtitles as Downloaded". The duplicate search is offered
+  // only while it is on.
+  embeddedAsDownloaded: boolean;
   // Every episode's disclosure asks with this same list, so the page makes
   // one request for all of them.
   episodeIds: number[];
   onlyDesired: boolean;
   profileItems: ReturnType<typeof useProfileItemsToLanguages>;
+  // The raw profile: its items carry the audio rules the languages above lack.
+  profile?: Language.Profile;
   historyMap: Map<string, History.Episode>;
   embeddedScoreMap: Map<string, History.Episode>;
   download: (item: Item.Episode, result: SearchResultType) => Promise<void>;
@@ -277,13 +294,52 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
         batchIds={episodeIds}
         disabled={disabled}
       />
+      {/* Shown whatever the setting and the tracks are now, so a flag set
+          earlier never hides. */}
+      {episode.forced_search_pending && (
+        // Focusable so a keyboard or a tap opens the explanation too.
+        <Tooltip
+          multiline
+          w={260}
+          events={{ hover: true, focus: true, touch: true }}
+          label="The next wanted search ignores this episode's embedded subtitles and looks for external ones."
+        >
+          <Badge variant="light" color="yellow" tabIndex={0}>
+            Duplicate search pending
+          </Badge>
+        </Tooltip>
+      )}
     </Group>
   );
 });
 
 const ActionsCell = ({ episode }: { episode: Item.Episode }) => {
-  const { disabled, download } = useEpisodesTable();
+  const { disabled, download, embeddedAsDownloaded, episodeIds, profile } =
+    useEpisodesTable();
   const modals = useModals();
+  const { set: setForcedSearch, clear: clearForcedSearch } =
+    useEpisodeForcedSearch();
+  // The same request the hidden-tracks disclosures make, so it costs nothing
+  // extra.
+  const { data: hiddenTracks } = useEmbeddedHiddenTracks("episode", episodeIds);
+  const pending = episode.forced_search_pending === true;
+  const canForce = canForceDuplicateSearch({
+    embeddedAsDownloaded,
+    // Only the languages the audio rules keep, as the search itself does.
+    wantedLanguages: wantedLanguagesForAudio(
+      profile?.items ?? [],
+      episode.audio_language ?? [],
+    ),
+    subtitles: episode.subtitles ?? [],
+    hiddenLanguages: (hiddenTracks?.get(episode.id) ?? []).map(
+      (track) => track.code2,
+    ),
+  });
+  const forcedSearchParams = {
+    seriesId: episode.sonarrSeriesId,
+    episodeId: episode.sonarrEpisodeId,
+    arrInstanceId: episode.arr_instance_id ?? undefined,
+  };
 
   const episodeAvailableLangs = Array.from(
     new Set(
@@ -343,6 +399,43 @@ const ActionsCell = ({ episode }: { episode: Item.Episode }) => {
         }}
         icon={faHistory}
       ></Action>
+      {pending ? (
+        <Action
+          label="Clear duplicate search"
+          disabled={disabled}
+          isLoading={clearForcedSearch.isPending}
+          className={tableStyles.actionIcon}
+          onClick={() => clearForcedSearch.mutate(forcedSearchParams)}
+          icon={faBan}
+        ></Action>
+      ) : (
+        canForce && (
+          <Action
+            label="Force duplicate search"
+            disabled={disabled}
+            isLoading={setForcedSearch.isPending}
+            className={tableStyles.actionIcon}
+            onClick={() => {
+              modals.openConfirmModal({
+                title: "Search again for this episode?",
+                size: "lg",
+                children: (
+                  <Text size="sm">
+                    The next wanted search, Search All or series Search will
+                    ignore the embedded subtitles on this episode and look for
+                    external ones in your profile languages. A download can
+                    replace an external file of the same language. The embedded
+                    tracks are not changed.
+                  </Text>
+                ),
+                labels: { confirm: "Search again", cancel: "Cancel" },
+                onConfirm: () => setForcedSearch.mutate(forcedSearchParams),
+              });
+            }}
+            icon={faRotate}
+          ></Action>
+        )
+      )}
     </Group>
   );
 };
@@ -500,6 +593,9 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
 
     const { mutateAsync } = useDownloadEpisodeSubtitles();
 
+    const { data: settings } = useSystemSettings();
+    const embeddedAsDownloaded = settings?.general?.use_embedded_subs === true;
+
     const episodeIds = useMemo(
       () => (episodes ?? []).map((episode) => episode.id),
       [episodes],
@@ -553,18 +649,22 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
     const tableValue = useMemo<EpisodesTableValue>(
       () => ({
         disabled,
+        embeddedAsDownloaded,
         episodeIds,
         onlyDesired,
         profileItems,
+        profile,
         historyMap,
         embeddedScoreMap,
         download,
       }),
       [
         disabled,
+        embeddedAsDownloaded,
         episodeIds,
         onlyDesired,
         profileItems,
+        profile,
         historyMap,
         embeddedScoreMap,
         download,

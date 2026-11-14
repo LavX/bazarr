@@ -155,6 +155,36 @@ describe("Wanted Series", () => {
     await screen.findByText(/No missing Series subtitles/i);
   });
 
+  it("keeps Search All off when nothing is missing and nothing is pending", async () => {
+    server.use(
+      http.get("/api/episodes/wanted", () =>
+        HttpResponse.json({ data: [], total: 0, forced_pending: 0 }),
+      ),
+    );
+
+    customRender(<WantedSeriesView />);
+
+    await screen.findByText(/No missing Series subtitles/i);
+    expect(screen.getByRole("button", { name: "Search All" })).toBeDisabled();
+  });
+
+  it("enables Search All for pending duplicate searches without listing them", async () => {
+    server.use(
+      http.get("/api/episodes/wanted", () =>
+        HttpResponse.json({ data: [], total: 0, forced_pending: 2 }),
+      ),
+    );
+
+    customRender(<WantedSeriesView />);
+
+    await screen.findByText(/No missing Series subtitles/i);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Search All" })).toBeEnabled(),
+    );
+    // The list is unchanged and Scan All still has nothing to scan.
+    expect(screen.getByRole("button", { name: "Scan All" })).toBeDisabled();
+  });
+
   it("filters wanted series by any selected Sonarr tag", async () => {
     const user = userEvent.setup();
     server.use(

@@ -400,6 +400,11 @@ class TableEpisodes(Base):
         Index('ix_table_episodes_wanted', 'sonarrEpisodeId',
               sqlite_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'"),
               postgresql_where=text("missing_subtitles IS NOT NULL AND missing_subtitles != '[]'")),
+        # Search runs look up the few episodes with a pending forced search
+        # request; the index holds only those rows.
+        Index('ix_table_episodes_forced_search', 'id',
+              sqlite_where=text('forced_search_requested_at IS NOT NULL'),
+              postgresql_where=text('forced_search_requested_at IS NOT NULL')),
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -412,6 +417,9 @@ class TableEpisodes(Base):
     episode = mapped_column(Integer, nullable=False)
     episode_file_id = mapped_column(Integer, index=True)
     failedAttempts = mapped_column(Text)
+    # When the user asked for a forced duplicate search of this episode; NULL
+    # means no request is pending. Only the search runs clear it.
+    forced_search_requested_at = mapped_column(DateTime)
     ffprobe_cache = mapped_column(LargeBinary)
     file_size = mapped_column(BigInteger)
     format = mapped_column(Text)

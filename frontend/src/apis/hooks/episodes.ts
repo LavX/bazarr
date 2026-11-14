@@ -160,3 +160,43 @@ export function useEpisodesHistory(seriesId?: number) {
     placeholderData: undefined,
   });
 }
+
+type ForcedSearchParam = {
+  seriesId: number;
+  episodeId: number;
+  arrInstanceId?: number;
+};
+
+/**
+ * Set and clear the duplicate-search flag on one episode. Both refresh the
+ * series pages, which read the flag off the episode.
+ */
+export function useEpisodeForcedSearch() {
+  const client = useQueryClient();
+
+  const refresh = () => {
+    void client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+    void client.invalidateQueries({ queryKey: [QueryKeys.Episodes] });
+  };
+
+  const set = useMutation({
+    mutationKey: [QueryKeys.Series, QueryKeys.Episodes, "forced-search", "set"],
+    mutationFn: ({ seriesId, episodeId, arrInstanceId }: ForcedSearchParam) =>
+      api.episodes.setForcedSearch(seriesId, episodeId, arrInstanceId),
+    onSettled: refresh,
+  });
+
+  const clear = useMutation({
+    mutationKey: [
+      QueryKeys.Series,
+      QueryKeys.Episodes,
+      "forced-search",
+      "clear",
+    ],
+    mutationFn: ({ seriesId, episodeId, arrInstanceId }: ForcedSearchParam) =>
+      api.episodes.clearForcedSearch(seriesId, episodeId, arrInstanceId),
+    onSettled: refresh,
+  });
+
+  return { set, clear };
+}
