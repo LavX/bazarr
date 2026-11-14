@@ -1,7 +1,7 @@
 """The Plugin Hub state as one versioned document row.
 
 Revision ID: b6d9f3a1c872
-Revises: f3b8d2a6c417
+Revises: a5e2c8d19f73
 """
 import json
 import logging
@@ -12,7 +12,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "b6d9f3a1c872"
-down_revision = "f3b8d2a6c417"
+down_revision = "a5e2c8d19f73"
 branch_labels = None
 depends_on = None
 

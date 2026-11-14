@@ -17,7 +17,7 @@ hub_store = engines.hub_store
 
 VERSIONS = Path(__file__).parents[2] / "migrations" / "versions"
 REVISION = "b6d9f3a1c872"
-PREVIOUS = "f3b8d2a6c417"
+PREVIOUS = "a5e2c8d19f73"
 UNUSED = ("provider_hub_catalog_sources", "provider_hub_catalog_entries", "provider_hub_installations",
           "provider_hub_config", "provider_hub_secrets", "provider_hub_jobs", "provider_hub_install_events")
 
