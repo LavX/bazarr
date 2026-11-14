@@ -348,6 +348,7 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
     mine = os.getpid()
     my_start = started_at(str(mine))
     uid = os.getuid() if hasattr(os, "getuid") else None
+
     def gone(name: str, error: OSError) -> bool:
         """Whether the process is confirmed to have exited, given the error that its look ended with."""
         if isinstance(error, (ProcessLookupError, FileNotFoundError)):
@@ -381,20 +382,25 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
     for name in entries:
         if int(name) == mine:
             continue
-        owned = False
+        owned: bool | None = None  # None: unknown, which is treated as possibly ours
         try:
-            owned = uid is not None and os.stat(os.path.join(proc, name)).st_uid == uid
+            try:
+                if uid is not None:
+                    owned = os.stat(os.path.join(proc, name)).st_uid == uid
+            except OSError:
+                pass  # ownership stays unknown; the look below decides whether it matters
             if inspect(name):
                 return True
         except OSError as error:
             if gone(name, error):
                 continue  # the process ended while it was being looked at
-            # Whatever the error, it may be something a worker started. Only our
-            # own processes that began after this one can be (a worker runs as
-            # this user and its children start later; the desktop session, the
-            # agents and the like that were already running cannot be).
+            # Whatever the error, it may be something a worker started. Only a
+            # process that is not confirmed foreign and not confirmed older than
+            # this one can be (a worker runs as this user and its children start
+            # later; the desktop session, the agents and the like that were
+            # already running cannot be). Unknown counts as possibly ours and newer.
             began = started_at(name)
-            if owned and (began is None or my_start is None or began >= my_start):
+            if owned is not False and (began is None or my_start is None or began >= my_start):
                 unreadable.append(name)
     for _ in range(_UNREADABLE_RETRIES):
         if not unreadable:

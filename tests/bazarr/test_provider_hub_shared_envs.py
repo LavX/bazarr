@@ -1596,6 +1596,72 @@ def test_a_failed_state_read_keeps_the_process_in_use(tmp_path, monkeypatch):
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
 
+def _failing_entry_stat(monkeypatch, entry, error=None, uid=None):
+    """os.stat of the fake process entry raises ``error``, or reports another owner ``uid``."""
+    real_stat = venvmod.os.stat
+
+    def stat(path, *args, **kwargs):
+        if str(path) == str(entry):
+            if error is not None:
+                raise error
+            return SimpleNamespace(st_uid=uid)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "stat", stat)
+
+
+def test_a_failed_ownership_lookup_on_a_live_unreadable_process_keeps_it_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, error=OSError(5, "Input/output error"))
+    _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_failed_ownership_lookup_on_a_process_that_reads_clean_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, error=OSError(5, "Input/output error"))
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def test_a_first_entry_permission_error_is_retried_and_still_blocks_if_unreadable(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, error=PermissionError(13, "Permission denied"))
+    _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_first_entry_permission_error_on_a_process_that_then_reads_clean_is_dropped(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, error=PermissionError(13, "Permission denied"))
+    reads = _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")])
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert reads["count"] == 2
+
+
+def test_an_unreadable_process_confirmed_to_belong_to_someone_else_is_not_counted(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_entry_stat(monkeypatch, entry, uid=os.getuid() + 1)
+    _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def test_an_unreadable_start_time_counts_the_process_as_possibly_newer(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    mine = proc / str(os.getpid())
+    mine.mkdir()
+    (mine / "stat").write_text(f"{os.getpid()} (pytest) S " + "0 " * 18 + "100 0\n")
+    (entry / "stat").unlink()
+    (entry / "stat").mkdir()  # reading it fails
+    _failing_exe(monkeypatch, entry, [PermissionError(13, "Permission denied")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
 def test_a_process_that_stays_unreadable_still_blocks_cleanup(tmp_path, monkeypatch):
     proc, entry = _fake_proc(tmp_path)
     seen = _unreadable_reads(monkeypatch, entry, failures=10**6)
