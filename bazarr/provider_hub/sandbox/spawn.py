@@ -198,6 +198,11 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
         notes.append("Connections to pathname UNIX sockets (a Docker socket, for example) are not restricted.")
     if probe.abi < 6:
         notes.append("A worker can signal processes outside its sandbox, its launcher included.")
+    notes.append(
+        "A worker cannot use /dev/shm, so multiprocessing's shared memory (process pools, "
+        "cross-process locks and queues, SharedMemory) is unavailable to it: creating one fails "
+        "with an error. Hosts where the sandbox is not enforced are unaffected."
+    )
     notes.append("A listening TCP socket that was never bound gets a port without a bind check.")
     notes.append("UDP and DNS are not restricted.")
     notes.append("The number of processes is not limited.")

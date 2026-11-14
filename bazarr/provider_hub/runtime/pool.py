@@ -154,11 +154,12 @@ same offset and device as for an untouched one, and the object's size is unreach
 without privileges (``map_files``). The rule that can be checked is the strict one; a
 plugin that uses ``mmap.mmap(-1, n)`` is stopped for it and should use a private
 mapping (``flags=mmap.MAP_PRIVATE``) or a memfd it keeps open (measured by blocks).
-Python's multiprocessing Lock, Queue, ProcessPoolExecutor and sharedctypes arrays use
-``/dev/shm`` objects and are fine: the sandbox policy grants a worker ``/dev/shm`` (create,
-read, write and remove files, no execute), which is why the guard above exists. Every worker
-of the host shares that directory, so one can read and change another's shared memory;
-the sandbox does not separate them.
+Python's multiprocessing Lock, Queue, ProcessPoolExecutor and sharedctypes arrays and
+``multiprocessing.shared_memory`` use ``/dev/shm`` objects. Where the sandbox is enforced they are
+unavailable: the policy grants a worker no access to ``/dev/shm`` (it is one directory for the whole
+host, so a grant would let every worker read and change every other worker's shared memory), and
+creating one fails with an ``OSError``. Where nothing is enforced (declared mode, or a host without
+the sandbox) they work, and this accounting and the guard above are what bound them.
 
 Folder budgets count what is on disk under the folder, plus files the worker tree
 unlinked but still holds open (found through its descriptors, charged by blocks).

@@ -4215,94 +4215,60 @@ def test_a_sigterm_ignoring_worker_is_still_killed_when_waitid_fails(monkeypatch
             pass
 
 
-# ------------------------------------------------ /dev/shm: multiprocessing works under enforcement
+# ------------------------------------------------ /dev/shm is not granted under enforcement
 
 
 @linux_only
-def test_the_policy_grants_dev_shm_to_the_worker_and_the_launch_spec_carries_it(tmp_path):
-    if not os.path.isdir("/dev/shm"):
-        pytest.skip("this host has no /dev/shm")
+def test_the_policy_grants_no_dev_shm_and_the_launch_spec_names_none(tmp_path):
     spec = make_spec(tmp_path, "pass")
-    assert spec.policy.shared_memory == ("/dev/shm",)
+    assert not hasattr(spec.policy, "shared_memory")
+    for group in (spec.policy.read_only, spec.policy.read_write, spec.policy.devices, spec.policy.resolve_unix):
+        assert not [path for path in group if path == "/dev/shm" or path.startswith("/dev/shm/")]
     payload = json.loads(spec.to_launch_json(enforce=True, min_abi=1))
-    assert [grant[0] if isinstance(grant, list) else grant for grant in payload["shared_memory"]] == ["/dev/shm"]
-    assert "/dev/shm" not in spec.policy.read_write, "it is a shared-memory grant, not a data folder"
+    assert "shared_memory" not in payload
+    assert not [grant for key in ("read_only", "read_write", "devices", "resolve_unix") for grant in payload[key]
+                if "/dev/shm" in (grant[0] if isinstance(grant, list) else grant)]
 
 
 @linux_only
-def test_an_enforced_worker_can_use_multiprocessing_primitives(tmp_path, live):
+def test_an_enforced_worker_can_neither_create_read_nor_write_in_dev_shm_and_a_lock_fails_cleanly(tmp_path, live):
     if not os.path.isdir("/dev/shm") or not os.access("/dev/shm", os.W_OK):
         pytest.skip("this host has no writable /dev/shm")
-    need_abi(live, 3)  # ftruncate on a shared-memory object needs the truncate right
+    # A file the host leaves there: the worker must not read it, write it, list the directory or remove it.
+    planted = Path("/dev/shm/bazarr-planted-%d" % os.getpid())
+    planted.write_text("host data")
     script = """
-        import multiprocessing
-        import multiprocessing.shared_memory as shared
+        import errno, multiprocessing, os
 
-        lock = multiprocessing.Lock()
-        lock.acquire()
-        lock.release()
-        queue = multiprocessing.Queue()
-        queue.put(7)
-        assert queue.get(timeout=5) == 7
-        segment = shared.SharedMemory(create=True, size=4096)
-        segment.buf[0] = 9
-        assert segment.buf[0] == 9
-        segment.close()
-        segment.unlink()
-        print("ok")
-    """
-    result = run(make_spec(tmp_path, script), live)
-    assert result[0] == 0 and result[1].strip().endswith("ok"), result
-    # The grant is for shared memory only: no other file under /dev is writable...
-    script = """
-        import os
-        try:
-            os.open('/dev/bazarr-should-not-exist', os.O_CREAT | os.O_WRONLY)
-        except OSError as error:
-            print('denied', error.errno)
-    """
-    result = run(make_spec(tmp_path, script), live)
-    assert result[1].startswith("denied"), result
-
-
-@linux_only
-def test_the_dev_shm_grant_allows_no_directories_links_or_execution(tmp_path, live):
-    if not os.path.isdir("/dev/shm") or not os.access("/dev/shm", os.W_OK):
-        pytest.skip("this host has no writable /dev/shm")
-    need_abi(live, 3)
-    # Under enforcement a worker may create and remove plain files there, and nothing else: no directory,
-    # no symlink, and a file it wrote cannot be executed. Each is attempted and must be refused with
-    # EACCES (the kernel's Landlock answer), which an unsandboxed process would not give.
-    script = """
-        import errno, os, stat, subprocess, sys
-        tag = "/dev/shm/bazarr-grant-%d" % os.getpid()
+        planted = %r
         out = []
-        try:
-            fd = os.open(tag + "-file", os.O_CREAT | os.O_WRONLY, 0o700)
-            os.write(fd, b"#!/bin/sh\\necho ran\\n")
-            os.close(fd)
-            out.append("file-ok")
-        except OSError as error:
-            out.append("file-%s" % errno.errorcode.get(error.errno))
-        for label, call in (
-            ("mkdir", lambda: os.mkdir(tag + "-dir")),
-            ("symlink", lambda: os.symlink("/etc/passwd", tag + "-link")),
-            ("exec", lambda: subprocess.run([tag + "-file"], check=True, capture_output=True)),
-        ):
+
+        def attempt(label, call):
             try:
                 call()
                 out.append(label + "-allowed")
-            except PermissionError:
-                out.append(label + "-denied")
             except OSError as error:
-                out.append("%s-%s" % (label, errno.errorcode.get(error.errno)))
+                out.append("%%s-%%s" %% (label, errno.errorcode.get(error.errno, error.errno)))
+
+        attempt("create", lambda: os.close(os.open("/dev/shm/bazarr-new-%%d" %% os.getpid(), os.O_CREAT | os.O_WRONLY)))
+        attempt("read", lambda: os.close(os.open(planted, os.O_RDONLY)))
+        attempt("write", lambda: os.close(os.open(planted, os.O_WRONLY)))
+        attempt("list", lambda: os.listdir("/dev/shm"))
+        attempt("remove", lambda: os.unlink(planted))
+        attempt("mkdir", lambda: os.mkdir("/dev/shm/bazarr-dir-%%d" %% os.getpid()))
+        # A cross-process lock needs a semaphore in /dev/shm: it must fail with an OSError, not hang.
         try:
-            os.unlink(tag + "-file")
-            out.append("unlink-ok")
-        except OSError:
-            out.append("unlink-failed")
+            multiprocessing.Lock()
+            out.append("lock-created")
+        except OSError as error:
+            out.append("lock-OSError-%%s" %% errno.errorcode.get(error.errno, error.errno))
         print(" ".join(out))
-    """
-    result = run(make_spec(tmp_path, script), live)
-    assert result[0] == 0, result
-    assert result[1].split() == ["file-ok", "mkdir-denied", "symlink-denied", "exec-denied", "unlink-ok"], result
+    """ % str(planted)
+    try:
+        result = run(make_spec(tmp_path, script), live, timeout=30)
+        assert result[0] == 0, result
+        assert result[1].split() == ["create-EACCES", "read-EACCES", "write-EACCES", "list-EACCES",
+                                     "remove-EACCES", "mkdir-EACCES", "lock-OSError-EACCES"], result
+        assert planted.read_text() == "host data", "the worker changed a file in /dev/shm"
+    finally:
+        planted.unlink(missing_ok=True)

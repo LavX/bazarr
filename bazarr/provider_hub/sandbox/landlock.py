@@ -109,9 +109,6 @@ RIGHTS_READ_WRITE = (
     | FS_IOCTL_DEV
 )
 RIGHTS_DEVICE = FS_READ_FILE | FS_WRITE_FILE | FS_IOCTL_DEV
-# What POSIX shared memory needs in /dev/shm (sem_open, shm_open, ftruncate, unlink): create, read,
-# write, truncate and remove regular files. No execute, no links, no directories, no device nodes.
-RIGHTS_SHARED_MEMORY = FS_READ_FILE | FS_READ_DIR | FS_WRITE_FILE | FS_REMOVE_FILE | FS_MAKE_REG | FS_TRUNCATE
 RIGHTS_RESOLVE_UNIX = FS_RESOLVE_UNIX
 
 PR_SET_PDEATHSIG = 1
@@ -398,7 +395,6 @@ def apply_ruleset(
     read_write: Iterable[Grant] = (),
     devices: Iterable[Grant] = (),
     resolve_unix: Iterable[Grant] = (),
-    shared_memory: Iterable[Grant] = (),
     connect_ports: Iterable[int] | None = None,
     abi_cap: int | None = None,
     min_abi: int = 1,
@@ -407,8 +403,8 @@ def apply_ruleset(
 
     Call this from a single-threaded process right before ``execve``.
     ``read_write`` paths must exist (``LandlockError`` otherwise: a worker must
-    not start with fewer rules than asked); missing ``read_only``, ``devices``,
-    ``shared_memory`` and ``resolve_unix`` paths are skipped and reported.
+    not start with fewer rules than asked); missing ``read_only``, ``devices``
+    and ``resolve_unix`` paths are skipped and reported.
 
     ``connect_ports`` of ``None`` leaves TCP unrestricted. An iterable, even an
     empty one, makes TCP connect and bind default-deny at ABI 4 and above, with
@@ -446,11 +442,6 @@ def apply_ruleset(
         )
         skipped.extend(
             _split_grant(g)[0] for g in devices if not _add_path_rule(ruleset_fd, g, RIGHTS_DEVICE, handled_fs)
-        )
-        skipped.extend(
-            _split_grant(g)[0]
-            for g in shared_memory
-            if not _add_path_rule(ruleset_fd, g, RIGHTS_SHARED_MEMORY, handled_fs)
         )
         if handled_fs & FS_RESOLVE_UNIX:
             skipped.extend(
