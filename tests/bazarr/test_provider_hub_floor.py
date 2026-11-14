@@ -551,6 +551,37 @@ def test_a_bundle_at_another_commit_still_uses_the_network(snapshot, hub, monkey
     assert calls and LATER_COMMIT in calls[0]
 
 
+@pytest.mark.parametrize("damage", ["missing", "directory", "oversized"])
+def test_a_floor_file_that_cannot_be_read_falls_back_to_the_network(snapshot, hub, monkeypatch, damage):
+    """floor.json lists the file but it cannot be served: that is not an
+    integrity failure, so the reader answers None and the fetch goes on."""
+    from provider_hub import floor as floor_module
+    from provider_hub.floor import bundle_file, load_floor
+    load_floor()  # cache the snapshot so the size limit below only applies to the bundle file
+    _unlock(snapshot)
+    target = snapshot / "providers/examplehub/provider.py"
+    target.unlink()
+    if damage == "directory":
+        target.mkdir()
+    elif damage == "oversized":
+        target.write_bytes(b"x" * 1024)
+        monkeypatch.setattr(floor_module, "MAX_FILE_BYTES", 16)
+    manifest = _validated()
+
+    assert bundle_file(manifest, "provider.py") is None
+
+    class Response:
+        content = PROVIDER_FILE
+
+        def raise_for_status(self):
+            pass
+
+    calls = []
+    monkeypatch.setattr(hub.requests, "get", lambda url, **k: calls.append(url) or Response())
+    assert hub._fetch_github_bundle_file(manifest, "provider.py") == PROVIDER_FILE
+    assert calls
+
+
 def test_a_foreign_repository_never_reads_the_floor(snapshot, hub, monkeypatch):
     from provider_hub.floor import bundle_file
     assert bundle_file(_validated(repo="someone/else"), "provider.py") is None

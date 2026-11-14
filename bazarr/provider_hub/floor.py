@@ -293,9 +293,10 @@ def bundle_file(manifest: Any, relative_path: str) -> bytes | None:
     does not hold this manifest's file (another repository, another commit, a
     file it never carried, or no usable snapshot).
 
-    A file the snapshot does hold but whose bytes no longer match floor.json
-    raises FloorIntegrityError, which fails the install like any other
-    mismatching bundle file. The caller still checks the result against the
+    A file the snapshot lists but cannot serve (missing, unreadable, too large
+    or not a regular file) is logged and answered with None too. A file whose
+    bytes no longer match floor.json raises FloorIntegrityError, which fails the
+    install like any other mismatching bundle file. The caller still checks the result against the
     manifest's own pins."""
     if getattr(manifest, "source_repo", None) != OFFICIAL_CATALOG_REPO:
         return None
@@ -305,4 +306,10 @@ def bundle_file(manifest: Any, relative_path: str) -> bytes | None:
     path = "/".join(part for part in (manifest.source_path, relative_path) if part)
     if path in (CATALOG_FILE, META_FILE) or path not in floor.files:
         return None
-    return floor.read(path)
+    try:
+        return floor.read(path)
+    except FloorIntegrityError:
+        raise
+    except FloorError as error:
+        logger.warning("The bundled provider catalog does not serve %s: %s", path, error)
+        return None
