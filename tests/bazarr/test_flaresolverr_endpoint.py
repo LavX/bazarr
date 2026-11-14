@@ -18,7 +18,7 @@ FIELD = "flaresolverr_url"
 def _clean_environment(monkeypatch):
     monkeypatch.delenv(endpoints.FLARESOLVERR_ENV, raising=False)
     monkeypatch.setattr(endpoints, "_sibling_cache", {"checked_at": None, "url": None})
-    monkeypatch.setattr(endpoints, "_refresh_started_at", None)
+    monkeypatch.setattr(endpoints, "_probe_flight", None)
     yield
     _join_background_threads()
 
@@ -123,6 +123,38 @@ class TestFill:
         configs = _overlay(monkeypatch, [_installation("alpha", properties, trusted=True)],
                            {"alpha": {"apikey": "k"}}, _settings())
         assert configs["alpha"] == {"apikey": "k"}
+
+    def test_an_eligible_empty_field_is_set_to_an_empty_string_when_no_address_exists(self, monkeypatch):
+        properties = {FIELD: {"type": "string"}}
+        configs = _overlay(monkeypatch, [_installation("alpha", properties, trusted=True)], {}, _settings(""))
+        assert configs["alpha"] == {FIELD: ""}
+
+    def test_clearing_the_address_reaches_a_pool_that_still_holds_the_old_one(self, monkeypatch):
+        """A pool merges a partial config over what it has, so an absent key keeps the old address."""
+        from subliminal_patch.core import SZProviderPool
+        from subliminal_patch.extensions import provider_registry
+
+        class Provider:
+            def __init__(self, **config):
+                self.config = config
+
+            def initialize(self):
+                pass
+
+            def terminate(self):
+                pass
+
+        monkeypatch.setitem(provider_registry.providers, "alpha", Provider)
+        properties = {FIELD: {"type": "string"}}
+        installations = [_installation("alpha", properties, trusted=True)]
+        pool = SZProviderPool(providers=["alpha"], provider_configs=_overlay(
+            monkeypatch, installations, {}, _settings(GLOBAL_URL)))
+        assert pool.provider_configs["alpha"][FIELD] == GLOBAL_URL
+
+        pool.provider_configs.update(_overlay(monkeypatch, installations, {}, _settings("")))
+
+        assert pool.provider_configs["alpha"][FIELD] == ""
+        assert pool["alpha"].config[FIELD] == ""
 
     def test_a_blocked_provider_is_skipped(self, monkeypatch):
         configs = _overlay(monkeypatch, [_installation("alpha", trusted=True)],
@@ -430,6 +462,87 @@ class TestNeverBlocksTheCaller:
             assert time.monotonic() - started < 2.0
         finally:
             release.set()
+
+    def test_a_pending_startup_probe_and_an_explicit_detect_share_one_probe(self, monkeypatch):
+        """The startup probe is slow and negative; Detect must not race it with a second probe."""
+        import threading
+        import time
+
+        release = threading.Event()
+        calls = []
+
+        def probe(url):
+            calls.append(url)
+            if len(calls) == 1:
+                release.wait(10)
+                return False
+            return True
+
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr", probe)
+        endpoints.start_flaresolverr_hint_probe()
+        for _ in range(100):
+            if calls:
+                break
+            time.sleep(0.02)
+        result = {}
+        detect = threading.Thread(
+            target=lambda: result.update(found=endpoints.detect_flaresolverr_sibling(refresh=True)))
+        detect.start()
+        time.sleep(0.2)
+        release.set()
+        detect.join(5)
+        _join_background_threads()
+
+        assert len(calls) == 1
+        assert result["found"] is None
+        assert endpoints._sibling_cache["url"] is None
+        assert endpoints._probe_flight is None
+
+    def test_a_detect_that_starts_the_probe_lets_the_background_refresh_join_it(self, monkeypatch):
+        import threading
+        import time
+
+        release, calls = self._gated_probe(monkeypatch)
+        result = {}
+        detect = threading.Thread(
+            target=lambda: result.update(found=endpoints.detect_flaresolverr_sibling(refresh=True)))
+        detect.start()
+        for _ in range(100):
+            if calls:
+                break
+            time.sleep(0.02)
+        try:
+            assert endpoints.schedule_sibling_refresh() is None
+        finally:
+            release.set()
+            detect.join(5)
+        assert result["found"] == endpoints.FLARESOLVERR_SIBLING_URL
+        assert len(calls) == 1
+
+    def test_detect_reports_against_the_address_in_use_after_the_probe_ends(self, monkeypatch):
+        """A setting saved while Detect waits must decide whether the hint is still worth showing."""
+        import threading
+        import time
+
+        release, calls = self._gated_probe(monkeypatch)
+        settings = _settings("")
+        result = {}
+        detect = threading.Thread(
+            target=lambda: result.update(status=endpoints.flaresolverr_status(settings, refresh=True)))
+        detect.start()
+        for _ in range(100):
+            if calls:
+                break
+            time.sleep(0.02)
+        settings["endpoints"][endpoints.FLARESOLVERR_SETTING_KEY] = endpoints.FLARESOLVERR_SIBLING_URL
+        release.set()
+        detect.join(5)
+
+        status = result["status"]
+        assert status["url"] == endpoints.FLARESOLVERR_SIBLING_URL
+        assert status["source"] == "setting"
+        assert status["detected"] is None
+        assert status["sibling_found"] is True
 
     def test_the_api_read_never_probes_in_the_request(self, monkeypatch):
         """GET answers from the cache; only POST asks for a probe, and neither writes the setting."""

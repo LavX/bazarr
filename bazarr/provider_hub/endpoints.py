@@ -40,7 +40,10 @@ SIBLING_CACHE_SECONDS = 300.0
 
 _sibling_lock = threading.Lock()
 _sibling_cache: dict = {"checked_at": None, "url": None}
-_refresh_started_at: float | None = None
+# The one probe that may be running, whoever asked for it. The background
+# refresh and an explicit Detect share it, so two probes never run at once and
+# a late negative can never overwrite a newer answer.
+_probe_flight: dict | None = None
 
 
 def normalize_endpoint_url(value) -> str:
@@ -106,7 +109,9 @@ def fill_flaresolverr_url(config: dict, properties: dict, installation, settings
 
     Runs after the stored config, the schema defaults and the plugin's own
     settings section are merged, so a value the user set for the provider is
-    never replaced. A plugin whose schema has no such field is left as it is.
+    never replaced. With no address to give, the field is set to an empty
+    string so that a pool holding an older address drops it. A plugin whose
+    schema has no such field is left as it is.
     """
     if FLARESOLVERR_PROVIDER_FIELD not in properties:
         return
@@ -114,9 +119,11 @@ def fill_flaresolverr_url(config: dict, properties: dict, installation, settings
         return
     if not may_receive_flaresolverr(installation):
         return
-    url = resolve_flaresolverr_url(settings)
-    if url:
-        config[FLARESOLVERR_PROVIDER_FIELD] = url
+    # Assigned even when there is no address. A persistent pool merges the new
+    # config over the one it holds, so a key that is simply absent would keep
+    # the address filled in before the setting was cleared. An explicit empty
+    # string is what replaces it.
+    config[FLARESOLVERR_PROVIDER_FIELD] = resolve_flaresolverr_url(settings)
 
 
 def _probe_flaresolverr(url: str) -> bool:
@@ -167,47 +174,63 @@ def _record_sibling(found: bool) -> str | None:
     return url
 
 
+def _join_or_start_probe() -> tuple[threading.Event, threading.Thread | None]:
+    """The event of the probe in flight, starting one when none is.
+
+    The second item is the thread that was started, or ``None`` when an
+    existing probe was joined. The probe thread is bounded by the probe
+    deadline, so a flight never outlives it by much and cannot block the next
+    one for good.
+    """
+    global _probe_flight
+    with _sibling_lock:
+        flight = _probe_flight
+        if flight is not None:
+            return flight["done"], None
+        done = threading.Event()
+        _probe_flight = {"done": done}
+
+    def run():
+        global _probe_flight
+        try:
+            _record_sibling(_probe_bounded(FLARESOLVERR_SIBLING_URL))
+        except Exception:
+            logger.debug("FlareSolverr sibling probe failed", exc_info=True)
+        finally:
+            with _sibling_lock:
+                _probe_flight = None
+            done.set()
+
+    thread = threading.Thread(target=run, name="flaresolverr-hint", daemon=True)
+    thread.start()
+    return done, thread
+
+
 def detect_flaresolverr_sibling(refresh: bool = False) -> str | None:
     """Look for the sibling now, within the probe deadline, and cache the answer.
 
     Meant for an explicit Detect press and for the background refresh. A page
     load must use :func:`sibling_hint` instead, which never waits on a probe.
-    This only reports: it never writes the setting.
+    A probe already in flight is joined rather than raced. This only reports:
+    it never writes the setting.
     """
     with _sibling_lock:
         checked_at = _sibling_cache["checked_at"]
         if not refresh and checked_at is not None and time.monotonic() - checked_at < SIBLING_CACHE_SECONDS:
             return _sibling_cache["url"]
-    return _record_sibling(_probe_bounded(FLARESOLVERR_SIBLING_URL))
+    done, _thread = _join_or_start_probe()
+    done.wait(SIBLING_PROBE_DEADLINE_SECONDS + 5.0)
+    with _sibling_lock:
+        return _sibling_cache["url"]
 
 
 def schedule_sibling_refresh() -> threading.Thread | None:
-    """Refresh the cached answer in the background, one refresh at a time.
+    """Refresh the cached answer in the background, one probe at a time.
 
-    Returns the thread that was started, or ``None`` when a refresh is already
-    running. A refresh that outlives its deadline plus a margin no longer blocks
-    the next one.
+    Returns the thread that was started, or ``None`` when a probe is already
+    running.
     """
-    global _refresh_started_at
-    with _sibling_lock:
-        started = _refresh_started_at
-        if started is not None and time.monotonic() - started < SIBLING_PROBE_DEADLINE_SECONDS + 5.0:
-            return None
-        _refresh_started_at = time.monotonic()
-
-    def run():
-        global _refresh_started_at
-        try:
-            detect_flaresolverr_sibling(refresh=True)
-        except Exception:
-            logger.debug("FlareSolverr sibling probe failed", exc_info=True)
-        finally:
-            with _sibling_lock:
-                _refresh_started_at = None
-
-    thread = threading.Thread(target=run, name="flaresolverr-hint", daemon=True)
-    thread.start()
-    return thread
+    return _join_or_start_probe()[1]
 
 
 def sibling_hint() -> tuple[str | None, bool]:
@@ -237,11 +260,13 @@ def flaresolverr_status(settings=None, refresh: bool = False) -> dict:
     Without ``refresh`` this answers from the cache and never waits on the
     network. With ``refresh`` (an explicit Detect) it probes within the deadline.
     """
-    url, source = flaresolverr_url_source(settings)
     if refresh:
         detected, detecting = detect_flaresolverr_sibling(refresh=True), False
     else:
         detected, detecting = sibling_hint()
+    # Read after the probe: a Detect can wait seconds, and the setting may have
+    # been saved meanwhile. The hint is compared with what is in use now.
+    url, source = flaresolverr_url_source(settings)
     return {
         "url": url,
         "source": source,
