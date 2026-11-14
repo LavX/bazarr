@@ -1756,7 +1756,7 @@ def test_an_unreadable_process_of_someone_elses_session_is_not_a_candidate(tmp_p
     ready = tmp_path / "ready"
     # Started through a shell that exits at once, so nothing of ours is its parent.
     subprocess.run(
-        ["sh", "-c", f'{sys.executable} -c "$0" "$1" >/dev/null 2>&1 &', _NON_DUMPABLE, str(ready)], check=True
+        ["sh", "-c", '"$0" -c "$1" "$2" >/dev/null 2>&1 &', sys.executable, _NON_DUMPABLE, str(ready)], check=True
     )
     stray = _wait_for_pid(ready)
     try:
