@@ -871,14 +871,43 @@ class _WrappedConnection(_Wrapped):
 def breakable(hub_store, hub_engine, monkeypatch):
     """The engine's driver connections, each of which can be made to fail when closed."""
     armed = {}
-    pool = hub_engine.pool
-    creator = pool._creator
+    if hub_engine.dialect.name == "postgresql":
+        import psycopg2.extensions as extensions
 
-    def wrapped(*args, **kwargs):
-        return _WrappedConnection(creator(*args, **kwargs), armed)
+        class Cursor(extensions.cursor):
+            def execute(self, *args, **kwargs):
+                try:
+                    return super().execute(*args, **kwargs)
+                except Exception:
+                    self._statement_failed = True
+                    raise
 
-    monkeypatch.setattr(pool, "_creator", wrapped)
-    hub_engine.dispose()  # connections made from now on are the wrapped ones
+            def close(self):
+                if armed.get("cursor") and getattr(self, "_statement_failed", False):
+                    raise RuntimeError(f"cursor close failed, row preview: {SECRET}")
+                super().close()
+
+        class Connection(extensions.connection):
+            def close(self):
+                if armed.get("connection"):
+                    raise RuntimeError(f"connection close failed, row preview: {SECRET}")
+                super().close()
+
+        connect = hub_engine.dialect.connect
+
+        def connect_with_failing_closes(*args, **kwargs):
+            kwargs.update(connection_factory=Connection, cursor_factory=Cursor)
+            return connect(*args, **kwargs)
+
+        monkeypatch.setattr(hub_engine.dialect, "connect", connect_with_failing_closes)
+    else:
+        creator = hub_engine.pool._creator
+
+        def wrapped(*args, **kwargs):
+            return _WrappedConnection(creator(*args, **kwargs), armed)
+
+        monkeypatch.setattr(hub_engine.pool, "_creator", wrapped)
+    hub_engine.dispose()  # connections made from now on are the failing ones
     return armed
 
 
