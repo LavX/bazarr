@@ -142,6 +142,18 @@ for _k, _v in _SYS_BEFORE.items():
     sys.modules[_k] = _v
 
 
+@pytest.fixture(autouse=True)
+def _plugin_state_in_a_file(tmp_path, monkeypatch):
+    """Keep the Plugin Hub state off the database in this file.
+
+    The cleanup above removes the modules the import of the editor pulled in,
+    which leaves SQLAlchemy half re-imported for anything that touches it
+    afterwards. Importing app.config reads the plugin state at import, so the
+    tests that load it point that state at a file, as the other Hub tests do.
+    """
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
