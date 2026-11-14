@@ -3,6 +3,46 @@ import threading
 import time
 
 
+# Seconds to wait before each reconnect attempt. The last value repeats, so an
+# arr that stays down is retried every 30s without hammering it, while one that
+# comes back is picked up within seconds.
+RECONNECT_INTERVALS = (5, 10, 15, 30)
+
+
+def _make_reconnection_handler(intervals=RECONNECT_INTERVALS):
+    from signalrcore.transport.reconnection import ReconnectionHandler
+
+    class BackoffReconnectionHandler(ReconnectionHandler):
+        """Bounded backoff that never gives up.
+
+        ``sleep_time`` is the ceiling. The reconnect loops use it as the longest
+        a new socket may take to finish its handshake before it is abandoned.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.intervals = tuple(intervals)
+            self.sleep_time = self.intervals[-1]
+
+        def next(self):
+            self.reconnecting = True
+            index = min(self.attempt_number, len(self.intervals) - 1)
+            self.attempt_number += 1
+            return self.intervals[index]
+
+        def reset(self):
+            # signalrcore calls this after every successful send, including
+            # the outgoing SignalR handshake. A server that accepts the socket
+            # and closes it before answering would then restart the backoff at
+            # 5s forever. Use reset_backoff() once a handshake really lands.
+            pass
+
+        def reset_backoff(self):
+            super().reset()
+
+    return BackoffReconnectionHandler()
+
+
 def _bazarr_retry_wakeup(self):
     return self.__dict__.setdefault("_bazarr_retry_wakeup", threading.Event())
 
@@ -24,6 +64,12 @@ def _wait_for_handshake(self, wakeup, timeout=None):
         if wakeup.wait(wait_time):
             return False
     return False
+
+
+def _reset_backoff(transport):
+    handler = getattr(transport, "reconnection_handler", None)
+    if handler is not None:
+        getattr(handler, "reset_backoff", handler.reset)()
 
 
 def _abandon_client(client):
@@ -76,7 +122,7 @@ def patch_signalrcore_reconnect():
                         if _wait_for_handshake(
                                 self, wakeup,
                                 timeout=getattr(self.reconnection_handler, "sleep_time", None)):
-                            self.reconnection_handler.reset()
+                            _reset_backoff(self)
                         else:
                             _abandon_client(self._client)
                             self.deferred_reconnect(self.reconnection_handler.next())
@@ -112,7 +158,7 @@ def patch_signalrcore_reconnect():
                 if _wait_for_handshake(
                         self, wakeup,
                         timeout=getattr(self.reconnection_handler, "sleep_time", None)):
-                    self.reconnection_handler.reset()
+                    _reset_backoff(self)
                     return
                 _abandon_client(self._client)
                 sleep_time = self.reconnection_handler.next()
@@ -151,6 +197,9 @@ def patch_signalrcore_stop():
 
             old_state = self.state
             self.state = new_state
+            if new_state == TransportState.connected:
+                # Only a received handshake response gets here.
+                _reset_backoff(self)
 
             self.logger.debug(
                 "Transport state changed: %s -> %s", old_state.name, new_state.name)
@@ -176,7 +225,7 @@ def build_signalr_connection(url, headers):
     from signalrcore.hub_connection_builder import HubConnectionBuilder
     from signalrcore.protocol.json_hub_protocol import JsonHubProtocol
 
-    return HubConnectionBuilder() \
+    builder = HubConnectionBuilder() \
         .with_url(url,
                   options={
                       "verify_ssl": False,
@@ -186,6 +235,9 @@ def build_signalr_connection(url, headers):
         .with_automatic_reconnect({
             "type": "raw",
             "keep_alive_interval": 5,
-            "reconnect_interval": 180,
             "max_attempts": None
-        }).build()
+        })
+    # The stock raw handler waits one fixed interval between attempts, which
+    # left the feed down for minutes after the arr was back.
+    builder.reconnection_handler = _make_reconnection_handler()
+    return builder.build()
