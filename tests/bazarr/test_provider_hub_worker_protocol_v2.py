@@ -4662,6 +4662,26 @@ def test_a_reaped_last_member_of_a_worker_is_not_signalled_even_when_its_group_n
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_the_anchor_survives_a_group_wide_polite_signal(monkeypatch):
+    from provider_hub.sandbox import spawn as sandbox_spawn
+
+    process = sandbox_spawn._start_plain(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    anchor = process._anchor
+    assert anchor is not None
+    try:
+        time.sleep(0.5)  # the anchor's interpreter has started and installed its handlers
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            os.killpg(anchor.pid, sig)
+        assert process.wait(timeout=10) is not None  # the leader is ended by them
+        # The anchor still holds the group number: it is not a zombie and has not exited.
+        assert anchor.poll() is None
+    finally:
+        process.stop(0.3)
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
 def test_a_reaped_anchor_is_not_signalled_and_the_teardown_is_not_stuck(monkeypatch):
     from provider_hub.sandbox import spawn as sandbox_spawn
 

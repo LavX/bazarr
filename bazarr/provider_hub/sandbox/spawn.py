@@ -507,8 +507,13 @@ def _close_fds(holder: dict) -> None:
                 pass
 
 
+# The anchor ignores the polite group signals: a group-wide SIGTERM (or SIGINT, SIGHUP) sent to end
+# the worker must not take the anchor with it, or the group number loses its holder before the
+# group is ended. Only SIGKILL, or the host letting go of its end of the socket, ends it.
 _ANCHOR_SCRIPT = (
-    "import os, sys\n"
+    "import os, signal, sys\n"
+    "for name in ('SIGTERM', 'SIGINT', 'SIGHUP'):\n"
+    "    signal.signal(getattr(signal, name), signal.SIG_IGN)\n"
     "sys.stdin.buffer.read()\n"
     "if os.getpgrp() == os.getpid():\n"
     "    os.killpg(os.getpgrp(), 9)\n"
