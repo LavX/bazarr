@@ -272,6 +272,12 @@ DEFAULT_MEMORY_BYTES = 512 * MIB
 CONFIG_RESERVE_BYTES = 1 * GIB
 FOLDER_SCAN_SECONDS = 5.0
 
+# Allowances for one sweep of one worker reading its /proc (see ``SampleBudget``).
+SAMPLE_SECONDS = 2 * FOLDER_SCAN_SECONDS  # wall time for all of one worker's reading in one sweep
+SAMPLE_MAX_ENTRIES = 1_000_000  # records read in all: mappings, descriptors, threads, processes
+SAMPLE_MAX_BYTES = 128 * 1024 * 1024  # text read in all from /proc files
+SAMPLE_MAX_KEPT = 100_000  # records the pass may hold in memory at once (sets and dicts it builds)
+
 # Longest polite window a stop may ask for: the shutdown frame cannot carry more.
 MAX_CLOSE_GRACE = 600
 
@@ -490,6 +496,13 @@ class PoolLimits:
     budget_max_entries: int = 100_000
     # How long one folder scan may take before it counts as incomplete.
     budget_scan_seconds: float = FOLDER_SCAN_SECONDS
+    # What one sweep of one worker may spend reading its /proc, all of it together (see ``SampleBudget``):
+    # wall time, records, bytes, and records held in memory. When any runs out the sample is incomplete,
+    # which fails closed like an unreadable file. The defaults are far above a legitimate plugin.
+    sample_seconds: float = SAMPLE_SECONDS
+    sample_max_entries: int = SAMPLE_MAX_ENTRIES
+    sample_max_bytes: int = SAMPLE_MAX_BYTES
+    sample_max_kept: int = SAMPLE_MAX_KEPT
     # Free space in /dev/shm under which nothing new is admitted and the heaviest user is
     # stopped; None means the larger of 8 MiB and a tenth of its size.
     shm_reserve_bytes: int | None = None
@@ -539,13 +552,70 @@ PROC_LINE_LIMIT = 16 * 1024
 PROC_MAX_ENTRIES = 65536
 
 
+# The per-file limits above bound one /proc file. A worker tree can have up to 256 processes, each
+# under them, so reading all of it needs an aggregate allowance too. One ``SampleBudget`` is made per
+# sweep of a worker and shared by everything that reads its /proc: tree and thread discovery, memory
+# sampling, descriptor rechecks and the deleted-open pass. When it runs out the sample is incomplete,
+# which fails closed exactly as an unreadable file does.
+#
+# The defaults are far above what a legitimate plugin reads (a handful of processes with a few
+# thousand mappings, a few hundred descriptors and a few dozen threads each is about 100,000 records
+# and 10 MB of text), and far below the 16 million mapping records a 256-process tree could feed.
+
+
+class SampleBudget:
+    """One sweep's allowance for reading a worker's /proc: time, records, bytes and kept records.
+
+    ``spend`` charges what was read and answers False once anything ran out, and stays False after
+    that; ``keep`` does the same for records held in a growing structure; ``expired`` looks at the
+    clock only. Callers stop and report an incomplete result when they are told no.
+    """
+
+    __slots__ = ("deadline", "entries", "nbytes", "kept", "exhausted", "_ticks")
+
+    def __init__(self, seconds: "float | None" = SAMPLE_SECONDS, entries: int = SAMPLE_MAX_ENTRIES,
+                 nbytes: int = SAMPLE_MAX_BYTES, kept: int = SAMPLE_MAX_KEPT) -> None:
+        self.deadline = None if seconds is None else time.monotonic() + seconds
+        self.entries = entries
+        self.nbytes = nbytes
+        self.kept = kept
+        self.exhausted = False
+        self._ticks = 0
+
+    def expired(self) -> bool:
+        if not self.exhausted and self.deadline is not None and time.monotonic() > self.deadline:
+            self.exhausted = True
+        return self.exhausted
+
+    def spend(self, entries: int = 1, nbytes: int = 0) -> bool:
+        if self.exhausted:
+            return False
+        self.entries -= entries
+        self.nbytes -= nbytes
+        self._ticks += 1
+        if self.entries < 0 or self.nbytes < 0:
+            self.exhausted = True
+        elif self._ticks % 64 == 0:
+            self.expired()
+        return not self.exhausted
+
+    def keep(self, count: int = 1) -> bool:
+        if self.exhausted:
+            return False
+        self.kept -= count
+        if self.kept < 0:
+            self.exhausted = True
+        return not self.exhausted
+
+
 def _bounded_lines(path: str, max_bytes: int = PROC_MAX_BYTES, max_lines: int = PROC_MAX_LINES,
-                   max_seconds: float = FOLDER_SCAN_SECONDS):
+                   max_seconds: float = FOLDER_SCAN_SECONDS, budget: "SampleBudget | None" = None):
     """Lines of a /proc file one at a time, never holding more than a line.
 
     Raises ``_ProcOverflow`` (an ``OSError``) when the file passes ``max_bytes``,
-    ``max_lines`` or ``max_seconds``, or has one line longer than ``PROC_LINE_LIMIT``:
-    callers already treat an unreadable file of a live process as an incomplete sample.
+    ``max_lines`` or ``max_seconds``, or has one line longer than ``PROC_LINE_LIMIT``, or when
+    ``budget`` (the sweep's shared allowance) runs out: callers already treat an unreadable file
+    of a live process as an incomplete sample.
     """
     deadline = time.monotonic() + max_seconds
     total = 0
@@ -558,16 +628,17 @@ def _bounded_lines(path: str, max_bytes: int = PROC_MAX_BYTES, max_lines: int = 
             total += len(raw)
             count += 1
             if (len(raw) > PROC_LINE_LIMIT or total > max_bytes or count > max_lines
-                    or time.monotonic() > deadline):
+                    or time.monotonic() > deadline
+                    or (budget is not None and not budget.spend(1, len(raw)))):
                 raise _ProcOverflow(path)
             yield raw.decode("utf-8", "surrogateescape").rstrip("\n")
 
 
-def _read_kb(path: str, *names: str) -> dict:
+def _read_kb(path: str, *names: str, budget: "SampleBudget | None" = None) -> dict:
     found: dict = {}
     wanted = set(names)
     # status and smaps_rollup are a few kilobytes; an enormous one is not honest.
-    for line in _bounded_lines(path, max_bytes=256 * 1024, max_lines=4096):
+    for line in _bounded_lines(path, max_bytes=256 * 1024, max_lines=4096, budget=budget):
         name, _, rest = line.partition(":")
         if name in wanted:
             try:
@@ -580,7 +651,7 @@ def _read_kb(path: str, *names: str) -> dict:
 PARENT_MAP_LIMIT = 32768
 
 
-def _children_of(pid: int) -> tuple[list[int] | None, bool]:
+def _children_of(pid: int, budget: "SampleBudget | None" = None) -> tuple[list[int] | None, bool]:
     """Direct children from the kernel's per-thread children lists: ``(children or None, incomplete)``.
 
     None means the lists are not available here (the caller scans ``/proc``
@@ -600,9 +671,14 @@ def _children_of(pid: int) -> tuple[list[int] | None, bool]:
         incomplete = True
         threads = threads[:PROC_MAX_ENTRIES]
     for tid in threads:
+        if budget is not None and not budget.spend():
+            # The sweep's allowance is gone: the children of the threads not read are unknown.
+            return found, True
         try:
             with open("/proc/%d/task/%s/children" % (pid, tid), "r", encoding="ascii") as handle:
                 text = handle.read(PROC_MAX_BYTES + 1)
+            if budget is not None and not budget.spend(0, len(text)):
+                return found, True
             readable = True
             if len(text) > PROC_MAX_BYTES:
                 incomplete = True
@@ -615,7 +691,8 @@ def _children_of(pid: int) -> tuple[list[int] | None, bool]:
     return (found if readable else None), incomplete
 
 
-def _parent_map(limit: int = PARENT_MAP_LIMIT) -> tuple[dict[int, list[int]], bool]:
+def _parent_map(limit: int = PARENT_MAP_LIMIT, budget: "SampleBudget | None" = None
+                ) -> tuple[dict[int, list[int]], bool]:
     """pid -> children by scanning /proc: ``(map, complete)``. The fallback when children lists are off.
 
     Not complete when the listing is cut at ``limit`` entries, cannot be read, or a
@@ -633,6 +710,8 @@ def _parent_map(limit: int = PARENT_MAP_LIMIT) -> tuple[dict[int, list[int]], bo
     for name in names[:limit]:
         if not name.isdigit():
             continue
+        if budget is not None and not budget.spend():
+            return tree, False
         try:
             with open("/proc/%s/stat" % name, "r", encoding="ascii", errors="replace") as handle:
                 text = handle.read(PROC_LINE_LIMIT + 1)
@@ -649,26 +728,29 @@ def _parent_map(limit: int = PARENT_MAP_LIMIT) -> tuple[dict[int, list[int]], bo
     return tree, complete
 
 
-def _process_tree(root: int, max_processes: int) -> tuple[list[int], bool]:
+def _process_tree(root: int, max_processes: int, budget: "SampleBudget | None" = None) -> tuple[list[int], bool]:
     """The root and its descendants, and whether that list may be incomplete.
 
     Incomplete when the walk stopped at ``max_processes``, when a children list
     could not be read, or when the ``/proc`` scan used instead was cut short or
-    skipped a record: a descendant could be missing from the answer.
+    skipped a record, or when ``budget`` (the sweep's shared allowance) ran out: a descendant
+    could be missing from the answer.
     """
     incomplete = False
     seen = [root]
     index = 0
     fallback: dict[int, list[int]] | None = None
     while index < len(seen):
+        if budget is not None and not budget.spend():
+            return seen, True
         current = seen[index]
         index += 1
-        kids, partial = _children_of(current)
+        kids, partial = _children_of(current, budget)
         if partial:
             incomplete = True
         if kids is None:
             if fallback is None:
-                fallback, complete = _parent_map()
+                fallback, complete = _parent_map(budget=budget)
                 if not complete:
                     incomplete = True
             kids = fallback.get(current, [])
@@ -682,7 +764,8 @@ def _process_tree(root: int, max_processes: int) -> tuple[list[int], bool]:
     return seen, incomplete
 
 
-def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=()) -> MemorySample | None:
+def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=(),
+                             budget: "SampleBudget | None" = None) -> MemorySample | None:
     """Memory of a process and every descendant, from ``smaps_rollup``, plus the memfds they hold open.
 
     The sum uses ``Pss`` so pages shared between workers are not counted in
@@ -697,17 +780,25 @@ def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=()) ->
     that is also mapped is then counted twice, which errs towards stopping the
     worker. ``skip_fds`` names processes whose descriptor directory is not read (the
     pool's own non-dumpable launcher, which hides it from its own user by design).
+
+    ``budget`` is the sweep's shared allowance for reading this worker's /proc (one is made when
+    none is given); when it runs out the sample is ``truncated``.
     """
     if not os.path.isdir("/proc/self"):
         return None
+    if budget is None:
+        budget = SampleBudget()
     total = 0
     rss_total = 0
     counted = 0
     source = "smaps_rollup"
-    members, truncated = _process_tree(pid, max_processes)
+    members, truncated = _process_tree(pid, max_processes, budget)
     for member in members:
+        if budget.exhausted:
+            truncated = True
+            break
         try:
-            values = _read_kb("/proc/%d/smaps_rollup" % member, "Pss", "Rss")
+            values = _read_kb("/proc/%d/smaps_rollup" % member, "Pss", "Rss", budget=budget)
             used = values.get("Pss", values.get("Rss"))
             rss = values.get("Rss", used)
             if used is None:
@@ -717,7 +808,7 @@ def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=()) ->
             # nothing about the process being gone: ask status. Only a process
             # whose own /proc entry has vanished is not part of the tree any more.
             try:
-                values = _read_kb("/proc/%d/status" % member, "VmRSS")
+                values = _read_kb("/proc/%d/status" % member, "VmRSS", budget=budget)
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError:
@@ -733,11 +824,11 @@ def read_process_tree_memory(pid: int, max_processes: int = 256, skip_fds=()) ->
         total += used
         rss_total += rss
         counted += 1
-    held, held_incomplete = memfd_usage(members, skip_fds)
+    held, held_incomplete = memfd_usage(members, skip_fds, budget)
     if held:
         total += held
         rss_total += held
-    truncated = truncated or held_incomplete
+    truncated = truncated or held_incomplete or budget.exhausted
     if not counted:
         # Nothing readable. If nothing was seen at all the process is gone; if
         # live processes denied the read, the answer is "unknown", not "none".
@@ -980,7 +1071,7 @@ def _holds_memory(target: str) -> bool:
     return target.startswith("/memfd:") or target.startswith(_SHM_DIR)
 
 
-def _recheck_descriptors(pid: int, wanted: dict) -> list:
+def _recheck_descriptors(pid: int, wanted: dict, budget: "SampleBudget | None" = None) -> list:
     """One more pass over a process's descriptors, for the mapped files a first pass did not match.
 
     The descriptor pass and the mapping pass of a sample are two snapshots, so a worker that
@@ -988,8 +1079,8 @@ def _recheck_descriptors(pid: int, wanted: dict) -> list:
     measure looking mapped-only. ``wanted`` maps a name (in the form ``maps`` writes it, without
     " (deleted)") to the set of inodes mapped under it. Returns ``(name, stat result, link target)``
     for each descriptor that holds one of them now: only those targets are stat'ed, and the
-    pass reads at most ``PROC_MAX_ENTRIES`` descriptors. What cannot be read finds nothing, and the
-    caller then fails closed as before.
+    pass reads at most ``PROC_MAX_ENTRIES`` descriptors and charges ``budget`` for each. What cannot
+    be read finds nothing, and the caller then fails closed as before.
     """
     found = []
     directory = "/proc/%d/fd" % pid
@@ -998,6 +1089,8 @@ def _recheck_descriptors(pid: int, wanted: dict) -> list:
     except OSError:
         return found
     for name in descriptors:
+        if budget is not None and not budget.spend():
+            return found
         link = "%s/%s" % (directory, name)
         try:
             target = os.readlink(link)
@@ -1024,7 +1117,7 @@ def _maps_device(field: str) -> "int | None":
         return None
 
 
-def _recheck_by_inode(pid: int, wanted: dict, done: set, deadline: "float | None" = None) -> "tuple[list, bool]":
+def _recheck_by_inode(pid: int, wanted: dict, done: set, budget: "SampleBudget") -> "tuple[list, bool]":
     """One more pass over a process's descriptors, for mapped deleted files measured by inode.
 
     ``wanted`` maps an inode to ``({device: [mapped names]}, {mapped name: None})``, built once for the
@@ -1034,7 +1127,7 @@ def _recheck_by_inode(pid: int, wanted: dict, done: set, deadline: "float | None
     name does not matter: a hard link to the mapped file, deleted or not, measures it. ``done`` holds
     the (inode, device) groups already resolved, so the work is one step per descriptor plus one per
     mapped name however many descriptors hold the same file. Returns ``([(mapped name, stat result)],
-    timed_out)``: ``timed_out`` when ``deadline`` (a ``time.monotonic`` value) passed first. What cannot
+    timed_out)``: ``timed_out`` when ``budget`` (the sweep's shared allowance) ran out first. What cannot
     be read finds nothing, and the caller fails closed as before.
     """
     found: list = []
@@ -1043,8 +1136,8 @@ def _recheck_by_inode(pid: int, wanted: dict, done: set, deadline: "float | None
         descriptors = os.listdir(directory)[:PROC_MAX_ENTRIES]
     except OSError:
         return found, False
-    for count, name in enumerate(descriptors):
-        if deadline is not None and count % 64 == 0 and time.monotonic() > deadline:
+    for name in descriptors:
+        if not budget.spend():
             return found, True
         link = "%s/%s" % (directory, name)
         try:
@@ -1071,7 +1164,7 @@ def _recheck_by_inode(pid: int, wanted: dict, done: set, deadline: "float | None
     return found, False
 
 
-def memfd_usage(pids, skip=()) -> tuple[int, bool]:
+def memfd_usage(pids, skip=(), budget: "SampleBudget | None" = None) -> tuple[int, bool]:
     """Bytes held by memfds and ``/dev/shm`` files that processes have open: ``(bytes, incomplete)``.
 
     Memory in a memfd that is open but not mapped is in nobody's Pss or Rss, so a
@@ -1090,7 +1183,13 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
     for what it costs). Not covered: pipe and socket
     buffers, eventfds and the like (small or bounded by system limits), and tmpfs
     files outside ``/dev/shm`` (the folder budgets cover the folders a plugin has).
+
+    Everything read is charged to ``budget`` (the sweep's shared allowance; one is made when none
+    is given), and so is every record the pass keeps in its sets and dicts. When it runs out the
+    result is incomplete, as for an unreadable file.
     """
+    if budget is None:
+        budget = SampleBudget()
     total = 0
     seen: set = set()
     measured: set = set()  # (target path, inode) of every memory object a descriptor measured
@@ -1099,6 +1198,8 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
     for pid in pids:
         if pid in skip:
             continue
+        if budget.expired():
+            return total, True
         directory = "/proc/%d/fd" % pid
         try:
             descriptors = os.listdir(directory)
@@ -1111,6 +1212,8 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
             incomplete = True
             continue
         for name in descriptors:
+            if not budget.spend():
+                return total, True
             link = "%s/%s" % (directory, name)
             try:
                 target = os.readlink(link)
@@ -1130,6 +1233,8 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
+            if not budget.keep(2):
+                return total, True
             measured.add((_maps_form(target[: -len(_DELETED)] if target.endswith(_DELETED) else target), info.st_ino))
             identity = (info.st_dev, info.st_ino)
             if identity in seen:
@@ -1144,11 +1249,14 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
         if pid in skip:
             continue
         try:
-            lines = list(_mapped_objects("/proc/%d/maps" % pid))
+            lines = list(_mapped_objects("/proc/%d/maps" % pid, budget))
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError:
+            # Too big, or the sweep's allowance ran out: unread mappings are unknown.
             incomplete = True
+            if budget.exhausted:
+                return total, True
             continue
         for parts in lines:
             path = parts[5][: -len(_DELETED)] if parts[5].endswith(_DELETED) else parts[5]
@@ -1175,12 +1283,14 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
                 # Each such mapping is charged a page, and ``WorkerPool`` guards the total.
                 total += _PAGE_SIZE
                 continue
+            if not budget.keep():
+                return total, True
             unmatched.setdefault(pid, {}).setdefault(path, set()).add(inode)
     # The descriptors were read before the mappings, so an object created (or a mapping made)
     # in between looks mapped-only. Look at that process's descriptors once more, for those
     # objects only; what no descriptor holds even now is mapped-only, and fails closed.
     for pid, wanted in unmatched.items():
-        for path, info, target in _recheck_descriptors(pid, wanted):
+        for path, info, target in _recheck_descriptors(pid, wanted, budget):
             if not _holds_memory(target):
                 continue
             measured.add((path, info.st_ino))
@@ -1188,6 +1298,8 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
             if identity not in seen:
                 seen.add(identity)
                 total += _allocated(info)
+        if budget.exhausted:
+            return total, True
     for wanted in unmatched.values():
         if any((path, inode) not in measured for path, inodes in wanted.items() for inode in inodes):
             incomplete = True
@@ -1207,13 +1319,13 @@ def _maps_form(name: str) -> str:
     return name.replace("\n", "\\012") if "\n" in name else name
 
 
-def _mapped_objects(path: str):
+def _mapped_objects(path: str, budget: "SampleBudget | None" = None):
     """The mappings of a ``maps`` file that have a name, as ``line.split(None, 5)``: read within bounds.
 
     The name (the sixth field) is left as ``maps`` wrote it; compare it with ``_maps_form`` of a
     ``readlink`` target.
     """
-    for line in _bounded_lines(path):
+    for line in _bounded_lines(path, budget=budget):
         parts = line.split(None, 5)
         if len(parts) >= 6:
             yield parts
@@ -1231,32 +1343,34 @@ def _is_shared_anonymous(path: str, perms: str = "rw-s") -> bool:
     return (path == "/dev/zero" or path.startswith("[anon_shmem")) and perms[3:4] == "s"
 
 
-def shm_mapping_count(pids, skip=()) -> int:
+def shm_mapping_count(pids, skip=(), budget: "SampleBudget | None" = None) -> int:
     """How many mappings of ``/dev/shm`` objects these processes hold (the guard's measure of who uses it)."""
     count = 0
     for pid in pids:
         if pid in skip:
             continue
         try:
-            for parts in _mapped_objects("/proc/%d/maps" % pid):
+            for parts in _mapped_objects("/proc/%d/maps" % pid, budget):
                 if parts[5].startswith(_SHM_DIR):
                     count += 1
         except _ProcOverflow:
-            # More mappings than any honest process has: the heaviest user by far.
+            # More mappings than any honest process has (or the sweep's allowance is gone): the
+            # heaviest user by far.
             count += PROC_MAX_LINES
         except OSError:
             continue
     return count
 
 
-def shm_usage(pids, skip=()) -> tuple[int, int]:
+def shm_usage(pids, skip=(), budget: "SampleBudget | None" = None) -> tuple[int, int]:
     """What these processes hold of ``/dev/shm``: ``(bytes, mappings)``. The guard's measure of who uses it.
 
     Bytes are the allocated size (blocks) of every ``/dev/shm`` object a descriptor
     holds open, each counted once across the tree, plus one page for every mapping
     that no descriptor measures (an unlinked semaphore, a closed arena). Mappings are
     all mappings of ``/dev/shm`` objects. A listing too big to read counts as the most
-    an honest process could have, so a worker that tries it is the first to go.
+    an honest process could have, and so does what is left unread when ``budget`` (the sweep's
+    shared allowance) runs out, so a worker that tries it is the first to go.
     """
     total = 0
     mappings = 0
@@ -1265,6 +1379,10 @@ def shm_usage(pids, skip=()) -> tuple[int, int]:
     for pid in pids:
         if pid in skip:
             continue
+        if budget is not None and budget.expired():
+            total += PROC_MAX_ENTRIES * _PAGE_SIZE
+            mappings += PROC_MAX_LINES
+            break
         directory = "/proc/%d/fd" % pid
         try:
             descriptors = os.listdir(directory)
@@ -1274,6 +1392,9 @@ def shm_usage(pids, skip=()) -> tuple[int, int]:
         except OSError:
             continue
         for name in descriptors:
+            if budget is not None and not budget.spend():
+                total += PROC_MAX_ENTRIES * _PAGE_SIZE
+                break
             link = "%s/%s" % (directory, name)
             try:
                 target = os.readlink(link)
@@ -1285,6 +1406,9 @@ def shm_usage(pids, skip=()) -> tuple[int, int]:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
+            if budget is not None and not budget.keep(2):
+                total += PROC_MAX_ENTRIES * _PAGE_SIZE
+                break
             measured.add((_maps_form(held), info.st_ino))
             if (info.st_dev, info.st_ino) not in seen:
                 seen.add((info.st_dev, info.st_ino))
@@ -1293,7 +1417,7 @@ def shm_usage(pids, skip=()) -> tuple[int, int]:
         if pid in skip:
             continue
         try:
-            for parts in _mapped_objects("/proc/%d/maps" % pid):
+            for parts in _mapped_objects("/proc/%d/maps" % pid, budget):
                 path = parts[5][: -len(_DELETED)] if parts[5].endswith(_DELETED) else parts[5]
                 if not path.startswith(_SHM_DIR):
                     continue
@@ -1317,7 +1441,8 @@ def _under(path: str, folder: str) -> bool:
 
 
 def deleted_open_usage(pids, folders, files: "dict | None" = None,
-                       max_seconds: "float | None" = FOLDER_SCAN_SECONDS) -> tuple[dict, bool]:
+                       max_seconds: "float | None" = FOLDER_SCAN_SECONDS,
+                       budget: "SampleBudget | None" = None) -> tuple[dict, bool]:
     """Bytes held by files that were unlinked but are still open, per folder: ``({folder: bytes}, incomplete)``.
 
     A worker can create a file in its folder, unlink it and keep writing through
@@ -1350,18 +1475,17 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None,
     charged to each folder, file by file, so a caller that also scans the folder can charge a
     file that still has a link under it only once (see ``_LinkTally``).
 
-    The whole pass is bounded by ``max_seconds`` (None: unbounded), like the folder scan, and fails
-    closed the same way: when it runs out the result is incomplete, so the budget fails. Every
-    per-descriptor and per-mapping step is a constant-time lookup in a set or dict, so a worker that
-    maps one file through thousands of hard links costs one step for each.
+    The whole pass is bounded by ``budget``, the sweep's shared allowance of time, records, bytes
+    and kept records (one is made from ``max_seconds`` when none is given; None is unbounded in
+    time), and fails closed the way the folder scan does: when it runs out the result is incomplete,
+    so the budget fails. Every per-descriptor and per-mapping step is a constant-time lookup in a set
+    or dict, so a worker that maps one file through thousands of hard links costs one step for each.
     """
-    deadline = None if max_seconds is None else time.monotonic() + max_seconds
-    ticks = 0
+    if budget is None:
+        budget = SampleBudget(seconds=max_seconds)
 
-    def out_of_time(every=64):
-        nonlocal ticks
-        ticks += 1
-        return deadline is not None and ticks % every == 0 and time.monotonic() > deadline
+    def out_of_time():
+        return not budget.spend()
 
     roots = [(folder, {_maps_form(folder), _maps_form(os.path.realpath(folder))}) for folder in folders]
     usage = {folder: 0 for folder, _names in roots}
@@ -1377,7 +1501,7 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None,
         return [folder for folder, names in roots if any(_under(path, name) for name in names)]
 
     for pid in pids:
-        if deadline is not None and time.monotonic() > deadline:
+        if budget.expired():
             return usage, True
         directory = "/proc/%d/fd" % pid
         try:
@@ -1415,17 +1539,22 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None,
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
+            if not budget.keep(2):
+                return usage, True
             held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
             held_names.add((path, info.st_ino))
     for pid in pids:
-        if deadline is not None and time.monotonic() > deadline:
+        if budget.expired():
             return usage, True
         try:
-            lines = [parts for parts in _mapped_objects("/proc/%d/maps" % pid) if parts[5].endswith(_DELETED)]
+            lines = [parts for parts in _mapped_objects("/proc/%d/maps" % pid, budget)
+                     if parts[5].endswith(_DELETED)]
         except FileNotFoundError:
             continue
         except OSError:
             incomplete = True
+            if budget.exhausted:
+                return usage, True
             continue
         for parts in lines:
             if out_of_time():
@@ -1450,12 +1579,16 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None,
             # mapped name is kept so the file is charged to every folder it was mapped from.
             device = _maps_device(parts[3])
             if device is not None and (device, inode) in held:
+                if not budget.keep(2):
+                    return usage, True
                 held[(device, inode)][0].add(path)
                 held_names.add((path, inode))
                 continue
             # No descriptor held it when the descriptors were read. It may have been unlinked since
             # (the passes are separate snapshots), or held through another name: the descriptors
             # are read again below.
+            if not budget.keep(2):
+                return usage, True
             unmatched.setdefault(inode, {})[(path, device)] = None
     # A descriptor anywhere in the supplied tree measures a mapping anywhere in it: a child may hold
     # the mapping while its parent holds the live hard link (or the other way round).
@@ -1468,13 +1601,13 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None,
             wanted[inode] = (by_device, {path: None for path, _device in names})
         done: set = set()
         for pid in pids:
-            found, timed_out = _recheck_by_inode(pid, wanted, done, deadline)
+            found, timed_out = _recheck_by_inode(pid, wanted, done, budget)
             for path, info in found:
+                if not budget.keep(2):
+                    return usage, True
                 held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
                 held_names.add((path, info.st_ino))
-            if timed_out:
-                return usage, True
-            if deadline is not None and time.monotonic() > deadline:
+            if timed_out or budget.expired():
                 return usage, True
     if any((path, inode) not in held_names for inode, names in unmatched.items() for path, _device in names):
         # Referenced by a mapping alone: no descriptor to stat, so its size is unknown.
@@ -2275,9 +2408,10 @@ class WorkerPool:
             process = session.process if session is not None else None
             if process is None or process.returncode is not None:
                 continue
-            pids, _incomplete = _process_tree(process.pid, 256)
+            budget = self._new_budget()
+            pids, _incomplete = _process_tree(process.pid, 256, budget)
             skip = {process.pid} if isinstance(process, LauncherProcess) else set()
-            held, count = shm_usage(pids, skip)
+            held, count = shm_usage(pids, skip, budget)
             score = (held, count)
             if (held or count) and (heaviest is None or score > heaviest[0]):
                 heaviest = (score, entry, slot)
@@ -2300,12 +2434,13 @@ class WorkerPool:
                 idle = slot.active == 0 and slot.pending == 0
                 self._handle_death(entry, slot, self._death_reason(slot), idle=idle)
                 return
-        self._sample_if_due(slot, now)
+        budget = self._new_budget()  # one allowance for all the reading this sweep does for the worker
+        self._sample_if_due(slot, now, budget)
         definition = slot.definition
         problem = None
         problem = self._memory_problem(slot, definition.memory_limit())
         if problem is None:
-            problem = self._budget_problem(slot, now, definition)
+            problem = self._budget_problem(slot, now, definition, budget=budget)
         if problem is not None:
             self._kill_current(entry, slot, problem)
             return
@@ -2331,7 +2466,8 @@ class WorkerPool:
                 entry.retiring.remove(slot)
                 self._queue_close(slot, None, "reap")
                 return
-        self._sample_if_due(slot, now)
+        budget = self._new_budget()
+        self._sample_if_due(slot, now, budget)
         problem = self._memory_problem(slot, slot.definition.memory_limit())
         if problem is not None:
             slot.kill_reason = (problem[0], "retiring worker: " + problem[1])
@@ -2341,7 +2477,7 @@ class WorkerPool:
                 self._queue_close(slot, None, "kill")
             return
         # A draining worker still writes: its own folders, as its own settings named them.
-        problem = self._slot_budget_problem(slot, now)
+        problem = self._slot_budget_problem(slot, now, budget)
         if problem is not None:
             slot.kill_reason = problem
             with self._cond:
@@ -2357,18 +2493,24 @@ class WorkerPool:
     def _sweep_ephemeral(self, slot, now):
         if slot.session is None or not slot.session.alive:
             return
-        self._sample_if_due(slot, now)
+        budget = self._new_budget()
+        self._sample_if_due(slot, now, budget)
         problem = self._memory_problem(slot, slot.definition.memory_limit())
         if problem is not None:
             slot.kill_reason = problem
         else:
-            problem = self._slot_budget_problem(slot, now)
+            problem = self._slot_budget_problem(slot, now, budget)
             if problem is None:
                 return
             slot.kill_reason = problem
         self._terminate_now(slot)
 
-    def _slot_budget_problem(self, slot, now):
+    def _new_budget(self) -> SampleBudget:
+        """A fresh allowance for one sweep's reading of one worker's /proc."""
+        return SampleBudget(self.limits.sample_seconds, self.limits.sample_max_entries,
+                            self.limits.sample_max_bytes, self.limits.sample_max_kept)
+
+    def _slot_budget_problem(self, slot, now, budget=None):
         """The folder budget problem of a worker that is not the entry's current one, or None.
 
         Checked against the slot's own definition and no more often than
@@ -2377,7 +2519,7 @@ class WorkerPool:
         if now - slot.last_budget_at < self.limits.budget_interval:
             return None
         slot.last_budget_at = now
-        return self._budget_problem(None, now, definition=slot.definition, force=True, tree=slot)
+        return self._budget_problem(None, now, definition=slot.definition, force=True, tree=slot, budget=budget)
 
     # ------------------------------------------------------------ lease / start
 
@@ -2801,7 +2943,7 @@ class WorkerPool:
                         free // MIB, self.limits.config_reserve_bytes // MIB))
         return self._budget_problem(holder, self._clock(), definition, force=fresh or holder is None, tree=tree)
 
-    def _budget_problem(self, holder, now, definition, force=False, tree=None):
+    def _budget_problem(self, holder, now, definition, force=False, tree=None, budget=None):
         """The folder-budget problem of ``definition``, cached on ``holder`` (a slot) when given.
 
         ``tree`` is the slot whose process tree is also searched for files that were
@@ -2813,7 +2955,7 @@ class WorkerPool:
             return holder.budget_problem
         problem = None
         files: dict = {}
-        held, held_incomplete = self._deleted_open_usage(tree or holder, definition.budgets, files)
+        held, held_incomplete = self._deleted_open_usage(tree or holder, definition.budgets, files, budget)
         for budget in definition.budgets:
             links = _LinkTally(files.get(budget.path))
             used, truncated = folder_usage(budget.path, self.limits.budget_max_entries,
@@ -2830,20 +2972,21 @@ class WorkerPool:
             holder.budget_problem = problem
         return problem
 
-    def _deleted_open_usage(self, slot, budgets, files=None):
+    def _deleted_open_usage(self, slot, budgets, files=None, budget=None):
         """``deleted_open_usage`` for the worker's whole tree; ``({}, False)`` when there is no tree to look at."""
         session = getattr(slot, "session", None)
         process = session.process if session is not None else None
         if process is None or process.returncode is not None or not os.path.isdir("/proc/self/fd"):
             return {}, False
-        pids, incomplete = _process_tree(process.pid, 256)
+        if budget is None:
+            budget = self._new_budget()
+        pids, incomplete = _process_tree(process.pid, 256, budget)
         if isinstance(process, LauncherProcess):
             # The launcher is the pool's own, trusted and non-dumpable: its descriptors
             # are closed to us by design and are not the worker's. Its descendants are.
             pids = [pid for pid in pids if pid != process.pid]
-        usage, partial = deleted_open_usage(pids, [budget.path for budget in budgets], files,
-                                            self.limits.budget_scan_seconds)
-        return usage, incomplete or partial
+        usage, partial = deleted_open_usage(pids, [folder.path for folder in budgets], files, budget=budget)
+        return usage, incomplete or partial or budget.exhausted
 
     def _preflight_running(self, entry, slot):
         """Before a request on a running worker: disk reserve and folder budgets."""
@@ -2886,15 +3029,17 @@ class WorkerPool:
 
     # -------------------------------------------------------------- memory
 
-    def _sample(self, slot):
+    def _sample(self, slot, budget=None):
         session = slot.session
         process = session.process if session else None
         if process is None or process.returncode is not None:
             # Nothing local, or a leader that was reaped: its number may belong to someone else now.
             return
         try:
-            if isinstance(process, LauncherProcess) and self._memory_reader is read_process_tree_memory:
-                sample = read_process_tree_memory(process.pid, skip_fds={process.pid})
+            if self._memory_reader is read_process_tree_memory:
+                skip = {process.pid} if isinstance(process, LauncherProcess) else ()
+                sample = read_process_tree_memory(process.pid, skip_fds=skip,
+                                                  budget=budget if budget is not None else self._new_budget())
             else:
                 sample = self._memory_reader(process.pid)
         except Exception:
@@ -2924,9 +3069,9 @@ class WorkerPool:
         return (PoolCodes.MEMORY_LIMIT, "worker used %d MiB, over its %d MiB limit" % (
             slot.memory_bytes // MIB, limit // MIB))
 
-    def _sample_if_due(self, slot, now):
+    def _sample_if_due(self, slot, now, budget=None):
         if slot.busy() or now - slot.last_sample_at >= self.limits.heartbeat_interval:
-            self._sample(slot)
+            self._sample(slot, budget)
 
     # ---------------------------------------------------- closing and killing
 

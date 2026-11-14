@@ -3065,17 +3065,79 @@ def test_an_exhausted_time_budget_fails_the_deleted_open_accounting_closed(tmp_p
         # And through the pool, with its own scan budget: the folder budget then fails.
         from types import SimpleNamespace
 
-        pool = make_pool(fast_pool_limits(budget_scan_seconds=0.0), use_clock=False)
+        pool = make_pool(fast_pool_limits(sample_seconds=0.0), use_clock=False)
         slot = SimpleNamespace(session=SimpleNamespace(process=child))
         _usage, incomplete = pool._deleted_open_usage(slot, [FolderBudget(str(folder), 1 * GIB)])
         assert incomplete is True
-        roomy = make_pool(fast_pool_limits(budget_scan_seconds=30.0), use_clock=False)
+        roomy = make_pool(fast_pool_limits(sample_seconds=30.0), use_clock=False)
         _usage, incomplete = roomy._deleted_open_usage(slot, [FolderBudget(str(folder), 1 * GIB)])
         assert incomplete is False
     finally:
         os.close(fd)
         child.kill()
         child.wait()
+
+
+@pytest.fixture
+def sleeper():
+    """A quiet child process whose /proc is small and complete."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL)
+    time.sleep(0.3)
+    yield child
+    child.kill()
+    child.wait()
+
+
+@needs_smaps
+def test_many_processes_each_under_the_per_file_limits_but_together_over_the_allowance_are_incomplete(sleeper):
+    mappings = len(open("/proc/%d/maps" % sleeper.pid).read().splitlines())
+    assert 0 < mappings < pool_module.PROC_MAX_LINES
+    crowd = [sleeper.pid] * 60  # sixty processes, every one far under the per-file limits
+    total, incomplete = pool_module.memfd_usage(crowd)
+    assert incomplete is False, "the default allowance is far above an honest tree"
+    allowance = pool_module.SampleBudget(entries=mappings * 5)
+    total, incomplete = pool_module.memfd_usage(crowd, budget=allowance)
+    assert incomplete is True and allowance.exhausted is True
+    # The same through the sampler: an exhausted allowance is a truncated sample, which counts as over the limit.
+    sample = pool_module.read_process_tree_memory(sleeper.pid, budget=pool_module.SampleBudget(entries=3))
+    assert sample is not None and sample.truncated is True
+    sample = pool_module.read_process_tree_memory(sleeper.pid)
+    assert sample is not None and sample.truncated is False
+
+
+@needs_smaps
+def test_the_allowance_covers_tree_and_thread_discovery_and_the_deleted_open_pass(sleeper, tmp_path):
+    # Thread discovery reads one children list per thread: it is charged too.
+    members, incomplete = pool_module._process_tree(os.getpid(), 256, pool_module.SampleBudget(entries=1))
+    assert incomplete is True
+    members, incomplete = pool_module._process_tree(os.getpid(), 256)
+    assert incomplete is False and os.getpid() in members
+    # The deleted-open pass shares the same kind of allowance, records kept in memory included.
+    folder = tmp_path / "data"
+    folder.mkdir()
+    fds = [_unlinked_file(folder, "f%d" % index, 4096) for index in range(5)]
+    try:
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
+        assert incomplete is False and usage[str(folder)] >= 5 * 4096
+        _usage, incomplete = pool_module.deleted_open_usage(
+            [os.getpid()], [str(folder)], budget=pool_module.SampleBudget(kept=3))
+        assert incomplete is True
+        _usage, incomplete = pool_module.deleted_open_usage(
+            [os.getpid()], [str(folder)], budget=pool_module.SampleBudget(nbytes=10))
+        assert incomplete is True
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def test_a_sweep_gets_one_allowance_from_the_pool_limits(make_pool):
+    pool = make_pool(fast_pool_limits(sample_seconds=3.0, sample_max_entries=11, sample_max_bytes=22,
+                                      sample_max_kept=33), use_clock=False)
+    budget = pool._new_budget()
+    assert (budget.entries, budget.nbytes, budget.kept) == (11, 22, 33)
+    assert budget.deadline is not None
+    defaults = PoolLimits()
+    assert (defaults.sample_max_entries, defaults.sample_max_kept) == (1_000_000, 100_000)
 
 
 @needs_smaps
