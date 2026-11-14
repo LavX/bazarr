@@ -2441,6 +2441,43 @@ def test_a_leader_reaped_by_somebody_else_does_not_prove_its_descendants_gone(ma
             pass
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg") or os.name != "posix", reason="needs POSIX process groups")
+@pytest.mark.parametrize("how", ["bare", "anchored", "own-session"])
+def test_a_host_with_neither_waitid_nor_proc_releases_the_slot_and_counts_an_unverified_teardown(
+        make_pool, monkeypatch, how):
+    from provider_hub.runtime import session as session_module
+    from provider_hub.sandbox import spawn as spawn_module
+
+    # Nothing here can tell a live worker from a stranger that took its pid. That is not a
+    # process somebody else reaped: the group is ended the usual way, the slot is released, and
+    # the teardown is counted as one without whole-tree proof.
+    monkeypatch.delattr(os, "waitid", raising=False)
+    monkeypatch.setattr(session_module, "_has_proc", lambda: False)
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(os.path, "isdir", lambda path: False if path == "/proc/self" else real_isdir(path))
+    if how == "own-session":
+        monkeypatch.setattr(spawn_module, "_start_anchor", lambda: None)
+    pool = make_pool(fast_pool_limits(unverified_limit=20, max_resident=1), use_clock=False)
+    if how == "bare":
+        pool.register(definition())
+    else:
+        command, env = fake_worker_command(), {**os.environ, **fake_worker_env()}
+
+        def spawn():
+            return spawn_module._start_plain(command, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE)
+
+        pool.register(WorkerDefinition("tr", kind="translator", spawn=spawn, session_limits=fast_session()))
+    for cycle in range(3):
+        child = pool.run("tr", "fork", {}).result["child"]
+        assert pool.status()["processes"] == 1
+        pool.stop("tr")
+        assert wait_until(lambda: pool.state("tr") is WorkerState.STOPPED), cycle
+        assert pool.status()["stuck"] == 0 and pool.status()["processes"] == 0, cycle
+        assert wait_until(lambda: not pid_alive(child)), "the group was not ended"
+    assert pool.status()["unverified_teardowns"]["tr"]["count"] == 3
+
+
 def test_a_session_that_ended_its_own_group_is_confirmed(make_pool):
     pool = make_pool(use_clock=False)
     pool.register(definition())

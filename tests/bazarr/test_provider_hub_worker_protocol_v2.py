@@ -4302,21 +4302,77 @@ def test_a_bare_child_with_no_saved_identity_is_unknown_when_a_stranger_has_its_
             pass
 
 
-def test_ownership_is_unknown_and_refused_with_neither_waitid_nor_proc(monkeypatch):
+def test_a_live_pid_is_taken_for_the_child_with_neither_waitid_nor_proc(monkeypatch):
     monkeypatch.delattr(os, "waitid", raising=False)
     monkeypatch.setattr(session_module, "_has_proc", lambda: False)
     session = WorkerSession(["worker"])
     process = _ReapingProcess()  # alive, a pid that answers signal 0
+    # The platform cannot tell a zombie, the child and a stranger apart; that is not an outside reap.
     with session._group_lock:
-        assert session._ours(process) is False
-    assert session._group_lost is True
-    assert session_module._zombie_or_gone(os.getpid()) == session_module._UNKNOWN
+        assert session._ours(process) is True
+    assert session._group_lost is False and session._ownership_unknown is False
+    assert session_module._zombie_or_gone(os.getpid()) == session_module._RUNNING
 
     def gone(pid, sig):
         raise ProcessLookupError(3, "No such process")
 
     monkeypatch.setattr(os, "kill", gone)
     assert session_module._zombie_or_gone(424242) == session_module._GONE
+
+    def refused(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    # A pid that refuses signal 0 is a stranger's: unknown, and never signalled.
+    monkeypatch.setattr(os, "kill", refused)
+    assert session_module._zombie_or_gone(424242) == session_module._UNKNOWN
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+@pytest.mark.parametrize("anchored", [True, False])
+def test_a_worker_handle_is_stopped_and_cleaned_with_neither_waitid_nor_proc(monkeypatch, anchored):
+    from provider_hub.sandbox import WorkerProcess, spawn as sandbox_spawn
+
+    monkeypatch.delattr(os, "waitid", raising=False)
+    monkeypatch.setattr(sandbox_spawn, "_has_proc", lambda: False)
+    if not anchored:
+        monkeypatch.setattr(sandbox_spawn, "_start_anchor", lambda: None)
+    process = sandbox_spawn._start_plain(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    assert isinstance(process, WorkerProcess)
+    try:
+        # Nothing can tell it from a stranger: it is ours (it was never reaped), not lost.
+        assert process.probe_exit() == "running"
+        assert process.signal_group(0) is True
+        process.stop(0.3)
+        assert process.group_cleaned is True and process.returncode is not None
+        assert process._leader_lost is False and process._anchor_lost is False
+    finally:
+        monkeypatch.undo()
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_worker_handle_reaped_by_somebody_else_is_still_lost_with_neither_waitid_nor_proc(monkeypatch):
+    from provider_hub.sandbox import WorkerProcess, spawn as sandbox_spawn
+
+    monkeypatch.delattr(os, "waitid", raising=False)
+    monkeypatch.setattr(sandbox_spawn, "_has_proc", lambda: False)
+    process = WorkerProcess([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        os.kill(process.pid, signal.SIGKILL)
+        os.waitpid(process.pid, 0)
+        assert process.returncode is None  # Popen was not told
+        assert process.probe_exit() == "gone"
+        assert process._leader_lost is True
+        process.stop(0.3)
+        assert process.group_cleaned is False
+    finally:
+        monkeypatch.undo()
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")

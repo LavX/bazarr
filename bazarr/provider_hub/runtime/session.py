@@ -255,7 +255,8 @@ def _signal_group(process, sig):
 
 
 _RUNNING, _EXITED, _GONE = "running", "exited", "gone"
-# Nothing here can tell the child from a stranger that took its pid: no waitid, and no /proc.
+# The platform could not say (an unreadable entry, no start time saved at spawn, a refused signal 0).
+# Where it has neither waitid nor /proc the child is taken for ours instead: see ``_zombie_or_gone``.
 _UNKNOWN = "unknown"
 
 
@@ -299,8 +300,9 @@ def _zombie_or_gone(pid, mark=None):
     when it started. A process that started after the child did (``mark`` is what
     ``_start_mark`` recorded at spawn) is not the child: ``gone``; with no mark saved, a
     live entry proves nothing about whose it is: ``unknown``. Where there is no
-    ``/proc`` either, a pid that answers might be the child or a stranger: ``unknown``,
-    and nothing is signalled on that word.
+    ``/proc`` either, a pid that answers might be the child or a stranger and nothing can
+    say which: it is taken for the child (``running``), and the pool counts the teardown as
+    unverified. A pid that does not answer is ``gone``; one that refuses signal 0 is ``unknown``.
     """
     if _has_proc():
         try:
@@ -323,7 +325,11 @@ def _zombie_or_gone(pid, mark=None):
         return _GONE
     except OSError:
         return _UNKNOWN
-    return _UNKNOWN
+    # The platform cannot tell a zombie, a live child and a stranger apart. Nobody here reaps
+    # the child but this session (it is kept unreaped until its group is ended), so it is
+    # taken for the live child: the group is ended the usual way and the teardown is counted
+    # as one without whole-tree proof. An outside reaper shows as ``gone`` above, not here.
+    return _RUNNING
 
 
 def _probe(process, mark=None):

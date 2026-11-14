@@ -593,16 +593,25 @@ def _start_mark(pid: int) -> "str | None":
         return None
 
 
+def _has_proc() -> bool:
+    return os.path.isdir("/proc/self")
+
+
 def _owned_without_waitid(pid: int, started: "str | None") -> "bool | None":
     """Whether a child that has not been reaped by us is still there, where ``waitid`` cannot say.
 
     True: its entry in ``/proc`` is there with the start time it had (alive, or a zombie,
-    which keeps its pid). False: the entry is gone or belongs to a process that started
-    later: somebody else reaped it and the pid may be a stranger's. None: nothing can
-    tell (no ``/proc``, an unreadable entry, or no start time saved at spawn to compare
-    with), so ownership is unknown and the caller must not signal.
+    which keeps its pid). Where the platform has neither ``/proc`` nor a non-reaping wait,
+    True also means that signal 0 reaches the pid: nothing on such a host can tell the
+    child from a stranger that took its number, so it is taken for ours, and the caller
+    ends the group by its usual order and records the teardown as unverified (the pool
+    counts it) instead of leaving it stuck. False: the entry is gone or belongs to a
+    process that started later: somebody else reaped it and the pid may be a stranger's.
+    None: the platform could tell and did not (an unreadable entry, no start time saved
+    at spawn to compare with, or a signal 0 that is refused), so ownership is unknown and
+    the caller must not signal.
     """
-    if os.path.isdir("/proc/self"):
+    if _has_proc():
         try:
             _state, start = _stat_fields(pid)
         except FileNotFoundError:
@@ -622,7 +631,9 @@ def _owned_without_waitid(pid: int, started: "str | None") -> "bool | None":
             return False
         except OSError:
             return None
-    # Something answers to the pid, but a zombie and a stranger look the same from here.
+        # Something answers to the pid, and a zombie and a stranger look the same from here:
+        # the platform cannot tell. Taken for ours (see above); not an outside reaper's.
+        return True
     return None
 
 
@@ -820,7 +831,11 @@ class WorkerProcess(subprocess.Popen):
 
     def _proc_answer(self) -> "str | None":
         """``probe_exit`` from ``/proc`` and the start time. Call with ``_own_lock`` held."""
-        if not os.path.isdir("/proc/self"):
+        if not _has_proc():
+            if self._anchor is not None:
+                # The anchor keeps the group's number whatever happens to the leader, so the leader
+                # can be reaped to see its exit: nothing is lost by it, and nothing else can tell.
+                return "exited" if super().poll() is not None else "running"
             try:
                 os.kill(self.pid, 0)
             except ProcessLookupError:
@@ -828,7 +843,10 @@ class WorkerProcess(subprocess.Popen):
                 return "gone"
             except OSError:
                 return None
-            return None  # a zombie and a stranger look the same from here
+            # A zombie and a stranger look the same from here, and so do running and exited: the
+            # platform cannot tell. The leader is taken for ours and for running; the exit is seen
+            # when it is reaped (the stop reaps it after the group is ended, never before).
+            return "running"
         try:
             state, start = _stat_fields(self.pid)
         except FileNotFoundError:
