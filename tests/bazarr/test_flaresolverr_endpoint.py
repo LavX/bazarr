@@ -412,9 +412,30 @@ class TestNeverBlocksTheCaller:
         try:
             status = endpoints.flaresolverr_status(_settings(""))
             assert status["detected"] == endpoints.FLARESOLVERR_SIBLING_URL
-            assert status["detecting"] is False
+            # The page polls only while this is true, so a running refresh of a
+            # stale answer has to say so or the open page never sees the result.
+            assert status["detecting"] is True
         finally:
             release.set()
+
+    def test_a_poll_after_a_stale_refresh_completes_gets_the_new_result(self, monkeypatch):
+        import time
+
+        endpoints._sibling_cache.update(checked_at=time_ago(endpoints.SIBLING_CACHE_SECONDS + 1),
+                                        url=endpoints.FLARESOLVERR_SIBLING_URL)
+        release, _calls = self._gated_probe(monkeypatch, found=False)
+        first = endpoints.flaresolverr_status(_settings(""))
+        assert first["detecting"] is True
+        release.set()
+        for _ in range(100):
+            status = endpoints.flaresolverr_status(_settings(""))
+            if not status["detecting"]:
+                break
+            time.sleep(0.05)
+
+        assert status["detecting"] is False
+        assert status["detected"] is None
+        assert status["sibling_found"] is False
 
     def test_a_fresh_answer_starts_no_probe(self, monkeypatch):
         import time
@@ -462,6 +483,34 @@ class TestNeverBlocksTheCaller:
             assert time.monotonic() - started < 2.0
         finally:
             release.set()
+
+    def test_a_second_detect_while_the_first_probe_is_still_blocked_starts_no_new_probe(self, monkeypatch):
+        """The deadline stops the callers' wait, not the network call, so the flight must outlive it."""
+        import time
+
+        release, calls = self._gated_probe(monkeypatch)
+        monkeypatch.setattr(endpoints, "SIBLING_PROBE_DEADLINE_SECONDS", 0.2)
+        try:
+            assert endpoints.detect_flaresolverr_sibling(refresh=True) is None
+            assert endpoints._probe_flight is not None
+            started = time.monotonic()
+            assert endpoints.detect_flaresolverr_sibling(refresh=True) is None
+            assert time.monotonic() - started < 2.0
+            assert endpoints.schedule_sibling_refresh() is None
+            assert len(calls) == 1
+        finally:
+            release.set()
+        _join_background_threads()
+        assert len(calls) == 1
+        assert endpoints._probe_flight is None
+
+    def test_a_result_that_lands_after_the_deadline_replaces_the_timeout_answer(self, monkeypatch):
+        release, _calls = self._gated_probe(monkeypatch)
+        monkeypatch.setattr(endpoints, "SIBLING_PROBE_DEADLINE_SECONDS", 0.2)
+        assert endpoints.detect_flaresolverr_sibling(refresh=True) is None
+        release.set()
+        _join_background_threads()
+        assert endpoints.detect_flaresolverr_sibling() == endpoints.FLARESOLVERR_SIBLING_URL
 
     def test_a_pending_startup_probe_and_an_explicit_detect_share_one_probe(self, monkeypatch):
         """The startup probe is slow and negative; Detect must not race it with a second probe."""

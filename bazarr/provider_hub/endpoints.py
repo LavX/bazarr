@@ -143,67 +143,71 @@ def _probe_flaresolverr(url: str) -> bool:
     return isinstance(payload, dict) and "flaresolverr" in str(payload.get("msg", "")).casefold()
 
 
-def _probe_bounded(url: str) -> bool:
-    """Probe with a deadline that covers the whole attempt, name lookup included.
-
-    ``requests`` timeouts do not bound ``getaddrinfo``, and a slow search domain
-    can hold a lookup for far longer than the request timeout. The probe runs in
-    its own daemon thread and the caller stops waiting at the deadline, so a
-    stuck lookup costs a parked thread, never a stalled caller.
-    """
-    outcome = {"found": False}
-    done = threading.Event()
-
-    def run():
-        try:
-            outcome["found"] = bool(_probe_flaresolverr(url))
-        except Exception:
-            outcome["found"] = False
-        finally:
-            done.set()
-
-    threading.Thread(target=run, name="flaresolverr-probe", daemon=True).start()
-    return bool(done.wait(SIBLING_PROBE_DEADLINE_SECONDS) and outcome["found"])
+def _record_sibling_locked(found: bool) -> None:
+    _sibling_cache["checked_at"] = time.monotonic()
+    _sibling_cache["url"] = FLARESOLVERR_SIBLING_URL if found else None
 
 
-def _record_sibling(found: bool) -> str | None:
-    url = FLARESOLVERR_SIBLING_URL if found else None
-    with _sibling_lock:
-        _sibling_cache["checked_at"] = time.monotonic()
-        _sibling_cache["url"] = url
-    return url
+def _settle(flight: dict, found: bool | None, finished: bool = False) -> None:
+    """Record the outcome of the flight and wake everyone waiting on it.
 
-
-def _join_or_start_probe() -> tuple[threading.Event, threading.Thread | None]:
-    """The event of the probe in flight, starting one when none is.
-
-    The second item is the thread that was started, or ``None`` when an
-    existing probe was joined. The probe thread is bounded by the probe
-    deadline, so a flight never outlives it by much and cannot block the next
-    one for good.
+    ``found`` is ``None`` when the deadline passed with the network operation
+    still running; that counts as a negative answer, but only if the flight has
+    not already been settled. A real result always replaces it. ``finished``
+    clears the flight, in the same step, because the network operation is over.
     """
     global _probe_flight
     with _sibling_lock:
-        flight = _probe_flight
-        if flight is not None:
-            return flight["done"], None
-        done = threading.Event()
-        _probe_flight = {"done": done}
+        if found is None:
+            if not flight["recorded"]:
+                _record_sibling_locked(False)
+        else:
+            _record_sibling_locked(found)
+        flight["recorded"] = True
+        if finished and _probe_flight is flight:
+            _probe_flight = None
+    flight["settled"].set()
+
+
+def _join_or_start_probe() -> tuple[dict, threading.Thread | None]:
+    """The probe in flight, starting one when none is.
+
+    The second item is the thread that was started, or ``None`` when an
+    existing probe was joined.
+
+    ``requests`` timeouts do not bound ``getaddrinfo``, and a slow search domain
+    can hold a lookup far longer than the request timeout. The flight therefore
+    lasts as long as the network operation does, so repeated requests never
+    stack up threads and sockets behind a stuck lookup. Callers do not wait that
+    long: at the probe deadline the flight is settled with a negative answer,
+    and a later real result still replaces it.
+    """
+    global _probe_flight
+    with _sibling_lock:
+        existing = _probe_flight
+        if existing is not None:
+            return existing, None
+        flight = {"settled": threading.Event(), "recorded": False, "started_at": time.monotonic()}
+        _probe_flight = flight
+
+    deadline = threading.Timer(SIBLING_PROBE_DEADLINE_SECONDS, _settle, args=(flight, None))
+    deadline.name = "flaresolverr-deadline"
+    deadline.daemon = True
 
     def run():
-        global _probe_flight
+        found = False
         try:
-            _record_sibling(_probe_bounded(FLARESOLVERR_SIBLING_URL))
+            found = bool(_probe_flaresolverr(FLARESOLVERR_SIBLING_URL))
         except Exception:
             logger.debug("FlareSolverr sibling probe failed", exc_info=True)
         finally:
-            with _sibling_lock:
-                _probe_flight = None
-            done.set()
+            deadline.cancel()
+            _settle(flight, found, finished=True)
 
-    thread = threading.Thread(target=run, name="flaresolverr-hint", daemon=True)
+    thread = threading.Thread(target=run, name="flaresolverr-probe", daemon=True)
+    deadline.start()
     thread.start()
-    return done, thread
+    return flight, thread
 
 
 def detect_flaresolverr_sibling(refresh: bool = False) -> str | None:
@@ -218,8 +222,8 @@ def detect_flaresolverr_sibling(refresh: bool = False) -> str | None:
         checked_at = _sibling_cache["checked_at"]
         if not refresh and checked_at is not None and time.monotonic() - checked_at < SIBLING_CACHE_SECONDS:
             return _sibling_cache["url"]
-    done, _thread = _join_or_start_probe()
-    done.wait(SIBLING_PROBE_DEADLINE_SECONDS + 5.0)
+    flight, _thread = _join_or_start_probe()
+    flight["settled"].wait(SIBLING_PROBE_DEADLINE_SECONDS + 5.0)
     with _sibling_lock:
         return _sibling_cache["url"]
 
@@ -237,8 +241,9 @@ def sibling_hint() -> tuple[str | None, bool]:
     """The cached sibling address and whether an answer is still being worked out.
 
     Never probes in the caller. A missing or stale answer starts a background
-    refresh; until it lands the caller gets the last known address (or none) and
-    ``detecting`` is true when nothing has been learned yet.
+    refresh; until it lands the caller gets the last known address (or none).
+    ``detecting`` is true while nothing has been learned yet and while a refresh
+    of a stale answer is running, because the page polls only while it is true.
     """
     with _sibling_lock:
         checked_at = _sibling_cache["checked_at"]
@@ -246,7 +251,10 @@ def sibling_hint() -> tuple[str | None, bool]:
     fresh = checked_at is not None and time.monotonic() - checked_at < SIBLING_CACHE_SECONDS
     if not fresh:
         schedule_sibling_refresh()
-    return url, checked_at is None
+    with _sibling_lock:
+        flight = _probe_flight
+        refreshing = flight is not None and not flight["recorded"]
+    return url, checked_at is None or (not fresh and refreshing)
 
 
 def start_flaresolverr_hint_probe() -> None:
