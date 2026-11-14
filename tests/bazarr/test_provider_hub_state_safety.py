@@ -501,7 +501,7 @@ def test_a_state_file_that_is_not_a_state_document_is_not_imported(hub_store, hu
     assert path.read_text(encoding="utf-8") == content
 
 
-DAMAGED_DOCUMENTS = ["[]", "null", '{"jobs": []}', '{"installations": []}', "{broken"]
+DAMAGED_DOCUMENTS = ["[]", "null", "{}", '{"jobs": []}', '{"installations": []}', "{broken"]
 
 
 def _damage_the_row(engine, text):

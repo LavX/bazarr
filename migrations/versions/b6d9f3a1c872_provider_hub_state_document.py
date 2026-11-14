@@ -40,7 +40,7 @@ def _legacy_path():
 
 
 def _legacy_document():
-    """The text to import from state.json, or an empty object without one.
+    """The text to import from state.json, or an empty inventory without one.
 
     A file that is not valid JSON, whose root is not an object, or that has no
     installation inventory raises, so
@@ -48,7 +48,8 @@ def _legacy_document():
     """
     path = _legacy_path()
     if not os.path.exists(path):
-        return "{}"
+        # Not an empty object: that reads as a damaged document at any revision.
+        return '{"installations": {}}'
     with open(path, "r", encoding="utf-8") as handle:
         data = json.load(handle)
     if not isinstance(data, dict):

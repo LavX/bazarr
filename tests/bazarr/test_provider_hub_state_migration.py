@@ -119,7 +119,7 @@ def test_upgrade_after_the_app_created_the_table_is_a_no_op(hub_store, hub_engin
 def test_upgrade_without_a_state_file_stores_an_empty_document(hub_store, hub_engine):
     with hub_engine.connect() as connection:
         _run(connection, _migration(hub_store.legacy_state_path()).upgrade)
-    assert json.loads(raw_row(hub_engine)[1]) == {}
+    assert json.loads(raw_row(hub_engine)[1]) == {"installations": {}}
 
 
 def test_an_unreadable_state_file_does_not_stop_the_upgrade(hub_store, hub_engine):

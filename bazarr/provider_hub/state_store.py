@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 TABLE_NAME = "provider_hub_state"
 ROW_ID = 1
 SCHEMA_VERSION = 1
+# What a first start stores when there is no state.json to import. Not an empty
+# object: an empty object is a damaged document at any revision.
+EMPTY_DOCUMENT = '{"installations": {}}'
 
 # The same columns the ORM model and the migration declare. Defined here on
 # its own metadata so the store does not import app.database, which cannot be
@@ -165,7 +168,7 @@ def _insert_if_absent(values: dict[str, Any], dialect_name: str):
 
 
 def _legacy_document(path: Path | None) -> str:
-    """The text to import from a state.json, or an empty object without one.
+    """The text to import from a state.json, or an empty inventory without one.
 
     A file that is not valid JSON, whose root is not an object, or that has no
     installation inventory raises:
@@ -174,7 +177,7 @@ def _legacy_document(path: Path | None) -> str:
     original. The file stays where it is either way.
     """
     if path is None or not path.exists():
-        return "{}"
+        return EMPTY_DOCUMENT
     with path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
     if not isinstance(data, dict):

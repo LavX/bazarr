@@ -625,10 +625,9 @@ def _stored_document(text: str) -> dict[str, Any]:
     root is not an object, or that has no installation inventory is damaged:
     a copy is kept beside the state file and ``StateCorruptError`` is raised,
     because normalizing it would fill in an empty inventory that reads as
-    "nothing is installed" and then be stored over the damaged document. The
-    one empty document that is not damage is the empty object the first start
-    stores when there was no file to import: ``FileNotFoundError``, a state
-    that has not been written yet.
+    "nothing is installed" and then be stored over the damaged document. An
+    empty object is damaged at every revision: a first start with no file to
+    import stores a document with an empty inventory, not an empty object.
     """
     current = state_file()
     content = text.encode("utf-8")
@@ -638,19 +637,15 @@ def _stored_document(text: str) -> dict[str, Any]:
         raise _unreadable(current, "not valid JSON", content) from error
     if not isinstance(data, dict):
         raise _unreadable(current, "the root is not an object", content)
-    if not data:
-        raise FileNotFoundError("the Provider Hub state has not been written yet")
     if not isinstance(data.get("installations"), dict):
         raise _unreadable(current, "the installation inventory is missing or not an object", content)
     return data
 
 
 def _document_for_mutation(text: str, recover_corrupt: bool) -> dict[str, Any]:
-    """The stored document ready to change: normalized, a default when nothing was written yet."""
+    """The stored document ready to change, normalized; a default only when asked to recover a damaged one."""
     try:
         return _normalized_state(_stored_document(text))
-    except FileNotFoundError:
-        return default_state()
     except StateCorruptError:
         if not recover_corrupt:
             raise
@@ -660,7 +655,7 @@ def _document_for_mutation(text: str, recover_corrupt: bool) -> dict[str, Any]:
 def read_state_document(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     """The stored document as it is, or an error: never a default.
 
-    Raises ``FileNotFoundError`` when nothing was stored yet and ``StateCorruptError``
+    Raises ``FileNotFoundError`` when there is no file and ``StateCorruptError``
     (after keeping a copy of a damaged file) when it is not JSON or its root is
     not an object.
     """
@@ -709,10 +704,7 @@ def load_state_strict(path: str | os.PathLike[str] | None = None) -> dict[str, A
         if _DATABASE_HELD:
             return _snapshot_state(strict=True)
         from . import state_store
-        try:
-            return _normalized_state(_stored_document(state_store.read_document()[1]))
-        except FileNotFoundError:
-            return default_state()
+        return _normalized_state(_stored_document(state_store.read_document()[1]))
     current = Path(path) if path is not None else state_file()
     data = _read_document(current)
     return default_state() if data is None else _normalized_state(data)
