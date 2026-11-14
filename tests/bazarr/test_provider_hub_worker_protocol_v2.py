@@ -4300,16 +4300,58 @@ def test_a_bare_child_with_no_saved_identity_is_unknown_when_a_stranger_has_its_
             pass
 
 
-def test_a_live_pid_is_taken_for_the_child_with_neither_waitid_nor_proc(monkeypatch):
+def _blind_host(monkeypatch):
+    """What a host with neither waitid nor /proc looks like to the session and to the spawner."""
+    from provider_hub.sandbox import spawn as sandbox_spawn
+
     monkeypatch.delattr(os, "waitid", raising=False)
     monkeypatch.setattr(session_module, "_has_proc", lambda: False)
-    session = WorkerSession(["worker"])
-    process = _ReapingProcess()  # alive, a pid that answers signal 0
-    # The platform cannot tell a zombie, the child and a stranger apart; that is not an outside reap.
-    with session._group_lock:
-        assert session._ours(process) is True
-    assert session._group_lost is False and session._ownership_unknown is False
-    assert session_module._zombie_or_gone(os.getpid()) == session_module._RUNNING
+    monkeypatch.setattr(sandbox_spawn, "_has_proc", lambda: False)
+
+
+def _record_group_signals(monkeypatch):
+    sent = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (sent.append((pgid, sig)), real_killpg(pgid, sig))[1])
+    return sent
+
+
+_GROUP_AND_EXIT = (
+    "import subprocess, sys, time\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdin=subprocess.DEVNULL)\n"
+    "print(child.pid, flush=True)\n"
+    "time.sleep(%s)\n"
+)
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_live_child_is_proven_ours_by_waitpid_with_neither_waitid_nor_proc(monkeypatch):
+    _blind_host(monkeypatch)
+    session, process = _bare_child()
+    try:
+        # Signal 0 would answer for anything; waitpid(WNOHANG) answering 0 is the proof.
+        assert session_module._probe(process, None) == session_module._RUNNING
+        with session._group_lock:
+            assert session._ours(process) is True
+        assert session._group_lost is False and session._ownership_unknown is False
+        assert process.returncode is None, "the probe reaped a live child"
+        session.close(grace=0.3)
+        assert process.returncode is not None
+        assert session.teardown_confirmed is True
+    finally:
+        monkeypatch.undo()
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_pid_alone_proves_nothing_with_neither_waitid_nor_proc(monkeypatch):
+    _blind_host(monkeypatch)
+    # Signal 0 reaches this process, yet without the child's Popen to ask waitpid about it nothing proves
+    # the pid is a child's: unknown. A pid nobody answers for is gone, and one that refuses is unknown.
+    assert session_module._zombie_or_gone(os.getpid()) == session_module._UNKNOWN
 
     def gone(pid, sig):
         raise ProcessLookupError(3, "No such process")
@@ -4320,9 +4362,57 @@ def test_a_live_pid_is_taken_for_the_child_with_neither_waitid_nor_proc(monkeypa
     def refused(pid, sig):
         raise PermissionError(1, "Operation not permitted")
 
-    # A pid that refuses signal 0 is a stranger's: unknown, and never signalled.
     monkeypatch.setattr(os, "kill", refused)
     assert session_module._zombie_or_gone(424242) == session_module._UNKNOWN
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_child_reaped_by_somebody_else_is_not_signalled_with_neither_waitid_nor_proc(monkeypatch):
+    # An outside reaper collects the child without telling Popen, and the pid is then reused. Signal 0
+    # would answer yes for the stranger; waitpid says ECHILD, so no group signal is sent.
+    _blind_host(monkeypatch)
+    session, process = _bare_child()
+    sent = _record_group_signals(monkeypatch)
+    try:
+        os.kill(process.pid, signal.SIGKILL)
+        os.waitpid(process.pid, 0)
+        assert process.returncode is None  # Popen was not told
+        real_kill = os.kill
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None if pid == process.pid and sig == 0 else real_kill(pid, sig))
+        assert session_module._probe(process, None) == session_module._GONE
+        with session._group_lock:
+            assert session._ours(process) is False
+        assert session._group_lost is True
+        session.close(grace=0.3)
+        assert [sig for pgid, sig in sent if pgid == process.pid] == [], sent
+        assert session.teardown_confirmed is False
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_child_that_exited_and_was_collected_by_the_probe_still_has_its_group_ended(monkeypatch):
+    # The child exits on its own, leaving a member of its group behind. With no way to see a zombie, the
+    # probe's own waitpid collects it; the group id is held while the member lives, so it is ended.
+    _blind_host(monkeypatch)
+    process = subprocess.Popen([sys.executable, "-c", _GROUP_AND_EXIT % "0.3"], start_new_session=True,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    session = WorkerSession(["worker"])
+    session.process = process
+    member = int(process.stdout.readline())
+    try:
+        assert wait_until(lambda: session._exited(process), timeout=10)
+        assert process.returncode is not None and session._reaped_here is True
+        assert pid_alive(member)
+        session.close(grace=0.3)
+        assert wait_until(lambda: not pid_alive(member), timeout=5), "a member of the group outlived the teardown"
+        assert session.teardown_confirmed is True
+    finally:
+        monkeypatch.undo()
+        try:
+            os.kill(member, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
@@ -4330,8 +4420,7 @@ def test_a_live_pid_is_taken_for_the_child_with_neither_waitid_nor_proc(monkeypa
 def test_a_worker_handle_is_stopped_and_cleaned_with_neither_waitid_nor_proc(monkeypatch, anchored):
     from provider_hub.sandbox import WorkerProcess, spawn as sandbox_spawn
 
-    monkeypatch.delattr(os, "waitid", raising=False)
-    monkeypatch.setattr(sandbox_spawn, "_has_proc", lambda: False)
+    _blind_host(monkeypatch)
     if not anchored:
         monkeypatch.setattr(sandbox_spawn, "_start_anchor", lambda: None)
     process = sandbox_spawn._start_plain(
@@ -4339,7 +4428,7 @@ def test_a_worker_handle_is_stopped_and_cleaned_with_neither_waitid_nor_proc(mon
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     assert isinstance(process, WorkerProcess)
     try:
-        # Nothing can tell it from a stranger: it is ours (it was never reaped), not lost.
+        # waitpid(WNOHANG) answering 0 proves it is ours and unreaped.
         assert process.probe_exit() == "running"
         assert process.signal_group(0) is True
         process.stop(0.3)
@@ -4354,23 +4443,58 @@ def test_a_worker_handle_is_stopped_and_cleaned_with_neither_waitid_nor_proc(mon
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
-def test_a_worker_handle_reaped_by_somebody_else_is_still_lost_with_neither_waitid_nor_proc(monkeypatch):
-    from provider_hub.sandbox import WorkerProcess, spawn as sandbox_spawn
+@pytest.mark.parametrize("anchored", [True, False])
+def test_a_worker_handle_reaped_by_somebody_else_is_lost_with_neither_waitid_nor_proc(monkeypatch, anchored):
+    from provider_hub.sandbox import spawn as sandbox_spawn
 
-    monkeypatch.delattr(os, "waitid", raising=False)
-    monkeypatch.setattr(sandbox_spawn, "_has_proc", lambda: False)
-    process = WorkerProcess([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _blind_host(monkeypatch)
+    if not anchored:
+        monkeypatch.setattr(sandbox_spawn, "_start_anchor", lambda: None)
+    process = sandbox_spawn._start_plain(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sent = _record_group_signals(monkeypatch)
+    pids = [process.pid] + ([process._anchor.pid] if anchored else [])
     try:
-        os.kill(process.pid, signal.SIGKILL)
-        os.waitpid(process.pid, 0)
+        os.killpg(process._anchor.pid if anchored else process.pid, signal.SIGKILL)
+        for pid in pids:
+            os.waitpid(pid, 0)
         assert process.returncode is None  # Popen was not told
-        assert process.probe_exit() == "gone"
-        assert process._leader_lost is True
+        sent.clear()
+        # The pids now answer signal 0 for a stranger; waitpid says ECHILD for both.
+        real_kill = os.kill
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None if pid in pids and sig == 0 else real_kill(pid, sig))
+        assert process.signal_group(signal.SIGCONT) is None
         process.stop(0.3)
+        assert [sig for pgid, sig in sent if pgid in pids] == [], sent
         assert process.group_cleaned is False
     finally:
         monkeypatch.undo()
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_worker_handle_collected_by_the_probe_has_its_group_ended(monkeypatch):
+    from provider_hub.sandbox import spawn as sandbox_spawn
+
+    _blind_host(monkeypatch)
+    monkeypatch.setattr(sandbox_spawn, "_start_anchor", lambda: None)
+    process = sandbox_spawn._start_plain(
+        [sys.executable, "-c", _GROUP_AND_EXIT % "0.3"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    member = int(process.stdout.readline())
+    try:
+        assert wait_until(lambda: process.probe_exit() == "exited", timeout=10)
+        assert process.returncode is not None and process._leader_reaped_here is True
+        assert pid_alive(member)
+        process.stop(0.3)
+        assert process.group_cleaned is True
+        assert wait_until(lambda: not pid_alive(member), timeout=5), "a member of the group outlived stop()"
+    finally:
+        monkeypatch.undo()
+        try:
+            os.kill(member, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")

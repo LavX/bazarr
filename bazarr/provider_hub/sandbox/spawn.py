@@ -6,9 +6,24 @@ Fork safety: Bazarr+ is heavily threaded, so the host never forks itself. No
 as ``subprocess.Popen([python, "-I", "-S", "-B", launcher.py, ...])``: a fresh
 single-threaded interpreter that applies the limits and the ruleset and then
 ``execve``s the worker.
+
+Hosts that can tell nothing about a child (no ``waitid`` that leaves an exit unconsumed,
+and no ``/proc``): signal 0 proves nothing there, since a pid that answers may be the
+child, a zombie, or a stranger that took the number after an outside reap. The one proof
+only a parent can get is ``waitpid(pid, WNOHANG)`` on its own direct child (the leader and
+the anchor both are): 0 means it is ours, alive and unreaped, so the group is signalled
+and reaped by us afterwards; its own pid means this call reaped it (the status is recorded
+as ``Popen`` would, and the group id is still held while any member lives, so the
+remaining members are ended by a group signal right after); ``ECHILD`` means somebody
+else reaped it, so ownership is lost and no group signal is sent. The window left: the
+child exits, an outside reaper collects it, and its pid is reused as a group leader, all
+between our ``WNOHANG`` and the signal that follows it. The host installs no ``SIGCHLD``
+handler and calls no ``waitpid(-1)``, so nothing in this process reaps a worker behind
+``Popen``'s back; only a reaper outside it, or a thread of an embedding application, could.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -597,19 +612,39 @@ def _has_proc() -> bool:
     return os.path.isdir("/proc/self")
 
 
+def _waitpid_proof(popen: "subprocess.Popen") -> str:
+    """Whether a direct child is ours, where neither ``waitid`` nor ``/proc`` can say. Its ``returncode`` is None.
+
+    ``"live"``: ``waitpid(pid, WNOHANG)`` returned 0, so the pid is our own unreaped child.
+    ``"reaped"``: it returned the pid, so this call collected the child; its status is
+    recorded as ``Popen`` records it. ``"lost"``: ``ECHILD`` (or any other error), so
+    somebody else reaped it and the number may be a stranger's. See the module docstring
+    for the window this leaves. Taken under the ``Popen``'s own wait lock, so a concurrent
+    ``poll`` cannot collect the same exit.
+    """
+    lock = getattr(popen, "_waitpid_lock", None)
+    with (lock if lock is not None else contextlib.nullcontext()):
+        if popen.returncode is not None:
+            return "reaped"
+        try:
+            pid, status = os.waitpid(popen.pid, os.WNOHANG)
+        except OSError:
+            return "lost"
+        if pid == 0:
+            return "live"
+        popen.returncode = os.waitstatus_to_exitcode(status)
+        return "reaped"
+
+
 def _owned_without_waitid(pid: int, started: "str | None") -> "bool | None":
     """Whether a child that has not been reaped by us is still there, where ``waitid`` cannot say.
 
     True: its entry in ``/proc`` is there with the start time it had (alive, or a zombie,
-    which keeps its pid). Where the platform has neither ``/proc`` nor a non-reaping wait,
-    True also means that signal 0 reaches the pid: nothing on such a host can tell the
-    child from a stranger that took its number, so it is taken for ours, and the caller
-    ends the group by its usual order and records the teardown as unverified (the pool
-    counts it) instead of leaving it stuck. False: the entry is gone or belongs to a
-    process that started later: somebody else reaped it and the pid may be a stranger's.
-    None: the platform could tell and did not (an unreadable entry, no start time saved
-    at spawn to compare with, or a signal 0 that is refused), so ownership is unknown and
-    the caller must not signal.
+    which keeps its pid). False: the entry is gone or belongs to a process that started
+    later: somebody else reaped it and the pid may be a stranger's. None: nothing can
+    tell (no ``/proc``, where signal 0 proves nothing and ``_waitpid_proof`` decides
+    instead; an unreadable entry; or no start time saved at spawn to compare with), so
+    ownership is unknown and the caller must not signal.
     """
     if _has_proc():
         try:
@@ -631,9 +666,7 @@ def _owned_without_waitid(pid: int, started: "str | None") -> "bool | None":
             return False
         except OSError:
             return None
-        # Something answers to the pid, and a zombie and a stranger look the same from here:
-        # the platform cannot tell. Taken for ours (see above); not an outside reaper's.
-        return True
+    # Something answers to the pid, but a zombie and a stranger look the same from here.
     return None
 
 
@@ -658,6 +691,11 @@ class WorkerProcess(subprocess.Popen):
     _anchor: "subprocess.Popen | None" = None
     _leader_lost = False
     _anchor_lost = False
+    # Set when ``_waitpid_proof`` itself collected the leader (or the anchor) on a host with
+    # nothing else to go by: the group id is still held while any member lives, so the group
+    # may be signalled once more, and only on that word.
+    _leader_reaped_here = False
+    _anchor_reaped_here = False
     _started_mark: "str | None" = None
     _anchor_mark: "str | None" = None
     # None until a ``stop`` has run. True: this object ended the worker's process
@@ -680,6 +718,8 @@ class WorkerProcess(subprocess.Popen):
         # on, so nothing is ever signalled by it again.
         self._leader_lost = False
         self._anchor_lost = False
+        self._leader_reaped_here = False
+        self._anchor_reaped_here = False
         super().__init__(*args, **kwargs)
         self._started_mark = _start_mark(self.pid)
 
@@ -738,18 +778,17 @@ class WorkerProcess(subprocess.Popen):
         False once it was reaped, by this object or by anything else (``waitid``
         finds no such child). A zombie is still ours: it keeps its pid.
         """
-        if self.returncode is not None or self._leader_lost:
+        if self._leader_lost:
             return False
+        if self.returncode is not None:
+            return self._leader_reaped_here
         waitid = getattr(os, "waitid", None)
         flag = getattr(os, "WNOWAIT", None)
         if waitid is None or flag is None:
             # No non-reaping wait: ``returncode`` stays None after somebody else's reap, so
-            # ask ``/proc``; where that cannot tell either, ownership is unknown and refused.
-            owned = _owned_without_waitid(self.pid, self._started_mark)
-            if not owned:
-                self._leader_lost = True
-                return False
-            return self.returncode is None
+            # ask ``/proc``, or where there is none, ``waitpid``; where that cannot tell
+            # either, ownership is unknown and refused.
+            return self._leader_owned_without_waitid()
         try:
             waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | flag)
         except ChildProcessError:
@@ -758,10 +797,39 @@ class WorkerProcess(subprocess.Popen):
         except OSError:
             # Any other answer (EPERM, EINVAL, ENOSYS...) says nothing about the pid: the same
             # identity check as without waitid decides, and unknown is refused.
-            if _owned_without_waitid(self.pid, self._started_mark) is not True:
+            if not self._leader_owned_without_waitid():
+                return False
+        return self.returncode is None or self._leader_reaped_here
+
+    def _leader_owned_without_waitid(self) -> bool:
+        """``_still_ours`` where ``waitid`` cannot say. Call with ``_own_lock`` held."""
+        if _has_proc():
+            if not _owned_without_waitid(self.pid, self._started_mark):
                 self._leader_lost = True
                 return False
-        return self.returncode is None
+            return self.returncode is None
+        proof = _waitpid_proof(self)
+        if proof == "lost":
+            self._leader_lost = True
+            return False
+        if proof == "reaped":
+            self._leader_reaped_here = True
+        return True
+
+    def _anchor_owned_without_waitid(self, anchor) -> bool:
+        """``_anchor_ours`` where ``waitid`` cannot say. Call with ``_own_lock`` held."""
+        if _has_proc():
+            if not _owned_without_waitid(anchor.pid, self._anchor_mark):
+                self._anchor_lost = True
+                return False
+            return True
+        proof = _waitpid_proof(anchor)
+        if proof == "lost":
+            self._anchor_lost = True
+            return False
+        if proof == "reaped":
+            self._anchor_reaped_here = True
+        return True
 
     def _anchor_ours(self) -> bool:
         """Whether the group anchor is still unreaped. Call with ``_own_lock`` held.
@@ -774,24 +842,21 @@ class WorkerProcess(subprocess.Popen):
         if anchor is None or self._anchor_lost:
             return False
         if anchor.returncode is not None:
+            if self._anchor_reaped_here:
+                return True
             self._anchor_lost = True
             return False
         waitid = getattr(os, "waitid", None)
         flag = getattr(os, "WNOWAIT", None)
         if waitid is None or flag is None:
-            owned = _owned_without_waitid(anchor.pid, self._anchor_mark)
-            if not owned:
-                self._anchor_lost = True
-                return False
-            return True
+            return self._anchor_owned_without_waitid(anchor)
         try:
             waitid(os.P_PID, anchor.pid, os.WEXITED | os.WNOHANG | flag)
         except ChildProcessError:
             self._anchor_lost = True
             return False
         except OSError:
-            if _owned_without_waitid(anchor.pid, self._anchor_mark) is not True:
-                self._anchor_lost = True
+            if not self._anchor_owned_without_waitid(anchor):
                 return False
         return True
 
@@ -836,16 +901,15 @@ class WorkerProcess(subprocess.Popen):
                 # The anchor keeps the group's number whatever happens to the leader, so the leader
                 # can be reaped to see its exit: nothing is lost by it, and nothing else can tell.
                 return "exited" if super().poll() is not None else "running"
-            try:
-                os.kill(self.pid, 0)
-            except ProcessLookupError:
+            # Signal 0 would answer for a zombie and for a stranger alike: only a parent's
+            # ``waitpid`` proves the child is ours (see the module docstring).
+            proof = _waitpid_proof(self)
+            if proof == "lost":
                 self._leader_lost = True
                 return "gone"
-            except OSError:
-                return None
-            # A zombie and a stranger look the same from here, and so do running and exited: the
-            # platform cannot tell. The leader is taken for ours and for running; the exit is seen
-            # when it is reaped (the stop reaps it after the group is ended, never before).
+            if proof == "reaped":
+                self._leader_reaped_here = True
+                return "exited"
             return "running"
         try:
             state, start = _stat_fields(self.pid)
@@ -1011,7 +1075,7 @@ class WorkerProcess(subprocess.Popen):
             if timed_out:
                 self._reap_quietly()
             return cleaned
-        if self.returncode is not None:
+        if self.returncode is not None and not self._leader_reaped_here:
             # Reaped by an earlier poll, wait or communicate before the group was
             # ended: the pid may be someone else's now.
             return False
@@ -1043,13 +1107,13 @@ class WorkerProcess(subprocess.Popen):
         # otherwise the whole grace passes), and the group is signalled while the leader
         # is still there, alive or a zombie. Only then is it reaped.
         with self._own_lock:
-            if self._still_ours():
+            if self._still_ours() and self.returncode is None:
                 try:
                     os.kill(self.pid, signal.SIGTERM)
                 except OSError:
                     pass
         end = time.monotonic() + max(grace, 0.0)
-        while time.monotonic() < end and not self._zombie():
+        while self.returncode is None and time.monotonic() < end and not self._zombie():
             time.sleep(0.01)
         with self._own_lock:
             if self._still_ours():

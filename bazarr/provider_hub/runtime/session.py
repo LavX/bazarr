@@ -50,6 +50,7 @@ from .errors import (
     WorkerExited,
 )
 from .frames import Codes, FrameError
+from ..sandbox.spawn import _waitpid_proof
 
 logger = logging.getLogger(__name__)
 
@@ -255,8 +256,11 @@ def _signal_group(process, sig):
 
 
 _RUNNING, _EXITED, _GONE = "running", "exited", "gone"
-# The platform could not say (an unreadable entry, no start time saved at spawn, a refused signal 0).
-# Where it has neither waitid nor /proc the child is taken for ours instead: see ``_zombie_or_gone``.
+# The probe itself collected the child (``waitpid`` on a host with neither waitid nor /proc): its
+# status is recorded, and the group it led may still be signalled once, on that word alone.
+_REAPED = "reaped"
+# The platform could not say (an unreadable entry, no start time saved at spawn, a refused signal 0,
+# or no process object to ask ``waitpid`` about where there is neither waitid nor /proc).
 _UNKNOWN = "unknown"
 
 
@@ -292,7 +296,7 @@ def _start_mark(pid):
         return None
 
 
-def _zombie_or_gone(pid, mark=None):
+def _zombie_or_gone(pid, mark=None, process=None):
     """Without ``waitid``: ``running``, ``exited`` (a zombie), ``gone`` or ``unknown``, never reaping.
 
     ``kill(pid, 0)`` succeeds on a zombie, and on a stranger that reused the pid, so on
@@ -300,9 +304,12 @@ def _zombie_or_gone(pid, mark=None):
     when it started. A process that started after the child did (``mark`` is what
     ``_start_mark`` recorded at spawn) is not the child: ``gone``; with no mark saved, a
     live entry proves nothing about whose it is: ``unknown``. Where there is no
-    ``/proc`` either, a pid that answers might be the child or a stranger and nothing can
-    say which: it is taken for the child (``running``), and the pool counts the teardown as
-    unverified. A pid that does not answer is ``gone``; one that refuses signal 0 is ``unknown``.
+    ``/proc`` either, signal 0 proves nothing (a pid that answers might be the child, a zombie
+    or a stranger), so with the child's ``Popen`` in hand the one proof a parent can get is
+    asked: ``waitpid(pid, WNOHANG)``. 0 is ``running`` (ours, alive, unreaped; the group is
+    then signalled and the teardown counted as unverified by the pool); the pid is ``reaped``
+    (this call collected it); ``ECHILD`` is ``gone`` (somebody else reaped it). A pid that does
+    not answer is ``gone``; without the ``Popen``, or when signal 0 is refused, ``unknown``.
     """
     if _has_proc():
         try:
@@ -325,11 +332,10 @@ def _zombie_or_gone(pid, mark=None):
         return _GONE
     except OSError:
         return _UNKNOWN
-    # The platform cannot tell a zombie, a live child and a stranger apart. Nobody here reaps
-    # the child but this session (it is kept unreaped until its group is ended), so it is
-    # taken for the live child: the group is ended the usual way and the teardown is counted
-    # as one without whole-tree proof. An outside reaper shows as ``gone`` above, not here.
-    return _RUNNING
+    if process is None or process.returncode is not None:
+        return _UNKNOWN
+    proof = _waitpid_proof(process)
+    return {"live": _RUNNING, "reaped": _REAPED}.get(proof, _GONE)
 
 
 def _probe(process, mark=None):
@@ -362,13 +368,13 @@ def _probe(process, mark=None):
     waitid = getattr(os, "waitid", None)
     flag = getattr(os, "WNOWAIT", None)
     if waitid is None or flag is None:
-        return _zombie_or_gone(process.pid, mark)
+        return _zombie_or_gone(process.pid, mark, process)
     try:
         found = waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | flag)
     except ChildProcessError:
         return _GONE
     except OSError:
-        return _zombie_or_gone(process.pid, mark)
+        return _zombie_or_gone(process.pid, mark, process)
     return _RUNNING if found is None else _EXITED
 
 
@@ -413,6 +419,8 @@ class WorkerSession:
         self._process_mark = None
         # Set when neither waitid nor /proc could say whether the pid is still the child's.
         self._ownership_unknown = False
+        # The leader was collected by the blind-host probe (``_REAPED``): its group may be signalled once.
+        self._reaped_here = False
         self.welcome: Welcome | None = None
         self.exit_code: int | None = None
         # Group teardown happens once, while the leader is still unreaped; after
@@ -1172,6 +1180,11 @@ class WorkerSession:
     def _exited(self, process):
         """Whether the worker has exited. Notes (once and for good) if it was reaped elsewhere."""
         state = _probe(process, self._process_mark)
+        if state == _REAPED:
+            with self._group_lock:
+                if not self._group_ended and not self._group_lost:
+                    self._reaped_here = True
+            return True
         if state in (_GONE, _UNKNOWN):
             with self._group_lock:
                 # Our own reap makes the leader vanish too, but only after the
@@ -1191,9 +1204,16 @@ class WorkerSession:
         Not after the group was ended, after the leader was reaped by anyone, or
         when it turns out to be gone right now.
         """
-        if self._group_ended or self._group_lost or process.returncode is not None:
+        if self._group_ended or self._group_lost:
             return False
+        if process.returncode is not None:
+            # Collected by the blind-host probe (``_REAPED``) the group is still ours to end; by
+            # anything else, its number may be a stranger's.
+            return self._reaped_here
         state = _probe(process, self._process_mark)
+        if state == _REAPED:
+            self._reaped_here = True
+            return True
         if state in (_GONE, _UNKNOWN):
             # Reaped by somebody else, or nothing can say the pid is still the child's: not signalled.
             self._group_lost = True

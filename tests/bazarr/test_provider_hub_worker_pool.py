@@ -2478,6 +2478,63 @@ def test_a_host_with_neither_waitid_nor_proc_releases_the_slot_and_counts_an_unv
     assert pool.status()["unverified_teardowns"]["tr"]["count"] == 3
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg") or os.name != "posix", reason="needs POSIX process groups")
+@pytest.mark.parametrize("how", ["bare", "own-session"])
+def test_a_leader_reaped_by_somebody_else_stays_stuck_with_neither_waitid_nor_proc(make_pool, monkeypatch, how):
+    import threading
+
+    from provider_hub.runtime import session as session_module
+    from provider_hub.runtime.session import WorkerSession
+    from provider_hub.sandbox import spawn as spawn_module
+
+    monkeypatch.delattr(os, "waitid", raising=False)
+    monkeypatch.setattr(session_module, "_has_proc", lambda: False)
+    monkeypatch.setattr(spawn_module, "_has_proc", lambda: False)
+    pool = make_pool(use_clock=False)
+    if how == "bare":
+        pool.register(definition())
+    else:
+        monkeypatch.setattr(spawn_module, "_start_anchor", lambda: None)
+        command, env = fake_worker_command(), {**os.environ, **fake_worker_env()}
+        pool.register(WorkerDefinition(
+            "tr", kind="translator", session_limits=fast_session(),
+            spawn=lambda: spawn_module._start_plain(command, env=env, stdin=subprocess.PIPE,
+                                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)))
+    child = pool.run("tr", "fork", {}).result["child"]
+    leader = pid_of(pool, "tr")
+    outside_reaper_done = threading.Event()
+    real_reap = WorkerSession._reap_exit_code
+
+    def late_reap(self):
+        outside_reaper_done.wait(10)
+        return real_reap(self)
+
+    sent = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(WorkerSession, "_reap_exit_code", late_reap)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (sent.append((pgid, sig)), real_killpg(pgid, sig))[1])
+    try:
+        # An outside reaper takes the leader while its descendant lives on, and the pid answers signal 0
+        # for a stranger afterwards. waitpid says ECHILD: the group is not signalled.
+        os.kill(leader, 9)
+        os.waitpid(leader, 0)
+        real_kill = os.kill
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None if pid == leader and sig == 0 else real_kill(pid, sig))
+        outside_reaper_done.set()
+        pool.stop("tr")
+        assert [sig for pgid, sig in sent if pgid == leader] == [], sent
+        assert pid_alive(child), "the group was signalled on a pid nobody vouched for"
+        assert pool.state("tr") is WorkerState.STOPPING
+        assert pool.status()["stuck"] == 1 and pool.status()["processes"] == 1
+    finally:
+        outside_reaper_done.set()
+        monkeypatch.undo()
+        try:
+            os.kill(child, 9)
+        except OSError:
+            pass
+
+
 def test_a_session_that_ended_its_own_group_is_confirmed(make_pool):
     pool = make_pool(use_clock=False)
     pool.register(definition())
