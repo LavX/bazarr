@@ -1286,7 +1286,7 @@ def test_the_pool_never_signals_a_process_group_itself():
 
 def test_a_process_tree_larger_than_the_read_limit_is_reported_truncated(monkeypatch):
     fake = list(range(2 ** 22 + 100, 2 ** 22 + 400))
-    monkeypatch.setattr(pool_module, "_children_of", lambda pid: (fake if pid == os.getpid() else [], False))
+    monkeypatch.setattr(pool_module, "_children_of", lambda pid, budget=None: (fake if pid == os.getpid() else [], False))
     sample = read_process_tree_memory(os.getpid(), max_processes=256)
     if sample is not None:
         assert sample.truncated
@@ -1691,19 +1691,19 @@ def test_a_live_descendant_whose_memory_cannot_be_read_makes_the_sample_incomple
         assert wait_until(lambda: read_process_tree_memory(os.getpid()).processes >= 2)
         assert read_process_tree_memory(os.getpid()).truncated is False
 
-        def denying(path, *names):
+        def denying(path, *names, **kwargs):
             if "/proc/%d/" % child.pid in path:
                 raise PermissionError(13, "Permission denied")
-            return real(path, *names)
+            return real(path, *names, **kwargs)
 
         monkeypatch.setattr(pool_module, "_read_kb", denying)
         sample = read_process_tree_memory(os.getpid())
         assert sample is not None and sample.truncated is True
 
-        def vanished(path, *names):
+        def vanished(path, *names, **kwargs):
             if "/proc/%d/" % child.pid in path:
                 raise FileNotFoundError(2, "No such file or directory")
-            return real(path, *names)
+            return real(path, *names, **kwargs)
 
         # A process that exited between the listing and the read is not an unknown.
         monkeypatch.setattr(pool_module, "_read_kb", vanished)
@@ -1822,7 +1822,7 @@ def test_a_kill_decided_before_a_retirement_ends_the_retiring_worker_cleanly(mak
 
 @needs_smaps
 def test_a_tree_where_nothing_can_be_read_is_unknown_not_empty(monkeypatch):
-    def denying(path, *names):
+    def denying(path, *names, **kwargs):
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(pool_module, "_read_kb", denying)
@@ -1834,7 +1834,7 @@ def test_a_tree_where_nothing_can_be_read_is_unknown_not_empty(monkeypatch):
 
 
 def test_a_worker_whose_every_process_denies_the_read_is_over_budget(make_pool, monkeypatch):
-    def denying(path, *names):
+    def denying(path, *names, **kwargs):
         raise PermissionError(13, "Permission denied")
 
     pool = make_pool(memory_reader=read_process_tree_memory)
@@ -2165,11 +2165,11 @@ def test_a_capped_proc_scan_marks_the_tree_incomplete(monkeypatch):
     assert complete is False
     # Children lists unavailable and the scan falls short: the sample cannot be called complete.
     monkeypatch.undo()
-    monkeypatch.setattr(pool_module, "_children_of", lambda pid: (None, False))
-    monkeypatch.setattr(pool_module, "_parent_map", lambda limit=0: ({}, False))
+    monkeypatch.setattr(pool_module, "_children_of", lambda pid, budget=None: (None, False))
+    monkeypatch.setattr(pool_module, "_parent_map", lambda limit=0, budget=None: ({}, False))
     members, incomplete = pool_module._process_tree(os.getpid(), 256)
     assert incomplete is True and members == [os.getpid()]
-    monkeypatch.setattr(pool_module, "_parent_map", lambda limit=0: ({}, True))
+    monkeypatch.setattr(pool_module, "_parent_map", lambda limit=0, budget=None: ({}, True))
     assert pool_module._process_tree(os.getpid(), 256) == ([os.getpid()], False)
 
 
@@ -2209,10 +2209,10 @@ def test_an_unreadable_children_list_marks_the_walk_incomplete(monkeypatch):
 def test_a_missing_smaps_rollup_falls_back_to_status_instead_of_dropping_the_process(monkeypatch):
     real = pool_module._read_kb
 
-    def no_smaps(path, *names):
+    def no_smaps(path, *names, **kwargs):
         if path.endswith("/smaps_rollup"):
             raise FileNotFoundError(2, "No such file or directory")
-        return real(path, *names)
+        return real(path, *names, **kwargs)
 
     monkeypatch.setattr(pool_module, "_read_kb", no_smaps)
     sample = read_process_tree_memory(os.getpid())
@@ -2813,7 +2813,7 @@ def _file_of(path, size):
 def _budget_pool(make_pool, monkeypatch, folder, limit):
     """A pool whose folder check reads this process's own unlinked-but-open files."""
     pool = make_pool(use_clock=False)
-    monkeypatch.setattr(pool, "_deleted_open_usage", lambda slot, budgets, files=None: pool_module.deleted_open_usage(
+    monkeypatch.setattr(pool, "_deleted_open_usage", lambda slot, budgets, files=None, budget=None: pool_module.deleted_open_usage(
         [os.getpid()], [budget.path for budget in budgets], files))
     return pool, WorkerDefinition("tr", kind="translator", budgets=[FolderBudget(str(folder), limit, "plugin data")])
 
@@ -2914,7 +2914,7 @@ def test_each_folders_budget_sees_a_file_unlinked_from_both_and_still_linked_in_
     os.unlink(second / "b")
     try:
         pool = make_pool(use_clock=False)
-        monkeypatch.setattr(pool, "_deleted_open_usage", lambda slot, budgets, files=None: pool_module.deleted_open_usage(
+        monkeypatch.setattr(pool, "_deleted_open_usage", lambda slot, budgets, files=None, budget=None: pool_module.deleted_open_usage(
             [os.getpid()], [budget.path for budget in budgets], files))
 
         def problem(first_limit, second_limit):
@@ -2959,7 +2959,7 @@ def test_a_mapped_deleted_file_is_measured_through_a_descriptor_on_another_hard_
         assert incomplete is False
         assert 3 * MIB <= usage[str(folder)] < 3 * MIB + 256 * 1024, usage
         pool = make_pool(use_clock=False)
-        monkeypatch.setattr(pool, "_deleted_open_usage", lambda slot, budgets, files=None: pool_module.deleted_open_usage(
+        monkeypatch.setattr(pool, "_deleted_open_usage", lambda slot, budgets, files=None, budget=None: pool_module.deleted_open_usage(
             [os.getpid()], [budget.path for budget in budgets], files))
 
         def problem(limit):
@@ -3835,11 +3835,11 @@ def _between_the_passes(monkeypatch, action):
     real = pool_module._mapped_objects
     calls = []
 
-    def wrapped(path):
+    def wrapped(path, budget=None):
         if not calls:
             calls.append(path)
             action()
-        return real(path)
+        return real(path, budget)
 
     monkeypatch.setattr(pool_module, "_mapped_objects", wrapped)
     return calls
