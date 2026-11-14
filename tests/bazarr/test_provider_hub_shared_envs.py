@@ -1455,6 +1455,68 @@ def test_a_process_whose_entry_cannot_be_checked_after_a_missing_file_still_bloc
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
 
+def _failing_exe(monkeypatch, entry, errors):
+    """The exe link of the fake process raises the given errors in turn, then reads normally."""
+    real_readlink = venvmod.os.readlink
+    queue = list(errors)
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe") and queue:
+            raise queue.pop(0)
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+
+def test_an_io_error_on_the_first_look_is_retried_and_dropped_once_readable(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_exe(monkeypatch, entry, [OSError(5, "Input/output error")])
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def test_an_io_error_that_persists_keeps_the_process_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_exe(monkeypatch, entry, [OSError(5, "Input/output error")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_missing_file_on_the_first_look_in_a_live_process_keeps_it_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_process_whose_entry_vanished_on_the_first_look_is_dropped(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            shutil.rmtree(entry)
+            raise FileNotFoundError(2, "No such file")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def test_an_unreadable_process_that_began_before_this_one_is_not_counted(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    mine = proc / str(os.getpid())
+    mine.mkdir()
+    (mine / "stat").write_text(f"{os.getpid()} (pytest) S " + "0 " * 18 + "99999999999999999 0\n")
+    _failing_exe(monkeypatch, entry, [OSError(5, "Input/output error")] * 10)
+    (entry / "stat").write_text(f"{entry.name} (old) S " + "0 " * 18 + "1 0\n")
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
 def test_a_process_that_stays_unreadable_still_blocks_cleanup(tmp_path, monkeypatch):
     proc, entry = _fake_proc(tmp_path)
     seen = _unreadable_reads(monkeypatch, entry, failures=10**6)

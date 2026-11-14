@@ -348,9 +348,19 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
     mine = os.getpid()
     my_start = started_at(str(mine))
     uid = os.getuid() if hasattr(os, "getuid") else None
-    # Unreadable processes that are ours and began after this one. A process in
-    # the middle of exec or exit is briefly unreadable too, so these are looked
-    # at again a few times before they count.
+    def gone(name: str) -> bool:
+        """Whether the process entry is confirmed missing (a pid can be reused, and a missing file is not a missing process)."""
+        try:
+            os.lstat(os.path.join(proc, name))
+        except FileNotFoundError:
+            return True
+        except OSError:
+            pass  # cannot tell, so it is not a confirmed exit
+        return False
+
+    # Processes that could not be read, or not read through, and could be ours.
+    # A process in the middle of exec or exit is briefly unreadable too, so these
+    # are looked at again a few times before they count.
     unreadable: list[str] = []
     for name in entries:
         if int(name) == mine:
@@ -360,15 +370,16 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
             owned = uid is not None and os.stat(os.path.join(proc, name)).st_uid == uid
             if inspect(name):
                 return True
-        except PermissionError:
-            # Unreadable, but ours: it may be something a worker started. Only a
-            # process that began after this one can be (the desktop session, the
+        except OSError as error:
+            if isinstance(error, (ProcessLookupError, FileNotFoundError)) and gone(name):
+                continue  # the process ended while it was being looked at
+            # Whatever the error, it may be something a worker started. Only our
+            # own processes that began after this one can be (a worker runs as
+            # this user and its children start later; the desktop session, the
             # agents and the like that were already running cannot be).
             began = started_at(name)
             if owned and (began is None or my_start is None or began >= my_start):
                 unreadable.append(name)
-        except OSError:
-            continue  # the process ended while it was being looked at
     for _ in range(_UNREADABLE_RETRIES):
         if not unreadable:
             break
@@ -378,18 +389,9 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
             try:
                 if inspect(name):
                     return True
-            except (ProcessLookupError, FileNotFoundError):
-                # Only an entry that is really gone means it exited (a pid can be
-                # reused, and a missing file is not a missing process).
-                try:
-                    os.lstat(os.path.join(proc, name))
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    pass  # cannot tell, so it is not a confirmed exit
-                still_unreadable.append(name)
-            except OSError:
-                still_unreadable.append(name)  # not a confirmed exit, so still unreadable
+            except OSError as error:
+                if not (isinstance(error, (ProcessLookupError, FileNotFoundError)) and gone(name)):
+                    still_unreadable.append(name)
         unreadable = still_unreadable
     # Still alive and still not readable: fail closed, it counts as in use.
     return bool(unreadable)
