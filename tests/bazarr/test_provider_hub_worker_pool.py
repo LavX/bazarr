@@ -1086,6 +1086,17 @@ def test_last_error_in_status_has_no_paths(make_pool):
     assert pool_module._public_text("open '/config/plugins/run/x/y.py' failed in /tmp/a") == \
         "open '<path>' failed in <path>"
     assert pool_module._public_text("and/or 10 / 5 http://host/x") == "and/or 10 / 5 http://host/x"
+    # Paths with spaces in them. Quoted ones are cut at the quote, whatever is inside...
+    assert pool_module._public_text("open '/tmp/provider files/worker' failed") == "open '<path>' failed"
+    assert pool_module._public_text('open "/tmp/a b/c d.py" failed') == 'open "<path>" failed'
+    assert "files" not in pool_module._public_text("cannot read `/tmp/provider files`")
+    # ...unquoted ones go on over each following word that still has a slash in it.
+    text = pool_module._public_text("failed to open /tmp/provider files/worker/run.py: no such file")
+    assert text == "failed to open <path>: no such file", text
+    text = pool_module._public_text("cannot read /srv/my plugins/a b/c.py and /etc/x")
+    assert "plugins" not in text and "c.py" not in text and "/etc" not in text, text
+    # The documented limit: a space-containing last component with no slash after it reads as prose.
+    assert pool_module._public_text("open /tmp/provider files now") == "open <path> files now"
 
 
 # ---------------------------------------------------------------------- runtime seam
@@ -3138,6 +3149,57 @@ def test_a_sweep_gets_one_allowance_from_the_pool_limits(make_pool):
     assert budget.deadline is not None
     defaults = PoolLimits()
     assert (defaults.sample_max_entries, defaults.sample_max_kept) == (1_000_000, 100_000)
+
+
+def _fake_maps(record_count, *, name, produced):
+    """A stand-in for ``_mapped_objects`` that counts how many records the consumer pulled from it."""
+
+    def fake(path, budget=None):
+        for index in range(record_count):
+            produced.append(index)
+            yield ["7f0000000000-7f0000001000", "rw-s", "00000000", "00:2f", str(1000 + index), name % index]
+
+    return fake
+
+
+@needs_smaps
+def test_mapping_records_are_streamed_and_charged_not_collected_into_lists(sleeper, monkeypatch):
+    produced = []
+    monkeypatch.setattr(pool_module, "_mapped_objects",
+                        _fake_maps(5000, name="/SYSV0000%04d (deleted)", produced=produced))
+    # Memory sampling keeps the unmeasured records one by one; the first one over the allowance ends
+    # the pass, and a list of all 5000 is never built first.
+    _total, incomplete = pool_module.memfd_usage([sleeper.pid], budget=pool_module.SampleBudget(kept=10))
+    assert incomplete is True
+    assert len(produced) < 50, "the whole list of %d mappings was pulled before any was charged" % len(produced)
+
+
+@needs_smaps
+def test_the_deleted_mappings_are_consumed_one_at_a_time(sleeper, tmp_path, monkeypatch):
+    produced = []
+    monkeypatch.setattr(pool_module, "_mapped_objects", _fake_maps(5000, name="/tmp/x/f%d (deleted)", produced=produced))
+    folder = tmp_path / "data"
+    folder.mkdir()
+    # Every record is a deleted mapping under the pretend folder; the allowance for kept records is tiny.
+    monkeypatch.setattr(pool_module, "_under", lambda path, name: True)
+    _usage, incomplete = pool_module.deleted_open_usage(
+        [sleeper.pid], [str(folder)], budget=pool_module.SampleBudget(kept=6))
+    assert incomplete is True
+    assert len(produced) < 50, "the whole list of %d mappings was pulled before any was charged" % len(produced)
+
+
+@needs_smaps
+def test_thread_discovery_charges_the_records_it_keeps(sleeper):
+    # The child belongs to this process: one child record is kept for it.
+    kids, incomplete = pool_module._children_of(os.getpid(), pool_module.SampleBudget())
+    assert incomplete is False and sleeper.pid in kids
+    kids, incomplete = pool_module._children_of(os.getpid(), pool_module.SampleBudget(kept=0))
+    assert incomplete is True
+    # The records found are charged by the tree walk as well, and its fallback scan charges each pid.
+    members, incomplete = pool_module._process_tree(os.getpid(), 256, pool_module.SampleBudget(kept=0))
+    assert incomplete is True
+    tree, complete = pool_module._parent_map(budget=pool_module.SampleBudget(kept=0))
+    assert complete is False or tree == {}
 
 
 @needs_smaps

@@ -350,7 +350,16 @@ _TRANSITIONS: dict[WorkerState, frozenset] = {
     _S.BROKEN: frozenset({_S.STARTING, _S.STOPPED}),
 }
 _COUNTS_AS_RESIDENT = (_S.STARTING, _S.READY)
-_PATH_IN_TEXT = re.compile(r"(?<![\w:/.])/[\w.\-+@%~]+(?:/[\w.\-+@%~]*)*")
+_PATH_CHARS = r"[\w.\-+@%~]"
+# An absolute path inside quotes, spaces and all: the quotes say where it ends.
+_QUOTED_PATH = re.compile(r"(?P<q>[\"'`])/(?:(?!(?P=q))[^\n])*(?P=q)")
+# An unquoted absolute path. A component may hold spaces (``/tmp/provider files/worker``): the path
+# goes on over following words as long as each still has a slash in it, so the rest of such a path
+# is not left behind. The limit: a space-containing last component with no slash after it
+# (``/tmp/provider files``) cannot be told from prose, and its tail stays visible.
+_PATH_IN_TEXT = re.compile(
+    r"(?<![\w:/.])/" + _PATH_CHARS + r"+(?:/" + _PATH_CHARS + r"*)*"
+    r"(?: +" + _PATH_CHARS + r"+(?:/" + _PATH_CHARS + r"*)+)*")
 
 
 def _log_failure(message: str, error: BaseException, level: int = logging.DEBUG) -> None:
@@ -365,7 +374,8 @@ def _log_failure(message: str, error: BaseException, level: int = logging.DEBUG)
 
 def _public_text(text) -> str:
     """Error text safe for a status page: filesystem paths removed, length bounded."""
-    return _PATH_IN_TEXT.sub("<path>", str(text))[:300]
+    text = _QUOTED_PATH.sub(lambda match: match.group("q") + "<path>" + match.group("q"), str(text))
+    return _PATH_IN_TEXT.sub("<path>", text)[:300]
 
 
 def memory_limit_for(kind: str | None) -> int:
@@ -660,34 +670,42 @@ def _children_of(pid: int, budget: "SampleBudget | None" = None) -> tuple[list[i
     """
     found: list[int] = []
     incomplete = False
+    readable = False
+    count = 0
     try:
-        threads = os.listdir("/proc/%d/task" % pid)
+        # Streamed: a process with a huge number of threads is never listed whole.
+        with os.scandir("/proc/%d/task" % pid) as threads:
+            for thread in threads:
+                count += 1
+                if count > PROC_MAX_ENTRIES:
+                    incomplete = True
+                    break
+                if budget is not None and not budget.spend():
+                    # The sweep's allowance is gone: the children of the threads not read are unknown.
+                    return found, True
+                limit = PROC_MAX_BYTES if budget is None else min(PROC_MAX_BYTES, max(budget.nbytes, 0))
+                try:
+                    with open("/proc/%d/task/%s/children" % (pid, thread.name), "r", encoding="ascii") as handle:
+                        text = handle.read(limit + 1)
+                    if budget is not None and not budget.spend(0, len(text)):
+                        return found, True
+                    readable = True
+                    if len(text) > limit:
+                        incomplete = True
+                        continue
+                    kids = [int(p) for p in text.split()]
+                    if budget is not None and not budget.keep(len(kids)):
+                        # Records of what was found are held too, and they are charged.
+                        return found, True
+                    found.extend(kids)
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError):
+                    incomplete = True
     except FileNotFoundError:
         return [], False  # gone
     except OSError:
         return None, False
-    readable = False
-    if len(threads) > PROC_MAX_ENTRIES:
-        incomplete = True
-        threads = threads[:PROC_MAX_ENTRIES]
-    for tid in threads:
-        if budget is not None and not budget.spend():
-            # The sweep's allowance is gone: the children of the threads not read are unknown.
-            return found, True
-        try:
-            with open("/proc/%d/task/%s/children" % (pid, tid), "r", encoding="ascii") as handle:
-                text = handle.read(PROC_MAX_BYTES + 1)
-            if budget is not None and not budget.spend(0, len(text)):
-                return found, True
-            readable = True
-            if len(text) > PROC_MAX_BYTES:
-                incomplete = True
-                continue
-            found.extend(int(p) for p in text.split())
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError):
-            incomplete = True
     return (found if readable else None), incomplete
 
 
@@ -711,6 +729,8 @@ def _parent_map(limit: int = PARENT_MAP_LIMIT, budget: "SampleBudget | None" = N
         if not name.isdigit():
             continue
         if budget is not None and not budget.spend():
+            return tree, False
+        if budget is not None and not budget.keep():
             return tree, False
         try:
             with open("/proc/%s/stat" % name, "r", encoding="ascii", errors="replace") as handle:
@@ -1104,6 +1124,8 @@ def _recheck_descriptors(pid: int, wanted: dict, budget: "SampleBudget | None" =
         except OSError:
             continue
         if stat.S_ISREG(info.st_mode) and info.st_ino in wanted[path]:
+            if budget is not None and not budget.keep():
+                return found
             found.append((path, info, target))
     return found
 
@@ -1155,10 +1177,15 @@ def _recheck_by_inode(pid: int, wanted: dict, done: set, budget: "SampleBudget")
         by_device, names = wanted[info.st_ino]
         group = (info.st_ino, info.st_dev)
         if group not in done:
+            matched = by_device.get(info.st_dev, ())
+            if not budget.keep(len(matched) + 1):
+                return found, True
             done.add(group)
-            found.extend((path, info) for path in by_device.get(info.st_dev, ()))
+            found.extend((path, info) for path in matched)
         own = _maps_form(target[: -len(_DELETED)] if target.endswith(_DELETED) else target)
         if own in names and (info.st_ino, own) not in done:
+            if not budget.keep(2):
+                return found, True
             done.add((info.st_ino, own))
             found.append((own, info))
     return found, False
@@ -1248,17 +1275,21 @@ def memfd_usage(pids, skip=(), budget: "SampleBudget | None" = None) -> tuple[in
     for pid in pids:
         if pid in skip:
             continue
-        try:
-            lines = list(_mapped_objects("/proc/%d/maps" % pid, budget))
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        except OSError:
-            # Too big, or the sweep's allowance ran out: unread mappings are unknown.
-            incomplete = True
-            if budget.exhausted:
-                return total, True
-            continue
-        for parts in lines:
+        records = _mapped_objects("/proc/%d/maps" % pid, budget)
+        while True:
+            # One record at a time: a mapping list is never held whole.
+            try:
+                parts = next(records)
+            except StopIteration:
+                break
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            except OSError:
+                # Too big, or the sweep's allowance ran out: unread mappings are unknown.
+                incomplete = True
+                if budget.exhausted:
+                    return total, True
+                break
             path = parts[5][: -len(_DELETED)] if parts[5].endswith(_DELETED) else parts[5]
             if _is_shared_anonymous(path, parts[1]):
                 # MAP_SHARED|MAP_ANONYMOUS: tmpfs pages behind a file nobody has a descriptor
@@ -1546,17 +1577,22 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None,
     for pid in pids:
         if budget.expired():
             return usage, True
-        try:
-            lines = [parts for parts in _mapped_objects("/proc/%d/maps" % pid, budget)
-                     if parts[5].endswith(_DELETED)]
-        except FileNotFoundError:
-            continue
-        except OSError:
-            incomplete = True
-            if budget.exhausted:
-                return usage, True
-            continue
-        for parts in lines:
+        records = _mapped_objects("/proc/%d/maps" % pid, budget)
+        while True:
+            # One record at a time: the deleted mappings are never collected into a list first.
+            try:
+                parts = next(records)
+            except StopIteration:
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                incomplete = True
+                if budget.exhausted:
+                    return usage, True
+                break
+            if not parts[5].endswith(_DELETED):
+                continue
             if out_of_time():
                 return usage, True
             path = parts[5][: -len(_DELETED)]
