@@ -625,7 +625,7 @@ def test_a_partial_translation_publishes_the_source_cues_and_a_partial_footer(qu
     translator footer says partial, not translated."""
     fixture = queued_gemini
     monkeypatch.setattr(gemini_translator.settings.translator, "translator_info", True, raising=False)
-    monkeypatch.setattr(gemini_translator.settings.translator, "gemini_model", "gemini-2.0-flash", raising=False)
+    monkeypatch.setattr(gemini_translator.settings.translator, "gemini_model", "gemini-3.6-flash", raising=False)
     monkeypatch.setattr(gemini_translator.requests, "request",
                         lambda *args, **kwargs: fixture.calls.append(True) or _gemini_batch_response([]))
 
