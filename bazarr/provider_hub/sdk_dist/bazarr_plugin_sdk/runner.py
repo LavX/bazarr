@@ -44,6 +44,7 @@ from ._protocol import frames
 from ._protocol.worker_channel import ChannelClosed, Operation, OperationCancelled, OperationError, OperationResult, WorkerChannel
 from .context import PluginContext
 from .errors import INTERNAL, PluginError
+from ._scrub import held_secrets, scrub
 from .kinds import KindSpec, MethodSpec, get_kind
 
 EXIT_OK = 0
@@ -68,16 +69,13 @@ class SdkChannel(WorkerChannel):
         if isinstance(error, PluginError):
             # Every secret the host has sent this worker, from any request and in every
             # escaped spelling, goes out of the text before it is cut to size.
-            with self._lock:
-                secrets = sorted(self._secret_values, key=len, reverse=True)
+            secrets = held_secrets(self)
 
-            def scrub(text: str) -> str:
-                for secret in secrets:
-                    text = text.replace(secret, "***")
-                return text
+            def scrub_text(text: str) -> str:
+                return scrub(text, secrets)
 
             try:
-                payload = error.to_dict(scrub)
+                payload = error.to_dict(scrub_text)
                 self._send({"t": frames.RES, "id": req_id, "ok": False, "error": payload})
                 return
             except ChannelClosed:

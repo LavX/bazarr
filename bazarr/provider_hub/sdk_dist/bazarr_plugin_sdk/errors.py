@@ -114,7 +114,7 @@ class PluginError(OperationError):
             self.code, text(self.message, _MAX_MESSAGE), retryable=self.retryable, retry_after=self.retry_after
         )
         if self.field_errors:
-            data["field_errors"] = {key: text(value, _MAX_MESSAGE) for key, value in self.field_errors.items()}
+            data["field_errors"] = {text(key, _MAX_MESSAGE): text(value, _MAX_MESSAGE) for key, value in self.field_errors.items()}
         if self.reason is not None:
             data["reason"] = text(self.reason, _MAX_MESSAGE)
         if self.detail:

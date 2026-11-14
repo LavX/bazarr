@@ -14,26 +14,56 @@ Use these helpers instead. They move bytes and names only: a copy gets the
 default mode of a new file, never the mode, owner, times or attributes of its
 source, and nothing here calls a metadata function.
 
-Every write goes to a temporary name beside the target and is renamed into
-place, so a reader never sees a half-written file.
+Every write goes to a uniquely named temporary file beside the target, is
+flushed to disk and is renamed into place, so a reader never sees a half-written file.
 """
 
 from __future__ import annotations
 
 import errno
 import os
+import secrets
 import shutil
 
 from pathlib import Path
-from typing import Union
+from typing import BinaryIO, Callable, Union
 
 PathLike = Union[str, "os.PathLike[str]"]
 
 __all__ = ["copy_file", "copy_tree", "move", "touch", "write_file"]
 
 
-def _temp_beside(target: Path) -> Path:
-    return target.with_name(f".{target.name}.{os.getpid()}.part")
+def _create_temp(target: Path) -> tuple[int, Path]:
+    """Create a new, empty file beside ``target`` that no other writer can hold.
+
+    The name is random and the file is opened with ``O_EXCL``, so two writers of
+    one destination, in one process or in two, never share a temporary file. It
+    gets the default mode of a new file.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    while True:
+        temp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.part")
+        try:
+            return os.open(temp, flags, 0o666), temp
+        except FileExistsError:
+            continue
+
+
+def _write_temp(target: Path, fill: Callable[[BinaryIO], None]) -> None:
+    """Fill a fresh temporary file, flush it to disk and rename it over ``target``.
+
+    On any failure only this call's own temporary file is removed.
+    """
+    fd, temp = _create_temp(target)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            fill(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+    except BaseException:
+        _discard(temp)
+        raise
 
 
 def copy_file(src: PathLike, dst: PathLike) -> Path:
@@ -42,28 +72,20 @@ def copy_file(src: PathLike, dst: PathLike) -> Path:
     ``dst`` is the target file, not a directory to copy into.
     """
     target = Path(dst)
-    temp = _temp_beside(target)
-    try:
-        shutil.copyfile(src, temp)
-        os.replace(temp, target)
-    except BaseException:
-        _discard(temp)
-        raise
+
+    def fill(handle: BinaryIO) -> None:
+        with open(src, "rb") as source:
+            shutil.copyfileobj(source, handle)
+
+    _write_temp(target, fill)
     return target
 
 
 def write_file(path: PathLike, data: Union[bytes, str], *, encoding: str = "utf-8") -> Path:
     """Write ``data`` to ``path`` through a temporary file and a rename. Returns ``path``."""
     target = Path(path)
-    temp = _temp_beside(target)
     payload = data.encode(encoding) if isinstance(data, str) else data
-    try:
-        with open(temp, "wb") as handle:
-            handle.write(payload)
-        os.replace(temp, target)
-    except BaseException:
-        _discard(temp)
-        raise
+    _write_temp(target, lambda handle: handle.write(payload))
     return target
 
 

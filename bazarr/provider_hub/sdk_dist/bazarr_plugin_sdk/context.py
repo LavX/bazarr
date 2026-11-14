@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence, TypeVar
 
 from ._protocol.worker_channel import HostCallFailed, Operation, OperationCancelled
+from ._scrub import channel_secrets, scrub
 from .errors import CANCELLED, ERROR_CODES, INTERNAL, PluginError
 
 T = TypeVar("T")
@@ -96,7 +97,9 @@ class PluginContext:
             return
         self._last_progress = now
         fraction = min(1.0, done / total) if total else None
-        self.operation.progress(fraction=fraction, message=str(message)[:500] or None, data={"done": done, "total": total})
+        # Scrub the whole message, then cut it: a secret across the cut must not leave a prefix.
+        text = scrub(str(message), channel_secrets(self.operation))[:500]
+        self.operation.progress(fraction=fraction, message=text or None, data={"done": done, "total": total})
 
     def heartbeat(self) -> None:
         """Say the request is alive and making headway. Call it at least once per interval."""
