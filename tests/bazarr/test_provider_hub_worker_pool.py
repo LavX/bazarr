@@ -2720,6 +2720,81 @@ def _unlinked_file(folder, name, size):
     return fd
 
 
+def _file_of(path, size):
+    with open(path, "wb") as handle:
+        handle.write(b"x" * size)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _budget_pool(make_pool, monkeypatch, folder, limit):
+    """A pool whose folder check reads this process's own unlinked-but-open files."""
+    pool = make_pool(use_clock=False)
+    monkeypatch.setattr(pool, "_deleted_open_usage", lambda slot, budgets, files=None: pool_module.deleted_open_usage(
+        [os.getpid()], [budget.path for budget in budgets], files))
+    return pool, WorkerDefinition("tr", kind="translator", budgets=[FolderBudget(str(folder), limit, "plugin data")])
+
+
+def test_a_file_with_two_names_in_a_folder_is_charged_once(tmp_path):
+    folder = tmp_path / "data"
+    (folder / "sub").mkdir(parents=True)
+    _file_of(folder / "a", 2 * MIB)
+    os.link(folder / "a", folder / "b")
+    os.link(folder / "a", folder / "sub" / "c")
+    used, truncated = folder_usage(str(folder))
+    assert truncated is False
+    assert 2 * MIB <= used < 2 * MIB + 256 * 1024, used
+
+
+def test_a_folder_budget_counts_a_hard_linked_file_once(make_pool, tmp_path, monkeypatch):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    _file_of(folder / "a", 3 * MIB)
+    os.link(folder / "a", folder / "b")
+    pool, definition_ = _budget_pool(make_pool, monkeypatch, folder, 4 * MIB)
+    # Two names are 3 MiB on disk, under the 4 MiB budget; per name it would be 6 MiB.
+    assert pool._budget_problem(None, 0.0, definition_) is None
+    _file_of(folder / "other", 2 * MIB)
+    assert pool._budget_problem(None, 0.0, definition_)[0] == "folder_budget"
+
+
+@needs_smaps
+def test_a_deleted_open_file_with_a_surviving_link_in_the_folder_is_charged_once(make_pool, tmp_path, monkeypatch):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    _file_of(folder / "a", 3 * MIB)
+    os.link(folder / "a", folder / "b")
+    held = os.open(folder / "a", os.O_RDONLY)
+    os.unlink(folder / "a")
+    try:
+        pool, definition_ = _budget_pool(make_pool, monkeypatch, folder, 4 * MIB)
+        # The name that is left was scanned; the open descriptor is the same file, not another one.
+        assert pool._budget_problem(None, 0.0, definition_) is None
+        _file_of(folder / "other", 2 * MIB)
+        assert pool._budget_problem(None, 0.0, definition_)[0] == "folder_budget"
+    finally:
+        os.close(held)
+
+
+@needs_smaps
+def test_a_deleted_open_file_whose_other_link_is_elsewhere_is_still_charged(make_pool, tmp_path, monkeypatch):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _file_of(folder / "a", 3 * MIB)
+    os.link(folder / "a", outside / "kept")
+    held = os.open(folder / "a", os.O_RDONLY)
+    os.unlink(folder / "a")
+    try:
+        pool, definition_ = _budget_pool(make_pool, monkeypatch, folder, 2 * MIB)
+        # No link is left under the folder to scan, so the open file is the only charge: 3 MiB.
+        assert pool._budget_problem(None, 0.0, definition_)[0] == "folder_budget"
+    finally:
+        os.close(held)
+    assert pool._budget_problem(None, 0.0, definition_) is None
+
+
 @needs_smaps
 def test_deleted_open_usage_totals_are_per_folder_by_ancestry_not_by_filesystem(tmp_path):
     first = tmp_path / "first"

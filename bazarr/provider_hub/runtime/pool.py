@@ -773,8 +773,40 @@ def _is_reparse(entry, info) -> bool:
     return bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
-def folder_usage(path: str, max_entries: int = 100_000, max_seconds: float | None = FOLDER_SCAN_SECONDS
-                 ) -> tuple[int, bool]:
+class _LinkTally:
+    """Charges a file once however many names it has, across one budget's scan and its deleted-open files.
+
+    A file is one set of blocks on disk whatever links point at it, so a 300 MiB file with two
+    names under a folder is 300 MiB, not 600. Identity is (device, inode). Only a file with more
+    than one link needs remembering (a directory never does: it is charged per entry). A file
+    that was unlinked but is still open, and still has a link somewhere (``deleted``: identity to
+    size), is recognised too: if the scan reaches it through that surviving link, the scan has
+    charged it and the deleted-open pass must not.
+    """
+
+    def __init__(self, deleted: "dict | None" = None) -> None:
+        self.deleted = deleted or {}
+        self.linked: set = set()
+
+    def charge(self, info) -> int:
+        size = _allocated(info)
+        inode = getattr(info, "st_ino", 0)
+        if not inode or stat.S_ISDIR(info.st_mode):
+            return size
+        identity = (info.st_dev, inode)
+        if getattr(info, "st_nlink", 1) > 1 or identity in self.deleted:
+            if identity in self.linked:
+                return 0
+            self.linked.add(identity)
+        return size
+
+    def deleted_charged(self) -> int:
+        """Bytes of the deleted-open files the scan already charged through a surviving link."""
+        return sum(size for identity, size in self.deleted.items() if identity in self.linked)
+
+
+def folder_usage(path: str, max_entries: int = 100_000, max_seconds: float | None = FOLDER_SCAN_SECONDS,
+                 links: "_LinkTally | None" = None) -> tuple[int, bool]:
     """Allocated bytes under ``path`` without following links.
 
     Returns ``(bytes, truncated)``; ``truncated`` means the scan is incomplete and
@@ -793,14 +825,19 @@ def folder_usage(path: str, max_entries: int = 100_000, max_seconds: float | Non
     ``os.scandir(path)`` walk that does not follow or enter symlinks, junctions or other
     reparse points, and looks at a directory once more just before listing it; without a
     descriptor that window cannot be closed completely.
+
+    A file with several hard links is charged once (``links`` remembers which ones the scan has
+    met; one is made when none is given).
     """
     deadline = None if max_seconds is None else time.monotonic() + max_seconds
+    if links is None:
+        links = _LinkTally()
     if not _fd_walk_available():
-        return _folder_usage_by_path(path, max_entries, deadline)
-    return _folder_usage_by_descriptor(path, max_entries, deadline)
+        return _folder_usage_by_path(path, max_entries, deadline, links)
+    return _folder_usage_by_descriptor(path, max_entries, deadline, links)
 
 
-def _folder_usage_by_path(path: str, max_entries: int, deadline) -> tuple[int, bool]:
+def _folder_usage_by_path(path: str, max_entries: int, deadline, links: "_LinkTally") -> tuple[int, bool]:
     root = os.path.realpath(path)
     try:
         if not stat.S_ISDIR(os.stat(root).st_mode):
@@ -834,7 +871,7 @@ def _folder_usage_by_path(path: str, max_entries: int, deadline) -> tuple[int, b
                     return total, True
                 try:
                     info = entry.stat(follow_symlinks=False)
-                    total += _allocated(info)
+                    total += links.charge(info)
                     if _is_reparse(entry, info):
                         continue
                     if entry.is_dir(follow_symlinks=False):
@@ -846,7 +883,7 @@ def _folder_usage_by_path(path: str, max_entries: int, deadline) -> tuple[int, b
     return total, False
 
 
-def _folder_usage_by_descriptor(path: str, max_entries: int, deadline) -> tuple[int, bool]:
+def _folder_usage_by_descriptor(path: str, max_entries: int, deadline, links: "_LinkTally") -> tuple[int, bool]:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     nofollow = flags | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -877,7 +914,7 @@ def _folder_usage_by_descriptor(path: str, max_entries: int, deadline) -> tuple[
                 return total, True
             try:
                 info = entry.stat(follow_symlinks=False)
-                total += _allocated(info)
+                total += links.charge(info)
                 if not entry.is_dir(follow_symlinks=False):
                     continue
             except FileNotFoundError:
@@ -1223,7 +1260,7 @@ def _under(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
-def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
+def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict, bool]:
     """Bytes held by files that were unlinked but are still open, per folder: ``({folder: bytes}, incomplete)``.
 
     A worker can create a file in its folder, unlink it and keep writing through
@@ -1248,6 +1285,10 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
     Incomplete when the descriptors or mappings of a live process cannot be read,
     or a candidate descriptor cannot be stat'ed. A process that vanished, or a
     descriptor closed meanwhile, is not an omission.
+
+    ``files``, when given, is filled with ``{folder: {(device, inode): bytes}}``: what was
+    charged to each folder, file by file, so a caller that also scans the folder can charge a
+    file that still has a link under it only once (see ``_LinkTally``).
     """
     roots = [(folder, {_maps_form(folder), _maps_form(os.path.realpath(folder))}) for folder in folders]
     usage = {folder: 0 for folder, _names in roots}
@@ -1336,9 +1377,11 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
         if any((path, inode) not in held_names for path, inodes in wanted.items() for inode in inodes):
             # Referenced by a mapping alone: no descriptor to stat, so its size is unknown.
             incomplete = True
-    for path, size in held.values():
+    for identity, (path, size) in held.items():
         for folder in folders_of(path):
             usage[folder] += size
+            if files is not None:
+                files.setdefault(folder, {})[identity] = size
     return usage, incomplete
 
 
@@ -2663,11 +2706,14 @@ class WorkerPool:
         if holder is not None and not force and now - holder.last_budget_check < self.limits.budget_interval:
             return holder.budget_problem
         problem = None
-        held, held_incomplete = self._deleted_open_usage(tree or holder, definition.budgets)
+        files: dict = {}
+        held, held_incomplete = self._deleted_open_usage(tree or holder, definition.budgets, files)
         for budget in definition.budgets:
+            links = _LinkTally(files.get(budget.path))
             used, truncated = folder_usage(budget.path, self.limits.budget_max_entries,
-                                           self.limits.budget_scan_seconds)
-            used += held.get(budget.path, 0)
+                                           self.limits.budget_scan_seconds, links)
+            # A deleted file that still has a link in the folder was charged by the scan.
+            used += held.get(budget.path, 0) - links.deleted_charged()
             truncated = truncated or held_incomplete
             if truncated or used > budget.max_bytes:
                 problem = (PoolCodes.FOLDER_BUDGET, "%s is over its %d MiB budget" % (
@@ -2678,7 +2724,7 @@ class WorkerPool:
             holder.budget_problem = problem
         return problem
 
-    def _deleted_open_usage(self, slot, budgets):
+    def _deleted_open_usage(self, slot, budgets, files=None):
         """``deleted_open_usage`` for the worker's whole tree; ``({}, False)`` when there is no tree to look at."""
         session = getattr(slot, "session", None)
         process = session.process if session is not None else None
@@ -2689,7 +2735,7 @@ class WorkerPool:
             # The launcher is the pool's own, trusted and non-dumpable: its descriptors
             # are closed to us by design and are not the worker's. Its descendants are.
             pids = [pid for pid in pids if pid != process.pid]
-        usage, partial = deleted_open_usage(pids, [budget.path for budget in budgets])
+        usage, partial = deleted_open_usage(pids, [budget.path for budget in budgets], files)
         return usage, incomplete or partial
 
     def _preflight_running(self, entry, slot):
