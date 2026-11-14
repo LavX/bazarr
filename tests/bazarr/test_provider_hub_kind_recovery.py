@@ -118,7 +118,15 @@ def test_a_translator_installation_can_be_repaired(hub, monkeypatch):
     old = _env(hub, "old")
     _save(_translator_row(hub, old, needs_repair=True, last_error=env_registry.NEEDS_REPAIR_MESSAGE))
     monkeypatch.setattr(service, "PluginEnvironment", _BuildsEnvironment)
-    monkeypatch.setattr("provider_hub.registry.register_active_provider_classes", lambda installations=None: [])
+    # The real registration and retire steps run; they are watched, not replaced.
+    from provider_hub import registry
+
+    registered, retired = [], []
+    real_register, real_retire = registry.register_active_provider_classes, registry.retire_provider_instances
+    monkeypatch.setattr(registry, "register_active_provider_classes",
+                        lambda installations=None: registered.append(installations) or real_register(installations))
+    monkeypatch.setattr(registry, "retire_provider_instances",
+                        lambda provider_id: retired.append(provider_id) or real_retire(provider_id))
     probed = []
     monkeypatch.setattr(get_kind("translator"), "smoke_test",
                         lambda validated, bundle, python: probed.append(python), raising=False)
@@ -133,6 +141,8 @@ def test_a_translator_installation_can_be_repaired(hub, monkeypatch):
     assert row["python_path"] == str(new / "bin" / "python")
     assert "needs_repair" not in row
     assert row["last_error"] is None
+    # A translator has no subtitle provider class to register and no pooled workers to retire.
+    assert registered == [] and retired == []
 
 
 def test_a_subtitle_installation_with_an_invalid_manifest_is_still_refused_by_boot_reconcile(hub):

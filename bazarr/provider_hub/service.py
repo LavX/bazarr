@@ -3502,31 +3502,33 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             release_pins()
             env_registry.discard_if_unused(provider_hub_dir(), env_path)
             raise ProviderHubInstallError(f"{provider_id} changed while it was being repaired")
-        try:
-            from .registry import register_active_provider_classes
+        if kind_of(repaired) == SUBTITLE_PROVIDER:
+            # Only a subtitle provider has a registered class and pooled workers to refresh.
+            try:
+                from .registry import register_active_provider_classes
 
-            register_active_provider_classes(
-                [item for item in running_installations(kind=None) if item.provider_id == provider_id]
-            )
-        except Exception:
-            logging.getLogger(__name__).exception("Provider Hub: could not re-register %s after its repair", provider_id)
-        try:
-            # Pools keep the instance, and the worker, they built before the
-            # repair. They drop it now; it drains, and the old environment
-            # stays held until its worker has exited.
-            from .registry import retire_provider_instances
+                register_active_provider_classes(
+                    [item for item in running_installations(kind=None) if item.provider_id == provider_id]
+                )
+            except Exception:
+                logging.getLogger(__name__).exception("Provider Hub: could not re-register %s after its repair", provider_id)
+            try:
+                # Pools keep the instance, and the worker, they built before the
+                # repair. They drop it now; it drains, and the old environment
+                # stays held until its worker has exited.
+                from .registry import retire_provider_instances
 
-            retire_provider_instances(provider_id)
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "Provider Hub: could not retire the workers of %s after its repair; "
-                "its previous environment is kept in place", provider_id,
-            )
-            old_python = row.get("python_path")
-            if old_python:
-                # Never released: a worker may still run from it, and a cleanup
-                # must leave it alone until the process restarts.
-                hold_environment(env_registry.env_dir_of(old_python))
+                retire_provider_instances(provider_id)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Provider Hub: could not retire the workers of %s after its repair; "
+                    "its previous environment is kept in place", provider_id,
+                )
+                old_python = row.get("python_path")
+                if old_python:
+                    # Never released: a worker may still run from it, and a cleanup
+                    # must leave it alone until the process restarts.
+                    hold_environment(env_registry.env_dir_of(old_python))
         job.update(message=f"Rebuilt the environment of '{name}'")
         return _redact_installation(repaired)
 
@@ -3753,7 +3755,6 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
         installed_kind=kind_of(provider),
     )
     if not isinstance(manifest, dict):
-        target_name = provider.get("name") or provider_id
         message = _refused_update_reason(
             state,
             provider_id,
@@ -3762,30 +3763,38 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
             catalog_list,
             installed_kind=kind_of(provider),
         ) or "No update manifest is available"
-        with record_job(
-            "stage_update",
-            target_kind="provider",
-            target_id=provider_id,
-            target_name=target_name,
-            from_version=provider.get("active_version") or provider.get("staged_version"),
-        ) as job:
-            provider["last_error"] = message
-
-            def record_missing_manifest(state: dict[str, Any]) -> None:
-                state.setdefault("installations", {})[provider_id] = provider
-
-            mutate_state(record_missing_manifest)
-            job.data["state"] = "failed"
-            job.update(
-                error=message,
-                message=message,
-            )
-        return _redact_installation(provider)
+        return _record_failed_update(provider_id, provider, message)
     try:
         return stage_install(manifest, checkpoint=checkpoint, source_id=source_id)
-    except (ProviderHubInstallError, ManifestValidationError):
-        # A manifest the install path does not accept is a refused install like any other.
+    except ProviderHubInstallError:
         return get_provider(provider_id)
+    except ManifestValidationError as error:
+        # The install path refused the manifest before it started a job, so the refusal is
+        # recorded here as a failed update, the way a missing manifest is.
+        return _record_failed_update(provider_id, provider, refusal_text(error))
+
+
+def _record_failed_update(provider_id: str, provider: dict[str, Any], message: str) -> dict[str, Any]:
+    """Record an update that could not be staged: the reason on the installation and a failed job."""
+    with record_job(
+        "stage_update",
+        target_kind="provider",
+        target_id=provider_id,
+        target_name=provider.get("name") or provider_id,
+        from_version=provider.get("active_version") or provider.get("staged_version"),
+    ) as job:
+        provider["last_error"] = message
+
+        def record_failure(state: dict[str, Any]) -> None:
+            state.setdefault("installations", {})[provider_id] = provider
+
+        mutate_state(record_failure)
+        job.data["state"] = "failed"
+        job.update(
+            error=message,
+            message=message,
+        )
+    return _redact_installation(provider)
 
 
 def list_jobs() -> list[dict[str, Any]]:

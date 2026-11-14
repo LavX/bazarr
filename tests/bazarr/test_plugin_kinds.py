@@ -176,9 +176,10 @@ def test_an_update_check_covers_only_the_kind_it_is_asked_for(tmp_path, monkeypa
     def bound(row):
         return dict(row, source_bound=True, source_id="official")
 
-    # The catalog stores the newer version of the other installation as a schema 1 manifest,
-    # which catalog_kind_of reads as a subtitle provider. A candidate of another kind than the
-    # installation is never offered, so only the subtitle installation has an update.
+    # Only the subtitle kind is offered updates today, so the offer rule is lifted here to leave the
+    # kind filter of the update check as the one thing that keeps the other installation out of the
+    # subtitle check. The catalog stores both newer versions as schema 1 manifests.
+    monkeypatch.setattr(service, "_offerable_as_update", lambda entry, installed_kind: True)
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", catalog_entries={
         "official:providerhub:1.1.0": {"source": "official", "provider_id": "providerhub", "version": "1.1.0",
                                        "manifest": provider_manifest_v1("providerhub", "1.1.0")},
@@ -193,11 +194,11 @@ def test_an_update_check_covers_only_the_kind_it_is_asked_for(tmp_path, monkeypa
     everything = service.check_updates()
     subtitle = service.check_updates(kind=SUBTITLE_PROVIDER)
 
-    other = service.check_updates(kind=SERVICE_KIND)
-
-    assert everything["details"]["providers"] == ["providerhub: 1.0.0 -> 1.1.0"]
+    assert sorted(everything["details"]["providers"]) == [
+        "exampleservice: 1.0.0 -> 1.1.0",
+        "providerhub: 1.0.0 -> 1.1.0",
+    ]
     assert subtitle["details"]["providers"] == ["providerhub: 1.0.0 -> 1.1.0"]
-    assert other["details"]["providers"] == []
 
 
 def test_no_kind_keeps_every_entry():

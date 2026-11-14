@@ -6,8 +6,9 @@ release attaches (at the next restart, or live), and owns every side effect
 that installing, enabling, configuring or removing one of its plugins has on
 the rest of Bazarr+. The shared Provider Hub core calls is_enabled,
 set_enabled, on_config_saved, on_installed and on_removed, and validate_manifest
-when a catalog refresh reads a plugin. The smoke_test hook is not called by the
-core; the core runs the same check directly.
+when a catalog refresh reads a plugin. It also calls validate_manifest and
+smoke_test when it activates a staged release, repairs an environment or
+reconciles environments at boot.
 """
 from __future__ import annotations
 
@@ -102,7 +103,9 @@ class Kind:
     def smoke_test(self, validated: "ValidatedManifest", bundle_path, python_path) -> None:
         """Start the staged plugin once to prove it loads. The default has nothing to start.
 
-        The core does not call this hook. The subtitle provider kind overrides it.
+        The core calls this hook when it activates a staged release, repairs an environment and
+        reconciles environments at boot. The subtitle provider kind runs the worker health check;
+        a kind with nothing to start keeps this version.
         """
 
 

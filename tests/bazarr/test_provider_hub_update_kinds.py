@@ -116,6 +116,7 @@ def test_a_subtitle_update_is_still_selected_and_staged(tmp_path, monkeypatch):
 def test_a_manifest_the_install_path_refuses_is_a_refused_update(tmp_path, monkeypatch):
     from provider_hub.manifest import ManifestValidationError
     from provider_hub.service import apply_update
+    from provider_hub.state import load_state
 
     _write_state(tmp_path, monkeypatch, _manifest(provider_id=PLUGIN, version="1.0.0"), None,
                  _entry(_manifest(provider_id=PLUGIN, version="1.1.0")))
@@ -125,4 +126,11 @@ def test_a_manifest_the_install_path_refuses_is_a_refused_update(tmp_path, monke
 
     monkeypatch.setattr("provider_hub.service.stage_install", refuse)
 
-    assert apply_update(PLUGIN)["state"] == "active"
+    provider = apply_update(PLUGIN)
+
+    assert provider["state"] == "active"
+    assert provider["last_error"] == "not a manifest this install path accepts"
+    assert load_state()["installations"][PLUGIN]["last_error"] == "not a manifest this install path accepts"
+    job = next(item for item in load_state()["jobs"] if item["target_id"] == PLUGIN)
+    assert job["state"] == "failed"
+    assert job["error"] == "not a manifest this install path accepts"
