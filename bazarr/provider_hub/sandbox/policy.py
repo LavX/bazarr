@@ -71,6 +71,13 @@ DEVICE_PATHS: tuple[str, ...] = (
     "/dev/urandom",
 )
 
+# POSIX shared memory lives here: Python's multiprocessing Lock, Queue, ProcessPoolExecutor and
+# shared_memory create, map and remove files in it. A worker may create, read, write and remove
+# files in it (no execute). It is one directory for the whole host, so workers can see each
+# other's objects there; the pool bounds what they use of it (see ``WorkerPool``), nothing
+# separates them.
+SHARED_MEMORY_PATHS: tuple[str, ...] = ("/dev/shm",)
+
 # Directories whose UNIX sockets name resolution may legitimately use. Only
 # consulted at ABI 9 and above, where connecting to a pathname socket outside
 # the domain is otherwise denied.
@@ -428,6 +435,7 @@ class SandboxPolicy:
     read_only: tuple[str, ...]
     read_write: tuple[str, ...]
     devices: tuple[str, ...] = DEVICE_PATHS
+    shared_memory: tuple[str, ...] = SHARED_MEMORY_PATHS
     resolve_unix: tuple[str, ...] = RESOLVE_UNIX_PATHS
     # None: TCP unrestricted (declared). A set: connect only to these ports and
     # bind nothing, where the kernel supports it (ABI 4 and above).
@@ -480,12 +488,14 @@ class SandboxPolicy:
                 raise PolicyError("read-write path is not an existing directory: %s" % path)
         ro_items = _resolve_grants((*SYSTEM_READ_PATHS, *interpreter_read_paths(interpreter, read_write), *read_only), read_write)
         device_items = _resolve_grants(DEVICE_PATHS, read_write)
+        shm_items = _resolve_grants(SHARED_MEMORY_PATHS, read_write)
         unix_items = _resolve_grants(RESOLVE_UNIX_PATHS, read_write)
-        every = [*ro_items, *rw_items, *device_items, *unix_items]
+        every = [*ro_items, *rw_items, *device_items, *shm_items, *unix_items]
         policy = cls(
             read_only=(*(p for p, _i, _m in ro_items), "/proc/self"),
             read_write=tuple(p for p, _i, _m in rw_items),
             devices=tuple(p for p, _i, _m in device_items),
+            shared_memory=tuple(p for p, _i, _m in shm_items),
             resolve_unix=tuple(p for p, _i, _m in unix_items),
             connect_ports=ports,
             abi_cap=abi_cap,
@@ -545,6 +555,7 @@ class RuntimeSpec:
             "read_only": [self.policy.grant(p) for p in self.policy.read_only],
             "read_write": [self.policy.grant(p) for p in self.policy.read_write],
             "devices": [self.policy.grant(p) for p in self.policy.devices],
+            "shared_memory": [self.policy.grant(p) for p in self.policy.shared_memory],
             "resolve_unix": [self.policy.grant(p) for p in self.policy.resolve_unix],
             "connect_ports": None if self.policy.connect_ports is None else sorted(self.policy.connect_ports),
             "limits": self.limits.to_dict(),

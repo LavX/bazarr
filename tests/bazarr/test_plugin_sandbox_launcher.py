@@ -4211,3 +4211,53 @@ def test_a_sigterm_ignoring_worker_is_still_killed_when_waitid_fails(monkeypatch
             os.kill(child, signal.SIGKILL)
         except OSError:
             pass
+
+
+# ------------------------------------------------ /dev/shm: multiprocessing works under enforcement
+
+
+@linux_only
+def test_the_policy_grants_dev_shm_to_the_worker_and_the_launch_spec_carries_it(tmp_path):
+    if not os.path.isdir("/dev/shm"):
+        pytest.skip("this host has no /dev/shm")
+    spec = make_spec(tmp_path, "pass")
+    assert spec.policy.shared_memory == ("/dev/shm",)
+    payload = json.loads(spec.to_launch_json(enforce=True, min_abi=1))
+    assert [grant[0] if isinstance(grant, list) else grant for grant in payload["shared_memory"]] == ["/dev/shm"]
+    assert "/dev/shm" not in spec.policy.read_write, "it is a shared-memory grant, not a data folder"
+
+
+@linux_only
+def test_an_enforced_worker_can_use_multiprocessing_primitives(tmp_path, live):
+    if not os.path.isdir("/dev/shm") or not os.access("/dev/shm", os.W_OK):
+        pytest.skip("this host has no writable /dev/shm")
+    need_abi(live, 3)  # ftruncate on a shared-memory object needs the truncate right
+    script = """
+        import multiprocessing
+        import multiprocessing.shared_memory as shared
+
+        lock = multiprocessing.Lock()
+        lock.acquire()
+        lock.release()
+        queue = multiprocessing.Queue()
+        queue.put(7)
+        assert queue.get(timeout=5) == 7
+        segment = shared.SharedMemory(create=True, size=4096)
+        segment.buf[0] = 9
+        assert segment.buf[0] == 9
+        segment.close()
+        segment.unlink()
+        print("ok")
+    """
+    result = run(make_spec(tmp_path, script), live)
+    assert result[0] == 0 and result[1].strip().endswith("ok"), result
+    # The grant is for shared memory only: no other file under /dev is writable, and nothing executes there.
+    script = """
+        import os
+        try:
+            os.open('/dev/bazarr-should-not-exist', os.O_CREAT | os.O_WRONLY)
+        except OSError as error:
+            print('denied', error.errno)
+    """
+    result = run(make_spec(tmp_path, script), live)
+    assert result[1].startswith("denied"), result

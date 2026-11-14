@@ -56,7 +56,7 @@ Spec layout (JSON object)::
       "min_abi": 1,
       "abi_cap": null,
       "read_only": [...], "read_write": [...], "devices": [...],
-      "resolve_unix": [...], "connect_ports": null | [443, 80],
+      "shared_memory": [...], "resolve_unix": [...], "connect_ports": null | [443, 80],
       "limits": {"nofile": 1024, "fsize": 536870912, "core": 0, "nproc": null,
                  "nice": 10, "oom_score_adj": 800, "umask": 63},
       "term_grace": 3.0
@@ -292,6 +292,7 @@ def _child(spec, landlock, seccomp, capabilities, parent_pid, close_fds, report_
                 read_only=spec.get("read_only", ()),
                 read_write=spec.get("read_write", ()),
                 devices=spec.get("devices", ()),
+                shared_memory=spec.get("shared_memory", ()),
                 resolve_unix=spec.get("resolve_unix", ()),
                 connect_ports=spec.get("connect_ports"),
                 abi_cap=spec.get("abi_cap"),
