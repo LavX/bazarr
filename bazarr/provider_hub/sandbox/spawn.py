@@ -180,7 +180,9 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
         return [
             "Workers run with a clean environment, but this platform applies no resource limits "
             "and nothing confines their files, network or signals. Detached processes cannot be "
-            "tracked on this platform: only a worker's process group is ended. A plugin may not "
+            "tracked on this platform: only a worker's process group is ended, and a worker that "
+            "exits by itself (on its shutdown request, say) leaves the processes it started running "
+            "where this host cannot see its exit without collecting it. A plugin may not "
             "keep deleted files mapped inside its folders." + _shm_note()
         ]
     if not probe.enforced:
@@ -1120,10 +1122,10 @@ class WorkerProcess(subprocess.Popen):
                 # signals as a no-op), so its pid is still its own.
                 with self._own_lock:
                     if self._still_ours():
-                        try:
-                            os.kill(self.pid, signal.SIGTERM)
-                        except OSError:
-                            pass
+                        # The first polite signal goes to the whole group, while the leader is
+                        # still ours: where our own probe is what reaps a worker that leaves at
+                        # once, nothing signals its group afterwards.
+                        self._term_group(killpg)
                 if self.returncode is None:
                     self._wait_for_exit_unreaped(grace)
                 with self._own_lock:
@@ -1144,10 +1146,7 @@ class WorkerProcess(subprocess.Popen):
         # is still there, alive or a zombie. Only then is it reaped.
         with self._own_lock:
             if self._still_ours():
-                try:
-                    os.kill(self.pid, signal.SIGTERM)
-                except OSError:
-                    pass
+                self._term_group(killpg)
         end = time.monotonic() + max(grace, 0.0)
         while self.returncode is None and time.monotonic() < end and not self._zombie():
             time.sleep(0.01)
@@ -1164,6 +1163,13 @@ class WorkerProcess(subprocess.Popen):
         # Our own waitpid collected the leader (here or in a probe): its exit is proven and nothing
         # is signalled after it (see the module docstring).
         return cleaned or (self.returncode is not None and self._exit_proven)
+
+    def _term_group(self, killpg) -> None:
+        """SIGTERM the leader's whole group. Call with ``_own_lock`` held and the leader proven ours."""
+        try:
+            killpg(self.pid, signal.SIGTERM)
+        except OSError:
+            pass
 
     def _zombie(self) -> bool:
         """Whether ``/proc`` says the child has exited and is waiting to be reaped."""

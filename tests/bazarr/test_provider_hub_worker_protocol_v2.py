@@ -4729,6 +4729,40 @@ def test_a_reaped_anchor_is_not_signalled_and_the_teardown_is_not_stuck(monkeypa
             pass
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+@pytest.mark.parametrize("how", ["no-waitid", "failed-waitid"])
+def test_the_first_polite_signal_goes_to_the_whole_group_where_our_probe_reaps_a_leaver(monkeypatch, how):
+    from provider_hub.sandbox import spawn as sandbox_spawn
+
+    _blind_host(monkeypatch)
+    if how == "failed-waitid":
+        def failing(*args, **kwargs):
+            raise OSError(errno.EPERM, "Operation not permitted")
+
+        monkeypatch.setattr(os, "waitid", failing, raising=False)
+    monkeypatch.setattr(sandbox_spawn, "_start_anchor", lambda: None)
+    # The leader leaves on SIGTERM and so does the member it started; nothing signals the group after
+    # a reap of our own, so only a group-wide first signal ends the member.
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdin=subprocess.DEVNULL)\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    process = sandbox_spawn._start_plain([sys.executable, "-c", script], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    member = int(process.stdout.readline())
+    time.sleep(0.3)  # both interpreters are up and ignore nothing
+    try:
+        process.stop(2.0)
+        assert process.returncode is not None
+        assert wait_until(lambda: not pid_alive(member), timeout=5), "the member outlived the group's first signal"
+        assert process.group_cleaned is True
+    finally:
+        monkeypatch.undo()
+        _kill_quietly(member)
+
+
 def _exited_worker_with_a_member(monkeypatch):
     from provider_hub.sandbox import spawn as sandbox_spawn
 
