@@ -18,6 +18,10 @@ OFFICIAL_CATALOG_SOURCE_ID = "official"
 OFFICIAL_CATALOG_SOURCE_NAME = "Official Bazarr Provider Catalog"
 OFFICIAL_CATALOG_URL = "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json"
 OFFICIAL_CATALOG_REPO = "LavX/bazarr-provider-catalog"
+# Catalog entries read from the snapshot bundled in the image carry this origin.
+ORIGIN_BUNDLED = "bundled"
+# The trust reason of an official source whose catalog came from that snapshot.
+RELEASE_FLOOR_TRUST_REASON = "release floor"
 _STATE_LOCK = threading.RLock()
 
 
@@ -200,6 +204,12 @@ def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:
                 }
             )
             official["trusted"] = bool(official.get("trusted"))
+            if official.get("trust_reason") == RELEASE_FLOOR_TRUST_REASON and (
+                official.get("dev_ref") or not isinstance(official.get("floor_seed"), dict)
+            ):
+                # The floor vouches for the release's own catalog only: a source
+                # on a dev_ref, or one the seed never marked, cannot hold it.
+                official["trusted"] = False
             official["id"] = OFFICIAL_CATALOG_SOURCE_ID
             official["name"] = OFFICIAL_CATALOG_SOURCE_NAME
             sources[source_id] = official
