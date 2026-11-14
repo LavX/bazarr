@@ -1,5 +1,6 @@
 # coding=utf-8
 """Repairing a plugin's environment, and what a failed check leaves behind."""
+import contextlib
 import threading
 import time
 import sys
@@ -1901,3 +1902,71 @@ def test_a_restored_environment_built_for_another_architecture_does_not_clear_th
     row = load_state()["installations"]["examplehub"]
     assert row["needs_repair"] is True
     assert row["last_error"] == env_registry.NEEDS_REPAIR_MESSAGE
+
+
+def _lock_unavailable(monkeypatch):
+    """The environment lock cannot be taken: a timeout, or a lock file that cannot be opened."""
+
+    @contextlib.contextmanager
+    def unavailable():
+        yield False
+
+    monkeypatch.setattr(env_registry, "environment_lock", unavailable)
+
+
+def test_an_install_is_not_recorded_when_the_environment_lock_cannot_be_taken(hub, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, stage_install_local
+    from test_provider_hub import _provider_zip
+
+    content = b"class LocalProvider: pass\n"
+    manifest = _manifest(provider_id="locallyinstalled", name="Locally Installed",
+                         provider_content=content, dependencies={"requirements": []})
+    package = _provider_zip(manifest, {"provider.py": content}, prefix="locallyinstalled/")
+    _patch_environment(monkeypatch)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: True)
+    _lock_unavailable(monkeypatch)
+
+    with pytest.raises(ProviderHubInstallError, match="lock"):
+        stage_install_local(package)
+
+    assert "locallyinstalled" not in load_state()["installations"]
+    assert load_state()["plugin_envs"] == {}
+
+
+def test_a_repair_is_not_recorded_when_the_environment_lock_cannot_be_taken(hub, tmp_path, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, repair_installation_environment
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    old = _env(hub / "shared_envs" / "old")
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(bundle, old / "bin" / "python", needs_repair=True)}
+    save_state(state)
+    _patch_environment(monkeypatch)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.registry.register_active_provider_classes", lambda installations=None: [])
+    _lock_unavailable(monkeypatch)
+
+    with pytest.raises(ProviderHubInstallError, match="lock"):
+        repair_installation_environment("examplehub")
+
+    row = load_state()["installations"]["examplehub"]
+    assert row["python_path"] == str(old / "bin" / "python")
+    assert row["needs_repair"] is True
+    assert load_state()["plugin_envs"] == {}
+
+
+def test_a_cleanup_removes_nothing_when_the_environment_lock_cannot_be_taken(hub, monkeypatch):
+    unused = _env(hub / "shared_envs" / "unused")
+    state = load_state()
+    state["plugin_envs"] = {"fp": {"path": str(unused)}}
+    save_state(state)
+    _lock_unavailable(monkeypatch)
+
+    assert env_registry.cleanup_environments(hub) == []
+    assert env_registry.discard_if_unused(hub, unused) is False
+
+    assert unused.exists()
+    assert load_state()["plugin_envs"] == {"fp": {"path": str(unused)}}

@@ -467,6 +467,10 @@ class EnvironmentGone(RuntimeError):
     """The environment a row is about to point at was removed in the meantime."""
 
 
+class EnvironmentLockUnavailable(EnvironmentGone):
+    """The environment lock could not be had, so a row is not recorded without it."""
+
+
 def environment_lock():
     """The lock every process takes to decide about, delete or record an environment.
 
@@ -484,10 +488,18 @@ def environment_lock():
 def recording_environment(env_path: str | Path):
     """Hold the environment lock while a row that points at ``env_path`` is committed.
 
-    Raises ``EnvironmentGone`` when the interpreter is no longer there, so the
-    row is never stored against a directory a cleanup has removed.
+    Raises ``EnvironmentLockUnavailable`` when the lock cannot be taken and
+    ``EnvironmentGone`` when the interpreter is no longer there, so the row is
+    never stored without the exclusion or against a directory a cleanup has
+    removed.
     """
-    with environment_lock():
+    with environment_lock() as held:
+        if not held:
+            # Without the lock a cleanup that already planned its removal could
+            # delete this environment right after the row points at it.
+            raise EnvironmentLockUnavailable(
+                f"the environment {env_path} was not recorded: the environment lock could not be taken"
+            )
         if not python_executable(env_path).exists():
             raise EnvironmentGone(f"the environment {env_path} was removed before it could be recorded")
         yield
