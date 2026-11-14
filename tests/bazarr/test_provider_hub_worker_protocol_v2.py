@@ -2866,9 +2866,9 @@ def test_a_healthy_worker_is_not_probed_with_signal_zero_where_that_would_kill_i
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
-def test_close_reaps_the_worker_where_a_zombie_cannot_be_told_from_a_live_process(make_session, monkeypatch):
+def test_close_ends_the_group_where_a_zombie_cannot_be_told_from_a_live_process(make_session, monkeypatch):
     # No waitid, and no /proc: kill(pid, 0) answers yes for a zombie, and for a stranger that took
-    # the pid, so nothing can vouch that the pid is still the child's.
+    # the pid. Nothing else reaps the child, so it is taken for ours and its group is ended.
     monkeypatch.delattr(os, "waitid", raising=False)
     monkeypatch.setattr(session_module, "_has_proc", lambda: False)
     session = make_session(limits=fast_limits(kill_grace=3.0, term_grace=0.3))
@@ -2879,12 +2879,10 @@ def test_close_reaps_the_worker_where_a_zombie_cannot_be_told_from_a_live_proces
         started = time.monotonic()
         session.close(grace=0.5)
         assert time.monotonic() - started < 8
-        # The worker itself is ended and reaped, the way Popen does it...
         assert process.returncode is not None
-        # ...but its group is not signalled on a pid nobody can vouch for, so what it forked
-        # is not known to be gone: the teardown reads as unconfirmed.
-        assert session.teardown_confirmed is False
-        assert session._group_lost is True
+        # The group was ended with the leader unreaped; the pool still counts it as unverified.
+        assert session.teardown_confirmed is True
+        assert session._group_lost is False and session._ownership_unknown is False
     finally:
         monkeypatch.undo()
         try:
@@ -4387,9 +4385,9 @@ def test_a_started_session_records_its_childs_start_time():
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
-def test_close_ends_a_stubborn_worker_where_ownership_cannot_be_established(make_session, monkeypatch):
+def test_close_ends_a_stubborn_worker_where_the_platform_cannot_tell_ownership(make_session, monkeypatch):
     # Neither waitid nor /proc, and a worker that ignores both the shutdown frame and SIGTERM:
-    # the group is not signalled, but close() must still end and reap the child itself.
+    # close() ends and reaps the child, and the group goes with it.
     monkeypatch.delattr(os, "waitid", raising=False)
     monkeypatch.setattr(session_module, "_has_proc", lambda: False)
     session = make_session({"stubborn": True}, limits=fast_limits(kill_grace=3.0, term_grace=0.3))
@@ -4401,9 +4399,8 @@ def test_close_ends_a_stubborn_worker_where_ownership_cannot_be_established(make
         session.close(grace=0.4)
         assert time.monotonic() - started < 10
         assert process.returncode is not None, "the stubborn worker outlived close()"
-        # Marked once, whichever way the unknown answer first came: through exited() or ours().
-        assert session._group_lost is True and session._ownership_unknown is True
-        assert session.teardown_confirmed is False
+        assert session._group_lost is False and session._ownership_unknown is False
+        assert session.teardown_confirmed is True
     finally:
         monkeypatch.undo()
         try:

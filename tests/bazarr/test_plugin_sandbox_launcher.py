@@ -4012,9 +4012,17 @@ def test_a_leader_reaped_by_somebody_else_is_not_signalled_even_without_waitid(m
         monkeypatch.undo()
 
 
-def test_ownership_is_unknown_when_neither_waitid_nor_proc_can_tell(monkeypatch):
+def test_a_pid_that_answers_is_taken_for_ours_when_neither_waitid_nor_proc_can_tell(monkeypatch):
     monkeypatch.setattr(spawn.os.path, "isdir", lambda path: False if path == "/proc/self" else os.path.exists(path))
     monkeypatch.setattr(os, "kill", lambda pid, sig: None)  # something answers to the pid
+    # The platform cannot tell the child from a stranger: not an outside reap, so not lost.
+    assert spawn._owned_without_waitid(424242, None) is True
+
+    def refused(pid, sig):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    # A pid that refuses signal 0 is somebody else's: unknown, and never signalled.
+    monkeypatch.setattr(os, "kill", refused)
     assert spawn._owned_without_waitid(424242, None) is None
 
     def gone(pid, sig):
@@ -4160,15 +4168,15 @@ def test_a_leader_that_a_stranger_now_holds_is_not_signalled_when_waitid_fails_o
 
 
 @linux_only
-def test_ownership_stays_unknown_and_refused_when_waitid_fails_and_nothing_else_can_tell(monkeypatch):
+def test_a_live_worker_is_still_ours_when_waitid_fails_and_nothing_else_can_tell(monkeypatch):
     process = WorkerProcess([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         monkeypatch.setattr(os, "waitid", _failing_waitid(errno.EPERM))
         monkeypatch.setattr(spawn.os.path, "isdir", lambda path: False if path == "/proc/self" else os.path.exists(path))
         with process._own_lock:
-            assert process._still_ours() is False
-        assert process._leader_lost is True
+            assert process._still_ours() is True
+        assert process._leader_lost is False
     finally:
         monkeypatch.undo()
         process.kill()
