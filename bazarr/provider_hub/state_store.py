@@ -79,40 +79,110 @@ _ready_lock = threading.Lock()
 _private_engine: Any = None
 
 
-class _DriverTextFilter(logging.Filter):
-    """Withhold driver text from the records SQLAlchemy logs itself.
+# Top-level keys of the state document whose contents the store understands.
+# A string under any other key is something this code did not put there, so it
+# is treated as a possible credential.
+_STRUCTURAL_KEYS = frozenset({
+    "catalog_sources", "catalog_entries", "installations", "jobs", "plugin_secret_paths", "plugin_envs",
+})
+
+
+def _document_strings(node: Any):
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _document_strings(value)
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            yield from _document_strings(value)
+
+
+def register_document_secrets(document: str) -> None:
+    """Register the credential values in a state document with the log scrubber, before it is bound.
+
+    The statements here bind the whole document, and a document imported from
+    an older state.json can hold plaintext credentials until the boot
+    migration encrypts them. A database error or a driver's log record can
+    quote the statement, so every value that could be a credential is known to
+    the shared scrubber (``secret_store.scrub``) before the statement runs:
+    every string under an installation's ``config``, and every string under a
+    top-level key this code does not understand. Registered values are masked
+    wherever the scrubber is applied, and by ``_SecretTextFilter`` on the
+    SQLAlchemy loggers, which covers the records written before the app's log
+    handlers exist (Alembic, early boot). A value shorter than the scrubber's
+    minimum is not masked, as everywhere else.
+    """
+    try:
+        from secret_store import scrub
+        data = json.loads(document)
+        if not isinstance(data, dict):
+            return
+        found: set[str] = set()
+        for row in (data.get("installations") or {}).values() if isinstance(data.get("installations"), dict) else ():
+            if isinstance(row, dict):
+                found.update(_document_strings(row.get("config")))
+        for key, value in data.items():
+            if key not in _STRUCTURAL_KEYS:
+                found.update(_document_strings(value))
+        found = {value.strip() for value in found if value.strip()}
+        with scrub._refresh_lock:
+            known = scrub.registered_secret_values()
+            if not found <= known:
+                scrub.register_secret_values(known | found)
+    except Exception:  # never let the scrub registration stand in the way of storing state
+        logger.debug("Could not register the state document's credential values for scrubbing", exc_info=False)
+
+
+class _SecretTextFilter(logging.Filter):
+    """Mask the registered credential values in the records SQLAlchemy logs itself.
 
     SQLAlchemy logs some failures before any exception reaches this store: a
     cursor that cannot be closed while a statement error is handled, a
-    connection that cannot be closed or reset by the pool. Those records carry
-    the driver's message, and PostgreSQL's DETAIL quotes the failing row, which
-    is the state document and can hold a plaintext credential from an older
-    state.json. The credential cannot be kept out of the statement on every
-    path (the Alembic import runs before the secret store is usable, and the
-    boot migration encrypts after the import), so the text is withheld here.
+    connection the pool cannot close. Those records carry the driver's
+    message, and PostgreSQL's DETAIL quotes the failing row, which is the
+    state document. The app's log handlers scrub formatted text, but only once
+    ``configure_logging`` has run, so the same scrubber is applied here, on
+    the SQLAlchemy loggers, to the message and to the exception text. Only the
+    registered values and the known token shapes are masked: every other
+    SQLAlchemy warning or error keeps its driver detail. The exception is
+    rendered into ``exc_text`` (masked) and ``exc_info`` is dropped from these
+    records, so no handler formats the raw traceback.
 
-    Trade-off: for every logger under ``sqlalchemy``, a record at WARNING or
-    above, or one carrying an exception, keeps its logger name, its level and
-    the exception's class name, and loses its message, arguments and traceback.
-    That is the price of not formatting driver text for this process's own
-    database connections; Python warnings are not logging records and are
-    untouched.
+    If the scrubber cannot be imported, the records of the logger are
+    withheld instead (message and exception removed), since nothing can be
+    masked.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno >= logging.WARNING or record.exc_info or record.exc_text:
-            error = record.exc_info[1] if record.exc_info else None
-            kind = f" ({type(error).__name__})" if error is not None else ""
-            record.msg = (f"a database operation reported a problem{kind}; the details are withheld "
-                          "because they can quote the Plugin Hub state")
+        try:
+            from secret_store.scrub import scrub_text
+        except Exception:
+            scrub_text = None
+        try:
+            message = record.getMessage()
+        except Exception:
+            message = str(record.msg)
+        exception_text = record.exc_text
+        if record.exc_info and not exception_text:
+            exception_text = logging.Formatter().formatException(record.exc_info)
+        if scrub_text is None:
+            if record.levelno >= logging.WARNING or record.exc_info or record.exc_text:
+                record.msg = "a database operation reported a problem; the details are withheld"
+                record.args = ()
+                record.exc_info = record.exc_text = record.stack_info = None
+            return True
+        scrubbed = scrub_text(message)
+        if scrubbed != message or record.args:
+            record.msg = scrubbed
             record.args = ()
+        if exception_text:
+            record.exc_text = scrub_text(exception_text)
             record.exc_info = None
-            record.exc_text = None
-            record.stack_info = None
         return True
 
 
-_log_filter = _DriverTextFilter()
+_log_filter = _SecretTextFilter()
 _filtered_logger_count = -1
 
 
@@ -143,8 +213,9 @@ def hide_parameters(bind):
     reaches the log and the traceback, so every engine the store touches has
     to hide them. The app engine and the private one are created with the flag;
     this covers an engine handed in from outside (tests, tooling, an alembic
-    connection) and is a no-op for the others. It also withholds driver text
-    from the log records SQLAlchemy writes itself; see ``_DriverTextFilter``.
+    connection) and is a no-op for the others. It also installs the filter that
+    masks credential values in the log records SQLAlchemy writes itself; see
+    ``_SecretTextFilter``.
     """
     _install_log_filter()
     target = getattr(bind, "engine", bind)
@@ -266,6 +337,7 @@ def import_legacy_state(connection, path: Path | None) -> bool:
         # corrupt or unreadable cannot block a database that is fine.
         return False
     document = _legacy_document(path)
+    register_document_secrets(document)
     result = connection.execute(_insert_if_absent({
         "id": ROW_ID,
         "schema_version": SCHEMA_VERSION,
@@ -403,6 +475,7 @@ def read_document(bind=None) -> tuple[int, str]:
 
 
 def _commit_document(connection, read_revision: int, document: str) -> None:
+    register_document_secrets(document)
     result = connection.execute(
         sa.update(_state_table)
         .where(_state_table.c.id == ROW_ID, _state_table.c.revision == read_revision)

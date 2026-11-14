@@ -26,6 +26,15 @@ hub_store = engines.hub_store
 SECRET = "plaintext-credential-9f3a"  # pragma: allowlist secret
 
 
+@pytest.fixture(autouse=True)
+def _scrub_values_are_restored():
+    """The store registers the credential values of every document it binds; leave the set as it was."""
+    from secret_store import scrub
+    saved = scrub.registered_secret_values()
+    yield
+    scrub.register_secret_values(saved)
+
+
 @pytest.fixture
 def snapshot_file(tmp_path, monkeypatch):
     from provider_hub import state
@@ -853,7 +862,7 @@ class _WrappedCursor(_Wrapped):
 
     def close(self):
         if self._armed.get("cursor") and getattr(self, "_statement_failed", False):
-            raise RuntimeError(f"cursor close failed, row preview: {SECRET}")
+            raise RuntimeError(self._armed.get("text") or f"cursor close failed, row preview: {SECRET}")
         self._target.close()
 
 
@@ -863,7 +872,7 @@ class _WrappedConnection(_Wrapped):
 
     def close(self):
         if self._armed.get("connection"):
-            raise RuntimeError(f"connection close failed, row preview: {SECRET}")
+            raise RuntimeError(self._armed.get("text") or f"connection close failed, row preview: {SECRET}")
         self._target.close()
 
 
@@ -884,13 +893,13 @@ def breakable(hub_store, hub_engine, monkeypatch):
 
             def close(self):
                 if armed.get("cursor") and getattr(self, "_statement_failed", False):
-                    raise RuntimeError(f"cursor close failed, row preview: {SECRET}")
+                    raise RuntimeError(armed.get("text") or f"cursor close failed, row preview: {SECRET}")
                 super().close()
 
         class Connection(extensions.connection):
             def close(self):
                 if armed.get("connection"):
-                    raise RuntimeError(f"connection close failed, row preview: {SECRET}")
+                    raise RuntimeError(armed.get("text") or f"connection close failed, row preview: {SECRET}")
                 super().close()
 
         connect = hub_engine.dialect.connect
@@ -940,36 +949,84 @@ def test_a_cursor_that_cannot_be_closed_while_a_statement_fails_logs_no_credenti
         logging.getLogger().removeHandler(handler)
         breakable["cursor"] = False
 
-    # SQLAlchemy did log the failed close, and what reached the log has no driver text.
-    assert any("withheld" in record.getMessage() for record in caplog.records)
+    # SQLAlchemy did log the failed close, with the credential masked and the rest of the detail kept.
+    assert any(record.name.startswith("sqlalchemy") and record.exc_text and "cursor close failed" in record.exc_text
+               and "***" in record.exc_text for record in caplog.records)
     assert not _leaked(caplog, capfd)
 
 
 def test_a_connection_the_pool_cannot_close_logs_no_credential(hub_store, hub_engine, breakable, caplog, capfd):
     from provider_hub.state import mutate_state
+    mutate_state(lambda state: state.update({"0credential": SECRET}))  # the store registers the value as it binds it
     handler = logging.StreamHandler(sys.stderr)
     logging.getLogger().addHandler(handler)
     breakable["connection"] = True
     try:
         with caplog.at_level(logging.DEBUG):
-            mutate_state(lambda state: state.update({"0credential": SECRET}))
+            mutate_state(lambda state: state["jobs"].append({"id": "again"}))
             hub_engine.dispose()  # a pooled connection is closed here; an unpooled one already was
     finally:
         logging.getLogger().removeHandler(handler)
         breakable["connection"] = False
 
-    assert any("withheld" in record.getMessage() for record in caplog.records)
+    assert any(record.name.startswith("sqlalchemy") and record.exc_text and "connection close failed" in record.exc_text
+               and "***" in record.exc_text for record in caplog.records)
     assert not _leaked(caplog, capfd)
 
 
-def test_the_filter_keeps_the_logger_and_the_exception_class_only():
+def test_the_filter_masks_registered_values_and_keeps_every_other_detail():
     from provider_hub import state_store
+    from secret_store import scrub
+    scrub.register_secret_values(scrub.registered_secret_values() | {SECRET})
+    try:
+        raise RuntimeError(f"row preview {SECRET} and a lock timeout on another table")
+    except RuntimeError:
+        exc_info = sys.exc_info()
     record = logging.LogRecord("sqlalchemy.pool.impl.NullPool", logging.ERROR, __file__, 1,
-                               "Exception closing connection %r", (SECRET,), (RuntimeError, RuntimeError(SECRET), None))
+                               "Exception closing connection %r", (f"conn {SECRET}",), exc_info)
+
     state_store._log_filter.filter(record)
+
     assert record.name == "sqlalchemy.pool.impl.NullPool"
-    assert "RuntimeError" in record.getMessage() and SECRET not in record.getMessage()
-    assert record.exc_info is None and record.exc_text is None
-    info = logging.LogRecord("sqlalchemy.engine.Engine", logging.INFO, __file__, 1, "SELECT 1", (), None)
+    assert SECRET not in record.getMessage() and "Exception closing connection" in record.getMessage()
+    assert SECRET not in record.exc_text
+    assert "a lock timeout on another table" in record.exc_text and "RuntimeError" in record.exc_text
+    assert record.exc_info is None
+    info = logging.LogRecord("sqlalchemy.engine.Engine", logging.INFO, __file__, 1, "SELECT %s", ("1",), None)
     state_store._log_filter.filter(info)
     assert info.getMessage() == "SELECT 1"
+
+
+def test_an_unrelated_database_error_keeps_its_driver_detail(hub_store, hub_engine, breakable, caplog):
+    """A connection that will not close for a reason that has nothing to do with the state keeps its text."""
+    from provider_hub.state import mutate_state
+    breakable["text"] = "No space left on device while closing"
+    breakable["connection"] = True
+    try:
+        with caplog.at_level(logging.DEBUG):
+            mutate_state(lambda state: state["jobs"].append({"id": "ordinary"}))
+            hub_engine.dispose()
+    finally:
+        breakable["connection"] = False
+
+    sqlalchemy_records = [record for record in caplog.records if record.name.startswith("sqlalchemy")]
+    assert any("No space left on device while closing" in record.exc_text for record in sqlalchemy_records
+               if record.exc_text)
+    assert "No space left on device while closing" in caplog.text
+    assert SECRET not in caplog.text
+
+
+def test_a_credential_in_an_installation_config_is_masked_in_what_the_store_logs(
+        hub_store, hub_engine, breakable, caplog):
+    from provider_hub.state import mutate_state
+    mutate_state(lambda state: state["installations"].update(examplehub=_installation(config={"api_key": SECRET})))
+    breakable["connection"] = True
+    try:
+        with caplog.at_level(logging.DEBUG):
+            mutate_state(lambda state: state["jobs"].append({"id": "again"}))
+            hub_engine.dispose()
+    finally:
+        breakable["connection"] = False
+
+    assert any(record.name.startswith("sqlalchemy") and record.exc_text for record in caplog.records)
+    assert SECRET not in caplog.text
