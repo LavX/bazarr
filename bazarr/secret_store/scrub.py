@@ -152,7 +152,16 @@ def register_secret_values(values: Iterable[Any]) -> int:
     registered = frozenset(cleaned)
     # Longest first: a credential that contains another is masked whole
     # rather than in pieces.
-    ordered = sorted(registered, key=len, reverse=True)
+    # A log line can quote a credential through ``%r``, which escapes quotes,
+    # backslashes and non-printable characters, so that spelling is masked too.
+    # It is derived here, for every registration path, and the value set itself
+    # stays the credentials.
+    spellings = set(registered)
+    for value in registered:
+        quoted = repr(value)[1:-1]
+        if len(quoted) >= _MIN_VALUE_LENGTH:
+            spellings.add(quoted)
+    ordered = sorted(spellings, key=len, reverse=True)
     regex = re.compile('|'.join(re.escape(value) for value in ordered)) if ordered else None
     _VALUE_STATE = (registered, regex)
     return len(registered)
@@ -177,7 +186,7 @@ def scrub_text(text: str) -> str:
     text = _mask_patterns(text)
 
     values, regex = _VALUE_STATE
-    if values and regex is not None and any(value in text for value in values):
+    if values and regex is not None:
         text = regex.sub(MASK, text)
     return text
 

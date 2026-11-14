@@ -1070,12 +1070,21 @@ def test_an_ordinary_config_value_is_masked_in_sqlalchemy_records_only(hub_store
     assert "***" in database_record.exc_text and "error while talking to" in database_record.exc_text
 
 
-AWKWARD_CREDENTIALS = ['p"ss\\wrd', "ünïcödé-key", 'ü"n\\ï-mix']
+AWKWARD_CREDENTIALS = ['coreA1x"qu\\ote', "coreB2yünï-cödé", 'coreC3z"mi\\x-ü\'']
 
 
-def _every_form(value):
-    from provider_hub.state_store import rendered_forms
-    return rendered_forms(value) | {json.dumps(value), repr(value), ascii(value)}
+def _independent_renderings(credential):
+    """A document holding the credential, rendered every way a log could, without the production helper."""
+    document = {"0credential": credential}
+    as_json = json.dumps(document, sort_keys=True)
+    as_json_unicode = json.dumps(document, sort_keys=True, ensure_ascii=False)
+    return [
+        str(document), repr(document), as_json, as_json_unicode, repr(as_json), repr(as_json_unicode),
+        ascii(as_json_unicode), repr(repr(document)),
+        f"Failing row contains (1, 1, 2, {as_json})",
+        "INSERT INTO provider_hub_state VALUES ('" + as_json.replace("'", "''") + "')",
+        repr(as_json.encode("utf-8")), repr(str(document).encode("utf-8")),
+    ]
 
 
 def _refuse_larger_documents(hub_engine):
@@ -1098,7 +1107,7 @@ def test_every_rendered_form_of_a_credential_is_masked(hub_store, hub_engine, br
     mutate_state(lambda state: state["jobs"].append({"id": "seed"}))
     _refuse_larger_documents(hub_engine)
     breakable["cursor"] = True
-    breakable["extra"] = " | " + " | ".join(sorted(_every_form(credential)))
+    breakable["extra"] = " | " + " | ".join(_independent_renderings(credential))
     handler = logging.StreamHandler(sys.stderr)
     logging.getLogger().addHandler(handler)
     try:
@@ -1112,8 +1121,65 @@ def test_every_rendered_form_of_a_credential_is_masked(hub_store, hub_engine, br
     assert any(record.name.startswith("sqlalchemy") and record.exc_text and "cursor close failed" in record.exc_text
                for record in caplog.records)
     seen = caplog.text + capfd.readouterr().err
-    for form in _every_form(credential):
-        assert form not in seen, f"the form {form!r} reached the log"
+    core = credential[:6]  # the plain start of the credential survives every spelling unless it is masked
+    assert core not in seen and credential not in seen
+
+
+def test_a_credential_clipped_in_a_row_preview_is_masked(hub_store, hub_engine, breakable, caplog, capfd):
+    """PostgreSQL clips the columns of 'Failing row contains', so a long credential shows only a prefix."""
+    if hub_engine.dialect.name != "postgresql":
+        pytest.skip("the clipped row preview is PostgreSQL's")
+    from provider_hub.state import mutate_state
+    credential = "clipCORE" + "x" * 400
+    mutate_state(lambda state: state["jobs"].append({"id": "seed"}))
+    _refuse_larger_documents(hub_engine)
+    breakable["cursor"] = True
+    try:
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(hub_store.StateStoreError):
+                mutate_state(lambda state: state.update({"0credential": credential}))
+    finally:
+        breakable["cursor"] = False
+
+    assert any("Failing row contains" in (record.exc_text or "") for record in caplog.records)
+    assert "clipCORE" not in caplog.text + capfd.readouterr().err
+
+
+def test_a_row_preview_is_masked_whole(hub_store):
+    hub_store.register_document_secrets(json.dumps({"installations": {}, "0credential": "previewCORE" + "y" * 50}))
+    text = 'DETAIL:  Failing row contains (1, 1, 2, {"0credential": "previewCOREyyyyyyyyyyyy...).\n[SQL: UPDATE ...]'
+    masked = hub_store._mask_local(text)
+    assert "previewCORE" not in masked
+    assert "Failing row contains (***)" in masked and "[SQL: UPDATE ...]" in masked
+
+
+def test_the_masking_set_is_rebuilt_only_when_the_values_change_and_stays_bounded(hub_store, monkeypatch):
+    calls = []
+    real = hub_store.rendered_forms
+    monkeypatch.setattr(hub_store, "rendered_forms", lambda value, depth=2: calls.append(depth) or real(value, depth))
+    values = {"stable-value-one", "stable-value-two"}
+    hub_store._set_local_values(set(values))
+    first = len(calls)
+    hub_store._set_local_values(set(values))
+    assert len(calls) == first  # the same input does not rebuild
+    hub_store._set_local_values(values | {"another-value-3"})
+    assert len(calls) > first
+
+    calls.clear()
+    hub_store._set_local_values({f"credential-number-{number:04d}" for number in range(hub_store._MAX_LOCAL_VALUES + 50)}
+                                | {"L" * (hub_store._LONG_VALUE + 1)})
+    assert len(calls) == hub_store._MAX_LOCAL_VALUES
+    assert 1 in calls  # the over-long value is expanded one level, not two
+    assert len(hub_store._local_state[0]) < 20000
+
+
+def test_sql_literal_and_utf8_bytes_forms_are_masked(hub_store):
+    credential = "sqlcoreAA'ünï"
+    hub_store._set_local_values({credential})
+    literal = "INSERT INTO t VALUES ('" + credential.replace("'", "''") + "')"
+    as_bytes = repr(credential.encode("utf-8"))
+    assert "sqlcoreAA" not in hub_store._mask_local(literal)
+    assert "sqlcoreAA" not in hub_store._mask_local(as_bytes)
 
 
 def test_no_rendering_of_a_document_keeps_a_credential_after_masking(hub_store):
@@ -1133,6 +1199,8 @@ def test_no_rendering_of_a_document_keeps_a_credential_after_masking(hub_store):
         str(document), repr(document), as_json, as_json_unicode,
         repr(as_json), repr(as_json_unicode), ascii(as_json_unicode), str(repr(repr(document))),
         f"Failing row contains (1, 1, 2, {as_json})", f"parameters: {[as_json]!r}",
+        "INSERT INTO t VALUES ('" + as_json.replace("'", "''") + "')",
+        repr(as_json.encode("utf-8")), repr(str(document).encode("utf-8")),
     ]
     for rendering in renderings:
         masked = hub_store._mask_local(rendering)

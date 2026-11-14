@@ -103,22 +103,31 @@ _local_state: tuple[frozenset[str], Any] = (frozenset(), None)
 _MIN_LOCAL_VALUE_LENGTH = 6
 
 
-def rendered_forms(value: str) -> set[str]:
-    """Every way ``value`` can be spelled in a log line that quotes the document or a repr of it.
+_MAX_LOCAL_VALUES = 256
+_LONG_VALUE = 1024
+_last_local_input: frozenset[str] = frozenset()
 
-    The raw text; the JSON-escaped form with and without ``ensure_ascii`` (what
-    a driver's DETAIL shows of the stored document), without the outer quotes;
-    the repr and ascii-escaped form of each of those (what ``%r`` or an
-    exception's text shows of a string that holds them), and each of them with
-    either quote character escaped, for the quote context it ends up in.
+
+def rendered_forms(value: str, depth: int = 2) -> set[str]:
+    """The spellings of ``value`` a log line can carry when it quotes the document, a statement or a repr of either.
+
+    The raw text; the JSON-escaped form with and without ``ensure_ascii``
+    (what a driver's DETAIL shows of the stored document), without the outer
+    quotes; the repr and ascii-escaped form of each of those (what ``%r`` or an
+    exception's text shows of a string that holds them); each of them with
+    either quote character escaped, for the quote context it ends up in; the SQL
+    literal form (an apostrophe doubled); and the repr of its UTF-8 bytes. The
+    escaping is applied ``depth`` times, for a document quoted inside a message
+    that is itself quoted. Not covered: a rendering that splits the value (a
+    line wrap) or transforms it (a case change, a hash).
     """
     forms = {value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}
-    # A document can be quoted inside a message that is itself quoted, so the
-    # escaping is applied twice.
-    for _depth in range(2):
+    for _level in range(depth):
         for form in set(forms):
             forms.add(repr(form)[1:-1])
             forms.add(ascii(form)[1:-1])
+            forms.add(form.replace("'", "''"))
+            forms.add(repr(form.encode("utf-8"))[2:-1])
             # repr picks its quote from the string itself, so a text that holds
             # an apostrophe is shown with double quotes and its apostrophe bare,
             # while the same text inside a larger string that repr quotes with
@@ -133,23 +142,36 @@ def rendered_forms(value: str) -> set[str]:
 def _set_local_values(values: set[str]) -> None:
     """Publish the values the SQLAlchemy filter masks, with the regex that finds them, in one assignment.
 
-    Every rendered form of a value is masked, not only its decoded text.
+    Every rendered form of a value is masked, not only its decoded text. The
+    forms and the pattern are rebuilt only when the set of values changes, the
+    longest values go first and at most ``_MAX_LOCAL_VALUES`` are kept, and a
+    value over ``_LONG_VALUE`` characters gets one level of escaping instead of
+    two, so the pattern stays small whatever the document holds.
     """
-    global _local_state
-    cleaned = set()
-    for value in values:
-        if len(value) >= _MIN_LOCAL_VALUE_LENGTH:
-            cleaned |= rendered_forms(value)
-    cleaned = frozenset(cleaned)
+    global _local_state, _last_local_input
+    wanted = frozenset(value for value in values if len(value) >= _MIN_LOCAL_VALUE_LENGTH)
+    if wanted == _last_local_input:
+        return
+    cleaned: set[str] = set()
+    for value in sorted(wanted, key=len, reverse=True)[:_MAX_LOCAL_VALUES]:
+        cleaned |= rendered_forms(value, depth=1 if len(value) > _LONG_VALUE else 2)
     ordered = sorted(cleaned, key=len, reverse=True)
     regex = re.compile("|".join(re.escape(value) for value in ordered)) if ordered else None
-    _local_state = (cleaned, regex)
+    _local_state = (frozenset(cleaned), regex)
+    _last_local_input = wanted
+
+
+# PostgreSQL's DETAIL for a constraint error: the failing row, each column
+# clipped. A credential that straddles a clip shows only a prefix, which no
+# value mask matches, so the whole preview goes.
+_ROW_PREVIEW = re.compile(r"Failing row contains \([^\n]*")
 
 
 def _mask_local(text: str) -> str:
+    text = _ROW_PREVIEW.sub("Failing row contains (***)", text)
     values, regex = _local_state
-    if regex is not None and any(value in text for value in values):
-        return regex.sub("***", text)
+    if regex is not None:
+        text = regex.sub("***", text)
     return text
 
 
@@ -169,7 +191,8 @@ def register_document_secrets(document: str) -> None:
     * the values of the fields the installation's manifest declares secret
       (or the persisted secret paths name) are also registered with the shared
       scrubber (``secret_store.scrub``), as the boot registers them, so they
-      are masked in every log line, as they are and as ``%r`` renders them.
+      are masked in every log line (the scrubber derives the ``%r`` form of
+      every value it registers).
 
     A value shorter than six characters is not masked, as everywhere else.
     """
@@ -197,8 +220,6 @@ def register_document_secrets(document: str) -> None:
                 local.update(_document_strings(value))
         _set_local_values({value.strip() for value in local if value.strip()})
         secret = {value.strip() for value in secret if value.strip() and not value.startswith("enc:")}
-        # An app log line quotes a credential as it is or through %r.
-        secret |= {repr(value)[1:-1] for value in secret if len(repr(value)[1:-1]) >= _MIN_LOCAL_VALUE_LENGTH}
         if secret:
             from secret_store import scrub
             with scrub._refresh_lock:
