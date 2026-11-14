@@ -359,10 +359,18 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
                 pass  # cannot tell, so it is not a confirmed exit
         # A zombie whose only thread is the leader has released its files and
         # memory, but its entry stays until it is reaped and reads as missing.
-        try:
+        # The state and start time are read before and after the task list, so
+        # a zombie that is reaped and whose pid is reused cannot be mixed up
+        # with the process that took its place.
+        def identity() -> tuple[str, str]:
             with open(os.path.join(proc, name, "stat"), encoding="utf-8", errors="replace") as handle:
-                state = handle.read().rsplit(")", 1)[1].split()[0]
-            return state == "Z" and os.listdir(os.path.join(proc, name, "task")) == [name]
+                fields = handle.read().rsplit(")", 1)[1].split()
+            return fields[0], fields[19]
+
+        try:
+            before = identity()
+            tasks = os.listdir(os.path.join(proc, name, "task"))
+            return before[0] == "Z" and tasks == [name] and identity() == before
         except (OSError, IndexError):
             return False
 

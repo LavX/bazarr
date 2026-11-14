@@ -1549,6 +1549,43 @@ def test_a_zombie_leader_with_a_live_thread_still_blocks_cleanup(tmp_path, monke
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
 
+def test_a_zombie_replaced_by_a_live_process_between_the_reads_keeps_the_pid_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _zombie(entry)
+    real_listdir = venvmod.os.listdir
+
+    def listdir(path, *args, **kwargs):
+        listed = real_listdir(path, *args, **kwargs)
+        if str(path) == str(entry / "task"):
+            # reaped, and the pid taken by a live single-threaded process
+            (entry / "stat").write_text(f"{entry.name} (python) S " + "0 " * 18 + "88888888888888 0\n")
+        return listed
+
+    monkeypatch.setattr(venvmod.os, "listdir", listdir)
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_pid_reused_again_and_again_by_other_zombies_keeps_the_pid_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _zombie(entry)
+    real_listdir = venvmod.os.listdir
+    looks = {"count": 0}
+
+    def listdir(path, *args, **kwargs):
+        listed = real_listdir(path, *args, **kwargs)
+        if str(path) == str(entry / "task"):
+            looks["count"] += 1  # a different zombie holds the pid after every task listing
+            (entry / "stat").write_text(f"{entry.name} (true) Z " + "0 " * 18 + f"{88888888888888 + looks['count']} 0\n")
+        return listed
+
+    monkeypatch.setattr(venvmod.os, "listdir", listdir)
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
 def test_a_failed_state_read_keeps_the_process_in_use(tmp_path, monkeypatch):
     proc, entry = _fake_proc(tmp_path)
     _zombie(entry)
