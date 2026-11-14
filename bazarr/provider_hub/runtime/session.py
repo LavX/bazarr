@@ -338,7 +338,7 @@ def _zombie_or_gone(pid, mark=None, process=None):
     return {"live": _RUNNING, "reaped": _REAPED}.get(proof, _GONE)
 
 
-def _probe(process, mark=None):
+def _probe(process, mark=None, teardown=False):
     """What the worker is doing, without reaping it: ``running``, ``exited`` or ``gone``.
 
     Nothing may collect the leader until its group has been dealt with: a
@@ -347,13 +347,15 @@ def _probe(process, mark=None):
     calls ``poll()``. It looks with ``waitid(WNOWAIT)``, or where that is
     unavailable or fails, with the zombie check above. ``gone`` means somebody
     else already collected the leader (``ECHILD``): the pid is no longer ours.
+
+    ``teardown`` says the caller is ending the worker anyway (see ``WorkerProcess.probe_exit``).
     """
     # A process that owns its reaps (a launcher, an anchored worker) answers under its
     # own lock: reading ``returncode`` here and asking ``waitid`` afterwards could be
     # overtaken by its own ``stop()`` and read as a reap by somebody else.
     own = getattr(process, "probe_exit", None)
     if callable(own):
-        answer = own()
+        answer = own(teardown=teardown)
         if answer in (_RUNNING, _EXITED, _GONE):
             return answer
         if _is_posix():
@@ -419,8 +421,9 @@ class WorkerSession:
         self._process_mark = None
         # Set when neither waitid nor /proc could say whether the pid is still the child's.
         self._ownership_unknown = False
-        # The leader was collected by the blind-host probe (``_REAPED``): its group may be signalled once.
-        self._reaped_here = False
+        # The blind-host probe collected the leader (``_REAPED``) itself: its exit is proven. That
+        # grants no group signal later; see ``_ours``.
+        self._exit_proven = False
         self.welcome: Welcome | None = None
         self.exit_code: int | None = None
         # Group teardown happens once, while the leader is still unreaped; after
@@ -1177,13 +1180,25 @@ class WorkerSession:
 
     # ------------------------------------------------------------- lifecycle
 
-    def _exited(self, process):
-        """Whether the worker has exited. Notes (once and for good) if it was reaped elsewhere."""
-        state = _probe(process, self._process_mark)
+    def _exited(self, process, teardown=False):
+        """Whether the worker has exited. Notes (once and for good) if it was reaped elsewhere.
+
+        ``teardown``: the worker is being ended anyway. A blind host's probe collects the child to
+        see its exit; in a teardown, the probe that does it sends the one group signal right then
+        (the group id is still held by whatever lives in it). Outside a teardown (``alive``) it
+        grants no signal, now or later: the group is then taken as gone, and what the leader left
+        behind is not known.
+        """
+        state = _probe(process, self._process_mark, teardown)
         if state == _REAPED:
             with self._group_lock:
-                if not self._group_ended and not self._group_lost:
-                    self._reaped_here = True
+                self._exit_proven = True
+                if teardown and not self._group_ended and not self._group_lost:
+                    self._group_ended = True
+                    if not _signal_group(process, _SIGKILL):
+                        self._exit_proven = False
+                    else:
+                        self._teardown_ok = True
             return True
         if state in (_GONE, _UNKNOWN):
             with self._group_lock:
@@ -1207,12 +1222,14 @@ class WorkerSession:
         if self._group_ended or self._group_lost:
             return False
         if process.returncode is not None:
-            # Collected by the blind-host probe (``_REAPED``) the group is still ours to end; by
-            # anything else, its number may be a stranger's.
-            return self._reaped_here
+            # Collected earlier, by anyone (a probe included): the group number may be a
+            # stranger's by now, so it is never signalled.
+            return False
         state = _probe(process, self._process_mark)
         if state == _REAPED:
-            self._reaped_here = True
+            # This very call collected it: the caller signals the group right now, in the same
+            # locked step, and the next call finds the leader reaped and refuses.
+            self._exit_proven = True
             return True
         if state in (_GONE, _UNKNOWN):
             # Reaped by somebody else, or nothing can say the pid is still the child's: not signalled.
@@ -1224,7 +1241,7 @@ class WorkerSession:
 
     def _poll(self):
         process = self.process
-        if process is None or not self._exited(process):
+        if process is None or not self._exited(process, True):
             return None
         try:
             return self._reap(process, 0.0)
@@ -1235,7 +1252,7 @@ class WorkerSession:
     def _wait_exit(self, process, timeout):
         """Wait until the worker has exited, leaving it unreaped. False if it has not within ``timeout``."""
         deadline = time.monotonic() + timeout
-        while not self._exited(process):
+        while not self._exited(process, True):
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.005)
@@ -1309,6 +1326,11 @@ class WorkerSession:
             ours = self._ours(process)
             self._group_ended = True
             if ours and _signal_group(process, _SIGKILL):
+                self._teardown_ok = True
+            elif not ours and self._exit_proven and not self._group_lost:
+                # Our own waitpid proved the leader exited before this teardown, so its group
+                # number may be a stranger's now and nothing is signalled. The group is taken as
+                # gone (what the leader left behind is unknown; the pool counts it as unverified).
                 self._teardown_ok = True
 
     def _reap(self, process, timeout):
@@ -1529,6 +1551,11 @@ class WorkerSession:
                         process.kill()
                     except OSError:
                         pass
+            elif self._exit_proven and not self._group_lost and not self._group_ended:
+                # Collected by our own waitpid before this teardown: nothing is signalled, the
+                # group is taken as gone (see ``_end_group``).
+                self._group_ended = True
+                self._teardown_ok = True
             elif self._ownership_unknown:
                 # The group cannot be signalled on a pid nobody can vouch for, but the child
                 # itself can still be ended the way Popen does it (it looks before it kills),
@@ -1559,7 +1586,7 @@ class WorkerSession:
         # Before the welcome the worker is not in the conversation yet, and a
         # shutdown frame ahead of the welcome would be a frame it cannot place:
         # that worker is simply ended below.
-        if not already and process is not None and handshaken and not self._exited(process):
+        if not already and process is not None and handshaken and not self._exited(process, True):
             self._send_quietly({"t": frames.SHUTDOWN, "grace_ms": min(max(int(grace * 1000), 0), frames.MAX_SHUTDOWN_GRACE_MS)})
             if not self._wait_exit(process, grace):
                 if not self._signal_leader_group(process, _SIGTERM):
