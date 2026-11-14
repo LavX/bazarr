@@ -2903,6 +2903,10 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if key in ['settings-general-base_url', 'settings-sonarr-base_url', 'settings-radarr-base_url']:
             value = base_url_slash_cleaner(value)
 
+        if key == 'settings-endpoints-flaresolverr_v1_url' and isinstance(value, str):
+            # A pasted address often carries a trailing space or newline.
+            value = value.strip()
+
         if key == 'settings-general-instance_name' and value == '':
             value = None
 

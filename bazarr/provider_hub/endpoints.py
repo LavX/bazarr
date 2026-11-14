@@ -36,6 +36,8 @@ SIBLING_PROBE_TIMEOUT_SECONDS = 2.0
 # The whole attempt, name lookup included. The request timeout alone does not
 # bound the lookup.
 SIBLING_PROBE_DEADLINE_SECONDS = 3.0
+# FlareSolverr's index answers a few dozen bytes. Anything bigger is not it.
+SIBLING_PROBE_MAX_BYTES = 8192
 SIBLING_CACHE_SECONDS = 300.0
 
 _sibling_lock = threading.Lock()
@@ -96,7 +98,9 @@ def may_receive_flaresolverr(installation) -> bool:
     FlareSolverr fetches any URL it is asked for, so its address is a LAN
     browser. It goes only to a trusted installation or to one whose manifest
     declares ``"flaresolverr": true``, never to an untrusted plugin that merely
-    has a field of the right name.
+    has a field of the right name. The manifest flag is the plugin's own
+    declaration, not a check that anyone trusts it: it only keeps the address
+    away from plugins that never asked for it.
     """
     if getattr(installation, "trusted", False) is True:
         return True
@@ -127,6 +131,8 @@ def fill_flaresolverr_url(config: dict, properties: dict, installation, settings
 
 
 def _probe_flaresolverr(url: str) -> bool:
+    import json
+
     import requests
 
     try:
@@ -134,10 +140,20 @@ def _probe_flaresolverr(url: str) -> bool:
             # A container name is looked up directly: a proxy set for the
             # environment must not decide whether the sibling answers.
             session.trust_env = False
-            response = session.get(url, timeout=SIBLING_PROBE_TIMEOUT_SECONDS, allow_redirects=False)
-        if response.status_code != 200:
-            return False
-        payload = response.json()
+            response = session.get(url, timeout=SIBLING_PROBE_TIMEOUT_SECONDS, allow_redirects=False, stream=True)
+            try:
+                if response.status_code != 200:
+                    return False
+                # Whatever answers on that name is not trusted to be short.
+                chunks, size = [], 0
+                for chunk in response.iter_content(SIBLING_PROBE_MAX_BYTES):
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > SIBLING_PROBE_MAX_BYTES:
+                        return False
+                payload = json.loads(b"".join(chunks))
+            finally:
+                response.close()
     except Exception:
         return False
     return isinstance(payload, dict) and "flaresolverr" in str(payload.get("msg", "")).casefold()
@@ -242,8 +258,9 @@ def sibling_hint() -> tuple[str | None, bool]:
 
     Never probes in the caller. A missing or stale answer starts a background
     refresh; until it lands the caller gets the last known address (or none).
-    ``detecting`` is true while nothing has been learned yet and while a refresh
-    of a stale answer is running, because the page polls only while it is true.
+    ``detecting`` is true while nothing has been learned yet, while a refresh of
+    a stale answer is running and while a probe that hit its deadline is still
+    out, because the page polls only while it is true.
     """
     with _sibling_lock:
         checked_at = _sibling_cache["checked_at"]
@@ -257,9 +274,11 @@ def sibling_hint() -> tuple[str | None, bool]:
         checked_at = _sibling_cache["checked_at"]
         url = _sibling_cache["url"]
         fresh = checked_at is not None and time.monotonic() - checked_at < SIBLING_CACHE_SECONDS
-        flight = _probe_flight
-        refreshing = flight is not None and not flight["recorded"]
-    return url, checked_at is None or (not fresh and refreshing)
+        active = _probe_flight is not None
+        # The deadline recorded a negative while the network call is still out;
+        # the real answer is yet to come, so the page must keep asking.
+        late_answer = active and _probe_flight["recorded"]
+    return url, checked_at is None or late_answer or (not fresh and active)
 
 
 def start_flaresolverr_hint_probe() -> None:
@@ -271,10 +290,14 @@ def flaresolverr_status(settings=None, refresh: bool = False) -> dict:
     """What the Settings page shows: the effective address, its source and the hint.
 
     Without ``refresh`` this answers from the cache and never waits on the
-    network. With ``refresh`` (an explicit Detect) it probes within the deadline.
+    network. With ``refresh`` (an explicit Detect) it waits for a probe, up to the
+    deadline.
     """
     if refresh:
-        detected, detecting = detect_flaresolverr_sibling(refresh=True), False
+        detected = detect_flaresolverr_sibling(refresh=True)
+        with _sibling_lock:
+            # A probe that ran into its deadline is still out and may yet answer.
+            detecting = _probe_flight is not None and _probe_flight["recorded"]
     else:
         detected, detecting = sibling_hint()
     # Read after the probe: a Detect can wait seconds, and the setting may have
@@ -284,7 +307,7 @@ def flaresolverr_status(settings=None, refresh: bool = False) -> dict:
         "url": url,
         "source": source,
         # Once an address is in use there is nothing to accept.
-        "detected": detected if detected and detected != url else None,
+        "detected": detected if detected and detected.rstrip("/") != url.rstrip("/") else None,
         "detecting": detecting,
         # Whether the sibling answered at all, even when it is the address
         # already in use and so has nothing left to offer.

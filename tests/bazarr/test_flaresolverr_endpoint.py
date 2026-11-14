@@ -286,6 +286,11 @@ class TestSave:
         assert env.events.index(resets[0]) > max(
             index for index, event in enumerate(env.events) if event[0] == "write")
 
+    def test_a_pasted_address_with_surrounding_whitespace_is_trimmed_not_refused(self, env):
+        env.config.save_settings([(endpoints.FLARESOLVERR_FORM_KEY, [f"  {GLOBAL_URL} \n"])])
+
+        assert env.settings.endpoints.flaresolverr_v1_url == GLOBAL_URL
+
     def test_an_unrelated_save_does_not_reset_the_pool(self, env):
         env.config.save_settings([("settings-general-page_size", ["77"])])
         assert [event for event in env.events if event[0] == "reset"] == []
@@ -335,29 +340,71 @@ class TestDetect:
         assert status["sibling_found"] is True
         assert status["source"] == "setting"
 
-    def test_the_probe_only_accepts_a_flaresolverr_reply(self, monkeypatch):
+    @staticmethod
+    def _serve(monkeypatch, body, status=200):
+        """Replace the HTTP call with a response that streams ``body`` and records what was read."""
         import requests
 
-        def fake_get(payload, status=200):
-            class Response:
-                status_code = status
+        record = {"chunks": 0, "closed": False, "stream": None}
 
-                @staticmethod
-                def json():
-                    if isinstance(payload, Exception):
-                        raise payload
-                    return payload
+        class Response:
+            status_code = status
 
-            return lambda self, url, **kwargs: Response()
+            @staticmethod
+            def iter_content(chunk_size):
+                data = body
+                while True:
+                    record["chunks"] += 1
+                    yield data[:chunk_size] if not callable(data) else data()
+                    if not callable(data):
+                        data = data[chunk_size:]
+                        if not data:
+                            return
 
-        monkeypatch.setattr(requests.Session, "get", fake_get({"msg": "FlareSolverr is ready!"}))
+            @staticmethod
+            def close():
+                record["closed"] = True
+
+        def get(self, url, **kwargs):
+            record["stream"] = kwargs.get("stream")
+            return Response()
+
+        monkeypatch.setattr(requests.Session, "get", get)
+        return record
+
+    def test_the_probe_only_accepts_a_flaresolverr_reply(self, monkeypatch):
+        self._serve(monkeypatch, b'{"msg": "FlareSolverr is ready!"}')
         assert endpoints._probe_flaresolverr("http://x") is True
-        monkeypatch.setattr(requests.Session, "get", fake_get({"msg": "hello"}))
+        self._serve(monkeypatch, b'{"msg": "hello"}')
         assert endpoints._probe_flaresolverr("http://x") is False
-        monkeypatch.setattr(requests.Session, "get", fake_get(ValueError("html")))
+        self._serve(monkeypatch, b"<html>")
         assert endpoints._probe_flaresolverr("http://x") is False
-        monkeypatch.setattr(requests.Session, "get", fake_get({"msg": "FlareSolverr"}, status=302))
+        self._serve(monkeypatch, b'{"msg": "FlareSolverr"}', status=302)
         assert endpoints._probe_flaresolverr("http://x") is False
+
+    def test_the_probe_streams_and_closes_the_response(self, monkeypatch):
+        record = self._serve(monkeypatch, b'{"msg": "FlareSolverr"}')
+        assert endpoints._probe_flaresolverr("http://x") is True
+        assert record["stream"] is True
+        assert record["closed"] is True
+
+    def test_the_probe_stops_reading_an_endless_body(self, monkeypatch):
+        record = self._serve(monkeypatch, lambda: b"x" * endpoints.SIBLING_PROBE_MAX_BYTES)
+        assert endpoints._probe_flaresolverr("http://x") is False
+        assert record["chunks"] <= 3
+        assert record["closed"] is True
+
+    def test_a_body_just_over_the_limit_is_refused_even_if_it_would_match(self, monkeypatch):
+        body = b'{"msg": "FlareSolverr", "pad": "' + b"x" * endpoints.SIBLING_PROBE_MAX_BYTES + b'"}'
+        self._serve(monkeypatch, body)
+        assert endpoints._probe_flaresolverr("http://x") is False
+
+    def test_a_hint_that_differs_only_by_a_trailing_slash_is_not_offered(self, monkeypatch):
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr", lambda url: True)
+        endpoints.detect_flaresolverr_sibling(refresh=True)
+        status = endpoints.flaresolverr_status(_settings(endpoints.FLARESOLVERR_SIBLING_URL + "/"))
+        assert status["detected"] is None
+        assert status["sibling_found"] is True
 
 
 class TestNeverBlocksTheCaller:
@@ -528,6 +575,28 @@ class TestNeverBlocksTheCaller:
         _join_background_threads()
         assert endpoints.detect_flaresolverr_sibling() == endpoints.FLARESOLVERR_SIBLING_URL
 
+    def test_the_page_keeps_polling_while_a_probe_past_its_deadline_is_still_out(self, monkeypatch):
+        import time
+
+        release, _calls = self._gated_probe(monkeypatch, found=True)
+        monkeypatch.setattr(endpoints, "SIBLING_PROBE_DEADLINE_SECONDS", 0.2)
+        try:
+            explicit = endpoints.flaresolverr_status(_settings(""), refresh=True)
+            assert explicit["detected"] is None
+            assert explicit["detecting"] is True
+            polled = endpoints.flaresolverr_status(_settings(""))
+            assert polled["detecting"] is True
+        finally:
+            release.set()
+        _join_background_threads()
+        for _ in range(100):
+            polled = endpoints.flaresolverr_status(_settings(""))
+            if not polled["detecting"]:
+                break
+            time.sleep(0.05)
+        assert polled["detecting"] is False
+        assert polled["detected"] == endpoints.FLARESOLVERR_SIBLING_URL
+
     def test_a_pending_startup_probe_and_an_explicit_detect_share_one_probe(self, monkeypatch):
         """The startup probe is slow and negative; Detect must not race it with a second probe."""
         import threading
@@ -636,6 +705,32 @@ class TestNeverBlocksTheCaller:
         body = client.post("/providers/flaresolverr", headers=headers).get_json()
         assert body["data"]["detected"] == endpoints.FLARESOLVERR_SIBLING_URL
         assert body["data"]["detecting"] is False
+
+
+class TestAuthentication:
+    @staticmethod
+    def _client():
+        from flask import Flask
+        from flask_restx import Api
+
+        from api.providers import flaresolverr as api_module
+
+        app = Flask(__name__)
+        api = Api(app)
+        api.add_namespace(api_module.api_ns_providers_flaresolverr, path="/")
+        return app.test_client()
+
+    @pytest.mark.parametrize("method", ["get", "post"])
+    def test_no_key_is_refused_and_nothing_is_probed(self, monkeypatch, method):
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr",
+                            lambda url: pytest.fail("an unauthenticated request must not probe"))
+        monkeypatch.setattr(endpoints, "schedule_sibling_refresh",
+                            lambda: pytest.fail("an unauthenticated request must not probe"))
+        client = self._client()
+
+        assert getattr(client, method)("/providers/flaresolverr").status_code == 401
+        assert getattr(client, method)("/providers/flaresolverr",
+                                       headers={"X-API-KEY": "wrong"}).status_code == 401
 
 
 def time_ago(seconds):
