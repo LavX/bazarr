@@ -32,6 +32,10 @@ export interface SortableListProps<T> {
   renderItem: (item: T, index: number) => ReactNode;
   onReorder: (ids: string[]) => void;
   disabled?: boolean;
+  /** A class for each row, so a caller can draw the row as a card. */
+  rowClassName?: string;
+  /** Content shown under a row at the row's full width, below its handle and buttons. */
+  renderDetail?: (item: T, index: number) => ReactNode;
 }
 
 interface RowProps {
@@ -41,6 +45,8 @@ interface RowProps {
   count: number;
   disabled: boolean;
   onMove: (from: number, to: number) => void;
+  className?: string;
+  detail?: ReactNode;
   children: ReactNode;
 }
 
@@ -51,6 +57,8 @@ function SortableRow({
   count,
   disabled,
   onMove,
+  className,
+  detail,
   children,
 }: RowProps) {
   const {
@@ -68,44 +76,41 @@ function SortableRow({
     zIndex: isDragging ? 10 : undefined,
   };
   return (
-    <Group
-      ref={setNodeRef}
-      style={style}
-      gap="xs"
-      wrap="nowrap"
-      role="listitem"
-    >
-      <ActionIcon
-        variant="subtle"
-        color="gray"
-        aria-label={`Drag ${name}`}
-        disabled={disabled}
-        style={{ cursor: disabled ? "default" : "grab", touchAction: "none" }}
-        {...attributes}
-        {...listeners}
-      >
-        <FontAwesomeIcon icon={faGripVertical} />
-      </ActionIcon>
-      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
-      <ActionIcon
-        variant="subtle"
-        color="gray"
-        aria-label={`Move ${name} up`}
-        disabled={disabled || index === 0}
-        onClick={() => onMove(index, index - 1)}
-      >
-        <FontAwesomeIcon icon={faArrowUp} />
-      </ActionIcon>
-      <ActionIcon
-        variant="subtle"
-        color="gray"
-        aria-label={`Move ${name} down`}
-        disabled={disabled || index === count - 1}
-        onClick={() => onMove(index, index + 1)}
-      >
-        <FontAwesomeIcon icon={faArrowDown} />
-      </ActionIcon>
-    </Group>
+    <div ref={setNodeRef} style={style} className={className} role="listitem">
+      <Group gap="xs" wrap="nowrap" data-sortable-row="">
+        <ActionIcon
+          variant="subtle"
+          color="gray"
+          aria-label={`Drag ${name}`}
+          disabled={disabled}
+          style={{ cursor: disabled ? "default" : "grab", touchAction: "none" }}
+          {...attributes}
+          {...listeners}
+        >
+          <FontAwesomeIcon icon={faGripVertical} />
+        </ActionIcon>
+        <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+        <ActionIcon
+          variant="subtle"
+          color="gray"
+          aria-label={`Move ${name} up`}
+          disabled={disabled || index === 0}
+          onClick={() => onMove(index, index - 1)}
+        >
+          <FontAwesomeIcon icon={faArrowUp} />
+        </ActionIcon>
+        <ActionIcon
+          variant="subtle"
+          color="gray"
+          aria-label={`Move ${name} down`}
+          disabled={disabled || index === count - 1}
+          onClick={() => onMove(index, index + 1)}
+        >
+          <FontAwesomeIcon icon={faArrowDown} />
+        </ActionIcon>
+      </Group>
+      {detail}
+    </div>
   );
 }
 
@@ -121,6 +126,8 @@ export function SortableList<T>({
   renderItem,
   onReorder,
   disabled = false,
+  rowClassName,
+  renderDetail,
 }: SortableListProps<T>) {
   const ids = items.map(getId);
   const sensors = useSensors(
@@ -162,6 +169,8 @@ export function SortableList<T>({
               count={items.length}
               disabled={disabled}
               onMove={move}
+              className={rowClassName}
+              detail={renderDetail?.(item, index)}
             >
               {renderItem(item, index)}
             </SortableRow>
