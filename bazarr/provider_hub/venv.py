@@ -283,6 +283,8 @@ def _read_nul_separated(path: str) -> list[str]:
 # processes a few times (about 100 ms in all) before treating them as in use.
 _UNREADABLE_RETRIES = 3
 _UNREADABLE_PAUSE = 0.033
+# The process flag of a kernel thread, field 9 of /proc/PID/stat.
+_PF_KTHREAD = 0x00200000
 
 
 def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/proc") -> bool | None:
@@ -358,14 +360,25 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
                 return True  # the entry is gone (a missing file alone is not a missing process, and a pid can be reused)
             except OSError:
                 pass  # cannot tell, so it is not a confirmed exit
+        def stat_fields() -> list[str]:
+            """The stat fields after the command name, which may itself hold spaces and parentheses."""
+            with open(os.path.join(proc, name, "stat"), encoding="utf-8", errors="replace") as handle:
+                return handle.read().rsplit(")", 1)[1].split()
+
+        # A kernel thread has no executable, files or user memory to be using
+        # anything with, and its links read as missing.
+        try:
+            if int(stat_fields()[6]) & _PF_KTHREAD:
+                return True
+        except (OSError, IndexError, ValueError):
+            pass  # cannot tell, so it is not a confirmed kernel thread
         # A zombie whose only thread is the leader has released its files and
         # memory, but its entry stays until it is reaped and reads as missing.
         # The state and start time are read before and after the task list, so
         # a zombie that is reaped and whose pid is reused cannot be mixed up
         # with the process that took its place.
         def identity() -> tuple[str, str]:
-            with open(os.path.join(proc, name, "stat"), encoding="utf-8", errors="replace") as handle:
-                fields = handle.read().rsplit(")", 1)[1].split()
+            fields = stat_fields()
             return fields[0], fields[19]
 
         try:

@@ -1662,6 +1662,43 @@ def test_an_unreadable_start_time_counts_the_process_as_possibly_newer(tmp_path,
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
 
+def _stat_line(pid, comm="true", state="S", flags=0, start=99999999999999):
+    after = [state, "1", "1", "1", "0", "-1", str(flags), *["0"] * 12, str(start), "0"]
+    return f"{pid} ({comm}) {' '.join(after)}\n"
+
+
+def test_a_newer_kernel_thread_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "stat").write_text(_stat_line(entry.name, comm="kworker/0:1", flags=0x00200040))
+    reads = _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert reads["count"] == 1
+
+
+def test_an_unreadable_stat_with_a_missing_exe_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "stat").unlink()
+    (entry / "stat").mkdir()
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 10)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_command_name_with_parentheses_does_not_confuse_the_flags(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    tricky = "x) S 1 1 1 0 -1 4194304 0 (y"
+    _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 20)
+
+    # the name looks like it carries the kernel thread flag, the real flags say it does not
+    (entry / "stat").write_text(_stat_line(entry.name, comm=tricky, flags=0))
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+    # the name looks harmless, the real flags say kernel thread
+    (entry / "stat").write_text(_stat_line(entry.name, comm=tricky, flags=0x00200000))
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
 def test_a_process_that_stays_unreadable_still_blocks_cleanup(tmp_path, monkeypatch):
     proc, entry = _fake_proc(tmp_path)
     seen = _unreadable_reads(monkeypatch, entry, failures=10**6)
