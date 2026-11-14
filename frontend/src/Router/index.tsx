@@ -13,6 +13,7 @@ import {
   faExclamationTriangle,
   faFileExcel,
   faFilm,
+  faLanguage,
   faLaptop,
   faPlay,
   faStore,
@@ -45,7 +46,6 @@ import SettingsNotificationsView from "@/pages/Settings/Notifications";
 import SettingsProvidersView from "@/pages/Settings/Providers";
 import SettingsSchedulerView from "@/pages/Settings/Scheduler";
 import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
-import SettingsTranslationView from "@/pages/Settings/Translation";
 import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
@@ -57,12 +57,14 @@ import SystemLogsView from "@/pages/System/Logs";
 import SystemProvidersView from "@/pages/System/Providers";
 import SystemReleasesView from "@/pages/System/Releases";
 import SystemTasksView from "@/pages/System/Tasks";
+import TranslationView from "@/pages/Translation";
 import WantedMoviesView from "@/pages/Wanted/Movies";
 import WantedSeriesView from "@/pages/Wanted/Series";
 import WantedSportsView from "@/pages/Wanted/Sports";
 import { Environment } from "@/utilities";
 import Redirector from "./Redirector";
 import { RouterNames } from "./RouterNames";
+import TranslationGate from "./TranslationGate";
 import { CustomRouteObject } from "./type";
 
 const StatisticsView = lazy(() => import("@/pages/Statistics"));
@@ -75,8 +77,7 @@ const SubtitleEditorPage = lazy(
 export function useRoutes(): CustomRouteObject[] {
   const { data } = useBadges();
   const { sonarr, radarr, sportarr } = useEnabledStatus();
-  // Settings > Translation exists only while the v2 translation runtime is on.
-  // With it off the route is not in the router at all, not just hidden.
+  // The Translation page exists only while the v2 translation runtime is on.
   const translationRuntime = useTranslationRuntime();
 
   return useMemo(
@@ -238,6 +239,20 @@ export function useRoutes(): CustomRouteObject[] {
             element: <SettingsProvidersView></SettingsProvidersView>,
           },
           {
+            icon: faLanguage,
+            name: "Translation",
+            path: "translation",
+            // Out of the navigation while the runtime is off; the gate makes
+            // its address Not Found. See TranslationGate for why the route
+            // itself is always here.
+            hidden: !translationRuntime,
+            element: (
+              <TranslationGate>
+                <TranslationView />
+              </TranslationGate>
+            ),
+          },
+          {
             icon: faTowerBroadcast,
             name: "Distribution Hub",
             path: "distribution-hub",
@@ -306,17 +321,12 @@ export function useRoutes(): CustomRouteObject[] {
                 name: "AI Translator",
                 element: <SettingsTranslatorView></SettingsTranslatorView>,
               },
-              ...(translationRuntime
-                ? [
-                    {
-                      path: "translation",
-                      name: "Translation",
-                      element: (
-                        <SettingsTranslationView></SettingsTranslationView>
-                      ),
-                    },
-                  ]
-                : []),
+              {
+                // The page lived under Settings while it was being built.
+                path: "translation",
+                hidden: true,
+                element: <Navigate to="/translation" replace />,
+              },
               {
                 path: "external",
                 hidden: true,

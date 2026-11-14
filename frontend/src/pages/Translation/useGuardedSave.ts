@@ -60,5 +60,11 @@ export function useGuardedSave(
     save: () => attempt([]),
     accept: () => attempt(asking),
     decline: () => setAsking([]),
+    /** Forget the last refusal, for a form that reloads what is saved. */
+    dismiss: () => {
+      setMessage("");
+      setStale(false);
+      setFieldErrors({});
+    },
   };
 }

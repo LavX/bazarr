@@ -91,7 +91,13 @@ const sectionGroups = [
   { label: "Management", paths: ["history", "wanted", "blacklist"] },
   {
     label: "System",
-    paths: ["subtitle-hub", "distribution-hub", "settings", "system"],
+    paths: [
+      "subtitle-hub",
+      "translation",
+      "distribution-hub",
+      "settings",
+      "system",
+    ],
   },
 ];
 
