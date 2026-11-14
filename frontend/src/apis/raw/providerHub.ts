@@ -59,6 +59,8 @@ export interface ProviderHubInstallation {
   python_path?: string | null;
   staged_python_path?: string | null;
   last_error?: string | null;
+  /** True when the plugin's Python environment is missing or fails its check. */
+  needs_repair?: boolean;
   runtime_status?: ProviderHubRuntimeStatus;
   installed_at?: string | null;
   activated_at?: string | null;
@@ -188,6 +190,13 @@ class ProviderHubApi extends BaseApi {
   async uninstall(providerId: string) {
     const response = await this.delete<ProviderHubJobRef>(
       `/installations/${providerId}`,
+    );
+    return response.data;
+  }
+
+  async repair(providerId: string) {
+    const response = await this.postRaw<ProviderHubJobRef>(
+      `/installations/${providerId}/repair`,
     );
     return response.data;
   }

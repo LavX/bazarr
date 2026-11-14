@@ -242,6 +242,21 @@ class ProviderHubInstallation(Resource):
         return {"job_id": hub_jobs.queue_uninstall(provider_id, provider.get("name"))}, 202
 
 
+@api_ns_provider_hub.route('provider-hub/installations/<string:provider_id>/repair')
+class ProviderHubInstallationRepair(Resource):
+    @authenticate
+    @require_password_confirmation
+    @api_ns_provider_hub.response(202, 'Repair queued as a job')
+    @api_ns_provider_hub.response(401, 'Not Authenticated')
+    @api_ns_provider_hub.response(403, 'Password confirmation required')
+    @api_ns_provider_hub.response(404, 'Provider not found')
+    def post(self, provider_id):
+        provider = _provider(provider_id)
+        if not provider:
+            return 'Provider not found', 404
+        return {"job_id": hub_jobs.queue_repair(provider_id, provider.get("name"))}, 202
+
+
 @api_ns_provider_hub.route('provider-hub/updates/check')
 class ProviderHubUpdatesCheck(Resource):
     @authenticate

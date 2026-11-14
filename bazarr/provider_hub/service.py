@@ -49,10 +49,15 @@ from .state import (
     load_state,
     mutate_state,
     provider_hub_dir,
+    running_installations,
     spoofs_official_catalog_source,
 )
-from .venv import PluginEnvironment, python_executable
-from .worker import ProviderWorkerClient, worker_command
+from . import env_registry
+from .venv import (
+    _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
+    release_pins, validated_bundle_path, validated_interpreter,
+)
+from .worker import ProviderWorkerClient, release_when_gone, worker_command
 
 
 class CatalogSourceError(ValueError):
@@ -2138,7 +2143,7 @@ def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None
     return _redact_installation(provider) if redact else provider
 
 
-def _record_provider_last_error(provider_id: str, message: str | None) -> None:
+def _record_provider_last_error(provider_id: str, message: str | None, python_path: str | None = None) -> None:
     # The message is an exception's text, which for a worker failure is the
     # plugin's own words: it is stored in state, shown by the API and read
     # by the next boot, so it is masked and cut at this one write.
@@ -2149,13 +2154,22 @@ def _record_provider_last_error(provider_id: str, message: str | None) -> None:
         provider = state.setdefault("installations", {}).get(provider_id)
         if not isinstance(provider, dict):
             return
+        if python_path is not None and provider.get("python_path") != python_path:
+            # The result belongs to an interpreter the installation no longer runs from.
+            return
         provider["last_error"] = message
 
     mutate_state(update_error)
 
 
 def _remove_bundle_runtime_artifacts(bundle_path: Path) -> None:
-    for cache_dir in list(bundle_path.rglob("__pycache__")):
+    # Only inside the hub's own bundles, reached without a ``..`` or a symlink:
+    # the path often comes out of the state, and a stored value must not point
+    # this at someone else's directory tree.
+    bundle = validated_bundle_path(provider_hub_dir(), bundle_path)
+    if bundle is None:
+        return
+    for cache_dir in list(bundle.rglob("__pycache__")):
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
@@ -2184,10 +2198,19 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "message": "Restart Bazarr+ before testing this staged plugin",
             }
 
-        manifest_data = provider.get("manifest")
-        active_path = provider.get("active_path")
-        python_path = provider.get("python_path")
+        # The row is read again under the lock a cleanup decides under, and the
+        # environment is held in the same step: a repair and a cleanup that ran
+        # since the first read cannot take it away while the test runs.
+        with _ENV_LOCK:
+            provider = get_provider(provider_id, redact=False) or provider
+            manifest_data = provider.get("manifest")
+            active_path = provider.get("active_path")
+            python_path = provider.get("python_path")
+            release_environment = (
+                hold_environment(env_registry.env_dir_of(python_path)) if python_path else (lambda: None)
+            )
 
+        client = None
         try:
             if not isinstance(manifest_data, dict):
                 raise ProviderHubInstallError("active manifest is missing")
@@ -2195,6 +2218,9 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 raise ProviderHubInstallError("active bundle path is missing")
             if not python_path:
                 raise ProviderHubInstallError("provider Python path is missing")
+            interpreter = validated_interpreter(provider_hub_dir(), python_path)
+            if interpreter is None:
+                raise ProviderHubInstallError("provider Python path is not one of the hub's environments")
 
             trusted = bool(provider.get("trusted", False))
             manifest = validate_manifest(
@@ -2204,13 +2230,16 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                     trusted,
                 ),
             )
-            bundle_path = Path(active_path)
+            bundle_path = validated_bundle_path(provider_hub_dir(), active_path)
+            if bundle_path is None:
+                env_registry.mark_needs_repair(provider_id, python_path)
+                raise ProviderHubInstallError("active bundle path is not one of the hub's bundles")
             _remove_bundle_runtime_artifacts(bundle_path)
             verify_bundle_tree(manifest, bundle_path)
 
             runner = Path(__file__).with_name("worker_runner.py")
             client = ProviderWorkerClient(
-                worker_command(python_path, runner),
+                worker_command(interpreter, runner),
                 cwd=bundle_path,
                 env={
                     "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
@@ -2219,11 +2248,17 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             )
             try:
                 result = client.request("health", {}, timeout=10)
+            except Exception:
+                # The worker could not start or answer here, which is what a
+                # missing, stale or foreign environment looks like.
+                env_registry.mark_needs_repair(provider_id, python_path)
+                raise
             finally:
                 client.stop()
                 _remove_bundle_runtime_artifacts(bundle_path)
 
-            _record_provider_last_error(provider_id, None)
+            _record_provider_last_error(provider_id, None, python_path)
+            env_registry.clear_needs_repair(provider_id, python_path)
             job.update(
                 message="Worker health check passed",
                 details={"status": "ready"},
@@ -2237,7 +2272,7 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
             }
         except Exception as error:
             message = scrub_text(str(error) or error.__class__.__name__)
-            _record_provider_last_error(provider_id, message)
+            _record_provider_last_error(provider_id, message, python_path)
             job.data["state"] = "failed"
             job.update(
                 error=message,
@@ -2250,6 +2285,13 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "status": "failed",
                 "message": message,
             }
+        finally:
+            if client is None:
+                release_environment()
+            else:
+                # Held until the worker and anything it started are gone: a
+                # stop that leaves a survivor keeps the environment in place.
+                release_when_gone(client, release_environment, f"the connection test of {provider_id}")
 
 
 def _built_in_provider_ids() -> set[str]:
@@ -2574,22 +2616,39 @@ def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, A
     return result
 
 
-def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path) -> None:
+def _verify_bundle_for_run(manifest, bundle_path: Path) -> None:
+    """The check every run of a plugin's code starts with: the caches go, then the tree must match its manifest."""
     _remove_bundle_runtime_artifacts(bundle_path)
+    verify_bundle_tree(manifest, bundle_path)
+
+
+def _smoke_validate_worker(manifest, bundle_path: Path, python_path: Path, timeout: float = 10.0) -> None:
+    _verify_bundle_for_run(manifest, bundle_path)
     runner = Path(__file__).with_name("worker_runner.py")
-    client = ProviderWorkerClient(
-        worker_command(python_path, runner),
-        cwd=bundle_path,
-        env={
-            "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
-            "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
-        },
-    )
+    # The environment is held for as long as the worker may run, which can be
+    # past this call when the stop leaves something running.
+    release = hold_environment(env_registry.env_dir_of(python_path))
+    client = None
     try:
-        client.request("health", {}, timeout=10)
+        client = ProviderWorkerClient(
+            worker_command(python_path, runner),
+            cwd=bundle_path,
+            env={
+                "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
+                "BAZARR_PROVIDER_HUB_MANIFEST": json.dumps(manifest.raw),
+            },
+        )
+        client.request("health", {}, timeout=timeout)
     finally:
-        client.stop()
-        _remove_bundle_runtime_artifacts(bundle_path)
+        try:
+            if client is not None:
+                client.stop()
+        finally:
+            _remove_bundle_runtime_artifacts(bundle_path)
+            if client is None:
+                release()
+            else:
+                release_when_gone(client, release, "a health check")
 
 
 def _catalog_list_field(catalog_list: str | None) -> dict[str, str]:
@@ -2758,6 +2817,7 @@ def _stage_validated(
     """
     step = checkpoint or (lambda message: None)
     staged = []
+    env_path = None
     state = load_state()
     existing = (state.get("installations") or {}).get(validated.provider_id)
     if isinstance(existing, dict) and kind_of(existing) != validated.kind:
@@ -2782,7 +2842,7 @@ def _stage_validated(
         from_version=existing_version,
         to_version=validated.version,
         details={"catalog_url": catalog_url, "trusted": source_trusted, "origin": origin},
-    ) as job:
+    ) as job, pin_scope():
         try:
             deadline = None if install_timeout is None else time.monotonic() + max(0.0, install_timeout)
             step("Downloading the provider")
@@ -2794,13 +2854,27 @@ def _stage_validated(
             staged.append(env_path)
             staged_python_path = python_executable(env_path)
             step("Checking that the provider starts")
-            _smoke_validate_worker(validated, bundle_path, staged_python_path)
+            if deadline is None:
+                _smoke_validate_worker(validated, bundle_path, staged_python_path)
+            else:
+                # The check shares the install's budget instead of adding its own.
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise ProviderHubInstallError(
+                        f"install for {validated.provider_id} exceeded its time budget"
+                    )
+                _smoke_validate_worker(validated, bundle_path, staged_python_path, timeout=min(10.0, left))
             step("Recording the installation")
         except ProviderHubStopped:
             _discard_stopped_install(staged, existing)
             raise
         except Exception as error:
             install_error = error
+            if env_path is not None:
+                # An environment this install built and nothing records or uses
+                # would otherwise stay on disk for good.
+                release_pins()
+                env_registry.discard_if_unused(provider_hub_dir(), env_path)
 
             def record_failed_install(state: dict[str, Any]) -> dict[str, Any]:
                 installations = state.setdefault("installations", {})
@@ -2828,6 +2902,9 @@ def _stage_validated(
                 catalog_list,
             )
             installations[validated.provider_id] = installation
+            # The environment passed the worker check, so it is now the one
+            # recorded for this dependency set (a no-op when it already is).
+            env_registry.register_environment(state, environment_fingerprint(validated), env_path)
             # The plugin's secret paths join the persisted set now, so a
             # credential configured through the settings card is encrypted
             # at rest from the first save and stays covered after removal.
@@ -2866,17 +2943,29 @@ def _stage_validated(
 def _discard_stopped_install(paths, existing) -> None:
     """Remove the bundle and venv a stopped install staged, unless they are in use.
 
-    Both live at paths keyed by the version, so reinstalling the version that is
-    already active or staged lands on that installation's own files, which stay.
+    The bundle lives at a path keyed by the version, so reinstalling the version
+    that is already active or staged lands on that installation's own files,
+    which stay. A venv can be shared, so any venv an installation references, the
+    environment record names, or another install is using right now stays too.
     """
     existing = existing if isinstance(existing, dict) else {}
     in_use = {existing.get(key) for key in ("active_path", "staged_path", "python_path", "staged_python_path")}
     in_use.discard(None)
-    for path in paths:
-        # A bundle is recorded by its directory, a venv by its interpreter.
-        if {str(path), str(python_executable(path))} & in_use:
-            continue
-        shutil.rmtree(path, ignore_errors=True)
+    # This install's own hold ends here, so only other installs' holds count.
+    release_pins()
+    hub = provider_hub_dir()
+    with _ENV_LOCK:
+        for path in paths:
+            # A bundle is recorded by its directory, a venv by its interpreter.
+            if {str(path), str(python_executable(path))} & in_use:
+                continue
+            # Both removals stay inside the hub and never cross a symlink; a
+            # venv is also kept while anything references, records or pins it.
+            if env_registry.discard_if_unused(hub, path):
+                continue
+            if env_registry.is_environment_path(hub, path):
+                continue
+            env_registry.remove_inside_hub(hub, path)
 
 
 def stage_install(
@@ -3139,10 +3228,15 @@ def activate_staged_installations() -> list[str]:
                 staged_python_path = installation.get("staged_python_path")
                 if not staged_path or not staged_python_path:
                     raise ProviderHubInstallError("staged bundle or python path is missing")
-                staged_bundle_path = Path(staged_path)
+                staged_interpreter = validated_interpreter(provider_hub_dir(), staged_python_path)
+                if staged_interpreter is None:
+                    raise ProviderHubInstallError("staged python path is not one of the hub's environments")
+                staged_bundle_path = validated_bundle_path(provider_hub_dir(), staged_path)
+                if staged_bundle_path is None:
+                    raise ProviderHubInstallError("staged bundle path is not one of the hub's bundles")
                 _remove_bundle_runtime_artifacts(staged_bundle_path)
                 verify_bundle_tree(manifest, staged_bundle_path)
-                _smoke_validate_worker(manifest, staged_bundle_path, Path(staged_python_path))
+                _smoke_validate_worker(manifest, staged_bundle_path, staged_interpreter)
             except Exception as error:
                 installation["last_error"] = refusal_text(error)
                 _abandon_staged_catalog_list(installation)
@@ -3176,6 +3270,7 @@ def activate_staged_installations() -> list[str]:
             installation["state"] = "active"
             installation["pending_restart"] = False
             installation["last_error"] = None
+            installation.pop("needs_repair", None)
             installation["activated_at"] = utcnow_iso()
             activated.append(provider_id)
             changed = True
@@ -3198,6 +3293,151 @@ def activate_staged_installations() -> list[str]:
 
         mutate_state(persist_activated)
     return activated
+
+
+def reconcile_plugin_environments() -> dict[str, list[str]]:
+    """Boot step: adopt the environments installations already use.
+
+    Runs no pip and needs no network. An active installation whose environment
+    is gone is marked ``needs_repair`` instead of being rebuilt here.
+    """
+
+    def validate(row: dict[str, Any], staged: bool):
+        raw = row.get("staged_manifest") if staged and isinstance(row.get("staged_manifest"), dict) else row.get("manifest")
+        return validate_manifest(
+            raw,
+            built_in_provider_ids=_validation_built_in_provider_ids(raw, bool(row.get("trusted", False))),
+        )
+
+    return env_registry.reconcile_environments(
+        validate=validate, probe=_smoke_validate_worker, verify_bundle=_verify_bundle_for_run
+    )
+
+
+def repair_installation_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
+    """Rebuild an active installation's environment into a new directory; see ``_repair_environment``.
+
+    The environment the installation runs from now is held for the whole repair,
+    so a cleanup cannot remove it between the repoint and the moment the old
+    workers that still run from it have been drained.
+    """
+    row = (load_state().get("installations") or {}).get(provider_id)
+    old_python = row.get("python_path") if isinstance(row, dict) else None
+    release = hold_environment(env_registry.env_dir_of(old_python)) if old_python else (lambda: None)
+    try:
+        return _repair_environment(provider_id, checkpoint)
+    finally:
+        release()
+
+
+def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
+    """Rebuild an active installation's environment into a new directory.
+
+    The old directory is left alone, because other plugins may share it. The new
+    one is recorded and the installation pointed at it only after the worker
+    check passes there. Needs the network, so it is an explicit action and never
+    runs at boot.
+    """
+    step = checkpoint or (lambda message: None)
+    row = (load_state().get("installations") or {}).get(provider_id)
+    if not isinstance(row, dict) or not row.get("active_version"):
+        raise ProviderHubInstallError(f"{provider_id} has no active version to repair")
+    active_path = row.get("active_path")
+    manifest_data = row.get("manifest")
+    if not active_path or not isinstance(manifest_data, dict):
+        raise ProviderHubInstallError(f"{provider_id} has no bundle to repair")
+    bundle_path = validated_bundle_path(provider_hub_dir(), active_path)
+    if bundle_path is None:
+        raise ProviderHubInstallError(f"{provider_id} has a bundle path outside the hub's bundles; nothing was changed")
+    name = row.get("name") or provider_id
+    with record_job(
+        "repair",
+        target_kind="provider",
+        target_id=provider_id,
+        target_name=name,
+        from_version=row.get("active_version"),
+    ) as job, pin_scope():
+        env_path = None
+        try:
+            validated = validate_manifest(
+                manifest_data,
+                built_in_provider_ids=_validation_built_in_provider_ids(
+                    manifest_data, bool(row.get("trusted", False))
+                ),
+            )
+            try:
+                _verify_bundle_for_run(validated, bundle_path)
+            except Exception:
+                # Modified or foreign code is not run, and nothing is built for it.
+                env_registry.mark_needs_repair(provider_id)
+                raise
+            step("Rebuilding the plugin's dependencies")
+            env_path = PluginEnvironment(provider_hub_dir()).install(validated, rebuild=True)
+            python_path = python_executable(env_path)
+            step("Checking that the plugin starts")
+            _smoke_validate_worker(validated, bundle_path, python_path)
+            # A stop pressed during the check ends the repair here, before the
+            # installation is pointed at the new environment.
+            step("Recording the repair")
+        except Exception:
+            if env_path is not None:
+                release_pins()
+                env_registry.discard_if_unused(provider_hub_dir(), env_path)
+            raise
+
+        def record_repair(state: dict[str, Any]) -> dict[str, Any] | None:
+            current = (state.get("installations") or {}).get(provider_id)
+            if not isinstance(current, dict):
+                return None
+            if current.get("python_path") != row.get("python_path"):
+                # Another repair or an activation moved the installation while
+                # this one was building; theirs stands.
+                return {}
+            current["python_path"] = str(python_path)
+            if current.pop("needs_repair", None):
+                current["last_error"] = None
+            env_registry.register_environment(state, environment_fingerprint(validated), env_path)
+            return dict(current)
+
+        repaired = mutate_state(record_repair)
+        if repaired is None:
+            raise ProviderHubInstallError(f"{provider_id} was removed while it was being repaired")
+        if repaired == {}:
+            release_pins()
+            env_registry.discard_if_unused(provider_hub_dir(), env_path)
+            raise ProviderHubInstallError(f"{provider_id} changed while it was being repaired")
+        try:
+            from .registry import register_active_provider_classes
+
+            register_active_provider_classes(
+                [item for item in running_installations(kind=None) if item.provider_id == provider_id]
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("Provider Hub: could not re-register %s after its repair", provider_id)
+        try:
+            # Pools keep the instance, and the worker, they built before the
+            # repair. They drop it now; it drains, and the old environment
+            # stays held until its worker has exited.
+            from .registry import retire_provider_instances
+
+            retire_provider_instances(provider_id)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Provider Hub: could not retire the workers of %s after its repair; "
+                "its previous environment is kept in place", provider_id,
+            )
+            old_python = row.get("python_path")
+            if old_python:
+                # Never released: a worker may still run from it, and a cleanup
+                # must leave it alone until the process restarts.
+                hold_environment(env_registry.env_dir_of(old_python))
+        job.update(message=f"Rebuilt the environment of '{name}'")
+        return _redact_installation(repaired)
+
+
+def cleanup_plugin_environments() -> list[str]:
+    """Remove environments no installation references. Not for boot."""
+    return env_registry.cleanup_environments(provider_hub_dir())
 
 
 def remove_installation(provider_id: str) -> bool:

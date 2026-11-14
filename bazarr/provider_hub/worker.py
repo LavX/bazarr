@@ -209,6 +209,68 @@ def reap_idle_workers(idle_seconds: float) -> int:
     return reaped
 
 
+# Guards every client's list of process groups: a respawn appends from the request
+# thread while a release check prunes from another.
+_GROUPS_LOCK = threading.RLock()
+_unverifiable_lock = threading.Lock()
+_unverifiable_logged: set[str] = set()
+
+
+def _client_gone(client, budget: float) -> bool:
+    """Whether a client's worker has exited and nothing it started is left, waiting at most ``budget`` seconds."""
+    process = getattr(client, "process", None)
+    if process is None or not hasattr(client, "_has_exited"):
+        return True
+    deadline = time.monotonic() + budget
+    while not client._has_exited(process):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return client.group_gone(max(0.0, deadline - time.monotonic()))
+
+
+def release_when_gone(client, release, label: str, budget: float = 3.0) -> bool:
+    """Call ``release`` once the client's worker and its process group are confirmed gone.
+
+    For the environment hold of a temporary client (a probe, a connection test):
+    the hold must outlive a stop that did not end everything. Waits briefly in
+    the caller; if something is still running it logs, keeps the hold, and a
+    daemon thread releases it when the survivors are gone. True when released at
+    once.
+    """
+    if _client_gone(client, budget):
+        release()
+        return True
+    if getattr(os, "killpg", None) is None and getattr(client, "_groups", None):
+        # Where there are no process groups, nothing can show that the worker's
+        # descendants are gone. The hold is kept for the rest of this process:
+        # a cleanup on such a host never removes an environment a worker ran
+        # from this session.
+        with _unverifiable_lock:
+            first = label not in _unverifiable_logged
+            _unverifiable_logged.add(label)
+        if first:
+            logger.info(
+                "Provider Hub: the processes of a worker for %s cannot be checked on this platform; "
+                "its environment is kept until the next restart", label,
+            )
+        return False
+    logger.error("Provider Hub: a temporary worker for %s left processes running; its environment stays in place", label)
+
+    def wait_then_release() -> None:
+        while not _client_gone(client, 10.0):
+            time.sleep(0.05)
+        release()
+
+    threading.Thread(target=wait_then_release, name="hub-release-when-gone", daemon=True).start()
+    return False
+
+
+# The real process class, taken at import so a patched ``subprocess.Popen`` does not change
+# which objects are treated as real processes.
+_POPEN = subprocess.Popen
+
+
 class ProviderWorkerClient:
     """Small NDJSON client for a single provider worker process."""
 
@@ -218,7 +280,11 @@ class ProviderWorkerClient:
         cwd: str | os.PathLike[str] | None = None,
         env: dict[str, str] | None = None,
         provider_id: str | None = None,
+        before_start=None,
     ):
+        # Called before every start of the worker process, the first one and each
+        # respawn: whatever it raises keeps the process from starting.
+        self._before_start = before_start
         self.command = command
         self.cwd = str(cwd) if cwd else None
         self.env = env
@@ -246,8 +312,17 @@ class ProviderWorkerClient:
         self._stderr_thread: threading.Thread | None = None
 
     def start(self) -> bool:
-        if self.process and self.process.poll() is None:
-            return False
+        if self.process:
+            if not self._has_exited(self.process):
+                return False
+            if getattr(self.process, "returncode", 0) is None:
+                # The previous worker is gone but not collected: end what it
+                # left running before its slot is reused.
+                self._kill_tree(self.process, 5.0)
+
+        before_start = getattr(self, "_before_start", None)
+        if before_start is not None:
+            before_start()
 
         env = {
             "PATH": os.environ.get("PATH", ""),
@@ -268,6 +343,11 @@ class ProviderWorkerClient:
             text=True,
             start_new_session=True,
         )
+        # Every group this client started stays on the list until it is seen
+        # empty: a respawn must not make the previous worker's survivors
+        # forgotten while they still run from the environment.
+        with _GROUPS_LOCK:
+            self._groups = [*self._live_groups(), self.process.pid]
         self._stdout_queue = queue.Queue()
         self._stdout_thread = threading.Thread(
             target=self._enqueue_stdout,
@@ -368,6 +448,81 @@ class ProviderWorkerClient:
             return False
         return True
 
+    @staticmethod
+    def _has_exited(process) -> bool:
+        """Whether the worker has exited, without reaping it.
+
+        ``poll()`` collects the exit status, after which the worker's pid, and
+        with it the id of the process group it led, can be handed to an
+        unrelated process: signalling the group would then hit a stranger.
+        Seeing the exit with ``waitid(..., WNOWAIT)`` leaves the worker a
+        zombie that still reserves both, so whatever it forked can be signalled
+        before the caller reaps it.
+        """
+        returncode = getattr(process, "returncode", None)
+        if isinstance(returncode, int):
+            return True
+        waitid = getattr(os, "waitid", None)
+        if waitid is None or not isinstance(process, _POPEN):
+            return process.poll() is not None
+        try:
+            return waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            return True
+
+    @classmethod
+    def _wait_exit(cls, process, timeout: float) -> None:
+        """Wait for the worker to exit without reaping it; ``TimeoutExpired`` if it does not in time."""
+        if getattr(os, "waitid", None) is None or not isinstance(process, _POPEN):
+            process.wait(timeout=timeout)
+            return
+        deadline = time.monotonic() + timeout
+        while not cls._has_exited(process):
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(process.args if hasattr(process, "args") else "worker", timeout)
+            time.sleep(0.01)
+
+    @staticmethod
+    def _group_alive(group: int) -> bool:
+        """Whether anything is left in the process group ``group`` (signal 0 sends nothing)."""
+        killpg = getattr(os, "killpg", None)
+        if killpg is None:
+            # No way to look: whatever the worker started may still be running.
+            return True
+        try:
+            killpg(group, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _live_groups(self) -> list[int]:
+        """The groups this client started that still have members; the empty ones are forgotten."""
+        with _GROUPS_LOCK:
+            groups = [group for group in getattr(self, "_groups", ()) if self._group_alive(group)]
+            self._groups = groups
+            return groups
+
+    def group_gone(self, ceiling: float = 10.0) -> bool:
+        """True once nothing is left in any process group this client has started.
+
+        A worker's children can outlive it, and they run from the same
+        environment, so the environment is not free until every group is empty,
+        including the groups of workers an earlier respawn replaced. Checked for
+        at most ``ceiling`` seconds. Always true where process groups do not
+        exist or no worker was ever started.
+        """
+        deadline = time.monotonic() + ceiling
+        while True:
+            if not self._live_groups():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
     @classmethod
     def _terminate_tree(cls, process, grace_seconds: float) -> None:
         """Ask the group to stop, wait for the worker, reclaim what stayed.
@@ -385,8 +540,10 @@ class ProviderWorkerClient:
         """
         if not cls._signal_group(process, signal.SIGTERM):
             process.terminate()
-        process.wait(timeout=grace_seconds)
+        cls._wait_exit(process, grace_seconds)
+        # The leader is still unreaped here, so the group id is still its own.
         cls._signal_group(process, _SIGKILL)
+        process.wait(timeout=grace_seconds)
 
     @classmethod
     def _kill_tree(cls, process, grace_seconds: float) -> bool:
@@ -424,7 +581,10 @@ class ProviderWorkerClient:
         An idle worker has nothing in progress to unwind.
         """
         process = self.process
-        if process is None or process.poll() is not None:
+        if process is None or self._has_exited(process):
+            if process is not None and getattr(process, "returncode", 0) is None:
+                # Exited but not collected: end what it left running first.
+                self._kill_tree(process, grace_seconds)
             # Nothing to reap. Mirrors stop(): a held survivor whose process
             # finally exited on its own must not stay pinned in the strong
             # set; start() re-registers on the next spawn either way.
@@ -435,7 +595,7 @@ class ProviderWorkerClient:
         try:
             if time.monotonic() - self.last_used < idle_seconds:
                 return False
-            if process.poll() is not None:
+            if self._has_exited(process):
                 return False
             ended = True
             try:
@@ -464,18 +624,28 @@ class ProviderWorkerClient:
         if latch is not None:
             latch.set()
         process = self.process
-        if not process or process.poll() is not None:
+        if not process or self._has_exited(process):
+            if process is not None and getattr(process, "returncode", 0) is None:
+                # Exited but not yet reaped: its group id is still reserved, so
+                # what it left running can be ended before it is collected.
+                self._kill_tree(process, grace_seconds)
             # Nothing left to reap, so this is the one safe unconditional
             # discard.
             self._deregister()
             return
         try:
             self.request("shutdown", {"reason": "app_shutdown", "grace_ms": int(grace_seconds * 1000)}, grace_seconds)
-            process.wait(timeout=grace_seconds)
-            # A clean shutdown ends the worker, not necessarily what it forked.
+            self._wait_exit(process, grace_seconds)
+            # A clean shutdown ends the worker, not necessarily what it forked;
+            # the worker is unreaped, so its group id is still its own.
             self._signal_group(process, _SIGKILL)
+            process.wait(timeout=grace_seconds)
         except Exception:
-            self._kill_tree(process, grace_seconds)
+            # A failed or refused shutdown does not excuse what the worker
+            # forked. Unless it was already collected, end the whole group (a
+            # worker that died meanwhile is still a zombie holding its id).
+            if getattr(process, "returncode", 0) is None:
+                self._kill_tree(process, grace_seconds)
 
         # Leave the registry only once this process is confirmed dead AND is
         # still the one this client owns. Two ways to get that wrong:
@@ -632,6 +802,16 @@ class ProviderWorkerClient:
             # outside it, the sweep can acquire the lock after start() returns,
             # read the old timestamp, and kill the worker this request is
             # about to write to.
+            if getattr(self, "_closed", False) and op != "shutdown":
+                # Once stopped, a client starts nothing: a request that was
+                # already on its way (an archive member selection inside a
+                # download) fails instead of respawning the worker.
+                raise WorkerError("worker client is stopped")
+            if op == "shutdown" and not (self.process is not None and not self._has_exited(self.process)):
+                # Stopping a worker never starts one: a process that ended
+                # between the caller's check and this request has nothing left
+                # to shut down.
+                raise WorkerError("worker is not running")
             worker_started = self.start() is True
             provider_id = getattr(self, "provider_id", None)
             status_generation = (

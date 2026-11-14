@@ -863,7 +863,7 @@ def test_venv_installer_uses_isolated_hash_checked_pip(monkeypatch, tmp_path):
     assert "-r" in install_cmd
     assert "/usr/local" not in install_cmd
     assert "custom_libs" not in install_cmd
-    requirements_files = list(tmp_path.glob("envs/examplehub/1.0.0/*/requirements.txt"))
+    requirements_files = list(tmp_path.glob("shared_envs/*/requirements.txt"))
     assert len(requirements_files) == 1
     requirements_text = requirements_files[0].read_text(encoding="utf-8")
     assert "cloudscraper==1.2.58" in requirements_text
@@ -1652,8 +1652,8 @@ def test_provider_hub_restart_activation_promotes_staged_install(tmp_path, monke
     from provider_hub.state import load_state
 
     provider_id = "stagehub"
-    staged_path = tmp_path / "provider_hub" / "bundles" / provider_id / "1.1.0" / ("b" * 40)
-    staged_python_path = tmp_path / "provider_hub" / "envs" / provider_id / "1.1.0" / "test" / "bin" / "python"
+    staged_path = tmp_path / "bundles" / provider_id / "1.1.0" / ("b" * 40)
+    staged_python_path = tmp_path / "envs" / provider_id / "1.1.0" / "test" / "bin" / "python"
     state_file = tmp_path / "state.json"
     state_file.write_text(
         json.dumps(
@@ -1826,8 +1826,8 @@ def test_a_failed_restart_activation_caps_the_recorded_error_text(tmp_path, monk
             "provider_id": provider_id,
             "name": "Stage Hub Provider",
             "staged_version": "1.1.0",
-            "staged_path": str(tmp_path / "bundle"),
-            "staged_python_path": str(tmp_path / "python"),
+            "staged_path": str(tmp_path / "bundles" / "p" / "1.0.0" / "c"),
+            "staged_python_path": str(tmp_path / "shared_envs" / "fp" / "bin" / "python"),
             "staged_manifest": _manifest(provider_id=provider_id, version="1.1.0"),
             "state": "staged",
             "pending_restart": True,
@@ -3740,9 +3740,9 @@ def test_provider_hub_connection_test_runs_worker_health(tmp_path, monkeypatch):
         def stop(self):
             requests.append(("stop", None, None, self.cwd, self.env))
 
-    bundle_path = tmp_path / "bundle"
-    bundle_path.mkdir()
-    python_path = tmp_path / "venv" / "bin" / "python"
+    bundle_path = tmp_path / "provider_hub" / "bundles" / "p" / "1.0.0" / "c"
+    bundle_path.mkdir(parents=True)
+    python_path = tmp_path / "provider_hub" / "envs" / "p" / "1.0.0" / "fp" / "bin" / "python"
     python_path.parent.mkdir(parents=True)
     python_path.write_text("", encoding="utf-8")
 
@@ -3797,14 +3797,14 @@ def test_provider_hub_connection_test_ignores_runtime_pycache(tmp_path, monkeypa
             return None
 
     provider_content = b"class ExampleProvider: pass\n"
-    bundle_path = tmp_path / "bundle"
-    bundle_path.mkdir()
+    bundle_path = tmp_path / "provider_hub" / "bundles" / "p" / "1.0.0" / "c"
+    bundle_path.mkdir(parents=True)
     (bundle_path / "provider.py").write_bytes(provider_content)
     pycache_path = bundle_path / "__pycache__"
     pycache_path.mkdir()
     (pycache_path / "provider.cpython-314.pyc").write_bytes(b"runtime bytecode")
 
-    python_path = tmp_path / "venv" / "bin" / "python"
+    python_path = tmp_path / "provider_hub" / "envs" / "p" / "1.0.0" / "fp" / "bin" / "python"
     python_path.parent.mkdir(parents=True)
     python_path.write_text("", encoding="utf-8")
 
@@ -4639,9 +4639,9 @@ def test_a_failed_worker_health_check_masks_and_caps_the_stored_error(tmp_path, 
         def stop(self):
             return None
 
-    bundle_path = tmp_path / "bundle"
-    bundle_path.mkdir()
-    python_path = tmp_path / "venv" / "bin" / "python"
+    bundle_path = tmp_path / "provider_hub" / "bundles" / "p" / "1.0.0" / "c"
+    bundle_path.mkdir(parents=True)
+    python_path = tmp_path / "provider_hub" / "envs" / "p" / "1.0.0" / "fp" / "bin" / "python"
     python_path.parent.mkdir(parents=True)
     python_path.write_text("", encoding="utf-8")
 
@@ -4892,6 +4892,42 @@ def test_stage_install_fetches_bundle_builds_env_and_records_staged_paths(tmp_pa
     stored = load_state()["installations"]["examplehub"]
     assert stored["staged_path"] == str(bundle_path)
     assert stored["staged_python_path"] == str(python_path)
+    # The environment that passed the worker check is recorded for its dependency set.
+    from provider_hub.venv import environment_fingerprint
+    from provider_hub.manifest import validate_manifest
+    fingerprint = environment_fingerprint(validate_manifest(manifest, built_in_provider_ids=set()))
+    assert load_state()["plugin_envs"] == {fingerprint: {"path": str(python_path.parent.parent)}}
+
+
+def test_stage_install_does_not_record_an_environment_that_fails_the_worker_check(tmp_path, monkeypatch):
+    from provider_hub.service import ProviderHubInstallError, stage_install
+    from provider_hub.state import load_state
+
+    provider_content = b"class ExampleProvider: pass\n"
+    manifest = _manifest(file_payloads={"provider.py": provider_content}, dependencies={"requirements": []})
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated, timeout=None):
+            env_path = self.root / "shared_envs" / "fp"
+            (env_path / "bin").mkdir(parents=True, exist_ok=True)
+            (env_path / "bin" / "python").write_text("", encoding="utf-8")
+            return env_path
+
+    def failing_probe(manifest, bundle_path, python_path):
+        raise RuntimeError("worker would not start")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", lambda url, timeout: _FakeResponse(content=provider_content))
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker", failing_probe)
+
+    with pytest.raises(ProviderHubInstallError):
+        stage_install(manifest)
+
+    assert load_state()["plugin_envs"] == {}
 
 
 def test_stage_install_fetches_bundle_from_manifest_source_path(tmp_path, monkeypatch):
@@ -7561,7 +7597,7 @@ def test_catalog_rate_limit_preserves_cached_source(tmp_path, monkeypatch, statu
         "catalog_sources": {"community": {
             "id": "community", "name": "community", "url": "https://github.com/example/providers/blob/main/catalog.json",
             "last_checked_at": checked,
-        }}, "catalog_entries": {"community:example:1.0.0": entry}, "jobs": [],
+        }}, "catalog_entries": {"community:example:1.0.0": entry}, "installations": {}, "jobs": [],
     }))
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
     response = requests.Response()
@@ -8510,11 +8546,13 @@ def test_staging_an_update_keeps_the_list_the_active_version_came_from(tmp_path,
     assert row["manifest"] == legacy
 
 
-def _staged_cross_list_update(**row):
+def _staged_cross_list_update(tmp_path, **row):
     return {"movedhub": {
         "provider_id": "movedhub", "name": "Movedhub", "state": "staged", "pending_restart": True,
         "active_version": "1.0.0", "staged_version": "1.1.0", "active_path": "/old/bundle",
-        "python_path": "/old/python", "staged_path": "/new/bundle", "staged_python_path": "/new/python",
+        "python_path": "/old/python",
+        "staged_path": str(tmp_path / "provider_hub" / "bundles" / "movedhub" / "1.1.0" / "c"),
+        "staged_python_path": str(tmp_path / "provider_hub" / "shared_envs" / "fp" / "bin" / "python"),
         "source_bound": True, "source_id": "community", "catalog_list": "plugins",
         "manifest": _manifest(provider_id="movedhub"),
         "staged_manifest": provider_manifest_v2("movedhub", version="1.1.0"), **row}}
@@ -8524,7 +8562,7 @@ def test_a_failed_activation_puts_back_the_list_of_the_version_it_rolls_back_to(
     from provider_hub import service
     from provider_hub.state import load_state
 
-    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update(previous_catalog_list="providers"))
+    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update(tmp_path, previous_catalog_list="providers"))
 
     def refuse(manifest, bundle_path, python_path):
         raise service.ProviderHubInstallError("the worker did not start")
@@ -8545,7 +8583,7 @@ def test_a_failed_activation_of_an_update_with_no_earlier_list_leaves_the_list_t
     from provider_hub import service
     from provider_hub.state import load_state
 
-    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update())
+    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update(tmp_path))
 
     def refuse(manifest, bundle_path, python_path):
         raise service.ProviderHubInstallError("the worker did not start")
@@ -8569,7 +8607,7 @@ def test_a_failed_restage_puts_back_the_list_of_the_active_version(tmp_path, mon
     monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
     _patch_local_install_env(monkeypatch, tmp_path)
     _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
-               installations=_staged_cross_list_update(**previous))
+               installations=_staged_cross_list_update(tmp_path, **previous))
 
     def refuse(manifest, bundle_path, python_path):
         raise service.ProviderHubInstallError("the worker did not start")
@@ -8591,7 +8629,7 @@ def test_an_activated_cross_list_update_keeps_the_new_list(tmp_path, monkeypatch
     from provider_hub import service
     from provider_hub.state import load_state
 
-    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update(previous_catalog_list="providers"))
+    _hub_state(tmp_path, monkeypatch, installations=_staged_cross_list_update(tmp_path, previous_catalog_list="providers"))
     monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
     monkeypatch.setattr(service, "_smoke_validate_worker", lambda manifest, bundle_path, python_path: None)
 

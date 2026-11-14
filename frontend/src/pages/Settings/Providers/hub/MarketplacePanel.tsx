@@ -17,6 +17,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useProviderHubInstall,
   useProviderHubInstallLocal,
+  useProviderHubRepair,
   useProviderHubTest,
   useProviderHubUninstall,
 } from "@/apis/hooks";
@@ -84,6 +85,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
   const installLocal = useProviderHubInstallLocal();
   const testProvider = useProviderHubTest();
   const uninstall = useProviderHubUninstall();
+  const repair = useProviderHubRepair();
   const runGated = useGatedAction();
 
   const sources = catalog?.sources ?? [];
@@ -258,6 +260,13 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
         }
         onTest={(providerId) => testProvider.mutate(providerId)}
         onUninstall={(providerId) => uninstall.mutate(providerId)}
+        onRepair={(providerId) =>
+          void runGated(
+            () => repair.mutate(providerId),
+            "repair this provider's environment",
+          )
+        }
+        isRepairing={repair.isPending && repair.variables === entry.provider_id}
         isTesting={
           testProvider.isPending && testProvider.variables === entry.provider_id
         }
@@ -271,6 +280,8 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
       install,
       testProvider,
       uninstall,
+      repair,
+      runGated,
     ],
   );
 

@@ -5,7 +5,8 @@ from app.job_errors import reason_of
 from app.jobs_queue import JobFailed, jobs_queue
 
 from .jobs import failed_catalog_sources
-from .service import check_updates, refresh_catalog
+from .state import corrupt_copies
+from .service import check_updates, cleanup_plugin_environments, refresh_catalog
 
 
 def provider_hub_check_updates(job_id=None, wait_for_completion=False):
@@ -35,10 +36,22 @@ def provider_hub_check_updates(job_id=None, wait_for_completion=False):
     except Exception as error:
         logging.exception("Provider Hub update check failed")
         raise JobFailed(f"Could not check provider updates: {reason_of(error)}", reason="update_check_failed") from error
+    try:
+        # Scheduled, so never at boot: drops environments nothing references.
+        cleanup_plugin_environments()
+    except Exception:
+        logging.exception("Provider Hub environment cleanup failed")
+    paused = None
+    kept = corrupt_copies()
+    if kept:
+        # Cleanup stays off until an operator has looked at the damaged state.
+        logging.error("Provider Hub environment cleanup is paused: a damaged state document was kept at %s", kept[-1])
+        paused = f"Environment cleanup is paused: a damaged state copy is kept at {kept[-1]}"
     if refresh_failure:
         logging.warning("Provider Hub update check failed: reason=catalog_refresh_failed: %s", refresh_failure)
         raise JobFailed(refresh_failure, reason="catalog_refresh_failed")
-    message = (outcome or {}).get("message")
+    # One message, so the paused notice is not overwritten by the check's own.
+    message = " ".join(part for part in ((outcome or {}).get("message"), paused) if part)
     if message:
         jobs_queue.update_job_progress(job_id=job_id, progress_message=message, allow_cancelled=True)
     return outcome

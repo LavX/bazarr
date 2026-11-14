@@ -6,6 +6,7 @@ import {
   faEllipsis,
   faPuzzlePiece,
   faRotate,
+  faScrewdriverWrench,
   faTrash,
   faVial,
 } from "@fortawesome/free-solid-svg-icons";
@@ -43,7 +44,9 @@ interface CatalogCardProps {
   isInstalling: boolean;
   onTest?: (id: string) => void;
   onUninstall?: (id: string) => void;
+  onRepair?: (id: string) => void;
   isTesting?: boolean;
+  isRepairing?: boolean;
   /** True for providers installed from an uploaded local package, not a catalog. */
   isLocal?: boolean;
 }
@@ -53,6 +56,7 @@ type CtaState =
   | "installed"
   | "update"
   | "restart"
+  | "repair"
   | "broken"
   | "blocked";
 
@@ -84,6 +88,7 @@ function deriveCta(
   if (!installed && !manifestValid) return "broken";
   if (!installed) return entry.blocked_reason ? "blocked" : "install";
   if (installed.pending_restart) return "restart";
+  if (installed.needs_repair) return "repair";
   if (
     installed.active_version &&
     installed.active_version !== entry.version &&
@@ -101,7 +106,9 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
   isInstalling,
   onTest,
   onUninstall,
+  onRepair,
   isTesting,
+  isRepairing = false,
   isLocal = false,
 }) => {
   const manifest = useMemo(() => parseManifest(entry), [entry]);
@@ -157,6 +164,29 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
             }
           >
             <span className={styles.hubCardPendingText}>Pending restart</span>
+          </Tooltip>
+        );
+      case "repair":
+        return (
+          <Tooltip
+            label={
+              installed?.last_error ??
+              "The plugin's Python environment is missing or broken"
+            }
+            multiline
+            w={260}
+          >
+            <Button
+              size="xs"
+              variant="light"
+              color="red"
+              loading={isRepairing}
+              disabled={!onRepair}
+              onClick={() => installed && onRepair?.(installed.provider_id)}
+              leftSection={<FontAwesomeIcon icon={faScrewdriverWrench} />}
+            >
+              Repair
+            </Button>
           </Tooltip>
         );
       case "broken":
@@ -306,6 +336,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
               state={installed.state}
               pendingRestart={installed.pending_restart}
               activeVersion={installed.active_version}
+              needsRepair={installed.needs_repair}
             />
           )}
           {isLocal ? (

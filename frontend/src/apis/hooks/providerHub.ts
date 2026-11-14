@@ -145,6 +145,21 @@ export function useProviderHubUninstall() {
   });
 }
 
+export function useProviderHubRepair() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [...providerHubKey, QueryKeys.Actions, "repair"],
+    // Resolves when the repair job has finished and rejects with its reason.
+    mutationFn: async (providerId: string) => {
+      const { job_id: jobId } = await api.providerHub.repair(providerId);
+      await waitForJob(client, jobId);
+    },
+    onSettled: () => {
+      client.invalidateQueries({ queryKey: providerHubKey });
+    },
+  });
+}
+
 export function useProviderHubTest() {
   const client = useQueryClient();
   return useMutation({

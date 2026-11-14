@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
+import time
 import contextlib
 
 from dataclasses import dataclass
@@ -39,6 +41,7 @@ class ProviderHubInstallation:
     origin: str = "catalog"
     source_id: str | None = None
     kind: str = SUBTITLE_PROVIDER
+    needs_repair: bool = False
 
 
 def official_catalog_source() -> dict[str, Any]:
@@ -83,6 +86,13 @@ def catalog_source_for_entry(
     return {}
 
 
+logger = logging.getLogger(__name__)
+
+
+class StateCorruptError(ValueError):
+    """The stored state document is not valid JSON or its root is not an object."""
+
+
 def default_state() -> dict[str, Any]:
     return {
         "catalog_sources": {
@@ -95,6 +105,9 @@ def default_state() -> dict[str, Any]:
         # removed plugin keeps its registrations: the row goes at the next
         # restart, the path never leaves.
         "plugin_secret_paths": [],
+        # fingerprint -> {"path": venv directory}. Which environment each
+        # dependency set runs in; see env_registry.
+        "plugin_envs": {},
     }
 
 
@@ -135,15 +148,132 @@ def state_version() -> int:
     return _STATE_VERSION
 
 
+def corrupt_copies(path: str | os.PathLike[str] | None = None) -> list[Path]:
+    """The copies kept of state documents that could not be read, oldest first.
+
+    A copy stays until an operator removes it: while one exists, nothing that
+    deletes on the strength of the state may run.
+    """
+    current = Path(path) if path is not None else state_file()
+    try:
+        return sorted(current.parent.glob(f"{current.name}.*.corrupt"))
+    except OSError:
+        return []
+
+
+def _keep_corrupt_copy(current: Path) -> Path | None:
+    """Copy an unreadable state document aside, once per distinct content. Never deletes or moves it."""
+    try:
+        content = current.read_bytes()
+        for existing in corrupt_copies(current):
+            if existing.read_bytes() == content:
+                return existing
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        target = current.with_name(f"{current.name}.{stamp}.corrupt")
+        counter = 0
+        while target.exists():
+            counter += 1
+            target = current.with_name(f"{current.name}.{stamp}-{counter}.corrupt")
+        partial = target.with_name(target.name + ".part")
+        partial.write_bytes(content)
+        os.replace(partial, target)
+        return target
+    except OSError:
+        logger.exception("Provider Hub: could not keep a copy of the unreadable state document")
+        return None
+
+
+def _unreadable(current: Path, reason: str) -> StateCorruptError:
+    kept = _keep_corrupt_copy(current)
+    logger.error(
+        "Provider Hub: the state document %s is unreadable (%s). A copy was kept at %s and nothing was written.",
+        current, reason, kept,
+    )
+    return StateCorruptError(f"the Provider Hub state document is unreadable ({reason})")
+
+
 def mutate_state(
     mutator: Callable[[dict[str, Any]], Any],
     path: str | os.PathLike[str] | None = None,
+    *,
+    recover_corrupt: bool = False,
 ) -> Any:
+    """Read, change and write the state document.
+
+    A document that cannot be read (text that is not JSON, or a root that is
+    not an object) is never overwritten: a copy is kept beside it and the call
+    raises ``StateCorruptError``, because writing the default over it would turn
+    the damage into an empty installation inventory. A missing file starts from
+    the default. ``recover_corrupt`` is the one documented recovery path: it
+    keeps the copy and then starts from the default, and exists for an explicit
+    operator action, not for any routine writer.
+    """
     with state_write_lock():
-        data = load_state(path)
+        current = Path(path) if path is not None else state_file()
+        try:
+            data = _read_document(current)
+        except StateCorruptError:
+            if not recover_corrupt:
+                raise
+            data = default_state()
+        else:
+            data = default_state() if data is None else _normalized_state(data)
         result = mutator(data)
         save_state(data, path)
         return result
+
+
+def _read_document(current: Path) -> dict[str, Any] | None:
+    """The stored root object, None when there is no file, or ``StateCorruptError`` after keeping a copy."""
+    if not current.exists():
+        return None
+    try:
+        with current.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except ValueError as error:
+        raise _unreadable(current, "not valid JSON") from error
+    if not isinstance(data, dict):
+        raise _unreadable(current, "the root is not an object")
+    if not isinstance(data.get("installations"), dict):
+        # Every document this module writes carries the inventory. One without
+        # it is damaged: normalising it would fill in an empty inventory that
+        # reads as "nothing is installed" and is then saved as such.
+        raise _unreadable(current, "the installation inventory is missing or not an object")
+    return data
+
+
+def mutate_state_checked(
+    mutator: Callable[[dict[str, Any]], Any],
+    validate: Callable[[Any], None],
+    path: str | os.PathLike[str] | None = None,
+) -> Any:
+    """``mutate_state`` for a decision that must not run on a state it cannot read.
+
+    The stored document is read as it is, under the write lock, and handed to
+    ``validate`` before anything else happens. A missing file, text that is not
+    JSON, or a ``validate`` that raises ends the call with that error and writes
+    nothing: ``load_state`` would have turned any of them into an empty default.
+    """
+    with state_write_lock():
+        data = read_state_document(path)
+        validate(data)
+        data = _normalized_state(data)
+        result = mutator(data)
+        save_state(data, path)
+        return result
+
+
+def read_state_document(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """The stored document as it is, or an error: never a default.
+
+    Raises ``FileNotFoundError`` when the file is missing and ``StateCorruptError``
+    (after keeping a copy) when it is not JSON or its root is not an object.
+    """
+    current = Path(path) if path is not None else state_file()
+    data = _read_document(current)
+    if data is None:
+        raise FileNotFoundError(str(current))
+    return data
 
 
 def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
@@ -168,13 +298,8 @@ def load_state_strict(path: str | os.PathLike[str] | None = None) -> dict[str, A
     and the caller fails closed instead of reading no installations.
     """
     current = Path(path) if path is not None else state_file()
-    if not current.exists():
-        return default_state()
-    with current.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if not isinstance(data, dict):
-        raise ValueError("the Provider Hub state document is not an object")
-    return _normalized_state(data)
+    data = _read_document(current)
+    return default_state() if data is None else _normalized_state(data)
 
 
 def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:
@@ -225,6 +350,7 @@ def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:
                 installation["kind"] = SUBTITLE_PROVIDER
     data.setdefault("jobs", [])
     data.setdefault("plugin_secret_paths", [])
+    data.setdefault("plugin_envs", {})
     return data
 
 
@@ -260,6 +386,7 @@ def _installation_from_row(provider_id: str, item: dict[str, Any],
         origin=str(item.get("origin") or "catalog"),
         source_id=item.get("source_id"),
         kind=kind_of(item),
+        needs_repair=bool(item.get("needs_repair", False)),
     )
 
 
