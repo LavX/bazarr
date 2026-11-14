@@ -5,6 +5,8 @@ The environment key is a fingerprint of the dependency set. Environments built
 before sharing existed are adopted where they are, boot never runs pip, and an
 environment is removed only when no installation points at it.
 """
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1223,8 +1225,9 @@ def test_boot_flags_an_installation_whose_bundle_is_outside_the_hub_and_register
     assert (outside / "__pycache__").exists()
 
 
-def _fake_proc(tmp_path, pid="4242"):
+def _fake_proc(tmp_path, pid=None):
     """A /proc with one process of ours that runs from somewhere unrelated."""
+    pid = pid or str(os.getpid() + 1)
     proc = tmp_path / "proc"
     entry = proc / pid
     (entry / "fd").mkdir(parents=True)
@@ -1272,6 +1275,7 @@ def test_a_process_unreadable_once_and_then_gone_does_not_block_cleanup(tmp_path
             seen["count"] += 1
             if seen["count"] == 1:
                 raise PermissionError(13, "Permission denied")
+            shutil.rmtree(entry)
             raise FileNotFoundError(2, "No such file or directory")
         return real_readlink(path, *args, **kwargs)
 
@@ -1279,6 +1283,58 @@ def test_a_process_unreadable_once_and_then_gone_does_not_block_cleanup(tmp_path
     monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert not entry.exists()
+
+
+def test_a_process_unreadable_once_and_then_exited_with_a_lookup_error_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            raise PermissionError(13, "Permission denied") if seen["count"] == 1 else ProcessLookupError(3, "No such process")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def test_a_process_unreadable_once_and_then_failing_for_another_reason_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            raise PermissionError(13, "Permission denied") if seen["count"] == 1 else OSError(24, "Too many open files")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_a_missing_file_in_a_process_that_is_still_there_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            raise PermissionError(13, "Permission denied") if seen["count"] == 1 else FileNotFoundError(2, "No such file")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
 
 def test_a_process_that_turns_readable_and_uses_the_directory_still_blocks_cleanup(tmp_path, monkeypatch):

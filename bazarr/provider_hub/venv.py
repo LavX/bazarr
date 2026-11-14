@@ -378,10 +378,13 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
             try:
                 if inspect(name):
                     return True
-            except PermissionError:
-                still_unreadable.append(name)
+            except ProcessLookupError:
+                continue  # exited since the last look
+            except FileNotFoundError:
+                if os.path.lexists(os.path.join(proc, name)):
+                    still_unreadable.append(name)  # a file went missing, the process did not
             except OSError:
-                continue  # gone since the last look
+                still_unreadable.append(name)  # not a confirmed exit, so still unreadable
         unreadable = still_unreadable
     # Still alive and still not readable: fail closed, it counts as in use.
     return bool(unreadable)
