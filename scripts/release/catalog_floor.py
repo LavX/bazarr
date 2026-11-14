@@ -3,10 +3,10 @@
 """Pin the official provider catalog into a release image.
 
 The image ships a snapshot of the official catalog (its catalog.json and every
-provider bundle file it names), on disk and read-only, for a runtime reader to
-use later. Nothing reads it yet: this script only makes the snapshot
-reproducible and checked. It uses the standard library and git only, so the
-Docker stage that runs it needs nothing else.
+provider bundle file it names), on disk and read-only, for the runtime reader in
+bazarr/provider_hub/floor.py to use. This script only
+makes the snapshot reproducible and checked. It uses the standard library and
+git only, so the Docker stage that runs it needs nothing else.
 
 The pin is one lock file, docker/catalog-pin.lock.json: the catalog repository,
 the branch, one commit and the sha256 of every file taken from that commit.
