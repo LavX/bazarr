@@ -2789,6 +2789,7 @@ class _ReapingProcess:
 def test_the_group_is_signalled_before_any_poll_that_could_reap_the_leader(monkeypatch, how):
     session = WorkerSession(["worker"])
     process = _ReapingProcess()
+    session._process_mark = session_module._start_mark(process.pid)  # what a spawn records
     if how == "no-waitid":
         monkeypatch.delattr(os, "waitid", raising=False)
     else:
@@ -4199,6 +4200,7 @@ def test_the_leader_is_not_reaped_between_the_flag_and_the_group_signal(monkeypa
     order = []
     session = WorkerSession(["worker"])
     process = _OrderedProcess(order)
+    session._process_mark = session_module._start_mark(process.pid)  # what a spawn records
     in_step = threading.Event()
 
     def pausing_signal(target, sig):
