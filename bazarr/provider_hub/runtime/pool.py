@@ -1425,10 +1425,18 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
             # (the passes are separate snapshots), or held through another name: the descriptors
             # are read again below.
             unmatched.setdefault(pid, {}).setdefault(inode, []).append((path, device))
-    for pid, wanted in unmatched.items():
-        for path, info in _recheck_by_inode(pid, wanted):
-            held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
-            held_names.add((path, info.st_ino))
+    # A descriptor anywhere in the supplied tree measures a mapping anywhere in it: a child may hold
+    # the mapping while its parent holds the live hard link (or the other way round).
+    wanted_anywhere: dict = {}
+    for wanted in unmatched.values():
+        for inode, names in wanted.items():
+            known = wanted_anywhere.setdefault(inode, [])
+            known.extend(name for name in names if name not in known)
+    if wanted_anywhere:
+        for pid in pids:
+            for path, info in _recheck_by_inode(pid, wanted_anywhere):
+                held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
+                held_names.add((path, info.st_ino))
     for wanted in unmatched.values():
         if any((path, inode) not in held_names for inode, names in wanted.items() for path, _device in names):
             # Referenced by a mapping alone: no descriptor to stat, so its size is unknown.

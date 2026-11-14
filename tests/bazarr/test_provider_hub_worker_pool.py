@@ -2964,6 +2964,46 @@ def test_a_mapped_deleted_file_is_measured_through_a_descriptor_on_another_hard_
         os.close(held)
 
 
+_CHILD_MAPS_THEN_WAITS = (
+    "import ctypes, os, sys, time\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "libc = ctypes.CDLL(None, use_errno=True)\n"
+    "libc.mmap.restype = ctypes.c_void_p\n"
+    "libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]\n"
+    "address = libc.mmap(None, int(sys.argv[2]), 3, 1, fd, 0)\n"
+    "os.close(fd)\n"
+    "print('ready', flush=True)\n"
+    "time.sleep(60)\n"
+)
+
+
+@needs_smaps
+def test_a_mapping_held_by_a_child_is_measured_by_a_hard_link_its_parent_holds(tmp_path):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    _file_of(folder / "a", 3 * MIB)
+    os.link(folder / "a", folder / "b")
+    child = subprocess.Popen([sys.executable, "-c", _CHILD_MAPS_THEN_WAITS, str(folder / "a"), str(3 * MIB)],
+                             stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    held = None
+    try:
+        assert child.stdout.readline().strip() == b"ready"
+        os.unlink(folder / "a")
+        held = os.open(folder / "b", os.O_RDONLY)
+        # The mapping is in the child, the descriptor on the other name in this process: one tree.
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid(), child.pid], [str(folder)])
+        assert incomplete is False
+        assert 3 * MIB <= usage[str(folder)] < 3 * MIB + 256 * 1024, usage
+        # Alone, the child has nothing that measures it.
+        _usage, alone = pool_module.deleted_open_usage([child.pid], [str(folder)])
+        assert alone is True
+    finally:
+        if held is not None:
+            os.close(held)
+        child.kill()
+        child.wait()
+
+
 @needs_smaps
 def test_a_mapped_deleted_file_with_no_descriptor_anywhere_is_still_unmeasurable(tmp_path):
     folder = tmp_path / "data"
