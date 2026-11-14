@@ -1188,10 +1188,15 @@ class WorkerSession:
         (the group id is still held by whatever lives in it). Outside a teardown (``alive``) it
         grants no signal, now or later: the group is then taken as gone, and what the leader left
         behind is not known.
+
+        The probe, what it changes and the signal that may follow are one step under
+        ``_group_lock``: on a blind host the probe can collect the leader, and a thread that is
+        between its ownership check and its group signal (every such step holds this lock) must
+        not have the leader reaped, and its number reused, under it.
         """
-        state = _probe(process, self._process_mark, teardown)
-        if state == _REAPED:
-            with self._group_lock:
+        with self._group_lock:
+            state = _probe(process, self._process_mark, teardown)
+            if state == _REAPED:
                 self._exit_proven = True
                 if teardown and not self._group_ended and not self._group_lost:
                     self._group_ended = True
@@ -1199,9 +1204,8 @@ class WorkerSession:
                         self._exit_proven = False
                     else:
                         self._teardown_ok = True
-            return True
-        if state in (_GONE, _UNKNOWN):
-            with self._group_lock:
+                return True
+            if state in (_GONE, _UNKNOWN):
                 # Our own reap makes the leader vanish too, but only after the
                 # group was ended; a leader that vanishes before that was
                 # reaped by somebody else.

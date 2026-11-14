@@ -4535,6 +4535,40 @@ def test_a_teardown_probe_that_collects_a_worker_signals_its_group_once_right_th
         _kill_quietly(member)
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_an_exit_probe_does_not_run_while_another_thread_is_between_its_check_and_its_signal(monkeypatch):
+    # On a blind host the probe can collect the leader. A thread that holds the group lock between its
+    # ownership check and its group signal must not have that happen under it.
+    session = WorkerSession(["worker"])
+    process = _ReapingProcess()
+    holder_in = threading.Event()
+    holder_release = threading.Event()
+    probed_while_held = []
+
+    def probe(proc, mark=None, teardown=False):
+        probed_while_held.append(not holder_release.is_set())
+        return session_module._RUNNING
+
+    monkeypatch.setattr(session_module, "_probe", probe)
+
+    def holder():
+        with session._group_lock:
+            holder_in.set()
+            holder_release.wait(10)
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert holder_in.wait(5)
+    second = threading.Thread(target=lambda: session._exited(process))
+    second.start()
+    # The probe has not run while the holder is in its critical step; it runs once the lock is free.
+    assert not wait_until(lambda: bool(probed_while_held), timeout=0.5)
+    holder_release.set()
+    first.join(5)
+    second.join(5)
+    assert probed_while_held == [False]
+
+
 def _exited_worker_with_a_member(monkeypatch):
     from provider_hub.sandbox import spawn as sandbox_spawn
 
