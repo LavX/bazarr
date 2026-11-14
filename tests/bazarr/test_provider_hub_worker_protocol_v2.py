@@ -3929,7 +3929,7 @@ def test_a_group_found_gone_after_the_session_ended_it_is_not_reported_lost(monk
     process = _ReapingProcess()
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
     state = {"now": session_module._RUNNING}
-    monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None: state["now"])
+    monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None, teardown=False: state["now"])
     session._end_group(process)
     assert session._group_ended
     # The session's own reap: the leader is not there any more.
@@ -4624,7 +4624,7 @@ def test_exited_and_ours_both_record_an_unknown_answer_the_same_way(monkeypatch)
     for how in ("exited", "ours"):
         session = WorkerSession(["worker"])
         process = _ReapingProcess()
-        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None: session_module._UNKNOWN)
+        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None, teardown=False: session_module._UNKNOWN)
         if how == "exited":
             session._exited(process)
         else:
@@ -4634,7 +4634,7 @@ def test_exited_and_ours_both_record_an_unknown_answer_the_same_way(monkeypatch)
     for how in ("exited", "ours"):
         session = WorkerSession(["worker"])
         process = _ReapingProcess()
-        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None: session_module._GONE)
+        monkeypatch.setattr(session_module, "_probe", lambda proc, mark=None, teardown=False: session_module._GONE)
         if how == "exited":
             session._exited(process)
         else:
