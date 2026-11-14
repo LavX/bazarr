@@ -42,8 +42,8 @@ def _legacy_path():
 def _legacy_document():
     """The text to import from state.json, or an empty object without one.
 
-    A file that is not valid JSON raises, so the import is skipped and the file
-    stays as it is.
+    A file that is not valid JSON, or whose root is not an object, raises, so
+    the import is skipped and the file stays as it is.
     """
     path = _legacy_path()
     if not os.path.exists(path):
@@ -51,8 +51,7 @@ def _legacy_document():
     with open(path, "r", encoding="utf-8") as handle:
         data = json.load(handle)
     if not isinstance(data, dict):
-        logging.warning("The Plugin Hub state file is not an object; importing an empty state")
-        return "{}"
+        raise ValueError("The Plugin Hub state file is not an object; it was not imported")
     return json.dumps(data, sort_keys=True)
 
 

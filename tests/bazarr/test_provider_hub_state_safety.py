@@ -340,3 +340,22 @@ def test_a_cleanup_is_not_run_a_second_time_after_a_lost_race(hub_store, hub_eng
     assert env_registry.cleanup_environments(tmp_path / "provider_hub") == []
 
     assert len(runs) <= 1
+
+
+# Legacy files with a root that is not an object -------------------------------
+
+
+@pytest.mark.parametrize("content", ["[]", "null"])
+def test_a_state_file_with_a_non_object_root_is_not_imported(hub_store, hub_engine, content):
+    from provider_hub import state
+    path = hub_store.legacy_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        state.load_state()
+    with pytest.raises(ValueError):
+        state.sync_snapshot()
+
+    assert raw_row(hub_engine) is None
+    assert path.read_text(encoding="utf-8") == content

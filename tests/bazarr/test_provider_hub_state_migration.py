@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
@@ -133,6 +134,21 @@ def test_an_unreadable_state_file_does_not_stop_the_upgrade(hub_store, hub_engin
     assert not set(UNUSED) & tables
     assert raw_row(hub_engine) is None
     assert path.read_text(encoding="utf-8") == "{broken"
+
+
+@pytest.mark.parametrize("content", ["[]", "null"])
+def test_a_state_file_that_is_not_an_object_is_not_imported(hub_store, hub_engine, content):
+    path = hub_store.legacy_state_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding="utf-8")
+    with hub_engine.connect() as connection:
+        _with_old_tables(connection)
+        _run(connection, _migration(hub_store.legacy_state_path()).upgrade)
+        tables = _tables(connection)
+    assert "provider_hub_state" in tables
+    assert not set(UNUSED) & tables
+    assert raw_row(hub_engine) is None
+    assert path.read_text(encoding="utf-8") == content
 
 
 def test_downgrade_drops_the_table_and_keeps_the_file(hub_store, hub_engine):
