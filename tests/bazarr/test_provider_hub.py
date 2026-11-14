@@ -117,7 +117,28 @@ def _provider_zip(manifest, file_payloads, *, manifest_name="provider.json", pre
     return buffer.getvalue()
 
 
+def _skip_environment_presence_check(monkeypatch):
+    """The install tests stub the environment builder, so the directory it names never exists.
+
+    Recording refuses a row whose environment is gone; that is covered on its own.
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def lock_only(env_path):
+        yield
+
+    monkeypatch.setattr("provider_hub.env_registry.recording_environment", lock_only)
+
+
+@pytest.fixture(autouse=True)
+def _environment_presence_is_not_checked_here(monkeypatch):
+    _skip_environment_presence_check(monkeypatch)
+
+
 def _patch_local_install_env(monkeypatch, tmp_path):
+    _skip_environment_presence_check(monkeypatch)
+
     class FakeEnvironment:
         def __init__(self, root):
             self.root = Path(root)
