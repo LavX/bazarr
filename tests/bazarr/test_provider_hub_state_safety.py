@@ -678,3 +678,143 @@ def test_a_failed_table_creation_that_left_no_table_is_still_an_error(hub_store,
         hub_store.ensure_ready()
 
     assert "permission denied" not in str(failure.value)
+
+
+# Every driver call of the store -------------------------------------------
+
+
+def _driver_failure():
+    """A driver error whose text quotes a credential, as a constraint DETAIL or a connection error can."""
+    return sa.exc.OperationalError("SELECT 1", {}, Exception(f"could not connect; row preview: {SECRET}"))
+
+
+def _assert_nothing_leaks(failure, caplog, hub_store):
+    assert isinstance(failure.value, hub_store.StateStoreError)
+    assert failure.value.__cause__ is None and failure.value.__context__ is None
+    assert SECRET not in str(failure.value)
+    logging.getLogger("provider_hub.test").error("store failed", exc_info=failure.value)
+    assert SECRET not in "".join(traceback.format_exception(failure.value))
+    assert SECRET not in caplog.text
+
+
+class _BrokenConnection:
+    """A connection whose statements fail, or whose result cannot be fetched."""
+
+    def __init__(self, fail_on):
+        self.fail_on = fail_on
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def execute(self, *args, **kwargs):
+        if self.fail_on == "execute":
+            raise _driver_failure()
+        return self
+
+    def first(self):
+        raise _driver_failure()
+
+
+def _ready(hub_store, hub_engine):
+    hub_store.ensure_ready(hub_engine)
+
+
+def test_a_connection_that_fails_on_first_use_is_sanitized(hub_store, hub_engine, monkeypatch, caplog):
+    """Creating the table fails and so does the check that follows it."""
+    def down(*args, **kwargs):
+        raise _driver_failure()
+
+    monkeypatch.setattr(hub_engine, "connect", down)
+    monkeypatch.setattr(hub_engine, "begin", down)
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(Exception) as failure:
+            hub_store.ensure_ready()
+        _assert_nothing_leaks(failure, caplog, hub_store)
+
+
+def test_a_failed_recheck_after_a_failed_creation_is_sanitized(hub_store, hub_engine, monkeypatch, caplog):
+    def create(bind, checkfirst=True):
+        raise _driver_failure()
+
+    def inspect(bind):
+        raise _driver_failure()
+
+    monkeypatch.setattr(hub_store._state_table, "create", create)
+    monkeypatch.setattr(hub_store.sa, "inspect", inspect)
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(Exception) as failure:
+            hub_store.ensure_ready()
+        _assert_nothing_leaks(failure, caplog, hub_store)
+
+
+@pytest.mark.parametrize("fail_on", ["connect", "execute", "fetch"])
+def test_a_failed_read_is_sanitized(hub_store, hub_engine, monkeypatch, caplog, fail_on):
+    _ready(hub_store, hub_engine)
+
+    def down(*args, **kwargs):
+        raise _driver_failure()
+
+    monkeypatch.setattr(hub_engine, "connect", down if fail_on == "connect" else lambda: _BrokenConnection(fail_on))
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(Exception) as failure:
+            hub_store.read_document()
+        _assert_nothing_leaks(failure, caplog, hub_store)
+
+
+def test_a_failed_connect_for_a_write_is_sanitized(hub_store, hub_engine, monkeypatch, caplog):
+    _ready(hub_store, hub_engine)
+    real = hub_engine.connect
+    calls = []
+
+    def connect(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:  # the read works, the write transaction cannot connect
+            raise _driver_failure()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(hub_engine, "connect", connect)
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(Exception) as failure:
+            hub_store.update_document(lambda text: (text, None))
+        _assert_nothing_leaks(failure, caplog, hub_store)
+
+
+def test_a_failed_commit_statement_is_sanitized(hub_store, hub_engine, monkeypatch, caplog):
+    _ready(hub_store, hub_engine)
+
+    def commit(connection, revision, document):
+        raise _driver_failure()
+
+    monkeypatch.setattr(hub_store, "_commit_document", commit)
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(Exception) as failure:
+            hub_store.update_document(lambda text: (text, None))
+        _assert_nothing_leaks(failure, caplog, hub_store)
+
+
+def test_a_raw_driver_error_is_sanitized_too(hub_store, hub_engine, monkeypatch, caplog):
+    """An error the driver raises that SQLAlchemy did not wrap."""
+    import sqlite3
+    _ready(hub_store, hub_engine)
+
+    def commit(connection, revision, document):
+        raise sqlite3.OperationalError(f"disk I/O error near {SECRET}")
+
+    monkeypatch.setattr(hub_store, "_commit_document", commit)
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(Exception) as failure:
+            hub_store.update_document(lambda text: (text, None))
+        _assert_nothing_leaks(failure, caplog, hub_store)
+
+
+def test_an_error_that_is_not_the_drivers_passes_through(hub_store, hub_engine):
+    _ready(hub_store, hub_engine)
+
+    def step(text):
+        raise KeyError("not a database error")
+
+    with pytest.raises(KeyError):
+        hub_store.update_document(step)

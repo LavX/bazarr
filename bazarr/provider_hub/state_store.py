@@ -243,10 +243,20 @@ def write_transaction(bind):
             yield connection
 
 
-def _sanitized(function):
-    """Run ``function``, replacing a database error with ``StateStoreError``.
+_DRIVER_MODULES = frozenset({"sqlite3", "_sqlite3", "psycopg2", "psycopg", "_psycopg", "psycopg_pool"})
 
-    The replacement is raised after the handler has finished, so it has no
+
+def _is_driver_error(error: BaseException) -> bool:
+    """Whether ``error`` came from SQLAlchemy or the database driver, whose text can quote the document."""
+    return isinstance(error, sa.exc.SQLAlchemyError) or type(error).__module__.split(".")[0] in _DRIVER_MODULES
+
+
+def _sanitized(function):
+    """Run ``function``, replacing a database or driver error with ``StateStoreError``.
+
+    Every operation of this store that touches the driver runs through it:
+    connecting, executing, fetching, committing, creating the table. The
+    replacement is raised after the handler has finished, so it has no
     ``__cause__`` and no ``__context__``: nothing that prints or walks the
     exception chain reaches the driver's message, whose DETAIL can quote the
     failing row, which is the state document.
@@ -254,16 +264,17 @@ def _sanitized(function):
     failure = None
     try:
         return function()
-    except sa.exc.DBAPIError as error:
+    except Exception as error:
+        if not _is_driver_error(error):
+            raise
         failure = _describe(error)
     raise StateStoreError(failure)
 
 
-def _describe(error: sa.exc.DBAPIError) -> str:
-    original = error.orig
+def _describe(error: BaseException) -> str:
+    original = getattr(error, "orig", None) or error
     code = getattr(original, "pgcode", None) or getattr(original, "sqlite_errorname", None)
-    kind = type(original).__name__ if original is not None else type(error).__name__
-    return f"the Plugin Hub state could not be stored ({kind}{', ' + code if code else ''})"
+    return f"the Plugin Hub state could not be stored ({type(original).__name__}{', ' + code if code else ''})"
 
 
 def _create_table(bind) -> None:
@@ -272,18 +283,22 @@ def _create_table(bind) -> None:
     ``checkfirst`` is a separate existence check, so two starts at once can both
     see no table and one of them fails with a duplicate-table error. That one
     is not a failure when the table is there now; any other error, or a table
-    that is still missing, is raised.
+    that is still missing, is raised. The recheck can fail on its own (the
+    database is down), and is sanitized like everything else.
     """
     failure = None
     try:
         _state_table.create(bind, checkfirst=True)
-    except sa.exc.DBAPIError as error:
-        if sa.inspect(bind).has_table(TABLE_NAME):
-            logger.debug("The Plugin Hub state table was created by another process")
-            return
+    except Exception as error:
+        if not _is_driver_error(error):
+            raise
         failure = _describe(error)
-    if failure is not None:
-        raise StateStoreError(failure)
+    if failure is None:
+        return
+    if _sanitized(lambda: sa.inspect(bind).has_table(TABLE_NAME)):
+        logger.debug("The Plugin Hub state table was created by another process")
+        return
+    raise StateStoreError(failure)
 
 
 def ensure_ready(bind=None) -> None:
@@ -316,10 +331,14 @@ def read_document(bind=None) -> tuple[int, str]:
     """The stored revision and document text."""
     bind = bind if bind is not None else engine()
     ensure_ready(bind)
-    with bind.connect() as connection:
-        row = connection.execute(
-            sa.select(_state_table.c.revision, _state_table.c.document)
-            .where(_state_table.c.id == ROW_ID)).first()
+
+    def fetch():
+        with bind.connect() as connection:
+            return connection.execute(
+                sa.select(_state_table.c.revision, _state_table.c.document)
+                .where(_state_table.c.id == ROW_ID)).first()
+
+    row = _sanitized(fetch)
     if row is None:
         raise RuntimeError("the Plugin Hub state row is missing")
     return int(row[0]), row[1]
