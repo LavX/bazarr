@@ -4253,7 +4253,7 @@ def test_an_enforced_worker_can_use_multiprocessing_primitives(tmp_path, live):
     """
     result = run(make_spec(tmp_path, script), live)
     assert result[0] == 0 and result[1].strip().endswith("ok"), result
-    # The grant is for shared memory only: no other file under /dev is writable, and nothing executes there.
+    # The grant is for shared memory only: no other file under /dev is writable...
     script = """
         import os
         try:
@@ -4263,3 +4263,46 @@ def test_an_enforced_worker_can_use_multiprocessing_primitives(tmp_path, live):
     """
     result = run(make_spec(tmp_path, script), live)
     assert result[1].startswith("denied"), result
+
+
+@linux_only
+def test_the_dev_shm_grant_allows_no_directories_links_or_execution(tmp_path, live):
+    if not os.path.isdir("/dev/shm") or not os.access("/dev/shm", os.W_OK):
+        pytest.skip("this host has no writable /dev/shm")
+    need_abi(live, 3)
+    # Under enforcement a worker may create and remove plain files there, and nothing else: no directory,
+    # no symlink, and a file it wrote cannot be executed. Each is attempted and must be refused with
+    # EACCES (the kernel's Landlock answer), which an unsandboxed process would not give.
+    script = """
+        import errno, os, stat, subprocess, sys
+        tag = "/dev/shm/bazarr-grant-%d" % os.getpid()
+        out = []
+        try:
+            fd = os.open(tag + "-file", os.O_CREAT | os.O_WRONLY, 0o700)
+            os.write(fd, b"#!/bin/sh\\necho ran\\n")
+            os.close(fd)
+            out.append("file-ok")
+        except OSError as error:
+            out.append("file-%s" % errno.errorcode.get(error.errno))
+        for label, call in (
+            ("mkdir", lambda: os.mkdir(tag + "-dir")),
+            ("symlink", lambda: os.symlink("/etc/passwd", tag + "-link")),
+            ("exec", lambda: subprocess.run([tag + "-file"], check=True, capture_output=True)),
+        ):
+            try:
+                call()
+                out.append(label + "-allowed")
+            except PermissionError:
+                out.append(label + "-denied")
+            except OSError as error:
+                out.append("%s-%s" % (label, errno.errorcode.get(error.errno)))
+        try:
+            os.unlink(tag + "-file")
+            out.append("unlink-ok")
+        except OSError:
+            out.append("unlink-failed")
+        print(" ".join(out))
+    """
+    result = run(make_spec(tmp_path, script), live)
+    assert result[0] == 0, result
+    assert result[1].split() == ["file-ok", "mkdir-denied", "symlink-denied", "exec-denied", "unlink-ok"], result
