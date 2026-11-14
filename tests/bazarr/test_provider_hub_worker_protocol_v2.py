@@ -4300,6 +4300,17 @@ def test_a_bare_child_with_no_saved_identity_is_unknown_when_a_stranger_has_its_
             pass
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_proc_is_detected_by_looking_for_it_not_by_the_platform_name(monkeypatch):
+    # The real helper, with only the filesystem answer changed: a Linux host (a container, say) that
+    # hides /proc is a host without it.
+    assert session_module._has_proc() is True
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(os.path, "isdir", lambda path: False if path == "/proc/self" else real_isdir(path))
+    assert session_module._has_proc() is False
+    assert session_module._start_mark(os.getpid()) is None, "no /proc: no start time to record"
+
+
 def _blind_host(monkeypatch):
     """What a host with neither waitid nor /proc looks like to the session and to the spawner."""
     from provider_hub.sandbox import spawn as sandbox_spawn

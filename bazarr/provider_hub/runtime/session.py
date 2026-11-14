@@ -25,7 +25,6 @@ import queue
 import re
 import signal
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
@@ -275,7 +274,8 @@ def _is_posix():
 
 
 def _has_proc():
-    return sys.platform.startswith("linux")
+    """Whether ``/proc`` is mounted here. Not every Linux host has it: a container may hide it."""
+    return os.path.isdir("/proc/self")
 
 
 def _proc_fields(pid):
