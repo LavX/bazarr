@@ -60,7 +60,8 @@ def lifecycle(monkeypatch, tmp_path, schema_session):
         state = {"installations": {PLUGIN: {
             "provider_id": PLUGIN, "name": "Lingarr", "kind": "translator", "active_version": "1.0.0",
             "staged_version": "2.0.0", "active_path": "/old", "python_path": "/old/python",
-            "staged_path": str(tmp_path / "bundle"), "staged_python_path": str(tmp_path / "python"),
+            "staged_path": str(tmp_path / "bundles" / PLUGIN / "2.0.0" / ("b" * 40)),
+            "staged_python_path": str(tmp_path / "envs" / PLUGIN / "2.0.0" / "test" / "bin" / "python"),
             "state": "staged", "pending_restart": True, "manifest": old, "staged_manifest": new}}}
         path = tmp_path / "state.json"
         path.write_text(json.dumps(state), encoding="utf-8")
