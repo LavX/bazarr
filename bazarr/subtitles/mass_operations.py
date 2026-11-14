@@ -1767,14 +1767,26 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                               if item.get('embedded'))
             pending_extractions = {}
 
-            def refill_extractions():
+            # The next embedded item, pulled but not yet submitted. Holding it
+            # keeps an item from being lost when the gate is closed at refill
+            # time, without asking the gate when no embedded item is left.
+            held = None
+
+            def refill_extractions(consumed=0):
+                nonlocal held
                 while len(pending_extractions) < workers:
-                    next_item = next(embedded_items, None)
-                    if next_item is None:
-                        break
+                    if held is None:
+                        held = next(embedded_items, None)
+                        if held is None:
+                            break
+                    if held[0] <= consumed:
+                        # Passed while translation was off: do not extract it now.
+                        held = None
+                        continue
                     if not translation_available().available:
                         break
-                    index, embedded_item = next_item
+                    index, embedded_item = held
+                    held = None
                     # A cancel or failure can leave up to one extracted track per
                     # worker in the cache, counting any extraction still running.
                     # These are harmless cache files, and the batch does not wait
@@ -1804,7 +1816,7 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
                         finally:
                             # Even a completed future occupies the window until
                             # its result is consumed, including a failed result.
-                            refill_extractions()
+                            refill_extractions(i)
                     result = _process_subtitle_item(
                         item, action, options, job_id, source_srt_file=source_srt_file, **item_kwargs)
                 else:
