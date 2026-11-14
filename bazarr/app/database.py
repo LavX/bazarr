@@ -118,6 +118,9 @@ if postgresql:
         pool_pre_ping=True,
         pool_recycle=1800,
         isolation_level="AUTOCOMMIT",
+        # Statements bind credentials (the plugin state document); a failed one
+        # must not print its values into the log.
+        hide_parameters=True,
     )
 else:
     # insert is different between database types
@@ -129,7 +132,7 @@ else:
     # across threads, so the safest pattern is one fresh connection per
     # statement and let the WAL / busy_timeout PRAGMAs below absorb
     # contention. Do NOT switch this to QueuePool.
-    engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT", hide_parameters=True)
 
     from sqlalchemy.engine import Engine
     from sqlalchemy import event

@@ -67,6 +67,26 @@ _ready_lock = threading.Lock()
 _private_engine: Any = None
 
 
+def hide_parameters(bind):
+    """Keep bound values out of this store's database error text.
+
+    The statements here bind the whole state document, and a document
+    imported from an older state.json can still hold plaintext credentials.
+    SQLAlchemy prints the bound values in a failed statement's message, which
+    reaches the log and the traceback, so every engine the store touches has
+    to hide them. The app engine and the private one are created with the flag;
+    this covers an engine handed in from outside (tests, tooling, an alembic
+    connection) and is a no-op for the others.
+    """
+    target = getattr(bind, "engine", bind)
+    try:
+        if not getattr(target, "hide_parameters", False):
+            target.hide_parameters = True
+    except AttributeError:  # pragma: no cover - not a SQLAlchemy engine
+        pass
+    return bind
+
+
 def _build_private_engine():
     """An engine on the app's own database, for before app.database exists.
 
@@ -84,13 +104,13 @@ def _build_private_engine():
     if postgresql:
         from app.postgres_url import postgres_engine_url
         return sa.create_engine(postgres_engine_url(settings), poolclass=NullPool,
-                                isolation_level="AUTOCOMMIT")
+                                isolation_level="AUTOCOMMIT", hide_parameters=True)
     # The startup code creates this folder after the settings are loaded, which
     # on a first start is after the first read of the state.
     database_dir = os.path.join(args.config_dir, "db")
     os.makedirs(database_dir, exist_ok=True)
     created = sa.create_engine(f'sqlite:///{os.path.join(database_dir, "bazarr.db")}',
-                               poolclass=NullPool, isolation_level="AUTOCOMMIT")
+                               poolclass=NullPool, isolation_level="AUTOCOMMIT", hide_parameters=True)
 
     @sa.event.listens_for(created, "connect")
     def _configure(dbapi_connection, _record):
@@ -107,11 +127,11 @@ def _build_private_engine():
 def engine():
     global _private_engine
     if _engine_override is not None:
-        return _engine_override
+        return hide_parameters(_engine_override)
     module = sys.modules.get("app.database")
     app_engine = getattr(module, "engine", None) if module is not None else None
     if app_engine is not None:
-        return app_engine
+        return hide_parameters(app_engine)
     if _private_engine is None:
         _private_engine = _build_private_engine()
     return _private_engine
@@ -168,6 +188,7 @@ def import_legacy_state(connection, path: Path | None) -> bool:
     disk as the backup of what was imported, and an existing row is never
     touched, so running this again is harmless.
     """
+    hide_parameters(connection)
     present = connection.execute(
         sa.select(_state_table.c.id).where(_state_table.c.id == ROW_ID)).first()
     if present is not None:
@@ -196,6 +217,7 @@ def write_transaction(bind):
     the UPDATE wait and then match nothing, instead of raising a serialization
     failure. SQLite takes the write lock up front.
     """
+    hide_parameters(bind)
     sqlite = bind.dialect.name == "sqlite"
     level = "SERIALIZABLE" if sqlite else "READ COMMITTED"
     with bind.connect().execution_options(isolation_level=level) as connection:
@@ -214,7 +236,7 @@ def ensure_ready(bind=None) -> None:
     table and imports state.json itself. The migration does the same work and
     this is a no-op after it.
     """
-    bind = bind if bind is not None else engine()
+    bind = hide_parameters(bind if bind is not None else engine())
     if id(bind) in _ready:
         return
     with _ready_lock:
