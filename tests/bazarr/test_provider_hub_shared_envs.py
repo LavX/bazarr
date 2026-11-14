@@ -1246,7 +1246,7 @@ def _fake_proc(tmp_path, pid=None):
 def _unreadable_reads(monkeypatch, entry, failures):
     """Make the first ``failures`` reads of the fake process's exe link raise PermissionError."""
     real_readlink = venvmod.os.readlink
-    seen = {"count": 0}
+    seen = {"count": 0, "sleeps": []}
 
     def readlink(path, *args, **kwargs):
         if str(path) == str(entry / "exe"):
@@ -1256,7 +1256,7 @@ def _unreadable_reads(monkeypatch, entry, failures):
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(venvmod.time, "sleep", seen["sleeps"].append)
     return seen
 
 
@@ -1690,7 +1690,7 @@ def test_an_unreadable_stat_with_a_missing_exe_still_blocks_cleanup(tmp_path, mo
 
 def test_a_command_name_with_parentheses_does_not_confuse_the_flags(tmp_path, monkeypatch):
     proc, entry = _fake_proc(tmp_path)
-    tricky = "x) S 1 1 1 0 -1 4194304 0 (y"
+    tricky = "x) S 1 1 1 0 -1 2097152 0 (y"
     _failing_exe(monkeypatch, entry, [FileNotFoundError(2, "No such file")] * 20)
 
     # the name looks like it carries the kernel thread flag, the real flags say it does not
@@ -1702,12 +1702,76 @@ def test_a_command_name_with_parentheses_does_not_confuse_the_flags(tmp_path, mo
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
 
 
+@pytest.mark.parametrize("error", [FileNotFoundError(2, "No such file"), NotADirectoryError(20, "Not a directory")])
+def test_no_proc_at_all_leaves_the_decision_to_the_other_safeguards(tmp_path, monkeypatch, error):
+    def refuse(_proc):
+        raise error
+
+    monkeypatch.setattr(venvmod, "_candidate_pids", refuse)
+
+    assert venvmod.processes_using_directory(tmp_path / "env") is None
+
+
+@pytest.mark.parametrize("error", [OSError(24, "Too many open files"), OSError(12, "Out of memory"), PermissionError(13, "denied")])
+def test_a_proc_that_cannot_be_listed_right_now_counts_as_in_use(tmp_path, monkeypatch, error):
+    def refuse(_proc):
+        raise error
+
+    monkeypatch.setattr(venvmod, "_candidate_pids", refuse)
+
+    assert venvmod.processes_using_directory(tmp_path / "env") is True
+
+
+def test_a_process_that_stayed_unreadable_is_not_waited_for_again_in_the_same_pass(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    seen = _unreadable_reads(monkeypatch, entry, failures=10**6)
+    stuck = set()
+
+    assert venvmod.processes_using_directory(tmp_path / "one", proc=str(proc), stuck=stuck) is True
+    assert len(seen["sleeps"]) == venvmod._UNREADABLE_RETRIES and len(stuck) == 1
+    assert venvmod.processes_using_directory(tmp_path / "two", proc=str(proc), stuck=stuck) is True
+    assert len(seen["sleeps"]) == venvmod._UNREADABLE_RETRIES  # no new wait
+
+    # A fresh pass starts from nothing and looks again.
+    assert venvmod.processes_using_directory(tmp_path / "three", proc=str(proc), stuck=set()) is True
+    assert len(seen["sleeps"]) == 2 * venvmod._UNREADABLE_RETRIES
+
+
+def test_a_stuck_pid_that_became_readable_is_judged_afresh(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    _unreadable_reads(monkeypatch, entry, failures=0)
+    stuck = {(entry.name, 99999999999999)}
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc), stuck=stuck) is False
+
+
+def test_a_cleanup_pass_shares_one_stuck_set_and_the_next_pass_starts_over(hub, monkeypatch):
+    seen = []
+
+    def scan(directory, proc="/proc", stuck=None):
+        seen.append(stuck)
+        return False
+
+    monkeypatch.setattr(env_registry, "processes_using_directory", scan)
+    save_state(load_state())
+    _legacy_env(hub, "alpha", [])
+    _legacy_env(hub, "beta", [])
+
+    assert len(env_registry.cleanup_environments(hub)) == 2
+    assert len(seen) == 2 and seen[0] is not None and seen[0] is seen[1]
+    _legacy_env(hub, "gamma", [])
+    _legacy_env(hub, "delta", [])
+    env_registry.cleanup_environments(hub)
+    assert seen[2] is seen[3] and seen[2] is not seen[0]
+
+
 def test_a_process_that_stays_unreadable_still_blocks_cleanup(tmp_path, monkeypatch):
     proc, entry = _fake_proc(tmp_path)
     seen = _unreadable_reads(monkeypatch, entry, failures=10**6)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
     assert seen["count"] == 1 + venvmod._UNREADABLE_RETRIES
+    assert seen["sleeps"] == [venvmod._UNREADABLE_PAUSE] * venvmod._UNREADABLE_RETRIES
 
 
 _NON_DUMPABLE = (
@@ -1760,6 +1824,10 @@ def test_an_unreadable_process_of_someone_elses_session_is_not_a_candidate(tmp_p
     )
     stray = _wait_for_pid(ready)
     try:
+        with open(f"/proc/{stray}/stat", encoding="utf-8", errors="replace") as handle:
+            parent = int(handle.read().rsplit(")", 1)[1].split()[1])
+        if parent == os.getpid():
+            pytest.skip("the helper was not reparented away from the test run here")
         assert str(stray) not in venvmod._candidate_pids("/proc")
         assert venvmod.processes_using_directory(tmp_path / "env") is False
     finally:

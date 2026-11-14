@@ -295,21 +295,34 @@ def _candidate_pids(proc: str) -> list[str]:
     return [name for name in os.listdir(proc) if name.isdigit()]
 
 
-def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/proc") -> bool | None:
+def processes_using_directory(
+    directory: str | os.PathLike[str],
+    proc: str = "/proc",
+    stuck: set[tuple[str, int]] | None = None,
+) -> bool | None:
     """Whether any other live process runs from, has open, or maps something under ``directory``.
 
     Looks at each process's executable, working directory, open files, mapped
     files, command line and environment (Linux ``/proc``). This sees what the worker's process groups
     cannot: a child that started its own session is in none of them. A process
     that cannot be read but belongs to this user and began after this process
-    counts as using it, once a few short re-checks have not made it readable. ``None``
-    when ``/proc`` is not there to look at, so the caller keeps its other
-    safeguards.
+    counts as using it, once a few short re-checks have not made it readable.
+    ``None`` when there is no ``/proc`` at all to look at, so the caller keeps
+    its other safeguards. A ``/proc`` that exists but cannot be listed right now
+    (too many open files, no memory) is not "nothing to look at": it counts as
+    in use.
+
+    ``stuck`` is for a caller that checks several directories in one pass: a
+    process that stayed unreadable through the re-checks is recorded in it as
+    (pid, start time), and a later call with the same set counts it as in use
+    at once instead of waiting through the re-checks again.
     """
     try:
         entries = _candidate_pids(proc)
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return None
+    except OSError:
+        return True
     roots = {os.path.abspath(directory), os.path.realpath(directory)}
     prefixes = tuple(root.rstrip(os.sep) + os.sep for root in roots)
 
@@ -422,6 +435,8 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
             # already running cannot be). Unknown counts as possibly ours and newer.
             began = started_at(name)
             if owned is not False and (began is None or my_start is None or began >= my_start):
+                if stuck is not None and began is not None and (name, began) in stuck:
+                    return True  # unreadable through the re-checks a moment ago in this pass
                 unreadable.append(name)
     for _ in range(_UNREADABLE_RETRIES):
         if not unreadable:
@@ -437,6 +452,11 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
                     still_unreadable.append(name)
         unreadable = still_unreadable
     # Still alive and still not readable: fail closed, it counts as in use.
+    if stuck is not None:
+        for name in unreadable:
+            began = started_at(name)
+            if began is not None:
+                stuck.add((name, began))
     return bool(unreadable)
 
 

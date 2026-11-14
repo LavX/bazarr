@@ -430,7 +430,7 @@ def _overlaps(target: Path, others) -> bool:
     return False
 
 
-def _remove_environment(root: str | Path, target: str | Path, protected) -> bool:
+def _remove_environment(root: str | Path, target: str | Path, protected, stuck: set | None = None) -> bool:
     """Remove one environment directory if it is safe to. Callers hold ``_ENV_LOCK``.
 
     Refused when the target is not an environment directory strictly inside the
@@ -442,7 +442,7 @@ def _remove_environment(root: str | Path, target: str | Path, protected) -> bool
         return False
     if _overlaps(located, (*protected, *pinned_paths())):
         return False
-    if processes_using_directory(located):
+    if processes_using_directory(located, stuck=stuck):
         # A process the worker's groups do not cover (one that started its own
         # session) still runs from it: leave it for a later run.
         logger.info("Provider Hub: %s is still in use by a running process; not removed", located)
@@ -565,6 +565,7 @@ def cleanup_environments(root: str | Path) -> list[str]:
     """
     root = Path(root)
     removed: list[str] = []
+    stuck: set[tuple[str, int]] = set()  # processes that stayed unreadable earlier in this pass
 
     def apply(state: dict[str, Any]) -> None:
         referenced = referenced_env_paths(state)
@@ -577,7 +578,7 @@ def cleanup_environments(root: str | Path) -> list[str]:
             if path_key(path) in referenced or is_pinned(path):
                 continue
             if os.path.lexists(path):
-                if not _remove_environment(root, path, referenced):
+                if not _remove_environment(root, path, referenced, stuck):
                     continue
                 removed.append(path)
             del envs[fingerprint]
@@ -590,7 +591,7 @@ def cleanup_environments(root: str | Path) -> list[str]:
         # here once nothing references or pins them.
         removed.extend(
             str(old) for old in _legacy_environment_dirs(root)
-            if _remove_environment(root, old, referenced | recorded)
+            if _remove_environment(root, old, referenced | recorded, stuck)
         )
 
     # The decision and the state write happen under the lock an install takes
