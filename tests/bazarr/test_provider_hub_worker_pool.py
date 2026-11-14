@@ -2921,6 +2921,63 @@ def test_each_folders_budget_sees_a_file_unlinked_from_both_and_still_linked_in_
             os.close(fd)
 
 
+def _mapped_then_unlinked_with_a_link_held(folder, *, delete_the_link):
+    """data/a mapped (its descriptor closed) and unlinked, with a descriptor on hard link data/b."""
+    _file_of(folder / "a", 3 * MIB)
+    os.link(folder / "a", folder / "b")
+    fd = os.open(folder / "a", os.O_RDWR)
+    unmap = _map_with_c_mmap(fd, 3 * MIB)
+    os.close(fd)
+    os.unlink(folder / "a")
+    held = os.open(folder / "b", os.O_RDONLY)
+    if delete_the_link:
+        os.unlink(folder / "b")
+    return held, unmap
+
+
+@needs_smaps
+@pytest.mark.parametrize("delete_the_link", [False, True])
+def test_a_mapped_deleted_file_is_measured_through_a_descriptor_on_another_hard_link(
+        make_pool, tmp_path, monkeypatch, delete_the_link):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    held, unmap = _mapped_then_unlinked_with_a_link_held(folder, delete_the_link=delete_the_link)
+    try:
+        files = {}
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)], files)
+        # The descriptor on the other name holds the same inode: it is measured, not unmeasurable.
+        assert incomplete is False
+        assert 3 * MIB <= usage[str(folder)] < 3 * MIB + 256 * 1024, usage
+        pool = make_pool(use_clock=False)
+        monkeypatch.setattr(pool, "_deleted_open_usage", lambda slot, budgets, files=None: pool_module.deleted_open_usage(
+            [os.getpid()], [budget.path for budget in budgets], files))
+
+        def problem(limit):
+            return pool._budget_problem(None, 0.0, WorkerDefinition(
+                "tr", kind="translator", budgets=[FolderBudget(str(folder), limit, "plugin data")]))
+
+        # An under-budget worker is not stopped for it; the file is charged once (3 MiB), live link or not.
+        assert problem(4 * MIB) is None
+        assert problem(2 * MIB)[0] == "folder_budget"
+    finally:
+        unmap()
+        os.close(held)
+
+
+@needs_smaps
+def test_a_mapped_deleted_file_with_no_descriptor_anywhere_is_still_unmeasurable(tmp_path):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    held, unmap = _mapped_then_unlinked_with_a_link_held(folder, delete_the_link=False)
+    os.close(held)
+    try:
+        # The only name left is not held by any descriptor: nothing measures the mapped inode.
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
+        assert incomplete is True
+    finally:
+        unmap()
+
+
 @needs_smaps
 def test_deleted_open_usage_totals_are_per_folder_by_ancestry_not_by_filesystem(tmp_path):
     first = tmp_path / "first"

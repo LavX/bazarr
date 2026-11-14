@@ -1015,6 +1015,52 @@ def _recheck_descriptors(pid: int, wanted: dict) -> list:
     return found
 
 
+def _maps_device(field: str) -> "int | None":
+    """The device a ``maps`` line names (``"fd:01"``, hex major and minor) as ``st_dev`` writes it, or None."""
+    try:
+        major, minor = field.split(":")
+        return os.makedev(int(major, 16), int(minor, 16))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _recheck_by_inode(pid: int, wanted: dict) -> list:
+    """One more pass over a process's descriptors, for mapped deleted files measured by inode.
+
+    ``wanted`` maps an inode to ``[(mapped name, device or None)]``. A descriptor measures a mapping
+    when it holds the same regular file: same inode and the same device (``stat`` and ``maps`` do not
+    always agree on a device number, a btrfs subvolume for one, so a descriptor whose own name is the
+    mapped name matches on the inode alone). The descriptor's own name does not matter: a hard link
+    to the mapped file, deleted or not, measures it. Returns ``(mapped name, stat result)`` for each
+    mapping found. What cannot be read finds nothing, and the caller fails closed as before.
+    """
+    found = []
+    directory = "/proc/%d/fd" % pid
+    try:
+        descriptors = os.listdir(directory)[:PROC_MAX_ENTRIES]
+    except OSError:
+        return found
+    for name in descriptors:
+        link = "%s/%s" % (directory, name)
+        try:
+            target = os.readlink(link)
+        except OSError:
+            continue
+        if not target.startswith(os.sep):
+            continue
+        try:
+            info = os.stat(link)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_ino not in wanted:
+            continue
+        own = _maps_form(target[: -len(_DELETED)] if target.endswith(_DELETED) else target)
+        for path, device in wanted[info.st_ino]:
+            if device == info.st_dev or own == path:
+                found.append((path, info))
+    return found
+
+
 def memfd_usage(pids, skip=()) -> tuple[int, bool]:
     """Bytes held by memfds and ``/dev/shm`` files that processes have open: ``(bytes, incomplete)``.
 
@@ -1275,8 +1321,10 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
     page of a huge file; a sparse map). So that one case fails closed: the folder
     scan is incomplete and the budget fails. A file that is both open and mapped is
     charged once, by its blocks. Identity is (device, inode) for a descriptor, and
-    a mapping is recognised as the same file by its path and inode, so a file is
-    counted once however many processes hold it. Hard links to one file that were unlinked
+    a mapping is recognised as the same file by its inode and device (or, where
+    ``maps`` and ``stat`` disagree on the device, by its path and inode), whatever name
+    the descriptor was opened by: a descriptor on another hard link to the mapped file
+    measures it too. So a file is counted once however many processes hold it. Hard links to one file that were unlinked
     from folders with different budgets are charged to each of those folders, once each.
 
     Attribution is by ancestry only: the deleted file's original directory under a
@@ -1296,7 +1344,7 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
     incomplete = False
     held: dict = {}  # (device, inode) -> ({every original path seen}, size from a descriptor)
     held_names: set = set()  # (original path, inode): how a mapping recognises a file a descriptor holds
-    unmatched: dict = {}  # pid -> {name: {inode}} of mappings no descriptor held when the maps were read
+    unmatched: dict = {}  # pid -> {inode: [(name, device)]} of mappings no descriptor held when the maps were read
 
     def folders_of(path):
         if path.startswith("/memfd:") or not path.startswith(os.sep):
@@ -1365,16 +1413,24 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
             # for one); its size is then known from the descriptor.
             if (path, inode) in held_names:
                 continue
+            # Measuring is by inode, separately from which folder a name is charged to: a descriptor
+            # on a hard link to the mapped file (deleted or not) holds the very same blocks, and the
+            # mapped name is kept so the file is charged to every folder it was mapped from.
+            device = _maps_device(parts[3])
+            if device is not None and (device, inode) in held:
+                held[(device, inode)][0].add(path)
+                held_names.add((path, inode))
+                continue
             # No descriptor held it when the descriptors were read. It may have been unlinked since
-            # (the passes are separate snapshots): the descriptors are read again below.
-            unmatched.setdefault(pid, {}).setdefault(path, set()).add(inode)
+            # (the passes are separate snapshots), or held through another name: the descriptors
+            # are read again below.
+            unmatched.setdefault(pid, {}).setdefault(inode, []).append((path, device))
     for pid, wanted in unmatched.items():
-        for path, info, target in _recheck_descriptors(pid, wanted):
-            if target.endswith(_DELETED):
-                held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
-                held_names.add((path, info.st_ino))
+        for path, info in _recheck_by_inode(pid, wanted):
+            held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
+            held_names.add((path, info.st_ino))
     for wanted in unmatched.values():
-        if any((path, inode) not in held_names for path, inodes in wanted.items() for inode in inodes):
+        if any((path, inode) not in held_names for inode, names in wanted.items() for path, _device in names):
             # Referenced by a mapping alone: no descriptor to stat, so its size is unknown.
             incomplete = True
     for identity, (paths, size) in held.items():
