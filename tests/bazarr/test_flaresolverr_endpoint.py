@@ -437,6 +437,22 @@ class TestNeverBlocksTheCaller:
         assert status["detected"] is None
         assert status["sibling_found"] is False
 
+    def test_a_refresh_that_completes_before_the_answer_is_read_is_not_reported_stale(self, monkeypatch):
+        """The old address must never come back paired with "not detecting"."""
+        endpoints._sibling_cache.update(checked_at=time_ago(endpoints.SIBLING_CACHE_SECONDS + 1),
+                                        url=endpoints.FLARESOLVERR_SIBLING_URL)
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr", lambda url: False)
+        real_schedule = endpoints.schedule_sibling_refresh
+
+        def schedule_and_finish():
+            thread = real_schedule()
+            thread.join(5)
+            return thread
+
+        monkeypatch.setattr(endpoints, "schedule_sibling_refresh", schedule_and_finish)
+
+        assert endpoints.sibling_hint() == (None, False)
+
     def test_a_fresh_answer_starts_no_probe(self, monkeypatch):
         import time
 

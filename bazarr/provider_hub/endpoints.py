@@ -247,11 +247,16 @@ def sibling_hint() -> tuple[str | None, bool]:
     """
     with _sibling_lock:
         checked_at = _sibling_cache["checked_at"]
-        url = _sibling_cache["url"]
     fresh = checked_at is not None and time.monotonic() - checked_at < SIBLING_CACHE_SECONDS
     if not fresh:
         schedule_sibling_refresh()
+    # Answer and flight state are read together, after scheduling: a refresh
+    # that finished in between must not leave the old address paired with
+    # "not detecting".
     with _sibling_lock:
+        checked_at = _sibling_cache["checked_at"]
+        url = _sibling_cache["url"]
+        fresh = checked_at is not None and time.monotonic() - checked_at < SIBLING_CACHE_SECONDS
         flight = _probe_flight
         refreshing = flight is not None and not flight["recorded"]
     return url, checked_at is None or (not fresh and refreshing)
