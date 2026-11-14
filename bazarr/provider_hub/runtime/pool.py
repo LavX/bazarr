@@ -128,11 +128,16 @@ small and separate (at most 1 GiB, a filesystem of its own) is guarded instead: 
 sweep its free space is read, and below a reserve (``shm_reserve_bytes``; by default
 the larger of 8 MiB and a tenth of its size) the pool looks at what each live worker holds
 (the allocated size of the objects its descriptors hold, each counted once, plus a page for
-each mapping no descriptor measures; ties by mapping count). Only while some worker holds a
-meaningful share of the shortfall (at least 1 MiB and at least a quarter of the space that is
-missing, ``SHM_MIN_HOLDER_BYTES`` and ``SHM_SHARE_DIVISOR``) does it admit no new start or
+each mapping no descriptor measures; ties by mapping count). A mapping whose name still exists is
+measured by that name (same inode), at the object's full size however little of it is mapped. One
+whose name is gone has no readable size and is charged a page; for those the guard compares the
+space in use with what the listed files allocate, and when that unexplained space is itself a
+meaningful share, the workers holding such mappings are the candidates, the one with the most
+mappings first. Only while some worker holds a meaningful share of the shortfall (at least 1 MiB
+and at least a quarter of the space that is missing, ``SHM_MIN_HOLDER_BYTES`` and
+``SHM_SHARE_DIVISOR``) or is a candidate for unexplained space does it admit no new start or
 request (``shm_low``) and stop the heaviest such worker, one per sweep, until the space
-recovers or no worker holds a meaningful share. Files a stopped worker left behind and what the
+recovers or no worker is to blame. Files a stopped worker left behind and what the
 host itself keeps there never recover by stopping anyone, so when no worker is to blame the
 pool admits work as it does under a short disk reserve, and logs that once per episode
 (``status()["shm_short"]`` still reports the shortfall). Where ``/dev/shm`` is not small and
@@ -1407,25 +1412,43 @@ def shm_mapping_count(pids, skip=(), budget: "SampleBudget | None" = None) -> in
 
 
 def shm_usage(pids, skip=(), budget: "SampleBudget | None" = None) -> tuple[int, int]:
-    """What these processes hold of ``/dev/shm``: ``(bytes, mappings)``. The guard's measure of who uses it.
+    """What these processes hold of ``/dev/shm``: ``(bytes, mappings)``. See ``shm_usage_detail``."""
+    total, mappings, _blind = shm_usage_detail(pids, skip, budget)
+    return total, mappings
+
+
+def shm_listed_bytes(max_entries: int = 100_000, max_seconds: float = FOLDER_SCAN_SECONDS) -> tuple[int, bool]:
+    """Allocated bytes of everything listed under ``/dev/shm``: ``(bytes, truncated)``."""
+    return folder_usage(_SHM_DIR.rstrip("/"), max_entries, max_seconds)
+
+
+def shm_usage_detail(pids, skip=(), budget: "SampleBudget | None" = None) -> tuple[int, int, int]:
+    """What these processes hold of ``/dev/shm``: ``(bytes, mappings, blind mappings)``. The guard's measure.
 
     Bytes are the allocated size (blocks) of every ``/dev/shm`` object a descriptor
-    holds open, each counted once across the tree, plus one page for every mapping
-    that no descriptor measures (an unlinked semaphore, a closed arena). Mappings are
-    all mappings of ``/dev/shm`` objects. A listing too big to read counts as the most
-    an honest process could have, and so does what is left unread when ``budget`` (the sweep's
-    shared allowance) runs out, so a worker that tries it is the first to go.
+    holds open, each counted once across the tree. A mapping no descriptor measures is looked up
+    by its name: where the name still exists and is that same object (same inode), its blocks
+    are charged, once per object, however little of it is mapped. One whose name is gone (a
+    closed and unlinked arena, a semaphore) has a size nothing unprivileged can read: it is
+    charged one page and counted as *blind*, and the guard accounts for what blind mappings may
+    be hiding from the space that no listed file explains. Mappings are all mappings of
+    ``/dev/shm`` objects. A listing too big to read counts as the most an honest process could
+    have, and so does what is left unread when ``budget`` (the sweep's shared allowance) runs
+    out, so a worker that tries it is the first to go.
     """
     total = 0
     mappings = 0
+    blind = 0
     seen: set = set()
     measured: set = set()
+    named: dict = {}  # (name, inode) -> identity of the object it still names, or None
     for pid in pids:
         if pid in skip:
             continue
         if budget is not None and budget.expired():
             total += PROC_MAX_ENTRIES * _PAGE_SIZE
             mappings += PROC_MAX_LINES
+            blind += PROC_MAX_LINES
             break
         directory = "/proc/%d/fd" % pid
         try:
@@ -1470,14 +1493,38 @@ def shm_usage(pids, skip=(), budget: "SampleBudget | None" = None) -> tuple[int,
                     inode = int(parts[4])
                 except ValueError:
                     inode = None
-                if (path, inode) not in measured:
+                if (path, inode) in measured:
+                    continue
+                key = (path, inode)
+                if key not in named:
+                    # The name may still be there: then the object's blocks are known.
+                    identity = None
+                    if inode is not None and not parts[5].endswith(_DELETED):
+                        try:
+                            info = os.lstat(path)
+                        except OSError:
+                            info = None
+                        if info is not None and stat.S_ISREG(info.st_mode) and info.st_ino == inode:
+                            identity = (info.st_dev, info.st_ino, _allocated(info))
+                    if budget is not None and not budget.keep():
+                        total += PROC_MAX_ENTRIES * _PAGE_SIZE
+                        blind += 1
+                        continue
+                    named[key] = identity
+                identity = named[key]
+                if identity is None:
                     total += _PAGE_SIZE
+                    blind += 1
+                elif identity[:2] not in seen:
+                    seen.add(identity[:2])
+                    total += identity[2]
         except _ProcOverflow:
             mappings += PROC_MAX_LINES
+            blind += PROC_MAX_LINES
             total += PROC_MAX_LINES * _PAGE_SIZE
         except OSError:
             continue
-    return total, mappings
+    return total, mappings, blind
 
 
 def _under(path: str, folder: str) -> bool:
@@ -1840,6 +1887,7 @@ class WorkerPool:
         clock: Callable[[], float] = time.monotonic,
         disk_free: Callable[[], int | None] | None = None,
         shm_reader: Callable[[], Any] | None = None,
+        shm_lister: Callable[[], Any] | None = None,
         memory_reader: Callable[[int], MemorySample | None] | None = None,
         autostart: bool = True,
     ):
@@ -1848,6 +1896,9 @@ class WorkerPool:
         self._disk_free = disk_free or self._default_disk_free
         self._memory_reader = memory_reader or read_process_tree_memory
         self._shm_reader = shm_reader or shm_state
+        # ``() -> (bytes, truncated)``: what the files listed in /dev/shm allocate (the guard compares
+        # it with the space in use to find what mappings without a name are hiding).
+        self._shm_lister = shm_lister or shm_listed_bytes
         configured = self.limits.shm_reserve_bytes
         if configured is not None:
             if isinstance(configured, bool) or not isinstance(configured, int) or configured < 0:
@@ -2477,7 +2528,7 @@ class WorkerPool:
             return
         shortfall = reserve - free
         threshold = max(SHM_MIN_HOLDER_BYTES, shortfall // SHM_SHARE_DIVISOR)
-        heaviest = None
+        usages = []
         for entry, slot in workers:
             session = slot.session
             process = session.process if session is not None else None
@@ -2486,10 +2537,28 @@ class WorkerPool:
             budget = self._new_budget()
             pids, _incomplete = _process_tree(process.pid, 256, budget)
             skip = {process.pid} if isinstance(process, LauncherProcess) else set()
-            held, count = shm_usage(pids, skip, budget)
-            score = (held, count)
-            if held >= threshold and (heaviest is None or score > heaviest[0]):
-                heaviest = (score, entry, slot)
+            usages.append((shm_usage_detail(pids, skip, budget), entry, slot))
+        unexplained = 0
+        if any(blind for (_held, _count, blind), _entry, _slot in usages):
+            # Mappings whose name is gone have a size nobody can read. The space in use that no listed
+            # file accounts for is what they (or the host's own deleted files) may be hiding: only when
+            # that alone is meaningful are the workers holding such mappings to blame.
+            try:
+                listed, truncated = self._shm_lister()
+            except Exception as error:
+                _log_failure("listing /dev/shm failed", error)
+                listed, truncated = 0, True
+            unexplained = max(0, (total - free) - (0 if truncated else listed))
+        heaviest = None
+        for (held, count, blind), entry, slot in usages:
+            if held >= threshold:
+                rank = (1, held, count)
+            elif blind and unexplained >= threshold:
+                rank = (0, blind, count)
+            else:
+                continue
+            if heaviest is None or rank > heaviest[0]:
+                heaviest = (rank, entry, slot, held, count, blind)
         with self._cond:
             self._shm_low = heaviest is not None
             first = not self._shm_logged
@@ -2504,9 +2573,13 @@ class WorkerPool:
                                reserve // MIB)
         if heaviest is None:
             return
-        (held, count), entry, slot = heaviest
-        problem = (PoolCodes.SHM_LOW, "worker holds %d MiB (%d mappings) of /dev/shm, which is nearly full" % (
-            held // MIB, count))
+        rank, entry, slot, held, count, blind = heaviest
+        if rank[0]:
+            problem = (PoolCodes.SHM_LOW, "worker holds %d MiB (%d mappings) of /dev/shm, which is nearly full" % (
+                held // MIB, count))
+        else:
+            problem = (PoolCodes.SHM_LOW, "worker keeps %d mappings of /dev/shm objects with no name or descriptor, "
+                       "and space that no file explains is nearly all that is left" % blind)
         if entry is not None:
             self._kill_current(entry, slot, problem)
         else:

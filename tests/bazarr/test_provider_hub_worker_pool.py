@@ -4181,9 +4181,10 @@ def test_the_shm_guard_stops_the_heaviest_user_and_admits_nothing_until_it_recov
 @needs_smaps
 def test_space_that_no_worker_holds_neither_blocks_work_nor_stops_anyone(make_pool, caplog):
     caplog.set_level(logging.INFO)
-    # The host (or files a stopped worker left behind) fills /dev/shm; the only worker holds one page.
+    # The host (or files a stopped worker left behind) fills /dev/shm, and the files listed there account
+    # for all of it; the only worker maps one page of a nameless object, which cannot be the cause.
     pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False,
-                     shm_reader=lambda: (64 * MIB, 1 * MIB, True))
+                     shm_reader=lambda: (64 * MIB, 1 * MIB, True), shm_lister=lambda: (63 * MIB, False))
     for key in ("tiny", "fresh"):
         pool.register(definition(key))
     seen = []
@@ -4199,6 +4200,90 @@ def test_space_that_no_worker_holds_neither_blocks_work_nor_stops_anyone(make_po
     lines = [r for r in caplog.records if "/dev/shm" in r.getMessage() and "under its" in r.getMessage()]
     assert len(lines) == 1 and "still admitted" in lines[0].getMessage(), "logged once per episode"
     tiny.cancel()
+
+
+def _remove_big_fake_objects():
+    for name in os.listdir("/dev/shm"):
+        if name.startswith("bazarr-fake-big-"):
+            try:
+                os.unlink("/dev/shm/" + name)
+            except OSError:
+                pass
+
+
+@needs_smaps
+@pytest.mark.parametrize("unlink", [False, True])
+def test_a_worker_that_fills_dev_shm_and_keeps_only_a_page_mapped_is_still_stopped(make_pool, unlink):
+    # A 20 MiB object, one page of it mapped, the descriptor closed: with its name kept the blocks are
+    # read from the name; with the name removed the space is what no listed file explains.
+    try:
+        pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False,
+                         shm_reader=lambda: (64 * MIB, 1 * MIB, True),
+                         shm_lister=lambda: ((63 * MIB if not unlink else 0), False))
+        pool.register(definition("mapper", session=fast_session(handshake_timeout=20.0)))
+        seen = []
+        mapper = pool.submit("mapper", "shm_big_map", {"mb": 20, "unlink": unlink},
+                             on_progress=lambda message: seen.append("m"))
+        assert wait_until(lambda: "m" in seen, timeout=30)
+        pool.sweep()
+        with pytest.raises(WorkerKilled) as killed:
+            mapper.wait(10)
+        assert killed.value.code == "shm_low"
+    finally:
+        _remove_big_fake_objects()
+
+
+@needs_smaps
+def test_a_nameless_mapping_is_left_alone_when_the_listed_files_explain_the_used_space(make_pool):
+    try:
+        pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False,
+                         shm_reader=lambda: (64 * MIB, 1 * MIB, True), shm_lister=lambda: (63 * MIB, False))
+        pool.register(definition("mapper", session=fast_session(handshake_timeout=20.0)))
+        seen = []
+        mapper = pool.submit("mapper", "shm_big_map", {"mb": 1, "unlink": True},
+                             on_progress=lambda message: seen.append("m"))
+        assert wait_until(lambda: "m" in seen, timeout=30)
+        pool.sweep()
+        pool.sweep()
+        assert pool.state("mapper") is WorkerState.BUSY and pool.status()["shm_low"] is False
+        mapper.cancel()
+    finally:
+        _remove_big_fake_objects()
+
+
+@needs_smaps
+def test_a_mapped_object_is_measured_by_its_name_when_it_still_has_one_and_by_a_page_when_it_does_not():
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    page = os.sysconf("SC_PAGE_SIZE")
+    maps = []
+    names = []
+    try:
+        for index, keep_name in enumerate((True, False)):
+            path = "/dev/shm/bazarr-test-sized-%d-%d" % (os.getpid(), index)
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.write(fd, b"s" * (3 * MIB))
+            maps.append(libc.mmap(None, page, 3, 1, fd, 0))
+            os.close(fd)
+            if keep_name:
+                names.append(path)
+            else:
+                os.unlink(path)
+        held, mappings, blind = pool_module.shm_usage_detail([os.getpid()])
+        assert mappings == 2
+        # The named one is charged its 3 MiB, the nameless one a page and counted as blind.
+        assert 3 * MIB <= held < 3 * MIB + 8 * page, held
+        assert blind == 1
+        assert pool_module.shm_usage([os.getpid()]) == (held, 2)
+    finally:
+        for address in maps:
+            libc.munmap(ctypes.c_void_p(address), ctypes.c_size_t(page))
+        for path in names:
+            os.unlink(path)
 
 
 def test_with_no_worker_at_all_a_short_dev_shm_blocks_nothing(make_pool):

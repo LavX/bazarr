@@ -430,6 +430,35 @@ def _handle(operation):
             if operation.cancelled.wait(0.02):
                 raise worker_channel.OperationCancelled()
         return {"held": fd}
+    if name == "shm_big_map":
+        # A ``mb`` megabyte /dev/shm object mapped by one page, its descriptor closed, its name kept
+        # (``unlink`` false) or removed (``unlink`` true): shared memory held through a mapping alone.
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mmap.restype = ctypes.c_void_p
+        libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                              ctypes.c_long]
+        path = "/dev/shm/bazarr-fake-big-%d" % os.getpid()
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        block = b"b" * (1024 * 1024)
+        for _ in range(int(params.get("mb", 20))):
+            os.write(fd, block)
+        libc.mmap(None, 4096, 3, 1, fd, 0)
+        os.close(fd)
+        if params.get("unlink"):
+            os.unlink(path)
+        operation.progress(message="mapped")
+        deadline = time.monotonic() + float(params.get("seconds", 30.0))
+        while time.monotonic() < deadline:
+            if operation.cancelled.wait(0.02):
+                if not params.get("unlink"):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+                raise worker_channel.OperationCancelled()
+        return {"mapped": True}
     if name == "shm_maps":
         # Maps ``count`` /dev/shm objects by one page each, closes the descriptors and unlinks
         # the names: the objects live on through their mappings alone, as a semaphore's does.
