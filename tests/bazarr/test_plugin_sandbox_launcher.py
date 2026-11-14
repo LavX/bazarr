@@ -4012,11 +4012,11 @@ def test_a_leader_reaped_by_somebody_else_is_not_signalled_even_without_waitid(m
         monkeypatch.undo()
 
 
-def test_a_pid_that_answers_is_taken_for_ours_when_neither_waitid_nor_proc_can_tell(monkeypatch):
+def test_a_pid_that_answers_proves_nothing_when_neither_waitid_nor_proc_can_tell(monkeypatch):
     monkeypatch.setattr(spawn.os.path, "isdir", lambda path: False if path == "/proc/self" else os.path.exists(path))
     monkeypatch.setattr(os, "kill", lambda pid, sig: None)  # something answers to the pid
-    # The platform cannot tell the child from a stranger: not an outside reap, so not lost.
-    assert spawn._owned_without_waitid(424242, None) is True
+    # A zombie, the child and a stranger all answer signal 0: unknown (waitpid on the Popen decides).
+    assert spawn._owned_without_waitid(424242, None) is None
 
     def refused(pid, sig):
         raise PermissionError(errno.EPERM, "Operation not permitted")
