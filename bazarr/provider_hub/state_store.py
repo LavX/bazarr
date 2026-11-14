@@ -23,7 +23,7 @@ import json
 import logging
 import sys
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -273,20 +273,34 @@ def _commit_document(connection, read_revision: int, document: str) -> None:
         raise _StaleRevision()
 
 
-def update_document(step: Callable[[str], tuple[str, Any]], bind=None) -> Any:
+def update_document(step: Callable[[str], tuple[str, Any]], bind=None, *,
+                    around: Callable[[], Any] | None = None,
+                    after_commit: Callable[[Any], None] | None = None,
+                    retry_on_conflict: bool = True) -> Any:
     """Read the document, let ``step`` compute the next one, store it.
 
     ``step`` gets the stored text and returns ``(new_text, result)``; the
     result is handed back. A failure anywhere leaves the stored row exactly as
-    it was. A lost revision race reruns ``step`` once from a fresh read.
+    it was. A lost revision race reruns ``step`` once from a fresh read, so
+    ``step`` must be a pure function of the text it is given; a step that
+    cannot be passes ``retry_on_conflict=False`` and the race raises
+    ``StateConflictError`` instead.
+
+    ``around`` is a context manager factory entered just before the commit and
+    left after ``after_commit`` ran, whose value ``after_commit`` receives. The
+    caller uses it to order whatever follows a commit (the state.json copy)
+    across processes: the commit and that step happen inside it together.
     """
     bind = bind if bind is not None else engine()
-    for attempt in (1, 2):
+    for attempt in ((1, 2) if retry_on_conflict else (1,)):
         revision, text = read_document(bind)
         new_text, result = step(text)
         try:
-            with write_transaction(bind) as connection:
-                _commit_document(connection, revision, new_text)
+            with (around() if around is not None else nullcontext()) as held:
+                with write_transaction(bind) as connection:
+                    _commit_document(connection, revision, new_text)
+                if after_commit is not None:
+                    after_commit(held)
         except _StaleRevision:
             logger.debug("The Plugin Hub state changed during a write (attempt %d)", attempt)
             continue

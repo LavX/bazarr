@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 import contextlib
@@ -245,14 +246,105 @@ def _snapshot_state(*, strict: bool) -> dict[str, Any]:
         return _parse_document(handle.read(), strict=strict)
 
 
+_SNAPSHOT_LOCK_WAIT = 120.0
+_LOCK_HELD = threading.local()
+
+
+def _snapshot_lock_path() -> Path:
+    current = state_file()
+    return current.with_name(current.name + ".lock")
+
+
+def _lock_file(handle) -> bool:
+    """Try once for an exclusive lock on the open lock file. False when it is taken."""
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock_file(handle) -> None:
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def snapshot_lock():
+    """Serialize database commits and state.json publication across processes.
+
+    A commit and the refresh of state.json that follows it are one step: a
+    writer that commits revision 2 and is slow to publish must not overwrite
+    the file after another has already published revision 3. The lock is a file
+    beside the snapshot, held from just before the commit until the copy is
+    replaced, and is taken in the same order by every writer, so they cannot
+    wait on each other. It is reentrant within a thread. Yields False when the
+    lock cannot be had (an unwritable folder, or the wait ran out): the caller
+    then leaves the file alone rather than publish out of order.
+    """
+    if getattr(_LOCK_HELD, "depth", 0):
+        _LOCK_HELD.depth += 1
+        try:
+            yield True
+        finally:
+            _LOCK_HELD.depth -= 1
+        return
+    handle = None
+    held = False
+    try:
+        path = _snapshot_lock_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a+b")
+        deadline = time.monotonic() + _SNAPSHOT_LOCK_WAIT
+        while True:
+            if _lock_file(handle):
+                held = True
+                break
+            if time.monotonic() >= deadline:
+                logger.warning("Provider Hub: timed out waiting for the state file lock")
+                break
+            time.sleep(0.02)
+    except OSError as error:
+        logger.warning("Provider Hub: could not take the state file lock: %s", type(error).__name__)
+    if held:
+        _LOCK_HELD.depth = 1
+    try:
+        yield held
+    finally:
+        if held:
+            _LOCK_HELD.depth = 0
+            try:
+                _unlock_file(handle)
+            except OSError:
+                pass
+        if handle is not None:
+            handle.close()
+
+
 def _write_snapshot(data: dict[str, Any]) -> None:
     """Refresh state.json from the committed state, best effort.
 
     The file is the copy settings load reads before the database is open, and
     the one an older build finds after a downgrade. The database is the state:
     a failure here is logged and the write that was just committed stands.
-    ``sync_snapshot`` is the strict form for the callers that must not leave
-    the file behind.
+    Callers hold ``snapshot_lock``. ``sync_snapshot`` is the strict form for the
+    callers that must not leave the file behind.
     """
     try:
         write_state_file(data, state_file())
@@ -271,27 +363,45 @@ def sync_snapshot() -> bool:
     """
     if _uses_file(None) or _DATABASE_HELD:
         return False
-    data = load_state()
-    current = state_file()
-    try:
-        with current.open("r", encoding="utf-8") as handle:
-            if json.load(handle) == data:
+    with state_write_lock(), snapshot_lock() as held:
+        if not held:
+            raise OSError("the Provider Hub state file is locked by another writer")
+        # Read under the lock: a commit that lands after this read waits for it.
+        data = load_state()
+        current = state_file()
+        try:
+            with current.open("r", encoding="utf-8") as handle:
+                if json.load(handle) == data:
+                    return False
+        except FileNotFoundError:
+            if data == default_state():
                 return False
-    except FileNotFoundError:
-        if data == default_state():
-            return False
-    except (OSError, ValueError):
-        pass
-    write_state_file(data, current)
-    return True
+        except (OSError, ValueError):
+            pass
+        write_state_file(data, current)
+        return True
 
 
 def write_state_file(data: dict[str, Any], current: Path) -> None:
+    """Replace ``current`` with ``data`` in one step, through a temp file of its own.
+
+    Each writer gets its own temp name, so two writers never share a half
+    written file, and the rename keeps a reader from ever seeing one.
+    """
     current.parent.mkdir(parents=True, exist_ok=True)
-    tmp = current.with_suffix(current.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2, sort_keys=True)
-    os.replace(tmp, current)
+    handle, name = tempfile.mkstemp(dir=current.parent, prefix=current.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2, sort_keys=True)
+        try:
+            os.chmod(name, current.stat().st_mode & 0o7777)
+        except OSError:
+            pass
+        os.replace(name, current)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+        raise
 
 
 def _uses_file(path: str | os.PathLike[str] | None) -> bool:
@@ -343,13 +453,44 @@ def _enclosing(target: str) -> dict[str, Any] | None:
     return None
 
 
+def _commit_to_database(step: Callable[[str], tuple[str, Any]], written: list[dict[str, Any]],
+                        retry_on_conflict: bool) -> Any:
+    """Store the document ``step`` computes, then refresh the state.json copy.
+
+    The commit and the copy happen under ``snapshot_lock``, so the copy always
+    ends as the last committed state whichever process commits when.
+    ``written`` holds the document of the attempt that committed.
+    """
+    from . import state_store
+
+    def publish(held: bool) -> None:
+        if held:
+            _write_snapshot(written[-1])
+        else:
+            logger.warning("Provider Hub: the state file copy was not refreshed, another writer holds its lock")
+
+    result = state_store.update_document(
+        step, around=snapshot_lock, after_commit=publish, retry_on_conflict=retry_on_conflict)
+    _bump_version()
+    return result
+
+
 def mutate_state(
     mutator: Callable[[dict[str, Any]], Any],
     path: str | os.PathLike[str] | None = None,
     *,
     recover_corrupt: bool = False,
+    retry_on_conflict: bool = True,
 ) -> Any:
     """Read, change and write the state document.
+
+    On the database, a write that loses a race with another process runs
+    ``mutator`` once more on a fresh read. A mutator that retries must be a
+    pure change to the document it is handed: no settings writes, no files, no
+    network, nothing that must happen once. Do those after this call returns,
+    when the commit is known. A mutator that cannot be pure passes
+    ``retry_on_conflict=False`` and the call fails with ``StateConflictError``
+    on a lost race instead of running it again.
 
     A document that cannot be read (text that is not JSON, or a root that is
     not an object) is never overwritten: a copy is kept beside it and the call
@@ -385,7 +526,6 @@ def mutate_state(
             return result
         if _DATABASE_HELD:
             raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
-        from . import state_store
 
         def step(text: str) -> tuple[str, Any]:
             data = _parse_document(text, strict=False)
@@ -395,10 +535,7 @@ def mutate_state(
             return json.dumps(data, sort_keys=True), result
 
         written: list[dict[str, Any]] = []
-        result = state_store.update_document(step)
-        _bump_version()
-        _write_snapshot(written[-1])
-        return result
+        return _commit_to_database(step, written, retry_on_conflict)
 
 
 def _read_document(current: Path) -> dict[str, Any] | None:
@@ -424,6 +561,8 @@ def mutate_state_checked(
     mutator: Callable[[dict[str, Any]], Any],
     validate: Callable[[Any], None],
     path: str | os.PathLike[str] | None = None,
+    *,
+    retry_on_conflict: bool = True,
 ) -> Any:
     """``mutate_state`` for a decision that must not run on a state it cannot read.
 
@@ -443,7 +582,6 @@ def mutate_state_checked(
             return result
         if _DATABASE_HELD:
             raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
-        from . import state_store
 
         def step(text: str) -> tuple[str, Any]:
             data = _stored_document(text)
@@ -455,10 +593,7 @@ def mutate_state_checked(
             return json.dumps(data, sort_keys=True), result
 
         written: list[dict[str, Any]] = []
-        result = state_store.update_document(step)
-        _bump_version()
-        _write_snapshot(written[-1])
-        return result
+        return _commit_to_database(step, written, retry_on_conflict)
 
 
 def _stored_document(text: str) -> dict[str, Any]:
@@ -600,11 +735,8 @@ def save_state(data: dict[str, Any], path: str | os.PathLike[str] | None = None)
         if not _uses_file(path):
             if _DATABASE_HELD:
                 raise StateNotReadyError("the Provider Hub state is read-only until the database is open")
-            from . import state_store
             document = json.dumps(data, sort_keys=True)
-            state_store.update_document(lambda _stored: (document, None))
-            _bump_version()
-            _write_snapshot(data)
+            _commit_to_database(lambda _stored: (document, None), [data], True)
             return
         write_state_file(data, Path(path) if path is not None else state_file())
         _bump_version()
