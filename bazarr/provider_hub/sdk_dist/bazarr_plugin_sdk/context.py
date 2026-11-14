@@ -57,7 +57,8 @@ class PluginContext:
         budget: float | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
-        self.operation = operation
+        # The wire-level operation. Not part of the plugin API.
+        self._operation = operation
         self.op = operation.op
         self.kind_api = kind_api
         # Seconds between keep-alives the host expects while a request makes progress.
@@ -78,7 +79,7 @@ class PluginContext:
     @property
     def is_cancelled(self) -> bool:
         """True once the host has cancelled this request. Safe to read from any thread."""
-        return self.operation.cancelled.is_set()
+        return self._operation.cancelled.is_set()
 
     def raise_if_cancelled(self) -> None:
         if self.is_cancelled:
@@ -98,14 +99,14 @@ class PluginContext:
         self._last_progress = now
         fraction = min(1.0, done / total) if total else None
         # Scrub the whole message, then cut it: a secret across the cut must not leave a prefix.
-        text = scrub(str(message), channel_secrets(self.operation))[:500]
-        self.operation.progress(fraction=fraction, message=text or None, data={"done": done, "total": total})
+        text = scrub(str(message), channel_secrets(self._operation))[:500]
+        self._operation.progress(fraction=fraction, message=text or None, data={"done": done, "total": total})
 
     def heartbeat(self) -> None:
         """Say the request is alive and making headway. Call it at least once per interval."""
         if self.is_cancelled:
             return
-        self.operation.progress()
+        self._operation.progress()
 
     # host calls, blocking form
 
@@ -161,7 +162,7 @@ class PluginContext:
         """A host call. A cancellable one gives up when the host cancels the request; a settle
         (usage) or a store (checkpoint) that has gone out is waited for."""
         try:
-            return self.operation.call(name, params, timeout=HOST_CALL_TIMEOUT, cancellable=cancellable)
+            return self._operation.call(name, params, timeout=HOST_CALL_TIMEOUT, cancellable=cancellable)
         except OperationCancelled:
             raise PluginError(CANCELLED, "the host cancelled this request") from None
         except HostCallFailed as failure:

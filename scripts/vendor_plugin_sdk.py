@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Copy the plugin SDK into ``bazarr/provider_hub/sdk_dist`` and check that the copy is intact.
 
-    scripts/vendor_plugin_sdk.py --source ../bazarr-plugin-sdk --tag v0.1.0
-        copies <source>/src/bazarr_plugin_sdk and rewrites VENDORED.json
+    scripts/vendor_plugin_sdk.py --source ../bazarr-plugin-sdk
+        copies <source>/src/bazarr_plugin_sdk and rewrites VENDORED.json. The source must
+        be a clean git checkout. The manifest records the tag the checkout is exactly at,
+        or null when it is at no tag
     scripts/vendor_plugin_sdk.py --check [--source ../bazarr-plugin-sdk]
         fails when the files differ from VENDORED.json, and from the source when one is given
 
 The worker protocol files inside the SDK (``_protocol/frames.py`` and
 ``_protocol/worker_channel.py``) must equal the host's copies in
-``bazarr/provider_hub/runtime``; ``--check`` compares them whenever the host
-files exist.
+``bazarr/provider_hub/runtime``; ``--check`` compares them, and a missing host
+file is a failure.
 
 Standard library only.
 """
@@ -51,18 +53,38 @@ def read_version(source_package: Path) -> str:
     return str(namespace["__version__"])
 
 
-def git_commit(source: Path) -> str | None:
+def _git(source: Path, *args: str) -> str | None:
     try:
-        out = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+        out = subprocess.run(["git", "-C", str(source), *args], capture_output=True, text=True, check=True)
     except (OSError, subprocess.CalledProcessError):
         return None
-    return out.stdout.strip() or None
+    return out.stdout.strip()
 
 
-def vendor(source: Path, tag: str | None) -> None:
+def git_commit(source: Path) -> str | None:
+    return _git(source, "rev-parse", "HEAD") or None
+
+
+def git_tag(source: Path) -> str | None:
+    """The tag ``source`` is exactly at, or None."""
+    return _git(source, "describe", "--exact-match", "--tags", "HEAD") or None
+
+
+def git_dirty(source: Path) -> bool:
+    """True when the checkout has uncommitted or untracked files (ignored ones do not count)."""
+    status = _git(source, "status", "--porcelain")
+    return status is None or bool(status)
+
+
+def vendor(source: Path) -> None:
     source_package = source / "src" / PACKAGE
     if not source_package.is_dir():
         sys.exit(f"{source_package} is not a directory")
+    commit = git_commit(source)
+    if commit is None:
+        sys.exit(f"{source} is not a git checkout")
+    if git_dirty(source):
+        sys.exit(f"{source} has uncommitted or untracked changes; commit them first so the manifest names real source")
     target = DIST / PACKAGE
     if target.exists():
         shutil.rmtree(target)
@@ -71,8 +93,8 @@ def vendor(source: Path, tag: str | None) -> None:
     manifest = {
         "package": PACKAGE,
         "version": version,
-        "tag": tag or f"v{version}",
-        "source_commit": git_commit(source),
+        "tag": git_tag(source),
+        "source_commit": commit,
         "files": tree_hashes(target),
     }
     MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -103,17 +125,17 @@ def check(source: Path | None) -> list[str]:
         )
     for name in PROTOCOL_FILES:
         host_file = RUNTIME / name
-        if host_file.is_file():
-            copy = DIST / PACKAGE / "_protocol" / name
-            if not copy.is_file() or copy.read_bytes() != host_file.read_bytes():
-                problems.append(f"_protocol/{name} differs from the host copy runtime/{name}")
+        copy = DIST / PACKAGE / "_protocol" / name
+        if not host_file.is_file():
+            problems.append(f"the host copy runtime/{name} is missing, so _protocol/{name} cannot be checked")
+        elif not copy.is_file() or copy.read_bytes() != host_file.read_bytes():
+            problems.append(f"_protocol/{name} differs from the host copy runtime/{name}")
     return problems
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", type=Path, help="a checkout of the SDK repository")
-    parser.add_argument("--tag", help="the tag the checkout is at (default: v<version>)")
     parser.add_argument("--check", action="store_true", help="verify instead of copying")
     args = parser.parse_args(argv)
     if args.check:
@@ -123,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if problems else 0
     if args.source is None:
         parser.error("--source is required to vendor")
-    vendor(args.source, args.tag)
+    vendor(args.source)
     problems = check(args.source)
     for problem in problems:
         print(problem, file=sys.stderr)

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import importlib
 import inspect
 import logging
@@ -54,6 +55,8 @@ EXIT_START = 66
 
 # A result whose JSON is longer than this travels as data frames.
 INLINE_RESULT_BYTES = 512 * 1024
+# Seconds a finished request's tasks and executor threads get to wind down.
+SHUTDOWN_TIMEOUT = 5.0
 # A request param the SDK takes for itself: what a paid ``test`` may spend.
 BUDGET_PARAM = "budget"
 
@@ -203,10 +206,41 @@ def _run_coroutine(operation: Operation, ctx: PluginContext, awaitable: Any) -> 
     finally:
         done.set()
         try:
+            _cancel_remaining_tasks(loop)
             loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.run_until_complete(loop.shutdown_default_executor())
+            _shutdown_executor(loop)
         finally:
             loop.close()
+
+
+def _cancel_remaining_tasks(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel what the request left running and let it clean up, as ``asyncio.run`` does."""
+    pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+    if not pending:
+        return
+    for task in pending:
+        task.cancel()
+
+    async def gather() -> list[Any]:
+        return await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        results = loop.run_until_complete(asyncio.wait_for(gather(), SHUTDOWN_TIMEOUT))
+    except asyncio.TimeoutError:
+        return  # a task that ignores its cancel must not hold the worker
+    for task, result in zip(pending, results):
+        if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+            loop.call_exception_handler(
+                {"message": "unhandled exception during request shutdown", "exception": result, "task": task}
+            )
+
+
+def _shutdown_executor(loop: asyncio.AbstractEventLoop) -> None:
+    """Wait for the loop's executor threads, but only a few seconds: one may be stuck."""
+    try:
+        loop.run_until_complete(asyncio.wait_for(loop.shutdown_default_executor(), SHUTDOWN_TIMEOUT))
+    except asyncio.TimeoutError:
+        log.warning("a thread started by the request did not finish within %.0f seconds", SHUTDOWN_TIMEOUT)
 
 
 # Process entry
@@ -246,12 +280,18 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="bazarr_plugin_sdk.runner", description="Serve a Bazarr+ plugin over stdio frames.")
     parser.add_argument("--entry", help="module:Class of the plugin (default: BAZARR_PLUGIN_ENTRY)")
     parser.add_argument("--path", action="append", default=[], help="directory to add to sys.path, repeatable")
-    return parser.parse_args(argv)
+    # --help writes to stdout, which is still the frame pipe here: send it to stderr.
+    with contextlib.redirect_stdout(sys.stderr):
+        return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run a worker in this process and return its exit code. :func:`run_process` also ends the process."""
-    args = parse_args(argv)
+    try:
+        args = parse_args(argv)
+    except SystemExit as stop:
+        # argparse exits with 2 for a bad command line and 0 for --help.
+        return EXIT_OK if stop.code == 0 else EXIT_USAGE
     paths = list(args.path)
     extra = os.environ.get("BAZARR_PLUGIN_PATH")
     if extra:

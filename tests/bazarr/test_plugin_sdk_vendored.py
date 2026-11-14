@@ -8,6 +8,8 @@ and a plugin must run on it in an isolated interpreter the way a worker does.
 import ast
 import importlib.util
 import json
+import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -35,8 +37,6 @@ def test_the_copy_matches_its_manifest():
 def test_the_check_notices_a_changed_added_and_removed_file(tmp_path, monkeypatch):
     script = _load_script()
     copy = tmp_path / "sdk_dist"
-    import shutil
-
     shutil.copytree(DIST, copy)
     monkeypatch.setattr(script, "DIST", copy)
     monkeypatch.setattr(script, "MANIFEST", copy / "VENDORED.json")
@@ -53,17 +53,73 @@ def test_the_check_notices_a_changed_added_and_removed_file(tmp_path, monkeypatc
 @pytest.mark.parametrize("name", ["frames.py", "worker_channel.py"])
 def test_the_wire_protocol_files_equal_the_host_copies(name):
     host_file = RUNTIME / name
-    if not host_file.is_file():
-        pytest.skip("the host's worker protocol is not on this branch yet")
+    assert host_file.is_file(), f"the host's runtime/{name} is missing"
     assert (PACKAGE / "_protocol" / name).read_bytes() == host_file.read_bytes()
 
 
-def test_the_manifest_names_the_tag_and_version():
+def test_the_manifest_names_the_version_and_a_tag_only_when_there_is_one():
     manifest = json.loads((DIST / "VENDORED.json").read_text(encoding="utf-8"))
     init = (PACKAGE / "__init__.py").read_text(encoding="utf-8")
     assert manifest["package"] == "bazarr_plugin_sdk"
     assert f'__version__ = "{manifest["version"]}"' in init
-    assert manifest["tag"] == f"v{manifest['version']}"
+    assert re.fullmatch(r"[0-9a-f]{40}", manifest["source_commit"])
+    # a tag is recorded only for a source checkout that is exactly at it
+    assert manifest["tag"] is None or isinstance(manifest["tag"], str) and manifest["tag"]
+
+
+def test_the_check_fails_when_the_host_protocol_files_are_missing(tmp_path, monkeypatch):
+    script = _load_script()
+    monkeypatch.setattr(script, "RUNTIME", tmp_path)
+    problems = script.check(None)
+    assert any("runtime/frames.py is missing" in problem for problem in problems)
+    assert any("runtime/worker_channel.py is missing" in problem for problem in problems)
+
+
+def _git(path, *args):
+    subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+
+
+def _source_checkout(tmp_path):
+    source = tmp_path / "sdk"
+    shutil.copytree(PACKAGE, source / "src" / "bazarr_plugin_sdk", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    _git(source, "init", "-q")
+    _git(source, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "add", "-A")
+    _git(source, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "sdk")
+    return source
+
+
+def _vendor_into(script, monkeypatch, tmp_path):
+    dist = tmp_path / "sdk_dist"
+    dist.mkdir()
+    monkeypatch.setattr(script, "DIST", dist)
+    monkeypatch.setattr(script, "MANIFEST", dist / "VENDORED.json")
+    return dist
+
+
+def test_the_manifest_tag_is_null_without_a_tag_and_set_at_one(tmp_path, monkeypatch):
+    script = _load_script()
+    source = _source_checkout(tmp_path)
+    dist = _vendor_into(script, monkeypatch, tmp_path)
+    script.vendor(source)
+    manifest = json.loads((dist / "VENDORED.json").read_text(encoding="utf-8"))
+    assert manifest["tag"] is None and manifest["source_commit"] == script.git_commit(source)
+    _git(source, "tag", "v9.9.9")
+    script.vendor(source)
+    assert json.loads((dist / "VENDORED.json").read_text(encoding="utf-8"))["tag"] == "v9.9.9"
+
+
+def test_vendoring_refuses_a_dirty_source_tree(tmp_path, monkeypatch):
+    script = _load_script()
+    source = _source_checkout(tmp_path)
+    dist = _vendor_into(script, monkeypatch, tmp_path)
+    (source / "src" / "bazarr_plugin_sdk" / "errors.py").write_text("# edited\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        script.vendor(source)
+    (source / "src" / "bazarr_plugin_sdk" / "errors.py").write_bytes((PACKAGE / "errors.py").read_bytes())
+    (source / "src" / "bazarr_plugin_sdk" / "stray.py").write_text("", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        script.vendor(source)
+    assert not (dist / "VENDORED.json").exists()
 
 
 def test_the_sdk_uses_only_the_standard_library():
@@ -141,4 +197,4 @@ def test_a_plugin_runs_on_the_vendored_copy_in_an_isolated_interpreter(tmp_path)
     )
     assert result.returncode == 0, result.stdout + result.stderr
     last = result.stdout.strip().splitlines()[-1]
-    assert last.startswith("OK structure") and "cancel" in last, result.stdout
+    assert last.startswith("OK structure") and "cancel" in last[3:].split(","), result.stdout

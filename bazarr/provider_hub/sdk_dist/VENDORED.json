@@ -7,13 +7,13 @@
     "_protocol/frames.py": "f3920c413b6257a14672e2abda5ddc907a81d0410f485c537b825a1e0914f288",
     "_protocol/worker_channel.py": "0db8aeb63fb23edb497f615c60deae1831a8a87264f43b071dda2d13c920bdf6",
     "_scrub.py": "55d0a07425236b76857633c4c97c2f826817617d7d0b69ad223d0210be5681c0",
-    "context.py": "dba612ec473ac07f4c552a2b5b2c04cf42e9ef8e7d1337d7f08b57d48052fb33",
+    "context.py": "fd27bcc5d6bd0d1d14e45806a448b6cc536492f355db3ea48130fd2a38295fa7",
     "errors.py": "5031056f09e6db8d934aeab6d0ef298801a35cbd3feb8b74356e03eddc0930df",
-    "fs.py": "94f817b56e98fce77738d086b8808d21b4576a9b18986ee47f54347d65d75b39",
+    "fs.py": "816c88263d19af989418d29123385bb400bc0a0826446f090e782a081fd54696",
     "kinds.py": "dc225a61b3f41293d759493b1e463f3b75afedd2fee6b85ad983b30484c72e9d",
     "protocol.py": "be0480366543156bc52f7586fb30d5a90c1838533fd37786a1780d86a51c6ab7",
     "py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "runner.py": "6e10fa207341ae4604a704e79cf8dea3563fcc1880c2200b4228a0c9deaaa9b4",
+    "runner.py": "3e5820c0b13a5d5539994228b8ff3a1a136ce72099c9cca2f0b9aef53481c832",
     "testing/__init__.py": "618f7a95cababa6f883b02248993a2a86fca785706957357316b0073fc6585c0",
     "testing/conformance.py": "39a3e8dd3b4c74591c863b7b24a5afa76bc7e793386669199a604d2041b5ffc1",
     "testing/host.py": "d625948243493d6fd53ded2a7085cee407ab57579217d9ae026ad17213e66733",
@@ -21,7 +21,7 @@
     "translator/v1.py": "edf65cd90819f5886cd9479ca4e69e2392425b3a7b453866018b657ab6fa8292"
   },
   "package": "bazarr_plugin_sdk",
-  "source_commit": "d79b54f4bb8762248660f91b77e40e77b67dd5fb",
-  "tag": "v0.1.0",
+  "source_commit": "dc9cbb21da0936b96000939b54b2062d45ea8748",
+  "tag": null,
   "version": "0.1.0"
 }

@@ -24,13 +24,14 @@ import errno
 import os
 import secrets
 import shutil
+import stat
 
 from pathlib import Path
 from typing import BinaryIO, Callable, Union
 
 PathLike = Union[str, "os.PathLike[str]"]
 
-__all__ = ["copy_file", "copy_tree", "move", "touch", "write_file"]
+__all__ = ["copy_file", "copy_link", "copy_tree", "move", "touch", "write_file"]
 
 
 def _create_temp(target: Path) -> tuple[int, Path]:
@@ -38,13 +39,18 @@ def _create_temp(target: Path) -> tuple[int, Path]:
 
     The name is random and the file is opened with ``O_EXCL``, so two writers of
     one destination, in one process or in two, never share a temporary file. It
-    gets the default mode of a new file.
+    gets the mode of the file it will replace, or the default mode of a new file
+    when there is none (the process umask applies either way).
     """
+    try:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+    except OSError:
+        mode = 0o666
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
     while True:
         temp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.part")
         try:
-            return os.open(temp, flags, 0o666), temp
+            return os.open(temp, flags, mode), temp
         except FileExistsError:
             continue
 
@@ -74,6 +80,9 @@ def copy_file(src: PathLike, dst: PathLike) -> Path:
     target = Path(dst)
 
     def fill(handle: BinaryIO) -> None:
+        # Opening a named pipe would wait for a writer, so look before opening.
+        if not stat.S_ISREG(os.stat(src).st_mode):
+            raise shutil.SpecialFileError(f"{os.fspath(src)!r} is not a regular file")
         with open(src, "rb") as source:
             shutil.copyfileobj(source, handle)
 
@@ -105,23 +114,43 @@ def copy_tree(src: PathLike, dst: PathLike, *, dirs_exist_ok: bool = False, syml
 
     Directories are created with the default mode, files are copied by
     :func:`copy_file`. With ``symlinks`` (the default) a link is recreated as a
-    link; without it the file or directory it points to is copied.
-    ``dirs_exist_ok`` allows ``dst`` to exist already, as in ``shutil.copytree``.
+    link, a dangling one included; without it the file or directory it points
+    to is copied. ``dirs_exist_ok`` allows ``dst`` to exist already, as in
+    ``shutil.copytree``.
+
+    Only regular files, directories and links can be copied. Everything else in
+    the tree (a named pipe, a socket, a device) is left out, the rest is copied,
+    and a :class:`shutil.Error` naming each of them is raised at the end.
     """
     source = Path(src)
     target = Path(dst)
     if not source.is_dir():
         raise NotADirectoryError(str(source))
     target.mkdir(parents=True, exist_ok=dirs_exist_ok)
+    failures: list[tuple[str, str, str]] = []
     for entry in sorted(os.scandir(source), key=lambda item: item.name):
         destination = target / entry.name
-        if entry.is_symlink() and symlinks:
-            _discard(destination)
-            os.symlink(os.readlink(entry.path), destination)
-        elif entry.is_dir():
-            copy_tree(entry.path, destination, dirs_exist_ok=dirs_exist_ok, symlinks=symlinks)
-        else:
-            copy_file(entry.path, destination)
+        try:
+            if entry.is_symlink() and symlinks:
+                copy_link(entry.path, destination)
+            elif entry.is_dir():
+                copy_tree(entry.path, destination, dirs_exist_ok=dirs_exist_ok, symlinks=symlinks)
+            else:
+                copy_file(entry.path, destination)
+        except shutil.Error as error:
+            failures.extend(error.args[0])
+        except shutil.SpecialFileError as error:
+            failures.append((entry.path, str(destination), str(error)))
+    if failures:
+        raise shutil.Error(failures)
+    return target
+
+
+def copy_link(src: PathLike, dst: PathLike) -> Path:
+    """Recreate the symbolic link ``src`` as ``dst``, whatever it points at. Returns ``dst``."""
+    target = Path(dst)
+    _discard(target)
+    os.symlink(os.readlink(src), target)
     return target
 
 
@@ -130,7 +159,8 @@ def move(src: PathLike, dst: PathLike) -> Path:
 
     A rename is tried first. When the two paths are on different filesystems,
     or the sandbox refuses a rename across directories, the data is copied with
-    :func:`copy_file` or :func:`copy_tree` and the source removed.
+    :func:`copy_file`, :func:`copy_tree` or :func:`copy_link` and the source
+    removed. A symbolic link moves as a link.
     """
     source = Path(src)
     target = Path(dst)
@@ -140,7 +170,11 @@ def move(src: PathLike, dst: PathLike) -> Path:
     except OSError as error:
         if error.errno != errno.EXDEV:
             raise
-    if source.is_dir() and not source.is_symlink():
+    if source.is_symlink():
+        # Like ``shutil.move``: the link moves, not what it points at. A dangling one works too.
+        copy_link(source, target)
+        os.unlink(source)
+    elif source.is_dir():
         copy_tree(source, target)
         shutil.rmtree(source)
     else:
