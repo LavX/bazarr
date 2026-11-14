@@ -27,11 +27,12 @@ export function useFlareSolverrDetect() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: () => api.providers.detectFlaresolverr(),
-    onSuccess: (status) => {
-      client.setQueryData(
-        [QueryKeys.System, QueryKeys.Providers, "flaresolverr"],
-        status,
-      );
+    onSuccess: async (status) => {
+      const queryKey = [QueryKeys.System, QueryKeys.Providers, "flaresolverr"];
+      // A status read still in flight was asked before this answer existed.
+      // Left alone it would land afterwards and replace the newer result.
+      await client.cancelQueries({ queryKey });
+      client.setQueryData(queryKey, status);
     },
   });
 }
