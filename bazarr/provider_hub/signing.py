@@ -476,7 +476,8 @@ def verify_catalog(
 ) -> VerificationResult:
     """Verify a catalog against its detached signature envelope.
 
-    ``data`` is the exact byte string that was signed. ``envelope`` is the
+    ``data`` is the exact byte string that was signed: ``bytes``, ``bytearray``
+    or ``memoryview``. Anything else, text included, is ``MALFORMED``. ``envelope`` is the
     detached signature document (parsed, or JSON text or bytes), or ``None`` or
     empty when the catalog came without one. ``key_file`` is the CI key file.
     ``roots`` maps root key ids to raw 32-byte public keys and is the only
@@ -495,6 +496,18 @@ def verify_catalog(
     _require_aware(now, "now")
     if host_build_time is not None:
         _require_aware(host_build_time, "host_build_time")
+
+    # The signature is over bytes. Text that merely parses as the catalog is not
+    # what was signed, so it is refused here instead of failing deeper down.
+    if isinstance(data, (bytearray, memoryview)):
+        data = bytes(data)
+    elif not isinstance(data, bytes):
+        return VerificationResult(
+            Status.MALFORMED,
+            f"the catalog must be bytes, not {type(data).__name__}",
+            host_time=now,
+            baked=baked,
+        )
 
     if envelope is None or (isinstance(envelope, (bytes, bytearray, str)) and not envelope.strip()):
         return VerificationResult(Status.UNSIGNED, "the catalog has no signature", host_time=now, baked=baked)

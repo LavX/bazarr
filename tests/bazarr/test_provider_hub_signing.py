@@ -151,6 +151,30 @@ def test_accepts_json_text_and_bytes_for_documents(keys):
     assert verify(keys, data, envelope, key_file).ok
 
 
+def test_a_valid_catalog_decoded_to_text_is_malformed_not_an_error(keys):
+    data = catalog_bytes()
+    envelope = envelope_for(data, keys.ci)
+
+    result = verify(keys, data.decode("utf-8"), envelope)
+
+    assert result.status is Status.MALFORMED
+    assert not result.usable
+
+
+@pytest.mark.parametrize("bad", [5, [b"{}"], {"channel": "main"}])
+def test_a_catalog_that_is_not_bytes_is_malformed(keys, bad):
+    envelope = envelope_for(catalog_bytes(), keys.ci)
+
+    assert verify(keys, bad, envelope).status is Status.MALFORMED
+
+
+@pytest.mark.parametrize("wrap", [bytearray, memoryview])
+def test_a_bytes_like_catalog_is_verified_as_its_bytes(keys, wrap):
+    data = catalog_bytes()
+
+    assert verify(keys, wrap(data), envelope_for(data, keys.ci)).ok
+
+
 def test_key_id_is_sha256_prefix_of_the_public_key(keys):
     assert key_id(keys.ci_public) == hashlib.sha256(keys.ci_public).hexdigest()[:16]
     assert len(key_id(keys.ci_public)) == 16
