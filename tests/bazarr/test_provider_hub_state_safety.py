@@ -858,13 +858,15 @@ class _WrappedCursor(_Wrapped):
     def execute(self, *args, **kwargs):
         try:
             return self._target.execute(*args, **kwargs)
-        except Exception:
+        except Exception as error:
             object.__setattr__(self, "_statement_failed", True)
+            object.__setattr__(self, "_failure_text", str(error))
             raise
 
     def close(self):
         if self._armed.get("cursor") and getattr(self, "_statement_failed", False):
-            raise RuntimeError(self._armed.get("text") or f"cursor close failed, row preview: {SECRET}")
+            raise RuntimeError(self._armed.get("text") or f"cursor close failed, row preview: {SECRET}"
+                               + self._armed.get("extra", "") + " | " + getattr(self, "_failure_text", ""))
         self._target.close()
 
 
@@ -889,13 +891,15 @@ def breakable(hub_store, hub_engine, monkeypatch):
             def execute(self, *args, **kwargs):
                 try:
                     return super().execute(*args, **kwargs)
-                except Exception:
+                except Exception as error:
                     self._statement_failed = True
+                    self._failure_text = str(error)
                     raise
 
             def close(self):
                 if armed.get("cursor") and getattr(self, "_statement_failed", False):
-                    raise RuntimeError(armed.get("text") or f"cursor close failed, row preview: {SECRET}")
+                    raise RuntimeError(armed.get("text") or f"cursor close failed, row preview: {SECRET}"
+                                       + armed.get("extra", "") + " | " + getattr(self, "_failure_text", ""))
                 super().close()
 
         class Connection(extensions.connection):
@@ -1064,3 +1068,49 @@ def test_an_ordinary_config_value_is_masked_in_sqlalchemy_records_only(hub_store
     database_record = next(record for record in caplog.records if record.name == sqlalchemy_logger.name)
     assert "europe-west" not in database_record.exc_text and "hub.example.test" not in database_record.exc_text
     assert "***" in database_record.exc_text and "error while talking to" in database_record.exc_text
+
+
+AWKWARD_CREDENTIALS = ['p"ss\\wrd', "ünïcödé-key", 'ü"n\\ï-mix']
+
+
+def _every_form(value):
+    from provider_hub.state_store import rendered_forms
+    return rendered_forms(value) | {json.dumps(value), repr(value), ascii(value)}
+
+
+def _refuse_larger_documents(hub_engine):
+    with hub_engine.connect() as connection:
+        length = connection.execute(sa.text("SELECT length(document) FROM provider_hub_state")).scalar()
+        if hub_engine.dialect.name == "sqlite":
+            connection.exec_driver_sql(
+                "CREATE TRIGGER refuse BEFORE UPDATE ON provider_hub_state BEGIN "
+                f"SELECT RAISE(ABORT, 'refused') WHERE length(NEW.document) > {length}; END")
+        else:
+            connection.exec_driver_sql(
+                "ALTER TABLE provider_hub_state ADD CONSTRAINT refuse "
+                f"CHECK (length(document) <= {length})")
+
+
+@pytest.mark.parametrize("credential", AWKWARD_CREDENTIALS)
+def test_every_rendered_form_of_a_credential_is_masked(hub_store, hub_engine, breakable, caplog, capfd, credential):
+    """A failed statement whose cursor cannot be closed: the log gets the driver's own text, and more renderings."""
+    from provider_hub.state import mutate_state
+    mutate_state(lambda state: state["jobs"].append({"id": "seed"}))
+    _refuse_larger_documents(hub_engine)
+    breakable["cursor"] = True
+    breakable["extra"] = " | " + " | ".join(sorted(_every_form(credential)))
+    handler = logging.StreamHandler(sys.stderr)
+    logging.getLogger().addHandler(handler)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(hub_store.StateStoreError):
+                mutate_state(lambda state: state.update({"0credential": credential}))
+    finally:
+        logging.getLogger().removeHandler(handler)
+        breakable["cursor"] = False
+
+    assert any(record.name.startswith("sqlalchemy") and record.exc_text and "cursor close failed" in record.exc_text
+               for record in caplog.records)
+    seen = caplog.text + capfd.readouterr().err
+    for form in _every_form(credential):
+        assert form not in seen, f"the form {form!r} reached the log"

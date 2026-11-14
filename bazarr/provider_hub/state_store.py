@@ -103,10 +103,33 @@ _local_state: tuple[frozenset[str], Any] = (frozenset(), None)
 _MIN_LOCAL_VALUE_LENGTH = 6
 
 
+def rendered_forms(value: str) -> set[str]:
+    """Every way ``value`` can be spelled in a log line that quotes the document or a repr of it.
+
+    The raw text; the JSON-escaped form with and without ``ensure_ascii`` (what
+    a driver's DETAIL shows of the stored document), without the outer quotes;
+    and the repr and ascii-escaped form of each of those (what ``%r`` or an
+    exception's text shows of a string that holds them).
+    """
+    base = {value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}
+    forms = set(base)
+    for form in base:
+        forms.add(repr(form)[1:-1])
+        forms.add(ascii(form)[1:-1])
+    return {form for form in forms if form}
+
+
 def _set_local_values(values: set[str]) -> None:
-    """Publish the values the SQLAlchemy filter masks, with the regex that finds them, in one assignment."""
+    """Publish the values the SQLAlchemy filter masks, with the regex that finds them, in one assignment.
+
+    Every rendered form of a value is masked, not only its decoded text.
+    """
     global _local_state
-    cleaned = frozenset(value for value in values if len(value) >= _MIN_LOCAL_VALUE_LENGTH)
+    cleaned = set()
+    for value in values:
+        if len(value) >= _MIN_LOCAL_VALUE_LENGTH:
+            cleaned |= rendered_forms(value)
+    cleaned = frozenset(cleaned)
     ordered = sorted(cleaned, key=len, reverse=True)
     regex = re.compile("|".join(re.escape(value) for value in ordered)) if ordered else None
     _local_state = (cleaned, regex)
@@ -135,7 +158,7 @@ def register_document_secrets(document: str) -> None:
     * the values of the fields the installation's manifest declares secret
       (or the persisted secret paths name) are also registered with the shared
       scrubber (``secret_store.scrub``), as the boot registers them, so they
-      are masked in every log line.
+      are masked in every log line, as they are and as ``%r`` renders them.
 
     A value shorter than six characters is not masked, as everywhere else.
     """
@@ -163,6 +186,8 @@ def register_document_secrets(document: str) -> None:
                 local.update(_document_strings(value))
         _set_local_values({value.strip() for value in local if value.strip()})
         secret = {value.strip() for value in secret if value.strip() and not value.startswith("enc:")}
+        # An app log line quotes a credential as it is or through %r.
+        secret |= {repr(value)[1:-1] for value in secret if len(repr(value)[1:-1]) >= _MIN_LOCAL_VALUE_LENGTH}
         if secret:
             from secret_store import scrub
             with scrub._refresh_lock:
