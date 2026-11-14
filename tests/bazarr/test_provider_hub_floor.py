@@ -503,6 +503,16 @@ def _update_state(origin):
 def test_a_bundled_entry_is_never_offered_as_an_update(snapshot, hub):
     assert hub._latest_catalog_manifest(
         _update_state("bundled"), "examplehub", "0.9.0", "official", "providers") is None
+
+
+def test_a_bundled_entry_this_host_cannot_run_is_not_reported_as_refused(snapshot, hub, monkeypatch):
+    """Without the origin check the entry would be reported as a refused newer
+    version: the host lacks its runtime, so only the origin keeps it quiet."""
+    from provider_hub import compatibility
+    monkeypatch.setattr(compatibility, "AVAILABLE_RUNTIMES", frozenset())
+
+    assert hub._refused_update_reason(
+        _update_state(None), "examplehub", "0.9.0", "official", "providers") is not None
     assert hub._refused_update_reason(
         _update_state("bundled"), "examplehub", "0.9.0", "official", "providers") is None
 
