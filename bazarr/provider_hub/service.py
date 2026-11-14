@@ -3628,13 +3628,15 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
                 continue
             catalog_list = _installed_catalog_list(installation)
             latest = _latest_catalog_manifest(
-                state, provider_id, active_version, _bound_source_id(installation), catalog_list
+                state, provider_id, active_version, _bound_source_id(installation), catalog_list,
+                installed_kind=kind_of(installation),
             )
             refusal_floor = active_version
             if isinstance(latest, dict) and latest.get("version"):
                 refusal_floor = latest["version"]
             refusal = _refused_update_reason(
-                state, provider_id, refusal_floor, _bound_source_id(installation), catalog_list)
+                state, provider_id, refusal_floor, _bound_source_id(installation), catalog_list,
+                installed_kind=kind_of(installation))
             if refusal:
                 refusals.append(f"{installation.get('name') or provider_id}: {refusal}")
             if not isinstance(latest, dict):
@@ -3668,9 +3670,20 @@ def _bound_source_id(installation: dict[str, Any]) -> str | None:
     return installation.get("source_id") if installation.get("source_bound") else None
 
 
+def _offerable_as_update(entry: dict[str, Any], installed_kind: str) -> bool:
+    """Whether a catalog entry may be offered as an update to an installation of ``installed_kind``.
+
+    A candidate of another kind is never an update: a source replacing a subtitle provider with a
+    translator under the same id is not one. Updates are staged by ``stage_install``, which validates
+    as a subtitle provider, so only that kind is offered for now. A kind with its own staging lifts
+    the second condition.
+    """
+    return catalog_kind_of(entry) == installed_kind and installed_kind == SUBTITLE_PROVIDER
+
+
 def _latest_catalog_manifest(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
-    catalog_list: str | None = None,
+    catalog_list: str | None = None, installed_kind: str = SUBTITLE_PROVIDER,
 ) -> dict[str, Any] | None:
     """The newest version ``source_id`` lists for ``provider_id`` that this host can
     run. An install updates only from the source it is bound to, so an install with
@@ -3682,6 +3695,8 @@ def _latest_catalog_manifest(
     host = current_host()
 
     def usable(entry: dict[str, Any]) -> bool:
+        if not _offerable_as_update(entry, installed_kind):
+            return False
         manifest = entry["manifest"]
         try:
             get_kind(catalog_kind_of(entry)).validate_manifest(manifest, bool(entry.get("trusted", False)))
@@ -3697,7 +3712,7 @@ def _latest_catalog_manifest(
 
 def _refused_update_reason(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
-    catalog_list: str | None = None,
+    catalog_list: str | None = None, installed_kind: str = SUBTITLE_PROVIDER,
 ) -> str | None:
     """The host refusal of the newest refused version ``source_id`` lists for ``provider_id``
     above ``active_version``, or None when no refused version is above it. Callers pass the
@@ -3707,7 +3722,11 @@ def _refused_update_reason(
     host = current_host()
 
     def refused(entry: dict[str, Any]) -> bool:
-        return entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is not None
+        return (
+            entry.get("origin") != ORIGIN_BUNDLED
+            and _offerable_as_update(entry, installed_kind)
+            and _host_refusal(entry, host) is not None
+        )
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
@@ -3731,6 +3750,7 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
         provider.get("active_version") or provider.get("staged_version"),
         source_id,
         catalog_list,
+        installed_kind=kind_of(provider),
     )
     if not isinstance(manifest, dict):
         target_name = provider.get("name") or provider_id
@@ -3740,6 +3760,7 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
             provider.get("active_version") or provider.get("staged_version"),
             source_id,
             catalog_list,
+            installed_kind=kind_of(provider),
         ) or "No update manifest is available"
         with record_job(
             "stage_update",
@@ -3762,7 +3783,8 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
         return _redact_installation(provider)
     try:
         return stage_install(manifest, checkpoint=checkpoint, source_id=source_id)
-    except ProviderHubInstallError:
+    except (ProviderHubInstallError, ManifestValidationError):
+        # A manifest the install path does not accept is a refused install like any other.
         return get_provider(provider_id)
 
 
