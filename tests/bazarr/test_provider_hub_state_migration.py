@@ -56,17 +56,24 @@ def _with_old_tables(connection):
     assert set(UNUSED) <= _tables(connection)
 
 
-def test_the_new_revision_is_the_single_head():
-    revisions, parents = {}, set()
+def test_the_new_revision_is_on_the_one_chain():
+    """The chain has exactly one head, and this revision is that head or one of its ancestors."""
+    parents_of = {}
     for path in VERSIONS.glob("*.py"):
         text = path.read_text(encoding="utf-8")
         revision = re.search(r"^revision\s*=\s*['\"](\w+)", text, re.M)
         down = re.search(r"^down_revision\s*=\s*(.+)$", text, re.M)
         if revision:
-            revisions[revision.group(1)] = path
-        if down:
-            parents.update(re.findall(r"['\"](\w+)['\"]", down.group(1)))
-    assert sorted(set(revisions) - parents) == [REVISION]
+            parents_of[revision.group(1)] = tuple(re.findall(r"['\"](\w+)['\"]", down.group(1))) if down else ()
+    heads = set(parents_of) - {parent for parents in parents_of.values() for parent in parents}
+    assert len(heads) == 1, f"expected a single head, found {sorted(heads)}"
+    reachable, pending = set(), [heads.pop()]
+    while pending:
+        current = pending.pop()
+        if current not in reachable:
+            reachable.add(current)
+            pending.extend(parents_of.get(current, ()))
+    assert REVISION in reachable
     migration = _migration()
     assert (migration.revision, migration.down_revision) == (REVISION, PREVIOUS)
 
