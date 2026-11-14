@@ -120,6 +120,55 @@ def test_the_entrypoint_drops_privileges_by_number():
         'uid was only remapped if /etc was writable.')
 
 
+def _dockerfile_instruction(name):
+    """The last ``name`` instruction of the Dockerfile, with its JSON argument list."""
+    import json
+
+    matches = re.findall(rf'^{name} (\[.*\])\s*$', _dockerfile(), re.M)
+    assert matches, f'the Dockerfile has no exec-form {name} instruction'
+    return json.loads(matches[-1])
+
+
+def test_the_entrypoint_makes_tini_pid_1_after_the_privilege_drop():
+    """Orphaned plugin worker processes need an init to reap them.
+
+    tini has to sit on the unprivileged side of the drop: a root tini cannot
+    signal a PUID process once CAP_KILL is dropped, which the hardened compose
+    files do, so `docker stop` would end in SIGKILL.
+    """
+    assert _dockerfile_instruction('ENTRYPOINT') == ['/entrypoint.sh']
+
+    last = _entrypoint().rstrip().splitlines()[-1]
+    assert last == 'exec gosu "$PUID:$PGID" /usr/bin/tini -s -- env HOME=/config "$@"', (
+        f'the entrypoint no longer ends by exec-ing tini under the PUID:PGID drop: {last}')
+
+
+def test_the_command_chain_under_tini_is_unchanged():
+    assert _dockerfile_instruction('CMD') == [
+        'python', 'docker/supervisor.py', '--no-update', '--config', '/config']
+
+    assert _dockerfile_instruction('ENTRYPOINT') == ['/entrypoint.sh']
+    assert not re.search(r'^USER ', _dockerfile(), re.M)
+
+
+def test_tini_is_installed_from_a_pinned_package_and_checked_at_build_time():
+    dockerfile = _dockerfile()
+    assert re.search(r'^ARG TINI_VERSION=\d+\.\d+\.\d+-\d+$', dockerfile, re.M), (
+        'the tini package version is no longer pinned')
+    assert '"tini=${tini_candidate}"' in dockerfile, 'the tini install no longer uses the checked candidate'
+    assert '"^${tini_re}(\\+b[0-9]+)?\\$"' in dockerfile, (
+        'the tini candidate is no longer matched exactly against TINI_VERSION plus an optional +bN')
+    assert 'tini=${TINI_VERSION}*' not in dockerfile, 'the tini pin is a prefix glob again (0.19.0-3 matches 0.19.0-30)'
+    assert 'test -x /usr/bin/tini' in dockerfile, (
+        'the build no longer checks that tini is where the entrypoint expects it')
+
+
+def test_the_reference_compose_does_not_need_kill_for_tini():
+    """Signals reach tini from the daemon and tini runs as the app user, so no
+    extra capability may be added back for it."""
+    assert _compose()['services']['bazarr'].get('cap_add') == ['CHOWN', 'SETUID', 'SETGID']
+
+
 def test_the_reference_compose_hardens_the_bazarr_service():
     _assert_hardened(_compose()['services']['bazarr'], 'the reference docker-compose.yml')
 

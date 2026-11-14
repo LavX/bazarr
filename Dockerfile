@@ -111,6 +111,29 @@ COPY --from=python-builder /install /usr/local
 COPY --from=alass-builder /usr/local/cargo/bin/alass-cli /usr/local/bin/alass-cli
 RUN ln -s /usr/local/bin/alass-cli /usr/local/bin/alass
 
+# PID 1 is tini. Without an init, the Python supervisor is PID 1, and a process
+# that is orphaned inside the container (a plugin worker whose parent died, a
+# grandchild left behind by a worker that was killed) is re-parented to it,
+# never reaped, and stays a zombie until the container stops. tini reaps those
+# and passes SIGTERM and SIGINT on to the supervisor. entrypoint.sh starts it
+# as the last step, after the PUID:PGID drop: tini then runs as the same user as
+# the supervisor, so forwarding a signal needs no CAP_KILL, which the hardened
+# compose files drop. Debian's package, not a downloaded binary, so it gets
+# security updates with the rest of the image. The version is pinned: the
+# candidate must equal TINI_VERSION, optionally followed by Debian's
+# binary-only rebuild suffix (+bN), or the build fails, and it fails too if tini
+# is not where entrypoint.sh expects it.
+ARG TINI_VERSION=0.19.0-3
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+    && tini_re="$(printf '%s' "${TINI_VERSION}" | sed 's/\./\\./g')" \
+    && tini_candidate="$(apt-cache policy tini | sed -n 's/^  Candidate: //p')" \
+    && printf '%s\n' "${tini_candidate}" | grep -Eq "^${tini_re}(\+b[0-9]+)?\$" \
+    && apt-get install -y --no-install-recommends "tini=${tini_candidate}" \
+    && test -x /usr/bin/tini \
+    && /usr/bin/tini --version
+
 # Copy entrypoint and supervisor scripts (changes rarely)
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/supervisor.py /app/bazarr/docker/supervisor.py

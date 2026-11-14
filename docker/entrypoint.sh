@@ -70,5 +70,13 @@ chown -R "$PUID:$PGID" /config/log 2>/dev/null || true
 # Run as the requested user using gosu. HOME is set explicitly because gosu
 # takes it from the passwd entry, which is the thing usermod may not have been
 # allowed to update.
+#
+# tini becomes PID 1 here (every step is an exec, so the PID never changes) and
+# runs as the requested user, after the drop. It reaps orphaned processes and
+# forwards SIGTERM and SIGINT to the command. It has to be the unprivileged
+# side of the drop: a root tini cannot signal a PUID process once the container
+# has dropped CAP_KILL, and the hardened compose files do drop it. -s keeps the
+# reaping working when a runtime already put an init above this script, as
+# docker run --init does.
 echo "Starting Bazarr..."
-exec gosu "$PUID:$PGID" env HOME=/config "$@"
+exec gosu "$PUID:$PGID" /usr/bin/tini -s -- env HOME=/config "$@"
