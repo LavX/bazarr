@@ -3398,13 +3398,14 @@ def reconcile_plugin_environments() -> dict[str, list[str]]:
 
     def validate(row: dict[str, Any], staged: bool):
         raw = row.get("staged_manifest") if staged and isinstance(row.get("staged_manifest"), dict) else row.get("manifest")
-        return validate_manifest(
-            raw,
-            built_in_provider_ids=_validation_built_in_provider_ids(raw, bool(row.get("trusted", False))),
-        )
+        # Each kind validates its own manifests; the subtitle provider kind delegates to the provider validator.
+        return get_kind(kind_of(row)).validate_manifest(raw, bool(row.get("trusted", False)))
+
+    def probe(validated, bundle_path: Path, python_path: Path) -> None:
+        get_kind(kind_of(validated)).smoke_test(validated, bundle_path, python_path)
 
     return env_registry.reconcile_environments(
-        validate=validate, probe=_smoke_validate_worker, verify_bundle=_verify_bundle_for_run
+        validate=validate, probe=probe, verify_bundle=_verify_bundle_for_run
     )
 
 
@@ -3453,12 +3454,8 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
     ) as job, pin_scope():
         env_path = None
         try:
-            validated = validate_manifest(
-                manifest_data,
-                built_in_provider_ids=_validation_built_in_provider_ids(
-                    manifest_data, bool(row.get("trusted", False))
-                ),
-            )
+            kind = get_kind(kind_of(row))
+            validated = kind.validate_manifest(manifest_data, bool(row.get("trusted", False)))
             try:
                 _verify_bundle_for_run(validated, bundle_path)
             except Exception:
@@ -3469,7 +3466,7 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             env_path = PluginEnvironment(provider_hub_dir()).install(validated, rebuild=True)
             python_path = python_executable(env_path)
             step("Checking that the plugin starts")
-            _smoke_validate_worker(validated, bundle_path, python_path)
+            kind.smoke_test(validated, bundle_path, python_path)
             # A stop pressed during the check ends the repair here, before the
             # installation is pointed at the new environment.
             step("Recording the repair")
@@ -3687,11 +3684,7 @@ def _latest_catalog_manifest(
     def usable(entry: dict[str, Any]) -> bool:
         manifest = entry["manifest"]
         try:
-            validate_manifest(
-                manifest,
-                built_in_provider_ids=_validation_built_in_provider_ids(
-                    manifest, bool(entry.get("trusted", False))),
-            )
+            get_kind(catalog_kind_of(entry)).validate_manifest(manifest, bool(entry.get("trusted", False)))
         except ValueError:
             return False
         return entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is None
