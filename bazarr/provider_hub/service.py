@@ -2994,7 +2994,11 @@ def _stage_validated(
             _persist_plugin_secret_paths(state, installation)
             return dict(installation)
 
-        installation = mutate_state(record_staged_install)
+        try:
+            with env_registry.recording_environment(env_path):
+                installation = mutate_state(record_staged_install)
+        except env_registry.EnvironmentGone as error:
+            raise ProviderHubInstallError(str(error)) from error
         missing_required = [] if is_update else missing_required_fields(installation)
         if not is_update and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
@@ -3482,7 +3486,12 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             env_registry.register_environment(state, environment_fingerprint(validated), env_path)
             return dict(current)
 
-        repaired = mutate_state(record_repair)
+        try:
+            with env_registry.recording_environment(env_path):
+                repaired = mutate_state(record_repair)
+        except env_registry.EnvironmentGone as error:
+            release_pins()
+            raise ProviderHubInstallError(str(error)) from error
         if repaired is None:
             raise ProviderHubInstallError(f"{provider_id} was removed while it was being repaired")
         if repaired == {}:

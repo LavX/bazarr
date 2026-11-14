@@ -286,6 +286,55 @@ def _unlock_file(handle) -> None:
 
 
 @contextlib.contextmanager
+def process_lock(path: Path, wait: float = _SNAPSHOT_LOCK_WAIT):
+    """An exclusive lock on a file, shared by every process of this hub.
+
+    Reentrant within a thread. Yields False when the lock cannot be had (an
+    unwritable folder, or the wait ran out); callers decide what that means for
+    them. The file stays where it is: only the lock on it is taken and dropped.
+    """
+    held_here = getattr(_LOCK_HELD, "paths", None)
+    if held_here is None:
+        held_here = _LOCK_HELD.paths = {}
+    key = str(path)
+    if held_here.get(key):
+        held_here[key] += 1
+        try:
+            yield True
+        finally:
+            held_here[key] -= 1
+        return
+    handle = None
+    held = False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a+b")
+        deadline = time.monotonic() + wait
+        while True:
+            if _lock_file(handle):
+                held = True
+                break
+            if time.monotonic() >= deadline:
+                logger.warning("Provider Hub: timed out waiting for the lock %s", path.name)
+                break
+            time.sleep(0.02)
+    except OSError as error:
+        logger.warning("Provider Hub: could not take the lock %s: %s", path.name, type(error).__name__)
+    if held:
+        held_here[key] = 1
+    try:
+        yield held
+    finally:
+        if held:
+            held_here[key] = 0
+            try:
+                _unlock_file(handle)
+            except OSError:
+                pass
+        if handle is not None:
+            handle.close()
+
+
 def snapshot_lock():
     """Serialize database commits and state.json publication across processes.
 
@@ -294,47 +343,10 @@ def snapshot_lock():
     the file after another has already published revision 3. The lock is a file
     beside the snapshot, held from just before the commit until the copy is
     replaced, and is taken in the same order by every writer, so they cannot
-    wait on each other. It is reentrant within a thread. Yields False when the
-    lock cannot be had (an unwritable folder, or the wait ran out): the caller
+    wait on each other. Yields False when the lock cannot be had: the caller
     then leaves the file alone rather than publish out of order.
     """
-    if getattr(_LOCK_HELD, "depth", 0):
-        _LOCK_HELD.depth += 1
-        try:
-            yield True
-        finally:
-            _LOCK_HELD.depth -= 1
-        return
-    handle = None
-    held = False
-    try:
-        path = _snapshot_lock_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path, "a+b")
-        deadline = time.monotonic() + _SNAPSHOT_LOCK_WAIT
-        while True:
-            if _lock_file(handle):
-                held = True
-                break
-            if time.monotonic() >= deadline:
-                logger.warning("Provider Hub: timed out waiting for the state file lock")
-                break
-            time.sleep(0.02)
-    except OSError as error:
-        logger.warning("Provider Hub: could not take the state file lock: %s", type(error).__name__)
-    if held:
-        _LOCK_HELD.depth = 1
-    try:
-        yield held
-    finally:
-        if held:
-            _LOCK_HELD.depth = 0
-            try:
-                _unlock_file(handle)
-            except OSError:
-                pass
-        if handle is not None:
-            handle.close()
+    return process_lock(_snapshot_lock_path())
 
 
 def _write_snapshot(data: dict[str, Any]) -> None:

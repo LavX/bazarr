@@ -329,17 +329,16 @@ def test_a_catalog_refresh_is_not_run_a_second_time_after_a_lost_race(hub_store,
     assert len(fetches) == 1
 
 
-def test_a_cleanup_is_not_run_a_second_time_after_a_lost_race(hub_store, hub_engine, snapshot_file, tmp_path, monkeypatch):
+def test_a_cleanup_that_never_wins_its_commit_removes_nothing(hub_store, hub_engine, snapshot_file, monkeypatch):
     from provider_hub import env_registry
-    _seed({"examplehub": _installation()})
-    runs = []
-    original = env_registry._legacy_environment_dirs
-    monkeypatch.setattr(env_registry, "_legacy_environment_dirs", lambda root: runs.append(1) or original(root))
-    _lose_races(monkeypatch, 1)
+    root = snapshot_file.parent
+    environment = _real_environment(root, "fp0")
+    _record_environment("fp0", environment)
+    _lose_races(monkeypatch, 5)
 
-    assert env_registry.cleanup_environments(tmp_path / "provider_hub") == []
+    assert env_registry.cleanup_environments(root) == []
 
-    assert len(runs) <= 1
+    assert environment.is_dir()
 
 
 def test_a_refused_toggle_leaves_a_newer_write_alone(hub_store, hub_engine, snapshot_file, monkeypatch):
@@ -367,6 +366,120 @@ def test_a_refused_toggle_leaves_a_newer_write_alone(hub_store, hub_engine, snap
     row = load_state()["installations"]["examplehub"]
     assert row["config"] == {"region": "ap"}
     assert row["enabled"] is False
+
+
+# Environments --------------------------------------------------------------
+
+
+def _real_environment(root, name):
+    """A removable environment directory with an interpreter file, under shared_envs."""
+    from provider_hub.venv import python_executable
+    environment = root / "shared_envs" / name
+    interpreter = python_executable(environment)
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    return environment
+
+
+def _record_environment(name, environment):
+    from provider_hub.state import mutate_state
+    mutate_state(lambda state: state["plugin_envs"].update({name: {"path": str(environment)}}))
+
+
+def _reference(environment, provider_id="examplehub"):
+    from provider_hub.venv import python_executable
+    return _installation(provider_id, python_path=str(python_executable(environment)))
+
+
+def test_a_cleanup_that_loses_its_commit_removes_nothing(hub_store, hub_engine, snapshot_file, monkeypatch):
+    """Another process commits a reference to the environment while a cleanup is deciding."""
+    from provider_hub import env_registry, state_store
+    from provider_hub.state import load_state
+    root = snapshot_file.parent
+    environment = _real_environment(root, "fp1")
+    _record_environment("fp1", environment)
+    original = env_registry._legacy_environment_dirs
+    competing = []
+
+    def sweep(root_dir):
+        if not competing:
+            def step(text):
+                document = json.loads(text)
+                document["installations"]["examplehub"] = _reference(environment)
+                return json.dumps(document, sort_keys=True), None
+
+            state_store.update_document(step)
+            competing.append(True)
+        return original(root_dir)
+
+    monkeypatch.setattr(env_registry, "_legacy_environment_dirs", sweep)
+
+    removed = env_registry.cleanup_environments(root)
+
+    assert competing
+    assert removed == []
+    assert environment.is_dir()
+    assert "fp1" in load_state()["plugin_envs"]
+
+
+def test_a_cleanup_removes_an_unreferenced_environment_after_the_commit(hub_store, hub_engine, snapshot_file):
+    from provider_hub import env_registry
+    from provider_hub.state import load_state
+    root = snapshot_file.parent
+    environment = _real_environment(root, "fp2")
+    _record_environment("fp2", environment)
+
+    assert env_registry.cleanup_environments(root) == [str(environment)]
+
+    assert not environment.exists()
+    assert "fp2" not in load_state()["plugin_envs"]
+
+
+def test_a_cleanup_waits_for_a_row_another_process_is_recording(hub_store, hub_engine, snapshot_file):
+    from provider_hub import env_registry
+    from provider_hub.state import mutate_state
+    root = snapshot_file.parent
+    environment = _real_environment(root, "fp3")
+    _record_environment("fp3", environment)
+    recording = threading.Event()
+    commit_now = threading.Event()
+    removed = []
+
+    def other_process():
+        with env_registry.recording_environment(environment):
+            recording.set()
+            commit_now.wait(30)
+            mutate_state(lambda state: state["installations"].update(examplehub=_reference(environment)))
+
+    writer = threading.Thread(target=other_process)
+    writer.start()
+    assert recording.wait(60)
+    cleaner = threading.Thread(target=lambda: removed.append(env_registry.cleanup_environments(root)))
+    cleaner.start()
+    time.sleep(0.5)
+    assert cleaner.is_alive()
+    assert environment.is_dir()
+    commit_now.set()
+    writer.join(60)
+    cleaner.join(60)
+
+    assert removed == [[]]
+    assert environment.is_dir()
+
+
+def test_a_row_is_not_recorded_against_a_removed_environment(hub_store, hub_engine, snapshot_file):
+    from provider_hub import env_registry
+    root = snapshot_file.parent
+    environment = _real_environment(root, "fp4")
+    with env_registry.recording_environment(environment):
+        pass
+    for leftover in sorted(environment.rglob("*"), reverse=True):
+        leftover.unlink() if leftover.is_file() else leftover.rmdir()
+    environment.rmdir()
+
+    with pytest.raises(env_registry.EnvironmentGone):
+        with env_registry.recording_environment(environment):
+            pytest.fail("the row would have been recorded")
 
 
 # Legacy files with a root that is not an object -------------------------------
