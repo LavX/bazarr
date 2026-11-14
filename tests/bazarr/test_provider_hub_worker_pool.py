@@ -3015,6 +3015,70 @@ def test_a_mapping_held_by_a_child_is_measured_by_a_hard_link_its_parent_holds(t
 
 
 @needs_smaps
+def test_thousands_of_mapped_names_for_one_file_are_accounted_in_linear_time(tmp_path):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    names = 8000
+    _file_of(folder / "base", 1 * MIB)
+    unmaps = []
+    kept = []
+    try:
+        for index in range(names):
+            link = folder / ("n%d" % index)
+            os.link(folder / "base", link)
+            fd = os.open(link, os.O_RDWR)
+            unmaps.append(_map_with_c_mmap(fd, 4096))
+            os.close(fd)
+            os.unlink(link)
+        # The live link is held by a descriptor, and so are many more names of the same file: a worker
+        # can multiply both the mappings and the descriptors that all name one inode.
+        for index in range(200):
+            link = folder / ("k%d" % index)
+            os.link(folder / "base", link)
+            kept.append(os.open(link, os.O_RDONLY))
+        started = time.monotonic()
+        files = {}
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)], files)
+        took = time.monotonic() - started
+        assert incomplete is False
+        assert len(files[str(folder)]) == 1, "one file, however many names it was mapped through"
+        assert took < 1.0, took
+    finally:
+        for fd in kept:
+            os.close(fd)
+        for unmap in unmaps:
+            unmap()
+
+
+@needs_smaps
+def test_an_exhausted_time_budget_fails_the_deleted_open_accounting_closed(tmp_path, make_pool):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    fd = _unlinked_file(folder, "held", 1 * MIB)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL)
+    try:
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
+        assert incomplete is False and usage[str(folder)] >= 1 * MIB
+        # No time left: whatever was read so far cannot be trusted to be everything.
+        _usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)], max_seconds=0.0)
+        assert incomplete is True
+        # And through the pool, with its own scan budget: the folder budget then fails.
+        from types import SimpleNamespace
+
+        pool = make_pool(fast_pool_limits(budget_scan_seconds=0.0), use_clock=False)
+        slot = SimpleNamespace(session=SimpleNamespace(process=child))
+        _usage, incomplete = pool._deleted_open_usage(slot, [FolderBudget(str(folder), 1 * GIB)])
+        assert incomplete is True
+        roomy = make_pool(fast_pool_limits(budget_scan_seconds=30.0), use_clock=False)
+        _usage, incomplete = roomy._deleted_open_usage(slot, [FolderBudget(str(folder), 1 * GIB)])
+        assert incomplete is False
+    finally:
+        os.close(fd)
+        child.kill()
+        child.wait()
+
+
+@needs_smaps
 def test_a_mapped_deleted_file_with_no_descriptor_anywhere_is_still_unmeasurable(tmp_path):
     folder = tmp_path / "data"
     folder.mkdir()

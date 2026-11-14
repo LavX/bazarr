@@ -1024,23 +1024,28 @@ def _maps_device(field: str) -> "int | None":
         return None
 
 
-def _recheck_by_inode(pid: int, wanted: dict) -> list:
+def _recheck_by_inode(pid: int, wanted: dict, done: set, deadline: "float | None" = None) -> "tuple[list, bool]":
     """One more pass over a process's descriptors, for mapped deleted files measured by inode.
 
-    ``wanted`` maps an inode to ``[(mapped name, device or None)]``. A descriptor measures a mapping
-    when it holds the same regular file: same inode and the same device (``stat`` and ``maps`` do not
-    always agree on a device number, a btrfs subvolume for one, so a descriptor whose own name is the
-    mapped name matches on the inode alone). The descriptor's own name does not matter: a hard link
-    to the mapped file, deleted or not, measures it. Returns ``(mapped name, stat result)`` for each
-    mapping found. What cannot be read finds nothing, and the caller fails closed as before.
+    ``wanted`` maps an inode to ``({device: [mapped names]}, {mapped name: None})``, built once for the
+    whole tree. A descriptor measures a mapping when it holds the same regular file: same inode and the
+    same device (``stat`` and ``maps`` do not always agree on a device number, a btrfs subvolume for one,
+    so a descriptor whose own name is a mapped name matches on the inode alone). The descriptor's own
+    name does not matter: a hard link to the mapped file, deleted or not, measures it. ``done`` holds
+    the (inode, device) groups already resolved, so the work is one step per descriptor plus one per
+    mapped name however many descriptors hold the same file. Returns ``([(mapped name, stat result)],
+    timed_out)``: ``timed_out`` when ``deadline`` (a ``time.monotonic`` value) passed first. What cannot
+    be read finds nothing, and the caller fails closed as before.
     """
-    found = []
+    found: list = []
     directory = "/proc/%d/fd" % pid
     try:
         descriptors = os.listdir(directory)[:PROC_MAX_ENTRIES]
     except OSError:
-        return found
-    for name in descriptors:
+        return found, False
+    for count, name in enumerate(descriptors):
+        if deadline is not None and count % 64 == 0 and time.monotonic() > deadline:
+            return found, True
         link = "%s/%s" % (directory, name)
         try:
             target = os.readlink(link)
@@ -1054,11 +1059,16 @@ def _recheck_by_inode(pid: int, wanted: dict) -> list:
             continue
         if not stat.S_ISREG(info.st_mode) or info.st_ino not in wanted:
             continue
+        by_device, names = wanted[info.st_ino]
+        group = (info.st_ino, info.st_dev)
+        if group not in done:
+            done.add(group)
+            found.extend((path, info) for path in by_device.get(info.st_dev, ()))
         own = _maps_form(target[: -len(_DELETED)] if target.endswith(_DELETED) else target)
-        for path, device in wanted[info.st_ino]:
-            if device == info.st_dev or own == path:
-                found.append((path, info))
-    return found
+        if own in names and (info.st_ino, own) not in done:
+            done.add((info.st_ino, own))
+            found.append((own, info))
+    return found, False
 
 
 def memfd_usage(pids, skip=()) -> tuple[int, bool]:
@@ -1306,7 +1316,8 @@ def _under(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
-def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict, bool]:
+def deleted_open_usage(pids, folders, files: "dict | None" = None,
+                       max_seconds: "float | None" = FOLDER_SCAN_SECONDS) -> tuple[dict, bool]:
     """Bytes held by files that were unlinked but are still open, per folder: ``({folder: bytes}, incomplete)``.
 
     A worker can create a file in its folder, unlink it and keep writing through
@@ -1338,13 +1349,26 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
     ``files``, when given, is filled with ``{folder: {(device, inode): bytes}}``: what was
     charged to each folder, file by file, so a caller that also scans the folder can charge a
     file that still has a link under it only once (see ``_LinkTally``).
+
+    The whole pass is bounded by ``max_seconds`` (None: unbounded), like the folder scan, and fails
+    closed the same way: when it runs out the result is incomplete, so the budget fails. Every
+    per-descriptor and per-mapping step is a constant-time lookup in a set or dict, so a worker that
+    maps one file through thousands of hard links costs one step for each.
     """
+    deadline = None if max_seconds is None else time.monotonic() + max_seconds
+    ticks = 0
+
+    def out_of_time(every=64):
+        nonlocal ticks
+        ticks += 1
+        return deadline is not None and ticks % every == 0 and time.monotonic() > deadline
+
     roots = [(folder, {_maps_form(folder), _maps_form(os.path.realpath(folder))}) for folder in folders]
     usage = {folder: 0 for folder, _names in roots}
     incomplete = False
     held: dict = {}  # (device, inode) -> ({every original path seen}, size from a descriptor)
     held_names: set = set()  # (original path, inode): how a mapping recognises a file a descriptor holds
-    unmatched: dict = {}  # pid -> {inode: [(name, device)]} of mappings no descriptor held when the maps were read
+    unmatched: dict = {}  # inode -> {(name, device): None} of mappings no descriptor held when the maps were read
 
     def folders_of(path):
         if path.startswith("/memfd:") or not path.startswith(os.sep):
@@ -1353,6 +1377,8 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
         return [folder for folder, names in roots if any(_under(path, name) for name in names)]
 
     for pid in pids:
+        if deadline is not None and time.monotonic() > deadline:
+            return usage, True
         directory = "/proc/%d/fd" % pid
         try:
             descriptors = os.listdir(directory)
@@ -1365,6 +1391,8 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
             incomplete = True
             continue
         for name in descriptors:
+            if out_of_time():
+                return usage, True
             link = "%s/%s" % (directory, name)
             try:
                 target = os.readlink(link)
@@ -1390,6 +1418,8 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
             held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
             held_names.add((path, info.st_ino))
     for pid in pids:
+        if deadline is not None and time.monotonic() > deadline:
+            return usage, True
         try:
             lines = [parts for parts in _mapped_objects("/proc/%d/maps" % pid) if parts[5].endswith(_DELETED)]
         except FileNotFoundError:
@@ -1398,6 +1428,8 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
             incomplete = True
             continue
         for parts in lines:
+            if out_of_time():
+                return usage, True
             path = parts[5][: -len(_DELETED)]
             if not folders_of(path):
                 continue
@@ -1424,24 +1456,32 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
             # No descriptor held it when the descriptors were read. It may have been unlinked since
             # (the passes are separate snapshots), or held through another name: the descriptors
             # are read again below.
-            unmatched.setdefault(pid, {}).setdefault(inode, []).append((path, device))
+            unmatched.setdefault(inode, {})[(path, device)] = None
     # A descriptor anywhere in the supplied tree measures a mapping anywhere in it: a child may hold
     # the mapping while its parent holds the live hard link (or the other way round).
-    wanted_anywhere: dict = {}
-    for wanted in unmatched.values():
-        for inode, names in wanted.items():
-            known = wanted_anywhere.setdefault(inode, [])
-            known.extend(name for name in names if name not in known)
-    if wanted_anywhere:
+    if unmatched:
+        wanted: dict = {}  # inode -> ({device: [names]}, {name: None})
+        for inode, names in unmatched.items():
+            by_device: dict = {}
+            for path, device in names:
+                by_device.setdefault(device, []).append(path)
+            wanted[inode] = (by_device, {path: None for path, _device in names})
+        done: set = set()
         for pid in pids:
-            for path, info in _recheck_by_inode(pid, wanted_anywhere):
+            found, timed_out = _recheck_by_inode(pid, wanted, done, deadline)
+            for path, info in found:
                 held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
                 held_names.add((path, info.st_ino))
-    for wanted in unmatched.values():
-        if any((path, inode) not in held_names for inode, names in wanted.items() for path, _device in names):
-            # Referenced by a mapping alone: no descriptor to stat, so its size is unknown.
-            incomplete = True
+            if timed_out:
+                return usage, True
+            if deadline is not None and time.monotonic() > deadline:
+                return usage, True
+    if any((path, inode) not in held_names for inode, names in unmatched.items() for path, _device in names):
+        # Referenced by a mapping alone: no descriptor to stat, so its size is unknown.
+        incomplete = True
     for identity, (paths, size) in held.items():
+        if out_of_time():
+            return usage, True
         # Hard links to one file, unlinked from folders with different budgets: every folder that
         # one of the names was in is charged, once each.
         for folder in {folder for path in paths for folder in folders_of(path)}:
@@ -2801,7 +2841,8 @@ class WorkerPool:
             # The launcher is the pool's own, trusted and non-dumpable: its descriptors
             # are closed to us by design and are not the worker's. Its descendants are.
             pids = [pid for pid in pids if pid != process.pid]
-        usage, partial = deleted_open_usage(pids, [budget.path for budget in budgets], files)
+        usage, partial = deleted_open_usage(pids, [budget.path for budget in budgets], files,
+                                            self.limits.budget_scan_seconds)
         return usage, incomplete or partial
 
     def _preflight_running(self, entry, slot):
