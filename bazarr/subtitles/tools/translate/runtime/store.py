@@ -287,6 +287,9 @@ class TranslatorStore:
             if plugin_version is not None:
                 instance.plugin_version = plugin_version
             instance.updated_at = datetime.now()
+            # A saved owner is judged by the secrets its manifest declares now; a leftover of a removed field
+            # must not keep it waiting, and nothing else can clear it.
+            self._drop_undeclared_secrets(owner, schema)
             instance.awaiting_secrets = 1 if self._stale_secrets(owner, after) else 0
         return SaveResult(instance.revision, added_destinations(before, after), bool(instance.awaiting_secrets))
 
@@ -423,6 +426,8 @@ class TranslatorStore:
             if enabled is not None:
                 connection.enabled = 1 if enabled else 0
             connection.updated_at = datetime.now()
+            if settings is not None:
+                self._drop_undeclared_secrets((CONNECTION, connection_id), schema)
             connection.awaiting_secrets = 1 if self._stale_secrets((CONNECTION, connection_id), after) else 0
         return SaveResult(self._require_instance(connection.instance_id).revision,
                           added_destinations(before, after), bool(connection.awaiting_secrets))
@@ -735,11 +740,17 @@ class TranslatorStore:
             for kind, row in self._owners_of_plugin(plugin_id):
                 if (kind, row.id) in skipped:
                     continue
-                declared = {item["key"] for item in new_schema(kind, row).fields if is_secret_field(item)}
-                for secret in self._secret_rows((kind, row.id)):
-                    if secret.field not in declared:
-                        self._session.delete(secret)
-                        removed += 1
+                removed += self._drop_undeclared_secrets((kind, row.id), new_schema(kind, row))
+        return removed
+
+    def _drop_undeclared_secrets(self, owner: Owner, schema: DestinationSchema) -> int:
+        declared = {item["key"] for item in schema.fields if is_secret_field(item)}
+        removed = 0
+        for secret in self._secret_rows(owner):
+            if secret.field not in declared:
+                self._session.delete(secret)
+                removed += 1
+        if removed:
             self._session.flush()
         return removed
 

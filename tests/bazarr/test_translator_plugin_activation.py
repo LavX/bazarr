@@ -130,6 +130,42 @@ def test_a_secret_of_a_field_the_release_removed_does_not_keep_the_owner_waiting
     assert set(store.secret_summary(owner, frozenset({origin}))) == {"token"}
 
 
+def test_a_held_back_engine_with_a_removed_secret_can_be_repaired_and_turned_back_on(lifecycle):
+    from subtitles.tools.translate.runtime.destinations import DestinationSchema, effective_destinations
+
+    store = lifecycle.store
+    old_origin, new_origin = "https://api.example:443", "https://api.example.net:443"
+    old_fields = [{"key": "label", "type": "text"}, {"key": "token", "type": "secret"},
+                  {"key": "oldkey", "type": "secret"}]
+    new_fields = [{"key": "label", "type": "text"}, {"key": "token", "type": "secret"},
+                  {"key": "region", "type": "text", "required": True}]
+    instance = store.create_instance(PLUGIN, settings={"label": "mine"})
+    owner = ("instance", instance.id)
+    for name in ("token", "oldkey"):
+        store.set_secret(owner, name, f"{name}-value-0123456789", destinations=frozenset({old_origin}))
+    lifecycle.stage(_manifest("1.0.0", old_fields, endpoints=[old_origin]),
+                    _manifest("2.0.0", new_fields, endpoints=[new_origin]))
+    # The release drops a secret, requires a field the engine does not have and moves the address.
+    assert "Settings > Translation" in _activate()["last_error"]
+    store._session.expire_all()
+    held = store.get_instance(instance.id)
+    assert held.enabled == 0 and held.awaiting_secrets == 1
+
+    # The person gives the missing field and the key for the new address, saves, and turns the engine on.
+    schema = DestinationSchema(fields=tuple(new_fields), endpoints=(new_origin,))
+    destinations = effective_destinations(schema, {"label": "mine", "region": "eu"})
+    store.set_secret(owner, "token", "fresh-token-0123456789", destinations=destinations)
+    saved = store.save_instance_settings(instance.id, {"label": "mine", "region": "eu"}, schema=schema,
+                                         expected_revision=held.revision)
+    assert saved.awaiting_secrets is False
+    store.set_instance_enabled(instance.id, True, expected_revision=saved.revision)
+    store._session.expire_all()
+    engine = store.get_instance(instance.id)
+    assert engine.enabled == 1 and engine.awaiting_secrets == 0
+    assert store.instance_configured(engine) is True
+    assert set(store.secret_summary(owner, destinations)) == {"token"}
+
+
 def test_a_release_whose_new_rules_the_saved_settings_do_not_meet_holds_them_back_and_switches_them_off(lifecycle):
     store = lifecycle.store
     instance = store.create_instance(PLUGIN, settings={"label": "mine", "token": SECRET})

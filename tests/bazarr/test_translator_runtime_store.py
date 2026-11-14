@@ -682,7 +682,8 @@ def test_a_changed_destination_without_a_stored_secret_needs_nothing_entered(sto
 
 
 def test_an_instance_save_with_a_new_destination_marks_it_awaiting(store):
-    schema = DestinationSchema(fields=({"key": "server", "type": "text", "destination": True},))
+    schema = DestinationSchema(fields=({"key": "server", "type": "text", "destination": True},
+                                       {"key": "token", "type": "secret"}))
     instance = store.create_instance("lingarr", settings={"server": "http://a:9876"})
     owner = (INSTANCE, instance.id)
     store.set_secret(owner, "token", KEY, destinations=effective_destinations(schema, {"server": "http://a:9876"}))
