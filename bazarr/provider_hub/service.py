@@ -1891,26 +1891,41 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
         return dict(provider), (previous, written)
 
     def restore_previous(changes: tuple[dict[str, Any], dict[str, Any]]) -> list[str]:
-        """Put back each field this update changed that still holds what it wrote.
+        """Put back each field, and each config key, this update changed that still holds what it wrote.
 
-        A field another writer changed since is theirs and stays. Returns the
-        fields that were left.
+        A value another writer changed since is theirs and stays. Returns what
+        was left.
         """
         previous, written = changes
         left: list[str] = []
+
+        def put_back(container: dict[str, Any], key: str, before: Any, after: Any, name: str) -> None:
+            if before is after or before == after:
+                return  # this update did not change it
+            if container.get(key, _ABSENT) != after:
+                left.append(name)
+            elif before is _ABSENT:
+                container.pop(key, None)
+            else:
+                container[key] = copy.deepcopy(before)
 
         def restore(state: dict[str, Any]) -> None:
             left.clear()
             row = (state.get("installations") or {}).get(provider_id)
             if not isinstance(row, dict):
                 return
-            for key, value in previous.items():
-                if row.get(key, _ABSENT) != written[key]:
-                    left.append(key)
-                elif value is _ABSENT:
-                    row.pop(key, None)
-                else:
-                    row[key] = copy.deepcopy(value)
+            for key in previous:
+                if key != "config":
+                    put_back(row, key, previous[key], written[key], key)
+            if "config" in previous:
+                before = previous["config"] if isinstance(previous["config"], dict) else {}
+                after = written["config"] if isinstance(written["config"], dict) else {}
+                current = row.get("config")
+                if not isinstance(current, dict):
+                    left.append("config")
+                    return
+                for name in sorted(set(before) | set(after)):
+                    put_back(current, name, before.get(name, _ABSENT), after.get(name, _ABSENT), f"config.{name}")
 
         mutate_state(restore)
         return left

@@ -368,6 +368,33 @@ def test_a_refused_toggle_leaves_a_newer_write_alone(hub_store, hub_engine, snap
     assert row["enabled"] is False
 
 
+def test_a_refused_toggle_restores_only_the_config_keys_it_wrote(hub_store, hub_engine, snapshot_file, monkeypatch):
+    """Update A saves a credential and enables the provider; update B saves only the region."""
+    from provider_hub import state_store
+    from provider_hub.service import ProviderHubSettingsError, update_provider
+    from provider_hub.state import load_state
+    _seed({"examplehub": _installation(enabled=False, config={"region": "eu"})})
+
+    def refuse_after_another_process_writes(provider_id, enabled):
+        def step(text):
+            document = json.loads(text)
+            document["installations"]["examplehub"]["config"]["region"] = "ap"
+            return json.dumps(document, sort_keys=True), None
+
+        state_store.update_document(step)
+        return False
+
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        refuse_after_another_process_writes)
+
+    with pytest.raises(ProviderHubSettingsError):
+        update_provider("examplehub", enabled=True, config={"api_key": "refused-credential"})
+
+    row = load_state()["installations"]["examplehub"]
+    assert row["config"] == {"region": "ap"}  # the region is B's; A's refused credential is gone
+    assert row["enabled"] is False
+
+
 # Environments --------------------------------------------------------------
 
 
