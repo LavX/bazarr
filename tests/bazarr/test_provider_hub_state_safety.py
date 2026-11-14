@@ -562,3 +562,44 @@ def test_the_first_start_still_mutates_an_empty_state(hub_store, hub_engine, sna
 
     assert list(json.loads(raw_row(hub_engine)[1])["installations"]) == ["examplehub"]
     assert corrupt_copies() == []
+
+
+@pytest.mark.parametrize("damaged", DAMAGED_DOCUMENTS)
+def test_syncing_the_copy_from_a_damaged_document_leaves_the_copy_alone(
+        hub_store, hub_engine, snapshot_file, damaged):
+    from provider_hub import env_registry
+    from provider_hub.state import StateCorruptError, corrupt_copies, mutate_state, sync_snapshot
+    mutate_state(lambda state: state["installations"].update(examplehub=_installation()))
+    _damage_the_row(hub_engine, damaged)
+    copy_before = snapshot_file.read_bytes()
+    row_before = raw_row(hub_engine)
+
+    with pytest.raises(StateCorruptError):
+        sync_snapshot()
+
+    assert snapshot_file.read_bytes() == copy_before
+    assert raw_row(hub_engine) == row_before
+    assert [path.read_text(encoding="utf-8") for path in corrupt_copies()] == [damaged]
+    with pytest.raises(env_registry.StateUnreadable):
+        env_registry.validate_inventory({"installations": {}})
+
+
+@pytest.mark.parametrize("damaged", DAMAGED_DOCUMENTS)
+def test_the_boot_credential_migration_survives_a_damaged_document(
+        hub_store, hub_engine, snapshot_file, monkeypatch, damaged):
+    from provider_hub.state import corrupt_copies, mutate_state
+    from secret_store import registry
+    monkeypatch.setattr("secret_store.crypto.persist_master_key", lambda: None)
+    saved = set(registry.plugin_secret_paths())
+    mutate_state(lambda state: state["installations"].update(examplehub=_installation()))
+    _damage_the_row(hub_engine, damaged)
+    copy_before = snapshot_file.read_bytes()
+    row_before = raw_row(hub_engine)
+    try:
+        registry.migrate_installation_config_secrets()
+    finally:
+        registry.reset_plugin_secret_paths(saved)
+
+    assert snapshot_file.read_bytes() == copy_before
+    assert raw_row(hub_engine) == row_before
+    assert [path.read_text(encoding="utf-8") for path in corrupt_copies()] == [damaged]

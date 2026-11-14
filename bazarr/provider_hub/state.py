@@ -377,7 +377,8 @@ def sync_snapshot() -> bool:
     database must not stay readable in the file, whether the refresh after the
     write failed or an earlier run left the two apart. Returns True when the
     file was rewritten. Does nothing for the file backend, where the file is
-    the state.
+    the state. Raises ``StateCorruptError`` for a damaged database document,
+    after keeping a copy, and leaves the file as it is.
     """
     if _uses_file(None) or _DATABASE_HELD:
         return False
@@ -385,7 +386,10 @@ def sync_snapshot() -> bool:
         if not held:
             raise OSError("the Provider Hub state file is locked by another writer")
         # Read under the lock: a commit that lands after this read waits for it.
-        data = load_state()
+        # The strict reader: a damaged document raises, with a copy kept, and
+        # the file that is there stays. The permissive reader would answer an
+        # empty default and this would write it over the last good copy.
+        data = load_state_strict()
         current = state_file()
         try:
             with current.open("r", encoding="utf-8") as handle:

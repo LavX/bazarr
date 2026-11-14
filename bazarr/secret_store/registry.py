@@ -916,11 +916,19 @@ def _sync_state_file_copy() -> None:
     credential the migration cannot secure.
     """
     try:
-        from provider_hub.state import sync_snapshot
+        from provider_hub.state import StateCorruptError, sync_snapshot
     except ImportError:
         return
     try:
         sync_snapshot()
+    except StateCorruptError:
+        # The database document is damaged, which is not this migration's to
+        # fix: the file copy was left as it was and a copy of the damaged
+        # document was kept, which pauses the environment cleanup. Starting up
+        # on a damaged plugin state is better than not starting at all.
+        logger.error("The Provider Hub state document is damaged, so the state file was left as it is; "
+                     "a copy of the damaged document was kept beside it")
+        return
     except Exception as error:
         raise HubSecretMigrationError(
             "The Provider Hub state file could not be rewritten to match the "
@@ -1043,7 +1051,14 @@ def migrate_installation_config_secrets(state=None) -> None:
             "may remain readable in the clear"
         ) from error
     if state is None:
-        state = load_state()
+        try:
+            state = load_state()
+        except ValueError as error:
+            # A stored document that is not JSON: nothing in it can be
+            # enumerated, and the file copy sync below reports the damage.
+            logger.error("The Provider Hub state document could not be read to enumerate the "
+                         "installation credentials: %s", type(error).__name__)
+            state = {}
     if not isinstance(state, dict):
         state = {}
 
