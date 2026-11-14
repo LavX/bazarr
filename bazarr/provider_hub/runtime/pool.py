@@ -151,8 +151,11 @@ Folder budgets count what is on disk under the folder, plus files the worker tre
 unlinked but still holds open (found through its descriptors, charged by blocks).
 A deleted file referenced only by a mapping cannot be measured without privileges
 (its mapping's extent says nothing reliable about what it allocates), so that one
-case fails closed: a plugin may not keep deleted files mapped inside its folders, and
-doing so makes the folder scan incomplete, which fails its budget. memfds and
+case fails closed, after one more look at that process's descriptors for the unmatched
+files (the descriptor and mapping passes are separate snapshots, so a file unlinked, or a
+memfd created and mapped, in between is not mapped-only): a plugin may not keep deleted
+files mapped inside its folders, and doing so makes the folder scan incomplete, which
+fails its budget. memfds and
 anonymous mappings are not under any folder and are never charged.
 
 Nothing forgets a teardown that is not confirmed: the pool keeps, per plugin key and
@@ -940,6 +943,41 @@ def _holds_memory(target: str) -> bool:
     return target.startswith("/memfd:") or target.startswith(_SHM_DIR)
 
 
+def _recheck_descriptors(pid: int, wanted: dict) -> list:
+    """One more pass over a process's descriptors, for the mapped files a first pass did not match.
+
+    The descriptor pass and the mapping pass of a sample are two snapshots, so a worker that
+    unlinks a file, or creates and maps one, between them leaves a file a descriptor does
+    measure looking mapped-only. ``wanted`` maps a name (in the form ``maps`` writes it, without
+    " (deleted)") to the set of inodes mapped under it. Returns ``(name, stat result, link target)``
+    for each descriptor that holds one of them now: only those targets are stat'ed, and the
+    pass reads at most ``PROC_MAX_ENTRIES`` descriptors. What cannot be read finds nothing, and the
+    caller then fails closed as before.
+    """
+    found = []
+    directory = "/proc/%d/fd" % pid
+    try:
+        descriptors = os.listdir(directory)[:PROC_MAX_ENTRIES]
+    except OSError:
+        return found
+    for name in descriptors:
+        link = "%s/%s" % (directory, name)
+        try:
+            target = os.readlink(link)
+        except OSError:
+            continue
+        path = _maps_form(target[: -len(_DELETED)] if target.endswith(_DELETED) else target)
+        if path not in wanted:
+            continue
+        try:
+            info = os.stat(link)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_ino in wanted[path]:
+            found.append((path, info, target))
+    return found
+
+
 def memfd_usage(pids, skip=()) -> tuple[int, bool]:
     """Bytes held by memfds and ``/dev/shm`` files that processes have open: ``(bytes, incomplete)``.
 
@@ -963,6 +1001,7 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
     total = 0
     seen: set = set()
     measured: set = set()  # (target path, inode) of every memory object a descriptor measured
+    unmatched: dict = {}  # pid -> {name: {inode}} of mappings no descriptor measured when the maps were read
     incomplete = False
     for pid in pids:
         if pid in skip:
@@ -1043,6 +1082,21 @@ def memfd_usage(pids, skip=()) -> tuple[int, bool]:
                 # Each such mapping is charged a page, and ``WorkerPool`` guards the total.
                 total += _PAGE_SIZE
                 continue
+            unmatched.setdefault(pid, {}).setdefault(path, set()).add(inode)
+    # The descriptors were read before the mappings, so an object created (or a mapping made)
+    # in between looks mapped-only. Look at that process's descriptors once more, for those
+    # objects only; what no descriptor holds even now is mapped-only, and fails closed.
+    for pid, wanted in unmatched.items():
+        for path, info, target in _recheck_descriptors(pid, wanted):
+            if not _holds_memory(target):
+                continue
+            measured.add((path, info.st_ino))
+            identity = (info.st_dev, info.st_ino)
+            if identity not in seen:
+                seen.add(identity)
+                total += _allocated(info)
+    for wanted in unmatched.values():
+        if any((path, inode) not in measured for path, inodes in wanted.items() for inode in inodes):
             incomplete = True
     return total, incomplete
 
@@ -1200,6 +1254,7 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
     incomplete = False
     held: dict = {}  # (device, inode) -> (original path, size from a descriptor)
     held_names: set = set()  # (original path, inode): how a mapping recognises a file a descriptor holds
+    unmatched: dict = {}  # pid -> {name: {inode}} of mappings no descriptor held when the maps were read
 
     def folders_of(path):
         if path.startswith("/memfd:") or not path.startswith(os.sep):
@@ -1269,6 +1324,16 @@ def deleted_open_usage(pids, folders) -> tuple[dict, bool]:
             # for one); its size is then known from the descriptor.
             if (path, inode) in held_names:
                 continue
+            # No descriptor held it when the descriptors were read. It may have been unlinked since
+            # (the passes are separate snapshots): the descriptors are read again below.
+            unmatched.setdefault(pid, {}).setdefault(path, set()).add(inode)
+    for pid, wanted in unmatched.items():
+        for path, info, target in _recheck_descriptors(pid, wanted):
+            if target.endswith(_DELETED):
+                held.setdefault((info.st_dev, info.st_ino), (path, _allocated(info)))
+                held_names.add((path, info.st_ino))
+    for wanted in unmatched.values():
+        if any((path, inode) not in held_names for path, inodes in wanted.items() for inode in inodes):
             # Referenced by a mapping alone: no descriptor to stat, so its size is unknown.
             incomplete = True
     for path, size in held.values():

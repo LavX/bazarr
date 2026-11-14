@@ -3359,6 +3359,85 @@ def test_memfd_usage_refuses_a_mapped_only_memfd_and_counts_an_open_one(tmp_path
     assert pool_module.memfd_usage([os.getpid()]) == (0, False)
 
 
+def _between_the_passes(monkeypatch, action):
+    """Run ``action`` once, after the descriptors were read and before the first ``maps`` read."""
+    real = pool_module._mapped_objects
+    calls = []
+
+    def wrapped(path):
+        if not calls:
+            calls.append(path)
+            action()
+        return real(path)
+
+    monkeypatch.setattr(pool_module, "_mapped_objects", wrapped)
+    return calls
+
+
+@needs_smaps
+@pytest.mark.parametrize("keeps_descriptor", [True, False], ids=["descriptor-kept", "descriptor-closed"])
+def test_a_file_unlinked_between_the_descriptor_and_mapping_passes_is_still_measured(
+        tmp_path, monkeypatch, keeps_descriptor):
+    folder = tmp_path / "data"
+    folder.mkdir()
+    target = folder / "late"
+    fd = os.open(str(target), os.O_RDWR | os.O_CREAT, 0o600)
+    os.write(fd, b"z" * (2 * MIB))
+    unmap = _map_with_c_mmap(fd, 4096)
+    closed = []
+
+    def unlink_it():
+        os.unlink(str(target))
+        if not keeps_descriptor:
+            os.close(fd)
+            closed.append(True)
+
+    calls = _between_the_passes(monkeypatch, unlink_it)
+    try:
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(folder)])
+        assert calls
+        if keeps_descriptor:
+            # The descriptor measures it, only the first pass saw it before the unlink.
+            assert incomplete is False
+            assert 2 * MIB <= usage[str(folder)] < 2 * MIB + 256 * 1024
+        else:
+            # Nothing holds it now but the mapping: that still fails closed.
+            assert incomplete is True
+            assert usage[str(folder)] == 0
+    finally:
+        unmap()
+        if not closed:
+            os.close(fd)
+
+
+@needs_smaps
+@pytest.mark.parametrize("keeps_descriptor", [True, False], ids=["descriptor-kept", "descriptor-closed"])
+def test_a_memfd_created_and_mapped_between_the_descriptor_and_mapping_passes_is_still_measured(
+        monkeypatch, keeps_descriptor):
+    made = []
+
+    def create_and_map():
+        fd = os.memfd_create("late-memfd")
+        os.write(fd, b"q" * (3 * MIB))
+        made.append((fd, _map_with_c_mmap(fd, 4096)))
+        if not keeps_descriptor:
+            os.close(fd)
+
+    calls = _between_the_passes(monkeypatch, create_and_map)
+    try:
+        held, incomplete = pool_module.memfd_usage([os.getpid()])
+        assert calls and made
+        if keeps_descriptor:
+            assert incomplete is False and held >= 3 * MIB
+        else:
+            assert incomplete is True and held < 512 * 1024
+    finally:
+        for fd, unmap in made:
+            unmap()
+            if keeps_descriptor:
+                os.close(fd)
+
+
 # ------------------------------------ the folder scan holds directory descriptors and a time budget
 
 
