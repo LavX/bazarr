@@ -1221,3 +1221,80 @@ def test_boot_flags_an_installation_whose_bundle_is_outside_the_hub_and_register
     assert load_state()["installations"]["alpha"]["needs_repair"] is True
     assert register_active_provider_classes(active_installations()) == []
     assert (outside / "__pycache__").exists()
+
+
+def _fake_proc(tmp_path, pid="4242"):
+    """A /proc with one process of ours that runs from somewhere unrelated."""
+    proc = tmp_path / "proc"
+    entry = proc / pid
+    (entry / "fd").mkdir(parents=True)
+    (entry / "exe").symlink_to("/usr/bin/true")
+    (entry / "cwd").symlink_to("/")
+    (entry / "maps").write_text("")
+    (entry / "cmdline").write_bytes(b"true\0")
+    (entry / "environ").write_bytes(b"HOME=/root\0")
+    (entry / "stat").write_text(f"{pid} (true) S " + "0 " * 18 + "99999999999999 0\n")
+    return proc, entry
+
+
+def _unreadable_reads(monkeypatch, entry, failures):
+    """Make the first ``failures`` reads of the fake process's exe link raise PermissionError."""
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            if seen["count"] <= failures:
+                raise PermissionError(13, "Permission denied")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    return seen
+
+
+def test_a_process_unreadable_once_and_then_readable_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    seen = _unreadable_reads(monkeypatch, entry, failures=1)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert seen["count"] == 2
+
+
+def test_a_process_unreadable_once_and_then_gone_does_not_block_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            if seen["count"] == 1:
+                raise PermissionError(13, "Permission denied")
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+
+
+def test_a_process_that_turns_readable_and_uses_the_directory_still_blocks_cleanup(tmp_path, monkeypatch):
+    env = tmp_path / "env"
+    env.mkdir()
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "cwd").unlink()
+    (entry / "cwd").symlink_to(env)
+    _unreadable_reads(monkeypatch, entry, failures=1)
+
+    assert venvmod.processes_using_directory(env, proc=str(proc)) is True
+
+
+def test_a_process_that_stays_unreadable_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    seen = _unreadable_reads(monkeypatch, entry, failures=10**6)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+    assert seen["count"] == 1 + venvmod._UNREADABLE_RETRIES
