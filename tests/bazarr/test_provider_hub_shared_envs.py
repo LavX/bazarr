@@ -1711,16 +1711,19 @@ def test_a_process_that_stays_unreadable_still_blocks_cleanup(tmp_path, monkeypa
 
 
 _NON_DUMPABLE = (
-    "import ctypes, pathlib, sys, time\n"
+    "import ctypes, os, pathlib, sys, time\n"
     "ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"  # PR_SET_DUMPABLE: its /proc files are unreadable to others
-    "pathlib.Path(sys.argv[1]).write_text('up')\n"
+    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
     "time.sleep(60)\n"
 )
 
 
-def _wait_for(path):
+def _wait_for_pid(path):
     deadline = time.monotonic() + 20
-    while not path.exists():
+    while True:
+        text = path.read_text() if path.exists() else ""
+        if text.isdigit():
+            return int(text)
         assert time.monotonic() < deadline, "the helper process did not start"
         time.sleep(0.05)
 
@@ -1730,7 +1733,18 @@ def test_the_real_scan_still_counts_an_unreadable_descendant_of_the_test_run(tmp
     ready = tmp_path / "ready"
     child = subprocess.Popen([sys.executable, "-c", _NON_DUMPABLE, str(ready)])
     try:
-        _wait_for(ready)
+        pid = _wait_for_pid(ready)
+        # The entry of a non-dumpable process of ours stays ours, but its files
+        # are unreadable to a runner without ptrace rights (root, or one with
+        # CAP_SYS_PTRACE, can read them, and then there is nothing to count).
+        try:
+            os.readlink(f"/proc/{pid}/exe")
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this runner can read the files of a non-dumpable process")
+        if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+            pytest.skip("the entry of a non-dumpable process is not owned by the runner here")
         assert venvmod.processes_using_directory(tmp_path / "env") is True
     finally:
         child.kill()
@@ -1744,22 +1758,12 @@ def test_an_unreadable_process_of_someone_elses_session_is_not_a_candidate(tmp_p
     subprocess.run(
         ["sh", "-c", f'{sys.executable} -c "$0" "$1" >/dev/null 2>&1 &', _NON_DUMPABLE, str(ready)], check=True
     )
-    _wait_for(ready)
-    stray = next(
-        name
-        for name in os.listdir("/proc")
-        if name.isdigit() and b"prctl" in _cmdline(name)
-    )
+    stray = _wait_for_pid(ready)
     try:
-        assert stray not in venvmod._candidate_pids("/proc")
+        assert str(stray) not in venvmod._candidate_pids("/proc")
         assert venvmod.processes_using_directory(tmp_path / "env") is False
     finally:
-        os.kill(int(stray), 9)
-
-
-def _cmdline(name):
-    try:
-        with open(f"/proc/{name}/cmdline", "rb") as handle:
-            return handle.read()
-    except OSError:
-        return b""
+        try:
+            os.kill(stray, 9)  # not our child, so there is nothing to reap
+        except ProcessLookupError:
+            pass
