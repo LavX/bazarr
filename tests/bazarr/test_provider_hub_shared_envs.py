@@ -1294,13 +1294,55 @@ def test_a_process_unreadable_once_and_then_exited_with_a_lookup_error_does_not_
     def readlink(path, *args, **kwargs):
         if str(path) == str(entry / "exe"):
             seen["count"] += 1
-            raise PermissionError(13, "Permission denied") if seen["count"] == 1 else ProcessLookupError(3, "No such process")
+            if seen["count"] == 1:
+                raise PermissionError(13, "Permission denied")
+            shutil.rmtree(entry)
+            raise ProcessLookupError(3, "No such process")
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
     monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
+    assert not entry.exists()
+
+
+def test_a_lookup_error_for_a_pid_whose_entry_is_still_there_still_blocks_cleanup(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            raise PermissionError(13, "Permission denied") if seen["count"] == 1 else ProcessLookupError(3, "No such process")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
+
+
+def test_an_io_error_on_a_descriptor_after_a_denied_first_look_keeps_the_process_in_use(tmp_path, monkeypatch):
+    proc, entry = _fake_proc(tmp_path)
+    (entry / "fd" / "7").symlink_to("/anywhere")
+    real_readlink = venvmod.os.readlink
+    seen = {"count": 0}
+
+    def readlink(path, *args, **kwargs):
+        if str(path) == str(entry / "exe"):
+            seen["count"] += 1
+            if seen["count"] == 1:
+                raise PermissionError(13, "Permission denied")
+        if str(path) == str(entry / "fd" / "7"):
+            raise OSError(5, "Input/output error")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(venvmod.os, "readlink", readlink)
+    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+
+    assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
 
 def test_a_process_unreadable_once_and_then_failing_for_another_reason_still_blocks_cleanup(tmp_path, monkeypatch):
