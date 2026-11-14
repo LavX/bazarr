@@ -348,15 +348,23 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
     mine = os.getpid()
     my_start = started_at(str(mine))
     uid = os.getuid() if hasattr(os, "getuid") else None
-    def gone(name: str) -> bool:
-        """Whether the process entry is confirmed missing (a pid can be reused, and a missing file is not a missing process)."""
+    def gone(name: str, error: OSError) -> bool:
+        """Whether the process is confirmed to have exited, given the error that its look ended with."""
+        if isinstance(error, (ProcessLookupError, FileNotFoundError)):
+            try:
+                os.lstat(os.path.join(proc, name))
+            except FileNotFoundError:
+                return True  # the entry is gone (a missing file alone is not a missing process, and a pid can be reused)
+            except OSError:
+                pass  # cannot tell, so it is not a confirmed exit
+        # A zombie whose only thread is the leader has released its files and
+        # memory, but its entry stays until it is reaped and reads as missing.
         try:
-            os.lstat(os.path.join(proc, name))
-        except FileNotFoundError:
-            return True
-        except OSError:
-            pass  # cannot tell, so it is not a confirmed exit
-        return False
+            with open(os.path.join(proc, name, "stat"), encoding="utf-8", errors="replace") as handle:
+                state = handle.read().rsplit(")", 1)[1].split()[0]
+            return state == "Z" and os.listdir(os.path.join(proc, name, "task")) == [name]
+        except (OSError, IndexError):
+            return False
 
     # Processes that could not be read, or not read through, and could be ours.
     # A process in the middle of exec or exit is briefly unreadable too, so these
@@ -371,7 +379,7 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
             if inspect(name):
                 return True
         except OSError as error:
-            if isinstance(error, (ProcessLookupError, FileNotFoundError)) and gone(name):
+            if gone(name, error):
                 continue  # the process ended while it was being looked at
             # Whatever the error, it may be something a worker started. Only our
             # own processes that began after this one can be (a worker runs as
@@ -390,7 +398,7 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
                 if inspect(name):
                     return True
             except OSError as error:
-                if not (isinstance(error, (ProcessLookupError, FileNotFoundError)) and gone(name)):
+                if not gone(name, error):
                     still_unreadable.append(name)
         unreadable = still_unreadable
     # Still alive and still not readable: fail closed, it counts as in use.
