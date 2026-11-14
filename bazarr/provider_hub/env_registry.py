@@ -200,6 +200,7 @@ def reconcile_environments(
         return summary
     envs = {fp: dict(entry) for fp, entry in registry(state).items() if isinstance(entry, dict)}
     adoptions: dict[str, str] = {}
+    adopted_by: dict[str, list[str]] = {}
     flags: list[str] = []
     unflags: list[str] = []
     repoints: list[tuple[str, str, str, str]] = []
@@ -270,6 +271,7 @@ def reconcile_environments(
                     envs[fingerprint] = {"path": str(env_dir)}
                     adoptions[fingerprint] = str(env_dir)
                     summary["adopted"].append(provider_id)
+                    adopted_by.setdefault(fingerprint, []).append(provider_id)
                 continue
             if path_key(recorded) == str(env_dir) or staged or not row.get("active_path"):
                 continue
@@ -301,8 +303,15 @@ def reconcile_environments(
     def apply(state: dict[str, Any]) -> None:
         installations = state.get("installations") or {}
         stored = registry(state)
+        dropped_adoptions.clear()
+        dropped_repoints.clear()
         for fingerprint, path in adoptions.items():
-            stored[fingerprint] = {"path": path}
+            # Checked again here, under the environment lock: a cleanup that
+            # committed first may have removed the directory since the probes.
+            if lock_held[0] and python_executable(Path(path)).exists():
+                stored[fingerprint] = {"path": path}
+            else:
+                dropped_adoptions.append(fingerprint)
         for provider_id in flags:
             row = installations.get(provider_id)
             if isinstance(row, dict):
@@ -319,9 +328,30 @@ def reconcile_environments(
         for provider_id, python_key, old, new in repoints:
             row = installations.get(provider_id)
             if isinstance(row, dict) and row.get(python_key) == old:
-                row[python_key] = new
+                if lock_held[0] and Path(new).exists():
+                    row[python_key] = new
+                else:
+                    dropped_repoints.append(provider_id)
 
-    mutate_state(apply)
+    # A row or record that points at an environment is committed under the lock
+    # a cleanup deletes under, with the target checked again inside it, so a
+    # reference never lands on a directory a cleanup has removed.
+    lock_held = [False]
+    dropped_adoptions: list[str] = []
+    dropped_repoints: list[str] = []
+    with environment_lock() as held:
+        lock_held[0] = bool(held)
+        if not held:
+            logger.warning("Provider Hub: another process holds the environment lock, "
+                           "so no environment was adopted or repointed")
+        mutate_state(apply)
+    for fingerprint in dropped_adoptions:
+        for provider_id in adopted_by.get(fingerprint, []):
+            if provider_id in summary["adopted"]:
+                summary["adopted"].remove(provider_id)
+    for provider_id in dropped_repoints:
+        if provider_id in summary["repointed"]:
+            summary["repointed"].remove(provider_id)
     return summary
 
 
