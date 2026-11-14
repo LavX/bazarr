@@ -1276,7 +1276,8 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
     scan is incomplete and the budget fails. A file that is both open and mapped is
     charged once, by its blocks. Identity is (device, inode) for a descriptor, and
     a mapping is recognised as the same file by its path and inode, so a file is
-    counted once however many processes hold it.
+    counted once however many processes hold it. Hard links to one file that were unlinked
+    from folders with different budgets are charged to each of those folders, once each.
 
     Attribution is by ancestry only: the deleted file's original directory under a
     budgeted folder. Its device plays no part, and a file with no path under any
@@ -1293,7 +1294,7 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
     roots = [(folder, {_maps_form(folder), _maps_form(os.path.realpath(folder))}) for folder in folders]
     usage = {folder: 0 for folder, _names in roots}
     incomplete = False
-    held: dict = {}  # (device, inode) -> (original path, size from a descriptor)
+    held: dict = {}  # (device, inode) -> ({every original path seen}, size from a descriptor)
     held_names: set = set()  # (original path, inode): how a mapping recognises a file a descriptor holds
     unmatched: dict = {}  # pid -> {name: {inode}} of mappings no descriptor held when the maps were read
 
@@ -1338,8 +1339,7 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
-            held.setdefault((info.st_dev, info.st_ino),
-                            (path, _allocated(info)))
+            held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
             held_names.add((path, info.st_ino))
     for pid in pids:
         try:
@@ -1371,14 +1371,16 @@ def deleted_open_usage(pids, folders, files: "dict | None" = None) -> tuple[dict
     for pid, wanted in unmatched.items():
         for path, info, target in _recheck_descriptors(pid, wanted):
             if target.endswith(_DELETED):
-                held.setdefault((info.st_dev, info.st_ino), (path, _allocated(info)))
+                held.setdefault((info.st_dev, info.st_ino), (set(), _allocated(info)))[0].add(path)
                 held_names.add((path, info.st_ino))
     for wanted in unmatched.values():
         if any((path, inode) not in held_names for path, inodes in wanted.items() for inode in inodes):
             # Referenced by a mapping alone: no descriptor to stat, so its size is unknown.
             incomplete = True
-    for identity, (path, size) in held.items():
-        for folder in folders_of(path):
+    for identity, (paths, size) in held.items():
+        # Hard links to one file, unlinked from folders with different budgets: every folder that
+        # one of the names was in is charged, once each.
+        for folder in {folder for path in paths for folder in folders_of(path)}:
             usage[folder] += size
             if files is not None:
                 files.setdefault(folder, {})[identity] = size

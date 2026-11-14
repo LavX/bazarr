@@ -2869,6 +2869,59 @@ def test_a_deleted_open_file_whose_other_link_is_elsewhere_is_still_charged(make
 
 
 @needs_smaps
+def test_hard_links_unlinked_from_two_folders_are_charged_to_each_folder(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    _file_of(first / "a", 3 * MIB)
+    os.link(first / "a", second / "b")
+    held = [os.open(first / "a", os.O_RDONLY), os.open(second / "b", os.O_RDONLY)]
+    os.unlink(first / "a")
+    os.unlink(second / "b")
+    try:
+        files = {}
+        usage, incomplete = pool_module.deleted_open_usage([os.getpid()], [str(first), str(second)], files)
+        assert incomplete is False
+        # One file, two names in two budgeted folders: each folder holds it once.
+        assert 3 * MIB <= usage[str(first)] < 3 * MIB + 256 * 1024, usage
+        assert 3 * MIB <= usage[str(second)] < 3 * MIB + 256 * 1024, usage
+        assert len(files[str(first)]) == 1 and files[str(first)] == files[str(second)]
+    finally:
+        for fd in held:
+            os.close(fd)
+
+
+@needs_smaps
+def test_each_folders_budget_sees_a_file_unlinked_from_both_and_still_linked_in_one(make_pool, tmp_path, monkeypatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    _file_of(first / "a", 3 * MIB)
+    os.link(first / "a", second / "b")
+    os.link(first / "a", second / "kept")
+    held = [os.open(first / "a", os.O_RDONLY), os.open(second / "b", os.O_RDONLY)]
+    os.unlink(first / "a")
+    os.unlink(second / "b")
+    try:
+        pool = make_pool(use_clock=False)
+        monkeypatch.setattr(pool, "_deleted_open_usage", lambda slot, budgets, files=None: pool_module.deleted_open_usage(
+            [os.getpid()], [budget.path for budget in budgets], files))
+
+        def problem(first_limit, second_limit):
+            return pool._budget_problem(None, 0.0, WorkerDefinition("tr", kind="translator", budgets=[
+                FolderBudget(str(first), first_limit, "first"), FolderBudget(str(second), second_limit, "second")]))
+
+        # first holds the file only through the open descriptor (3 MiB); second holds it through "kept",
+        # which the scan charges, and the open descriptor is the same file (still 3 MiB, not 6).
+        assert problem(4 * MIB, 4 * MIB) is None
+        assert problem(2 * MIB, 4 * MIB)[0] == "folder_budget"
+        assert problem(4 * MIB, 2 * MIB)[0] == "folder_budget"
+    finally:
+        for fd in held:
+            os.close(fd)
+
+
+@needs_smaps
 def test_deleted_open_usage_totals_are_per_folder_by_ancestry_not_by_filesystem(tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"
