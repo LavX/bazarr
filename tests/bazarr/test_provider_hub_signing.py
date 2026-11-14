@@ -862,6 +862,18 @@ def test_non_finite_numbers_are_rejected(keys):
     assert verify(keys, data).status is Status.MALFORMED
 
 
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+def test_non_finite_numbers_in_an_ignored_field_are_rejected(keys, constant):
+    """Metadata is valid, so only strict JSON parsing can refuse this catalog."""
+    data = b'{"channel": "main", "signed_version": 10, "not_before": "%s", "expires": "%s", "weight": %s}' % (
+        stamp(SIGNED_AT).encode(),
+        stamp(EXPIRES).encode(),
+        constant,
+    )
+
+    assert verify(keys, data).status is Status.MALFORMED
+
+
 FULLWIDTH = str.maketrans("0123456789", "\uff10\uff11\uff12\uff13\uff14\uff15\uff16\uff17\uff18\uff19")
 
 
