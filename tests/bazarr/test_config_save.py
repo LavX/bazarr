@@ -1277,11 +1277,14 @@ def test_provider_order_setting_saves_normalized_lists(monkeypatch, submitted, e
         database=SimpleNamespace(execute=lambda _statement: None),
         update=lambda _model: _FakeUpdate(), System=object,
     ))
+    cleared = _stub_failure_record(monkeypatch)
     monkeypatch.setattr(config.settings.translator, 'openrouter_provider_order', ['previous'])
 
     config.save_settings([('settings-translator-openrouter_provider_order', submitted)])
 
     assert saved == [expected]
+    # A changed translator setting must also drop the failed-translation record.
+    assert cleared == [True]
     assert list(config.settings.translator.openrouter_provider_order) == expected
 
 
@@ -1317,6 +1320,19 @@ def test_invalid_provider_order_does_not_partially_apply_settings(monkeypatch):
     assert config.settings.translator.openrouter_provider_order == ['deepinfra']
 
 
+def _stub_failure_record(monkeypatch):
+    """Replace the translate failure record module with a fake that records each clear.
+
+    Importing the real module loads the subtitles package, which needs the real app.database
+    that these tests replace. Returns the list a call is appended to.
+    """
+    cleared = []
+    monkeypatch.setitem(sys.modules, 'subtitles.tools.translate.failure_record', SimpleNamespace(
+        clear_failed_translations=lambda: cleared.append(True),
+    ))
+    return cleared
+
+
 def _settings_save_harness(monkeypatch):
     """save_settings with its persistence and schedule side effects stubbed out."""
     from app import config
@@ -1335,6 +1351,7 @@ def _settings_save_harness(monkeypatch):
         database=SimpleNamespace(execute=lambda _statement: None),
         update=lambda _model: _FakeUpdate(), System=object,
     ))
+    _stub_failure_record(monkeypatch)
     return saved
 
 
