@@ -13,6 +13,8 @@ from provider_hub.venv import environment_fingerprint, path_key, pin_scope
 from provider_hub.manifest import validate_manifest
 from test_provider_hub import _manifest
 
+pytestmark = pytest.mark.usefixtures("own_process_candidates")
+
 
 @pytest.fixture
 def hub(tmp_path, monkeypatch):

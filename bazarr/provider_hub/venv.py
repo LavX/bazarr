@@ -287,6 +287,14 @@ _UNREADABLE_PAUSE = 0.033
 _PF_KTHREAD = 0x00200000
 
 
+def _candidate_pids(proc: str) -> list[str]:
+    """The process ids listed under ``proc``. Raises ``OSError`` when it cannot be listed.
+
+    A seam of its own so tests can narrow the scan to the processes they own.
+    """
+    return [name for name in os.listdir(proc) if name.isdigit()]
+
+
 def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/proc") -> bool | None:
     """Whether any other live process runs from, has open, or maps something under ``directory``.
 
@@ -299,7 +307,7 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
     safeguards.
     """
     try:
-        entries = [name for name in os.listdir(proc) if name.isdigit()]
+        entries = _candidate_pids(proc)
     except OSError:
         return None
     roots = {os.path.abspath(directory), os.path.realpath(directory)}

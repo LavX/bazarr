@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,8 @@ import provider_hub.venv as venvmod
 from provider_hub import env_registry
 from provider_hub.state import load_state, save_state
 from provider_hub.venv import PluginEnvironment, environment_fingerprint, pin_scope
+
+pytestmark = pytest.mark.usefixtures("own_process_candidates")
 
 REQ_A = SimpleNamespace(pip_line="alpha==1.0 --hash=sha256:" + "a" * 64)
 REQ_B = SimpleNamespace(pip_line="beta==2.0 --hash=sha256:" + "b" * 64)
@@ -1705,3 +1708,58 @@ def test_a_process_that_stays_unreadable_still_blocks_cleanup(tmp_path, monkeypa
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
     assert seen["count"] == 1 + venvmod._UNREADABLE_RETRIES
+
+
+_NON_DUMPABLE = (
+    "import ctypes, pathlib, sys, time\n"
+    "ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"  # PR_SET_DUMPABLE: its /proc files are unreadable to others
+    "pathlib.Path(sys.argv[1]).write_text('up')\n"
+    "time.sleep(60)\n"
+)
+
+
+def _wait_for(path):
+    deadline = time.monotonic() + 20
+    while not path.exists():
+        assert time.monotonic() < deadline, "the helper process did not start"
+        time.sleep(0.05)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc")
+def test_the_real_scan_still_counts_an_unreadable_descendant_of_the_test_run(tmp_path):
+    ready = tmp_path / "ready"
+    child = subprocess.Popen([sys.executable, "-c", _NON_DUMPABLE, str(ready)])
+    try:
+        _wait_for(ready)
+        assert venvmod.processes_using_directory(tmp_path / "env") is True
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc")
+def test_an_unreadable_process_of_someone_elses_session_is_not_a_candidate(tmp_path):
+    ready = tmp_path / "ready"
+    # Started through a shell that exits at once, so nothing of ours is its parent.
+    subprocess.run(
+        ["sh", "-c", f'{sys.executable} -c "$0" "$1" >/dev/null 2>&1 &', _NON_DUMPABLE, str(ready)], check=True
+    )
+    _wait_for(ready)
+    stray = next(
+        name
+        for name in os.listdir("/proc")
+        if name.isdigit() and b"prctl" in _cmdline(name)
+    )
+    try:
+        assert stray not in venvmod._candidate_pids("/proc")
+        assert venvmod.processes_using_directory(tmp_path / "env") is False
+    finally:
+        os.kill(int(stray), 9)
+
+
+def _cmdline(name):
+    try:
+        with open(f"/proc/{name}/cmdline", "rb") as handle:
+            return handle.read()
+    except OSError:
+        return b""
