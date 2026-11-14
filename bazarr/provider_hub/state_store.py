@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import threading
 from contextlib import contextmanager, nullcontext
@@ -98,38 +99,76 @@ def _document_strings(node: Any):
             yield from _document_strings(value)
 
 
+_local_state: tuple[frozenset[str], Any] = (frozenset(), None)
+_MIN_LOCAL_VALUE_LENGTH = 6
+
+
+def _set_local_values(values: set[str]) -> None:
+    """Publish the values the SQLAlchemy filter masks, with the regex that finds them, in one assignment."""
+    global _local_state
+    cleaned = frozenset(value for value in values if len(value) >= _MIN_LOCAL_VALUE_LENGTH)
+    ordered = sorted(cleaned, key=len, reverse=True)
+    regex = re.compile("|".join(re.escape(value) for value in ordered)) if ordered else None
+    _local_state = (cleaned, regex)
+
+
+def _mask_local(text: str) -> str:
+    values, regex = _local_state
+    if regex is not None and any(value in text for value in values):
+        return regex.sub("***", text)
+    return text
+
+
 def register_document_secrets(document: str) -> None:
-    """Register the credential values in a state document with the log scrubber, before it is bound.
+    """Make the credential values in a state document known to the log scrubbing, before it is bound.
 
     The statements here bind the whole document, and a document imported from
     an older state.json can hold plaintext credentials until the boot
     migration encrypts them. A database error or a driver's log record can
-    quote the statement, so every value that could be a credential is known to
-    the shared scrubber (``secret_store.scrub``) before the statement runs:
-    every string under an installation's ``config``, and every string under a
-    top-level key this code does not understand. Registered values are masked
-    wherever the scrubber is applied, and by ``_SecretTextFilter`` on the
-    SQLAlchemy loggers, which covers the records written before the app's log
-    handlers exist (Alembic, early boot). A value shorter than the scrubber's
-    minimum is not masked, as everywhere else.
+    quote the statement, so before it runs:
+
+    * every string under an installation's ``config``, and under a top-level
+      key this code does not understand, joins the set ``_SecretTextFilter``
+      masks. That set is local to the SQLAlchemy loggers: it can include
+      ordinary values (a region, a hostname) and must not mask them anywhere
+      else.
+    * the values of the fields the installation's manifest declares secret
+      (or the persisted secret paths name) are also registered with the shared
+      scrubber (``secret_store.scrub``), as the boot registers them, so they
+      are masked in every log line.
+
+    A value shorter than six characters is not masked, as everywhere else.
     """
     try:
-        from secret_store import scrub
         data = json.loads(document)
         if not isinstance(data, dict):
             return
-        found: set[str] = set()
-        for row in (data.get("installations") or {}).values() if isinstance(data.get("installations"), dict) else ():
-            if isinstance(row, dict):
-                found.update(_document_strings(row.get("config")))
+        local: set[str] = set()
+        secret: set[str] = set()
+        installations = data.get("installations")
+        if isinstance(installations, dict):
+            from secret_store.registry import installation_secret_fields
+            for provider_id, row in installations.items():
+                config = row.get("config") if isinstance(row, dict) else None
+                if not isinstance(config, dict):
+                    continue
+                local.update(_document_strings(config))
+                wanted = {str(field).lower()
+                          for field in installation_secret_fields(provider_id, row, data.get("plugin_secret_paths"))}
+                for field, value in config.items():
+                    if isinstance(field, str) and field.lower() in wanted and isinstance(value, str):
+                        secret.add(value)
         for key, value in data.items():
             if key not in _STRUCTURAL_KEYS:
-                found.update(_document_strings(value))
-        found = {value.strip() for value in found if value.strip()}
-        with scrub._refresh_lock:
-            known = scrub.registered_secret_values()
-            if not found <= known:
-                scrub.register_secret_values(known | found)
+                local.update(_document_strings(value))
+        _set_local_values({value.strip() for value in local if value.strip()})
+        secret = {value.strip() for value in secret if value.strip() and not value.startswith("enc:")}
+        if secret:
+            from secret_store import scrub
+            with scrub._refresh_lock:
+                known = scrub.registered_secret_values()
+                if not secret <= known:
+                    scrub.register_secret_values(known | secret)
     except Exception:  # never let the scrub registration stand in the way of storing state
         logger.debug("Could not register the state document's credential values for scrubbing", exc_info=False)
 
@@ -144,7 +183,8 @@ class _SecretTextFilter(logging.Filter):
     state document. The app's log handlers scrub formatted text, but only once
     ``configure_logging`` has run, so the same scrubber is applied here, on
     the SQLAlchemy loggers, to the message and to the exception text. Only the
-    registered values and the known token shapes are masked: every other
+    registered values, the values of the documents the store bound (kept in a
+    set local to these loggers) and the known token shapes are masked: every other
     SQLAlchemy warning or error keeps its driver detail. The exception is
     rendered into ``exc_text`` (masked) and ``exc_info`` is dropped from these
     records, so no handler formats the raw traceback.
@@ -172,12 +212,12 @@ class _SecretTextFilter(logging.Filter):
                 record.args = ()
                 record.exc_info = record.exc_text = record.stack_info = None
             return True
-        scrubbed = scrub_text(message)
+        scrubbed = _mask_local(scrub_text(message))
         if scrubbed != message or record.args:
             record.msg = scrubbed
             record.args = ()
         if exception_text:
-            record.exc_text = scrub_text(exception_text)
+            record.exc_text = _mask_local(scrub_text(exception_text))
             record.exc_info = None
         return True
 

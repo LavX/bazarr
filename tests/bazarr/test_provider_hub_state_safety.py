@@ -30,9 +30,11 @@ SECRET = "plaintext-credential-9f3a"  # pragma: allowlist secret
 def _scrub_values_are_restored():
     """The store registers the credential values of every document it binds; leave the set as it was."""
     from secret_store import scrub
+    from provider_hub import state_store
     saved = scrub.registered_secret_values()
     yield
     scrub.register_secret_values(saved)
+    state_store._set_local_values(set())
 
 
 @pytest.fixture
@@ -1030,3 +1032,35 @@ def test_a_credential_in_an_installation_config_is_masked_in_what_the_store_logs
 
     assert any(record.name.startswith("sqlalchemy") and record.exc_text for record in caplog.records)
     assert SECRET not in caplog.text
+
+
+def _document_with_ordinary_values():
+    return json.dumps({"installations": {"examplehub": _installation(config={
+        "api_key": SECRET, "region": "europe-west", "host": "hub.example.test"})}}, sort_keys=True)
+
+
+def test_only_declared_secrets_join_the_shared_scrub_set(hub_store):
+    from secret_store import scrub
+    hub_store.register_document_secrets(_document_with_ordinary_values())
+
+    assert scrub.scrub_text("region europe-west on hub.example.test") == "region europe-west on hub.example.test"
+    assert scrub.scrub_text(f"key {SECRET}") == "key ***"
+
+
+def test_an_ordinary_config_value_is_masked_in_sqlalchemy_records_only(hub_store, caplog):
+    sqlalchemy_logger = logging.getLogger("sqlalchemy.pool.impl.NullPool")
+    hub_store._install_log_filter()
+    hub_store.register_document_secrets(_document_with_ordinary_values())
+
+    with caplog.at_level(logging.DEBUG):
+        logging.getLogger("provider_hub.service").warning("using the region europe-west on hub.example.test")
+        try:
+            raise RuntimeError("error while talking to hub.example.test for europe-west")
+        except RuntimeError:
+            sqlalchemy_logger.exception("Exception closing connection")
+
+    app_lines = [record.getMessage() for record in caplog.records if record.name == "provider_hub.service"]
+    assert app_lines == ["using the region europe-west on hub.example.test"]
+    database_record = next(record for record in caplog.records if record.name == sqlalchemy_logger.name)
+    assert "europe-west" not in database_record.exc_text and "hub.example.test" not in database_record.exc_text
+    assert "***" in database_record.exc_text and "error while talking to" in database_record.exc_text
