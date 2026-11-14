@@ -70,6 +70,12 @@ def _import_state(bind, table):
     """
     # The insert binds the whole document, which can hold plaintext credentials.
     bind.engine.hide_parameters = True
+    try:
+        # Also withholds the driver text SQLAlchemy logs itself; see the store.
+        from provider_hub.state_store import hide_parameters
+        hide_parameters(bind)
+    except ImportError:
+        pass
     if bind.execute(sa.select(table.c.id).where(table.c.id == 1)).first() is not None:
         return
     document = _legacy_document()

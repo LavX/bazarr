@@ -79,6 +79,61 @@ _ready_lock = threading.Lock()
 _private_engine: Any = None
 
 
+class _DriverTextFilter(logging.Filter):
+    """Withhold driver text from the records SQLAlchemy logs itself.
+
+    SQLAlchemy logs some failures before any exception reaches this store: a
+    cursor that cannot be closed while a statement error is handled, a
+    connection that cannot be closed or reset by the pool. Those records carry
+    the driver's message, and PostgreSQL's DETAIL quotes the failing row, which
+    is the state document and can hold a plaintext credential from an older
+    state.json. The credential cannot be kept out of the statement on every
+    path (the Alembic import runs before the secret store is usable, and the
+    boot migration encrypts after the import), so the text is withheld here.
+
+    Trade-off: for every logger under ``sqlalchemy``, a record at WARNING or
+    above, or one carrying an exception, keeps its logger name, its level and
+    the exception's class name, and loses its message, arguments and traceback.
+    That is the price of not formatting driver text for this process's own
+    database connections; Python warnings are not logging records and are
+    untouched.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING or record.exc_info or record.exc_text:
+            error = record.exc_info[1] if record.exc_info else None
+            kind = f" ({type(error).__name__})" if error is not None else ""
+            record.msg = (f"a database operation reported a problem{kind}; the details are withheld "
+                          "because they can quote the Plugin Hub state")
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
+        return True
+
+
+_log_filter = _DriverTextFilter()
+_filtered_logger_count = -1
+
+
+def _install_log_filter() -> None:
+    """Put the filter on every logger under ``sqlalchemy``, including ones created since the last call.
+
+    A filter on a logger sees only the records logged on that logger, not its
+    children's, so each one is covered. The engine and pool loggers exist once
+    their engine does, which is before the store uses it.
+    """
+    global _filtered_logger_count
+    registry = logging.Logger.manager.loggerDict
+    if len(registry) == _filtered_logger_count:
+        return
+    for name, candidate in list(registry.items()):
+        if (name == "sqlalchemy" or name.startswith("sqlalchemy.")) and isinstance(candidate, logging.Logger):
+            if _log_filter not in candidate.filters:
+                candidate.addFilter(_log_filter)
+    _filtered_logger_count = len(registry)
+
+
 def hide_parameters(bind):
     """Keep bound values out of this store's database error text.
 
@@ -88,8 +143,10 @@ def hide_parameters(bind):
     reaches the log and the traceback, so every engine the store touches has
     to hide them. The app engine and the private one are created with the flag;
     this covers an engine handed in from outside (tests, tooling, an alembic
-    connection) and is a no-op for the others.
+    connection) and is a no-op for the others. It also withholds driver text
+    from the log records SQLAlchemy writes itself; see ``_DriverTextFilter``.
     """
+    _install_log_filter()
     target = getattr(bind, "engine", bind)
     try:
         if not getattr(target, "hide_parameters", False):
@@ -138,6 +195,7 @@ def _build_private_engine():
 
 def engine():
     global _private_engine
+    _install_log_filter()
     if _engine_override is not None:
         return hide_parameters(_engine_override)
     module = sys.modules.get("app.database")

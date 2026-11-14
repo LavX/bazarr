@@ -7,6 +7,7 @@ loses a race must not repeat anything outside the document.
 import contextlib
 import json
 import logging
+import sys
 import threading
 import time
 import traceback
@@ -818,3 +819,128 @@ def test_an_error_that_is_not_the_drivers_passes_through(hub_store, hub_engine):
 
     with pytest.raises(KeyError):
         hub_store.update_document(step)
+
+
+# What SQLAlchemy logs itself ------------------------------------------------
+
+
+class _Wrapped:
+    """Forwards everything to the real driver object, except what the test arms."""
+
+    def __init__(self, target, armed):
+        object.__setattr__(self, "_target", target)
+        object.__setattr__(self, "_armed", armed)
+
+    def __getattr__(self, name):
+        return getattr(self._target, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._target, name, value)
+
+    def __iter__(self):
+        return iter(self._target)
+
+
+class _WrappedCursor(_Wrapped):
+    """A cursor that cannot be closed after its statement failed, which is when SQLAlchemy logs it."""
+
+    def execute(self, *args, **kwargs):
+        try:
+            return self._target.execute(*args, **kwargs)
+        except Exception:
+            object.__setattr__(self, "_statement_failed", True)
+            raise
+
+    def close(self):
+        if self._armed.get("cursor") and getattr(self, "_statement_failed", False):
+            raise RuntimeError(f"cursor close failed, row preview: {SECRET}")
+        self._target.close()
+
+
+class _WrappedConnection(_Wrapped):
+    def cursor(self, *args, **kwargs):
+        return _WrappedCursor(self._target.cursor(*args, **kwargs), self._armed)
+
+    def close(self):
+        if self._armed.get("connection"):
+            raise RuntimeError(f"connection close failed, row preview: {SECRET}")
+        self._target.close()
+
+
+@pytest.fixture
+def breakable(hub_store, hub_engine, monkeypatch):
+    """The engine's driver connections, each of which can be made to fail when closed."""
+    armed = {}
+    pool = hub_engine.pool
+    creator = pool._creator
+
+    def wrapped(*args, **kwargs):
+        return _WrappedConnection(creator(*args, **kwargs), armed)
+
+    monkeypatch.setattr(pool, "_creator", wrapped)
+    hub_engine.dispose()  # connections made from now on are the wrapped ones
+    return armed
+
+
+def _leaked(caplog, capfd):
+    return SECRET in caplog.text or SECRET in capfd.readouterr().err
+
+
+def test_a_cursor_that_cannot_be_closed_while_a_statement_fails_logs_no_credential(
+        hub_store, hub_engine, breakable, caplog, capfd):
+    from provider_hub.state import mutate_state
+    mutate_state(lambda state: state["jobs"].append({"id": "seed"}))
+    with hub_engine.connect() as connection:
+        length = connection.execute(sa.text("SELECT length(document) FROM provider_hub_state")).scalar()
+        if hub_engine.dialect.name == "sqlite":
+            connection.exec_driver_sql(
+                "CREATE TRIGGER refuse BEFORE UPDATE ON provider_hub_state BEGIN "
+                f"SELECT RAISE(ABORT, 'refused') WHERE length(NEW.document) > {length}; END")
+        else:
+            connection.exec_driver_sql(
+                "ALTER TABLE provider_hub_state ADD CONSTRAINT refuse "
+                f"CHECK (length(document) <= {length})")
+    handler = logging.StreamHandler(sys.stderr)
+    logging.getLogger().addHandler(handler)
+    breakable["cursor"] = True
+    try:
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(hub_store.StateStoreError):
+                mutate_state(lambda state: state.update({"0credential": SECRET}))
+    finally:
+        logging.getLogger().removeHandler(handler)
+        breakable["cursor"] = False
+
+    # SQLAlchemy did log the failed close, and what reached the log has no driver text.
+    assert any("withheld" in record.getMessage() for record in caplog.records)
+    assert not _leaked(caplog, capfd)
+
+
+def test_a_connection_the_pool_cannot_close_logs_no_credential(hub_store, hub_engine, breakable, caplog, capfd):
+    from provider_hub.state import mutate_state
+    handler = logging.StreamHandler(sys.stderr)
+    logging.getLogger().addHandler(handler)
+    breakable["connection"] = True
+    try:
+        with caplog.at_level(logging.DEBUG):
+            mutate_state(lambda state: state.update({"0credential": SECRET}))
+            hub_engine.dispose()  # a pooled connection is closed here; an unpooled one already was
+    finally:
+        logging.getLogger().removeHandler(handler)
+        breakable["connection"] = False
+
+    assert any("withheld" in record.getMessage() for record in caplog.records)
+    assert not _leaked(caplog, capfd)
+
+
+def test_the_filter_keeps_the_logger_and_the_exception_class_only():
+    from provider_hub import state_store
+    record = logging.LogRecord("sqlalchemy.pool.impl.NullPool", logging.ERROR, __file__, 1,
+                               "Exception closing connection %r", (SECRET,), (RuntimeError, RuntimeError(SECRET), None))
+    state_store._log_filter.filter(record)
+    assert record.name == "sqlalchemy.pool.impl.NullPool"
+    assert "RuntimeError" in record.getMessage() and SECRET not in record.getMessage()
+    assert record.exc_info is None and record.exc_text is None
+    info = logging.LogRecord("sqlalchemy.engine.Engine", logging.INFO, __file__, 1, "SELECT 1", (), None)
+    state_store._log_filter.filter(info)
+    assert info.getMessage() == "SELECT 1"
