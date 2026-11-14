@@ -1104,15 +1104,22 @@ class WorkerProcess(subprocess.Popen):
                 # signals as a no-op), so its pid is still its own.
                 with self._own_lock:
                     if self._still_ours():
-                        try:
-                            os.kill(self.pid, signal.SIGTERM)
-                        except OSError:
-                            pass
-                self._wait_for_exit_unreaped(grace)
-                with self._own_lock:
-                    if self._still_ours():
-                        killpg(self.pid, signal.SIGKILL)
-                        cleaned = True
+                        if self.returncode is None:
+                            try:
+                                os.kill(self.pid, signal.SIGTERM)
+                            except OSError:
+                                pass
+                        else:
+                            # ``waitid`` exists but failed (EPERM, ENOSYS...) and nothing else can
+                            # tell: this very call collected the leader. The one group signal goes
+                            # out now, as in the branch without ``waitid``; the next check refuses.
+                            cleaned = self._kill_group_now(killpg)
+                if not cleaned:
+                    self._wait_for_exit_unreaped(grace)
+                    with self._own_lock:
+                        if self._still_ours():
+                            killpg(self.pid, signal.SIGKILL)
+                            cleaned = True
             except ProcessLookupError:
                 cleaned = True
             except (ChildProcessError, OSError):

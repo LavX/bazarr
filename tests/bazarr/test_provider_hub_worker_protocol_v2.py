@@ -4569,6 +4569,36 @@ def test_an_exit_probe_does_not_run_while_another_thread_is_between_its_check_an
     assert probed_while_held == [False]
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_failed_waitid_and_no_proc_still_ends_the_group_of_an_exited_leader(monkeypatch):
+    from provider_hub.sandbox import spawn as sandbox_spawn
+
+    _blind_host(monkeypatch)
+
+    def failing(*args, **kwargs):
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    # waitid exists and answers with an error, and there is no /proc: the first ownership check is the
+    # one that collects the exited leader, and the group must be signalled in that same step.
+    monkeypatch.setattr(os, "waitid", failing, raising=False)
+    monkeypatch.setattr(sandbox_spawn, "_start_anchor", lambda: None)
+    process = sandbox_spawn._start_plain(
+        [sys.executable, "-c", _GROUP_AND_EXIT % "0.3"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    member = int(process.stdout.readline())
+    sent = _record_group_signals(monkeypatch)
+    try:
+        time.sleep(0.8)  # the leader is a zombie now and nothing has looked
+        process.stop(0.3)
+        assert wait_until(lambda: not pid_alive(member), timeout=5), "a member of the group outlived stop()"
+        process.stop(0.3)
+        assert [sig for pgid, sig in sent if pgid == process.pid] == [signal.SIGKILL], sent
+        assert process.group_cleaned is True
+    finally:
+        monkeypatch.undo()
+        _kill_quietly(member)
+
+
 def _exited_worker_with_a_member(monkeypatch):
     from provider_hub.sandbox import spawn as sandbox_spawn
 
