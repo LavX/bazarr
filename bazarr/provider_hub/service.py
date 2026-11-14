@@ -1718,11 +1718,17 @@ def _effective_installation_config(installation: dict[str, Any],
 _ABSENT = object()
 
 
-def _restore_after_refused_update(provider_id: str, previous: dict[str, Any], restore) -> None:
+def _restore_after_refused_update(provider_id: str, changes, restore) -> None:
     try:
-        restore(previous)
+        left = restore(changes)
     except Exception:
         logging.getLogger(__name__).exception("Provider Hub: could not put %s back after a refused update", provider_id)
+        return
+    if left:
+        logging.getLogger(__name__).warning(
+            "Provider Hub: %s changed again after a refused update, so %s was left as the newer write set it",
+            provider_id, ", ".join(sorted(left)),
+        )
 
 
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -1881,20 +1887,33 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
 
         state.setdefault("installations", {})[provider_id] = provider
         _persist_plugin_secret_paths(state, provider)
-        return dict(provider), previous
+        written = {key: copy.deepcopy(provider.get(key, _ABSENT)) for key in previous}
+        return dict(provider), (previous, written)
 
-    def restore_previous(previous: dict[str, Any]) -> None:
+    def restore_previous(changes: tuple[dict[str, Any], dict[str, Any]]) -> list[str]:
+        """Put back each field this update changed that still holds what it wrote.
+
+        A field another writer changed since is theirs and stays. Returns the
+        fields that were left.
+        """
+        previous, written = changes
+        left: list[str] = []
+
         def restore(state: dict[str, Any]) -> None:
+            left.clear()
             row = (state.get("installations") or {}).get(provider_id)
             if not isinstance(row, dict):
                 return
             for key, value in previous.items():
-                if value is _ABSENT:
+                if row.get(key, _ABSENT) != written[key]:
+                    left.append(key)
+                elif value is _ABSENT:
                     row.pop(key, None)
                 else:
-                    row[key] = value
+                    row[key] = copy.deepcopy(value)
 
         mutate_state(restore)
+        return left
 
     # The state lock is taken first, because a settings write reaches the
     # enabled-providers sync, which takes the config lock itself: the other
@@ -1919,7 +1938,7 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
                 outcome = mutate_state(update_installation)
         if outcome is None:
             return None
-        provider, previous = outcome
+        provider, changes = outcome
         if enabled is not None:
             # The toggle writes Bazarr's own settings store. It runs once, after
             # the state commit is known, and a refusal puts the row back so the
@@ -1927,10 +1946,10 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
             try:
                 saved = get_kind(kind_of(provider)).set_enabled(provider, bool(enabled))
             except Exception:
-                _restore_after_refused_update(provider_id, previous, restore_previous)
+                _restore_after_refused_update(provider_id, changes, restore_previous)
                 raise
             if not saved:
-                _restore_after_refused_update(provider_id, previous, restore_previous)
+                _restore_after_refused_update(provider_id, changes, restore_previous)
                 raise ProviderHubSettingsError(
                     f"Could not {'enable' if enabled else 'disable'} {provider_id}: "
                     f"{ENABLED_PROVIDERS_NOT_SAVED}"

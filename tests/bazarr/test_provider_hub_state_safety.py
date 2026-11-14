@@ -342,6 +342,33 @@ def test_a_cleanup_is_not_run_a_second_time_after_a_lost_race(hub_store, hub_eng
     assert len(runs) <= 1
 
 
+def test_a_refused_toggle_leaves_a_newer_write_alone(hub_store, hub_engine, snapshot_file, monkeypatch):
+    from provider_hub import state_store
+    from provider_hub.service import ProviderHubSettingsError, update_provider
+    from provider_hub.state import load_state
+    _seed({"examplehub": _installation(enabled=False, config={"region": "eu"})})
+
+    def refuse_after_another_process_writes(provider_id, enabled):
+        # Between this update's commit and the refusal, another process saved a new region.
+        def step(text):
+            document = json.loads(text)
+            document["installations"]["examplehub"]["config"] = {"region": "ap"}
+            return json.dumps(document, sort_keys=True), None
+
+        state_store.update_document(step)
+        return False
+
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        refuse_after_another_process_writes)
+
+    with pytest.raises(ProviderHubSettingsError):
+        update_provider("examplehub", enabled=True, config={"region": "us"})
+
+    row = load_state()["installations"]["examplehub"]
+    assert row["config"] == {"region": "ap"}
+    assert row["enabled"] is False
+
+
 # Legacy files with a root that is not an object -------------------------------
 
 
