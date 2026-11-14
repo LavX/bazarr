@@ -126,11 +126,16 @@ sharedctypes array's arena) cannot be attributed to it without privilege. Each s
 mapping is charged one page, and nothing more is claimed. A ``/dev/shm`` that is
 small and separate (at most 1 GiB, a filesystem of its own) is guarded instead: at each
 sweep its free space is read, and below a reserve (``shm_reserve_bytes``; by default
-the larger of 8 MiB and a tenth of its size) the pool admits no new start or request
-(``shm_low``), logs once, and stops the worker holding the most ``/dev/shm`` (the
-allocated size of the objects its descriptors hold, each counted once, plus a page for
-each mapping no descriptor measures; ties by mapping count), one per sweep, until the
-space recovers. Where ``/dev/shm`` is not small and
+the larger of 8 MiB and a tenth of its size) the pool looks at what each live worker holds
+(the allocated size of the objects its descriptors hold, each counted once, plus a page for
+each mapping no descriptor measures; ties by mapping count). Only while some worker holds a
+meaningful share of the shortfall (at least 1 MiB and at least a quarter of the space that is
+missing, ``SHM_MIN_HOLDER_BYTES`` and ``SHM_SHARE_DIVISOR``) does it admit no new start or
+request (``shm_low``) and stop the heaviest such worker, one per sweep, until the space
+recovers or no worker holds a meaningful share. Files a stopped worker left behind and what the
+host itself keeps there never recover by stopping anyone, so when no worker is to blame the
+pool admits work as it does under a short disk reserve, and logs that once per episode
+(``status()["shm_short"]`` still reports the shortfall). Where ``/dev/shm`` is not small and
 separate there is nothing to guard, and the sandbox limitations say so: "shared memory
 under /dev/shm is not limited per plugin on this host".
 
@@ -145,7 +150,10 @@ without privileges (``map_files``). The rule that can be checked is the strict o
 plugin that uses ``mmap.mmap(-1, n)`` is stopped for it and should use a private
 mapping (``flags=mmap.MAP_PRIVATE``) or a memfd it keeps open (measured by blocks).
 Python's multiprocessing Lock, Queue, ProcessPoolExecutor and sharedctypes arrays use
-``/dev/shm`` objects and are fine.
+``/dev/shm`` objects and are fine: the sandbox policy grants a worker ``/dev/shm`` (create,
+read, write and remove files, no execute), which is why the guard above exists. Every worker
+of the host shares that directory, so one can read and change another's shared memory;
+the sandbox does not separate them.
 
 Folder budgets count what is on disk under the folder, plus files the worker tree
 unlinked but still holds open (found through its descriptors, charged by blocks).
@@ -271,6 +279,11 @@ TRANSLATOR_MEMORY_BYTES = 1 * GIB
 DEFAULT_MEMORY_BYTES = 512 * MIB
 CONFIG_RESERVE_BYTES = 1 * GIB
 FOLDER_SCAN_SECONDS = 5.0
+
+# The /dev/shm guard refuses work and stops a worker only while stopping one could help: some live
+# worker holds at least this much, and at least this fraction of the space that is missing.
+SHM_MIN_HOLDER_BYTES = 1 * MIB
+SHM_SHARE_DIVISOR = 4  # a quarter of the shortfall
 
 # Allowances for one sweep of one worker reading its /proc (see ``SampleBudget``).
 SAMPLE_SECONDS = 2 * FOLDER_SCAN_SECONDS  # wall time for all of one worker's reading in one sweep
@@ -1849,6 +1862,10 @@ class WorkerPool:
                     % (configured, state[0]))
         # Set by the sweep while /dev/shm is under its reserve; admissions are refused meanwhile.
         self._shm_low = False
+        # Free space is under the reserve (whether or not any worker is to blame), and whether this
+        # episode of it has been logged yet.
+        self._shm_short = False
+        self._shm_logged = False
         self._event_sink = event_sink
         self._clock = clock
         self._autostart = autostart
@@ -1901,12 +1918,17 @@ class WorkerPool:
                 raise ValueError("a worker named %s is already registered" % definition.key)
             self._entries[definition.key] = _Entry(definition)
 
-    def unregister(self, key: str) -> None:
-        """Stop the worker (and any retiring one) and forget the definition."""
+    def unregister(self, key: str) -> bool:
+        """Stop the worker (and any retiring one) and forget the definition.
+
+        Returns whether every teardown of the key is confirmed by the time this returns. False
+        means a process of the key is stuck (or a start is still being cut loose): it is ended
+        again on every sweep, and nothing of that key starts until it is gone.
+        """
         with self._cond:
             entry = self._entries.pop(key, None)
             if entry is None:
-                return
+                return not self._tearing.get(key)
             if entry.starting is not None:
                 # Its start is still running and will find the entry gone.
                 self._detach(entry.starting)
@@ -1922,6 +1944,12 @@ class WorkerPool:
         self._wait_detached()
         if self._stuck:
             self._retry_stuck()
+        return self.teardown_confirmed(key)
+
+    def teardown_confirmed(self, key: str) -> bool:
+        """Whether no worker of the key is still being torn down or stuck (its processes are confirmed gone)."""
+        with self._cond:
+            return not self._tearing.get(key)
 
     def _detach(self, slot):
         """Cut a start loose from its entry. Caller holds the lock.
@@ -2039,6 +2067,7 @@ class WorkerPool:
                 "processes": self._process_count(),
                 "stuck": len(self._stuck),
                 "shm_low": self._shm_low,
+                "shm_short": self._shm_short,
                 "unverified_teardowns": self._unverified_status(now),
                 "workers": workers,
             }
@@ -2277,13 +2306,15 @@ class WorkerPool:
 
     # --------------------------------------------------------------- operations
 
-    def stop(self, key: str) -> None:
+    def stop(self, key: str) -> bool:
         """Stop the plugin's workers on purpose: the current one, every draining one, a start in progress.
 
         A start that has not finished is cancelled: its worker is never
         published and its caller gets ``PoolUnavailable``. Busy workers are
         stopped politely and killed when the grace ends. Returns when the
-        teardown is over (bounded); a worker in backoff stays in backoff.
+        teardown is over (bounded); a worker in backoff stays in backoff. The result is whether
+        every teardown of the key is confirmed: False means a process is stuck (it is ended again
+        on every sweep) and the plugin reads as stopping until it is gone.
         """
         with self._cond:
             entry = self._entry(key)
@@ -2308,6 +2339,7 @@ class WorkerPool:
             self._wait_start_cancelled(starting)
         if self._stuck:
             self._retry_stuck()
+        return self.teardown_confirmed(key)
 
     def reset(self, key: str) -> None:
         """Forget the failure history and end backoff or an open breaker."""
@@ -2408,10 +2440,14 @@ class WorkerPool:
     def _guard_shm(self):
         """Watch the free space of /dev/shm, a size-limited tmpfs shared by every worker.
 
-        Under the reserve: no new start or request is admitted (``_violation``), once is
-        logged, and the worker whose tree holds the most /dev/shm mappings is stopped,
-        one per sweep, until the space is back above the reserve. A /dev/shm that is not
-        small and separate cannot be guarded; the sandbox limitations say so.
+        Under the reserve, and only while some live worker holds a meaningful share of the
+        shortfall (``SHM_MIN_HOLDER_BYTES``, ``SHM_SHARE_DIVISOR``): no new start or request is
+        admitted (``_violation``) and the worker holding the most is stopped, one per sweep,
+        until the space is back above the reserve or no worker holds a meaningful share. When
+        nobody does, stopping anyone cannot help (what a stopped worker left behind and what
+        the host keeps there never recover), so work is admitted. Either way the episode is
+        logged once. A /dev/shm that is not small and separate cannot be guarded; the sandbox
+        limitations say so.
         """
         try:
             state = self._shm_reader()
@@ -2421,23 +2457,26 @@ class WorkerPool:
         if not shm_guardable(state):
             with self._cond:
                 self._shm_low = False
+                self._shm_short = False
+                self._shm_logged = False
             return
         total, free, _separate = state
         reserve = self._shm_reserve(total)
         low = free < reserve
         with self._cond:
-            was = self._shm_low
-            self._shm_low = low
+            self._shm_short = low
             workers = []
             if low:
                 workers = [(entry, entry.slot) for entry in self._entries.values() if entry.slot is not None]
                 workers += [(entry, slot) for entry in self._entries.values() for slot in entry.retiring]
                 workers += [(None, slot) for slot in self._ephemeral]
-        if low and not was:
-            logger.warning("/dev/shm has %d MiB free, under its %d MiB reserve: nothing new is admitted and the "
-                           "heaviest user is stopped", free // MIB, reserve // MIB)
+            else:
+                self._shm_low = False
+                self._shm_logged = False
         if not low:
             return
+        shortfall = reserve - free
+        threshold = max(SHM_MIN_HOLDER_BYTES, shortfall // SHM_SHARE_DIVISOR)
         heaviest = None
         for entry, slot in workers:
             session = slot.session
@@ -2449,8 +2488,20 @@ class WorkerPool:
             skip = {process.pid} if isinstance(process, LauncherProcess) else set()
             held, count = shm_usage(pids, skip, budget)
             score = (held, count)
-            if (held or count) and (heaviest is None or score > heaviest[0]):
+            if held >= threshold and (heaviest is None or score > heaviest[0]):
                 heaviest = (score, entry, slot)
+        with self._cond:
+            self._shm_low = heaviest is not None
+            first = not self._shm_logged
+            self._shm_logged = True
+        if first:
+            if heaviest is not None:
+                logger.warning("/dev/shm has %d MiB free, under its %d MiB reserve: nothing new is admitted and "
+                               "the heaviest user is stopped", free // MIB, reserve // MIB)
+            else:
+                logger.warning("/dev/shm has %d MiB free, under its %d MiB reserve, and no worker holds a "
+                               "meaningful share of the shortfall: work is still admitted", free // MIB,
+                               reserve // MIB)
         if heaviest is None:
             return
         (held, count), entry, slot = heaviest

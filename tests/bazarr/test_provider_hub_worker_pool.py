@@ -4136,9 +4136,13 @@ def test_the_shm_guard_stops_the_heaviest_user_and_admits_nothing_until_it_recov
     pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False, shm_reader=reader)
     for key in ("light", "heavy", "other"):
         pool.register(definition(key))
-    light = pool.submit("light", "shm_maps", {"count": 1})
-    heavy = pool.submit("heavy", "shm_maps", {"count": 5})
+    # Free space 40 MiB then 1 MiB against an 8 MiB reserve: a shortfall of 7 MiB, so a holder must have
+    # at least 1.75 MiB (a quarter of it) to be to blame.
+    seen = []
+    light = pool.submit("light", "shm_file", {"mb": 2}, on_progress=lambda message: seen.append("l"))
+    heavy = pool.submit("heavy", "shm_file", {"mb": 5}, on_progress=lambda message: seen.append("h"))
     other = pool.submit("other", "sleep", {"seconds": 30})
+    assert wait_until(lambda: "l" in seen and "h" in seen, timeout=30)
     pool.sweep()
     time.sleep(0.3)
     pool.sweep()
@@ -4174,6 +4178,88 @@ def test_the_shm_guard_stops_the_heaviest_user_and_admits_nothing_until_it_recov
     other.cancel()
 
 
+@needs_smaps
+def test_space_that_no_worker_holds_neither_blocks_work_nor_stops_anyone(make_pool, caplog):
+    caplog.set_level(logging.INFO)
+    # The host (or files a stopped worker left behind) fills /dev/shm; the only worker holds one page.
+    pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False,
+                     shm_reader=lambda: (64 * MIB, 1 * MIB, True))
+    for key in ("tiny", "fresh"):
+        pool.register(definition(key))
+    seen = []
+    tiny = pool.submit("tiny", "shm_maps", {"count": 1}, on_progress=lambda message: seen.append("t"))
+    pool.sweep()
+    time.sleep(0.3)
+    pool.sweep()
+    pool.sweep()
+    assert pool.status()["shm_short"] is True and pool.status()["shm_low"] is False
+    assert pool.state("tiny") is WorkerState.BUSY, "a worker holding a page was stopped for space it cannot free"
+    # Work is admitted, as under a short disk reserve.
+    assert pool.run("fresh", "echo", {"x": 1}).result["echo"] == {"x": 1}
+    lines = [r for r in caplog.records if "/dev/shm" in r.getMessage() and "under its" in r.getMessage()]
+    assert len(lines) == 1 and "still admitted" in lines[0].getMessage(), "logged once per episode"
+    tiny.cancel()
+
+
+def test_with_no_worker_at_all_a_short_dev_shm_blocks_nothing(make_pool):
+    pool = make_pool(fast_pool_limits(), use_clock=False, shm_reader=lambda: (64 * MIB, 1 * MIB, True))
+    pool.register(definition())
+    pool.sweep()
+    assert pool.status()["shm_short"] is True and pool.status()["shm_low"] is False
+    assert pool.run("tr", "echo", {}).result["echo"] == {}
+
+
+@needs_smaps
+def test_only_a_worker_holding_a_meaningful_share_of_the_shortfall_is_stopped(make_pool):
+    pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False,
+                     shm_reader=lambda: (64 * MIB, 1 * MIB, True))
+    for key in ("tiny", "big"):
+        pool.register(definition(key, session=fast_session(handshake_timeout=20.0)))
+    seen = []
+    tiny = pool.submit("tiny", "shm_file", {"mb": 1}, on_progress=lambda message: seen.append("t"))
+    big = pool.submit("big", "shm_file", {"mb": 5}, on_progress=lambda message: seen.append("b"))
+    assert wait_until(lambda: "t" in seen and "b" in seen, timeout=30)
+    pool.sweep()
+    # Shortfall 7 MiB: a holder needs 1.75 MiB. One MiB is under it, five is over.
+    with pytest.raises(WorkerKilled) as killed:
+        big.wait(10)
+    assert killed.value.code == "shm_low"
+    assert pool.state("tiny") is WorkerState.BUSY
+    pool.sweep()
+    pool.sweep()
+    assert pool.state("tiny") is WorkerState.BUSY and pool.status()["shm_low"] is False
+    tiny.cancel()
+
+
+def test_stop_and_unregister_say_whether_the_teardown_is_confirmed(make_pool):
+    runtimes = []
+
+    class Survivor(StubProcessRuntime):
+        """Its process stays until the test says it is gone."""
+
+    def factory(*args):
+        runtimes.append(Survivor())
+        return runtimes[-1]
+
+    pool = make_pool(fast_pool_limits(max_resident=8, acquire_timeout=0.4), use_clock=False)
+    pool.register(WorkerDefinition("a", kind="daemon", runtime=factory))
+    pool.warm("a")
+    assert pool.stop("a") is False, "a process that stayed is not a confirmed teardown"
+    assert pool.teardown_confirmed("a") is False
+    assert pool.unregister("a") is False
+    runtimes[0].process.returncode = 0
+    pool.sweep()
+    assert wait_until(lambda: pool.status()["stuck"] == 0)
+    assert pool.teardown_confirmed("a") is True
+    pool.register(WorkerDefinition("b", kind="daemon", runtime=lambda *args: StubProcessRuntime()))
+    pool.warm("b")
+    runtimes_b = pool._entry("b").slot.session
+    runtimes_b.process.returncode = 0
+    assert pool.stop("b") is True
+    assert pool.unregister("b") is True
+    assert pool.unregister("never-registered") is True
+
+
 def test_the_shm_guard_is_off_where_dev_shm_is_not_small_and_separate(make_pool):
     calls = []
 
@@ -4202,11 +4288,11 @@ def test_the_reserve_defaults_to_a_tenth_of_dev_shm_and_can_be_set(make_pool):
     assert pool.status()["shm_low"] is False  # 70 MiB free, reserve 64 MiB
     pool = make_pool(fast_pool_limits(), use_clock=False, shm_reader=lambda: (640 * MIB, 60 * MIB, True))
     pool.sweep()
-    assert pool.status()["shm_low"] is True
+    assert pool.status()["shm_short"] is True
     pool = make_pool(fast_pool_limits(shm_reserve_bytes=10 * MIB), use_clock=False,
                      shm_reader=lambda: (640 * MIB, 60 * MIB, True))
     pool.sweep()
-    assert pool.status()["shm_low"] is False
+    assert pool.status()["shm_short"] is False and pool.status()["shm_low"] is False
 
 
 def test_the_limitations_say_when_dev_shm_is_not_limited_per_plugin(monkeypatch):
@@ -4548,7 +4634,7 @@ def test_an_empty_tiny_dev_shm_does_not_latch_the_guard(make_pool):
     assert pool._shm_reserve(4 * MIB) == 2 * MIB
     low = make_pool(fast_pool_limits(), use_clock=False, shm_reader=lambda: (4 * MIB, 1 * MIB, True))
     low.sweep()
-    assert low.status()["shm_low"] is True
+    assert low.status()["shm_short"] is True
 
 
 def test_the_default_reserve_for_bigger_filesystems_is_unchanged_and_never_above_half(make_pool):
