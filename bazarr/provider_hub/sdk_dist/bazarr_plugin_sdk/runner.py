@@ -64,20 +64,20 @@ log = logging.getLogger("bazarr_plugin_sdk.runner")
 class SdkChannel(WorkerChannel):
     """The reference channel, with failed responses that keep a plugin error's parts."""
 
-    def _respond_error(self, req_id: int, error: BaseException, operation: Operation | None = None) -> None:
+    def _respond_error(self, req_id: int, error: BaseException) -> None:
         if isinstance(error, PluginError):
-            payload = error.to_dict()
-            # The request's secret values never leave the worker in an error, as in the base class.
-            secrets = sorted(
-                (v for v in (operation.secrets.values() if operation else ()) if isinstance(v, str) and v),
-                key=len,
-                reverse=True,
-            )
-            for key in ("message", "traceback", "reason"):
-                if isinstance(payload.get(key), str):
-                    for secret in secrets:
-                        payload[key] = payload[key].replace(secret, "***")
+            # Every secret the host has sent this worker, from any request and in every
+            # escaped spelling, goes out of the text before it is cut to size.
+            with self._lock:
+                secrets = sorted(self._secret_values, key=len, reverse=True)
+
+            def scrub(text: str) -> str:
+                for secret in secrets:
+                    text = text.replace(secret, "***")
+                return text
+
             try:
+                payload = error.to_dict(scrub)
                 self._send({"t": frames.RES, "id": req_id, "ok": False, "error": payload})
                 return
             except ChannelClosed:
@@ -85,7 +85,7 @@ class SdkChannel(WorkerChannel):
             except Exception:
                 # An error that cannot be built or encoded gets the base class's fixed reply.
                 pass
-        super()._respond_error(req_id, error, operation)
+        super()._respond_error(req_id, error)
 
 
 class PluginWorker:

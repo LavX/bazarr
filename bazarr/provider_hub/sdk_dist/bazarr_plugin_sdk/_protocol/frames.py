@@ -73,8 +73,10 @@ line protocol in ``provider_hub.worker`` and are selected by ``wire_version``.
 from __future__ import annotations
 
 import json
+import re
 import struct
 import threading
+import urllib.parse
 
 PROTOCOL_MAJOR = 2
 PROTOCOL_MINOR = 0
@@ -97,6 +99,10 @@ HANDSHAKE_CONTROL_BYTES = 64 * 1024
 DEFAULT_HEARTBEAT_INTERVAL = 15.0
 DEFAULT_HEARTBEAT_MISSES = 3
 DEFAULT_MAX_IN_FLIGHT = 4
+# The longest drain a host may ask for in a shutdown frame: ten minutes.
+MAX_SHUTDOWN_GRACE_MS = 600_000
+# Containers nested deeper than this in a control frame are refused.
+MAX_JSON_DEPTH = 100
 DEFAULT_MAX_RESULT_BYTES = 32 * 1024 * 1024
 
 # The first byte of a v1 line (a JSON object).
@@ -178,12 +184,6 @@ class MalformedFrame(FrameError):
         self.type_byte = type_byte
 
 
-def shown(value, limit=64):
-    """A worker-supplied value, bounded and quoted, for use in an error message."""
-    text = value if isinstance(value, str) else repr(value)
-    return repr(text[:limit]) + ("..." if len(text) > limit else "")
-
-
 def default_caps():
     return {FRAME_CONTROL: MAX_CONTROL_BYTES, FRAME_DATA: MAX_DATA_BYTES}
 
@@ -234,7 +234,10 @@ class FrameWriter:
     interleaved with other frames; the operation id says which they belong to.
     """
 
-    def __init__(self, stream, caps=None, lock=None):
+    def __init__(self, stream, caps=None, lock=None, sender=None):
+        # ``sender`` ("host" or "worker"), when given, makes every control message
+        # this writer sends pass the receiving side's schema first.
+        self._sender = sender
         self._stream = stream
         self.caps = dict(caps) if caps else default_caps()
         self._lock = lock or threading.Lock()
@@ -252,37 +255,56 @@ class FrameWriter:
             self._stream.flush()
 
     def write_control(self, message):
-        body = encode_control(message)
+        body = encode_control(message, self._sender)
         cap = self.caps[FRAME_CONTROL]
         if len(body) > cap:
             raise FrameTooLarge("control message of %d bytes exceeds the %d byte cap" % (len(body), cap))
         self._write(FRAME_CONTROL, body)
 
-    def write_data(self, op_id, data, chunk_size=DEFAULT_CHUNK_BYTES):
-        """Send ``data`` as chunks. Returns ``(chunk_count, total_bytes)``."""
+    def write_data(self, op_id, data, chunk_size=DEFAULT_CHUNK_BYTES, before_chunk=None):
+        """Send ``data`` as chunks. Returns ``(chunk_count, total_bytes)``.
+
+        ``before_chunk``, when given, is called ahead of every chunk and may
+        raise to stop the transfer; chunks already written stay written.
+        """
         cap = self.caps[FRAME_DATA] - DATA_PREFIX.size
         size = max(1, min(int(chunk_size), cap))
         view = memoryview(data)
         count = 0
         for start in range(0, len(view), size):
+            if before_chunk is not None:
+                before_chunk()
             self._write(FRAME_DATA, DATA_PREFIX.pack(op_id) + bytes(view[start:start + size]))
             count += 1
         return count, len(view)
 
 
-def pack_control(message, cap=MAX_CONTROL_BYTES):
+def pack_control(message, cap=MAX_CONTROL_BYTES, sender=None):
     """One whole control frame (header and body) as bytes, checked against ``cap``.
 
     For senders that queue frames for a writer thread instead of writing under
     a lock.
     """
-    body = encode_control(message)
+    body = encode_control(message, sender)
     if len(body) > cap:
         raise FrameTooLarge("control message of %d bytes exceeds the %d byte cap" % (len(body), cap))
     return HEADER.pack(FRAME_CONTROL, len(body)) + body
 
 
-def encode_control(message):
+def encode_control(message, sender=None):
+    """Serialise one control message, refusing exactly what ``decode_control`` refuses.
+
+    With ``sender`` ("host" or "worker") the message must also pass the schema the
+    receiving side checks, so a frame the peer would reject never leaves: it is
+    the sender's mistake (``UnencodableFrame``, a ``ValueError``), not the peer's
+    reason to end the session.
+    """
+    _check_tree(message, True)
+    if sender is not None:
+        try:
+            validate_message(message, sender)
+        except MalformedFrame as error:
+            raise UnencodableFrame(str(error)) from None
     return json.dumps(message, separators=(",", ":"), allow_nan=False, ensure_ascii=False).encode("utf-8")
 
 
@@ -296,6 +318,10 @@ def split_data(body):
 
 def _is_int(value):
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_grace_ms(value):
+    return _is_int(value) and 0 <= value <= MAX_SHUTDOWN_GRACE_MS
 
 
 def _is_num(value):
@@ -316,6 +342,62 @@ def _is_bool(value):
 
 def _is_list(value):
     return isinstance(value, list)
+
+
+def is_secrets(value):
+    """A flat mapping of text names to non-empty text values.
+
+    The only shape a request may carry as ``secrets``: every value is
+    registered for redaction as text, so a number, a nested object, an empty
+    string or bytes would travel unredacted.
+    """
+    return isinstance(value, dict) and all(
+        isinstance(name, str) and isinstance(item, str) and item for name, item in value.items())
+
+
+def secret_forms(value):
+    """Every spelling of a secret that an error message, log line or URL may carry.
+
+    The literal value is never enough: ``KeyError(secret)`` prints through
+    ``repr`` and doubles every backslash, a JSON body escapes control and
+    non-ASCII characters, and a URL percent-encodes the reserved ones. Each
+    spelling is a string to cut out of outgoing text, so the list is built once
+    per secret when it is registered. The literal value comes first.
+    """
+    forms = [value]
+
+    def add(text):
+        if text and text not in forms:
+            forms.append(text)
+
+    bodies = []
+
+    def python_forms(text):
+        for spelled in (repr(text), ascii(text)):
+            body = spelled[1:-1]
+            plain = body.replace("\\'", "'")
+            # repr picks its quote by content: a body holds \' or a bare '.
+            bodies.extend((body, plain, plain.replace("'", "\\'")))
+        bodies.append(repr(text.encode("utf-8", "surrogatepass"))[2:-1])
+
+    def json_forms(text):
+        for ensure_ascii in (True, False):
+            body = json.dumps(text, ensure_ascii=ensure_ascii)[1:-1]
+            bodies.extend((body, body.replace("/", "\\/")))
+
+    python_forms(value)
+    json_forms(value)
+    for body in bodies:
+        add(body)
+        # An error that carries a repr or a JSON document is itself repr'd or
+        # dumped once more on its way out.
+        add(repr(body)[1:-1])
+        add(json.dumps(body)[1:-1])
+    for encoded in (urllib.parse.quote(value, safe=""), urllib.parse.quote(value),
+                    urllib.parse.quote_plus(value)):
+        add(encoded)
+        add(re.sub("%[0-9A-F]{2}", lambda m: m.group(0).lower(), encoded))
+    return forms
 
 
 def _opt(check):
@@ -344,7 +426,7 @@ _REQUIRED = {
 _OPTIONAL = {
     HELLO: {"max_in_flight": _is_int, "worker": _is_dict, "pid": _is_int},
     WELCOME: {"kind": _opt(_is_dict)},
-    REQ: {"deadline_ms": _opt(_is_int), "max_result_bytes": _opt(_is_int), "secrets": _opt(_is_dict)},
+    REQ: {"deadline_ms": _opt(_is_int), "max_result_bytes": _opt(_is_int), "secrets": _opt(is_secrets)},
     CANCEL: {"reason": _opt(_is_str)},
     PROGRESS: {"fraction": _opt(_is_num), "message": _opt(_is_str), "data": _opt(_is_dict)},
     CALL: {"id": _opt(_is_int)},
@@ -358,7 +440,7 @@ _OPTIONAL = {
     },
     HB: {"in_flight": _opt(_is_int), "rss_kb": _opt(_is_int)},
     SANDBOX_BLOCKED: {"id": _opt(_is_int), "errno": _opt(_is_int)},
-    SHUTDOWN: {"grace_ms": _opt(_is_int)},
+    SHUTDOWN: {"grace_ms": _opt(_is_grace_ms)},
 }
 
 
@@ -375,7 +457,8 @@ def validate_message(message, sender):
         raise MalformedFrame("control message has no type")
     allowed = FROM_WORKER if sender == "worker" else FROM_HOST
     if name not in allowed:
-        raise MalformedFrame("%s is not a message a %s may send" % (shown(name), sender))
+        # The value is the peer's own text and may be a secret echoed back: never repeat it.
+        raise MalformedFrame("unknown message type for a %s" % sender)
     for key, check in _REQUIRED[name].items():
         if key not in message or not check(message[key]):
             raise MalformedFrame("%s message has a missing or invalid %r" % (name, key))
@@ -389,12 +472,89 @@ def validate_message(message, sender):
     return message
 
 
+def _no_constant(name):
+    # NaN, Infinity and -Infinity are not JSON, and the encoder refuses them.
+    raise ValueError("non-finite number")
+
+
+def _finite_float(text):
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        # A literal such as 1e999 overflows to infinity.
+        raise ValueError("non-finite number")
+    return value
+
+
+def _no_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+class UnencodableFrame(ValueError):
+    """A message the sender built that the receiver's decoder would refuse.
+
+    It is the sender's own fault and fails the one request or call that built
+    it; it never reaches the wire, so it cannot end a session.
+    """
+
+
+def _check_tree(value, outbound):
+    """The one set of rules for what a control frame may hold, applied both ways.
+
+    Nesting no deeper than ``MAX_JSON_DEPTH``, text that is valid Unicode (no
+    lone surrogates), finite numbers and unique object keys. Parsed input
+    (``outbound`` false) fails as ``MalformedFrame``. A message about to be
+    sent also has to be plain JSON data with text keys, because the encoder
+    would otherwise turn ``{1: "a", "1": "b"}`` into an object with two ``"1"``
+    keys; it fails as ``UnencodableFrame`` (``TypeError`` for a type JSON has
+    no form for).
+    """
+    problem = UnencodableFrame if outbound else MalformedFrame
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, str):
+            try:
+                node.encode("utf-8")
+            except UnicodeEncodeError:
+                # A lone surrogate (\ud800): the receiver could never read it back.
+                raise problem("control frame holds text that is not valid Unicode") from None
+            continue
+        if node is None or isinstance(node, (bool, int)):
+            continue
+        if isinstance(node, float):
+            if node != node or node in (float("inf"), float("-inf")):
+                raise problem("control frame holds a number that is not finite")
+            continue
+        if isinstance(node, dict):
+            if outbound and not all(isinstance(key, str) for key in node):
+                raise TypeError("control message object keys must be text")
+            children = list(node.keys()) + list(node.values())
+        elif isinstance(node, (list, tuple)) and (outbound or isinstance(node, list)):
+            children = node
+        elif outbound:
+            raise TypeError("%s is not JSON serializable" % type(node).__name__)
+        else:
+            continue
+        if depth > MAX_JSON_DEPTH:
+            raise problem("control frame is nested too deeply")
+        stack.extend((child, depth + 1) for child in children)
+
+
 def decode_control(body, sender):
+    """Parse one control frame strictly: valid Unicode, finite numbers, unique keys, bounded depth."""
     try:
-        message = json.loads(body.decode("utf-8"))
+        message = json.loads(
+            body.decode("utf-8"), parse_constant=_no_constant, parse_float=_finite_float,
+            object_pairs_hook=_no_duplicates)
     except (UnicodeDecodeError, ValueError, RecursionError) as error:
         # RecursionError: JSON nested deeper than the interpreter allows.
         raise MalformedFrame("control frame is not valid JSON") from error
+    _check_tree(message, False)
     return validate_message(message, sender)
 
 

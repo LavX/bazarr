@@ -8,7 +8,7 @@ code that names the cause and keep the message for people.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ._protocol.frames import error_object
 from ._protocol.worker_channel import OperationError
@@ -99,15 +99,26 @@ class PluginError(OperationError):
     def __str__(self) -> str:
         return f"{self.code}: {self.message}" if self.message != self.code else self.code
 
-    def to_dict(self) -> dict[str, Any]:
-        """The ``error`` object of a failed response. Absent optional parts are left out."""
-        data = error_object(self.code, self.message[:_MAX_MESSAGE], retryable=self.retryable, retry_after=self.retry_after)
+    def to_dict(self, scrub: Callable[[str], str] | None = None) -> dict[str, Any]:
+        """The ``error`` object of a failed response. Absent optional parts are left out.
+
+        ``scrub`` rewrites each text before it is cut to size, so a value it removes
+        cannot survive as a fragment at the cut.
+        """
+
+        def text(value: str, limit: int, tail: bool = False) -> str:
+            value = scrub(value) if scrub is not None else value
+            return value[-limit:] if tail else value[:limit]
+
+        data = error_object(
+            self.code, text(self.message, _MAX_MESSAGE), retryable=self.retryable, retry_after=self.retry_after
+        )
         if self.field_errors:
-            data["field_errors"] = dict(self.field_errors)
+            data["field_errors"] = {key: text(value, _MAX_MESSAGE) for key, value in self.field_errors.items()}
         if self.reason is not None:
-            data["reason"] = self.reason
+            data["reason"] = text(self.reason, _MAX_MESSAGE)
         if self.detail:
-            data["traceback"] = self.detail[-_MAX_DETAIL:]
+            data["traceback"] = text(self.detail, _MAX_DETAIL, tail=True)
         return data
 
     @classmethod

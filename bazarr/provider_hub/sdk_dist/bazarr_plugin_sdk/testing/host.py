@@ -100,7 +100,7 @@ class Host:
         max_in_flight: int = 4,
         host_calls: Mapping[str, HostCallHandler] | None = None,
     ) -> None:
-        self._writer = frames.FrameWriter(to_worker)
+        self._writer = frames.FrameWriter(to_worker, sender="host")
         self._reader = frames.FrameReader(
             from_worker, {frames.FRAME_CONTROL: frames.HANDSHAKE_CONTROL_BYTES, frames.FRAME_DATA: frames.MAX_DATA_BYTES}
         )
