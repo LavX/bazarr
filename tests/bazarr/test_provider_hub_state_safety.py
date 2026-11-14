@@ -519,13 +519,15 @@ def test_a_state_file_that_is_not_a_state_document_is_not_imported(hub_store, hu
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(state.StateCorruptError):
         state.load_state()
-    with pytest.raises(ValueError):
+    with pytest.raises(state.StateCorruptError):
         state.sync_snapshot()
 
     assert raw_row(hub_engine) is None
     assert path.read_text(encoding="utf-8") == content
+    # The damaged file is copied aside, which pauses the environment cleanup.
+    assert [copy.read_text(encoding="utf-8") for copy in path.parent.glob("state.json.*.corrupt")] == [content]
 
 
 DAMAGED_DOCUMENTS = ["[]", "null", "{}", '{"jobs": []}', '{"installations": []}', "{broken"]

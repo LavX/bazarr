@@ -279,6 +279,60 @@ def test_the_boot_reads_the_copy_then_moves_to_the_database(backend, tmp_path):
             admin.dispose()
 
 
+_BOOT_CHILD_CORRUPT = _BOOT_CHILD.split("print(")[0] + '''print("RESULT " + json.dumps({
+    "held": state.database_held(),
+    "copies": [path.name for path in state.corrupt_copies()],
+}))
+'''
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgresql"])
+@pytest.mark.parametrize("content", ["[]", "null", '{"jobs": []}', "{broken"])
+def test_a_corrupt_state_file_does_not_stop_the_boot(backend, content, tmp_path):
+    """Config import with a state.json that is not a state document.
+
+    The credential migration reaches the file twice (the read, then the copy
+    sync). The boot still completes, the file stays as it was, and a copy is
+    kept, which pauses the environment cleanup.
+    """
+    env = dict(os.environ)
+    schema = None
+    admin = None
+    if backend == "postgresql":
+        url = os.environ.get("BAZARR_PG_TEST_URL")
+        if not url:
+            pytest.skip("BAZARR_PG_TEST_URL is required for real PostgreSQL coverage")
+        schema = "hub_boot_" + uuid.uuid4().hex
+        admin = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        with admin.connect() as connection:
+            connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+        env.update({"POSTGRES_ENABLED": "true", "POSTGRES_URL": url,
+                    "PGOPTIONS": f"-csearch_path={schema}"})
+    config_dir = tmp_path / "config"
+    (config_dir / "provider_hub").mkdir(parents=True)
+    state_file = config_dir / "provider_hub" / "state.json"
+    state_file.write_text(content, encoding="utf-8")
+    script = tmp_path / "boot_child.py"
+    script.write_text(_BOOT_CHILD_CORRUPT, encoding="utf-8")
+    env.update({"BAZARR_REPO_ROOT": os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..")),
+                "BAZARR_CONFIG_DIR": str(config_dir), "SZ_USER_AGENT": "test", "BAZARR_VERSION": "test"})
+    env.pop("BAZARR_PROVIDER_HUB_STATE", None)
+    try:
+        proc = subprocess.run([sys.executable, str(script), "-c", str(config_dir)], env=env,
+                              capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, f"the boot stopped\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        result = json.loads(next(line for line in proc.stdout.splitlines()
+                                 if line.startswith("RESULT "))[len("RESULT "):])
+        assert result["held"] is False
+        assert len(result["copies"]) == 1 and result["copies"][0].endswith(".corrupt")
+        assert state_file.read_text(encoding="utf-8") == content
+    finally:
+        if admin is not None:
+            with admin.connect() as connection:
+                connection.exec_driver_sql(f'DROP SCHEMA "{schema}" CASCADE')
+            admin.dispose()
+
+
 def _plaintext_installation(provider_id="credhub"):
     return {provider_id: {
         "provider_id": provider_id, "name": "Cred Hub", "active_version": "1.0.0", "state": "active",
