@@ -557,6 +557,23 @@ def test_a_symlink_swapped_in_for_a_destination_ancestor_never_leaves_the_destin
     assert list(outside.iterdir()) == []
 
 
+def test_a_snapshot_directory_that_already_exists_is_refused(tmp_path, monkeypatch):
+    """Someone else created a directory inside the snapshot after the empty
+    check: it is not adopted."""
+    dest = tmp_path / 'dest'
+    real_mkdir = os.mkdir
+
+    def mkdir_after_a_rival(path, mode=0o777, *, dir_fd=None):
+        if path == 'providers':
+            real_mkdir(path, mode, dir_fd=dir_fd)
+        return real_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, 'mkdir', mkdir_after_a_rival)
+
+    with pytest.raises(floor.FloorError, match='could not be written'):
+        floor.write_floor(_good_lock(), {'providers/alpha/provider.py': b'x\n'}, dest)
+
+
 def test_an_existing_ancestor_that_is_a_link_is_refused(tmp_path):
     outside = tmp_path / 'outside'
     outside.mkdir()

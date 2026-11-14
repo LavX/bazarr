@@ -487,10 +487,7 @@ def write_floor(lock, data, dest):
         def directory(parts):
             if parts not in opened:
                 parent = directory(parts[:-1])
-                try:
-                    os.mkdir(parts[-1], 0o755, dir_fd=parent)
-                except FileExistsError:
-                    pass
+                os.mkdir(parts[-1], 0o755, dir_fd=parent)
                 opened[parts] = os.open(parts[-1], _DIR_FLAGS, dir_fd=parent)
             return opened[parts]
 
