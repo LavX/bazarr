@@ -2275,7 +2275,8 @@ def test_the_fallback_group_kill_never_names_a_reaped_leader(tmp_path, monkeypat
 
     monkeypatch.setattr(os, "killpg", checked)
     process.stop(1.0)
-    assert seen == [(process.pid, True)], seen
+    # The polite signal and the kill both go to the group, each while the leader is still unreaped.
+    assert seen == [(process.pid, True), (process.pid, True)], seen
     assert process.returncode == 0 and wait_dead(child)
 
 
@@ -2301,7 +2302,8 @@ def test_the_fallback_stop_without_waitid_signals_only_a_worker_it_has_not_reape
     )
     assert quick.stdout.readline().strip() == b"up"
     quick.stop(5.0)
-    assert quick.returncode == 0 and seen == [quick.pid] and quick.group_cleaned is True
+    # The first polite signal and the kill both go to the group, never to a reaped leader.
+    assert quick.returncode == 0 and seen == [quick.pid, quick.pid] and quick.group_cleaned is True
     # One that ignores SIGTERM outlives its grace: the group is signalled while the leader is unreaped.
     stubborn = spawn_worker(
         make_spec(tmp_path, "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('up', flush=True); time.sleep(300)"),
@@ -2309,7 +2311,7 @@ def test_the_fallback_stop_without_waitid_signals_only_a_worker_it_has_not_reape
     )
     assert stubborn.stdout.readline().strip() == b"up"
     stubborn.stop(0.3)
-    assert seen == [quick.pid, stubborn.pid] and stubborn.returncode is not None
+    assert seen == [quick.pid, quick.pid, stubborn.pid, stubborn.pid] and stubborn.returncode is not None
 
 
 @linux_only
