@@ -4032,6 +4032,56 @@ def test_a_pid_taken_by_a_later_process_is_not_ours_without_waitid(monkeypatch):
     assert spawn._owned_without_waitid(os.getpid(), str(int(mark) + 1)) is False
 
 
+@linux_only
+@pytest.mark.parametrize("anchored", [True, False])
+def test_a_process_with_no_saved_identity_is_unknown_not_ours_without_waitid(monkeypatch, anchored):
+    # The identity read at spawn failed, then somebody else reaped the worker and a stranger took its
+    # pid. With no start time to compare, a live /proc entry proves nothing: no group signal, and
+    # what the worker left behind stays unconfirmed.
+    monkeypatch.delattr(os, "waitid", raising=False)
+    monkeypatch.setattr(spawn, "_start_mark", lambda pid: None)
+    sent = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (sent.append((pgid, sig)), real_killpg(pgid, sig))[1])
+    command = [sys.executable, "-c", "import time; time.sleep(60)"]
+    quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if anchored:
+        process = spawn._start_plain(command, **quiet)
+        if process._anchor is None:
+            process.stop(0.5)
+            pytest.skip("no process group anchor on this interpreter")
+        reaped = process._anchor.pid
+    else:
+        process = WorkerProcess(command, start_new_session=True, **quiet)
+        reaped = process.pid
+    assert process._started_mark is None
+    pids = [process.pid] + ([process._anchor.pid] if anchored else [])
+    try:
+        os.killpg(reaped, signal.SIGKILL)
+        os.waitpid(process.pid, 0)
+        if anchored:
+            os.waitpid(reaped, 0)
+        sent.clear()
+        # The pid now answers to a process that started later.
+        monkeypatch.setattr(spawn, "_stat_fields", lambda pid: ("S", "999999999999"))
+        assert process.probe_exit() in (None, "gone")
+        assert process.signal_group(signal.SIGCONT) is None
+        process.stop(0.5)
+        assert [sig for _pgid, sig in sent if _pgid in pids] == [], sent
+        assert process.group_cleaned is False
+    finally:
+        monkeypatch.undo()
+        process.stop(0.5)
+
+
+@linux_only
+def test_a_stranger_on_the_pid_is_unknown_when_no_start_time_was_saved(monkeypatch):
+    monkeypatch.setattr(spawn, "_stat_fields", lambda pid: ("S", "12345"))
+    assert spawn._owned_without_waitid(os.getpid(), None) is None
+    assert spawn._owned_without_waitid(os.getpid(), "12345") is True
+    assert spawn._owned_without_waitid(os.getpid(), "54321") is False
+
+
 def test_the_shm_state_is_none_where_there_is_no_statvfs(monkeypatch):
     monkeypatch.delattr(os, "statvfs", raising=False)
     assert spawn.shm_state() is None

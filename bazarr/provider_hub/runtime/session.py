@@ -297,7 +297,8 @@ def _zombie_or_gone(pid, mark=None):
     ``kill(pid, 0)`` succeeds on a zombie, and on a stranger that reused the pid, so on
     Linux ``/proc/<pid>/stat`` says what is there: its state (a zombie is ``exited``) and
     when it started. A process that started after the child did (``mark`` is what
-    ``_start_mark`` recorded at spawn) is not the child: ``gone``. Where there is no
+    ``_start_mark`` recorded at spawn) is not the child: ``gone``; with no mark saved, a
+    live entry proves nothing about whose it is: ``unknown``. Where there is no
     ``/proc`` either, a pid that answers might be the child or a stranger: ``unknown``,
     and nothing is signalled on that word.
     """
@@ -308,7 +309,10 @@ def _zombie_or_gone(pid, mark=None):
             return _GONE
         except (OSError, IndexError, ValueError):
             return _UNKNOWN
-        if mark is not None and start != mark:
+        if mark is None:
+            # No identity was saved at spawn, so a stranger that reused the pid cannot be told apart.
+            return _UNKNOWN
+        if start != mark:
             return _GONE
         if state in (b"Z", b"X"):
             return _EXITED

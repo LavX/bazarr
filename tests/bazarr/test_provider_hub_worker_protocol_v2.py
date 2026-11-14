@@ -4271,6 +4271,35 @@ def test_a_process_that_took_the_childs_pid_is_not_ours_without_waitid(monkeypat
         process.wait()
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_bare_child_with_no_saved_identity_is_unknown_when_a_stranger_has_its_pid(monkeypatch):
+    # The start time could not be read at spawn; the child is then reaped by somebody else and a
+    # stranger takes the pid. Nothing can tell them apart, so no group signal and no confirmed teardown.
+    monkeypatch.delattr(os, "waitid", raising=False)
+    session, process = _bare_child()
+    session._process_mark = None
+    sent = []
+    real_killpg = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (sent.append((pgid, sig)), real_killpg(pgid, sig))[1])
+    try:
+        os.kill(process.pid, signal.SIGKILL)
+        os.waitpid(process.pid, 0)
+        monkeypatch.setattr(session_module, "_proc_fields", lambda pid: (b"S", b"999999999999"))
+        assert session_module._probe(process, None) == session_module._UNKNOWN
+        with session._group_lock:
+            assert session._ours(process) is False
+        assert session._group_lost is True and session._ownership_unknown is True
+        session.close(grace=0.3)
+        assert [sig for pgid, sig in sent if pgid == process.pid] == [], sent
+        assert session.teardown_confirmed is False
+    finally:
+        monkeypatch.undo()
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
 def test_ownership_is_unknown_and_refused_with_neither_waitid_nor_proc(monkeypatch):
     monkeypatch.delattr(os, "waitid", raising=False)
     monkeypatch.setattr(session_module, "_has_proc", lambda: False)

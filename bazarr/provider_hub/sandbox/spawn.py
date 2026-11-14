@@ -599,7 +599,8 @@ def _owned_without_waitid(pid: int, started: "str | None") -> "bool | None":
     True: its entry in ``/proc`` is there with the start time it had (alive, or a zombie,
     which keeps its pid). False: the entry is gone or belongs to a process that started
     later: somebody else reaped it and the pid may be a stranger's. None: nothing can
-    tell, so ownership is unknown and the caller must not signal.
+    tell (no ``/proc``, an unreadable entry, or no start time saved at spawn to compare
+    with), so ownership is unknown and the caller must not signal.
     """
     if os.path.isdir("/proc/self"):
         try:
@@ -608,7 +609,10 @@ def _owned_without_waitid(pid: int, started: "str | None") -> "bool | None":
             return False
         except (OSError, IndexError, ValueError):
             return None
-        if started is not None and start != started:
+        if started is None:
+            # No identity was recorded at spawn: a stranger that reused the pid looks the same.
+            return None
+        if start != started:
             return False
         return True
     if os.name == "posix":
@@ -832,7 +836,9 @@ class WorkerProcess(subprocess.Popen):
             return "gone"
         except (OSError, IndexError, ValueError):
             return None
-        if self._started_mark is not None and start != self._started_mark:
+        if self._started_mark is None:
+            return None  # no identity saved at spawn: whatever answers to the pid may be a stranger
+        if start != self._started_mark:
             self._leader_lost = True
             return "gone"
         return "exited" if state in ("Z", "X") else "running"
