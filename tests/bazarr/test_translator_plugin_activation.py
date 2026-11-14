@@ -15,12 +15,12 @@ PLUGIN = "lingarr"
 SECRET = "plain-token-0123456789-abcdef"  # pragma: allowlist secret
 
 
-def _manifest(version, fields, backend_fields=()):
+def _manifest(version, fields, backend_fields=(), **extra):
     settings = {"fields": list(fields)}
     if backend_fields:
         settings["backend_types"] = {"openrouter": {"label": "OpenRouter", "fields": list(backend_fields)}}
     return service_manifest(PLUGIN, version, kind="translator", kind_api="bazarr.translator.v1",
-                            settings_version=1, settings=settings)
+                            settings_version=1, settings=settings, **extra)
 
 
 OLD_FIELDS = [{"key": "label", "type": "text"}, {"key": "token", "type": "text"}]
@@ -109,6 +109,25 @@ def test_activating_a_release_that_drops_a_field_removes_it_from_what_is_stored(
     assert _activate()["last_error"] is None
     store._session.expire_all()
     assert store.settings_of(store.get_instance(instance.id)) == {"label": "mine"}
+
+
+def test_a_secret_of_a_field_the_release_removed_does_not_keep_the_owner_waiting(lifecycle):
+    store = lifecycle.store
+    origin = "https://api.example:443"
+    old_fields = [{"key": "label", "type": "text"}, {"key": "token", "type": "secret"},
+                  {"key": "oldkey", "type": "secret"}]
+    new_fields = [{"key": "label", "type": "text"}, {"key": "token", "type": "secret"}]
+    instance = store.create_instance(PLUGIN, settings={"label": "mine"})
+    owner = ("instance", instance.id)
+    store.set_secret(owner, "token", "current-token-0123456789", destinations=frozenset({origin}))
+    # Bound to no address, the way a key entered before the engine named one is.
+    store.set_secret(owner, "oldkey", "obsolete-key-0123456789", destinations=frozenset())
+    lifecycle.stage(_manifest("1.0.0", old_fields, endpoints=[origin]),
+                    _manifest("2.0.0", new_fields, endpoints=[origin]))
+    assert _activate()["last_error"] is None
+    store._session.expire_all()
+    assert store.get_instance(instance.id).awaiting_secrets == 0
+    assert set(store.secret_summary(owner, frozenset({origin}))) == {"token"}
 
 
 def test_a_release_whose_new_rules_the_saved_settings_do_not_meet_holds_them_back_and_switches_them_off(lifecycle):

@@ -66,6 +66,8 @@ def bring_up_to_date(store: TranslatorStore, plugin_id: str, manifest: Mapping[s
         kept = {key: value for key, value in stored.items() if key in known}
         return kept if kept != stored else None
 
+    # A dropped or renamed secret field takes its stored value with it, like a dropped plain field leaves the settings.
+    store.drop_undeclared_secrets(plugin_id, schema_for, skip=blocked)
     store.apply_plugin_update(plugin_id, schema_for, new_settings=prune, plugin_version=parsed.version,
                               settings_version=parsed.settings_version, skip=blocked)
     if blocked:

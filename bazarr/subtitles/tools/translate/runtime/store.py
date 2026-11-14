@@ -721,6 +721,28 @@ class TranslatorStore:
             self.set_secret(owner, key, value if isinstance(value, str) else json.dumps(value),
                             destinations=destinations)
 
+    def drop_undeclared_secrets(self, plugin_id: str, new_schema: Callable[[str, Any], DestinationSchema],
+                                skip: Iterable[Owner] = ()) -> int:
+        """Remove the stored secrets of fields a release no longer declares secret. Returns how many went.
+
+        The release dropped or renamed the field, so nothing reads the value and the settings API cannot clear
+        it by name. Left in place it would keep the owner waiting for secrets for good as soon as its
+        destinations change. Owners in ``skip`` are left exactly as they were.
+        """
+        skipped = set(skip)
+        removed = 0
+        with self.transaction():
+            for kind, row in self._owners_of_plugin(plugin_id):
+                if (kind, row.id) in skipped:
+                    continue
+                declared = {item["key"] for item in new_schema(kind, row).fields if is_secret_field(item)}
+                for secret in self._secret_rows((kind, row.id)):
+                    if secret.field not in declared:
+                        self._session.delete(secret)
+                        removed += 1
+            self._session.flush()
+        return removed
+
     def move_newly_secret_values(self, plugin_id: str, new_schema: Callable[[str, Any], DestinationSchema]) -> int:
         """Move every plaintext value of a field the plugin now declares secret into the secret store.
 

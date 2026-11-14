@@ -1,7 +1,7 @@
 /* eslint-disable camelcase -- transport names. */
 import { FunctionComponent, useState } from "react";
-import { Alert, Button, Group, Stack } from "@mantine/core";
-import { useSaveEngine } from "@/apis/hooks/translation";
+import { Alert, Button, Group, Stack, Switch } from "@mantine/core";
+import { readRefusal, useSaveEngine } from "@/apis/hooks/translation";
 import {
   initialValues,
   PluginSettingsForm,
@@ -45,8 +45,42 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
     return saved;
   }, revision.conflicted);
 
+  // A plugin update can turn an engine off until its settings are reviewed, and saving them does not turn it
+  // back on, so the switch is here. It carries the revision the engine has now; a form that was current
+  // before the switch stays current after it.
+  const [switchProblem, setSwitchProblem] = useState("");
+  const switchEngine = (enabled: boolean) => {
+    const draftIsCurrent = revision.forSave() === engine.revision;
+    setSwitchProblem("");
+    mutation.mutate(
+      { id: engine.id, body: { enabled, expected_revision: engine.revision } },
+      {
+        onSuccess: (saved) => {
+          if (draftIsCurrent) {
+            revision.reload(saved.engine.revision);
+          }
+        },
+        onError: (error) =>
+          setSwitchProblem(
+            readRefusal(error)?.message ?? "The request failed. Try again.",
+          ),
+      },
+    );
+  };
+
   return (
     <Stack>
+      <Switch
+        label="Use this engine"
+        checked={engine.enabled}
+        disabled={mutation.isPending}
+        onChange={(event) => switchEngine(event.currentTarget.checked)}
+      />
+      {switchProblem && (
+        <Alert color="red" role="alert">
+          {switchProblem}
+        </Alert>
+      )}
       <PluginSettingsForm
         fields={fields}
         values={values}
