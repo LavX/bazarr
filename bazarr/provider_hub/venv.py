@@ -325,8 +325,10 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
             try:
                 if under(os.readlink(os.path.join(base, "fd", descriptor))):
                     return True
+            except PermissionError:
+                raise  # a descriptor that cannot be read could point anywhere
             except OSError:
-                continue
+                continue  # closed since the listing
         with open(os.path.join(base, "maps"), encoding="utf-8", errors="replace") as maps:
             for line in maps:
                 fields = line.rstrip("\n").split(None, 5)
@@ -381,8 +383,13 @@ def processes_using_directory(directory: str | os.PathLike[str], proc: str = "/p
             except ProcessLookupError:
                 continue  # exited since the last look
             except FileNotFoundError:
-                if os.path.lexists(os.path.join(proc, name)):
-                    still_unreadable.append(name)  # a file went missing, the process did not
+                try:
+                    os.lstat(os.path.join(proc, name))
+                except FileNotFoundError:
+                    continue  # the process entry is gone: it exited
+                except OSError:
+                    pass  # cannot tell, so it is not a confirmed exit
+                still_unreadable.append(name)  # a file went missing, the process did not
             except OSError:
                 still_unreadable.append(name)  # not a confirmed exit, so still unreadable
         unreadable = still_unreadable
