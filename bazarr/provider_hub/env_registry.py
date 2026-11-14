@@ -32,6 +32,7 @@ from typing import Any
 from .state import (
     corrupt_copies, provider_hub_dir, load_state, load_state_strict, mutate_state, mutate_state_checked, read_state_document,
 )
+from .state_store import StateConflictError
 from .venv import (
     SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, has_parent_reference, is_pinned, path_key, pinned_paths,
     processes_using_directory, python_executable, validated_bundle_path, validated_hub_path, validated_interpreter,
@@ -599,7 +600,9 @@ def cleanup_environments(root: str | Path) -> list[str]:
     # directory a cleanup is about to remove.
     with _ENV_LOCK:
         try:
-            mutate_state_checked(apply, validate_inventory)
-        except (StateUnreadable, OSError, ValueError):
+            # Directories are removed inside this decision, so a lost race must
+            # not run it again on a state it was not made for.
+            mutate_state_checked(apply, validate_inventory, retry_on_conflict=False)
+        except (StateUnreadable, StateConflictError, OSError, ValueError):
             logger.warning("Provider Hub: the state could not be read, so no environment was removed", exc_info=True)
     return removed

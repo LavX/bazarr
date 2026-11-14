@@ -170,10 +170,12 @@ def test_an_enable_toggle_that_registers_paths_commits_once(hub, monkeypatch):
     state = load_state()
     assert state["installations"]["examplehub"]["enabled"] is True
     assert "examplehub.token" in state["plugin_secret_paths"]
-    assert raw_row(hub)[0] == before + 1
+    # The row commits first, then the settings write registers its path in a
+    # write of its own.
+    assert raw_row(hub)[0] == before + 2
 
 
-def test_a_refused_toggle_leaves_the_nested_path_write_out_too(hub, monkeypatch):
+def test_a_refused_toggle_puts_the_row_back(hub, monkeypatch):
     from provider_hub.service import ProviderHubSettingsError, update_provider
     from provider_hub.state import load_state
     from secret_store import registry
@@ -187,13 +189,14 @@ def test_a_refused_toggle_leaves_the_nested_path_write_out_too(hub, monkeypatch)
         "provider_id": "examplehub", "name": "Example", "active_version": "1.0.0",
         "state": "active", "pending_restart": False, "manifest": _manifest(provider_id="examplehub"),
     }})
-    before = raw_row(hub)
 
     with pytest.raises(ProviderHubSettingsError):
         update_provider("examplehub", enabled=True)
 
-    assert raw_row(hub) == before
-    assert "examplehub.token" not in load_state()["plugin_secret_paths"]
+    # The toggle was refused after the commit, so the row is restored. A secret
+    # path the settings write registered stays: paths only ever accumulate.
+    row = load_state()["installations"]["examplehub"]
+    assert "enabled" not in row
 
 
 def test_the_decrypt_block_cache_follows_database_writes(hub):

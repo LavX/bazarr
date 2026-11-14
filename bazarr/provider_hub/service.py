@@ -1449,7 +1449,9 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 "rejected_plugins": rejected_plugins,
             }
 
-        result = mutate_state(refresh)
+        # The fetches above run inside this mutation, so a lost race must not
+        # run it again: it fails with a conflict and the refresh is retried.
+        result = mutate_state(refresh, retry_on_conflict=False)
         sources_count = result["sources"]
         entries_count = result["entries"]
         ok_sources = result["sources_ok"]
@@ -1713,6 +1715,16 @@ def _effective_installation_config(installation: dict[str, Any],
     return effective, undecryptable
 
 
+_ABSENT = object()
+
+
+def _restore_after_refused_update(provider_id: str, previous: dict[str, Any], restore) -> None:
+    try:
+        restore(previous)
+    except Exception:
+        logging.getLogger(__name__).exception("Provider Hub: could not put %s back after a refused update", provider_id)
+
+
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if config is not None:
         if not isinstance(config, dict):
@@ -1834,27 +1846,29 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
                 next_config[key] = value
         return next_config
 
-    def update_installation(state: dict[str, Any]) -> dict[str, Any] | None:
+    def update_installation(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        # A pure change to the document: a lost race reruns it, so it must not
+        # touch Bazarr's own settings or anything else outside the state. The
+        # enabled toggle's settings write happens after the commit, below.
         provider = (state.get("installations") or {}).get(provider_id)
         if not isinstance(provider, dict):
             return None
 
-        # Encrypt and validate before anything is written: the toggle below
-        # persists Bazarr's own settings store even if the Hub state save
-        # fails, so a refused configuration must refuse it too.
+        # Encrypt and validate before anything is written, so a refused
+        # configuration refuses the whole update.
         next_config = _encrypt_provider_config(provider, config) if config is not None else None
 
+        previous: dict[str, Any] = {}
+
+        def remember(key: str) -> None:
+            previous[key] = copy.deepcopy(provider[key]) if key in provider else _ABSENT
+
         if enabled is not None:
+            remember("enabled")
             provider["enabled"] = bool(enabled)
-            if not get_kind(kind_of(provider)).set_enabled(provider, bool(enabled)):
-                # Raised inside the mutation, so the Hub state is not saved
-                # either and the whole update is refused, configuration included.
-                raise ProviderHubSettingsError(
-                    f"Could not {'enable' if enabled else 'disable'} {provider_id}: "
-                    f"{ENABLED_PROVIDERS_NOT_SAVED}"
-                )
 
         if next_config is not None:
+            remember("config")
             provider["config"] = next_config
             # A re-entered credential ends the decrypt-failure note: the
             # installation stops asking for the key once its stored config
@@ -1862,34 +1876,65 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
             if provider.get("last_error") == DECRYPT_FAILED_MESSAGE:
                 _effective, undecryptable = _effective_installation_config(provider)
                 if not undecryptable:
+                    remember("last_error")
                     provider["last_error"] = None
 
         state.setdefault("installations", {})[provider_id] = provider
         _persist_plugin_secret_paths(state, provider)
-        return dict(provider)
+        return dict(provider), previous
 
-    if config is None:
-        provider = mutate_state(update_installation)
-    else:
-        # A config save follows the same destination rule the settings save
-        # follows, and its check and its write share the boundary the
-        # settings save commits under, the config lock: the check re-reads
-        # the two stores inside it, so a settings save cannot land a token
-        # between this check and this write, and this save cannot land a move
-        # between the settings save's check and its write either. The state
-        # lock is taken first, because a mutation under it reaches the
-        # enabled-providers sync, which takes the config lock itself: the
-        # other order would let a config save and an enable toggle wait on
-        # each other's locks.
-        from app.config import refuse_unverified_provider_hub_config_move
-        from discover.metadata import CONFIG_LOCK
+    def restore_previous(previous: dict[str, Any]) -> None:
+        def restore(state: dict[str, Any]) -> None:
+            row = (state.get("installations") or {}).get(provider_id)
+            if not isinstance(row, dict):
+                return
+            for key, value in previous.items():
+                if value is _ABSENT:
+                    row.pop(key, None)
+                else:
+                    row[key] = value
 
-        from .state import state_write_lock
-        with state_write_lock(), CONFIG_LOCK:
-            refuse_unverified_provider_hub_config_move(provider_id, config)
-            provider = mutate_state(update_installation)
-    if provider is None:
-        return None
+        mutate_state(restore)
+
+    # The state lock is taken first, because a settings write reaches the
+    # enabled-providers sync, which takes the config lock itself: the other
+    # order would let a config save and an enable toggle wait on each other's
+    # locks.
+    from .state import state_write_lock
+    with state_write_lock():
+        if config is None:
+            outcome = mutate_state(update_installation)
+        else:
+            # A config save follows the same destination rule the settings save
+            # follows, and its check and its write share the boundary the
+            # settings save commits under, the config lock: the check re-reads
+            # the two stores inside it, so a settings save cannot land a token
+            # between this check and this write, and this save cannot land a move
+            # between the settings save's check and its write either.
+            from app.config import refuse_unverified_provider_hub_config_move
+            from discover.metadata import CONFIG_LOCK
+
+            with CONFIG_LOCK:
+                refuse_unverified_provider_hub_config_move(provider_id, config)
+                outcome = mutate_state(update_installation)
+        if outcome is None:
+            return None
+        provider, previous = outcome
+        if enabled is not None:
+            # The toggle writes Bazarr's own settings store. It runs once, after
+            # the state commit is known, and a refusal puts the row back so the
+            # whole update is refused, configuration included.
+            try:
+                saved = get_kind(kind_of(provider)).set_enabled(provider, bool(enabled))
+            except Exception:
+                _restore_after_refused_update(provider_id, previous, restore_previous)
+                raise
+            if not saved:
+                _restore_after_refused_update(provider_id, previous, restore_previous)
+                raise ProviderHubSettingsError(
+                    f"Could not {'enable' if enabled else 'disable'} {provider_id}: "
+                    f"{ENABLED_PROVIDERS_NOT_SAVED}"
+                )
     if config is not None:
         get_kind(kind_of(provider)).on_config_saved(provider_id)
     if config is not None or enabled is not None:

@@ -17,6 +17,7 @@ from sqlalchemy.pool import NullPool
 
 import provider_hub_state_engines as engines
 from provider_hub_state_engines import raw_row
+from test_provider_hub import _manifest_with_region
 
 hub_engine = engines.hub_engine
 hub_store = engines.hub_store
@@ -30,6 +31,20 @@ def snapshot_file(tmp_path, monkeypatch):
     path = tmp_path / "snapshot" / "state.json"
     monkeypatch.setattr(state, "state_file", lambda: path)
     return path
+
+
+def _installation(provider_id="examplehub", **extra):
+    row = {"provider_id": provider_id, "name": "Example", "active_version": "1.0.0",
+           "state": "active", "pending_restart": False, "manifest": _manifest_with_region(provider_id=provider_id)}
+    row.update(extra)
+    return row
+
+
+def _seed(installations):
+    from provider_hub.state import load_state, save_state
+    state = load_state()
+    state["installations"].update(installations)
+    save_state(state)
 
 
 # Database error text -------------------------------------------------------
@@ -217,3 +232,111 @@ def test_two_writers_never_share_a_temp_file(tmp_path, monkeypatch):
     state.write_state_file({"n": 1}, tmp_path / "state.json")
     state.write_state_file({"n": 2}, tmp_path / "state.json")
     assert len(set(names)) == 2
+
+
+# Retries -------------------------------------------------------------------
+
+
+def _lose_races(monkeypatch, losses, only_documents_with=""):
+    """Make the next ``losses`` commits (of documents containing the text) find the row already moved on."""
+    from provider_hub import state_store
+    real = state_store._commit_document
+    remaining = [losses]
+
+    def commit(connection, revision, document):
+        if remaining[0] > 0 and only_documents_with in document:
+            remaining[0] -= 1
+            raise state_store._StaleRevision()
+        return real(connection, revision, document)
+
+    monkeypatch.setattr(state_store, "_commit_document", commit)
+
+
+def _enable_calls(monkeypatch, result=True):
+    calls = []
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+                        lambda provider_id, enabled: calls.append((provider_id, enabled)) or result)
+    return calls
+
+
+def test_a_lost_race_runs_the_toggle_once_after_the_commit(hub_store, hub_engine, snapshot_file, monkeypatch):
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state
+    _seed({"examplehub": _installation()})
+    calls = _enable_calls(monkeypatch)
+    committed_when_toggled = []
+    monkeypatch.setattr(
+        "provider_hub.kinds.subtitle_provider.set_bazarr_provider_enabled",
+        lambda provider_id, enabled: committed_when_toggled.append(
+            load_state()["installations"][provider_id].get("enabled")) or calls.append((provider_id, enabled)) or True)
+    _lose_races(monkeypatch, 1)
+
+    update_provider("examplehub", enabled=True)
+
+    assert calls == [("examplehub", True)]
+    assert committed_when_toggled == [True]
+    assert load_state()["installations"]["examplehub"]["enabled"] is True
+
+
+def test_a_write_that_never_wins_leaves_the_settings_alone(hub_store, hub_engine, snapshot_file, monkeypatch):
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state
+    from provider_hub.state_store import StateConflictError
+    _seed({"examplehub": _installation()})
+    calls = _enable_calls(monkeypatch)
+    _lose_races(monkeypatch, 5)
+    before = raw_row(hub_engine)
+
+    with pytest.raises(StateConflictError):
+        update_provider("examplehub", enabled=True)
+
+    assert calls == []
+    assert raw_row(hub_engine) == before
+    assert "enabled" not in load_state()["installations"]["examplehub"]
+
+
+def test_a_refused_toggle_puts_the_row_back(hub_store, hub_engine, snapshot_file, monkeypatch):
+    from provider_hub.service import ProviderHubSettingsError, update_provider
+    from provider_hub.state import load_state
+    _seed({"examplehub": _installation(enabled=False, config={"region": "eu"})})
+    calls = _enable_calls(monkeypatch, result=False)
+
+    with pytest.raises(ProviderHubSettingsError):
+        update_provider("examplehub", enabled=True, config={"region": "us"})
+
+    assert calls == [("examplehub", True)]
+    row = load_state()["installations"]["examplehub"]
+    assert row["enabled"] is False
+    assert row["config"] == {"region": "eu"}
+
+
+def test_a_catalog_refresh_is_not_run_a_second_time_after_a_lost_race(hub_store, hub_engine, snapshot_file, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state_store import StateConflictError
+    fetches = []
+
+    def fetch(*args, **kwargs):
+        fetches.append(1)
+        raise RuntimeError("catalog unreachable")
+
+    monkeypatch.setattr(service, "_fetch_github_catalog", fetch)
+    # The job rows the refresh writes commit on their own; the refresh itself is the one that stamps this.
+    _lose_races(monkeypatch, 1, only_documents_with="last_attempted_at")
+
+    with pytest.raises(StateConflictError):
+        service.refresh_catalog()
+
+    assert len(fetches) == 1
+
+
+def test_a_cleanup_is_not_run_a_second_time_after_a_lost_race(hub_store, hub_engine, snapshot_file, tmp_path, monkeypatch):
+    from provider_hub import env_registry
+    _seed({"examplehub": _installation()})
+    runs = []
+    original = env_registry._legacy_environment_dirs
+    monkeypatch.setattr(env_registry, "_legacy_environment_dirs", lambda root: runs.append(1) or original(root))
+    _lose_races(monkeypatch, 1)
+
+    assert env_registry.cleanup_environments(tmp_path / "provider_hub") == []
+
+    assert len(runs) <= 1
