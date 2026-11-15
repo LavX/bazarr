@@ -93,17 +93,33 @@ class _Abandoned(OperationCancelled):
 class SdkChannel(WorkerChannel):
     """The reference channel, with failed responses that keep a plugin error's parts."""
 
-    def retire(self, status: int) -> None:
-        """Stop taking calls and end once the answers in progress are written.
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Requests whose answer is still to be written, and after which the worker ends.
+        self._retiring: set[int] = set()
 
-        New requests get ``shutting_down``; the drain that follows cancels what runs,
-        says goodbye and closes, and the worker exits with ``status``.
+    def retire(self, status: int, operation: Operation) -> None:
+        """Stop taking calls now, and end once ``operation``'s answer is written.
+
+        New requests get ``shutting_down`` from here on. The drain that ends the worker
+        cancels what still runs, so it only starts after the answer of the retiring request
+        has gone out: its result must not be turned into a cancel. The worker then says
+        goodbye, closes and exits with ``status``.
         """
         if self._ended.is_set():
             return  # the host is already shutting this worker down; it exits as it was told to
         self.exit_status = status
+        with self._lock:
+            self._retiring.add(operation.id)
         self._stopping.set()
-        self._ended.set()
+
+    def _forget(self, operation: Operation) -> None:
+        super()._forget(operation)  # runs once the answer is written, whatever it was
+        with self._lock:
+            self._retiring.discard(operation.id)
+            last = not self._retiring and self._stopping.is_set() and self.exit_status == EXIT_ABANDONED
+        if last:
+            self._ended.set()
 
     def _respond_error(self, req_id: int, error: BaseException) -> None:
         if isinstance(error, PluginError):
@@ -194,7 +210,7 @@ class PluginWorker:
                 # running: the request itself, or what it left behind. Nothing else may run beside
                 # it, so the worker ends once the answer (a result or a cancel) is written.
                 log.warning("retiring the worker, left running: %s", ", ".join(grace.abandoned))
-                self.channel.retire(EXIT_ABANDONED)
+                self.channel.retire(EXIT_ABANDONED, operation)
         if operation.cancelled.is_set():
             raise OperationCancelled(operation.cancel_reason or "cancelled")
         return pack_result(value)
