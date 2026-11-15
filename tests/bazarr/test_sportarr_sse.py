@@ -185,7 +185,7 @@ def test_reconnect_uses_cursor_and_bounded_backoff():
                 ]
                 return
             connected.set()
-            self.closed.wait(60)
+            self.closed.wait(300)
 
     def factory():
         t = Dropped()
@@ -643,7 +643,7 @@ def test_subscription_after_startup_snapshot_queues_another_repair():
         def stream(self, client, cursor, on_open):
             assert allow_open.wait(60)
             on_open()
-            self.closed.wait(60)
+            self.closed.wait(300)
             return iter(())
 
     transport = Delayed()
@@ -774,6 +774,10 @@ def test_dns_setup_can_be_cancelled_and_has_an_absolute_deadline(
             while not marker.exists():
                 if self.finished.wait(0.05):
                     return
+            if cancel:
+                # Only an explicit close may end the setup in this variant.
+                self.finished.wait()
+                return
             super().run()
 
     monkeypatch.setattr(module, "Timer", TimerArmedByTheHelper)
@@ -821,8 +825,12 @@ def test_tls_setup_is_actively_cancelled(phase):
     )
     try:
         assert started.wait(60)
+        # Hang bounds above; this measures the explicit close. The stream
+        # phase has a 5 s passive connect timeout, the worker phase 30 s.
+        start = time.monotonic()
         transport.close()
         thread.join(60)
+        assert time.monotonic() - start < (4 if phase == "stream" else 10)
         assert not thread.is_alive() and errors
         assert transport._process.poll() is not None
     finally:
@@ -1015,7 +1023,7 @@ def test_actual_helpers_reconnect_with_cursor_and_reap_predecessor():
                 self.wfile.flush()
             else:
                 reconnected.set()
-                release.wait(60)
+                release.wait(300)
 
         def log_message(self, *args):
             pass
