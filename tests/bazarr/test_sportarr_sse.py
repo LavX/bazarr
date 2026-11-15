@@ -53,7 +53,8 @@ class Transport:
         self.opened.set()
         on_open()
         yield from self.lines
-        self.closed.wait(60)
+        # Longer than every stop bound, so only close() ends it.
+        self.closed.wait(300)
 
     def close(self):
         self.closed.set()
@@ -583,7 +584,11 @@ def test_incomplete_headers_are_actively_cancelled_and_joined(
         if phase == "worker":
             transport = client._work_transport
         process = getattr(transport, "_process", None)
+        # The 60 s wait is a hang bound. The passive setup deadline is 30 s, so
+        # stop must cancel the setup actively, well before that.
+        start = time.monotonic()
         stopped = client.stop(timeout=60)
+        assert time.monotonic() - start < 10
         assert stopped and not client.is_alive()
         if process is not None:
             assert process.poll() is not None
@@ -750,11 +755,28 @@ def test_dns_setup_can_be_cancelled_and_has_an_absolute_deadline(
         "from pathlib import Path\n"
         "def blocked(*args, **kwargs):\n"
         f"    Path({str(marker)!r}).touch()\n"
-        "    time.sleep(60)\n"
+        "    time.sleep(600)\n"
         "socket.getaddrinfo = blocked\n"
         f'runpy.run_path({str(module.WORKER_PATH)!r}, run_name="__main__")\n'
     )
     monkeypatch.setattr(module, "WORKER_PATH", wrapper)
+    timers = []
+
+    class TimerArmedByTheHelper(threading.Timer):
+        """The real deadline timer, counting down from the moment the helper
+        reaches DNS, so a slow helper boot cannot expire it early."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            timers.append(self)
+
+        def run(self):
+            while not marker.exists():
+                if self.finished.wait(0.05):
+                    return
+            super().run()
+
+    monkeypatch.setattr(module, "Timer", TimerArmedByTheHelper)
     transport = module.OwnedHTTPTransport(setup_timeout=2)
     thread, errors = _start_http_request(transport, "http://fixture.invalid:1234")
     try:
@@ -762,9 +784,14 @@ def test_dns_setup_can_be_cancelled_and_has_an_absolute_deadline(
         while not marker.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert marker.exists()
+        # The waits are hang bounds; the 10 s check measures the active
+        # cancel or the 2 s deadline from the moment DNS was entered.
+        start = time.monotonic()
         if cancel:
             transport.close()
         thread.join(60)
+        assert time.monotonic() - start < 10
+        assert [timer.interval for timer in timers] == [2]
         assert not thread.is_alive() and errors
         assert transport._process.poll() is not None
     finally:
@@ -1093,8 +1120,11 @@ def test_lost_parent_control_pipe_exits_blocked_helper(slow_headers_server):
     try:
         assert started.wait(60)
         # Parent exit closes this descriptor even when Requests has no response yet.
+        # The helper must notice by itself, well before the 30 s setup deadline.
+        start = time.monotonic()
         transport._process.stdin.close()
         thread.join(60)
+        assert time.monotonic() - start < 10
         assert not thread.is_alive() and errors
         assert transport._process.poll() is not None
     finally:
