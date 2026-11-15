@@ -806,6 +806,39 @@ def test_result_bound_by_the_request_is_enforced_and_the_session_survives(sessio
     assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
 
 
+def test_honest_worker_refuses_an_inline_result_over_the_request_bound(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("inline_blob", {"size": 5000}, max_result_bytes=1000, timeout=10)
+    assert caught.value.code == frames.Codes.RESULT_TOO_LARGE
+    assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+def test_host_refuses_an_inline_result_over_the_request_bound_from_a_worker_that_sends_it_anyway(session):
+    with pytest.raises(ResultTooLarge):
+        session.request("inline_blob", {"size": 5000, "overshoot": True}, max_result_bytes=1000, timeout=10)
+    assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
+
+
+def test_an_inline_result_within_the_request_bound_is_delivered(session):
+    outcome = session.request("inline_blob", {"size": 100}, max_result_bytes=1000, timeout=10)
+    assert outcome.result == {"text": "y" * 100}
+
+
+def test_the_bound_counts_the_inline_part_and_the_data_together_on_the_host(session):
+    # 600 data bytes and an inline part of about 20 bytes fit 700; 700 data bytes do not.
+    assert len(session.request("chunks", {"size": 600}, max_result_bytes=700, timeout=10).data) == 600
+    with pytest.raises(RequestFailed) as caught:
+        session.request("chunks", {"size": 690}, max_result_bytes=700, timeout=10)
+    assert caught.value.code == frames.Codes.RESULT_TOO_LARGE
+
+
+def test_host_counts_the_inline_part_with_the_data_bytes_it_received(session):
+    # 690 data bytes alone fit 700; with the inline reply that follows them they do not.
+    with pytest.raises(ResultTooLarge):
+        session.request("chunks", {"size": 690, "overshoot": True}, max_result_bytes=700, timeout=10)
+    assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
+
+
 def test_in_flight_limit_refuses_without_sending(make_session):
     session = make_session({"max_in_flight": 2})
     session.start()

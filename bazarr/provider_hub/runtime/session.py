@@ -928,6 +928,11 @@ class WorkerSession:
             if code == Codes.CANCELLED:
                 return None, None, True
             return None, self._failed(error, code, request), False
+        # The cap covers the whole result, as the worker counts it: the JSON of the inline
+        # part and every data byte. A worker that does not keep to it is not trusted to.
+        inline = len(frames.encode_control(message.get("result") or {}))
+        if request.received + inline > request.max_result_bytes:
+            return None, ResultTooLarge("result exceeded %d bytes" % request.max_result_bytes), False
         data = b"".join(request.chunks)
         declared = message.get("bytes")
         problem = None

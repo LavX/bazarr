@@ -15,6 +15,8 @@ Operations:
 ``chunks``         returns ``size`` bytes of data (``overshoot`` sends them
                    without honoring the request's limit; ``pause_file`` is
                    written after the first chunk, then the stream waits for a cancel).
+``inline_blob``    returns an inline result of ``size`` characters (``overshoot``
+                   sends it without honoring the request's limit).
 ``call``           makes the host call ``name`` with ``params`` and returns the ack.
 ``translate``      a fake translator: reserve, work in batches with a
                    checkpoint each, report usage, return the lines. Knobs in
@@ -241,6 +243,12 @@ def _handle(operation):
             operation._channel._writer.write_data(operation.id, pattern)
             return {"size": size}
         return worker_channel.OperationResult({"size": size}, pattern)
+    if name == "inline_blob":
+        result = {"text": "y" * int(params.get("size", 1000))}
+        if params.get("overshoot"):
+            # A worker that sends more inline than the request allows.
+            operation._channel._send({"t": frames.RES, "id": operation.id, "ok": True, "result": result})
+        return result
     if name == "call":
         try:
             if "as_request" in params:
