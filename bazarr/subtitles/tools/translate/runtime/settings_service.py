@@ -136,12 +136,28 @@ _RUNNING_TESTS: set[int] = set()
 _RUNNING_LOCK = threading.Lock()
 
 
-def _claim_test(connection_id: int) -> bool:
+class _Claim:
+    """The right to run one test of a connection. Released once, by whoever finishes with it last: the request,
+    or the probe's own thread when the request has stopped waiting for a probe that is still running."""
+
+    def __init__(self, connection_id: int):
+        self.connection_id = connection_id
+        self.handed_to_probe = False
+        self._released = False
+
+    def release(self) -> None:
+        with _RUNNING_LOCK:
+            if not self._released:
+                self._released = True
+                _RUNNING_TESTS.discard(self.connection_id)
+
+
+def _claim_test(connection_id: int) -> "_Claim | None":
     with _RUNNING_LOCK:
         if connection_id in _RUNNING_TESTS:
-            return False
+            return None
         _RUNNING_TESTS.add(connection_id)
-        return True
+        return _Claim(connection_id)
 
 
 def _release_test(connection_id: int) -> None:
@@ -488,6 +504,19 @@ class TranslatorSettingsService:
         expected = self._expected(payload, required=values is not None or bool(clear) or enabled is not None)
         if expected is not None and instance.revision != expected:
             raise StaleRevisionError("The engine settings changed since they were loaded.", revision=instance.revision)
+        # Everything that may call the plugin (its validate hook) or read the manifest is done first, before any
+        # lock is taken: a slow plugin must not hold the config lock. The revision check inside the transaction
+        # still refuses a save whose state moved in the meantime.
+        legacy = legacy_engines.legacy_engine_for(instance.plugin_id) is not None
+        commit: Callable[[], None] | None = None
+        if values is not None or clear:
+            if not legacy:
+                plugin = self._plugin(instance.plugin_id)
+                if plugin is None or not plugin.active:
+                    raise PluginUnavailableError("The plugin for this engine is not installed.")
+                commit = self._prepare_engine_values(instance, plugin, values, clear, payload, expected)
+        elif enabled is True:
+            self._check_engine_before_turning_on(instance)
         # The config lock is taken before the write transaction, the one order every writer of both keeps, and it
         # is held to the end, the undo included, so nothing else writes config.yaml between the save and its undo.
         #
@@ -498,16 +527,10 @@ class TranslatorSettingsService:
             undo: Callable[[], None] | None = None
             try:
                 with self._store.transaction():
-                    if values is not None or clear:
-                        if legacy_engines.legacy_engine_for(instance.plugin_id) is not None:
-                            undo = self._save_legacy_values(instance, values or {}, clear, payload, expected)
-                        else:
-                            plugin = self._plugin(instance.plugin_id)
-                            if plugin is None or not plugin.active:
-                                raise PluginUnavailableError("The plugin for this engine is not installed.")
-                            self._save_engine_values(instance, plugin, values, clear, payload, expected)
-                    elif enabled is True:
-                        self._check_engine_before_turning_on(instance)
+                    if legacy and (values is not None or clear):
+                        undo = self._save_legacy_values(instance, values or {}, clear, payload, expected)
+                    elif commit is not None:
+                        commit()
                     if enabled is not None and bool(instance.enabled) != enabled:
                         # The switch is swapped against the revision the client sent. Only when this request's own
                         # save has just moved it on does the switch use the revision that save produced.
@@ -536,7 +559,8 @@ class TranslatorSettingsService:
         self._validate(schema, self._merged(self._store.settings_of(instance), {}, schema), stored, plugin.plugin_id,
                        "engine", "", contents=self._store.secret_contents(owner, schema.fields))
 
-    def _save_engine_values(self, instance, plugin, values, clear, payload, expected) -> None:
+    def _prepare_engine_values(self, instance, plugin, values, clear, payload, expected) -> Callable[[], None]:
+        """Check an engine save against its manifest and its plugin, and return the step that commits it."""
         schema = self._engine_schema(plugin)
         owner = (INSTANCE, instance.id)
         before = self._store.settings_of(instance)
@@ -552,18 +576,23 @@ class TranslatorSettingsService:
         after = validated.settings
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
-        # The revision claim, the settings and every secret write or clear commit together. A save that only
-        # clears a secret still claims a revision, so a concurrent save of the same engine is never overwritten
-        # behind its back.
-        with self._store.transaction():
-            try:
-                self._store.save_instance_settings(
-                    instance.id, after, schema=schema, settings_version=parsed.settings_version if parsed else None,
-                    plugin_version=plugin.version, expected_revision=expected)
-            except StoreStale as error:
-                raise StaleRevisionError("The engine settings changed since they were loaded.",
-                                         revision=error.revision) from error
-            self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
+
+        def commit() -> None:
+            # The revision claim, the settings and every secret write or clear commit together. A save that only
+            # clears a secret still claims a revision, so a concurrent save of the same engine is never
+            # overwritten behind its back.
+            with self._store.transaction():
+                try:
+                    self._store.save_instance_settings(
+                        instance.id, after, schema=schema,
+                        settings_version=parsed.settings_version if parsed else None,
+                        plugin_version=plugin.version, expected_revision=expected)
+                except StoreStale as error:
+                    raise StaleRevisionError("The engine settings changed since they were loaded.",
+                                             revision=error.revision) from error
+                self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
+
+        return commit
 
     def _save_legacy_values(self, instance, values: Mapping[str, Any], clear: list[str], payload,
                             expected) -> Callable[[], None]:
@@ -665,6 +694,7 @@ class TranslatorSettingsService:
                                    host=host)
         self._require_consent(schema, {}, validated.settings, payload, new_owner=True)
         parsed = self._parsed(plugin)
+        self._make_key_durable(validated)
         with self._store.transaction():
             row = self._store.add_connection(
                 instance_id, backend_type, plugin_id=plugin_id, model=host[MODEL_KEY], settings=validated.settings,
@@ -715,6 +745,7 @@ class TranslatorSettingsService:
         after = validated.settings if checked else before
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
+        self._make_key_durable(validated)
         with self._store.transaction():
             try:
                 self._store.update_connection(
@@ -843,21 +874,43 @@ class TranslatorSettingsService:
         secrets = self._store.secrets_for_request(owner, destinations)
         held = self._store.secrets_for_request(owner, frozenset())  # every saved secret, for masking only
         where = self._typed_origin(schema, values)
-        if not _claim_test(connection.id):
+        claim = _claim_test(connection.id)
+        if claim is None:
             return self._test_result(False, "A test of this back end is already running. Wait for it to finish.")
         try:
             if self._probe is not None:
-                return self._paid_test(connection, instance, values, destinations, secrets, held, where)
+                return self._paid_test(connection, instance, values, destinations, secrets, held, where, claim)
             return self._listing_test(connection, instance, values, where)
         except Exception as error:
             if isinstance(error, PROGRAMMING_ERRORS):
+                if not getattr(error, "_test_sanitized", False):
+                    self._log_failure(error, held)
+                    raise self._sanitized(error, held) from None
                 raise
             # Whatever a probe or a model list raised, a refusal of ours included, may carry an address or a key
             # in its text or its fields: only its type is said, and the scrubbed traceback goes to the debug log.
             self._log_failure(error, held)
             return self._test_result(False, UNFINISHED_TEST)
         finally:
-            _release_test(connection.id)
+            if not claim.handed_to_probe:
+                claim.release()
+
+    @classmethod
+    def _sanitized(cls, error: BaseException, held: Mapping[str, str]) -> BaseException:
+        """A copy of the error of the same family whose text has every saved secret masked, with no traceback or
+        cause attached: what reaches the framework's own logging cannot carry a key."""
+        text = cls._mask(str(error), held)
+        clean: BaseException | None = None
+        try:
+            clean = type(error)(text)
+        except Exception:
+            for base in PROGRAMMING_ERRORS:
+                if isinstance(error, base):
+                    clean = base(text)
+                    break
+        clean = clean if clean is not None else RuntimeError(text)
+        clean._test_sanitized = True  # the outer handler does not clean it twice
+        return clean
 
     @classmethod
     def _log_failure(cls, error: BaseException, held: Mapping[str, str]) -> None:
@@ -885,7 +938,8 @@ class TranslatorSettingsService:
             return self._test_result(True, "", started)
         return self._test_result(False, self._unanswered(where))
 
-    def _paid_test(self, connection, instance, values, destinations, secrets, held, where) -> dict[str, Any]:
+    def _paid_test(self, connection, instance, values, destinations, secrets, held, where,
+                   claim: _Claim) -> dict[str, Any]:
         # Imported here: the ledger reads the database tables at import, and a caller that only lists
         # engines or saves settings must not need them.
         from .usage import RESERVED, CostLimits, UsageLedger, worst_case_micros
@@ -932,7 +986,7 @@ class TranslatorSettingsService:
         answer: Mapping[str, Any] = {}
         failure: Exception | None = None
         try:
-            answer = self._run_probe(request)
+            answer = self._run_probe(request, claim)
         except Exception as error:  # settled below, then said as a failure without its text
             failure = error
         finally:
@@ -942,16 +996,23 @@ class TranslatorSettingsService:
                 finally:
                     ledger.release_job(job_id)
         if failure is not None:
-            if isinstance(failure, PROGRAMMING_ERRORS):
-                raise failure
+            # A bug in our code is raised, with the secrets masked in what is raised. A lookup that failed on an
+            # odd answer from a provider (a missing key, an index) is that provider's failure, not ours.
+            if isinstance(failure, PROGRAMMING_ERRORS) and not isinstance(failure, LookupError):
+                self._log_failure(failure, held)
+                raise self._sanitized(failure, held) from None
             self._log_failure(failure, held)
             return self._test_result(False, UNFINISHED_TEST)
         if answer.get("ok") is True:
             return self._test_result(True, "", started)
         return self._test_result(False, self._said(answer.get("message"), held) or self._unanswered(where))
 
-    def _run_probe(self, request: ProbeRequest) -> Mapping[str, Any]:
-        """Call the probe, and stop waiting for it a little after the time it was given."""
+    def _run_probe(self, request: ProbeRequest, claim: _Claim) -> Mapping[str, Any]:
+        """Call the probe, and stop waiting for it a little after the time it was given.
+
+        The claim on the connection goes with the probe's thread: if this stops waiting, the connection stays
+        claimed until the probe really returns, so a second test cannot start beside one that still runs.
+        """
         box: dict[str, Any] = {}
 
         def run() -> None:
@@ -959,7 +1020,10 @@ class TranslatorSettingsService:
                 box["answer"] = self._probe(request)
             except Exception as error:  # handed to the caller, which says only its type
                 box["error"] = error
+            finally:
+                claim.release()
 
+        claim.handed_to_probe = True
         thread = threading.Thread(target=run, name="translation-connection-test", daemon=True)
         thread.start()
         thread.join(request.timeout_seconds + TEST_TIMEOUT_GRACE_SECONDS)
@@ -1187,6 +1251,22 @@ class TranslatorSettingsService:
             if text:
                 clean.add(text)
         return clean
+
+    @staticmethod
+    def _make_key_durable(validated: ValidatedValues) -> None:
+        """Make sure the master encryption key is on disk before a secret under it is written.
+
+        Persisting it writes config.yaml, which takes the config lock. That has to happen before the write
+        transaction opens, never inside it: the config lock comes first.
+        """
+        if not validated.secrets:
+            return
+        from secret_store import persist_master_key
+
+        try:
+            persist_master_key()
+        except ValueError:
+            raise ServiceError("The encryption key could not be saved, so no secret was stored. Try again.") from None
 
     def _write_secrets(self, owner, validated: ValidatedValues, clear: list[str], destinations) -> None:
         for name in clear:

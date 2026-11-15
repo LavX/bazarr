@@ -969,10 +969,8 @@ class TableTranslatorEngineInstance(Base):
     __tablename__ = 'translator_engine_instances'
     __table_args__ = (
         # An engine Bazarr+ serves itself has one instance, however many requests first list it at once. The
-        # runtime tables are created by their migration, which is held on the translator runtime branch
-        # (feat/translator-runtime-dark, the translator runtime tables revision) and declares this same index.
-        # The runtime's own check inside its write transaction is the main guard; this index holds across
-        # processes.
+        # runtime tables are created by their migration, which declares this same index. The runtime's own check
+        # inside its write transaction is the main guard; the index holds across processes.
         Index('ux_translator_engine_instances_legacy', 'plugin_id', unique=True,
               sqlite_where=text("plugin_id IN ('lingarr')"), postgresql_where=text("plugin_id IN ('lingarr')")),
     )

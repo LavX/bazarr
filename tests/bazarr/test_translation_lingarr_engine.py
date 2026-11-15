@@ -575,9 +575,11 @@ def test_the_database_refuses_a_second_lingarr_engine_and_the_loser_reads_the_wi
 
 # ----------------------------------------------------------------- lock order
 
-def test_overlapping_writers_of_the_config_and_the_tables_never_deadlock(database):
-    """The engine save, a turn-off that releases a pointer, and a config writer that then writes a row all keep
-    the one order: the config lock first, the write transaction second."""
+def test_a_config_writer_that_then_writes_a_row_never_deadlocks_with_an_engine_save(database):
+    """A writer holds the config lock and then writes a row, while an engine save runs. With the config lock
+    taken before the transaction the save waits its turn; with the transaction first, the two wait for each
+    other for ever. The interleaving is forced: the writer takes the lock first, the save signals that it has
+    reached for the lock, and only then does the writer write."""
     import threading
 
     import sqlalchemy as sa
@@ -586,19 +588,18 @@ def test_overlapping_writers_of_the_config_and_the_tables_never_deadlock(databas
 
     engine, make_session = database
     config_lock = threading.RLock()
+    save_reached_the_lock = threading.Event()
+    writer_holds_the_lock = threading.Event()
 
     class OneLockLingarr(FakeLingarr):
         def lock(self):
+            save_reached_the_lock.set()
             return config_lock
 
-    class LockedPointers(MemoryPointers):
-        def lock(self):
-            return config_lock
-
-    pointers, fake = LockedPointers(), OneLockLingarr()
+    fake = OneLockLingarr()
 
     def build(session):
-        store = TranslatorStore(session, pointers=pointers, plugin_active=lambda plugin_id: True)
+        store = TranslatorStore(session, pointers=MemoryPointers(), plugin_active=lambda plugin_id: True)
         return store, TranslatorSettingsService(
             store, plugin_lookup=lambda plugin_id: None, catalog_engines=lambda: [],
             update_lookup=lambda plugin_id: None, legacy=True, lingarr=fake)
@@ -607,58 +608,96 @@ def test_overlapping_writers_of_the_config_and_the_tables_never_deadlock(databas
     store, service = build(setup)
     service.snapshot()
     lingarr_id = store.list_instances("lingarr")[0].id
-    other_id = store.create_instance("example_engine").id
+    revision = setup.get(TableTranslatorEngineInstance, lingarr_id).revision
     failures = []
 
-    for turn in range(12):
-        url = f"http://10.0.1.{turn + 1}:9876"
-        pointers.engine = other_id
-        setup.execute(sa.text("UPDATE translator_engine_instances SET enabled = 1 WHERE id = :id"), {"id": other_id})
-        setup.commit()
-        start = threading.Barrier(3)
+    def writer():
+        session = make_session()
+        try:
+            own, _ = build(session)
+            with config_lock:
+                writer_holds_the_lock.set()
+                if not save_reached_the_lock.wait(10):
+                    failures.append(("writer", "the save never reached for the lock"))
+                own.create_instance("example_engine")
+        except Exception as error:  # reported below
+            failures.append(("writer", error))
+        finally:
+            session.close()
 
-        def save():
-            session = make_session()
-            try:
-                _, own = build(session)
-                row = session.get(TableTranslatorEngineInstance, lingarr_id)
-                start.wait(10)
-                own.save_engine(lingarr_id, {"expected_revision": row.revision, "values": {"url": url},
-                                             "accept_destinations": [url]})
-            except Exception as error:  # reported below
-                failures.append(("save", error))
-            finally:
-                session.close()
+    def save():
+        session = make_session()
+        try:
+            _, own = build(session)
+            writer_holds_the_lock.wait(10)
+            own.save_engine(lingarr_id, {"expected_revision": revision, "values": {"url": URL},
+                                         "accept_destinations": [URL]})
+        except Exception as error:
+            failures.append(("save", error))
+        finally:
+            session.close()
 
-        def turn_off():
-            session = make_session()
-            try:
-                own, _ = build(session)
-                start.wait(10)
-                own.set_instance_enabled(other_id, False)
-            except Exception as error:
-                failures.append(("turn_off", error))
-            finally:
-                session.close()
-
-        def config_writer():
-            session = make_session()
-            try:
-                own, _ = build(session)
-                start.wait(10)
-                with config_lock:  # a writer of config.yaml that then writes a row, like a pointer change
-                    own.create_instance("example_engine")
-            except Exception as error:
-                failures.append(("config_writer", error))
-            finally:
-                session.close()
-
-        threads = [threading.Thread(target=target, daemon=True) for target in (save, turn_off, config_writer)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(20)
-        assert not any(thread.is_alive() for thread in threads), f"deadlock on turn {turn}"
+    threads = [threading.Thread(target=target, daemon=True) for target in (writer, save)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(20)
+    assert not any(thread.is_alive() for thread in threads), "deadlock between the config lock and the transaction"
     assert failures == []
-    assert fake.address == "http://10.0.1.12:9876"
+    assert fake.address == URL
+    count = setup.execute(sa.text("SELECT count(*) FROM translator_engine_instances WHERE plugin_id = "
+                                  "'example_engine'")).scalar()
+    assert count == 1
     setup.close()
+
+
+def test_a_turn_off_that_releases_a_pointer_takes_the_config_lock_before_its_transaction(database):
+    import threading
+
+    engine, make_session = database
+    config_lock = threading.RLock()
+
+    class LockedPointers(MemoryPointers):
+        def lock(self):
+            return config_lock
+
+    pointers = LockedPointers()
+    session = make_session()
+    store = TranslatorStore(session, pointers=pointers, plugin_active=lambda plugin_id: True)
+    other = store.create_instance("example_engine")
+    pointers.engine = other.id
+    holder_has_lock, release = threading.Event(), threading.Event()
+    done = []
+
+    def holder():
+        with config_lock:
+            holder_has_lock.set()
+            release.wait(10)
+
+    def turn_off():
+        own = make_session()
+        try:
+            TranslatorStore(own, pointers=pointers, plugin_active=lambda plugin_id: True).set_instance_enabled(
+                other.id, False)
+            done.append(True)
+        finally:
+            own.close()
+
+    first = threading.Thread(target=holder, daemon=True)
+    first.start()
+    holder_has_lock.wait(10)
+    second = threading.Thread(target=turn_off, daemon=True)
+    second.start()
+    second.join(0.5)
+    # While another writer holds the config lock, the turn-off waits for it without holding a write
+    # transaction, so a writer that is inside one is not blocked by it.
+    other_session = make_session()
+    other_store = TranslatorStore(other_session, pointers=MemoryPointers(), plugin_active=lambda plugin_id: True)
+    other_store.create_instance("example_engine")
+    other_session.close()
+    assert done == []
+    release.set()
+    second.join(20)
+    first.join(20)
+    assert done == [True] and pointers.engine is None
+    session.close()

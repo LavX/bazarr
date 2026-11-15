@@ -53,6 +53,12 @@ class MemoryPointers:
         return True
 
 
+@pytest.fixture(autouse=True)
+def _debug_logging(caplog):
+    """Capture everything, so the checks that a secret is in no log line look at the debug lines too."""
+    caplog.set_level(logging.DEBUG)
+
+
 @pytest.fixture
 def world(monkeypatch, schema_session):
     from subtitles.tools.translate import runtime
@@ -285,6 +291,7 @@ def test_a_probe_that_raises_never_puts_its_text_in_the_answer_or_the_log(world,
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert "Bazarr+ log" in response.json["message"]
+    assert any("RuntimeError" in record.getMessage() for record in caplog.records)  # it was logged, with no key
     _nothing_leaked(world, caplog)
     assert "192.168.1.20" not in response.get_data(as_text=True)
 
@@ -648,7 +655,8 @@ def test_only_one_test_runs_per_connection_and_the_claim_is_always_given_back(wo
     world.probe({"ok": True})
     connection_id = world.lan_connection()
     other_id = world.lan_connection()
-    assert settings_service._claim_test(connection_id) is True
+    claim = settings_service._claim_test(connection_id)
+    assert claim is not None
     try:
         busy = world.call("post", f"connections/{connection_id}/test", {})
         assert busy.status_code == 200 and busy.json["ok"] is False and "already running" in busy.json["message"]
@@ -656,7 +664,7 @@ def test_only_one_test_runs_per_connection_and_the_claim_is_always_given_back(wo
         # Another connection is not held up by it.
         assert world.call("post", f"connections/{other_id}/test", {}).json["ok"] is True
     finally:
-        settings_service._release_test(connection_id)
+        claim.release()
     assert world.call("post", f"connections/{connection_id}/test", {}).json["ok"] is True
     # A failed test and a refused one give the claim back too.
     world.probe(RuntimeError("down"))
@@ -664,3 +672,131 @@ def test_only_one_test_runs_per_connection_and_the_claim_is_always_given_back(wo
     world.probe({"ok": True})
     assert world.call("post", f"connections/{connection_id}/test", {}).json["ok"] is True
     assert settings_service._RUNNING_TESTS == set()
+
+
+def test_a_programming_error_is_raised_with_the_saved_secrets_masked_in_what_the_framework_logs(world, caplog):
+    world.probe(TypeError("rejected abcde"))
+    connection_id = world.connection(values={"base_url": LAN, "api_key": "abcde", "model": "m"}, accept=[LAN])
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 500
+    assert "abcde" not in response.get_data(as_text=True) and "abcde" not in caplog.text
+    assert any(record.levelno >= logging.ERROR for record in caplog.records)  # the framework did log it
+    assert "TypeError: rejected ***" in caplog.text
+    # The scrubbed traceback is in the debug log, and the error that is raised carries no cause.
+    assert any("connection test failed" in record.getMessage() for record in caplog.records)
+
+
+def test_a_sanitized_error_is_of_the_same_family_and_carries_no_cause():
+    held = {"api_key": "abcde"}
+    for original in (TypeError("rejected abcde"), AttributeError("abcde"), NameError("abcde"), ImportError("abcde")):
+        clean = TranslatorSettingsService._sanitized(original, held)
+        assert type(clean) is type(original) and "abcde" not in str(clean)
+        assert clean.__cause__ is None and clean._test_sanitized is True
+
+    class Odd(TypeError):
+        def __init__(self, first, second):
+            super().__init__(first, second)
+
+    clean = TranslatorSettingsService._sanitized(Odd("abcde", 2), held)
+    assert isinstance(clean, TypeError) and "abcde" not in str(clean)
+
+
+def test_a_lookup_that_failed_on_an_odd_provider_answer_is_a_failed_test_not_a_crash(world, caplog):
+    world.probe(KeyError("choices"))
+    connection_id = world.lan_connection()
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 200 and response.json["ok"] is False
+    assert any("KeyError" in record.getMessage() for record in caplog.records)
+    _nothing_leaked(world, caplog)
+
+
+def test_a_timed_out_probe_keeps_the_connection_claimed_until_its_thread_exits(world, monkeypatch):
+    import threading
+    import time
+
+    from subtitles.tools.translate.runtime import settings_service
+
+    monkeypatch.setattr(settings_service, "TEST_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(settings_service, "TEST_TIMEOUT_GRACE_SECONDS", 0.1)
+    release, entered = threading.Event(), threading.Event()
+    calls = []
+
+    def hang(request):
+        calls.append(request)
+        entered.set()
+        release.wait(10)
+        return {"ok": True}
+
+    world.hooks["connection_probe"] = hang
+    connection_id = world.lan_connection()
+    try:
+        first = world.call("post", f"connections/{connection_id}/test", {})
+        assert first.json["ok"] is False and "debug logging" in first.json["message"]
+        assert entered.is_set() and connection_id in settings_service._RUNNING_TESTS
+        # The first request has answered, but its probe is still running: a second test cannot start.
+        second = world.call("post", f"connections/{connection_id}/test", {})
+        assert second.json["ok"] is False and "already running" in second.json["message"]
+        assert len(calls) == 1
+    finally:
+        release.set()
+    for _ in range(100):
+        if connection_id not in settings_service._RUNNING_TESTS:
+            break
+        time.sleep(0.05)
+    assert connection_id not in settings_service._RUNNING_TESTS
+    world.hooks["connection_probe"] = lambda request: {"ok": True}
+    assert world.call("post", f"connections/{connection_id}/test", {}).json["ok"] is True
+
+
+def test_the_master_key_is_made_durable_before_the_transaction_that_stores_a_secret(world, monkeypatch):
+    import secret_store
+
+    from subtitles.tools.translate.runtime.transaction import inside_write_transaction
+
+    seen = []
+    monkeypatch.setattr(secret_store, "persist_master_key",
+                        lambda *args, **kwargs: seen.append(inside_write_transaction(world.session)))
+    created = world.connection(values={"base_url": LAN, "api_key": SECRET, "model": "m"}, accept=[LAN])
+    assert seen and seen[0] is False
+    seen.clear()
+    row = world.store.get_connection(created)
+    updated = world.call("patch", f"connections/{created}", {"expected_revision": row.revision,
+                                                             "values": {"api_key": "another-secret-value"}})
+    assert updated.status_code == 200 and seen and seen[0] is False
+
+
+def test_a_master_key_that_cannot_be_saved_refuses_the_save_and_stores_nothing(world, monkeypatch):
+    import secret_store
+
+    def cannot(*args, **kwargs):
+        raise ValueError("Unable to persist secrets encryption key")
+
+    monkeypatch.setattr(secret_store, "persist_master_key", cannot)
+    response = world.call("post", f"engines/{world.instance.id}/connections", {
+        "backend_type": "openrouter", "values": {"api_key": SECRET}, "accept_destinations": []})
+    assert response.status_code == 400 and "encryption key" in response.json["message"]
+    assert world.store.list_connections(world.instance.id) == []
+
+
+def test_the_plugin_validates_before_any_lock_is_taken(world):
+    from discover.metadata import CONFIG_LOCK
+    from subtitles.tools.translate.runtime.transaction import inside_write_transaction
+
+    state = []
+
+    def validator(*args):
+        state.append((CONFIG_LOCK._is_owned(), inside_write_transaction(world.session)))
+        return {}
+
+    world.hooks["plugin_validator"] = validator
+    response = world.call("patch", f"engines/{world.instance.id}", {
+        "expected_revision": world.instance.revision, "values": {"concurrency": 3}})
+    assert response.status_code == 200, response.json
+    assert state == [(False, False)]
+    # Turning the engine on is checked by the plugin the same way.
+    state.clear()
+    world.call("patch", f"engines/{world.instance.id}", {"expected_revision": 2, "enabled": False})
+    state.clear()
+    on = world.call("patch", f"engines/{world.instance.id}", {"expected_revision": 3, "enabled": True})
+    assert on.status_code == 200, on.json
+    assert state and all(item == (False, False) for item in state)
