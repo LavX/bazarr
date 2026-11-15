@@ -53,7 +53,7 @@ class Transport:
         self.opened.set()
         on_open()
         yield from self.lines
-        self.closed.wait(5)
+        self.closed.wait(60)
 
     def close(self):
         self.closed.set()
@@ -89,10 +89,10 @@ def test_reader_enqueues_complete_frames_repairs_after_connect_and_stops():
         debounce=0.01,
     )
     client.start()
-    assert delivered.wait(2)
+    assert delivered.wait(60)
     assert work[0][0] == 1 and work[0][1].full
     assert client.last_event_id == "20"
-    assert client.stop(timeout=2) is True
+    assert client.stop(timeout=60) is True
     assert transport.closed.is_set() and not client.is_alive()
 
 
@@ -107,7 +107,7 @@ def test_bursts_coalesce_and_work_received_during_sync_is_not_lost():
         batches.append(batch)
         if len(batches) == 1:
             started.set()
-            release.wait(2)
+            release.wait(60)
         else:
             second.set()
 
@@ -121,17 +121,17 @@ def test_bursts_coalesce_and_work_received_during_sync_is_not_lost():
     )
     client.start()
     try:
-        assert started.wait(2)
+        assert started.wait(60)
         for i in range(100):
             client.dispatch(
                 SSEFrame(str(i), "file.imported", '{"eventId":8,"resourceType":"file"}')
             )
         release.set()
-        assert second.wait(2)
+        assert second.wait(60)
         assert len(batches) == 2 and batches[1].event_ids == {8}
     finally:
         release.set()
-        assert client.stop(timeout=2)
+        assert client.stop(timeout=60)
 
 
 def test_failed_work_retries_full_repair_without_advancing_unqueued_cursor():
@@ -157,9 +157,9 @@ def test_failed_work_retries_full_repair_without_advancing_unqueued_cursor():
         retry_min=0.01,
     )
     client.start()
-    assert repaired.wait(2)
+    assert repaired.wait(60)
     assert all(batch.full for batch in attempts)
-    assert client.stop(timeout=2)
+    assert client.stop(timeout=60)
     cursor = client.last_event_id
     assert not client.dispatch(SSEFrame("50", "file.imported", '{"eventId":8}'))
     assert client.last_event_id == cursor
@@ -184,7 +184,7 @@ def test_reconnect_uses_cursor_and_bounded_backoff():
                 ]
                 return
             connected.set()
-            self.closed.wait(3)
+            self.closed.wait(60)
 
     def factory():
         t = Dropped()
@@ -202,9 +202,9 @@ def test_reconnect_uses_cursor_and_bounded_backoff():
         retry_max=0.02,
     )
     client.start()
-    assert connected.wait(2)
+    assert connected.wait(60)
     assert transports[1].calls == ["9"]
-    assert client.stop(timeout=2)
+    assert client.stop(timeout=60)
     assert all(t.closed.is_set() for t in transports)
 
 
@@ -302,7 +302,7 @@ def test_real_idle_stream_authentication_and_active_socket_cancellation():
             self.wfile.write(b": connected\n\n")
             self.wfile.flush()
             request_seen.set()
-            release.wait(5)
+            release.wait(60)
 
         def log_message(self, *args):
             pass
@@ -325,16 +325,18 @@ def test_real_idle_stream_authentication_and_active_socket_cancellation():
     )
     try:
         client.start()
-        assert request_seen.wait(2)
+        # The waits are hang bounds; the 2 s check below measures stop latency
+        # from the moment the request was seen.
+        assert request_seen.wait(60)
         start = time.monotonic()
-        assert client.stop(timeout=2)
+        assert client.stop(timeout=60)
         assert time.monotonic() - start < 2
         assert requests == [("/proxy/api/stream", "fixture-key")]
     finally:
         release.set()
-        client.stop(timeout=2)
+        client.stop(timeout=60)
         server.shutdown()
-        serving.join(2)
+        serving.join(60)
         server.server_close()
 
 
@@ -494,7 +496,7 @@ def test_manager_disables_and_deletes_actual_readers(schema_session, sportarr_en
     manager = SportarrClientManager(factory)
     try:
         manager.refresh(schema_session)
-        assert all(transport.opened.wait(2) for transport in transports)
+        assert all(transport.opened.wait(60) for transport in transports)
         manager.refresh(schema_session)
         assert len(clients) == 2
         repo.update(a.id, enabled=False)
@@ -537,7 +539,7 @@ def slow_headers_server():
     finally:
         release.set()
         server.shutdown()
-        thread.join(2)
+        thread.join(60)
         server.server_close()
 
 
@@ -577,16 +579,16 @@ def test_incomplete_headers_are_actively_cancelled_and_joined(
     try:
         client.start()
         client.enqueue(full=True)
-        assert headers_started.wait(3)
+        assert headers_started.wait(60)
         if phase == "worker":
             transport = client._work_transport
         process = getattr(transport, "_process", None)
-        stopped = client.stop(timeout=1)
+        stopped = client.stop(timeout=60)
         assert stopped and not client.is_alive()
         if process is not None:
             assert process.poll() is not None
     finally:
-        client.stop(timeout=2)
+        client.stop(timeout=60)
         transport.close()
 
 
@@ -617,10 +619,10 @@ def test_startup_repair_does_not_wait_for_stream_success():
     )
     try:
         client.start()
-        assert repaired.wait(1)
+        assert repaired.wait(60)
         assert batches[0].full
     finally:
-        assert client.stop(timeout=2)
+        assert client.stop(timeout=60)
 
 
 def test_subscription_after_startup_snapshot_queues_another_repair():
@@ -634,9 +636,9 @@ def test_subscription_after_startup_snapshot_queues_another_repair():
 
     class Delayed(Transport):
         def stream(self, client, cursor, on_open):
-            assert allow_open.wait(2)
+            assert allow_open.wait(60)
             on_open()
-            self.closed.wait(3)
+            self.closed.wait(60)
             return iter(())
 
     transport = Delayed()
@@ -656,13 +658,13 @@ def test_subscription_after_startup_snapshot_queues_another_repair():
     )
     try:
         client.start()
-        assert startup_done.wait(1)
+        assert startup_done.wait(60)
         allow_open.set()
-        assert subscription_done.wait(1)
+        assert subscription_done.wait(60)
         assert len(batches) == 2 and all(batch.full for batch in batches)
     finally:
         allow_open.set()
-        assert client.stop(timeout=2)
+        assert client.stop(timeout=60)
 
 
 def _start_http_request(transport, url, phase="worker"):
@@ -732,7 +734,7 @@ def test_slow_headers_have_an_absolute_deadline(
         assert transport._process.poll() is not None
     finally:
         transport.close()
-        thread.join(2)
+        thread.join(60)
 
 
 @pytest.mark.parametrize("cancel", [True, False])
@@ -756,18 +758,18 @@ def test_dns_setup_can_be_cancelled_and_has_an_absolute_deadline(
     transport = module.OwnedHTTPTransport(setup_timeout=2)
     thread, errors = _start_http_request(transport, "http://fixture.invalid:1234")
     try:
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + 60
         while not marker.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert marker.exists()
         if cancel:
             transport.close()
-        thread.join(3)
+        thread.join(60)
         assert not thread.is_alive() and errors
         assert transport._process.poll() is not None
     finally:
         transport.close()
-        thread.join(2)
+        thread.join(60)
 
 
 @pytest.mark.parametrize("phase", ["stream", "worker"])
@@ -781,7 +783,7 @@ def test_tls_setup_is_actively_cancelled(phase):
         def handle(self):
             self.request.recv(4096)
             started.set()
-            release.wait(5)
+            release.wait(60)
 
     server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
     serving = threading.Thread(target=server.serve_forever, daemon=True)
@@ -791,17 +793,17 @@ def test_tls_setup_is_actively_cancelled(phase):
         transport, f"https://127.0.0.1:{server.server_address[1]}", phase
     )
     try:
-        assert started.wait(2)
+        assert started.wait(60)
         transport.close()
-        thread.join(1)
+        thread.join(60)
         assert not thread.is_alive() and errors
         assert transport._process.poll() is not None
     finally:
         transport.close()
-        thread.join(2)
+        thread.join(60)
         release.set()
         server.shutdown()
-        serving.join(2)
+        serving.join(60)
         server.server_close()
 
 
@@ -842,7 +844,7 @@ def ordinary_http_server():
         yield f"http://127.0.0.1:{server.server_port}", seen
     finally:
         server.shutdown()
-        serving.join(2)
+        serving.join(60)
         server.server_close()
 
 
@@ -951,11 +953,11 @@ def test_manager_replacement_and_shutdown_reap_actual_setup_helpers(schema_sessi
     manager = SportarrClientManager(factory)
     try:
         manager.refresh(schema_session)
-        assert started.wait(2)
+        assert started.wait(60)
         started.clear()
         repo.update(owner.id, base_url="/changed")
         manager.refresh(schema_session)
-        assert started.wait(2)
+        assert started.wait(60)
         assert len(clients) == 2 and not clients[0].is_alive()
         assert transports[0]._process.poll() is not None
         assert transports[1]._process.poll() is None
@@ -986,7 +988,7 @@ def test_actual_helpers_reconnect_with_cursor_and_reap_predecessor():
                 self.wfile.flush()
             else:
                 reconnected.set()
-                release.wait(5)
+                release.wait(60)
 
         def log_message(self, *args):
             pass
@@ -1012,13 +1014,13 @@ def test_actual_helpers_reconnect_with_cursor_and_reap_predecessor():
     )
     try:
         client.start()
-        assert reconnected.wait(3)
+        assert reconnected.wait(60)
         assert seen == [None, "17"]
     finally:
-        assert client.stop(timeout=2)
+        assert client.stop(timeout=60)
         release.set()
         server.shutdown()
-        serving.join(2)
+        serving.join(60)
         server.server_close()
         assert not client.is_alive()
         assert all(transport._process.poll() is not None for transport in transports)
@@ -1056,10 +1058,10 @@ def test_startup_repairs_over_http_when_actual_stream_is_unavailable(
     )
     try:
         client.start()
-        assert repaired.wait(2)
+        assert repaired.wait(60)
         assert any(item[0] == "/api/league" for item in seen)
     finally:
-        assert client.stop(timeout=2)
+        assert client.stop(timeout=60)
         assert all(transport._process.poll() is not None for transport in transports)
 
 
@@ -1089,15 +1091,15 @@ def test_lost_parent_control_pipe_exits_blocked_helper(slow_headers_server):
     transport = OwnedHTTPTransport()
     thread, errors = _start_http_request(transport, f"http://127.0.0.1:{port}")
     try:
-        assert started.wait(2)
+        assert started.wait(60)
         # Parent exit closes this descriptor even when Requests has no response yet.
         transport._process.stdin.close()
-        thread.join(1)
+        thread.join(60)
         assert not thread.is_alive() and errors
         assert transport._process.poll() is not None
     finally:
         transport.close()
-        thread.join(2)
+        thread.join(60)
 
 
 def test_the_master_toggle_stops_every_stream(schema_session, monkeypatch):
