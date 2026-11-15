@@ -897,6 +897,9 @@ class SubtitleScoreOverride(Resource):
         if score is None or not 0 <= score <= 100:
             return "The score must be a percentage from 0 to 100.", 400
         media, item_id = ("movie", movie_id) if movie_id is not None else ("episode", episode_id)
+        # The tables show the path through the path mappings, but the stored
+        # listing and the history rows keep the arr's own path.
+        subtitles_path = path_mappings.path_replace_reverse_instance(subtitles_path, arr_instance_id, media)
         try:
             set_score_override(database, media, item_id, subtitles_path, score,
                                arr_instance_id=arr_instance_id)

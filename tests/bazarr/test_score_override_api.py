@@ -400,3 +400,44 @@ def test_score_override_emits_an_episode_history_event(score_api, monkeypatch):
 
     assert response.status_code == 204
     assert events == [{"type": "episode-history"}]
+
+
+def test_score_override_reverse_maps_the_path_the_tables_show_for_a_movie(score_api, monkeypatch):
+    """The detail tables show a path through the path mappings and send that
+    path back. The stored listing and the history row keep the arr's own path,
+    so the request is reversed before the lookup instead of answering 404."""
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(path_mappings, "path_mapping_movies", [["/movies", "/data/movies"]])
+    client, session = score_api
+    _add_movie(session)
+
+    response = client.post(
+        ROOT,
+        json={"radarrMovieId": 7, "subtitlesPath": "/data/movies/a.en.srt", "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 204
+    assert session.execute(
+        select(TableHistoryMovie.subtitles_path).where(TableHistoryMovie.action == MANUAL_SCORE_ACTION)
+    ).all() == [("/movies/a.en.srt",)]
+
+
+def test_score_override_reverse_maps_the_path_the_tables_show_for_an_episode(score_api, monkeypatch):
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(path_mappings, "path_mapping_series", [["/series", "/data/series"]])
+    client, session = score_api
+    _add_episode(session)
+
+    response = client.post(
+        ROOT,
+        json={"sonarrEpisodeId": 20, "subtitlesPath": "/data/series/show/s01e01.en.srt", "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 204
+    assert session.execute(
+        select(TableHistory.subtitles_path).where(TableHistory.action == MANUAL_SCORE_ACTION)
+    ).all() == [("/series/show/s01e01.en.srt",)]
