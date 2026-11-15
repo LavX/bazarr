@@ -288,7 +288,9 @@ const BackendList: FunctionComponent<{
                   variant={editing ? "light" : "default"}
                   aria-expanded={editing}
                   aria-label={`Edit ${name}`}
-                  disabled={formBusy}
+                  // Not while this row's own switch is being written either: the form would open on the
+                  // revision the switch is about to leave behind.
+                  disabled={formBusy || item.id in switching}
                   onClick={() => {
                     setAdding(null);
                     setEditingId(editing ? null : item.id);

@@ -3,6 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
+import {
+  forgetPasswordConfirmation,
+  markPasswordConfirmed,
+} from "@/modules/passwordConfirm";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type {
@@ -41,6 +45,7 @@ function gate() {
 
 beforeEach(() => {
   calls = [];
+  forgetPasswordConfirmation();
   window.history.replaceState({}, "", "/");
   state = {
     enabled: true,
@@ -1978,5 +1983,309 @@ describe("Translation page, the same test result twice", () => {
     expect(region()).toBeEmptyDOMElement();
     held.open();
     await waitFor(() => expect(region()).toHaveTextContent(said));
+  });
+});
+
+describe("Translation page, installing an engine in place", () => {
+  const offer = {
+    plugin_id: "other_engine",
+    name: "Other Engine",
+    version: "2.0.0",
+    source: "official",
+  };
+  const withLogin = () =>
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: {},
+          translator: { default_score: 50, translator_info: true },
+          auth: { type: "form", username: "admin", password: "***" },
+        }),
+      ),
+      http.post("/api/system/account/confirm", () => {
+        record("post", "confirm", null);
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+  const askToInstall = async (user: ReturnType<typeof userEvent.setup>) => {
+    await showPage();
+    await user.click(
+      screen.getByRole("button", { name: "Install Other Engine" }),
+    );
+    return screen.findByRole("dialog", { name: "Install Other Engine?" });
+  };
+
+  beforeEach(() => {
+    state = { ...state, available_engines: [offer] };
+  });
+
+  it("asks for the password before the install goes out, where a login is set up", async () => {
+    withLogin();
+    server.use(
+      http.post("/api/provider-hub/installations", async ({ request }) => {
+        record("post", "install", await request.json());
+        return HttpResponse.json({ job_id: null });
+      }),
+    );
+    const user = userEvent.setup();
+    const ask = await askToInstall(user);
+    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    // The server would refuse an install without a confirmed password: the page asks first.
+    expect(
+      await screen.findByText("Confirm your password"),
+    ).toBeInTheDocument();
+    expect(calls).toEqual([]);
+    await user.type(screen.getByLabelText("Password"), "hunter2");
+    await user.click(screen.getByRole("button", { name: /^confirm$/i }));
+    await waitFor(() =>
+      expect(calls.map((call) => call.path)).toEqual(["confirm", "install"]),
+    );
+    expect(calls[1].body).toEqual({
+      source: "official",
+      provider_id: "other_engine",
+      version: "2.0.0",
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Install Other Engine?" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("asks again and sends the install once more when the server answers that the password must be confirmed", async () => {
+    withLogin();
+    // The page believes a confirmation is still good. The server does not.
+    markPasswordConfirmed();
+    let attempt = 0;
+    server.use(
+      http.post("/api/provider-hub/installations", async ({ request }) => {
+        record("post", "install", await request.json());
+        attempt += 1;
+        return attempt === 1
+          ? HttpResponse.json(
+              { code: "confirm_password", message: "Confirm your password" },
+              { status: 403 },
+            )
+          : HttpResponse.json({ job_id: null });
+      }),
+    );
+    const user = userEvent.setup();
+    const ask = await askToInstall(user);
+    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    // Refused for want of a confirmation: the prompt comes up, with no failure shown for it.
+    expect(
+      await screen.findByText(/Confirm your password to install Other Engine/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/The install did not finish/),
+    ).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("Password"), "hunter2");
+    await user.click(screen.getByRole("button", { name: /^confirm$/i }));
+    await waitFor(() =>
+      expect(calls.map((call) => call.path)).toEqual([
+        "install",
+        "confirm",
+        "install",
+      ]),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Install Other Engine?" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("installs nothing when the password question is closed without an answer", async () => {
+    withLogin();
+    const user = userEvent.setup();
+    const ask = await askToInstall(user);
+    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    const prompt = await screen.findByRole("dialog", {
+      name: "Confirm your password",
+    });
+    await user.click(within(prompt).getByRole("button", { name: /^cancel$/i }));
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Confirm your password"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(calls).toEqual([]);
+    // The install question is still there, and can be answered again.
+    expect(
+      await within(ask).findByRole("button", { name: "Install" }),
+    ).toBeEnabled();
+  });
+
+  it("stays busy until the new state is loaded, so a second install cannot start", async () => {
+    const held = gate();
+    let holding = false;
+    server.use(
+      http.post("/api/provider-hub/installations", async ({ request }) => {
+        record("post", "install", await request.json());
+        holding = true;
+        return HttpResponse.json({ job_id: null });
+      }),
+      http.get("/api/translation/state", async () => {
+        if (holding) {
+          await held.opened;
+        }
+        return HttpResponse.json(state);
+      }),
+    );
+    const user = userEvent.setup();
+    const ask = await askToInstall(user);
+    const install = within(ask).getByRole("button", { name: "Install" });
+    await user.click(install);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    // The job is done and the state is still on its way: nothing can be pressed.
+    expect(install).toBeDisabled();
+    expect(within(ask).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await user.click(install);
+    await user.keyboard("{Escape}");
+    expect(calls).toHaveLength(1);
+    expect(
+      screen.getByRole("dialog", { name: "Install Other Engine?" }),
+    ).toBeVisible();
+    held.open();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Install Other Engine?" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("shows the server's own sentence when the refusal is plain text", async () => {
+    server.use(
+      http.post("/api/provider-hub/installations", () =>
+        HttpResponse.text("This plugin is blocked on this machine.", {
+          status: 400,
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    const ask = await askToInstall(user);
+    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    expect(
+      await within(ask).findByText(
+        "The install did not finish: This plugin is blocked on this machine.",
+      ),
+    ).toBeVisible();
+    expect(within(ask).getByRole("button", { name: "Install" })).toBeEnabled();
+  });
+});
+
+describe("Translation page, a row whose switch is being written", () => {
+  it("cannot be opened for editing until the switch has been saved", async () => {
+    const held = gate();
+    server.use(
+      http.patch("/api/translation/connections/:id", async ({ params }) => {
+        record("patch", "connection " + String(params.id), null);
+        await held.opened;
+        return HttpResponse.json({
+          connection: connection(Number(params.id), { enabled: false }),
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    const edit = screen.getByRole("button", {
+      name: "Edit OpenAI compatible, model-1",
+    });
+    await user.click(screen.getByLabelText("Use OpenAI compatible, model-1"));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(edit).toBeDisabled();
+    // The other row is not held back.
+    expect(
+      screen.getByRole("button", { name: "Edit OpenAI compatible, model-2" }),
+    ).toBeEnabled();
+    await user.click(edit);
+    expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
+    held.open();
+    await waitFor(() => expect(edit).toBeEnabled());
+  });
+});
+
+describe("Translation page, defaults after a save", () => {
+  // A server that keeps the score it is sent, and answers the load after the save when let through.
+  function settingsServer(reload: "held" | "fails") {
+    const held = gate();
+    let score = 50;
+    let saved = false;
+    server.use(
+      http.get("/api/system/settings", async () => {
+        if (saved && reload === "fails") {
+          return new HttpResponse(null, { status: 500 });
+        }
+        if (saved) {
+          await held.opened;
+        }
+        return HttpResponse.json({
+          general: {},
+          translator: {
+            default_score: score,
+            min_source_score: 90,
+            translator_info: true,
+            openrouter_max_concurrent: 2,
+          },
+        });
+      }),
+      http.post("/api/system/settings", async ({ request }) => {
+        const text = await request.text();
+        record("post", "settings", text);
+        score = 65;
+        saved = true;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    return held;
+  }
+
+  async function changeScore(user: ReturnType<typeof userEvent.setup>) {
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Defaults" }));
+    const score = await screen.findByLabelText(
+      "Score of a translated subtitle",
+    );
+    await user.clear(score);
+    await user.type(score, "65");
+    await user.click(screen.getByRole("button", { name: "Save defaults" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    return score;
+  }
+
+  it("keeps showing what was sent until the saved values have been loaded back", async () => {
+    const held = settingsServer("held");
+    const user = userEvent.setup();
+    const score = await changeScore(user);
+    // Saved, and the load of the saved values is still open: the field does not fall back to 50.
+    expect(score).toHaveValue("65");
+    expect(score).toBeDisabled();
+    held.open();
+    await waitFor(() => expect(score).toBeEnabled());
+    expect(score).toHaveValue("65");
+    // The draft is gone: there is nothing left to save.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Save defaults" }),
+      ).toBeDisabled(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Discard changes" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says so and keeps what was sent when the saved values cannot be loaded back", async () => {
+    settingsServer("fails");
+    const user = userEvent.setup();
+    const score = await changeScore(user);
+    expect(
+      await screen.findByText(
+        "Your changes were saved, but the saved values could not be loaded back. The fields show what you sent.",
+      ),
+    ).toBeVisible();
+    expect(score).toHaveValue("65");
+    expect(score).toBeEnabled();
   });
 });

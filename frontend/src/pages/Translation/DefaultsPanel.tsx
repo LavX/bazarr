@@ -9,7 +9,11 @@ import {
   Switch,
 } from "@mantine/core";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
-import { readRefusal, useSaveLimits } from "@/apis/hooks/translation";
+import {
+  afterStateDelivered,
+  readRefusal,
+  useSaveLimits,
+} from "@/apis/hooks/translation";
 import type { TranslationSummary } from "@/types/translation";
 import styles from "./Translation.module.scss";
 
@@ -43,6 +47,8 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
   // Only what was changed. A field left alone follows what is saved.
   const [draft, setDraft] = useState<Draft>({});
   const [problem, setProblem] = useState("");
+  // The saved values are being loaded back, to confirm what the fields will show.
+  const [confirming, setConfirming] = useState(false);
   const stored = settings.data?.translator;
 
   if (settings.isLoading && !stored) {
@@ -75,7 +81,7 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
     setDraft((current) => ({ ...current, ...patch }));
   };
   const dirty = Object.keys(draft).length > 0;
-  const busy = saveSettings.isPending || saveLimits.isPending;
+  const busy = saveSettings.isPending || saveLimits.isPending || confirming;
   const invalid =
     draft.default_score === "" ||
     draft.min_source_score === "" ||
@@ -109,12 +115,28 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
           month_cap: cap(draft.month_cap, summary.month.cap),
         });
       }
-      setDraft({});
     } catch (error) {
       setProblem(
         readRefusal(error)?.message ||
           "The defaults were not saved. Try again.",
       );
+      return;
+    }
+    // Saved. The fields keep what was sent until the saved values have been loaded back: dropping the
+    // draft earlier would show the old values for a moment, or for good when the load fails.
+    setConfirming(true);
+    try {
+      const loaded =
+        Object.keys(changes).length > 0 ? await settings.refetch() : null;
+      if (loaded && (loaded.isError || loaded.data === undefined)) {
+        setProblem(
+          "Your changes were saved, but the saved values could not be loaded back. The fields show what you sent.",
+        );
+        return;
+      }
+      afterStateDelivered(() => setDraft({}));
+    } finally {
+      setConfirming(false);
     }
   };
 
