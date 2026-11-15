@@ -11,7 +11,9 @@ import {
   Text,
 } from "@mantine/core";
 import { useQueryClient } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { useProviderHubInstall } from "@/apis/hooks/providerHub";
+import { readRefusal } from "@/apis/hooks/translation";
 import { QueryKeys } from "@/apis/queries/keys";
 import type { TranslationAvailableEngine } from "@/types/translation";
 
@@ -54,9 +56,16 @@ const InstallConsent: FunctionComponent<InstallConsentProps> = ({
       onInstalled?.(engine);
       close();
     } catch (error) {
+      // A request that was refused says why in the server's words, when it has any. A job that
+      // failed carries its own reason. Anything else gets the page's sentence, never the transport's.
+      const reason = isAxiosError(error)
+        ? (readRefusal(error)?.message ?? "")
+        : error instanceof Error
+          ? error.message
+          : "";
       setProblem(
-        error instanceof Error && error.message
-          ? `The install did not finish: ${error.message}`
+        reason
+          ? `The install did not finish: ${reason}`
           : "The install did not finish. Check the Subtitle Hub activity for the reason.",
       );
     }

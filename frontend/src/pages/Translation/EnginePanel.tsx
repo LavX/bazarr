@@ -35,6 +35,23 @@ interface PointerChoice {
 }
 
 /**
+ * A choice laid over the ones before it. The engine and the fallback are never the same engine: when
+ * the engine picked now is the fallback that was picked a moment ago, that fallback is dropped, so
+ * the two never go out together as one request the server has to refuse.
+ */
+function together(before: PointerChoice, change: PointerChoice): PointerChoice {
+  const merged = { ...before, ...change };
+  if (
+    "engine" in change &&
+    change.engine !== null &&
+    merged.fallback_engine === change.engine
+  ) {
+    delete merged.fallback_engine;
+  }
+  return merged;
+}
+
+/**
  * The engine and fallback choices, written one request at a time. A choice made while a write is on
  * its way waits, and replaces any other that was waiting: requests never overlap, so they cannot land
  * out of order, and the last choice is the one that ends up saved. The choice shows at once.
@@ -87,8 +104,8 @@ function usePointerChoices() {
     problem,
     choose: (change: PointerChoice) => {
       setProblem("");
-      setChosen((current) => ({ ...current, ...change }));
-      waiting.current = { ...waiting.current, ...change };
+      setChosen((current) => together(current, change));
+      waiting.current = together(waiting.current ?? {}, change);
       void write();
     },
   };

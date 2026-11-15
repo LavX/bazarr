@@ -58,6 +58,9 @@ const BackendList: FunctionComponent<{
   // revision it opened with: a refreshed list does not move its draft on to a newer revision.
   const [editingId, setEditingId] = useState<number | null>(null);
   const [adding, setAdding] = useState<StartingPoint | null>(null);
+  // The open form is in the middle of a save, a reload or a removal. Until it is over, no other form
+  // can be opened and this one cannot be closed: its answer needs the form it was given in.
+  const [formBusy, setFormBusy] = useState(false);
   const [problem, setProblem] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const hintId = useId();
@@ -162,6 +165,8 @@ const BackendList: FunctionComponent<{
 
   const runTest = (item: TranslationConnection) => {
     // The answer belongs to the back end as it was when the test ran, and is said aloud as well as shown.
+    // Emptied first: a result that reads the same as the last one is then a change, and is said again.
+    setAnnouncement("");
     const report = (ok: boolean, message: string) => {
       setTests((current) => ({
         ...current,
@@ -283,6 +288,7 @@ const BackendList: FunctionComponent<{
                   variant={editing ? "light" : "default"}
                   aria-expanded={editing}
                   aria-label={`Edit ${name}`}
+                  disabled={formBusy}
                   onClick={() => {
                     setAdding(null);
                     setEditingId(editing ? null : item.id);
@@ -344,6 +350,7 @@ const BackendList: FunctionComponent<{
                     engine={engine}
                     connection={item}
                     onClose={() => setEditingId(null)}
+                    onBusy={setFormBusy}
                   />
                 </div>
               )}
@@ -372,6 +379,7 @@ const BackendList: FunctionComponent<{
             connection={null}
             start={adding}
             onClose={() => setAdding(null)}
+            onBusy={setFormBusy}
           />
         </div>
       ) : (
@@ -380,6 +388,7 @@ const BackendList: FunctionComponent<{
             <Button
               mt="sm"
               variant="light"
+              disabled={formBusy}
               leftSection={<FontAwesomeIcon icon={faPlus} />}
             >
               Add a back end

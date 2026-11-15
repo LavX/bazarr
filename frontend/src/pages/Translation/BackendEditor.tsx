@@ -1,5 +1,5 @@
 /* eslint-disable camelcase -- transport names. */
-import { FunctionComponent, useMemo, useState } from "react";
+import { FunctionComponent, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Group, Stack, Text } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import {
@@ -36,6 +36,12 @@ export interface BackendEditorProps {
   /** Where a new back end starts from: its type, and the preset when it has one. */
   start?: StartingPoint;
   onClose: () => void;
+  /**
+   * Told while a save, a reload or the removal is on its way, and again when it is over. The list
+   * holds its own controls back meanwhile: replacing this form in the middle would leave its answer
+   * with nowhere to go.
+   */
+  onBusy?: (busy: boolean) => void;
 }
 
 /**
@@ -47,6 +53,7 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
   connection,
   start,
   onClose,
+  onBusy,
 }) => {
   const types = engine.schema?.backend_types ?? {};
   const backendType = connection?.backend_type ?? start?.typeId ?? "";
@@ -173,6 +180,11 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
   // one is on its way the others cannot be started, so two writes to the same back end never overlap.
   const working = form.busy || loadingFor !== null;
   const busy = working || remove.isPending;
+  useEffect(() => {
+    onBusy?.(busy);
+    // A form that goes away is not busy any more.
+    return () => onBusy?.(false);
+  }, [busy, onBusy]);
 
   const name = connection
     ? backendLabel(engine, connection)

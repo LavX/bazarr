@@ -312,7 +312,14 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
                   variant="default"
                   loading={pointers.isPending}
                   disabled={starting}
-                  onClick={() => pointers.mutate({ engine: engine.id })}
+                  onClick={() =>
+                    pointers.mutate(
+                      { engine: engine.id },
+                      // The panel may be held up by a start that stopped half way: picking another
+                      // engine settles it, and the page moves on.
+                      { onSuccess: () => onPin(false) },
+                    )
+                  }
                 >
                   Use {engineName(engine)}
                 </Button>

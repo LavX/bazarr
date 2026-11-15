@@ -1,5 +1,5 @@
 import { FunctionComponent, useId, useState } from "react";
-import { Alert, Button, SegmentedControl, Skeleton } from "@mantine/core";
+import { Button, SegmentedControl, Skeleton } from "@mantine/core";
 import { faChevronRight, faLanguage } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -352,61 +352,55 @@ const ActivityPanel: FunctionComponent<{
               <Skeleton key={item} height={44} radius="sm" />
             ))}
           </div>
-        ) : history.isError && !history.data ? (
-          <Alert color="red" role="alert">
-            The history could not be loaded.{" "}
-            <Button
-              size="compact-xs"
-              variant="default"
-              ml="xs"
-              onClick={() => void history.refetch()}
-            >
-              Try again
-            </Button>
-          </Alert>
-        ) : past.length === 0 ? (
-          filter === "all" ? (
-            <EmptyState
-              icon={faLanguage}
-              title="Nothing has been translated yet"
-              body="Translated subtitles show up here, each with the back end that did it and what it cost."
-            />
-          ) : (
-            <div className={styles.quiet}>No jobs match this filter.</div>
-          )
         ) : (
           <>
+            {/* A failed load is said first, whatever is under it: rows, or an answer that there are none. */}
             {history.isError && (
               <LoadProblem
                 what="The history"
-                stale
+                stale={history.data !== undefined}
                 busy={history.isFetching}
                 onRetry={() => void history.refetch()}
               />
             )}
-            <JobList
-              jobs={past}
-              state={state}
-              label="History"
-              stale={history.isError}
-            />
-            {total > length && length < MOST && (
-              <Button
-                mt="md"
-                variant="default"
-                loading={history.isFetching}
-                onClick={() =>
-                  setLength((value) => Math.min(value + PAGE, MOST))
-                }
-              >
-                Show more
-              </Button>
-            )}
-            {total > MOST && length >= MOST && (
-              <p className={styles.sectionHint}>
-                Showing the newest {MOST} of {total.toLocaleString("en-US")}{" "}
-                jobs.
-              </p>
+            {history.data !== undefined &&
+              past.length === 0 &&
+              (filter === "all" ? (
+                <EmptyState
+                  icon={faLanguage}
+                  title="Nothing has been translated yet"
+                  body="Translated subtitles show up here, each with the back end that did it and what it cost."
+                />
+              ) : (
+                <div className={styles.quiet}>No jobs match this filter.</div>
+              ))}
+            {past.length > 0 && (
+              <>
+                <JobList
+                  jobs={past}
+                  state={state}
+                  label="History"
+                  stale={history.isError}
+                />
+                {total > length && length < MOST && (
+                  <Button
+                    mt="md"
+                    variant="default"
+                    loading={history.isFetching}
+                    onClick={() =>
+                      setLength((value) => Math.min(value + PAGE, MOST))
+                    }
+                  >
+                    Show more
+                  </Button>
+                )}
+                {total > MOST && length >= MOST && (
+                  <p className={styles.sectionHint}>
+                    Showing the newest {MOST} of {total.toLocaleString("en-US")}{" "}
+                    jobs.
+                  </p>
+                )}
+              </>
             )}
           </>
         )}
