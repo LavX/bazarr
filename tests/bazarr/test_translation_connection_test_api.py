@@ -29,7 +29,8 @@ def _manifest():
     return service_manifest(
         PLUGIN, settings_version=2, kind="translator", kind_api="bazarr.translator.v1",
         settings={
-            "fields": [{"key": "concurrency", "type": "integer", "min": 1, "max": 8, "default": 2}],
+            "fields": [{"key": "concurrency", "type": "integer", "min": 1, "max": 8, "default": 2},
+                       {"key": "service_token", "type": "secret"}],
             "backend_types": {
                 "openrouter": {"label": "OpenRouter", "endpoints": ["https://openrouter.ai:443"],
                                "fields": [{"key": "api_key", "type": "secret", "required": True}]},
@@ -87,6 +88,7 @@ def world(monkeypatch, schema_session):
                                          **w.hooks)
 
     monkeypatch.setattr(module, "get_service", service)
+    service_factory = service
     blueprint = Blueprint("translation_test_route", __name__, url_prefix="/api")
     Api(blueprint, authorizations={"apikey": {"type": "apiKey", "in": "header", "name": "X-API-KEY"}},
         security="apikey").add_namespace(module.api_ns_translation, "/")
@@ -123,6 +125,7 @@ def world(monkeypatch, schema_session):
         return connection(values={"base_url": LAN, "api_key": SECRET, "model": "qwen", **values}, accept=[LAN])
 
     w.call, w.probe, w.connection, w.lan_connection = call, probe, connection, lan_connection
+    w.service = service_factory
     return w
 
 
@@ -800,3 +803,87 @@ def test_the_plugin_validates_before_any_lock_is_taken(world):
     on = world.call("patch", f"engines/{world.instance.id}", {"expected_revision": 3, "enabled": True})
     assert on.status_code == 200, on.json
     assert state and all(item == (False, False) for item in state)
+
+
+NASTY = "ab\\cd\nq'\"z\u00e9"  # a backslash, a newline, both kinds of quote and a non-ASCII letter
+
+
+def _no_form_of(secret, *texts):
+    from subtitles.tools.translate.runtime.settings_service import _rendered_forms
+
+    for form in _rendered_forms(secret):
+        if len(form) >= 4:
+            for text in texts:
+                assert form not in text, f"{form!r} found"
+
+
+def test_a_secret_with_a_backslash_a_newline_and_quotes_is_masked_in_every_rendered_form(world, caplog):
+    forms = [repr(NASTY), str({"api_key": NASTY}), repr({"k": [NASTY]}), json.dumps(NASTY),
+             json.dumps({"api_key": NASTY}, ensure_ascii=False), NASTY.encode("unicode_escape").decode(),
+             repr(repr(NASTY)), f"{NASTY}"]
+    world.probe({"ok": False, "message": " | ".join(forms)})
+    connection_id = world.connection(values={"base_url": LAN, "api_key": NASTY, "model": "m"}, accept=[LAN])
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.json["ok"] is False and "***" in response.json["message"]
+    _no_form_of(NASTY, response.json["message"], response.get_data(as_text=True))
+
+
+def test_a_raised_error_formatted_with_a_nasty_secret_is_masked_in_the_error_and_the_logs(world, caplog):
+    world.probe(TypeError(f"bad {NASTY!r} in {({'api_key': NASTY})}"))
+    connection_id = world.connection(values={"base_url": LAN, "api_key": NASTY, "model": "m"}, accept=[LAN])
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 500
+    _no_form_of(NASTY, response.get_data(as_text=True), caplog.text)
+    assert "TypeError: bad" in caplog.text
+
+
+def test_the_error_that_is_raised_has_no_context_and_no_cause(world):
+    world.probe(TypeError("rejected abcde"))
+    connection_id = world.connection(values={"base_url": LAN, "api_key": "abcde", "model": "m"}, accept=[LAN])
+    with pytest.raises(TypeError) as raised:
+        world.service().test_connection(connection_id, None)
+    assert raised.value.__context__ is None and raised.value.__cause__ is None
+    assert "abcde" not in str(raised.value) and str(raised.value) == "rejected ***"
+
+
+def test_a_lookup_failure_in_a_model_list_source_is_a_failed_test_too(world, caplog):
+    def source(*args):
+        raise KeyError("models")
+
+    world.hooks["options_source"] = source
+    connection_id = world.lan_connection()
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 200 and response.json["ok"] is False
+
+
+def test_a_probe_thread_that_could_not_start_leaves_no_claim_behind(world, monkeypatch):
+    from subtitles.tools.translate.runtime import settings_service
+
+    class NoThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    world.probe({"ok": True})
+    connection_id = world.lan_connection()
+    monkeypatch.setattr(settings_service.threading, "Thread", NoThread)
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 200 and response.json["ok"] is False
+    assert settings_service._RUNNING_TESTS == set()
+
+
+def test_an_engine_save_makes_the_master_key_durable_before_any_lock_or_transaction(world, monkeypatch):
+    import secret_store
+
+    from discover.metadata import CONFIG_LOCK
+    from subtitles.tools.translate.runtime.transaction import inside_write_transaction
+
+    seen = []
+    monkeypatch.setattr(secret_store, "persist_master_key", lambda *args, **kwargs: seen.append(
+        (CONFIG_LOCK._is_owned(), inside_write_transaction(world.session))))
+    response = world.call("patch", f"engines/{world.instance.id}", {
+        "expected_revision": world.instance.revision, "values": {"service_token": SECRET}})
+    assert response.status_code == 200, response.json
+    assert seen and seen[0] == (False, False)

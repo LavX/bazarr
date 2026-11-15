@@ -130,6 +130,14 @@ TEST_TIMEOUT_GRACE_SECONDS = 5.0
 # missing attribute or key) is not turned into "the back end did not answer": it is raised.
 PROGRAMMING_ERRORS = (TypeError, AttributeError, NameError, LookupError, AssertionError, ImportError,
                       NotImplementedError, SyntaxError)
+
+
+def _is_bug(error: BaseException) -> bool:
+    """A mistake in our own code or in a binding, as opposed to a failure of the back end or the provider. A
+    failed lookup (a missing key or index) in what a provider answered is the provider's."""
+    return isinstance(error, PROGRAMMING_ERRORS) and not isinstance(error, LookupError)
+
+
 UNFINISHED_TEST = "The test could not be completed. The Bazarr+ log has the cause when debug logging is on."
 # One test at a time per connection: a second request while one runs is told so instead of starting another.
 _RUNNING_TESTS: set[int] = set()
@@ -158,11 +166,6 @@ def _claim_test(connection_id: int) -> "_Claim | None":
             return None
         _RUNNING_TESTS.add(connection_id)
         return _Claim(connection_id)
-
-
-def _release_test(connection_id: int) -> None:
-    with _RUNNING_LOCK:
-        _RUNNING_TESTS.discard(connection_id)
 
 
 OPEN_TEST = "The translation engine is not running, so this back end cannot be tested yet."
@@ -254,6 +257,18 @@ def _entries_of(secret: str) -> list[str]:
     except ValueError:
         return []
     return [item for item in parsed if isinstance(item, str)] if isinstance(parsed, list) else []
+
+
+def _rendered_forms(value: str) -> set[str]:
+    """A secret as it is, and as formatting renders it: repr without its quotes (either quote style), repr of
+    that again (a dict inside a message), JSON with and without ensure_ascii, and the unicode-escape form,
+    each with the quote characters escaped as well."""
+    escaped = value.encode("unicode_escape").decode("ascii")
+    once = repr(value)[1:-1]
+    base = {value, once, escaped, repr(once)[1:-1], repr(repr(value))[1:-1],
+            json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}
+    forms = (base | {form.replace("'", "\\'") for form in base} | {form.replace('"', '\\"') for form in base})
+    return {form for form in forms if form}
 
 
 def _configured_limits() -> "CostLimits":
@@ -576,6 +591,7 @@ class TranslatorSettingsService:
         after = validated.settings
         self._require_consent(schema, before, after, payload, new_owner=False)
         parsed = self._parsed(plugin)
+        self._make_key_durable(validated)  # before the lock and the transaction, never inside them
 
         def commit() -> None:
             # The revision claim, the settings and every secret write or clear commit together. A save that only
@@ -877,23 +893,33 @@ class TranslatorSettingsService:
         claim = _claim_test(connection.id)
         if claim is None:
             return self._test_result(False, "A test of this back end is already running. Wait for it to finish.")
+        bug: BaseException | None = None
+        result: dict[str, Any] | None = None
         try:
             if self._probe is not None:
-                return self._paid_test(connection, instance, values, destinations, secrets, held, where, claim)
-            return self._listing_test(connection, instance, values, where)
+                result = self._paid_test(connection, instance, values, destinations, secrets, held, where, claim)
+            else:
+                result = self._listing_test(connection, instance, values, where)
         except Exception as error:
-            if isinstance(error, PROGRAMMING_ERRORS):
-                if not getattr(error, "_test_sanitized", False):
-                    self._log_failure(error, held)
-                    raise self._sanitized(error, held) from None
-                raise
             # Whatever a probe or a model list raised, a refusal of ours included, may carry an address or a key
             # in its text or its fields: only its type is said, and the scrubbed traceback goes to the debug log.
-            self._log_failure(error, held)
-            return self._test_result(False, UNFINISHED_TEST)
+            # A bug in our own code is raised, as a copy with the secrets masked. The copy is built here and
+            # raised after this block, so it carries no context and no traceback of the original.
+            if _is_bug(error):
+                if getattr(error, "_test_sanitized", False):
+                    bug = error
+                else:
+                    self._log_failure(error, held)
+                    bug = self._sanitized(error, held)
+            else:
+                self._log_failure(error, held)
+                result = self._test_result(False, UNFINISHED_TEST)
         finally:
             if not claim.handed_to_probe:
                 claim.release()
+        if bug is not None:
+            raise bug
+        return result
 
     @classmethod
     def _sanitized(cls, error: BaseException, held: Mapping[str, str]) -> BaseException:
@@ -998,9 +1024,9 @@ class TranslatorSettingsService:
         if failure is not None:
             # A bug in our code is raised, with the secrets masked in what is raised. A lookup that failed on an
             # odd answer from a provider (a missing key, an index) is that provider's failure, not ours.
-            if isinstance(failure, PROGRAMMING_ERRORS) and not isinstance(failure, LookupError):
+            if _is_bug(failure):
                 self._log_failure(failure, held)
-                raise self._sanitized(failure, held) from None
+                raise self._sanitized(failure, held)
             self._log_failure(failure, held)
             return self._test_result(False, UNFINISHED_TEST)
         if answer.get("ok") is True:
@@ -1023,9 +1049,9 @@ class TranslatorSettingsService:
             finally:
                 claim.release()
 
-        claim.handed_to_probe = True
         thread = threading.Thread(target=run, name="translation-connection-test", daemon=True)
         thread.start()
+        claim.handed_to_probe = True  # only once the thread exists: if it never started, the request releases
         thread.join(request.timeout_seconds + TEST_TIMEOUT_GRACE_SECONDS)
         if thread.is_alive():
             raise TimeoutError("the probe did not answer in time")
@@ -1081,12 +1107,17 @@ class TranslatorSettingsService:
     def _mask(text: str, held: Mapping[str, str]) -> str:
         """The text with every saved secret and credential shape masked, whitespace left as it was.
 
-        ``held`` is every secret the connection stores, whatever its length. A short value is masked only as a
-        whole word, so it does not eat the letters of an ordinary word.
+        ``held`` is every secret the connection stores, whatever its length. A secret is masked as it is and in
+        the forms it takes when something renders it (repr, a dict or tuple inside a message, JSON, unicode
+        escapes), so a key with a backslash, a quote or a newline in it does not get through escaped. A short
+        value is masked only as a whole word, so it does not eat the letters of an ordinary word.
         """
         pieces = {piece for value in held.values() for piece in [value, *_entries_of(value)] if piece}
-        for piece in sorted(pieces, key=len, reverse=True):
-            pattern = re.escape(piece) if len(piece) >= 4 else r"(?<!\w)" + re.escape(piece) + r"(?!\w)"
+        forms: set[str] = set()
+        for piece in pieces:
+            forms |= _rendered_forms(piece)
+        for form in sorted(forms, key=len, reverse=True):
+            pattern = re.escape(form) if len(form) >= 4 else r"(?<!\w)" + re.escape(form) + r"(?!\w)"
             text = re.sub(pattern, "***", text)
         try:
             from secret_store.scrub import scrub_text
