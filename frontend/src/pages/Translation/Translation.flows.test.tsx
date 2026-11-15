@@ -6,7 +6,14 @@ import queryClient from "@/apis/queries";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type { TranslationState } from "@/types/translation";
-import { connection, engine, inputsHolding, second, SECRET } from "./fixtures";
+import {
+  connection,
+  engine,
+  inputsHolding,
+  lingarr,
+  second,
+  SECRET,
+} from "./fixtures";
 import TranslationView from ".";
 
 // The page's longer flows: what stays on screen while a request is on its way,
@@ -1006,5 +1013,178 @@ describe("Translation page, turning translation off on the full page", () => {
         name: "Translate the subtitles you cannot find",
       }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("Translation page, an engine Bazarr+ runs itself", () => {
+  it("lists it as a choice with no plugin trouble, and selects it like any engine", async () => {
+    state = { ...state, instances: [second, engine(), lingarr()] };
+    server.use(
+      http.put("/api/translation/pointers", async ({ request }) => {
+        record("put", "pointers", await request.json());
+        return HttpResponse.json({
+          engine: 5,
+          fallback_engine: null,
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    const group = await showPage();
+    const radio = within(group).getByRole("radio", { name: /Lingarr/ });
+    expect(radio).toHaveAccessibleName(/Legacy/);
+    // It has no plugin, and that is not reported as a plugin that stopped.
+    expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Sends each job to your own Lingarr service."),
+    ).toBeInTheDocument();
+    await user.click(radio);
+    await waitFor(() =>
+      expect(calls).toEqual([
+        { method: "put", path: "pointers", body: { engine: 5 } },
+      ]),
+    );
+  });
+
+  it("draws its URL and token from its schema, asks before a new address, and keeps the token write-only", async () => {
+    state = {
+      ...state,
+      engine: 5,
+      instances: [
+        engine(),
+        lingarr({ configured: false, values: {}, secrets: {} }),
+      ],
+    };
+    let attempt = 0;
+    server.use(
+      http.patch(
+        "/api/translation/engines/:id",
+        async ({ request, params }) => {
+          const body = (await request.json()) as {
+            accept_destinations?: string[];
+          };
+          record("patch", "engine " + String(params.id), body);
+          attempt += 1;
+          if (attempt === 1) {
+            return HttpResponse.json(
+              {
+                error: "consent_required",
+                message: "These addresses are new.",
+                destinations: ["http://lingarr.lan:9876"],
+              },
+              { status: 409 },
+            );
+          }
+          const saved = lingarr({
+            revision: 2,
+            values: { url: "http://lingarr.lan:9876" },
+            secrets: { token: { configured: true, last4: "6789" } },
+          });
+          state = { ...state, instances: [engine(), saved] };
+          return HttpResponse.json({ engine: saved, notices: [] });
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    // Selected and not set up yet: the page says so, in the band and on the card.
+    const band = screen.getByRole("group", { name: "Translation status" });
+    expect(within(band).getByText("Not set up")).toBeVisible();
+    await user.type(
+      screen.getByRole("textbox", { name: /Lingarr URL/ }),
+      "http://lingarr.lan:9876",
+    );
+    await user.type(screen.getByLabelText("API token"), SECRET);
+    // Two engines have a Save button; the one on screen is Lingarr's.
+    await user.click(
+      screen.getByRole("button", { name: "Save engine settings" }),
+    );
+    const ask = await screen.findByRole("dialog", {
+      name: "Send subtitles to a new address?",
+    });
+    await waitFor(() =>
+      expect(within(ask).getByText("http://lingarr.lan:9876")).toBeVisible(),
+    );
+    await user.click(
+      within(ask).getByRole("button", { name: "Send to this address" }),
+    );
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual({
+      method: "patch",
+      path: "engine 5",
+      body: {
+        expected_revision: 1,
+        values: { url: "http://lingarr.lan:9876", token: SECRET },
+        clear_secrets: [],
+        accept_destinations: ["http://lingarr.lan:9876"],
+      },
+    });
+    // Saved: ready, and the token is only said to be there.
+    expect(await within(band).findByText("Ready")).toBeVisible();
+    expect(
+      await screen.findByPlaceholderText(
+        "Saved, ending 6789. Leave empty to keep it.",
+      ),
+    ).toHaveValue("");
+    expect(inputsHolding(SECRET)).toHaveLength(0);
+    expect(document.body.textContent).not.toContain(SECRET);
+  });
+
+  it("is reached from the first-run panel, which opens the full page on its set-up", async () => {
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [
+        engine({ configured: false, connections: [] }),
+        lingarr({ configured: false, values: {}, secrets: {} }),
+      ],
+    };
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    // Not set up, so it is not offered for use yet.
+    expect(
+      screen.queryByRole("button", { name: "Use Lingarr" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Set up Lingarr" }));
+    const group = await screen.findByRole("radiogroup", { name: "Engine" });
+    expect(within(group).getByRole("radio", { name: "None" })).toBeChecked();
+    // The full page opened on Lingarr's own form.
+    expect(screen.getByRole("textbox", { name: /Lingarr URL/ })).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Lingarr", level: 2 }),
+    ).toBeVisible();
+  });
+
+  it("is offered for use on first run once its URL is set", async () => {
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [engine({ configured: false, connections: [] }), lingarr()],
+    };
+    server.use(
+      http.put("/api/translation/pointers", async ({ request }) => {
+        record("put", "pointers", await request.json());
+        return HttpResponse.json({
+          engine: 5,
+          fallback_engine: null,
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await user.click(
+      await screen.findByRole("button", { name: "Use Lingarr" }),
+    );
+    await waitFor(() =>
+      expect(calls).toEqual([
+        { method: "put", path: "pointers", body: { engine: 5 } },
+      ]),
+    );
   });
 });

@@ -94,6 +94,16 @@ function usePointerChoices() {
   };
 }
 
+/** For an engine kept from earlier versions, which Bazarr+ runs itself. */
+export const LegacyMark: FunctionComponent = () => (
+  <span
+    className={styles.legacy}
+    title="Kept from earlier versions. It is not a plugin: there is nothing to install or update."
+  >
+    Legacy
+  </span>
+);
+
 export const OfficialMark: FunctionComponent = () => (
   <span className={styles.official}>
     <FontAwesomeIcon icon={faCircleCheck} />
@@ -108,7 +118,7 @@ function engineLine(engine: TranslationEngine): string {
     return status.next;
   }
   if (!hasBackends(engine)) {
-    return "Needs no set-up.";
+    return engine.description || "Needs no set-up.";
   }
   const on = engine.connections.filter(working);
   const first = backendLabel(engine, on[0]);
@@ -172,6 +182,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           <label className={styles.engineLabel} htmlFor={id}>
             {engineName(engine)}
             {engine.official && <OfficialMark />}
+            {engine.legacy && <LegacyMark />}
           </label>
           <p className={styles.engineText} id={`${id}-text`}>
             {engineLine(engine)}

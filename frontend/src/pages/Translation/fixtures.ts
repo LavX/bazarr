@@ -167,6 +167,44 @@ export const job = (
   ...patch,
 });
 
+/** Lingarr as the server lists it: run by Bazarr+ itself, no plugin, a URL and a token from a small schema. */
+export const lingarr = (
+  patch: Partial<TranslationEngine> = {},
+): TranslationEngine => ({
+  id: 5,
+  plugin_id: "lingarr",
+  name: "Lingarr",
+  official: false,
+  legacy: true,
+  description: "Sends each job to your own Lingarr service.",
+  enabled: true,
+  revision: 1,
+  awaiting_secrets: false,
+  configured: true,
+  settings_version: 1,
+  plugin_version: null,
+  plugin: null,
+  schema: {
+    settings_version: 1,
+    endpoints: [],
+    fields: [
+      {
+        key: "url",
+        type: "text",
+        label: "Lingarr URL",
+        required: true,
+        destination: true,
+      },
+      { key: "token", type: "secret", label: "API token" },
+    ],
+    backend_types: {},
+  },
+  values: { url: "http://lingarr:9876" },
+  secrets: { token: { configured: true, last4: "9f3c" } },
+  connections: [],
+  ...patch,
+});
+
 /** The inputs on the page that hold exactly this text, whether or not they show it. */
 export const inputsHolding = (text: string) =>
   Array.from(document.querySelectorAll("input, textarea")).filter(

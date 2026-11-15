@@ -52,10 +52,12 @@ const LoadingPage: FunctionComponent = () => (
 const EngineTab: FunctionComponent<{
   state: TranslationState;
   canTest: boolean;
-}> = ({ state, canTest }) => {
+  /** The engine whose set-up the tab starts on, when the first-run panel named one. */
+  startOn: number | null;
+}> = ({ state, canTest, startOn }) => {
   const engines = orderedEngines(state.instances);
   // The engine whose set-up is shown: the one the user opened, else the selected one, else the first.
-  const [opened, setOpened] = useState<number | null>(null);
+  const [opened, setOpened] = useState<number | null>(startOn);
   const open =
     engines.find((item) => item.id === opened) ??
     engines.find((item) => item.id === state.engine) ??
@@ -104,6 +106,7 @@ const TranslationView: FunctionComponent = () => {
   // Once the full page has been shown it stays: by choice ("Set it up by hand"), or because there was
   // something to show. Picking None there does not swap the page for the first-run panel.
   const [full, setFull] = useState(false);
+  const [startOn, setStartOn] = useState<number | null>(null);
   // A start that is under way keeps the first-run panel up until it has gone through, whatever a refresh
   // in between says: the panel holds the reason a step failed and the way to try again.
   const [starting, setStarting] = useState(false);
@@ -154,7 +157,10 @@ const TranslationView: FunctionComponent = () => {
         {refreshFailed}
         <QuickStart
           state={data}
-          onByHand={() => setFull(true)}
+          onByHand={(engineId) => {
+            setStartOn(engineId ?? null);
+            setFull(true);
+          }}
           onPin={setStarting}
         />
       </Container>
@@ -209,7 +215,7 @@ const TranslationView: FunctionComponent = () => {
           </Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="engine" pt="lg">
-          <EngineTab state={data} canTest={can("test")} />
+          <EngineTab state={data} canTest={can("test")} startOn={startOn} />
         </Tabs.Panel>
         <Tabs.Panel value="defaults" pt="lg">
           <DefaultsPanel summary={can("limits") ? summary.data : undefined} />

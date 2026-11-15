@@ -65,6 +65,10 @@ export const backendName = (
 export const working = (item: TranslationConnection) =>
   item.enabled && item.usable && !item.awaiting_secrets;
 
+/** Whether there is something to run: an engine's plugin, or Bazarr+ itself for an engine it runs. */
+export const canRun = (engine: TranslationEngine) =>
+  engine.legacy === true || engine.plugin?.active === true;
+
 export interface Status {
   tone: Tone;
   label: string;
@@ -74,7 +78,7 @@ export interface Status {
 
 /** Whether an engine can take a job, and when it cannot, the reason and the next step. */
 export function engineStatus(engine: TranslationEngine): Status {
-  if (!engine.plugin?.active) {
+  if (!canRun(engine)) {
     return {
       tone: "danger",
       label: "Plugin not running",

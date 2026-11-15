@@ -40,6 +40,14 @@ export interface TranslationEngine {
   plugin_id: string;
   name: string;
   official: boolean;
+  /**
+   * An engine kept from earlier versions that Bazarr+ runs itself (Lingarr): it has no plugin, so
+   * `plugin` is null and there is nothing to install or update. Its settings come from `schema`
+   * like any engine's.
+   */
+  legacy?: boolean;
+  /** One line about what the engine does, shown on its card once it is ready. */
+  description?: string;
   enabled: boolean;
   revision: number;
   awaiting_secrets: boolean;

@@ -15,9 +15,10 @@ import type {
   TranslationState,
 } from "@/types/translation";
 import ConsentModal from "./ConsentModal";
-import { OfficialMark } from "./EnginePanel";
+import { LegacyMark, OfficialMark } from "./EnginePanel";
 import InstallConsent from "./InstallConsent";
 import {
+  canRun,
   engineName,
   engineStatus,
   keyOnlyTypes,
@@ -179,8 +180,8 @@ const KeyStart: FunctionComponent<{
 
 export interface QuickStartProps {
   state: TranslationState;
-  /** Leave the panel for the full page, with nothing selected. */
-  onByHand: () => void;
+  /** Leave the panel for the full page, with nothing selected, on this engine's set-up when one is named. */
+  onByHand: (engineId?: number) => void;
   /** Keep the panel up (true) until a start that is under way has gone through (false). */
   onPin: (pinned: boolean) => void;
 }
@@ -229,13 +230,15 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
           Recommended. It translates with an AI service through your own key,
           and you pay that service for what you translate.
         </p>
-        {official?.plugin?.active ? (
+        {official && canRun(official) ? (
           keyOnlyTypes(official).length > 0 ? (
             <KeyStart engine={official} onPin={onPin} />
           ) : (
             <div className={styles.startForm}>
               <div>
-                <Button onClick={onByHand}>Set up its back ends</Button>
+                <Button onClick={() => onByHand(official.id)}>
+                  Set up its back ends
+                </Button>
               </div>
             </div>
           )
@@ -266,10 +269,13 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
               <div>
                 <h3 className={styles.startOptionHead}>
                   {engineName(engine)}
+                  {engine.legacy && <LegacyMark />}
                   <StatusBadge tone={status.tone} label={status.label} />
                 </h3>
                 <p className={styles.startOptionText}>
-                  {ready ? "Installed. It works as it is." : status.next}
+                  {ready
+                    ? engine.description || "Installed. It works as it is."
+                    : status.next}
                 </p>
               </div>
               {ready ? (
@@ -281,8 +287,8 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
                   Use {engineName(engine)}
                 </Button>
               ) : (
-                engine.plugin?.active && (
-                  <Button variant="default" onClick={onByHand}>
+                canRun(engine) && (
+                  <Button variant="default" onClick={() => onByHand(engine.id)}>
                     Set up {engineName(engine)}
                   </Button>
                 )
@@ -337,7 +343,12 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
 
       <p className={styles.startFoot}>
         Want a local server, a custom address or several back ends?{" "}
-        <Anchor component="button" type="button" size="sm" onClick={onByHand}>
+        <Anchor
+          component="button"
+          type="button"
+          size="sm"
+          onClick={() => onByHand()}
+        >
           Set it up by hand
         </Anchor>
       </p>
