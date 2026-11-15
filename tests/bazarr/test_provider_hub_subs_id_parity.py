@@ -83,8 +83,8 @@ def test_the_audit_tally_holds():
     classes = list(LEGACY_ID_CLASS.values())
     assert classes.count(PREFIX) == 5
     assert classes.count(DERIVED) == 11
-    assert classes.count(DERIVED) + classes.count(DERIVABLE) == 38
-    assert classes.count(LOST) == 13
+    assert classes.count(DERIVED) + classes.count(DERIVABLE) == 37
+    assert classes.count(LOST) == 14
 
 
 def test_every_written_rule_is_a_derived_or_prefix_provider_and_only_those():
@@ -151,6 +151,9 @@ def test_the_module_does_not_reach_the_database():
     ("subtis", DERIVABLE),  # hashes the stored lookup URL and its method
     ("shooter", DERIVABLE),  # hashes the stored URL, the language and the media hash
     ("titrari", LOST),  # the built-in's id is a result position, not the site id
+    ("subtitrarinoi", LOST),  # same: a result position
+    ("opensubtitles", LOST),  # rows do not say which mode wrote them
+    ("subsynchro", DERIVABLE),  # the stored URL, hashed on the legacy AJAX path
 ])
 def test_classes_follow_the_plugin_id_formulas(provider, kind):
     assert LEGACY_ID_CLASS[provider] == kind

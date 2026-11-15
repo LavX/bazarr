@@ -83,17 +83,18 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "napiprojekt": LOST,  # digest over a source value the old row lacks
     "napisy24": LOST,  # old id is the video hash, new id the site's own id
     "nekur": DERIVABLE,
-    # Scraper-mode ids only (``opensubtitles-native-<id>``). A row written by
-    # the XML-RPC built-in holds an IDSubtitleFile, which the plugin never
-    # reports: those rows are lost.
-    "opensubtitles": DERIVABLE,
+    # The plugin's ids are ``opensubtitles-native-<id>`` from the site's pages;
+    # the XML-RPC built-in stored an IDSubtitleFile. A row does not record which
+    # of the two wrote it, and an XML-RPC file id could equal another
+    # subtitle's native id, so no rewrite can be trusted and the rows are lost.
+    "opensubtitles": LOST,
     "opensubtitlescom": DERIVED,
     "pipocas": DERIVABLE,
     "prijevodionline": DERIVABLE,
     "regielive": DERIVABLE,  # the id is parsed out of the old URL
-    # sha1 over the media file's content hash, the site's language code and
-    # the download URL. The row holds the URL and the language; the hash comes
-    # from the media file the row belongs to.
+    # sha1 over the media file's content hash, the alpha3 and the download
+    # URL. The row holds the URL and the language; the hash comes from the
+    # media file the row belongs to.
     "shooter": DERIVABLE,
     "soustitreseu": LOST,  # digest over a URL the old row lacks
     "subclub": DERIVABLE,
@@ -106,12 +107,18 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "subsro": DERIVED,
     "subssabbz": LOST,  # digest over the download URL and the file name
     "subsunacs": LOST,  # digest over the download URL and an identity
-    "subsynchro": LOST,  # the file id comes from the download page
+    # The built-in's id is the download URL. The plugin hashes that URL into
+    # its id only on the legacy AJAX fallback path (``subsynchro-`` plus the
+    # first 16 hex of its sha1); results from the current site take the file id
+    # from the page's own markup, which no row holds. Derivable for the first.
+    "subsynchro": DERIVABLE,
     # sha1 over the lookup method and the lookup URL. The old id is the stored
     # lookup URL, and the method is one of four (hash, bytes, name,
     # alternative) that a rule can try against it.
     "subtis": DERIVABLE,
-    "subtitrarinoi": DERIVABLE,
+    # The built-in's id is the position of the result in the search page, not
+    # the site's id the plugin uses, so no old row names the new subtitle.
+    "subtitrarinoi": LOST,
     "subtitriid": DERIVABLE,
     "subtitulamostv": PREFIX,
     "subx": DERIVABLE,
