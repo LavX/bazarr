@@ -1500,13 +1500,22 @@ def shm_usage_detail(pids, skip=(), budget: "SampleBudget | None" = None) -> tup
                 if key not in named:
                     # The name may still be there: then the object's blocks are known.
                     identity = None
-                    if inode is not None and not parts[5].endswith(_DELETED):
-                        try:
-                            info = os.lstat(path)
-                        except OSError:
-                            info = None
-                        if info is not None and stat.S_ISREG(info.st_mode) and info.st_ino == inode:
-                            identity = (info.st_dev, info.st_ino, _allocated(info))
+                    if inode is not None:
+                        # ``maps`` writes " (deleted)" after the name of a removed file, but a live file
+                        # may really be called that, and it writes a newline in a name as \012: look
+                        # the name up in each form, and trust only a hit on the same inode.
+                        raw = parts[5]
+                        forms = {path, raw, raw.replace("\\012", "\n"), path.replace("\\012", "\n")}
+                        for form in forms:
+                            if not form.startswith(_SHM_DIR):
+                                continue
+                            try:
+                                info = os.lstat(form)
+                            except OSError:
+                                continue
+                            if stat.S_ISREG(info.st_mode) and info.st_ino == inode:
+                                identity = (info.st_dev, info.st_ino, _allocated(info))
+                                break
                     if budget is not None and not budget.keep():
                         total += PROC_MAX_ENTRIES * _PAGE_SIZE
                         blind += 1
@@ -1918,6 +1927,11 @@ class WorkerPool:
         # episode of it has been logged yet.
         self._shm_short = False
         self._shm_logged = False
+        # Blind holders (nameless mappings) are blamed for unexplained space only while stopping one
+        # has been lowering it: ``pending`` is the unexplained figure when one was last stopped, and
+        # ``off`` ends the blame for the rest of the episode once that figure did not go down.
+        self._shm_blind_pending = None
+        self._shm_blind_off = False
         self._event_sink = event_sink
         self._clock = clock
         self._autostart = autostart
@@ -2511,6 +2525,8 @@ class WorkerPool:
                 self._shm_low = False
                 self._shm_short = False
                 self._shm_logged = False
+                self._shm_blind_pending = None
+                self._shm_blind_off = False
             return
         total, free, _separate = state
         reserve = self._shm_reserve(total)
@@ -2525,6 +2541,8 @@ class WorkerPool:
             else:
                 self._shm_low = False
                 self._shm_logged = False
+                self._shm_blind_pending = None
+                self._shm_blind_off = False
         if not low:
             return
         shortfall = reserve - free
@@ -2540,21 +2558,37 @@ class WorkerPool:
             skip = {process.pid} if isinstance(process, LauncherProcess) else set()
             usages.append((shm_usage_detail(pids, skip, budget), entry, slot))
         unexplained = 0
-        if any(blind for (_held, _count, blind), _entry, _slot in usages):
+        blind_blame = False
+        with self._cond:
+            pending = self._shm_blind_pending
+            blind_off = self._shm_blind_off
+        if pending is not None or (not blind_off and any(blind for (_h, _c, blind), _e, _s in usages)):
             # Mappings whose name is gone have a size nobody can read. The space in use that no listed
             # file accounts for is what they (or the host's own deleted files) may be hiding: only when
-            # that alone is meaningful are the workers holding such mappings to blame.
+            # that alone is meaningful are the workers holding such mappings to blame. A listing that was
+            # cut short only gives a floor for what is listed, so the unexplained figure is an upper bound
+            # and nobody is blamed on it.
             try:
                 listed, truncated = self._shm_lister()
             except Exception as error:
                 _log_failure("listing /dev/shm failed", error)
                 listed, truncated = 0, True
-            unexplained = max(0, (total - free) - (0 if truncated else listed))
+            unexplained = max(0, (total - free) - listed)
+            blind_blame = not truncated
+            if pending is not None:
+                # The last blind holder was stopped: if that did not lower the unexplained space, the
+                # space is not theirs (the host's, or files that stay) and no more of them are blamed.
+                with self._cond:
+                    self._shm_blind_pending = None
+                    if unexplained >= pending:
+                        self._shm_blind_off = True
+                        blind_off = True
+        blind_blame = blind_blame and not blind_off
         heaviest = None
         for (held, count, blind), entry, slot in usages:
             if held >= threshold:
                 rank = (1, held, count)
-            elif blind and unexplained >= threshold:
+            elif blind and blind_blame and unexplained >= threshold:
                 rank = (0, blind, count)
             else:
                 continue
@@ -2575,6 +2609,9 @@ class WorkerPool:
         if heaviest is None:
             return
         rank, entry, slot, held, count, blind = heaviest
+        if not rank[0]:
+            with self._cond:
+                self._shm_blind_pending = unexplained
         if rank[0]:
             problem = (PoolCodes.SHM_LOW, "worker holds %d MiB (%d mappings) of /dev/shm, which is nearly full" % (
                 held // MIB, count))

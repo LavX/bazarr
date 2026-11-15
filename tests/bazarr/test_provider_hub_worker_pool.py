@@ -4262,6 +4262,8 @@ def test_a_mapped_object_is_measured_by_its_name_when_it_still_has_one_and_by_a_
     page = os.sysconf("SC_PAGE_SIZE")
     maps = []
     names = []
+    # What this process already maps there (other tests may leave something): only the difference counts.
+    base_held, base_mappings, base_blind = pool_module.shm_usage_detail([os.getpid()])
     try:
         for index, keep_name in enumerate((True, False)):
             path = "/dev/shm/bazarr-test-sized-%d-%d" % (os.getpid(), index)
@@ -4274,16 +4276,97 @@ def test_a_mapped_object_is_measured_by_its_name_when_it_still_has_one_and_by_a_
             else:
                 os.unlink(path)
         held, mappings, blind = pool_module.shm_usage_detail([os.getpid()])
-        assert mappings == 2
+        assert mappings - base_mappings == 2
         # The named one is charged its 3 MiB, the nameless one a page and counted as blind.
-        assert 3 * MIB <= held < 3 * MIB + 8 * page, held
-        assert blind == 1
-        assert pool_module.shm_usage([os.getpid()]) == (held, 2)
+        assert 3 * MIB <= held - base_held < 3 * MIB + 8 * page, held - base_held
+        assert blind - base_blind == 1
+        assert pool_module.shm_usage([os.getpid()]) == (held, mappings)
     finally:
         for address in maps:
             libc.munmap(ctypes.c_void_p(address), ctypes.c_size_t(page))
         for path in names:
             os.unlink(path)
+
+
+@needs_smaps
+def test_names_that_look_deleted_or_hold_a_newline_are_still_looked_up_by_name():
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    page = os.sysconf("SC_PAGE_SIZE")
+    base_held, base_mappings, base_blind = pool_module.shm_usage_detail([os.getpid()])
+    maps = []
+    names = []
+    try:
+        for label in ("odd-%d (deleted)", "odd-%d\nname"):
+            path = "/dev/shm/bazarr-test-" + label % os.getpid()
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            names.append(path)
+            os.write(fd, b"n" * (2 * MIB))
+            maps.append(libc.mmap(None, page, 3, 1, fd, 0))
+            os.close(fd)
+        held, mappings, blind = pool_module.shm_usage_detail([os.getpid()])
+        assert mappings - base_mappings == 2
+        # Both names still exist: each object is charged its 2 MiB, and neither is blind.
+        assert 4 * MIB <= held - base_held < 4 * MIB + 8 * page, held - base_held
+        assert blind == base_blind
+    finally:
+        for address in maps:
+            libc.munmap(ctypes.c_void_p(address), ctypes.c_size_t(page))
+        for path in names:
+            os.unlink(path)
+
+
+@needs_smaps
+def test_a_cut_short_listing_blames_nobody_for_unexplained_space(make_pool):
+    try:
+        pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False,
+                         shm_reader=lambda: (64 * MIB, 1 * MIB, True), shm_lister=lambda: (0, True))
+        pool.register(definition("mapper", session=fast_session(handshake_timeout=20.0)))
+        seen = []
+        mapper = pool.submit("mapper", "shm_big_map", {"mb": 1, "unlink": True},
+                             on_progress=lambda message: seen.append("m"))
+        assert wait_until(lambda: "m" in seen, timeout=30)
+        pool.sweep()
+        pool.sweep()
+        assert pool.state("mapper") is WorkerState.BUSY and pool.status()["shm_low"] is False
+        mapper.cancel()
+    finally:
+        _remove_big_fake_objects()
+
+
+@needs_smaps
+def test_blind_holders_are_blamed_no_more_once_stopping_one_did_not_lower_the_unexplained_space(make_pool):
+    state = {"free": 1 * MIB}
+    try:
+        pool = make_pool(fast_pool_limits(max_resident=4), use_clock=False,
+                         shm_reader=lambda: (64 * MIB, state["free"], True), shm_lister=lambda: (0, False))
+        seen = []
+        jobs = {}
+        for key in ("first", "second"):
+            pool.register(definition(key, session=fast_session(handshake_timeout=20.0)))
+            jobs[key] = pool.submit(key, "shm_big_map", {"mb": 1, "unlink": True},
+                                    on_progress=lambda message, key=key: seen.append(key))
+        assert wait_until(lambda: len(seen) == 2, timeout=30)
+        pool.sweep()
+        killed = [key for key in jobs if pool.state(key) is not WorkerState.BUSY]
+        assert len(killed) == 1, "one blind holder is stopped per sweep"
+        survivor = "second" if killed == ["first"] else "first"
+        # The unexplained space is what it was: it was not these workers, so the rest are left alone.
+        pool.sweep()
+        pool.sweep()
+        assert pool.state(survivor) is WorkerState.BUSY and pool.status()["shm_low"] is False
+        # A new episode (the space recovers, then runs short again) starts the blame afresh.
+        state["free"] = 40 * MIB
+        pool.sweep()
+        state["free"] = 1 * MIB
+        pool.sweep()
+        assert pool.state(survivor) is not WorkerState.BUSY
+    finally:
+        _remove_big_fake_objects()
 
 
 def test_with_no_worker_at_all_a_short_dev_shm_blocks_nothing(make_pool):
@@ -4386,13 +4469,15 @@ def test_the_limitations_say_when_dev_shm_is_not_limited_per_plugin(monkeypatch)
     monkeypatch.setattr(spawn_module, "shm_state", lambda: (30 * GIB, 30 * GIB, True))
     from provider_hub.sandbox import SandboxProbe, sandbox_limitations
 
-    notes = " ".join(sandbox_limitations(SandboxProbe(abi=9, verified=True, network_verified=True,
-                                                      signal_scope_verified=True, capabilities_dropped=True)))
+    enforced = SandboxProbe(abi=9, verified=True, network_verified=True, signal_scope_verified=True,
+                            capabilities_dropped=True)
+    declared = SandboxProbe(abi=0, verified=False, reason="test: declared mode")
+    # Where the sandbox is enforced a worker cannot reach /dev/shm at all: nothing to say about its limit.
+    assert "/dev/shm is not limited" not in " ".join(sandbox_limitations(enforced))
+    notes = " ".join(sandbox_limitations(declared))
     assert "shared memory under /dev/shm is not limited per plugin on this host" in notes.lower()
     monkeypatch.setattr(spawn_module, "shm_state", lambda: (64 * MIB, 60 * MIB, True))
-    notes = " ".join(sandbox_limitations(SandboxProbe(abi=9, verified=True, network_verified=True,
-                                                      signal_scope_verified=True, capabilities_dropped=True)))
-    assert "/dev/shm is not limited" not in notes
+    assert "/dev/shm is not limited" not in " ".join(sandbox_limitations(declared))
 
 
 # --------------------------------- named shared anonymous mappings, and bounded /proc reads

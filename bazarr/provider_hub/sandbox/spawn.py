@@ -215,8 +215,6 @@ def sandbox_limitations(probe: SandboxProbe) -> list[str]:
         "mappings (MAP_SHARED|MAP_ANONYMOUS, as Python's mmap.mmap(-1, n) makes): their size "
         "cannot be measured, so the worker counts as over its memory limit."
     )
-    if not shm_guardable(shm_state()):
-        notes.append("Shared memory under /dev/shm is not limited per plugin on this host.")
     return notes
 
 
