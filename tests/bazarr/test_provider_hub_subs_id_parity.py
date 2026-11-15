@@ -7,7 +7,7 @@ the plugin only keeps a row working if the plugin's host id equals the stored
 one, or the row is rewritten to it. The fixtures pair what each built-in
 stores with the id its plugin builds. The built-in side comes from this
 repository's provider classes; the plugin side is transcribed from the id
-formulas of the catalog at ``beta`` commit f51d041 and was not executed, so a
+formulas of the catalog at ``beta`` commit f51d041, read but not run, so a
 catalog change to an id format is not caught here.
 """
 import pytest
@@ -38,7 +38,6 @@ REWRITES = [
     ("titulky", "98001", "cs", "titulky:titulky-98001-ces"),
     ("titlovi", "444", "pt-BR", "titlovi:titlovi-444-por"),
     ("titlovi", "445", "sr-Cyrl", "titlovi:titlovi-445-srp"),
-    ("titrari", "1010", "ro", "titrari:titrari-1010-ron"),
     ("tvsubtitles", "7788", "fr", "tvsubtitles:tvsubtitles-7788-fra"),
     ("opensubtitlescom", "3344", "de", "opensubtitlescom:opensubtitlescom-3344-deu"),
     ("opensubtitlescom", "3345", "de:hi", "opensubtitlescom:opensubtitlescom-3345-deu"),
@@ -83,7 +82,7 @@ def test_the_table_covers_exactly_the_migrated_built_ins():
 def test_the_audit_tally_holds():
     classes = list(LEGACY_ID_CLASS.values())
     assert classes.count(PREFIX) == 5
-    assert classes.count(DERIVED) == 12
+    assert classes.count(DERIVED) == 11
     assert classes.count(DERIVED) + classes.count(DERIVABLE) == 38
     assert classes.count(LOST) == 13
 
@@ -107,7 +106,7 @@ def test_an_unknown_provider_is_never_rewritten():
     assert rewrite_legacy_subs_id("not-a-provider", "1", "en") is None
 
 
-@pytest.mark.parametrize("provider", ["betaseries", "titulky", "titlovi", "titrari", "tvsubtitles",
+@pytest.mark.parametrize("provider", ["betaseries", "titulky", "titlovi", "tvsubtitles",
                                       "opensubtitlescom", "subsro", "supersubtitles"])
 @pytest.mark.parametrize("language", [None, "", "xx", "not a language"])
 def test_a_rule_that_needs_the_language_returns_none_without_one(provider, language):
@@ -147,11 +146,14 @@ def test_the_module_does_not_reach_the_database():
     assert not any(name in vars(legacy) for name in ("database", "TableBlacklist", "TableHistory"))
 
 
-@pytest.mark.parametrize("provider", ["animetosho", "subtis"])
-def test_animetosho_and_subtis_are_classified_from_their_plugin_formulas(provider):
-    # animetosho hashes an entry id the row never held, subtis hashes the
-    # lookup URL built from the media file: only the second can be followed.
-    assert LEGACY_ID_CLASS[provider] == {"animetosho": LOST, "subtis": DERIVABLE}[provider]
+@pytest.mark.parametrize("provider, kind", [
+    ("animetosho", LOST),  # hashes a torrent entry id the row never held
+    ("subtis", DERIVABLE),  # hashes the stored lookup URL and its method
+    ("shooter", DERIVABLE),  # hashes the stored URL, the language and the media hash
+    ("titrari", LOST),  # the built-in's id is a result position, not the site id
+])
+def test_classes_follow_the_plugin_id_formulas(provider, kind):
+    assert LEGACY_ID_CLASS[provider] == kind
     assert rewrite_legacy_subs_id(provider, "https://x/y", "en") is None
 
 
@@ -186,7 +188,7 @@ def test_a_plain_row_for_a_site_marked_forced_subtitle_is_the_documented_gap():
     assert rewrite_legacy_subs_id("supersubtitles", "77", "hu") == "supersubtitles:supersubtitles-77-hun"
 
 
-def test_confirmed_only_withholds_the_unread_prefix_rules():
+def test_confirmed_only_withholds_the_prefix_rules_read_but_not_run():
     for provider in PREFIX_UNCONFIRMED:
         assert rewrite_legacy_subs_id(provider, "9", None) == f"{provider}:9"
         assert rewrite_legacy_subs_id(provider, "9", None, confirmed_only=True) is None

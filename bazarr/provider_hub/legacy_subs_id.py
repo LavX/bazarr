@@ -22,13 +22,12 @@ Classes (``LEGACY_ID_CLASS``):
 ``derivable``
     The plugin id is a function of the old id plus context a row, or the media
     file it belongs to, can supply (the language, the season and episode, a
-    value parsed from a URL, the video's hash or size). Read from the plugin
-    code, no rule written yet.
+    value parsed from a URL, the video's hash). Read from the plugin code, no
+    rule written yet.
 ``lost``
     The plugin id embeds data an old row never recorded (a file hash, an entry
-    id, a digest over a value only the provider's site can return). The row
-    cannot be rewritten: its entry stops suppressing and that is documented
-    rather than fixed.
+    id, a hash of content the row never held). The row cannot be rewritten: its
+    entry stops suppressing and that is documented rather than fixed.
 
 Languages. A blacklist row stores the language the search used, with
 ``:forced`` or ``:hi`` appended for those variants, and the History page stores
@@ -84,12 +83,18 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "napiprojekt": LOST,  # digest over a source value the old row lacks
     "napisy24": LOST,  # old id is the video hash, new id the site's own id
     "nekur": DERIVABLE,
+    # Scraper-mode ids only (``opensubtitles-native-<id>``). A row written by
+    # the XML-RPC built-in holds an IDSubtitleFile, which the plugin never
+    # reports: those rows are lost.
     "opensubtitles": DERIVABLE,
     "opensubtitlescom": DERIVED,
     "pipocas": DERIVABLE,
     "prijevodionline": DERIVABLE,
     "regielive": DERIVABLE,  # the id is parsed out of the old URL
-    "shooter": LOST,  # digest over the file hash
+    # sha1 over the media file's content hash, the site's language code and
+    # the download URL. The row holds the URL and the language; the hash comes
+    # from the media file the row belongs to.
+    "shooter": DERIVABLE,
     "soustitreseu": LOST,  # digest over a URL the old row lacks
     "subclub": DERIVABLE,
     "subdl": PREFIX,  # single files only; pack members and AI rows are lost
@@ -102,10 +107,9 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "subssabbz": LOST,  # digest over the download URL and the file name
     "subsunacs": LOST,  # digest over the download URL and an identity
     "subsynchro": LOST,  # the file id comes from the download page
-    # sha1 over the lookup method and the API URL built from the video's hash,
-    # size or file name. Everything but the method comes from the media file
-    # the row belongs to, and the method is one of four, so a rule needs the
-    # file and may try each.
+    # sha1 over the lookup method and the lookup URL. The old id is the stored
+    # lookup URL, and the method is one of four (hash, bytes, name,
+    # alternative) that a rule can try against it.
     "subtis": DERIVABLE,
     "subtitrarinoi": DERIVABLE,
     "subtitriid": DERIVABLE,
@@ -113,7 +117,9 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "subx": DERIVABLE,
     "supersubtitles": DERIVED,
     "titlovi": DERIVED,
-    "titrari": DERIVED,
+    # The built-in's id is the position of the result in the search page, not
+    # the site's id the plugin uses, so no old row names the new subtitle.
+    "titrari": LOST,
     "titulky": DERIVED,
     "turkcealtyaziorg": DERIVABLE,  # case and dash change; movies keep the raw id
     "tvsubtitles": DERIVED,
@@ -124,11 +130,11 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "zimuku": LOST,  # digest over the language label of the detail page
 }
 
-# The prefix rows whose plugin side was read but not run on a recorded
-# response: the plugin takes its id from a normalised URL or an id the old
-# class built from a differently named field. A rewrite that is wrong here
-# yields an id no subtitle has, so the default applies the rule; a caller that
-# wants only confirmed rules passes ``confirmed_only=True``.
+# The prefix rows read but not run, where the two sides may still differ in
+# form: the plugin takes its id from a normalised URL, or the old class built
+# it from a differently named field. A rewrite that is wrong here yields an id
+# no subtitle has, so the default applies the rule; a caller that wants only
+# the rest passes ``confirmed_only=True``.
 PREFIX_UNCONFIRMED = frozenset({"karagarga", "ktuvit", "subtitulamostv"})
 
 # Bazarr's own codes for the languages babelfish has no plain code for, and the
@@ -138,7 +144,7 @@ _BAZARR_CODES = {"pb": "por", "zt": "zho", "ea": "spa"}
 # Derived rules whose plugin id ends in the row's language as an ISO 639-3
 # code, in the form ``<provider>-<old id>-<alpha3>``.
 _WITH_ALPHA3 = frozenset({
-    "betaseries", "opensubtitlescom", "titlovi", "titrari", "titulky", "tvsubtitles",
+    "betaseries", "opensubtitlescom", "titlovi", "titulky", "tvsubtitles",
 })
 
 _DIGITS = re.compile(r"\d+")
