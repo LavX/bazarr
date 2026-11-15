@@ -83,8 +83,8 @@ def test_the_audit_tally_holds():
     classes = list(LEGACY_ID_CLASS.values())
     assert classes.count(PREFIX) == 5
     assert classes.count(DERIVED) == 11
-    assert classes.count(DERIVED) + classes.count(DERIVABLE) == 40
-    assert classes.count(LOST) == 11
+    assert classes.count(DERIVED) + classes.count(DERIVABLE) == 41
+    assert classes.count(LOST) == 10
 
 
 def test_every_written_rule_is_a_derived_or_prefix_provider_and_only_those():
@@ -158,6 +158,10 @@ def test_the_module_does_not_reach_the_database():
     ("zimuku", DERIVABLE),  # the stored page link and a tag of a closed set
     ("napiprojekt", DERIVABLE),  # the stored video hash and one of a few sources
     ("yavkanet", LOST),  # several per-file rows collapse onto one archive id
+    ("subssabbz", LOST),  # the old page link and file name have no delimiter
+    ("subsunacs", LOST),  # same, and an identity the row lacks
+    ("whisperai", DERIVABLE),  # transcription rows only
+    ("jimaku", LOST),  # unconfirmed: derivable if the file URL embeds the entry id
 ])
 def test_the_reviewed_classes_are_pinned(provider, kind):
     assert LEGACY_ID_CLASS[provider] == kind

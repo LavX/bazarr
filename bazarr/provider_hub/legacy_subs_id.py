@@ -25,9 +25,14 @@ Classes (``LEGACY_ID_CLASS``):
     value parsed from a URL, the video's hash). Read from the plugin code, no
     rule written yet.
 ``lost``
-    The plugin id embeds data an old row never recorded (a file hash, an entry
-    id, a hash of content the row never held). The row cannot be rewritten: its
-    entry stops suppressing and that is documented rather than fixed.
+    No rule can map the old id onto the new one, for one of three reasons: the
+    plugin id embeds data an old row never recorded (an entry id, a hash of
+    content the row never held); several old rows collapse onto one new id, so
+    none can be told apart (one row per file against one id per archive); or
+    the origin of the row is ambiguous, so a rewrite could name another
+    subtitle (a row that may have been written by either of two modes). The row
+    cannot be rewritten: its entry stops suppressing and that is documented
+    rather than fixed.
 
 Languages. A blacklist row stores the language the search used, with
 ``:forced`` or ``:hi`` appended for those variants, and the History page stores
@@ -75,8 +80,11 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "greeksubs": DERIVED,
     "greeksubtitles": DERIVABLE,  # the number is parsed out of the old URL
     "hdbits": DERIVED,
-    # Unconfirmed: read as embedding the entry id, which no row holds, but
-    # not checked against a recorded response.
+    # Unconfirmed. The plugin id is ``jimaku-<entry id>-<first 12 hex of the
+    # sha1 of the file URL>``. The old id is the file URL, which gives the
+    # second part; the entry id is not on the row. This is derivable if the
+    # live file URL embeds the entry id, and lost if it does not. Not checked
+    # against a live response.
     "jimaku": LOST,
     "karagarga": PREFIX,
     "ktuvit": PREFIX,
@@ -111,8 +119,14 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "subsarr": DERIVABLE,
     "subsource": PREFIX,
     "subsro": DERIVED,
-    "subssabbz": LOST,  # digest over the download URL and the file name
-    "subsunacs": LOST,  # digest over the download URL and an identity
+    # The old id is the page link followed directly by the file name, with no
+    # delimiter, so where the link ends is ambiguous. The plugin then hashes
+    # the two parts separately, with the hearing-impaired and forced flags.
+    "subssabbz": LOST,
+    # Same joined page link and file name as subssabbz, and the plugin hashes
+    # an identity that is the archive path or the entry URL before the file
+    # name, which the old id does not say.
+    "subsunacs": LOST,
     # The built-in's id is the download URL. The plugin hashes that URL into
     # its id only on the legacy AJAX fallback path (``subsynchro-`` plus the
     # first 16 hex of its sha1); results from the current site take the file id
@@ -136,7 +150,12 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "titulky": DERIVED,
     "turkcealtyaziorg": DERIVABLE,  # case and dash change; movies keep the raw id
     "tvsubtitles": DERIVED,
-    "whisperai": LOST,  # digest, and the old id held the video's original name
+    # The old id is ``<original name>_<task>_<language>``. The plugin hashes
+    # the video path, the task, the audio's input language and the output
+    # language. For a transcription the input equals the output, so those rows
+    # are derivable; a translation row does not record the audio language it
+    # started from, so those are lost.
+    "whisperai": DERIVABLE,
     "wizdom": DERIVED,
     # The built-in id is the page link plus a file name, one row per file in
     # an archive. The plugin hashes the page URL and alpha3 once per archive,
