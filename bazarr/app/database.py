@@ -1115,6 +1115,12 @@ def migrate_db(app):
         database.rollback()
         logging.exception("Multi-instance default backfill failed; continuing startup")
 
+    # The instance keys live in the database, and only the default Sonarr and
+    # Radarr keys are mirrored into the settings, so the log scrubber learns the
+    # rest here. A short key is masked only once it is registered.
+    from secret_store.scrub import refresh_database_secret_values
+    refresh_database_secret_values(database)
+
     # A library row can name an instance that is gone: deleting an instance
     # keeps its rows, and a one-item write past its owner lookup still lands
     # naming it. Discover counts such a row like one with no owner, so put

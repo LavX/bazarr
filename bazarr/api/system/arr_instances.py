@@ -103,6 +103,16 @@ def _changes_postprocessing_override(incoming, stored):
                for key in _INSTANCE_POSTPROCESSING_KEYS)
 
 
+def _register_instance_keys():
+    """Hand the scrub layer the instance keys now committed, so a key just
+    entered is masked in the process that stores it. After the commit, never
+    before: a refresh that read the database from another session while the
+    write was still open would not see the new key, and would drop it from the
+    registered set. Never raises."""
+    from secret_store.scrub import refresh_database_secret_values
+    refresh_database_secret_values(database)
+
+
 @api_ns_system_arr_instances.route("/system/arr-instances")
 class ArrInstancesList(Resource):
     @authenticate
@@ -128,6 +138,7 @@ class ArrInstancesList(Resource):
         body, status = service.create_instance(database, args)
         if status < 400:
             database.commit()
+            _register_instance_keys()
             # Rebuild scheduler sync jobs + re-fan-out this kind's SignalR feed so
             # the new instance is live without a restart (#156). Best-effort: the
             # row is already committed.
@@ -162,6 +173,7 @@ class ArrInstanceItem(Resource):
         body, status = service.update_instance(database, instance_id, args)
         if status < 400:
             database.commit()
+            _register_instance_keys()
             # Rebuild jobs + re-fan-out this kind's SignalR (#156). A disabled
             # instance's per-instance sync job is now orphaned, so remove it (the
             # rebuild only adds/replaces jobs, never removes them).

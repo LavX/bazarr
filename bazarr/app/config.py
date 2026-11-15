@@ -989,7 +989,10 @@ from secret_store import (  # noqa: E402
 from secret_store.migration import (LAST_FOUR_MIN_LENGTH, clear_decrypt_failure_path,  # noqa: E402
                                     decrypt_failure_paths, note_replaced_secret)
 from secret_store.registry import (SECRET_DESCRIPTOR_KEY, HubSecretRegistrationError,  # noqa: E402
-                                   at_rest_secret_paths, manifest_boolean_secret_paths)
+                                   at_rest_secret_paths, is_plugin_secret, is_system_secret,
+                                   is_user_visible_secret, is_user_visible_secret_list,
+                                   is_write_only_secret, manifest_boolean_secret_paths)
+from secret_store.scrub import MASK, mask_credential_refusal  # noqa: E402
 
 # Legacy Plex encryption (URLSafeSerializer + plex.encryption_key) used a
 # different at-rest format with no marker prefix. If we hand its
@@ -1583,9 +1586,76 @@ def _validate_auth_password(settings_items):
         if key.lower() != 'settings-auth-password':
             continue
         submitted = value[0] if isinstance(value, list) and len(value) == 1 else value
-        if submitted == AUTH_PASSWORD_MASK:
+        if _is_mask(submitted):
             raise ValidationError(f'The password cannot be {AUTH_PASSWORD_MASK}: that text stands for '
                                   'the stored password. Choose a different password.')
+
+
+def _is_mask(value):
+    """Whether a submitted value is the mask text, ignoring surrounding spaces.
+
+    A form value arrives as a single-item list or as bare text; either is
+    unwrapped before it is compared."""
+    submitted = value[0] if isinstance(value, list) and len(value) == 1 else value
+    return isinstance(submitted, str) and submitted.strip() == MASK
+
+
+def _validate_new_credentials(settings_items):
+    """Refuse the mask text as a new credential value.
+
+    The settings read shows some credentials as the mask, so a client can send
+    the mask back meaning "keep what is stored". Saved as a value it would
+    replace the stored credential with three asterisks, so it is refused and
+    nothing is applied. The rule covers every registered credential a settings
+    save can write: the user-visible scalars, the Provider Hub plugin secrets,
+    and each entry of a credential list such as the Gemini keys. A mask equal to
+    the stored value, which an earlier save may have left, is not a change and
+    passes, and so does a clear. The login password has its own check
+    (see _validate_auth_password). A key nested under a credential is refused
+    whatever its value, because a value cannot be saved inside a credential.
+
+    Length is not checked. A short credential saves like any other, and the
+    scrub layer masks it where it appears as a whole token.
+
+    Precondition: the submitted value is text, or None for no value, or for a
+    credential list a list of such values. Before this helper runs, _save_settings
+    refuses any scalar credential value that is neither text nor None, and its
+    check unwraps a single-item list only to test the type. This helper unwraps
+    for itself.
+    """
+    for key, value in settings_items:
+        parts = key.split('-') if isinstance(key, str) else []
+        if len(parts) >= 4 and parts[0] == 'settings':
+            nested = f'{parts[1].lower()}.{parts[2].lower()}'
+            if (is_user_visible_secret(nested) or is_plugin_secret(nested) or is_user_visible_secret_list(nested)
+                    or is_system_secret(nested) or is_write_only_secret(nested)):
+                raise ValidationError(f'{key} cannot be saved. A value cannot be saved inside a credential.')
+            continue
+        canonical = _canonical_settings_key(key)
+        if canonical is None:
+            continue
+        _, section, field = canonical.split('-')
+        path = f'{section}.{field}'
+        if path == 'auth.password':
+            continue
+        stored = _settings_value(settings, [section, field])
+        if is_user_visible_secret_list(path):
+            entries = value if isinstance(value, list) else [value]
+            stored_entries = [str(item) for item in stored] if isinstance(stored, (list, tuple)) else []
+            for entry in entries:
+                if entry is None or isinstance(entry, (list, dict)):
+                    continue
+                known = next((item for item in stored_entries if item.strip() == str(entry).strip()), None)
+                refusal = mask_credential_refusal(path, entry, known)
+                if refusal:
+                    raise ValidationError(refusal)
+            continue
+        if not (is_user_visible_secret(path) or is_plugin_secret(path)):
+            continue
+        submitted = value[0] if isinstance(value, list) and len(value) == 1 else value
+        refusal = mask_credential_refusal(path, submitted, stored)
+        if refusal:
+            raise ValidationError(refusal)
 
 
 def _validate_postprocessing_command(settings_items):
@@ -2630,7 +2700,7 @@ def save_settings(settings_items):
                     effective_language = values[0]
                 if key.startswith("settings-discover-"):
                     field = key.removeprefix("settings-discover-")
-                    if field != "tmdb_access_token" or values[0] != "***":
+                    if field != "tmdb_access_token" or str(values[0]).strip() != "***":
                         effective[field] = values[0]
             changed = effective != previous or effective_language != previous_language
         persisted = False
@@ -2749,6 +2819,8 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if not isinstance(checked, (str, type(None))):
             raise ValidationError(f'{key.split("-")[-1]} must be text')
 
+    _validate_new_credentials(settings_items)
+
     configure_debug = False
     configure_log_rotation = False
     hi_extension_changed = False
@@ -2805,10 +2877,19 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             # hand it out again as if it were a setting.
             continue
 
+        if (settings_keys[0] == 'settings' and len(settings_keys) == 3
+                and is_system_secret(f'{settings_keys[1].lower()}.{settings_keys[2].lower()}')
+                and _is_mask(value)):
+            # The settings read shows a system secret as the mask, and a client
+            # that sends back what it read means to keep the stored one. The
+            # mask must never become the secret.
+            continue
+
         if key in {'settings-discover-tmdb_access_token', 'settings-discover-locale'}:
-            if key.endswith('tmdb_access_token') and value[0] == '***':
+            unwrapped = value[0] if isinstance(value, list) and value else value
+            if key.endswith('tmdb_access_token') and _is_mask(value):
                 continue
-            settings.discover[settings_keys[-1]] = value[0]
+            settings.discover[settings_keys[-1]] = unwrapped
             continue
 
         # A registered credential is identified before any generic
@@ -2920,7 +3001,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             value = None
 
         if key == 'settings-auth-password':
-            if value == AUTH_PASSWORD_MASK and settings.auth.password:
+            if _is_mask(value) and settings.auth.password:
                 # The settings read hands out the mask, never the hash, and a
                 # client that sends back what it read means to keep the stored
                 # password.

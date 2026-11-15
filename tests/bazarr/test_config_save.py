@@ -1496,6 +1496,271 @@ def test_another_section_cannot_be_redirected_into_the_translator_provider_order
     assert config.settings.translator.openrouter_provider_order == ['deepinfra']
 
 
+@pytest.mark.parametrize('submitted', [['a'], ['abcde'], ['abcde '], ['abc']])
+def test_a_short_new_credential_saves(monkeypatch, submitted):
+    # A short credential is not refused: the scrub layer masks it as a whole token.
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.omdb, 'apikey', 'previous-key')  # pragma: allowlist secret
+
+    config.save_settings([('settings-omdb-apikey', submitted)])
+
+    assert len(saved) == 1
+    assert config.settings.omdb.apikey == submitted[0]
+
+
+def test_a_short_captcha_secret_and_a_short_username_secret_save(monkeypatch):
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.anticaptcha, 'anti_captcha_key', 'previous-key')  # pragma: allowlist secret
+    monkeypatch.setattr(config.settings.hdbits, 'username', 'previous')
+    monkeypatch.setattr(config.settings.ktuvit, 'email', 'previous@example.org')
+
+    config.save_settings([
+        ('settings-anticaptcha-anti_captcha_key', ['abcde']),
+        ('settings-hdbits-username', ['ab']),
+        ('settings-ktuvit-email', ['a@b']),
+    ])
+
+    assert len(saved) == 1
+    assert config.settings.anticaptcha.anti_captcha_key == 'abcde'  # pragma: allowlist secret
+    assert config.settings.hdbits.username == 'ab'
+    assert config.settings.ktuvit.email == 'a@b'
+
+
+def test_a_numeric_credential_stored_as_a_number_saves_unchanged(monkeypatch):
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.omdb, 'apikey', 12345)
+
+    config.save_settings([('settings-omdb-apikey', ['12345'])])
+
+    assert len(saved) == 1
+    assert str(config.settings.omdb.apikey) == '12345'
+
+
+@pytest.mark.parametrize('key', ['settings-omdb-apikey-x', 'settings-omdb-apikey-x-y'])
+@pytest.mark.parametrize('submitted', [['ab'], ['abcdef']], ids=['short', 'long'])
+def test_a_nested_key_under_a_credential_is_refused_whatever_its_value(monkeypatch, key, submitted):
+    # A key at any depth under a credential is refused at any length, because a credential
+    # cannot hold a nested value.
+    from dynaconf.validator import ValidationError
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.omdb, 'apikey', 'previous-key')  # pragma: allowlist secret
+
+    with pytest.raises(ValidationError) as refusal:
+        config.save_settings([(key, submitted)])
+
+    assert key in str(refusal.value)
+    assert saved == []
+    assert config.settings.omdb.apikey == 'previous-key'  # pragma: allowlist secret
+
+
+@pytest.mark.parametrize('key', [
+    'settings-translator-gemini_keys-x',            # a credential list
+    'settings-general-flask_secret_key-x',          # a system secret
+    'settings-discover-tmdb_access_token-x',        # the write-only token
+    'settings-plex-token-x',                        # a user-visible scalar
+])
+def test_a_nested_key_under_any_kind_of_credential_is_refused(key):
+    from dynaconf.validator import ValidationError
+    from app import config
+
+    with pytest.raises(ValidationError, match='cannot be saved inside a credential'):
+        config._validate_new_credentials([(key, ['abcdef'])])
+
+
+def test_a_nested_key_under_a_plugin_secret_is_refused(plugin_secret):
+    from dynaconf.validator import ValidationError
+
+    with pytest.raises(ValidationError, match='cannot be saved inside a credential'):
+        plugin_secret._validate_new_credentials([('settings-credplug-token-x', ['abcdef'])])
+
+
+def test_a_nested_key_under_a_setting_that_is_not_a_credential_still_saves(monkeypatch):
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.general, 'provider_priorities', {})
+
+    config.save_settings([('settings-general-provider_priorities-opensubtitlescom', ['50'])])
+
+    assert len(saved) == 1
+    assert config.settings.general.provider_priorities['opensubtitlescom'] == 50
+
+
+def test_the_login_password_is_left_to_its_own_check():
+    # The login password keeps its own check, so the credential rules leave it alone.
+    from app import config
+
+    config._validate_new_credentials([('settings-auth-password', ['abc'])])
+
+
+@pytest.mark.parametrize('submitted', [['***'], [' *** '], '***', ' *** '])
+def test_the_login_password_mask_keeps_the_stored_password_whatever_its_padding(monkeypatch, submitted):
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.auth, 'password', 'stored-hash-value')  # pragma: allowlist secret
+
+    config.save_settings([('settings-auth-password', submitted)])
+
+    assert len(saved) == 1
+    assert config.settings.auth.password == 'stored-hash-value'  # pragma: allowlist secret
+
+
+@pytest.mark.parametrize('submitted', [['***'], [' *** '], '***', ' *** '])
+def test_the_login_password_mask_is_refused_when_none_is_stored(monkeypatch, submitted):
+    from dynaconf.validator import ValidationError
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.auth, 'password', '')
+
+    with pytest.raises(ValidationError, match='The password cannot be'):
+        config.save_settings([('settings-auth-password', submitted)])
+
+    assert saved == []
+    assert config.settings.auth.password == ''
+
+
+def test_a_clear_is_not_a_new_credential(monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config.settings.omdb, 'apikey', 'previous-key')  # pragma: allowlist secret
+
+    config._validate_new_credentials([('settings-omdb-apikey', [''])])
+
+
+@pytest.mark.parametrize('submitted', [['***'], ['*** '], '***'])
+def test_the_mask_text_never_replaces_a_stored_credential(monkeypatch, submitted):
+    # The settings read masks some secrets, so a client can echo the mask back. It must not
+    # become the credential: the save is refused before anything is applied or written.
+    from dynaconf.validator import ValidationError
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.omdb, 'apikey', 'previous-key')  # pragma: allowlist secret
+
+    with pytest.raises(ValidationError) as refusal:
+        config.save_settings([('settings-omdb-apikey', submitted)])
+
+    assert 'omdb.apikey' in str(refusal.value) and '***' in str(refusal.value)
+    assert saved == []
+    assert config.settings.omdb.apikey == 'previous-key'  # pragma: allowlist secret
+
+
+def test_a_stored_mask_text_credential_can_be_saved_unchanged(monkeypatch):
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.omdb, 'apikey', '***')
+
+    config.save_settings([('settings-omdb-apikey', ['***'])])
+
+    assert len(saved) == 1
+    assert config.settings.omdb.apikey == '***'
+
+
+@pytest.mark.parametrize('submitted', [['***'], ['*** '], '***', ' *** '])
+def test_a_system_secret_sent_back_as_the_mask_keeps_the_stored_value(monkeypatch, submitted):
+    # The settings read shows a system secret as the mask, and a client may send it back, as
+    # a form list or as bare text, with or without surrounding spaces.
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.general, 'flask_secret_key', 'stored-signing-key')  # pragma: allowlist secret
+
+    config.save_settings([('settings-general-flask_secret_key', submitted)])
+
+    assert len(saved) == 1
+    assert config.settings.general.flask_secret_key == 'stored-signing-key'  # pragma: allowlist secret
+
+
+def test_the_refusal_names_the_section_and_the_field(monkeypatch):
+    from dynaconf.validator import ValidationError
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.opensubtitlescom, 'password', 'previous-password')  # pragma: allowlist secret
+
+    with pytest.raises(ValidationError) as refusal:
+        config.save_settings([('settings-opensubtitlescom-password', ['***'])])
+
+    assert str(refusal.value).startswith('opensubtitlescom.password cannot be ***')
+    assert saved == []
+
+
+@pytest.fixture
+def plugin_secret(monkeypatch):
+    """A registered plugin secret with a stored value, removed again afterwards."""
+    from app import config
+    from secret_store import registry
+
+    monkeypatch.setattr(registry, '_DYNAMIC_PLUGIN_SECRET_PATHS', {'credplug.token'})
+    config.settings.set('credplug', {'token': 'previous-token'})
+    try:
+        yield config
+    finally:
+        config.settings.unset('credplug', force=True)
+
+
+@pytest.mark.parametrize('submitted', [['***'], '***'])
+def test_the_mask_text_never_replaces_a_plugin_secret(monkeypatch, plugin_secret, submitted):
+    from dynaconf.validator import ValidationError
+
+    saved = _settings_save_harness(monkeypatch)
+
+    with pytest.raises(ValidationError) as refusal:
+        plugin_secret.save_settings([('settings-credplug-token', submitted)])
+
+    assert str(refusal.value).startswith('credplug.token cannot be ***')
+    assert saved == []
+    assert plugin_secret.settings.credplug.token == 'previous-token'  # pragma: allowlist secret
+
+
+def test_a_short_plugin_secret_saves(monkeypatch, plugin_secret):
+    saved = _settings_save_harness(monkeypatch)
+
+    plugin_secret.save_settings([('settings-credplug-token', ['abc'])])
+
+    assert len(saved) == 1
+    assert plugin_secret.settings.credplug.token == 'abc'  # pragma: allowlist secret
+
+
+@pytest.mark.parametrize('submitted', [['***'], ['previous-key', '***']])
+def test_the_mask_text_never_enters_a_credential_list(monkeypatch, submitted):
+    from dynaconf.validator import ValidationError
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'gemini_keys', ['previous-key'])  # pragma: allowlist secret
+
+    with pytest.raises(ValidationError) as refusal:
+        config.save_settings([('settings-translator-gemini_keys', submitted)])
+
+    assert str(refusal.value).startswith('translator.gemini_keys cannot be ***')
+    assert saved == []
+    assert list(config.settings.translator.gemini_keys) == ['previous-key']  # pragma: allowlist secret
+
+
+def test_a_credential_list_takes_short_entries(monkeypatch):
+    from app import config
+
+    saved = _settings_save_harness(monkeypatch)
+    monkeypatch.setattr(config.settings.translator, 'gemini_keys', ['abc'])
+
+    config.save_settings([('settings-translator-gemini_keys', ['abc', 'abd'])])
+
+    assert len(saved) == 1
+    assert list(config.settings.translator.gemini_keys) == ['abc', 'abd']
+
+
 @pytest.mark.parametrize("value", [["a", "b"], [None], ["line\nbreak"], ["enc:v1:cipher"], [" "], ["a" * 4097]])
 def test_tmdb_form_prevalidation_rejects_invalid_values_before_other_mutations(monkeypatch, value):
     from app import config
@@ -2088,6 +2353,12 @@ _SAVE_SIDE_EFFECT_CASES = {
         {"opensubtitles": {"username": "same"}},
         [("settings-opensubtitles-username", ["same"])],
         []),
+    # A save the mask rule refuses is refused before anything is applied, so it queues
+    # nothing, even beside an effect it would otherwise set off. None marks such a case.
+    "mask text as a credential": (
+        {"general": {"use_embedded_subs": True}, "omdb": {"apikey": "before"}},
+        [("settings-general-use_embedded_subs", ["false"]), ("settings-omdb-apikey", ["***"])],
+        None),
 }
 
 
@@ -2105,6 +2376,7 @@ def test_a_refused_save_queues_no_library_job_and_resets_no_provider(monkeypatch
     from app import config
 
     starting, items, expected = _SAVE_SIDE_EFFECT_CASES[case]
+    refused = expected is None
     for section, values in starting.items():
         for name, value in values.items():
             monkeypatch.setattr(getattr(config.settings, section), name, value)
@@ -2125,20 +2397,23 @@ def test_a_refused_save_queues_no_library_job_and_resets_no_provider(monkeypatch
     monkeypatch.setattr(config, "write_config", lambda: outcome != "unwritable")
     monkeypatch.setattr(config, "restore_persisted_settings", lambda: restored.append(True))
 
-    if outcome == "saved":
+    if outcome == "saved" and not refused:
         config.save_settings(items)
     else:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as refusal:
             config.save_settings(items)
+        if refused:
+            assert "cannot be ***" in str(refusal.value)
     if os.environ["SZ_HI_EXTENSION"] != "hi":
         record(f"hi extension {os.environ['SZ_HI_EXTENSION']}")
 
-    if outcome == "saved":
+    if outcome == "saved" and not refused:
         assert sorted(effects) == sorted(expected)
         assert restored == []
     else:
         assert effects == [], "a refused save acted on values it did not keep"
-        assert restored == [True]
+        # The mask rule refuses before anything is applied, so there is nothing to restore.
+        assert restored == ([] if refused else [True])
 
 
 @pytest.mark.parametrize("kind", ["sonarr", "radarr"])

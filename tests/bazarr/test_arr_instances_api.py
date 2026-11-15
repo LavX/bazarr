@@ -1534,3 +1534,92 @@ def test_every_arr_session_refuses_to_follow_a_redirect_with_the_key(kind, http_
 
     assert target_records == [], "the API key never reached the second origin"
     assert len(first_records) == 2, "each request was answered by the first origin only"
+
+
+@pytest.mark.parametrize('kind', ['sonarr', 'radarr', 'sportarr'])
+def test_a_short_key_saves_on_create_and_update(schema_session, kind):
+    # The scrub layer masks a short credential as a whole token, so it is not refused.
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository
+
+    created, status = service.create_instance(schema_session, {"kind": kind, "name": "Main", "api_key": "abc"})
+    assert status == 201
+    repo = ArrInstanceRepository(schema_session)
+    assert repo.get_decrypted_api_key(created["id"]) == "abc"
+
+    _, status = service.update_instance(schema_session, created["id"], {"api_key": "abd"})
+    assert status == 200
+    assert repo.get_decrypted_api_key(created["id"]) == "abd"
+
+
+@pytest.mark.parametrize('operation', ['create', 'update'])
+def test_the_mask_text_never_replaces_an_arr_key(schema_session, operation):
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository
+
+    created, _ = service.create_instance(schema_session, {"kind": "sonarr", "name": "Main", "api_key": "original-key"})
+    if operation == 'create':
+        body, status = service.create_instance(schema_session, {"kind": "radarr", "name": "Films", "api_key": "***"})
+    else:
+        body, status = service.update_instance(schema_session, created["id"], {"api_key": "***"})
+
+    assert status == 400
+    assert body["message"].startswith("sonarr.api_key cannot be ***" if operation == 'update'
+                                      else "radarr.api_key cannot be ***")
+    assert ArrInstanceRepository(schema_session).get_decrypted_api_key(created["id"]) == "original-key"
+    assert len(service.list_instances(schema_session)[0]) == 1
+
+
+def test_a_stored_mask_text_key_saves_unchanged_and_a_name_only_save_keeps_the_key(schema_session):
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    row = repo.create("sonarr", "Main", api_key="***")
+
+    assert service.update_instance(schema_session, row.id, {"api_key": "***"})[1] == 200
+    assert service.update_instance(schema_session, row.id, {"name": "Renamed"})[1] == 200
+    assert repo.get_decrypted_api_key(row.id) == "***"
+
+
+@pytest.fixture
+def clean_scrub_registry():
+    from secret_store.scrub import clear_secret_values, register_secret_values, registered_secret_values
+
+    previous = registered_secret_values()
+    clear_secret_values()
+    yield
+    clear_secret_values()
+    register_secret_values(previous)
+
+
+@pytest.mark.parametrize('kind', ['sonarr', 'radarr', 'sportarr'])
+def test_a_short_key_saved_with_an_instance_is_masked_in_text(arr_instance_api, clean_scrub_registry, kind):
+    # Only the default Sonarr and Radarr keys are mirrored into the settings, so the database
+    # is where the scrub layer learns the rest, including the second instance of a kind. The
+    # route registers them once the write is committed.
+    from secret_store.scrub import scrub_text
+
+    first = arr_instance_api.post(ARR_ROOT, json={"kind": kind, "name": "First", "api_key": "abc"},
+                                  headers=ARR_HEADERS)
+    second = arr_instance_api.post(ARR_ROOT, json={"kind": kind, "name": "Second", "api_key": "xyz"},
+                                   headers=ARR_HEADERS)
+    assert first.status_code == second.status_code == 201
+
+    assert scrub_text("apikey=abc and key: xyz, but not abcd") == "apikey=*** and key: ***, but not abcd"
+
+    changed = arr_instance_api.patch(f"{ARR_ROOT}/{second.json['id']}", json={"api_key": "uvw"},
+                                     headers=ARR_HEADERS)
+    assert changed.status_code == 200
+    assert scrub_text("key=uvw") == "key=***"
+
+
+def test_the_instance_keys_in_the_database_are_registered_at_boot(schema_session, clean_scrub_registry):
+    from arr_instances.repository import ArrInstanceRepository
+    from secret_store.scrub import refresh_database_secret_values, scrub_text
+
+    ArrInstanceRepository(schema_session).create("radarr", "Films", api_key="abc")
+
+    assert scrub_text("key=abc") == "key=abc"
+    refresh_database_secret_values(schema_session)
+    assert scrub_text("key=abc") == "key=***"

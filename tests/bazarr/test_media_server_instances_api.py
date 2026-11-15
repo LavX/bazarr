@@ -1180,3 +1180,71 @@ def test_one_ownership_decision_carries_the_probe_through_a_late_sign_in(
     assert response.status_code == 200, response.json
     assert response.json['success'] is True
     assert records, 'the probe tested the stored address it was asked to test'
+
+
+@pytest.mark.parametrize('kind', ['emby', 'jellyfin', 'plex', 'silo'])
+def test_a_short_key_saves_on_create_and_update(instance_api, schema_session, kind):
+    # The scrub layer masks a short credential as a whole token, so it is not refused.
+    from media_servers.repository import MediaServerInstanceRepository
+    mappings = [] if kind in ('jellyfin', 'plex') else payload(kind)['path_mappings']
+    created = instance_api.post(ROOT, json=payload(kind, api_key='abc', path_mappings=mappings), headers=HEADERS)
+    assert created.status_code == 201
+    repo = MediaServerInstanceRepository(schema_session)
+    assert repo.get_decrypted_api_key(created.json['id']) == 'abc'
+
+    assert instance_api.patch(ROOT + '/' + created.json['id'], json={'api_key': 'abd'}, headers=HEADERS).status_code == 200
+    assert repo.get_decrypted_api_key(created.json['id']) == 'abd'
+
+
+@pytest.mark.parametrize('kind', ['emby', 'jellyfin', 'plex', 'silo'])
+@pytest.mark.parametrize('operation', ['create', 'update'])
+def test_the_mask_text_never_replaces_a_media_server_key(instance_api, schema_session, kind, operation):
+    from media_servers.repository import MediaServerInstanceRepository
+    mappings = [] if kind in ('jellyfin', 'plex') else payload(kind)['path_mappings']
+    created = instance_api.post(ROOT, json=payload(kind, path_mappings=mappings), headers=HEADERS).json
+    if operation == 'create':
+        response = instance_api.post(ROOT, json=payload(kind, 'B', api_key='***', path_mappings=mappings),
+                                     headers=HEADERS)
+    else:
+        response = instance_api.patch(ROOT + '/' + created['id'], json={'api_key': '***'}, headers=HEADERS)
+
+    assert response.status_code == 400
+    assert response.json['error_code'] == 'invalid_credential'
+    assert response.json['message'].startswith(f'{kind}.api_key cannot be ***')
+    assert MediaServerInstanceRepository(schema_session).get_decrypted_api_key(created['id']) == 'opaque-A'
+    assert len(instance_api.get(ROOT, headers=HEADERS).json['data']) == 1
+
+
+def test_a_save_that_leaves_the_key_out_or_clears_it_is_not_a_new_value(instance_api, schema_session):
+    from media_servers.repository import MediaServerInstanceRepository
+    created = instance_api.post(ROOT, json=payload('emby'), headers=HEADERS).json
+    path = ROOT + '/' + created['id']
+
+    assert instance_api.patch(path, json={'name': 'Renamed'}, headers=HEADERS).status_code == 200
+    assert instance_api.patch(path, json={'enabled': False, 'clear_api_key': True}, headers=HEADERS).status_code == 200
+    assert MediaServerInstanceRepository(schema_session).get_decrypted_api_key(created['id']) == ''
+
+
+@pytest.fixture
+def clean_scrub_registry():
+    from secret_store.scrub import clear_secret_values, register_secret_values, registered_secret_values
+
+    previous = registered_secret_values()
+    clear_secret_values()
+    yield
+    clear_secret_values()
+    register_secret_values(previous)
+
+
+@pytest.mark.parametrize('kind', ['emby', 'jellyfin', 'plex', 'silo'])
+def test_a_short_key_saved_with_a_destination_is_masked_in_text(instance_api, clean_scrub_registry, kind):
+    # Emby, Jellyfin and Silo keys live only in the database, so the scrub layer learns them here.
+    from secret_store.scrub import scrub_text
+    mappings = [] if kind in ('jellyfin', 'plex') else payload(kind)['path_mappings']
+    created = instance_api.post(ROOT, json=payload(kind, api_key='abc', path_mappings=mappings), headers=HEADERS)
+    assert created.status_code == 201
+
+    assert scrub_text('X-Emby-Token=abc and token: abc, but not abcd') == 'X-Emby-Token=*** and token: ***, but not abcd'
+
+    instance_api.patch(ROOT + '/' + created.json['id'], json={'api_key': 'xyz'}, headers=HEADERS)
+    assert scrub_text('token=xyz') == 'token=***'
