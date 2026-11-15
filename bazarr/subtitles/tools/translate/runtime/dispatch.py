@@ -296,6 +296,14 @@ class Dispatcher:
             jobs.cancel(state.job_id)
             self._finish_history(history, state, "cancelled")
             raise
+        except (DispatchFailed, Declined, GateClosed):
+            raise  # already recorded
+        except Exception as error:
+            # A bug or a database fault: the job must not stay "running" for a worker that is no longer on it.
+            logger.exception("A translation job failed unexpectedly")
+            jobs.await_retry(state.job_id, fail.INTERNAL, type(error).__name__)
+            self._finish_history(history, state, "awaiting_retry", fail.INTERNAL, type(error).__name__)
+            raise
         finally:
             try:
                 ledger.release_job(state.ledger_id)
@@ -318,6 +326,9 @@ class Dispatcher:
             row = jobs.get(row.id)
         if row is None or row.state != QUEUED:
             return None
+        if spec.pinned_connection_id is None and row.pinned_connection_id is not None:
+            # A manual pick recorded its connection on the job when it was made.
+            spec.pinned_connection_id = row.pinned_connection_id
         return row
 
     def _plan(self, spec: JobSpec) -> tuple[list[_Choice], list[Notice]]:

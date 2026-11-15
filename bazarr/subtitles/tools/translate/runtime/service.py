@@ -92,7 +92,7 @@ class RuntimeTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type, video_path,
                  orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id, radarr_id, arr_instance_id=None,
                  sports_operation=None, cancel=None, expected_destination_versions=(), source_key=None,
-                 pinned_connection_id=None, dispatcher=None):
+                 dispatcher=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -111,7 +111,6 @@ class RuntimeTranslatorService:
         self.cancel = cancel
         self.expected_destination_versions = tuple(expected_destination_versions or ())
         self.source_key = source_key or str(source_srt_file)
-        self.pinned_connection_id = pinned_connection_id
         self.partial_error = None
         # True when the job found itself replaced or already running elsewhere: nothing was translated.
         self.skipped = False
@@ -170,8 +169,7 @@ class RuntimeTranslatorService:
                                  self.arr_instance_id, self.sports_operation),
             history_media={"media_type": self.media_type, "media_id": media_id, "media_title": title or None,
                            "arr_instance_id": self.arr_instance_id},
-            pinned_connection_id=self.pinned_connection_id, check_cancel=self._check, progress=self._progress,
-            legacy=self._legacy)
+            check_cancel=self._check, progress=self._progress, legacy=self._legacy)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
         except DispatchFailed as failed:

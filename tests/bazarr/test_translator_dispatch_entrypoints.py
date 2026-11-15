@@ -102,6 +102,13 @@ def test_a_manual_pick_replaces_a_queued_job_and_ends_it_superseded(env, queue_s
     assert (row.manual, row.pinned_connection_id) == (1, 3)
 
 
+def test_a_request_that_follows_a_manual_pick_joins_the_pinned_job(env, queue_status):
+    pick = enqueue.decide(SOURCE, "fr", pinned_connection_id=3, session=env.session, clock=env.clock)
+    later = enqueue.decide(SOURCE, "fr", session=env.session, clock=env.clock)  # the request that queues it
+    assert later.translator_job_id == pick.translator_job_id
+    assert jobs_of(env).get(pick.translator_job_id).pinned_connection_id == 3
+
+
 def test_a_manual_pick_is_refused_with_the_reason_while_the_job_runs(env):
     jobs = jobs_of(env)
     job_id = jobs.request(SOURCE, "fr").job_id
@@ -180,18 +187,6 @@ def test_with_the_switch_on_a_request_waiting_for_its_retry_time_queues_nothing(
     jobs.start(job_id, source_digest="d", engine_instance_id=1, settings_revision=1)
     jobs.await_retry(job_id, "rate_limited", "later", retry_at=datetime.now() + timedelta(hours=1))
     assert _request(main) is None and queued == []
-
-
-def test_with_the_switch_on_a_refused_manual_pick_raises_the_reason(env, queued, monkeypatch):
-    from subtitles.tools.translate import main
-
-    monkeypatch.setattr(main, "_runtime_active", lambda: True)
-    jobs = jobs_of(env)
-    job_id = jobs.request(SOURCE, "fr").job_id
-    jobs.start(job_id, source_digest="d", engine_instance_id=1, settings_revision=1)
-    with pytest.raises(TranslationJobError):
-        _request(main, pinned_connection_id=5)
-    assert queued == []
 
 
 def test_a_fault_in_the_runtimes_bookkeeping_does_not_stop_a_request_being_queued(queued, monkeypatch):
@@ -282,8 +277,8 @@ def test_with_the_switch_on_the_job_builds_the_runtime_service_and_never_the_fac
     monkeypatch.setattr(job.main.TranslatorFactory, "create_translator",
                         staticmethod(lambda *a, **k: pytest.fail("the factory was called")))
     made = _translator(monkeypatch)
-    job(pinned_connection_id=4)
-    assert made[0]["source_key"] == SOURCE and made[0]["pinned_connection_id"] == 4
+    job()
+    assert made[0]["source_key"] == SOURCE and "pinned_connection_id" not in made[0]
     assert made[0]["to_lang"] == "fra" and made[0]["orig_to_lang"] == "fr"
 
 

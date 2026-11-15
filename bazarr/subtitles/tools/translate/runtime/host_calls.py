@@ -18,6 +18,7 @@ wrote it and handed back to a later attempt.
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -98,6 +99,30 @@ def _touch(context: AttemptContext) -> None:
             logger.debug("A translation activity callback failed", exc_info=True)
 
 
+def _releases_its_session(handler):
+    """Give the thread's database session back when a call is answered.
+
+    A handler runs on a thread of the worker session that lives only as long as calls are waiting, and
+    the application's session is one per thread. Left alone, each of those threads would keep a connection
+    checked out until it was garbage collected, which on PostgreSQL's small pool runs out within one job.
+    """
+    @functools.wraps(handler)
+    def wrapper(call):
+        try:
+            return handler(call)
+        finally:
+            context = getattr(call, "context", None)
+            remove = getattr(getattr(context, "session", None), "remove", None)
+            if callable(remove):
+                try:
+                    remove()
+                except Exception:
+                    logger.debug("A translation host call could not release its session", exc_info=True)
+
+    return wrapper
+
+
+@_releases_its_session
 def reserve(call) -> dict:
     """Record a paid call's worst-case charge before it is sent. Refused when it does not fit the budget."""
     from .usage import UsageError, UsageLedger, to_micros
@@ -124,6 +149,7 @@ def reserve(call) -> dict:
     return {"hold": hold}
 
 
+@_releases_its_session
 def usage(call) -> dict:
     """Settle reservations against what a call used. A call made without a reservation is recorded too."""
     from .usage import UsageError, UsageLedger, to_micros
@@ -168,6 +194,7 @@ def usage(call) -> dict:
     return {}
 
 
+@_releases_its_session
 def checkpoint(call) -> dict:
     """Store a checkpoint: the plugin's own resumable state, kept as text under the job's next batch index."""
     from .history import HistoryStore

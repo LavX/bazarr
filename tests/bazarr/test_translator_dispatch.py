@@ -307,6 +307,14 @@ def test_a_pinned_connection_gives_its_result_or_its_error_and_nothing_else(env)
     env.scripts[PLUGIN] = {}
 
 
+def test_the_pin_a_manual_pick_recorded_on_the_job_is_honoured(env):
+    instance, first, second = two_connections(env)
+    jobs = TranslationJobs(env.session, clock=env.clock)
+    jobs.request(SOURCE, TARGET, manual=True, pinned_connection_id=second.id)
+    env.dispatcher().run(make_spec())  # the spec itself names no pin
+    assert env.served() == [str(second.id)]
+
+
 def test_a_pinned_connection_that_cannot_be_used_closes_the_job(env):
     instance, first, second = two_connections(env)
     env.store.update_connection(second.id, schema=helpers_schema(), enabled=False)
@@ -524,6 +532,19 @@ def test_an_answer_that_fails_the_checks_is_refused_and_never_fails_over(env, co
     assert env.history(env.last_job())["status"] == "failed"
 
 
+def test_a_bug_in_the_dispatcher_leaves_the_job_awaiting_a_retry_and_not_running(env, monkeypatch):
+    from subtitles.tools.translate.runtime.dispatch import Dispatcher
+
+    env.ai_engine()
+    monkeypatch.setattr(Dispatcher, "_compose", lambda *args: (_ for _ in ()).throw(RuntimeError("a bug")))
+    with pytest.raises(RuntimeError):
+        env.dispatcher().run(make_spec())
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("awaiting_retry", "internal")
+    assert env.history(job)["status"] == "awaiting_retry"
+    assert UsageLedger(env.session, clock=env.clock).job_hold(str(job.id)) == 0
+
+
 def test_a_partial_answer_keeps_the_source_text_for_the_lines_it_left_out(env):
     env.ai_engine()
     env.scripts[PLUGIN] = {"*": [{"partial": [1, 3]}]}
@@ -602,7 +623,7 @@ def test_the_upkeep_gives_back_stale_budgets_moves_running_ones_and_sweeps_expir
     jobs.save_batch(job_id, 0, ["x"])
     jobs.await_retry(job_id, "rate_limited", "later")
     ledger = UsageLedger(env.session, clock=env.clock)
-    limits = CostLimits(month_cap=usd(10), translation_limit=1)
+    limits = CostLimits(month_cap=usd(10), translation_limit=2)
     ledger.reserve_job_budget(str(job_id), limits)
     ledger.reserve_job_budget("gone", limits)
     env.clock.advance(days=8)  # past the checkpoint retention, and the budget of the live job is in an old month
@@ -807,6 +828,22 @@ def test_a_checkpoint_must_be_plain_json_and_is_kept_as_written(env):
     context, call = _host_call(env, job_id, {"data": {"lines": {"0": "a"}, "model": "m"}})
     hc.checkpoint(call)
     assert TranslationJobs(env.session, clock=env.clock).finished_batches(job_id) == {0: ['{"lines": {"0": "a"}, "model": "m"}']}
+
+
+def test_each_host_call_gives_its_threads_database_session_back(env, monkeypatch):
+    from subtitles.tools.translate.runtime import host_calls as hc
+
+    released = []
+    monkeypatch.setattr(env.session, "remove", lambda: released.append(1))
+    job_id = _running_job(env)
+    context, call = _host_call(env, job_id, {"amount": 0, "model": "m"})
+    hc.reserve(call)
+    hc.checkpoint(_host_call(env, job_id, {"data": {"a": 1}})[1])
+    hc.usage(_host_call(env, job_id, {"tokens": 1, "cost": 0, "model": "m", "reservations": []})[1])
+    assert len(released) == 3, "a call that failed releases it too"
+    with pytest.raises(Exception):
+        hc.usage(_host_call(env, job_id, {"tokens": -1, "cost": 0})[1])
+    assert len(released) == 4
 
 
 def test_a_call_that_belongs_to_no_running_translation_is_refused(env):

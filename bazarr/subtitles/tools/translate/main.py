@@ -90,19 +90,19 @@ def _job_source_key(video_path, source_srt_file, embedded_source):
     return str(source_srt_file)
 
 
-def _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source, pinned_connection_id):
+def _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source):
     """The queue job to follow for a request the runtime already has a job for, 0 when the request waits for
     its job's retry time, or None when a new queue job is to be added (and always None with the runtime off).
 
-    A manual pick that cannot be honoured raises ``TranslationJobError`` with the reason.
+    A manual pick of one back end is made before this call, through ``runtime.enqueue.decide`` with the
+    connection, which records the pin on the job; the request here then joins that job.
     """
     if not _runtime_active():
         return None
     from .runtime import enqueue
     from .runtime.jobs import TranslationJobError
     try:
-        decision = enqueue.decide(_job_source_key(video_path, source_srt_file, embedded_source), to_lang, forced, hi,
-                                  pinned_connection_id=pinned_connection_id)
+        decision = enqueue.decide(_job_source_key(video_path, source_srt_file, embedded_source), to_lang, forced, hi)
     except TranslationJobError:
         raise
     except Exception:
@@ -170,7 +170,7 @@ def _search_providers_instead(media_type, radarr_id, sonarr_episode_id, arr_inst
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
                              media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata,
                              job_id=None, arr_instance_id=None, sports_operation=None, embedded_source=None,
-                             expected_destination_versions=(), pinned_connection_id=None):
+                             expected_destination_versions=()):
     """Translate a subtitle file, as a queued job.
 
     ``embedded_source`` names an embedded track to translate instead of a file:
@@ -185,9 +185,6 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     waited is not replaced, and the job reports that as a skip. A manual
     translation passes nothing and may replace its destination.
 
-    ``pinned_connection_id`` is a manual pick of one back end of the v2 translation runtime: the job uses
-    that back end only and neither fails over nor falls back. It has no effect with the runtime off.
-
     Called without ``job_id`` it only queues, for every media type, and returns
     the id of the job to follow: the one it queued, or the identical one already
     pending or running. It returns None when nothing could be queued. Called
@@ -196,8 +193,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     if not job_id:
         # With the v2 runtime on, a request for a source and target that already has a job joins it.
         # Reusing ``job_id`` keeps the frame the queue records to the function's own parameters.
-        job_id = _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source,
-                                 pinned_connection_id)
+        job_id = _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source)
         if job_id is not None:
             return job_id or None
         # Build the label inline: add_job_from_function captures the frame,
@@ -304,14 +300,13 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             # The selected engine of the runtime, with its failover, fallback and checkpoints, replaces the
             # factory. The service it returns answers the same translate() call.
             from .runtime.service import RuntimeTranslatorService
-            translator = RuntimeTranslatorService(**translator_arguments, source_key=source_key,
-                                                  pinned_connection_id=pinned_connection_id)
+            translator = RuntimeTranslatorService(**translator_arguments, source_key=source_key)
         else:
             translator = TranslatorFactory.create_translator(translator_type, **translator_arguments)
 
         logging.debug(f'Created translator instance: {translator.__class__.__name__}')  # noqa: G004
         result = translator.translate(job_id=job_id)
-        if getattr(translator, 'skipped', False):
+        if getattr(translator, 'skipped', False) is True:
             # Another job already runs this source and target, or a manual pick replaced this one.
             _report_runtime_skip(job_id, from_lang, to_lang, 'replaced or already running')
             return None
