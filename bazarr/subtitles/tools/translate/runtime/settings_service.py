@@ -888,7 +888,10 @@ class TranslatorSettingsService:
             return self._test_result(False, "The address changed after the key was saved, so the saved key is not "
                                             "sent to the new one. Enter the key again and save.")
         secrets = self._store.secrets_for_request(owner, destinations)
-        held = self._store.secrets_for_request(owner, frozenset())  # every saved secret, for masking only
+        # Every saved secret of the connection and of its engine, for masking only.
+        held = {**{f"engine.{name}": value for name, value in
+                   self._store.secrets_for_request((INSTANCE, instance.id), frozenset()).items()},
+                **self._store.secrets_for_request(owner, frozenset())}
         where = self._typed_origin(schema, values)
         claim = _claim_test(connection.id)
         if claim is None:
@@ -1050,7 +1053,12 @@ class TranslatorSettingsService:
                 claim.release()
 
         thread = threading.Thread(target=run, name="translation-connection-test", daemon=True)
-        thread.start()
+        try:
+            thread.start()
+        except Exception as error:
+            # Nothing was sent, so a priced test is settled at nothing and the request releases the claim.
+            logger.warning("A connection test could not start its probe: %s", type(error).__name__)
+            return {"ok": False, "sent": False, "message": "The test could not be started. Try again in a moment."}
         claim.handed_to_probe = True  # only once the thread exists: if it never started, the request releases
         thread.join(request.timeout_seconds + TEST_TIMEOUT_GRACE_SECONDS)
         if thread.is_alive():

@@ -808,6 +808,10 @@ def test_the_plugin_validates_before_any_lock_is_taken(world):
 NASTY = "ab\\cd\nq'\"z\u00e9"  # a backslash, a newline, both kinds of quote and a non-ASCII letter
 
 
+# Written out by hand: the raw backslash, the doubled one of a repr or JSON, the escaped and the real newline.
+LITERAL_FRAGMENTS = ["ab\\cd", "ab\\\\cd", "cd\\nq", "cd\nq", "q'", 'q\\"', "z\u00e9", "z\\u00e9"]
+
+
 def _no_form_of(secret, *texts):
     from subtitles.tools.translate.runtime.settings_service import _rendered_forms
 
@@ -826,6 +830,10 @@ def test_a_secret_with_a_backslash_a_newline_and_quotes_is_masked_in_every_rende
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.json["ok"] is False and "***" in response.json["message"]
     _no_form_of(NASTY, response.json["message"], response.get_data(as_text=True))
+    # Independent of the code under test: literal fragments of the secret, as written out by hand.
+    for fragment in LITERAL_FRAGMENTS:
+        assert fragment not in response.json["message"], fragment
+        assert fragment not in caplog.text, fragment
 
 
 def test_a_raised_error_formatted_with_a_nasty_secret_is_masked_in_the_error_and_the_logs(world, caplog):
@@ -834,6 +842,9 @@ def test_a_raised_error_formatted_with_a_nasty_secret_is_masked_in_the_error_and
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 500
     _no_form_of(NASTY, response.get_data(as_text=True), caplog.text)
+    for fragment in LITERAL_FRAGMENTS:
+        assert fragment not in response.get_data(as_text=True), fragment
+        assert fragment not in caplog.text, fragment
     assert "TypeError: bad" in caplog.text
 
 
@@ -874,6 +885,27 @@ def test_a_probe_thread_that_could_not_start_leaves_no_claim_behind(world, monke
     assert settings_service._RUNNING_TESTS == set()
 
 
+def test_a_priced_test_whose_probe_thread_could_not_start_was_never_sent_and_is_not_charged(world, monkeypatch):
+    from subtitles.tools.translate.runtime import settings_service
+
+    class NoThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    world.probe({"ok": True})
+    connection_id = _priced(world)
+    monkeypatch.setattr(settings_service.threading, "Thread", NoThread)
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 200 and response.json["ok"] is False
+    assert "could not be started" in response.json["message"]
+    (call,), (budget,) = _calls(world)
+    assert (call.actual_micros, call.state, budget.state) == (0, "settled", "released")
+    assert world.requests == [] and settings_service._RUNNING_TESTS == set()
+
+
 def test_an_engine_save_makes_the_master_key_durable_before_any_lock_or_transaction(world, monkeypatch):
     import secret_store
 
@@ -887,3 +919,18 @@ def test_an_engine_save_makes_the_master_key_durable_before_any_lock_or_transact
         "expected_revision": world.instance.revision, "values": {"service_token": SECRET}})
     assert response.status_code == 200, response.json
     assert seen and seen[0] == (False, False)
+
+
+def test_an_engine_level_secret_is_masked_in_a_probe_message_in_its_escaped_forms_too(world, caplog):
+    engine_secret = "svc\\tok\nen'x"
+    saved = world.call("patch", f"engines/{world.instance.id}", {
+        "expected_revision": world.instance.revision, "values": {"service_token": engine_secret}})
+    assert saved.status_code == 200, saved.json
+    world.probe({"ok": False, "message": f"{engine_secret} | {engine_secret!r} | {json.dumps(engine_secret)}"})
+    connection_id = world.lan_connection()
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    message = response.json["message"]
+    assert "***" in message
+    for fragment in ("svc\\tok", "svc\\\\tok", "tok\nen", "tok\\nen"):
+        assert fragment not in message, fragment
+        assert fragment not in caplog.text, fragment
