@@ -180,7 +180,17 @@ class RuntimeTranslatorService:
         self.partial_error = outcome.partial_error
         if outcome.kind == "published":
             return outcome.published
-        return self._publish(subs, lines, outcome, job_id)
+        try:
+            path = self._publish(subs, lines, outcome, job_id)
+        except BaseException as error:
+            # The job is not over until the subtitle is written: its batches stay for a retry and the failure is
+            # on record.
+            if outcome.publication_failed is not None:
+                outcome.publication_failed(error)
+            raise
+        if outcome.complete is not None:
+            outcome.complete()
+        return path
 
     def _publish(self, subs, source_lines, outcome, job_id):
         with staged_subtitle_write(self.video_path, self.dest_srt_file,
@@ -240,18 +250,27 @@ def translate_lines(lines, source_language, target_language, title="", media_typ
     def legacy(engine, instance):
         from ..services.translator_factory import TranslatorFactory
 
+        # Lingarr reads the two languages from the service it is built with.
         service = TranslatorFactory.create_translator(
             engine.translator_type, source_srt_file=None, dest_srt_file=None, lang_obj=None, to_lang=None,
-            from_lang=None, media_type=media_type, video_path=None, orig_to_lang=None, forced=False, hi=False,
-            sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None)
+            from_lang=source_language, media_type=media_type, video_path=None, orig_to_lang=target_language,
+            forced=False, hi=False, sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None)
         try:
             answered = service._translate_content(list(lines), job_id=job_id)
         except Exception as error:
             if _unreachable(error):
                 raise LegacyDeclined(f"The {engine.name} server could not be reached.") from error
             raise
-        by_position = {item["position"]: item["line"] for item in (answered or []) if isinstance(item, dict)}
-        return LegacyResult(lines=[by_position.get(index, text) for index, text in enumerate(lines)])
+        if not isinstance(answered, list):
+            # The service answers None when the reply was not what it expected. That is a failure, not a
+            # translation that left every line as it was.
+            raise TranslationRuntimeError(f"{engine.name} did not return a usable translation.", "invalid_result")
+        by_position = {item["position"]: item["line"] for item in answered
+                       if isinstance(item, dict) and isinstance(item.get("line"), str)}
+        missing = sum(1 for index, text in enumerate(lines) if text.strip() and index not in by_position)
+        return LegacyResult(
+            lines=[by_position.get(index, text) for index, text in enumerate(lines)],
+            partial_error=f"No translated text was returned for {missing} of {len(lines)} cues." if missing else None)
 
     spec = JobSpec(
         source_key="editor:" + line_digest(lines), target_key=target_key(target_language), lines=list(lines),
@@ -265,4 +284,6 @@ def translate_lines(lines, source_language, target_language, title="", media_typ
         raise TranslationRuntimeError(failed.message, failed.error_class, failed.retry_later) from failed
     if outcome.kind == "skipped":
         return None
+    if outcome.complete is not None:
+        outcome.complete()  # the editor takes the lines: there is no file to write
     return EditorTranslation(list(outcome.lines), outcome.partial_error)

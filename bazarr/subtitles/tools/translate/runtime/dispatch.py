@@ -119,6 +119,10 @@ class DispatchOutcome:
     plugin_id: str = ""
     engine_name: str = ""
     notices: list[Notice] = field(default_factory=list)
+    # For lines the caller has still to write: the job is not over until it has. The caller ends it with
+    # ``complete()`` once the subtitle is published, or ``publication_failed(error)`` when it could not be.
+    complete: Callable[[], None] | None = field(default=None, repr=False)
+    publication_failed: Callable[[BaseException], None] | None = field(default=None, repr=False)
 
     @property
     def partial(self) -> bool:
@@ -146,6 +150,14 @@ class EngineDeclined(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class _CheckFailed(Exception):
+    """The cancel check itself raised something other than a Stop. The request has been cancelled."""
+
+    def __init__(self, original: BaseException):
+        super().__init__(str(original))
+        self.original = original
 
 
 class DispatchFailed(Exception):
@@ -221,6 +233,11 @@ class RetryWindows:
         self._until.clear()
 
 
+# One store for the whole process: a dispatcher is made for each request, and a connection that asked to be left
+# alone has to be left alone by all of them.
+RETRY_WINDOWS = RetryWindows()
+
+
 # ---------------------------------------------------------------------------------------------- the engine
 
 @dataclass
@@ -237,6 +254,8 @@ class _Run:
     ledger_id: str
     watch: DeadlineWatch
     budget: Any = None
+    # True once this dispatcher reserved the job's budget: only that one gives it back.
+    budget_reserved: bool = False
     stop_reason: str | None = None
     declines: list[str] = field(default_factory=list)
     notices: list[Notice] = field(default_factory=list)
@@ -263,7 +282,7 @@ class Dispatcher:
         self.monotonic = monotonic
         self.sleep = sleep
         self.holds = holds or gate_module.HOLDS
-        self.windows = windows or RetryWindows(monotonic)
+        self.windows = windows if windows is not None else RETRY_WINDOWS
         self.poll = poll
         self.budget_wait = budget_wait
         self.deadlines = dict(deadlines or {})
@@ -305,10 +324,11 @@ class Dispatcher:
             self._finish_history(history, state, "awaiting_retry", fail.INTERNAL, type(error).__name__)
             raise
         finally:
-            try:
-                ledger.release_job(state.ledger_id)
-            except Exception:
-                logger.warning("A translation job could not give back its budget", exc_info=True)
+            if state.budget_reserved:
+                try:
+                    ledger.release_job(state.ledger_id)
+                except Exception:
+                    logger.warning("A translation job could not give back its budget", exc_info=True)
 
     # ------------------------------------------------------------------------------------------ the job
     def _ensure_job(self, jobs: TranslationJobs, spec: JobSpec):
@@ -340,14 +360,14 @@ class Dispatcher:
             instance = store.get_instance(connection.instance_id, fresh=True) if connection is not None else None
             if connection is None or instance is None:
                 raise GateClosed("The back end that was picked no longer exists", gate_module.ENGINE_MISSING)
-            state = gate_module.engine_state(store, instance, self.holds)
+            state = gate_module.engine_state(store, instance, self.holds, self.workers)
             if not state.available:
                 raise GateClosed(state.reason, state.cause)
             if not store.connection_usable(connection):
                 raise GateClosed("The back end that was picked cannot be used right now",
                                  gate_module.NOT_CONFIGURED)
             return [_Choice(instance, connection)], notices
-        result = gate_module.evaluate(store, self.holds)
+        result = gate_module.evaluate(store, self.holds, self.workers)
         if not result.available:
             raise GateClosed(result.reason, result.cause)
         engine_id, fallback_id = store.pointers()
@@ -357,7 +377,7 @@ class Dispatcher:
             if fallback is None:
                 notices.append(Notice("fallback_skipped", "The fallback engine no longer exists.", fallback_id))
             else:
-                state = gate_module.engine_state(store, fallback, self.holds)
+                state = gate_module.engine_state(store, fallback, self.holds, self.workers)
                 if state.available:
                     chain.append(_Choice(fallback))
                 else:
@@ -403,8 +423,10 @@ class Dispatcher:
                 continue
             except AttemptFailure as failure:
                 raise self._end_failed(jobs, history, state, failure) from None
-            jobs.complete(state.job_id)
-            self._finish_history(history, state, "partial" if output.partial_error else "completed")
+            output.complete = lambda: self._complete(jobs, history, state, output)
+            output.publication_failed = lambda error: self._publication_failed(jobs, history, state, error)
+            if output.kind == "published":
+                output.complete()  # the engine's own service has written the subtitle already
             output.job_id = state.job_id
             output.engine_instance_id = instance.id
             output.notices = list(state.notices)
@@ -412,6 +434,29 @@ class Dispatcher:
         raise Declined(state.declines)  # pragma: no cover - the loop returns or raises
 
     # ------------------------------------------------------------------------------------------ endings
+    def _complete(self, jobs, history, state, output) -> None:
+        jobs.complete(state.job_id)
+        self._finish_history(history, state, "partial" if output.partial_error else "completed")
+
+    def _publication_failed(self, jobs, history, state, error: BaseException) -> None:
+        """The subtitle could not be written. The batches stay for a retry, unless the write was refused because
+        a subtitle arrived meanwhile or the person stopped the job: then nothing is left to retry."""
+        from app.jobs_queue import JobCancelled
+        from subtitles.tools.subsync_engines import SubtitleDestinationChanged, SubtitleSourceChanged
+
+        if isinstance(error, JobCancelled):
+            jobs.cancel(state.job_id)
+            self._finish_history(history, state, "cancelled")
+        elif isinstance(error, (SubtitleDestinationChanged, SubtitleSourceChanged)):
+            jobs.fail(state.job_id, fail.DESTINATION_CHANGED, fail.MESSAGES[fail.DESTINATION_CHANGED])
+            self._finish_history(history, state, "failed", fail.DESTINATION_CHANGED,
+                                 fail.MESSAGES[fail.DESTINATION_CHANGED])
+        else:
+            message = fail.MESSAGES[fail.PUBLISH_FAILED]
+            jobs.await_retry(state.job_id, fail.PUBLISH_FAILED, message, retry_at=self.clock() +
+                             timedelta(seconds=DEFAULT_RETRY_SECONDS))
+            self._finish_history(history, state, "awaiting_retry", fail.PUBLISH_FAILED, type(error).__name__)
+
     def _finish_history(self, history, state, status, error_class=None, detail=None):
         try:
             history.finish_job(state.ledger_id, status, error_class=error_class, error_detail=detail)
@@ -440,7 +485,7 @@ class Dispatcher:
 
     def _retry_at(self, failure: AttemptFailure) -> datetime:
         now = self.clock()
-        if failure.error_class == fail.MONTH_CAP:
+        if failure.error_class == fail.MONTH_CAP and failure.retry_after is None:
             return (now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=32)).replace(day=1)
         return now + timedelta(seconds=failure.retry_after or DEFAULT_RETRY_SECONDS)
 
@@ -484,7 +529,7 @@ class Dispatcher:
         last: AttemptFailure | None = None
         for index, connection in enumerate(candidates):
             try:
-                result = self._attempt(spec, state, jobs, instance, info, connection, source, target, budget)
+                result = self._attempt(spec, state, jobs, ledger, instance, info, connection, source, target)
             except AttemptFailure as failure:
                 last = failure
                 more = index < len(candidates) - 1
@@ -496,8 +541,11 @@ class Dispatcher:
                                          error_class=failure.error_class)
                 if failure.error_class == fail.DECLINED:
                     raise EngineDeclined(failure.message or failure.reason or "declined") from None
-                if failing_over:
+                if connection is not None and failure.fails_over:
+                    # A retry time is kept whether or not another connection is left to try, so the next job
+                    # does not start on the one that asked to be left alone.
                     self.windows.note(connection.id, failure)
+                if failing_over:
                     logger.info("A translation attempt failed over to the next connection (%s)", failure.error_class)
                     continue
                 raise
@@ -545,15 +593,18 @@ class Dispatcher:
             if budget.status != WAIT:
                 break
             if waited >= self.budget_wait:
-                raise AttemptFailure(fail.MONTH_CAP, "The month's translation budget is held by other jobs.")
+                # Money held by other jobs frees as they settle, not at the start of the next month.
+                raise AttemptFailure(fail.MONTH_CAP, "The month's translation budget is held by other jobs.",
+                                     retry_after=DEFAULT_RETRY_SECONDS)
             spec.check_cancel()
             self.sleep(self.poll)
             waited += self.poll
         state.budget = budget
+        state.budget_reserved = budget.status == RESERVED
         return budget
 
     # ------------------------------------------------------------------------------------------- attempt
-    def _secrets(self, instance, connection, info) -> dict[str, str]:
+    def _secrets(self, instance, connection, info, serving) -> dict[str, str]:
         """The stored secrets this attempt may carry: the engine's and the connection's, each only to the
         destinations it was entered for. The connection's win a name they share."""
         store = self.store
@@ -563,11 +614,6 @@ class Dispatcher:
             self._refuse_stale((INSTANCE, instance.id), engine_destinations)
             granted = dict(store.secrets_for_request((INSTANCE, instance.id), engine_destinations))
             if connection is not None:
-                serving = info if not connection.plugin_id or connection.plugin_id == info.plugin_id \
-                    else self.plugins(connection.plugin_id)
-                if serving is None:
-                    raise AttemptFailure(fail.DEPENDENCY_UNAVAILABLE, "The plugin that serves this back end is not "
-                                                                      "installed or is turned off.")
                 schema = schema_for_backend(serving.manifest, connection.backend_type)
                 destinations = effective_destinations(schema, store.settings_of(connection))
                 self._refuse_stale((CONNECTION, connection.id), destinations)
@@ -580,6 +626,13 @@ class Dispatcher:
             raise AttemptFailure(fail.INVALID_CONFIG, "The translator's manifest could not be read.") from None
         return {name: value for name, value in granted.items() if isinstance(value, str) and value}
 
+    @staticmethod
+    def _remaining_budget(ledger, state: _Run) -> float | None:
+        """What the job may still spend, in dollars: what its budget holds now, which is less than what was reserved
+        once earlier attempts and engines have spent some. None when no cap applies."""
+        hold = ledger.job_hold(state.ledger_id)
+        return None if hold is None else hold / 1_000_000
+
     def _refuse_stale(self, owner, destinations) -> None:
         """A key entered for other destinations is never sent to these. The owner's own flag normally keeps such
         a connection out of the list; this is the check at the point of sending."""
@@ -587,7 +640,7 @@ class Dispatcher:
             raise AttemptFailure(fail.AUTH_REQUIRED, "The address changed after the key was saved, so the saved "
                                                      "key is not sent to the new one. Enter the key again.")
 
-    def _attempt(self, spec, state: _Run, jobs, instance, info, connection, source, target, budget):
+    def _attempt(self, spec, state: _Run, jobs, ledger, instance, info, connection, source, target):
         from app.jobs_queue import JobCancelled
 
         serving_id = info.plugin_id if connection is None or not connection.plugin_id else connection.plugin_id
@@ -607,8 +660,8 @@ class Dispatcher:
             connection=None if connection is None else wire.connection_wire(connection,
                                                                              self.store.settings_of(connection)),
             checkpoints=stored_checkpoints(stored),
-            budget=None if budget.amount is None else budget.amount / 1_000_000)
-        secrets = self._secrets(instance, connection, serving)
+            budget=self._remaining_budget(ledger, state))
+        secrets = self._secrets(instance, connection, info, serving)
         state.watch.activity()
 
         def on_progress(message: dict) -> None:
@@ -629,15 +682,24 @@ class Dispatcher:
             raise
         except BaseException as error:
             raise fail.classify(error) from None
-        context.cancel = handle.cancel
+        def stop(reason: str) -> None:
+            # A stop of the host's own (the budget ran out): the grace period starts now, and the answer of an
+            # attempt that was told to stop is not taken.
+            state.stop_reason = state.stop_reason or reason
+            state.watch.cancel_requested(reason)
+            handle.cancel(reason)
+
+        context.cancel = stop
         if context.cancel_pending:
-            handle.cancel(context.cancel_pending)
+            stop(context.cancel_pending)
         try:
             outcome = self._await(handle, spec, state, serving_id)
         except JobCancelled:
             raise
         except AttemptFailure:
             raise
+        except _CheckFailed as failed:
+            raise failed.original from None
         except BaseException as error:
             if state.stop_reason:
                 raise self._stopped(state.stop_reason) from None
@@ -646,6 +708,8 @@ class Dispatcher:
         return wire.read_result(outcome.result, getattr(outcome, "data", b""), len(spec.lines))
 
     def _stopped(self, reason: str) -> AttemptFailure:
+        if reason == "budget_exhausted":
+            return AttemptFailure(fail.BUDGET_EXHAUSTED, fail.MESSAGES[fail.BUDGET_EXHAUSTED])
         if reason == DEADLINE_EXCEEDED:
             return AttemptFailure(DEADLINE_EXCEEDED, "The translation ran past its overall time limit.")
         return AttemptFailure(INACTIVITY_TIMEOUT, "The translator stopped reporting progress.")
@@ -667,6 +731,10 @@ class Dispatcher:
             else:
                 if by_person:
                     raise JobCancelled("The translation was stopped")
+                if state.stop_reason or state.watch.deadline_passed():
+                    # Told to stop, or past the overall deadline: an answer that arrives in the grace period
+                    # is not taken.
+                    raise self._stopped(state.stop_reason or DEADLINE_EXCEEDED)
                 return outcome
             if not by_person:
                 try:
@@ -676,6 +744,11 @@ class Dispatcher:
                     state.watch.cancel_requested("cancelled")
                     handle.cancel("cancelled")
                     continue
+                except BaseException as error:
+                    # Whatever the check raised (a sports operation that no longer matches, say), the request
+                    # must not be left running and spending.
+                    handle.cancel("cancelled")
+                    raise _CheckFailed(error) from None
             verdict = state.watch.check()
             if verdict.action == DeadlineAction.CANCEL:
                 state.stop_reason = verdict.reason

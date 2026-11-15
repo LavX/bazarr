@@ -40,6 +40,7 @@ def test_a_job_runs_on_its_connection_and_is_recorded_everywhere(env):
     connection = env.connection(instance, price_input_per_million=1.0, price_output_per_million=2.0)
     env.scripts[PLUGIN] = {"*": [{"reserve": 0.001, "cost": 0.0004, "tokens": 40}]}
     outcome = env.dispatcher().run(make_spec())
+    outcome.complete()
 
     assert outcome.kind == "lines" and outcome.partial_error is None
     assert outcome.lines == [f"[fr] {line}" for line in LINES]
@@ -125,6 +126,7 @@ def test_these_failures_move_to_the_next_connection_and_it_continues_from_the_ch
     instance, first, second = two_connections(env)
     env.scripts[PLUGIN] = {str(first.id): [{"fail": {"code": code, "message": "no"}, "fail_at_batch": 1}]}
     outcome = env.dispatcher().run(make_spec())
+    outcome.complete()
 
     assert env.served() == [str(first.id), str(second.id)]
     # The first connection translated one batch before it failed; the second took it from the checkpoint.
@@ -228,6 +230,7 @@ def test_a_decline_goes_to_the_fallback_engine_once(env):
     env.pointers.fallback = fallback.id
     env.scripts[SECOND_PLUGIN] = {"*": [decline()]}
     outcome = env.dispatcher().run(make_spec())
+    outcome.complete()
 
     assert outcome.engine_instance_id == fallback.id and outcome.plugin_id == PLUGIN
     job = env.last_job()
@@ -549,6 +552,7 @@ def test_a_partial_answer_keeps_the_source_text_for_the_lines_it_left_out(env):
     env.ai_engine()
     env.scripts[PLUGIN] = {"*": [{"partial": [1, 3]}]}
     outcome = env.dispatcher().run(make_spec())
+    outcome.complete()
     assert outcome.lines == ["[fr] One", "Two", "[fr] Three", "Four", "[fr] Five"]
     assert outcome.partial_error == "No translated text was returned for 2 of 5 cues."
     job = env.last_job()
@@ -568,6 +572,7 @@ def test_a_retry_resumes_after_the_last_finished_batch(env):
     assert job.state == "awaiting_retry" and len(env.checkpoints()) == 1
     time.sleep(0.3)  # the pool restarts a crashed worker after a short backoff
     outcome = env.dispatcher().run(make_spec())
+    outcome.complete()
     assert outcome.lines == ["ck:[fr] One", "ck:[fr] Two", "[fr] Three", "[fr] Four", "[fr] Five"]
     assert env.last_job().id == job.id and env.last_job().state == "completed"
     assert env.checkpoints() == []
@@ -875,3 +880,286 @@ def test_two_jobs_at_once_never_hold_the_same_money(env):
     assert errors == [] and len(outcomes) == 2
     budgets = sorted(item["request"]["budget"] for item in env.requests())
     assert budgets[-1] <= 0.5 and sum(budgets) <= 1.0, "two jobs were each handed no more than their share"
+
+
+# ------------------------------------------------------------------- the job ends when the subtitle is written
+
+
+def test_the_job_is_not_completed_until_the_caller_has_published(env):
+    env.ai_engine()
+    outcome = env.dispatcher().run(make_spec())
+    job = env.last_job()
+    assert job.state == "running" and len(env.checkpoints()) == 1, "nothing is deleted before the write"
+    assert env.history(job)["status"] == "running"
+    outcome.complete()
+    assert env.last_job().state == "completed" and env.checkpoints() == []
+    assert env.history(env.last_job())["status"] == "completed"
+
+
+def test_a_publication_that_fails_keeps_the_batches_and_records_the_failure(env):
+    env.ai_engine()
+    outcome = env.dispatcher().run(make_spec())
+    outcome.publication_failed(OSError("disk full"))
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("awaiting_retry", "publish_failed")
+    assert len(env.checkpoints()) == 1 and len(json.loads(env.checkpoints()[0].batches_json)) == 3, \
+        "the retry resumes from the finished batches"
+    row = env.history(job)
+    assert (row["status"], row["error_class"]) == ("awaiting_retry", "publish_failed")
+
+
+def test_a_write_refused_because_a_subtitle_arrived_is_not_retried(env):
+    from subtitles.tools.subsync_engines import SubtitleDestinationChanged
+
+    env.ai_engine()
+    outcome = env.dispatcher().run(make_spec())
+    outcome.publication_failed(SubtitleDestinationChanged("moved"))
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("failed", "destination_changed") and env.checkpoints() == []
+
+
+def test_a_stop_during_the_write_cancels_the_job(env):
+    from app.jobs_queue import JobCancelled
+
+    env.ai_engine()
+    outcome = env.dispatcher().run(make_spec())
+    outcome.publication_failed(JobCancelled("stopped"))
+    assert env.last_job().state == "cancelled" and env.history(env.last_job())["status"] == "cancelled"
+
+
+def test_an_engine_that_published_by_itself_completes_the_job_at_once(env, lingarr_url):
+    lingarr_instance(env)
+    env.dispatcher().run(make_spec(legacy=lambda *_: LegacyResult(published="/media/film/film.fr.srt")))
+    assert env.last_job().state == "completed"
+
+
+# ---------------------------------------------------------------------------------------------- the budget
+
+
+def test_the_dispatcher_that_lost_the_race_for_a_job_does_not_give_back_the_winners_budget(env):
+    env.ai_engine()
+    jobs = TranslationJobs(env.session, clock=env.clock)
+    job_id = jobs.request(SOURCE, TARGET).job_id
+    ledger = UsageLedger(env.session, clock=env.clock)
+    limits = CostLimits(month_cap=usd(10), translation_limit=1)
+    env.limits = limits
+    # The winner has started the job and holds its budget.
+    jobs.start(job_id, source_digest="d", engine_instance_id=1, settings_revision=1)
+    ledger.reserve_job_budget(str(job_id), limits)
+    held = ledger.job_hold(str(job_id))
+    assert held == usd(10)
+    # The loser saw the same queued job and runs it: it finds the job taken.
+    assert env.dispatcher().run(make_spec()).kind == "skipped"
+    assert ledger.job_hold(str(job_id)) == held
+
+
+def test_a_dispatcher_gives_back_a_budget_it_reserved(env):
+    env.ai_engine()
+    env.limits = CostLimits(month_cap=usd(10), translation_limit=1)
+    env.dispatcher().run(make_spec())
+    assert UsageLedger(env.session, clock=env.clock).job_hold(str(env.last_job().id)) == 0
+
+
+def test_two_holds_of_one_call_are_settled_against_the_final_total(env):
+    job_id = _running_job(env)
+    limits = CostLimits(job_cap=usd(1), translation_limit=1)
+    ledger = UsageLedger(env.session, clock=env.clock)
+    ledger.reserve_job_budget(str(job_id), limits)
+    first = ledger.reserve_call(str(job_id), "a", worst_case_micros=usd(0.4), limits=limits)
+    second = ledger.reserve_call(str(job_id), "b", worst_case_micros=usd(0.4), limits=limits)
+    assert first.admitted and second.admitted
+    settled = ledger.settle_calls(str(job_id), [("a", 10, 0, usd(0.7), "m"), ("b", 0, 0, 0, "m")], limits=limits)
+    assert settled.job_cost == usd(0.7) and settled.over_budget is False, "no half-way sum of 1.1 counts"
+
+
+def test_a_settlement_of_two_holds_that_really_crosses_the_cap_is_over_budget(env):
+    job_id = _running_job(env)
+    limits = CostLimits(job_cap=usd(1), translation_limit=1)
+    ledger = UsageLedger(env.session, clock=env.clock)
+    ledger.reserve_job_budget(str(job_id), limits)
+    ledger.reserve_call(str(job_id), "a", worst_case_micros=usd(0.4), limits=limits)
+    ledger.reserve_call(str(job_id), "b", worst_case_micros=usd(0.4), limits=limits)
+    assert ledger.settle_calls(str(job_id), [("a", 1, 0, usd(1.2), "m"), ("b", 0, 0, 0, "m")],
+                               limits=limits).over_budget is True
+
+
+def test_a_settlement_naming_a_hold_that_is_not_the_jobs_changes_nothing(env):
+    from subtitles.tools.translate.runtime.usage import UsageError
+
+    job_id = _running_job(env)
+    limits = CostLimits(job_cap=usd(1), translation_limit=1)
+    ledger = UsageLedger(env.session, clock=env.clock)
+    ledger.reserve_job_budget(str(job_id), limits)
+    ledger.reserve_call(str(job_id), "a", worst_case_micros=usd(0.4), limits=limits)
+    with pytest.raises(UsageError):
+        ledger.settle_calls(str(job_id), [("a", 1, 0, usd(0.1), "m"), ("nope", 0, 0, 0, "m")], limits=limits)
+    assert ledger.job_cost(str(job_id)) == usd(0.4), "the first hold was not settled"
+
+
+def test_a_call_that_holds_twice_and_reports_once_is_not_cancelled_for_the_sum_half_way(env):
+    from subtitles.tools.translate.runtime import host_calls as hc
+
+    job_id = _running_job(env)
+    limits = CostLimits(job_cap=usd(1), translation_limit=1)
+    UsageLedger(env.session, clock=env.clock).reserve_job_budget(str(job_id), limits)
+    context, reserve_call = _host_call(env, job_id, {"amount": 0.4, "model": "m"}, limits=limits)
+    stopped = []
+    context.cancel = stopped.append
+    holds = [hc.reserve(reserve_call)["hold"], hc.reserve(reserve_call)["hold"]]
+    settle = type("Call", (), {"context": context, "params": {"tokens": 5, "cost": 0.7, "model": "m",
+                                                             "reservations": holds}})()
+    hc.usage(settle)
+    assert context.over_budget is False and stopped == []
+
+
+def test_a_job_whose_budget_is_held_by_others_for_too_long_is_retried_after_the_default_delay(env):
+    env.ai_engine()
+    env.limits = CostLimits(month_cap=usd(1), translation_limit=1)
+    jobs = TranslationJobs(env.session, clock=env.clock)
+    other = jobs.request("/media/other.en.srt", TARGET).job_id  # a live job that holds the month
+    jobs.start(other, source_digest="d", engine_instance_id=1, settings_revision=1)
+    UsageLedger(env.session, clock=env.clock).reserve_job_budget(str(other), env.limits)
+    with pytest.raises(DispatchFailed) as caught:
+        env.dispatcher(budget_wait=0).run(make_spec())
+    assert caught.value.error_class == "month_cap" and caught.value.retry_at == datetime(2026, 11, 15, 12, 15, 0)
+
+
+def test_a_later_connection_and_the_fallback_get_what_is_left_and_not_the_original_reservation(env):
+    instance, first, second = two_connections(env)
+    fallback = env.engine(SECOND_PLUGIN, select=False)
+    env.pointers.fallback = fallback.id
+    env.limits = CostLimits(job_cap=usd(1), translation_limit=1)
+    env.scripts[PLUGIN] = {str(first.id): [{"reserve": 0.3, "cost": 0.3, "fail": {"code": "rate_limited",
+                                                                                 "message": "x"},
+                                            "fail_at_batch": 1}]}
+    env.dispatcher().run(make_spec())
+    budgets = [item["request"]["budget"] for item in env.requests()]
+    assert budgets == [1.0, 0.7]
+
+
+# ------------------------------------------------------------------------------------------ retry windows
+
+
+def test_the_retry_windows_are_shared_by_every_dispatcher_of_the_process(env):
+    from subtitles.tools.translate.runtime import dispatch
+
+    dispatch.RETRY_WINDOWS.clear()
+    try:
+        instance, first, second = two_connections(env)
+        env.scripts[PLUGIN] = {str(first.id): [{"fail": {"code": "rate_limited", "message": "x",
+                                                         "retry_after": 3600}}, {}]}
+        shared = dict(windows=None, monotonic=time.monotonic)
+        env.dispatcher(**shared).run(make_spec())
+        env.dispatcher(**shared).run(make_spec(source_key="/media/other.en.srt"))  # a new dispatcher, as a request makes
+        assert env.served() == [str(first.id), str(second.id), str(second.id)]
+    finally:
+        dispatch.RETRY_WINDOWS.clear()
+
+
+def test_the_retry_time_of_the_only_connection_is_kept_too(env):
+    instance = env.engine()
+    only = env.connection(instance)
+    env.scripts[PLUGIN] = {"*": [{"fail": {"code": "rate_limited", "message": "x", "retry_after": 600}}, {}]}
+    with pytest.raises(DispatchFailed):
+        env.dispatcher().run(make_spec())
+    with pytest.raises(DispatchFailed) as caught:
+        env.dispatcher().run(make_spec())
+    assert caught.value.error_class == "rate_limited" and caught.value.retry_at is not None
+    assert env.served() == [str(only.id)], "the second job did not ask a connection that asked to be left alone"
+
+
+# ---------------------------------------------------------------------------------- stops, deadlines, gate
+
+
+def test_an_answer_that_arrives_after_the_deadline_is_not_taken(env):
+    env.ai_engine()
+    env.scripts[PLUGIN] = {"*": [{"late_success": True}]}
+    with pytest.raises(DispatchFailed) as caught:
+        env.dispatcher(monotonic=time.monotonic, deadlines={"overall": 0.5, "inactivity": 60, "grace": 20}).run(
+            make_spec())
+    assert caught.value.error_class == "deadline_exceeded" and caught.value.retry_later is False
+    assert env.last_job().state == "failed"
+
+
+def test_a_cancel_check_that_raises_anything_stops_the_request(env):
+    env.ai_engine()
+    env.scripts[PLUGIN] = {"*": [{"wait_cancel": True}]}
+    cancelled = []
+
+    class Port:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def submit(self, *args, **kwargs):
+            handle = self.inner.submit(*args, **kwargs)
+            real = handle.cancel
+            handle.cancel = lambda reason="cancelled": (cancelled.append(reason), real(reason))[1]
+            return handle
+
+        def abandon(self, plugin_id):
+            pass
+
+    calls = []
+
+    def check():
+        calls.append(1)
+        if len(calls) > 3:
+            raise ValueError("The operation no longer matches")
+
+    with pytest.raises(ValueError):
+        env.dispatcher(workers=Port(env.workers)).run(make_spec(check_cancel=check))
+    assert cancelled == ["cancelled"], "the request that was left running is cancelled"
+
+
+def test_a_stop_for_the_budget_starts_the_grace_clock_and_ends_in_a_budget_failure(env):
+    instance = env.engine()
+    env.connection(instance, price_input_per_million=1.0, price_output_per_million=1.0)
+    env.limits = CostLimits(job_cap=usd(0.1), translation_limit=1)
+    env.scripts[PLUGIN] = {"*": [{"reserve": 0.05, "cost": 0.5, "stubborn_after_usage": True}]}
+    env.session_overrides = {"cancel_grace": 30.0}
+    abandoned = []
+
+    class Port:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def submit(self, *args, **kwargs):
+            return self.inner.submit(*args, **kwargs)
+
+        def abandon(self, plugin_id):
+            abandoned.append(plugin_id)
+
+    with pytest.raises(DispatchFailed) as caught:
+        env.dispatcher(workers=Port(env.workers), monotonic=time.monotonic,
+                       deadlines={"overall": 60, "inactivity": 60, "grace": 0.6}).run(make_spec())
+    assert caught.value.error_class == "budget_exhausted" and abandoned == [PLUGIN]
+
+
+def test_the_secrets_of_a_connection_served_by_another_plugin_follow_that_plugins_schema(env, monkeypatch):
+    from subtitles.tools.translate.runtime import dispatch
+
+    instance = env.engine()
+    connection = env.store.add_connection(instance.id, "openai_compatible", plugin_id=SECOND_PLUGIN, model="m")
+    env.store.set_secret((CONNECTION, connection.id), "api_key", KEY,
+                         destinations=frozenset({"http://lan.example.test:1234/v1"}))
+    seen = []
+    real_engine = dispatch.schema_for_engine
+    real_backend = dispatch.schema_for_backend
+    monkeypatch.setattr(dispatch, "schema_for_engine", lambda manifest: seen.append(("engine", manifest["id"]))
+                        or real_engine(manifest))
+    monkeypatch.setattr(dispatch, "schema_for_backend", lambda manifest, kind: seen.append(("backend", manifest["id"]))
+                        or real_backend(manifest, kind))
+    env.dispatcher().run(make_spec()).complete()
+    assert seen == [("engine", PLUGIN), ("backend", SECOND_PLUGIN)]
+    assert env.requests()[0]["secrets"] == {"api_key": KEY}
+
+
+def test_a_dispatcher_with_no_worker_bound_closes_the_job_without_asking_for_one(env):
+    from subtitles.tools.translate.runtime.workers import UnboundWorkers
+
+    env.ai_engine()
+    with pytest.raises(GateClosed) as caught:
+        env.dispatcher(workers=UnboundWorkers()).run(make_spec())
+    assert caught.value.cause == "workers_unbound" and "not available yet" in caught.value.reason
+    assert env.requests() == []
+    assert env.last_job().error_class == "gate_closed"

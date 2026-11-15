@@ -27,6 +27,8 @@ connection, the last one repeating. An outcome may set:
 ``partial``        positions the answer leaves out (status partial)
 ``corrupt``        ``bad_tag`` or ``control`` damages the first line, ``drop`` leaves one line out
 ``noreport``       settle nothing (a worker that forgets its usage call)
+``late_success``   wait for the cancel, then finish the whole translation anyway and answer it
+``stubborn_after_usage``  after the first batch is settled, ignore every cancel and never answer
 
 ``BAZARR_FAKE_TRANSLATOR_STATE`` names a file that keeps the attempt counts across worker processes, so that a
 script's second outcome applies to the request after a worker was killed.
@@ -146,7 +148,11 @@ def _translate(operation):
     if outcome.get("blocked"):
         operation.sandbox_blocked(outcome.get("target", "203.0.113.9:1234"), errno=13)
         raise worker_channel.OperationError("sandbox_blocked", "connect refused by the sandbox")
-    if outcome.get("wait_cancel"):
+    ignoring = False
+    if outcome.get("late_success"):
+        operation.cancelled.wait(60)
+        ignoring = True
+    elif outcome.get("wait_cancel"):
         while True:
             if operation.cancelled.wait(0.02):
                 if not outcome.get("ignore_cancel"):
@@ -158,11 +164,12 @@ def _translate(operation):
     batches = 0
     pending = [line for line in lines if line["position"] not in done]
     for start in range(0, len(pending), batch):
-        operation.check_cancelled()
+        if not ignoring:
+            operation.check_cancelled()
         chunk = pending[start:start + batch]
         if outcome.get("delay"):
             time.sleep(float(outcome["delay"]))
-        hold = _call(operation, "reserve", {"amount": reserve, "model": model}).get("hold")
+        hold = _call(operation, "reserve", {"amount": reserve, "model": model}, cancellable=not ignoring).get("hold")
         if outcome.get("die_after") == "reserve":
             os._exit(9)
         holds.append(hold)
@@ -175,6 +182,9 @@ def _translate(operation):
             _call(operation, "usage", {"tokens": tokens, "cost": cost, "model": model, "reservations": [hold]},
                   cancellable=False)
         batches += 1
+        if outcome.get("stubborn_after_usage"):
+            while True:
+                time.sleep(0.05)
         operation.progress(fraction=min(1.0, (len(done) + len(texts)) / max(1, len(lines))),
                            message="translated %d" % (len(done) + len(texts)),
                            data={"done": len(done) + len(texts), "total": len(lines)})

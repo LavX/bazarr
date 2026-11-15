@@ -177,16 +177,17 @@ def usage(call) -> dict:
                             connection_id=context.connection_id, backend_type=context.backend_type,
                             model=model or context.model)
         holds = [hold]
-    over_budget = False
-    for index, hold in enumerate(holds):
-        # The whole reading is one call's: the first hold takes it, any further hold of the same call settles at 0.
-        try:
-            settlement = ledger.settle_call(
-                context.ledger_id, hold, input_tokens=tokens if index == 0 else 0, output_tokens=0,
-                actual_micros=actual if index == 0 else 0, model=model, limits=limits)
-        except UsageError:
-            raise _refuse("invalid_request", "that reservation is not one of this job's") from None
-        over_budget = over_budget or settlement.over_budget
+    # The whole reading is one call's: the first hold takes it and any further hold of the same call settles at 0.
+    # All of them are settled as one step, so a total taken half way (the reading against one hold while the
+    # other still counts at its worst case) never decides whether the job is over its budget.
+    try:
+        settlement = ledger.settle_calls(
+            context.ledger_id,
+            [(hold, tokens if index == 0 else 0, 0, actual if index == 0 else 0, model)
+             for index, hold in enumerate(holds)], limits=limits)
+    except UsageError:
+        raise _refuse("invalid_request", "that reservation is not one of this job's") from None
+    over_budget = settlement.over_budget
     if over_budget:
         context.over_budget = True
         context.stop("budget_exhausted")

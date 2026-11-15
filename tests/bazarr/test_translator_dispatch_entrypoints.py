@@ -562,3 +562,78 @@ def test_with_the_switch_off_the_editor_uses_the_sidecar_service(monkeypatch):
 
     monkeypatch.setattr(settings.translator, "runtime_v2", False)
     assert editor._runtime_editor_service("movie") is None
+
+
+def test_a_subtitle_that_cannot_be_written_leaves_the_job_awaiting_a_retry_with_its_batches(env, media, monkeypatch):
+    from subtitles.tools.translate.runtime import service
+
+    env.ai_engine()
+
+    def broken(*args, **kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(service, "staged_subtitle_write", broken)
+    with pytest.raises(OSError):
+        build_service(env, media).translate(job_id=None)
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("awaiting_retry", "publish_failed")
+    assert len(env.checkpoints()) == 1, "the batches wait for the retry"
+    row = env.history(job)
+    assert (row["status"], row["error_class"]) == ("awaiting_retry", "publish_failed")
+
+
+def test_the_job_completes_only_once_the_subtitle_is_written(env, media):
+    env.ai_engine()
+    service = build_service(env, media)
+    service.translate(job_id=None)
+    job = env.last_job()
+    assert job.state == "completed" and media.dest.exists() and env.checkpoints() == []
+
+
+def _editor_lingarr(env, monkeypatch, answer):
+    from app.config import settings
+    from subtitles.tools.translate.runtime import legacy_engines, service
+    from subtitles.tools.translate.services.translator_factory import TranslatorFactory
+
+    monkeypatch.setattr(settings.translator, "lingarr_url", "http://lingarr.example.test:9876")
+    env.pointers.engine = env.store.create_instance(legacy_engines.LINGARR_PLUGIN_ID,
+                                                    settings={legacy_engines.SAVED_FLAG: True}).id
+    built = []
+    old = Mock()
+    old._translate_content.return_value = answer
+
+    def create(translator_type, **kwargs):
+        built.append((translator_type, kwargs))
+        return old
+
+    monkeypatch.setattr(TranslatorFactory, "create_translator", staticmethod(create))
+    monkeypatch.setattr(service, "jobs_queue", SimpleNamespace(raise_if_cancelled=lambda job_id: None,
+                                                               update_job_progress=lambda **kwargs: True))
+    return built, service
+
+
+def test_the_editors_lingarr_service_is_built_with_the_real_languages(env, monkeypatch):
+    built, service = _editor_lingarr(env, monkeypatch,
+                                     [{"position": 0, "line": "Szia"}, {"position": 1, "line": "Világ"}])
+    result = service.translate_lines(["Hello", "World"], "en", "hu", dispatcher=env.dispatcher())
+    assert result.lines == ["Szia", "Világ"] and result.partial_error is None
+    assert built[0][0] == "lingarr"
+    assert (built[0][1]["from_lang"], built[0][1]["orig_to_lang"]) == ("en", "hu")
+    assert env.last_job().state == "completed"
+
+
+def test_a_lingarr_answer_of_none_is_a_failure_and_not_the_untranslated_source(env, monkeypatch):
+    from subtitles.tools.translate.runtime.service import TranslationRuntimeError
+
+    _built, service = _editor_lingarr(env, monkeypatch, None)
+    with pytest.raises(TranslationRuntimeError) as caught:
+        service.translate_lines(["Hello", "World"], "en", "hu", dispatcher=env.dispatcher())
+    assert caught.value.reason == "invalid_result"
+    assert env.last_job().state != "completed"
+
+
+def test_lines_lingarr_left_out_are_a_partial_translation(env, monkeypatch):
+    _built, service = _editor_lingarr(env, monkeypatch, [{"position": 0, "line": "Szia"}])
+    result = service.translate_lines(["Hello", "World"], "en", "hu", dispatcher=env.dispatcher())
+    assert result.lines == ["Szia", "World"]
+    assert result.partial_error == "No translated text was returned for 1 of 2 cues."

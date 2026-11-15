@@ -20,9 +20,10 @@ class Env:
         self.active = {PLUGIN}
         self.store = TranslatorStore(session, pointers=self.pointers, plugin_active=lambda pid: pid in self.active)
         self.holds = GateHolds()
+        self.workers = object()  # a worker port that is bound: anything but the unbound one
 
     def evaluate(self):
-        return gate.evaluate(self.store, self.holds)
+        return gate.evaluate(self.store, self.holds, self.workers)
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -133,6 +134,43 @@ def test_a_gate_that_cannot_read_the_configuration_is_closed_and_says_why(env):
     assert (result.available, result.cause) == (False, gate.UNREADABLE) and "database is gone" in result.reason
 
 
+def test_a_plugin_engine_is_not_available_while_no_worker_is_bound_and_says_so(env):
+    from subtitles.tools.translate.runtime.workers import UnboundWorkers
+
+    instance = env.store.create_instance(PLUGIN)
+    env.store.add_connection(instance.id, "openrouter", model="m")
+    env.pointers.engine = instance.id
+    closed = gate.evaluate(env.store, env.holds, UnboundWorkers())
+    assert (closed.available, closed.cause) == (False, gate.WORKERS_UNBOUND)
+    assert "not available yet" in closed.reason and "worker" in closed.reason
+    assert gate.evaluate(env.store, env.holds, env.workers).available is True
+
+
+def test_the_default_is_the_bound_port_and_nothing_is_bound_until_the_worker_is_set_up(env):
+    from subtitles.tools.translate.runtime import workers
+
+    assert workers.is_bound() is False
+    instance = env.store.create_instance(PLUGIN)
+    env.store.add_connection(instance.id, "openrouter", model="m")
+    env.pointers.engine = instance.id
+    assert gate.evaluate(env.store, env.holds).cause == gate.WORKERS_UNBOUND
+    answer = gate.translation_gate(env.store, env.holds)
+    assert tuple(answer)[0] is False and "not available yet" in answer.reason
+    workers.bind(env.workers)
+    try:
+        assert workers.is_bound() is True and gate.evaluate(env.store, env.holds).available is True
+    finally:
+        workers.unbind()
+
+
+def test_lingarr_needs_no_worker_so_an_unbound_port_does_not_close_it(env, lingarr_url):
+    from subtitles.tools.translate.runtime.workers import UnboundWorkers
+
+    instance = env.store.create_instance(legacy_engines.LINGARR_PLUGIN_ID, settings={legacy_engines.SAVED_FLAG: True})
+    env.pointers.engine = instance.id
+    assert gate.evaluate(env.store, env.holds, UnboundWorkers()).available is True
+
+
 # ------------------------------------------------------------------------------------------------- the switch
 
 
@@ -140,7 +178,7 @@ def test_with_the_runtime_on_translation_available_is_the_gates_answer(env, monk
     from subtitles.tools.translate import availability
 
     monkeypatch.setattr(availability, "runtime_active", lambda: True)
-    monkeypatch.setattr(gate, "evaluate", lambda store=None, holds=None: gate.GateResult(False, "closed here", "x"))
+    monkeypatch.setattr(gate, "evaluate", lambda store=None, holds=None, workers=None: gate.GateResult(False, "closed here", "x"))
     answer = availability.translation_available()
     assert tuple(answer) == (False, "closed here")
     # A named type is one of the old engines, which the runtime does not have: the selected engine answers.

@@ -261,29 +261,49 @@ class UsageLedger:
         the job's budget is first held to the caps that apply now, and ``over_budget`` is also true when the
         job's cost is over the job cap in force.
         """
-        _micros(actual_micros, "actual_micros")
-        if input_tokens < 0 or output_tokens < 0:
-            raise UsageError("Usage cannot be negative")
+        return self.settle_calls(job_id, [(call_id, input_tokens, output_tokens, actual_micros, model)],
+                                 limits=limits)
+
+    def settle_calls(self, job_id: str, settlements, *, limits: CostLimits | None = None) -> Settlement:
+        """Settle several reservations of one call as one step, against the job's final total.
+
+        ``settlements`` is a sequence of ``(call_id, input_tokens, output_tokens, actual_micros, model)``. Every
+        reservation is settled in one transaction and ``over_budget`` is judged once, after the last of them: a
+        call that reserved two holds and reports one reading settles one hold at that reading and the other at
+        nothing, and no sum taken half way (the reading against the second hold still counted at its worst
+        case) ever counts. A reservation that is not the job's refuses the whole step.
+        """
+        items = list(settlements)
+        for _call_id, input_tokens, output_tokens, actual_micros, _model in items:
+            _micros(actual_micros, "actual_micros")
+            if input_tokens < 0 or output_tokens < 0:
+                raise UsageError("Usage cannot be negative")
         with ledger_transaction(self._session):
             now = self._clock()
-            row = self._call_row(job_id, call_id)
-            if row is None:
-                raise UsageError(f"No reservation for call {call_id} of job {job_id}")
-            if row.state == CALL_SETTLED:
+            rows = []
+            for call_id, *_rest in items:
+                row = self._call_row(job_id, call_id)
+                if row is None:
+                    raise UsageError(f"No reservation for call {call_id} of job {job_id}")
+                rows.append(row)
+            if all(row.state == CALL_SETTLED for row in rows):
                 return Settlement(self._job_counted(job_id), self._over_budget(job_id), already_settled=True)
-            counted_before = self._job_counted(job_id)
-            row.actual_micros = actual_micros
-            row.input_tokens = input_tokens
-            row.output_tokens = output_tokens
-            if model:
-                row.model = model
-            row.state = CALL_SETTLED
-            row.settled_at = now
-            # Every read below reloads rows and sums from the database, and the session does not flush on
-            # its own: write the settlement first, and each adjustment before the next read.
-            self._session.flush()
-            self._keep_the_refund_in_the_calls_month(job_id, row.month, counted_before)
-            self._session.flush()
+            for row, (_call_id, input_tokens, output_tokens, actual_micros, model) in zip(rows, items):
+                if row.state == CALL_SETTLED:
+                    continue
+                counted_before = self._job_counted(job_id)
+                row.actual_micros = actual_micros
+                row.input_tokens = input_tokens
+                row.output_tokens = output_tokens
+                if model:
+                    row.model = model
+                row.state = CALL_SETTLED
+                row.settled_at = now
+                # Every read below reloads rows and sums from the database, and the session does not flush on
+                # its own: write the settlement first, and each adjustment before the next read.
+                self._session.flush()
+                self._keep_the_refund_in_the_calls_month(job_id, row.month, counted_before)
+                self._session.flush()
             if limits is not None:
                 budget = self._budget_row(job_id)
                 if budget is not None and budget.state == BUDGET_ACTIVE:

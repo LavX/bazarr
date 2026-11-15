@@ -8,7 +8,15 @@ business: it passes a ``definition_for`` that turns a plugin id into a ``WorkerD
 definition's ``host_calls`` should be ``host_calls.host_calls()`` so the worker can reserve, report usage and
 checkpoint.
 
-Until a binding exists the module answers with ``UnboundWorkers``: every request is refused as unavailable.
+Until a binding exists the module answers with ``UnboundWorkers``: every request is refused as unavailable, and
+the gate (``gate.engine_state``) reports an engine that needs a worker as not available, with that reason, so no
+job is made only to fail. The binding is one call, made once when the translator worker is set up::
+
+    from subtitles.tools.translate.runtime import workers
+    workers.bind(workers.PoolWorkers(pool, definition_for))
+
+``definition_for(plugin_id)`` returns the ``WorkerDefinition`` of that plugin's worker (its spawn or command, folders and
+limits) with ``host_calls=host_calls.host_calls()``, or None when the plugin has no worker. ``workers.unbind()`` undoes it.
 """
 from __future__ import annotations
 
@@ -106,6 +114,11 @@ def bind(port: WorkerPort) -> None:
 
 def unbind() -> None:
     bind(UnboundWorkers())
+
+
+def is_bound(port: WorkerPort | None = None) -> bool:
+    """Whether a real worker port is bound (the given one, or the default)."""
+    return not isinstance(port if port is not None else bound_port(), UnboundWorkers)
 
 
 def bound_port() -> WorkerPort:

@@ -8,6 +8,8 @@ search. With the runtime on, the answer is about the selected engine and nothing
 * the engine is not configured: its plugin is missing or off, it is off itself, it waits for its keys to be
   entered again, none of its back ends can be used, or (Lingarr) it has no address;
 * a migrated engine is still waiting to be installed (``GateHolds.hold_for_install``);
+* the engine runs in a worker and none is bound yet (``workers.bind``), which is the case until the translator
+  worker is set up;
 * the engine is paused behind the old sidecar's drain (``GateHolds.pause_for_drain``). Only a paused selected
   engine closes the gate: a paused engine that is merely the fallback is skipped for the jobs routed to it.
 
@@ -31,12 +33,15 @@ AWAITING_INSTALL = "awaiting_install"
 SIDECAR_DRAIN = "sidecar_drain"
 NOT_CONFIGURED = "not_configured"
 UNREADABLE = "unreadable"
+WORKERS_UNBOUND = "workers_unbound"
 
 REASONS = {
     NO_ENGINE: "No translator is configured",
     ENGINE_MISSING: "The selected translator no longer exists",
     AWAITING_INSTALL: "The selected translator is waiting to be installed",
     SIDECAR_DRAIN: "The selected translator is paused until the old translator service has stopped",
+    WORKERS_UNBOUND: ("The selected translator is not available yet: the worker that runs translator plugins "
+                      "is not set up in this build"),
 }
 
 
@@ -104,19 +109,29 @@ def why_not_configured(store, instance) -> str:
     return "None of the selected translator's back ends can be used right now"
 
 
-def engine_state(store, instance, holds: GateHolds | None = None) -> GateResult:
-    """Whether one engine instance can take a job right now, and why not."""
+def engine_state(store, instance, holds: GateHolds | None = None, workers=None) -> GateResult:
+    """Whether one engine instance can take a job right now, and why not.
+
+    ``workers`` is the worker port the dispatcher will use; the default is the bound one. An engine that runs
+    in a worker is not available while none is bound, so no job is made that could only fail. An engine
+    served by code in Bazarr+ (Lingarr) needs no worker.
+    """
+    from . import legacy_engines
+    from . import workers as workers_module
+
     holds = holds or HOLDS
     if holds.awaiting_install(instance.id):
         return GateResult(False, REASONS[AWAITING_INSTALL], AWAITING_INSTALL, instance.id)
     if holds.paused(instance.id):
         return GateResult(False, REASONS[SIDECAR_DRAIN], SIDECAR_DRAIN, instance.id)
+    if legacy_engines.legacy_engine_for(instance.plugin_id) is None and not workers_module.is_bound(workers):
+        return GateResult(False, REASONS[WORKERS_UNBOUND], WORKERS_UNBOUND, instance.id)
     if not store.instance_configured(instance):
         return GateResult(False, why_not_configured(store, instance), NOT_CONFIGURED, instance.id)
     return GateResult(True, "", "", instance.id)
 
 
-def evaluate(store=None, holds: GateHolds | None = None) -> GateResult:
+def evaluate(store=None, holds: GateHolds | None = None, workers=None) -> GateResult:
     """The gate for the selected engine. Never raises."""
     try:
         if store is None:
@@ -131,15 +146,15 @@ def evaluate(store=None, holds: GateHolds | None = None) -> GateResult:
         instance = store.get_instance(engine_id, fresh=True)
         if instance is None:
             return GateResult(False, REASONS[ENGINE_MISSING], ENGINE_MISSING, engine_id)
-        return engine_state(store, instance, holds)
+        return engine_state(store, instance, holds, workers)
     except Exception as error:
         logger.error("BAZARR cannot read the translator configuration, so nothing can be translated: %s", error)
         return GateResult(False, f"The translator configuration cannot be read: {error}", UNREADABLE)
 
 
-def translation_gate(store=None, holds: GateHolds | None = None):
+def translation_gate(store=None, holds: GateHolds | None = None, workers=None):
     """The gate as the old ``translation_available`` answers it: ``(available, reason)``."""
     from ..availability import TranslationAvailability
 
-    result = evaluate(store, holds)
+    result = evaluate(store, holds, workers)
     return TranslationAvailability(result.available, result.reason)

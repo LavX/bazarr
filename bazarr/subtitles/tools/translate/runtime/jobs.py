@@ -596,6 +596,10 @@ class DeadlineWatch:
             self._cancel_at = self._clock()
             self._cancel_reason = reason
 
+    def deadline_passed(self) -> bool:
+        """The overall deadline is behind us, whether or not ``check`` has said so yet."""
+        return self._clock() - self._started >= self._overall
+
     @property
     def cancelling(self) -> bool:
         return self._cancel_at is not None
