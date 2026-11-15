@@ -108,12 +108,15 @@ def write_file(path: PathLike, data: Union[bytes, str], *, encoding: str = "utf-
 
 
 def touch(path: PathLike) -> Path:
-    """Create an empty file if ``path`` does not exist. An existing file is left as it is.
+    """Create an empty file if ``path`` does not exist. Whatever exists there is left as it is.
 
-    Unlike ``Path.touch`` it does not update the modification time.
+    Unlike ``Path.touch`` it does not update the modification time, and it never
+    opens an existing file for writing: the file is created exclusively.
     """
     target = Path(path)
-    with open(target, "ab"):
+    try:
+        os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o666))
+    except FileExistsError:
         pass
     return target
 
@@ -201,8 +204,9 @@ def copy_link(src: PathLike, dst: PathLike) -> Path:
 def move(src: PathLike, dst: PathLike) -> Path:
     """Move the file or directory ``src`` to the path ``dst``. Returns ``dst``.
 
-    A rename is tried first. When the two paths are on different filesystems,
-    or the sandbox refuses a rename across directories, the data is copied with
+    A rename is tried first. When the two paths are on different filesystems
+    (``EXDEV``), or the sandbox refuses a rename across directories (``EXDEV`` or
+    ``EPERM``), the data is copied with
     :func:`copy_file`, :func:`copy_tree` or :func:`copy_link` and the source
     removed. A symbolic link moves as a link.
     """
@@ -212,7 +216,7 @@ def move(src: PathLike, dst: PathLike) -> Path:
         os.replace(source, target)
         return target
     except OSError as error:
-        if error.errno != errno.EXDEV:
+        if error.errno not in (errno.EXDEV, errno.EPERM):
             raise
     if source.is_symlink():
         # Like ``shutil.move``: the link moves, not what it points at. A dangling one works too.

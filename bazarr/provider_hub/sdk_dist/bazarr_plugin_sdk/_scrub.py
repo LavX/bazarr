@@ -59,7 +59,11 @@ class SecretFilter(logging.Filter):
         secrets = held_secrets(self.channel)
         if not secrets:
             return True
-        record.msg = scrub(record.getMessage(), secrets)
+        try:
+            text = record.getMessage()
+        except Exception:  # a format string that does not fit its arguments
+            text = str(record.msg)
+        record.msg = scrub(text, secrets)
         record.args = None
         if record.exc_info:
             record.exc_text = scrub("".join(traceback.format_exception(*record.exc_info)), secrets)

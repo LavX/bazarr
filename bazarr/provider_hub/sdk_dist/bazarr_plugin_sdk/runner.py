@@ -20,8 +20,14 @@ a handler that maps each request to a method of the plugin:
 The channel keeps the original stdin and stdout for frames and points fd 1 at
 stderr and fd 0 at the null device before any plugin code runs.
 
+A call that is cancelled and still running when the grace period ends is answered
+as cancelled and left behind on its thread. The worker then refuses new calls and
+exits, so the host starts a fresh one: a new call must never run beside code that
+was told to stop and did not.
+
 Exit codes: 0 normal, 3 the host broke the protocol or refused the worker, 64
-bad command line or entry, 66 the plugin would not start.
+bad command line or entry, 66 the plugin would not start, 70 a cancelled call would
+not stop and the worker ended after answering it.
 """
 
 from __future__ import annotations
@@ -55,6 +61,7 @@ EXIT_OK = 0
 EXIT_PROTOCOL = 3
 EXIT_USAGE = 64
 EXIT_START = 66
+EXIT_ABANDONED = 70
 
 # A result whose JSON is longer than this travels as data frames.
 INLINE_RESULT_BYTES = 512 * 1024
@@ -70,8 +77,22 @@ ENTRY_RE = re.compile(r"^(?P<module>[A-Za-z_][\w.]*):(?P<name>[A-Za-z_]\w*)$")
 log = logging.getLogger("bazarr_plugin_sdk.runner")
 
 
+class _Abandoned(OperationCancelled):
+    """A cancelled call that is still running after its grace period."""
+
+
 class SdkChannel(WorkerChannel):
     """The reference channel, with failed responses that keep a plugin error's parts."""
+
+    def retire(self, status: int) -> None:
+        """Stop taking calls and end once the answers in progress are written.
+
+        New requests get ``shutting_down``; the drain that follows cancels what runs,
+        says goodbye and closes, and the worker exits with ``status``.
+        """
+        self.exit_status = status
+        self._stopping.set()
+        self._ended.set()
 
     def _respond_error(self, req_id: int, error: BaseException) -> None:
         if isinstance(error, PluginError):
@@ -149,12 +170,18 @@ class PluginWorker:
         )
         func = getattr(self.plugin, method.name)
         kwargs = self._kwargs(method, func, params, operation.secrets, ctx)
-        if inspect.iscoroutinefunction(func):
-            value = _run_coroutine(operation, ctx, func(**kwargs), grace)
-        else:
-            value = call_bounded(operation, grace, func, kwargs)
-            if inspect.isawaitable(value):
-                value = _run_coroutine(operation, ctx, value, grace)
+        try:
+            if inspect.iscoroutinefunction(func):
+                value = _run_coroutine(operation, ctx, func(**kwargs), grace)
+            else:
+                value = call_bounded(operation, grace, func, kwargs)
+                if inspect.isawaitable(value):
+                    value = _run_coroutine(operation, ctx, value, grace)
+        except _Abandoned:
+            # The slot is freed once this returns, but the plugin's thread is still running.
+            # Nothing else may run beside it: end the worker after the answer is written.
+            self.channel.retire(EXIT_ABANDONED)
+            raise
         if operation.cancelled.is_set():
             raise OperationCancelled(operation.cancel_reason or "cancelled")
         return pack_result(value)
@@ -208,7 +235,7 @@ def _supervise(operation: Operation, grace: Grace, finished: threading.Event, on
 
 def _abandoned(operation: Operation) -> OperationCancelled:
     log.warning("the request did not stop within %.1f seconds of its cancel and was abandoned", SHUTDOWN_TIMEOUT)
-    return OperationCancelled(operation.cancel_reason or "cancelled")
+    return _Abandoned(operation.cancel_reason or "cancelled")
 
 
 def call_bounded(operation: Operation, grace: Grace, func: Callable[..., Any], kwargs: dict[str, Any]) -> Any:

@@ -104,6 +104,8 @@ class PluginContext:
         fraction = min(1.0, done / total) if total else None
         # Scrub the whole message, then cut it: a secret across the cut must not leave a prefix.
         text = scrub(str(message), channel_secrets(self._operation))[:500]
+        # A lone surrogate cannot be sent as UTF-8; it becomes a question mark instead of an error.
+        text = text.encode("utf-8", "replace").decode("utf-8")
         self._operation.progress(fraction=fraction, message=text or None, data={"done": done, "total": total})
 
     def heartbeat(self) -> None:

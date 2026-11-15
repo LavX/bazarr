@@ -2493,6 +2493,7 @@ class ChannelHarness:
 
 def test_the_channel_lock_can_be_taken_again_by_the_thread_that_holds_it():
     harness = ChannelHarness(lambda operation: {})
+    harness.start()
     try:
         assert harness.channel._lock.acquire(timeout=5)
         try:

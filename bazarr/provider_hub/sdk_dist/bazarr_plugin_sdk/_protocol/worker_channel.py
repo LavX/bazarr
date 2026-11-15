@@ -359,7 +359,9 @@ class WorkerChannel:
         self._writer = frames.FrameWriter(self._output, sender="worker")
         self._reader_thread = None
         self._heartbeat_thread = None
-        self._lock = threading.Lock()
+        # Re-entrant: a log filter or a finaliser that runs on a thread already holding it
+        # (the garbage collector can start one anywhere) must not wait for itself.
+        self._lock = threading.RLock()
         # Operations whose handler is running; these are what the in-flight cap counts.
         self._operations = {}
         # Operations whose handler returned and whose reply is being written.
