@@ -2401,6 +2401,30 @@ def _manifest_provider_id(manifest: dict[str, Any]) -> str:
     return manifest_provider_id(manifest)
 
 
+PLUGIN_KIND_NOT_INSTALLED_REASON = "This Bazarr+ does not install this kind of plugin."
+LOCAL_PACKAGE_KIND_REASON = (
+    "A local package can only be a subtitle provider. Only the official catalog can install this kind of plugin."
+)
+
+
+def _kind_for_manifest(manifest: Any):
+    """The registered kind that stages ``manifest``, or ManifestValidationError.
+
+    A schema 1 manifest, and anything that is not an object, belongs to the subtitle provider kind,
+    which gives the refusal it always has for a manifest it cannot read. A schema 2 manifest names
+    its kind and the contract it follows, and both must be defined by this Bazarr+.
+    """
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 2:
+        return get_kind(SUBTITLE_PROVIDER)
+    plugin = parse_plugin_manifest(manifest)
+    kind = kind_for_api(plugin.kind_api)
+    if kind is None:
+        raise ManifestValidationError(PLUGIN_KIND_NOT_INSTALLED_REASON)
+    if kind.name != plugin.kind:
+        raise ManifestValidationError(PLUGIN_KIND_MISMATCH_REASON)
+    return kind
+
+
 def _validation_built_in_provider_ids(manifest: dict[str, Any], trusted: bool) -> set[str]:
     return validation_built_in_provider_ids(
         _manifest_provider_id(manifest),
@@ -2946,16 +2970,17 @@ def _stage_validated(
             staged.append(env_path)
             staged_python_path = python_executable(env_path)
             step("Checking that the provider starts")
-            if deadline is None:
-                _smoke_validate_worker(validated, bundle_path, staged_python_path)
-            else:
+            smoke_timeout = None
+            if deadline is not None:
                 # The check shares the install's budget instead of adding its own.
                 left = deadline - time.monotonic()
                 if left <= 0:
                     raise ProviderHubInstallError(
                         f"install for {validated.provider_id} exceeded its time budget"
                     )
-                _smoke_validate_worker(validated, bundle_path, staged_python_path, timeout=min(10.0, left))
+                smoke_timeout = min(10.0, left)
+            get_kind(validated.kind).smoke_test(
+                validated, bundle_path, staged_python_path, timeout=smoke_timeout)
             step("Recording the installation")
         except ProviderHubStopped:
             _discard_stopped_install(staged, existing)
@@ -3084,13 +3109,8 @@ def stage_install(
     else:
         source_id, source_trusted = None, False
         catalog_list = CATALOG_LIST_PROVIDERS
-    validated = validate_manifest(
-        manifest,
-        built_in_provider_ids=_validation_built_in_provider_ids(
-            manifest,
-            source_trusted,
-        ),
-    )
+    # The entry's own kind validates it: a translator is not a subtitle provider.
+    validated = _kind_for_manifest(manifest).validate_manifest(manifest, source_trusted)
     refusal = (_install_refusal(state, source_id, validated.provider_id)
                or _host_refusal({"manifest": manifest}, current_host()))
     if refusal:
@@ -3244,6 +3264,10 @@ def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[st
     try:
         _safe_extract_zip(package, work_dir)
         manifest, bundle_root = _find_local_manifest(work_dir)
+        # A local package has no catalog behind it, and only the official catalog installs the other kinds.
+        if isinstance(manifest, dict) and manifest.get("schema_version") == 2 and (
+                manifest.get("kind") or SUBTITLE_PROVIDER) != SUBTITLE_PROVIDER:
+            raise ProviderHubInstallError(LOCAL_PACKAGE_KIND_REASON)
         # Untrusted (full built-in set, no replacements): a local package can
         # never shadow a built-in provider.
         validated = validate_manifest(
