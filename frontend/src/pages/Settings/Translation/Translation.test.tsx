@@ -246,6 +246,40 @@ describe("Settings > Translation", () => {
     expect(calls[1].body).toMatchObject({ expected_revision: 4 });
   });
 
+  it("can turn on a disabled engine whose plugin declares no settings", async () => {
+    const bare = engine({
+      enabled: false,
+      awaiting_secrets: true,
+      values: {},
+      secrets: {},
+      connections: [],
+      schema: {
+        settings_version: 1,
+        endpoints: [],
+        fields: [],
+        backend_types: {},
+      },
+    });
+    state = { ...state, instances: [second, bare] };
+    server.use(
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        record("patch", "engine", await request.json());
+        return HttpResponse.json({
+          engine: { ...bare, enabled: true, revision: 4 },
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    expect(
+      screen.queryByRole("button", { name: "Save engine settings" }),
+    ).toBeNull();
+    await user.click(screen.getByRole("switch", { name: "Use this engine" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({ enabled: true, expected_revision: 3 });
+  });
+
   it("says why an engine cannot be turned on yet", async () => {
     state = {
       ...state,

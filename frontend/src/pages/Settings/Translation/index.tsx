@@ -160,7 +160,7 @@ const SettingsTranslationView: FunctionComponent = () => {
                   The plugin for this engine is not installed or not running.
                 </Alert>
               )}
-              {(engine.schema?.fields.length ?? 0) > 0 && (
+              {engine.schema && (
                 <EngineSettings key={engine.id} engine={engine} />
               )}
               {Object.keys(engine.schema?.backend_types ?? {}).length > 0 && (

@@ -16,7 +16,8 @@ import { useGuardedSave } from "./useGuardedSave";
  * The engine's own settings, drawn from its manifest. Connections have their
  * own form. The draft keeps the revision it was loaded from, so a save made
  * after another tab's save is refused. The form keeps what was typed when that
- * happens, and a second save then overwrites on purpose.
+ * happens, and a second save then overwrites on purpose. An engine whose plugin
+ * declares no settings has the switch only.
  */
 const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
   engine,
@@ -81,41 +82,45 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
           {switchProblem}
         </Alert>
       )}
-      <PluginSettingsForm
-        fields={fields}
-        values={values}
-        secrets={engine.secrets}
-        errors={form.fieldErrors}
-        disabled={form.busy}
-        pendingClear={cleared}
-        onChange={setValues}
-        onClearSecret={(key) =>
-          setCleared((current) => [...new Set([...current, key])])
-        }
-      />
-      {engine.awaiting_secrets && (
-        <Alert color="yellow" title="Secrets needed">
-          An address changed, so the saved keys no longer apply. Enter them
-          again.
-        </Alert>
+      {fields.length > 0 && (
+        <>
+          <PluginSettingsForm
+            fields={fields}
+            values={values}
+            secrets={engine.secrets}
+            errors={form.fieldErrors}
+            disabled={form.busy}
+            pendingClear={cleared}
+            onChange={setValues}
+            onClearSecret={(key) =>
+              setCleared((current) => [...new Set([...current, key])])
+            }
+          />
+          {engine.awaiting_secrets && (
+            <Alert color="yellow" title="Secrets needed">
+              An address changed, so the saved keys no longer apply. Enter them
+              again.
+            </Alert>
+          )}
+          {form.message && (
+            <Alert color="red" role="alert">
+              {form.message}
+              {form.stale && " Your changes are kept. Save again to overwrite."}
+            </Alert>
+          )}
+          <Group>
+            <Button loading={form.busy} onClick={() => void form.save()}>
+              Save engine settings
+            </Button>
+          </Group>
+          <ConsentModal
+            destinations={form.asking}
+            busy={form.busy}
+            onAccept={() => void form.accept()}
+            onCancel={form.decline}
+          />
+        </>
       )}
-      {form.message && (
-        <Alert color="red" role="alert">
-          {form.message}
-          {form.stale && " Your changes are kept. Save again to overwrite."}
-        </Alert>
-      )}
-      <Group>
-        <Button loading={form.busy} onClick={() => void form.save()}>
-          Save engine settings
-        </Button>
-      </Group>
-      <ConsentModal
-        destinations={form.asking}
-        busy={form.busy}
-        onAccept={() => void form.accept()}
-        onCancel={form.decline}
-      />
     </Stack>
   );
 };
