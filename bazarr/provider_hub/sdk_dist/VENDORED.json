@@ -23,7 +23,7 @@
     "translator/v1.py": "edf65cd90819f5886cd9479ca4e69e2392425b3a7b453866018b657ab6fa8292"
   },
   "package": "bazarr_plugin_sdk",
-  "source_commit": "ab0f0551d819c0035875e83fdfde26d17dba4c6c",
+  "source_commit": "ac1b974a949a040cabb350df8d491ecf4b2a0ea8",
   "tag": null,
   "version": "0.1.0"
 }
