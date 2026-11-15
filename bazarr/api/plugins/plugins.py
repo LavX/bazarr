@@ -189,12 +189,16 @@ class PluginsInstallation(Resource):
 
     @authenticate
     @api_ns_plugins.response(202, 'Uninstall queued as a job')
+    @api_ns_plugins.response(400, 'Another plugin depends on it')
     @api_ns_plugins.response(401, 'Not Authenticated')
     @api_ns_plugins.response(404, 'Plugin not found')
     def delete(self, plugin_id):
         installation = _installation(plugin_id)
         if not installation:
             return 'Plugin not found', 404
+        refusal = service.dependent_refusal(plugin_id, "removed")
+        if refusal:
+            return refusal, 400
         return {"job_id": hub_jobs.queue_uninstall(plugin_id, installation.get("name"))}, 202
 
 

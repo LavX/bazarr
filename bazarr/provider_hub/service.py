@@ -29,7 +29,7 @@ from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
-from . import catalog_feed, floor
+from . import catalog_feed, closure, floor
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -956,7 +956,8 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
             entry = {**entry, "source_name": source.get("name") or entry.get("source")}
             refusal = (_install_refusal(state, entry.get("source"), entry.get("provider_id"),
                                         catalog_kind_of(entry))
-                       or _host_refusal(entry, host))
+                       or _host_refusal(entry, host)
+                       or _closure_refusal(state, entry, host))
             if refusal:
                 entry["blocked_reason"] = refusal
         entries.append(entry)
@@ -1839,6 +1840,10 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
     if config is not None:
         if not isinstance(config, dict):
             raise ValueError("config must be an object")
+    if enabled is False:
+        refusal = dependent_refusal(provider_id, "switched off", enabled_only=True)
+        if refusal:
+            raise ValueError(refusal)
 
     def _encrypt_provider_config(provider: dict[str, Any],
                                   config: dict[str, Any]) -> dict[str, Any]:
@@ -2856,6 +2861,36 @@ def _host_refusal(entry: dict[str, Any], host: HostFacts) -> str | None:
     return None if compatible else reason
 
 
+def _entry_usable(state: dict[str, Any], host: HostFacts):
+    """Whether a stored catalog entry may be installed here: its source may supply its kind, this host
+    can run it and its kind accepts its manifest. The rule a dependency is chosen by, as the plugin is."""
+
+    def usable(entry: dict[str, Any]) -> bool:
+        if _install_refusal(state, entry.get("source"), entry.get("provider_id"), catalog_kind_of(entry)):
+            return False
+        if _host_refusal(entry, host) is not None:
+            return False
+        try:
+            get_kind(catalog_kind_of(entry)).validate_manifest(entry["manifest"], bool(entry.get("trusted", False)))
+        except Exception:
+            return False
+        return True
+
+    return usable
+
+
+def _closure_of(state: dict[str, Any], entry: dict[str, Any], host: HostFacts | None = None):
+    host = host or current_host()
+    return closure.resolve_closure(state, entry, _entry_usable(state, host))
+
+
+def _closure_refusal(state: dict[str, Any], entry: dict[str, Any], host: HostFacts | None = None) -> str | None:
+    """Why the dependencies of ``entry`` do not resolve here, or None when they do or it has none."""
+    if not closure.has_needs(entry.get("manifest")):
+        return None
+    return _closure_of(state, entry, host).refusal
+
+
 def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     """A serialized installation with its origin and the source Bazarr+ bound it to.
 
@@ -3335,7 +3370,8 @@ def _requested_entry(
         )
     key, entry = found
     refusal = (_install_refusal(state, source_id, provider_id, catalog_kind_of(entry))
-               or _host_refusal(entry, current_host()))
+               or _host_refusal(entry, current_host())
+               or _closure_refusal(state, entry))
     if refusal:
         raise ProviderHubInstallError(refusal)
     return key, entry
@@ -3373,7 +3409,17 @@ def install_catalog_entry(
     ``entry_key`` pins the stored entry a request resolved to, which matters when
     the source lists the same id and version in both catalog lists.
     """
-    _key, entry = _requested_entry(load_state(), source_id, provider_id, version, entry_key=entry_key)
+    state = load_state()
+    _key, entry = _requested_entry(state, source_id, provider_id, version, entry_key=entry_key)
+    # The plugins it extends or needs are installed first, from the same source, by the same rules.
+    if closure.has_needs(entry.get("manifest")):
+        for member in _closure_of(state, entry).members:
+            if member.reason == "root":
+                continue
+            stage_install(
+                member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
+                catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+            )
     # An entry stored before the plugins list existed carries no list and came from providers.
     return stage_install(
         entry["manifest"], checkpoint=checkpoint, source_id=source_id,
@@ -3704,11 +3750,20 @@ def cleanup_plugin_environments() -> list[str]:
     return env_registry.cleanup_environments(provider_hub_dir())
 
 
+def dependent_refusal(provider_id: str, action: str, *, enabled_only: bool = False) -> str | None:
+    """Why ``provider_id`` cannot be removed or switched off while others depend on it, or None."""
+    names = closure.dependents(load_state(), provider_id, enabled_only=enabled_only)
+    return closure.dependents_text(provider_id, names, action) if names else None
+
+
 def remove_installation(provider_id: str) -> bool:
     state = load_state()
     installations = state.setdefault("installations", {})
     if provider_id not in installations:
         return False
+    refusal = dependent_refusal(provider_id, "removed")
+    if refusal:
+        raise ProviderHubInstallError(refusal)
     item = installations[provider_id]
     target_name = (
         item.get("name") if isinstance(item, dict) else None
@@ -3869,7 +3924,8 @@ def _latest_catalog_manifest(
             get_kind(catalog_kind_of(entry)).validate_manifest(manifest, bool(entry.get("trusted", False)))
         except ValueError:
             return False
-        return entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is None
+        return (entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is None
+                and _closure_refusal(state, entry, host) is None)
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
@@ -3892,13 +3948,13 @@ def _refused_update_reason(
         return (
             entry.get("origin") != ORIGIN_BUNDLED
             and _offerable_as_update(entry, installed_kind)
-            and _host_refusal(entry, host) is not None
+            and (_host_refusal(entry, host) is not None or _closure_refusal(state, entry, host) is not None)
         )
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
         usable=refused, source_id=source_id, above_version=active_version, catalog_list=catalog_list)
-    return _host_refusal(entry, host) if entry else None
+    return (_host_refusal(entry, host) or _closure_refusal(state, entry, host)) if entry else None
 
 
 def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
