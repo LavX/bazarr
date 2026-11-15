@@ -897,13 +897,29 @@ class SubtitleScoreOverride(Resource):
         if score is None or not 0 <= score <= 100:
             return "The score must be a percentage from 0 to 100.", 400
         media, item_id = ("movie", movie_id) if movie_id is not None else ("episode", episode_id)
-        # The tables show the path through the path mappings, but the stored
-        # listing and the history rows keep the arr's own path.
-        subtitles_path = path_mappings.path_replace_reverse_instance(subtitles_path, arr_instance_id, media)
-        try:
-            set_score_override(database, media, item_id, subtitles_path, score,
-                               arr_instance_id=arr_instance_id)
-        except (LookupError, ValueError) as error:
+        # The tables show a path through the global path mappings, while the
+        # stored listing and the history rows keep the arr's own path. Take the
+        # path as sent first, then its reverse through the same global mapping
+        # the tables forward with, then the instance's own mapping, and use the
+        # first one the item lists.
+        reverse_global = (path_mappings.path_replace_reverse_movie if media == "movie"
+                          else path_mappings.path_replace_reverse)
+        candidates = []
+        for candidate in (subtitles_path, reverse_global(subtitles_path),
+                          path_mappings.path_replace_reverse_instance(subtitles_path, arr_instance_id, media)):
+            if candidate not in candidates:
+                candidates.append(candidate)
+        error = None
+        for candidate in candidates:
+            try:
+                set_score_override(database, media, item_id, candidate, score,
+                                   arr_instance_id=arr_instance_id)
+                break
+            except LookupError as lookup_error:
+                return str(lookup_error), 404
+            except ValueError as value_error:
+                error = value_error
+        else:
             return str(error), 404
         return '', 204
 

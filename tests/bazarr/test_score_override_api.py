@@ -441,3 +441,114 @@ def test_score_override_reverse_maps_the_path_the_tables_show_for_an_episode(sco
     assert session.execute(
         select(TableHistory.subtitles_path).where(TableHistory.action == MANUAL_SCORE_ACTION)
     ).all() == [("/series/show/s01e01.en.srt",)]
+
+
+def _table_path(monkeypatch, media, stored):
+    """The path the detail tables show for a stored subtitle path: the output of
+    the real serializer, which maps it through the global path mappings."""
+    from api import utils
+
+    monkeypatch.setattr(utils, "language_from_alpha2", lambda value: "English")
+    monkeypatch.setattr(utils, "alpha3_from_alpha2", lambda value: "eng")
+    item = {"subtitles": str([["en", stored, 100]])}
+    if media == "movie":
+        item["radarrId"] = 7
+    else:
+        item["sonarrEpisodeId"] = 20
+    return utils.postprocess(item)["subtitles"][0]["path"]
+
+
+def _stub_instance_mapping(monkeypatch, mapping):
+    import utilities.path_mappings as module
+
+    monkeypatch.setattr(module, "_instance_path_mapping", lambda arr_instance_id, media_type: mapping)
+
+
+@pytest.mark.parametrize("instance_mapping", [None, [["/movies", "/mnt/instance"]]])
+def test_score_override_accepts_the_path_the_movie_table_shows(score_api, monkeypatch, instance_mapping):
+    """The table maps with the global mapping. The instance mapping, when there
+    is one, is a different mapping and must not stop the inverse of the global
+    one from matching."""
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(path_mappings, "path_mapping_movies", [["/movies", "/data/movies"]])
+    _stub_instance_mapping(monkeypatch, instance_mapping)
+    client, session = score_api
+    _add_movie(session)
+    shown = _table_path(monkeypatch, "movie", "/movies/a.en.srt")
+    assert shown == "/data/movies/a.en.srt"
+
+    response = client.post(
+        ROOT,
+        json={"radarrMovieId": 7, "arr_instance_id": 1, "subtitlesPath": shown, "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 204
+    assert session.execute(
+        select(TableHistoryMovie.subtitles_path).where(TableHistoryMovie.action == MANUAL_SCORE_ACTION)
+    ).all() == [("/movies/a.en.srt",)]
+
+
+@pytest.mark.parametrize("instance_mapping", [None, [["/series", "/mnt/instance"]]])
+def test_score_override_accepts_the_path_the_episode_table_shows(score_api, monkeypatch, instance_mapping):
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(path_mappings, "path_mapping_series", [["/series", "/data/series"]])
+    _stub_instance_mapping(monkeypatch, instance_mapping)
+    client, session = score_api
+    _add_episode(session)
+    shown = _table_path(monkeypatch, "episode", "/series/show/s01e01.en.srt")
+    assert shown == "/data/series/show/s01e01.en.srt"
+
+    response = client.post(
+        ROOT,
+        json={"sonarrEpisodeId": 20, "arr_instance_id": 1, "subtitlesPath": shown, "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 204
+    assert session.execute(
+        select(TableHistory.subtitles_path).where(TableHistory.action == MANUAL_SCORE_ACTION)
+    ).all() == [("/series/show/s01e01.en.srt",)]
+
+
+def test_score_override_still_accepts_the_stored_path_and_the_instance_mapped_path(score_api, monkeypatch):
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(path_mappings, "path_mapping_movies", [["/movies", "/data/movies"]])
+    _stub_instance_mapping(monkeypatch, [["/movies", "/mnt/instance"]])
+    client, session = score_api
+    _add_movie(session)
+
+    for sent in ("/movies/a.en.srt", "/mnt/instance/a.en.srt"):
+        response = client.post(
+            ROOT,
+            json={"radarrMovieId": 7, "arr_instance_id": 1, "subtitlesPath": sent, "score": 40},
+            headers=HEADERS,
+        )
+        assert response.status_code == 204
+
+    assert session.execute(
+        select(TableHistoryMovie.subtitles_path).where(TableHistoryMovie.action == MANUAL_SCORE_ACTION)
+    ).all() == [("/movies/a.en.srt",), ("/movies/a.en.srt",)]
+
+
+def test_score_override_refuses_a_path_no_mapping_lists(score_api, monkeypatch):
+    from utilities.path_mappings import path_mappings
+
+    monkeypatch.setattr(path_mappings, "path_mapping_movies", [["/movies", "/data/movies"]])
+    _stub_instance_mapping(monkeypatch, None)
+    client, session = score_api
+    _add_movie(session)
+
+    response = client.post(
+        ROOT,
+        json={"radarrMovieId": 7, "arr_instance_id": 1, "subtitlesPath": "/elsewhere/a.en.srt", "score": 40},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 404
+    assert session.execute(
+        select(TableHistoryMovie).where(TableHistoryMovie.action == MANUAL_SCORE_ACTION)
+    ).all() == []
