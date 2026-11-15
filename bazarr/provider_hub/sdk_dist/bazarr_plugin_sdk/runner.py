@@ -11,8 +11,8 @@ a handler that maps each request to a method of the plugin:
   thread, and a cancel both cancels its task and sets ``ctx.cancelled``; a
   plain method runs on that thread directly and reads ``ctx.is_cancelled``;
 * the result is a JSON object. A result that is not an object travels as
-  ``{"value": ...}``. One larger than :data:`INLINE_RESULT_BYTES` travels as
-  data frames, with ``{"json_in_data": true}`` as its inline part and the
+  ``{WRAPPED: ...}``. One larger than :data:`INLINE_RESULT_BYTES` travels as
+  data frames, with ``{IN_DATA: true}`` as its inline part and the
   UTF-8 JSON of the real result as the data;
 * a :class:`~bazarr_plugin_sdk.errors.PluginError` becomes a failed response
   that carries its code, retry time, field errors and reason.
@@ -47,7 +47,8 @@ from ._protocol.worker_channel import ChannelClosed, Operation, OperationCancell
 from .context import PluginContext
 from .errors import INTERNAL, PluginError
 from ._grace import Grace
-from ._scrub import held_secrets, scrub
+from ._result import IN_DATA, RESERVED, WRAPPED
+from ._scrub import SecretFilter, channel_secrets, held_secrets, scrub, scrubbed_traceback
 from .kinds import KindSpec, MethodSpec, get_kind
 
 EXIT_OK = 0
@@ -173,17 +174,21 @@ class PluginWorker:
 
 def pack_result(value: Any) -> dict[str, Any] | OperationResult:
     """The response for a method's return value."""
-    payload = value if isinstance(value, dict) else {"value": value}
+    if isinstance(value, dict) and RESERVED & value.keys():
+        raise PluginError(
+            INTERNAL, f"a result may not use the reserved keys {sorted(RESERVED)}", reason="reserved_key"
+        )
+    payload = value if isinstance(value, dict) else {WRAPPED: value}
     try:
         encoded = frames.encode_control(payload)
         if len(encoded) <= INLINE_RESULT_BYTES:
             return payload
         # The data is the JSON of the real result, a list or a scalar as it is: the
-        # ``{"value": ...}`` wrapper is only for a result that travels inline.
+        # wrapper is only for a result that travels inline.
         data = encoded if isinstance(value, dict) else frames.encode_control(value)
     except (TypeError, ValueError) as error:
         raise PluginError(INTERNAL, f"the result is not JSON: {error}", reason="result_not_json") from None
-    return OperationResult({"json_in_data": True}, data)
+    return OperationResult({IN_DATA: True}, data)
 
 
 def _supervise(operation: Operation, grace: Grace, finished: threading.Event, on_cancel: Callable[[], None]) -> bool:
@@ -240,6 +245,8 @@ def _run_coroutine(operation: Operation, ctx: PluginContext | None, awaitable: A
     """
     grace = grace or Grace(SHUTDOWN_TIMEOUT)
     loop = asyncio.new_event_loop()
+    # The default handler logs an exception's text as it is, and that text may hold a secret.
+    loop.set_exception_handler(_scrubbing_exception_handler(operation))
 
     async def wrap() -> Any:
         return await awaitable
@@ -257,7 +264,7 @@ def _run_coroutine(operation: Operation, ctx: PluginContext | None, awaitable: A
                 box["error"] = error
             finished.set()
             grace.start()
-            _clean_up(loop, grace)
+            _clean_up(loop, grace, operation)
         finally:
             finished.set()
             cleaned.set()
@@ -286,7 +293,23 @@ def _run_coroutine(operation: Operation, ctx: PluginContext | None, awaitable: A
     return box["value"]
 
 
-def _clean_up(loop: asyncio.AbstractEventLoop, grace: Grace) -> None:
+def _scrubbing_exception_handler(operation: Any) -> Callable[[asyncio.AbstractEventLoop, dict[str, Any]], None]:
+    """A loop exception handler that logs like the default one, with the channel's secrets removed."""
+
+    def handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        secrets = channel_secrets(operation)
+        lines = [str(context.get("message") or "unhandled exception in the event loop")]
+        error = context.get("exception")
+        for key in sorted(key for key in context if key not in ("message", "exception")):
+            lines.append(f"{key}: {context[key]!r}")
+        if isinstance(error, BaseException):
+            lines.append(scrubbed_traceback(error, []))
+        log.error("%s", scrub("\n".join(lines), secrets))
+
+    return handler
+
+
+def _clean_up(loop: asyncio.AbstractEventLoop, grace: Grace, operation: Any = None) -> None:
     """Every step after the request, each within what is left of the shared budget.
 
     The loop is closed only when every step finished; after an overrun something may
@@ -297,14 +320,14 @@ def _clean_up(loop: asyncio.AbstractEventLoop, grace: Grace) -> None:
     for step in steps:
         try:
             clean = step(loop, grace) and clean
-        except Exception:
-            log.warning("a cleanup step failed", exc_info=True)
+        except Exception as error:
+            log.warning("a cleanup step failed: %s", scrubbed_traceback(error, channel_secrets(operation)))
             clean = False
     if clean:
         try:
             loop.close()
-        except Exception:
-            log.warning("closing the event loop failed", exc_info=True)
+        except Exception as error:
+            log.warning("closing the event loop failed: %s", scrubbed_traceback(error, channel_secrets(operation)))
 
 
 def _cancel_remaining_tasks(loop: asyncio.AbstractEventLoop, grace: Grace) -> bool:
@@ -349,8 +372,8 @@ def _shutdown_executor(loop: asyncio.AbstractEventLoop, grace: Grace) -> bool:
     def run() -> None:
         try:
             loop.run_until_complete(loop.shutdown_default_executor())
-        except BaseException:  # nothing to report: the request is over
-            log.debug("the executor shutdown failed", exc_info=True)
+        except BaseException as error:  # nothing to report: the request is over
+            log.debug("the executor shutdown failed: %s", type(error).__name__)
 
     helper = threading.Thread(target=run, name="bazarr-plugin-executor-shutdown", daemon=True)
     helper.start()
@@ -417,7 +440,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Take the frame pipe before any plugin code is imported: from here on a print()
     # in a module body or a constructor goes to stderr.
     stdin, stdout = SdkChannel._take_stdio(True)
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # Every record, whoever logs it, loses the host's secret values once the channel holds them.
+    secret_filter = SecretFilter()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.addFilter(secret_filter)
+    logging.basicConfig(handlers=[handler], level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     try:
         plugin, spec = load_plugin(args.entry, paths)
     except PluginError as error:
@@ -426,7 +453,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         traceback.print_exc()
         return EXIT_START
-    return PluginWorker(plugin, spec, stdin=stdin, stdout=stdout, redirect_stdout=False).run()
+    worker = PluginWorker(plugin, spec, stdin=stdin, stdout=stdout, redirect_stdout=False)
+    secret_filter.channel = worker.channel
+    return worker.run()
 
 
 def run_process(argv: Sequence[str] | None = None) -> None:

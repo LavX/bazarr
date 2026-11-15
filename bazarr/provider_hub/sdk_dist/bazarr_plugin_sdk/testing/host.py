@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable, Mapping, Sequence
 
 from .._protocol import frames
+from .._result import IN_DATA, WRAPPED
 
 HostCallHandler = Callable[[Mapping[str, Any]], "Mapping[str, Any] | None"]
 
@@ -64,11 +65,14 @@ class Response:
 
     @property
     def value(self) -> Any:
-        """The method's return value: unwrapped from data frames and from ``{"value": ...}``."""
-        if self.result.get("json_in_data"):
+        """The method's return value, unwrapped only where the runner marked it (see ``_result``).
+
+        An ordinary result, even one with a ``value`` or ``json_in_data`` field, comes back as it is.
+        """
+        if self.result.get(IN_DATA) is True:
             return json.loads(self.data.decode("utf-8"))
-        if set(self.result) == {"value"}:
-            return self.result["value"]
+        if set(self.result) == {WRAPPED}:
+            return self.result[WRAPPED]
         return self.result
 
     def wait(self, timeout: float = 10.0) -> "Response":

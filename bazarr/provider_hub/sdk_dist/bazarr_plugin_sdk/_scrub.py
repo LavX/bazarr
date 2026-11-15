@@ -9,6 +9,9 @@ prefix behind.
 
 from __future__ import annotations
 
+import logging
+import traceback
+
 from typing import Any
 
 
@@ -33,3 +36,36 @@ def scrub(text: str, secrets: list[str]) -> str:
     for secret in secrets:
         text = text.replace(secret, "***")
     return text
+
+
+def scrubbed_traceback(error: BaseException, secrets: list[str]) -> str:
+    """The traceback text of ``error`` with the secrets taken out."""
+    return scrub("".join(traceback.format_exception(type(error), error, error.__traceback__)), secrets)
+
+
+class SecretFilter(logging.Filter):
+    """A log filter that takes the secrets of one channel out of every record it passes.
+
+    Install it on the handler, so records from every logger (the runner's, asyncio's, a
+    plugin's) are cleaned: the message and the exception text, after formatting and
+    before anything is cut or written.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.channel: Any = None
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        secrets = held_secrets(self.channel)
+        if not secrets:
+            return True
+        record.msg = scrub(record.getMessage(), secrets)
+        record.args = None
+        if record.exc_info:
+            record.exc_text = scrub("".join(traceback.format_exception(*record.exc_info)), secrets)
+            record.exc_info = None
+        elif record.exc_text:
+            record.exc_text = scrub(record.exc_text, secrets)
+        if record.stack_info:
+            record.stack_info = scrub(record.stack_info, secrets)
+        return True
