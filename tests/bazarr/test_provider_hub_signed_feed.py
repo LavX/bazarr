@@ -319,6 +319,102 @@ def test_a_catalog_inside_its_validity_does_not_block_anything(world):
     assert all(not entry.get("blocked_reason") for entry in list_catalog()["entries"])
 
 
+# --- a cached catalog that the host has since moved past ---------------------------------------------
+
+
+def _blocked():
+    from provider_hub.service import list_catalog
+
+    return {entry["provider_id"]: entry.get("blocked_reason") for entry in list_catalog()["entries"]}
+
+
+def test_a_restored_database_with_a_cache_older_than_the_counter_file_installs_nothing(world):
+    from provider_hub.catalog_feed import write_counter_file, ChannelRecord
+    from provider_hub.service import ProviderHubInstallError, resolve_catalog_install
+
+    _latch(world)
+    assert all(reason is None for reason in _blocked().values())
+    # The file a later refresh wrote holds a higher counter than the restored database's cached catalog.
+    write_counter_file({"main": ChannelRecord(150, 1)})
+
+    assert set(_blocked()) == {PROVIDER, SERVICE}
+    assert all("older than one it already accepted" in reason for reason in _blocked().values())
+    with pytest.raises(ProviderHubInstallError, match="Refresh the catalog"):
+        resolve_catalog_install("official", PROVIDER, "1.0.0")
+
+
+def test_a_restored_database_that_never_saw_the_latch_installs_nothing_until_a_verified_refresh(world):
+    from provider_hub.state import mutate_state
+
+    _latch(world)
+
+    def restore(state):
+        # An old backup: the cached catalog is the legacy one and the channel looks never latched.
+        state.pop("catalog_feeds")
+        source = state["catalog_sources"]["official"]
+        source.update(catalog_signature="unsigned (legacy)", signature_verified=False, catalog_expires_at=None)
+        source.pop("catalog_signed_version")
+
+    mutate_state(restore)
+
+    assert all("older than one it already accepted" in reason for reason in _blocked().values())
+    world.publish(commit=HEAD, version=100)
+    _move_head(world, "e" * 40)
+    world.publish(commit="e" * 40, version=101, plugins=[_plugin()], providers=[_provider()])
+    _refresh()
+    assert all(reason is None for reason in _blocked().values())
+
+
+def test_a_legacy_cache_on_a_channel_that_never_latched_installs_as_it_always_did(world):
+    world.legacy(providers=[_provider()])
+    _refresh()
+
+    assert _blocked() == {PROVIDER: None}
+
+
+def test_an_explicit_main_ref_still_reads_the_signed_channel(world):
+    from provider_hub.catalog_feed import feed_channel
+    from provider_hub.service import update_catalog_source
+
+    assert feed_channel("main") == "main" and feed_channel(None) == "main" and feed_channel("feature-x") is None
+    _latch(world)
+    update_catalog_source("official", dev_ref="main")
+    _move_head(world, "e" * 40)
+    world.legacy(commit="e" * 40, providers=[_provider("9.9.9")])
+
+    _refresh()
+
+    assert "only accepts a signed catalog" in _official()["last_error"]
+    assert {entry["version"] for entry in _entries().values()} == {"1.0.0"}
+
+
+def test_expiry_is_judged_on_the_channel_that_supplied_the_cached_entries(world):
+    from provider_hub.state import mutate_state
+
+    _publish_signed(world, version=100, expires=world.now + timedelta(days=89))
+    _refresh()
+    # The source now asks for beta, which never accepted anything, but the cached entries are main's.
+    mutate_state(lambda state: state["catalog_sources"]["official"].update(dev_ref="beta"))
+    world.now = world.now + timedelta(days=91)
+
+    reasons = _blocked()
+
+    assert reasons and all("signed main catalog expired" in reason for reason in reasons.values()), reasons
+
+
+def test_the_key_file_version_counts_across_both_channels(world):
+    from provider_hub.service import update_catalog_source
+
+    world.publish(version=100, key_file=world.key_file(version=2))
+    _refresh()
+    update_catalog_source("official", dev_ref="beta")
+    world.publish(channel="beta", version=5, key_file=world.key_file(version=1))
+
+    _refresh()
+
+    assert "key file is older" in _official()["last_error"]
+
+
 # --- one verification point for every origin ---------------------------------------------------
 
 

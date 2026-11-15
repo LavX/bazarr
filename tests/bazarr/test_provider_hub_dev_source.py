@@ -116,8 +116,15 @@ def test_the_official_source_cannot_be_named_as_the_development_source(hub, monk
     assert _stored() == {}
 
 
+def _digest():
+    from provider_hub.service import install_consent
+
+    return install_consent(SOURCE, PLUGIN, "1.0.0", catalog_list="plugins")["digest"]
+
+
 @pytest.fixture
 def staging(hub, monkeypatch):
+    monkeypatch.setattr("provider_hub.consent.sandbox_status", lambda: {})
     from provider_hub import service
 
     tmp_path = hub.tmp_path
@@ -142,7 +149,7 @@ def test_an_install_from_the_development_source_is_untrusted_and_badged(staging,
     monkeypatch.setenv("BAZARR_DEV_PLUGIN_SOURCE", SOURCE)
     _refresh()
 
-    row = install_catalog_entry(SOURCE, PLUGIN, "1.0.0")
+    row = install_catalog_entry(SOURCE, PLUGIN, "1.0.0", consent_digest=_digest())
 
     assert row["state"] == "staged" and row["trusted"] is False
     [listed] = list_installations()
@@ -156,7 +163,7 @@ def test_after_the_variable_is_unset_the_install_stays_and_gets_no_update(stagin
 
     monkeypatch.setenv("BAZARR_DEV_PLUGIN_SOURCE", SOURCE)
     _refresh()
-    install_catalog_entry(SOURCE, PLUGIN, "1.0.0")
+    install_catalog_entry(SOURCE, PLUGIN, "1.0.0", consent_digest=_digest())
     monkeypatch.delenv("BAZARR_DEV_PLUGIN_SOURCE")
 
     [listed] = list_installations()

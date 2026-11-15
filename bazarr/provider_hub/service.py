@@ -1277,11 +1277,13 @@ def _note_catalog_signature(
         source["signature_verified"] = False
         source["catalog_channel"] = catalog_feed.feed_channel(source.get("dev_ref"))
         source["catalog_expires_at"] = None
+        source.pop("catalog_signed_version", None)
         source.pop("catalog_signed_commit", None)
         return
     source["catalog_signature"] = catalog_feed.SIGNATURE_VERIFIED
     source["signature_verified"] = True
     source["catalog_channel"] = feed.channel
+    source["catalog_signed_version"] = feed.result.signed_version
     source["catalog_expires_at"] = catalog_feed._iso(feed.result.expires)
     source["catalog_signed_commit"] = feed.source_commit
     if feed.may_advance_state:
@@ -2846,6 +2848,13 @@ def _reserved_provider_ids(state: dict[str, Any]) -> set[str]:
     )
 
 
+def _supply_refusal(state: dict[str, Any]) -> str | None:
+    """Why nothing installs from the official source's cached catalog right now (expired, or older than a
+    counter or latch this host holds), or None. Running plugins are never touched."""
+    official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
+    return catalog_feed.supply_refusal(state, official) if isinstance(official, dict) else None
+
+
 def _source_may_carry_new_kinds(state: dict[str, Any], source_id: str | None) -> bool:
     """Whether ``source_id`` may supply plugins of a kind other than the subtitle provider.
 
@@ -2866,10 +2875,7 @@ def _install_refusal(
     if source_id != OFFICIAL_CATALOG_SOURCE_ID and str(provider_id) in _reserved_provider_ids(state):
         return RESERVED_ID_REASON
     if source_id == OFFICIAL_CATALOG_SOURCE_ID:
-        # An expired signed catalog blocks installs and updates from its channel, never running plugins.
-        official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
-        dev_ref = official.get("dev_ref") if isinstance(official, dict) else None
-        return catalog_feed.expiry_refusal(state, catalog_feed.feed_channel(dev_ref))
+        return _supply_refusal(state)
     return None
 
 
@@ -3448,6 +3454,30 @@ CONSENT_CHANGED_REASON = (
 )
 
 
+def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> None:
+    """Stage the plugins a closure adds, dependencies first, before the plugin that needs them."""
+    for member in resolved.members:
+        if member.reason == "root":
+            continue
+        stage_install(
+            member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
+            catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+        )
+
+
+def _install_closure(state: dict[str, Any], entry: dict[str, Any]):
+    """The closure an install of ``entry`` acts on, or ProviderHubInstallError when it has no plugin to install."""
+    resolved = _closure_of(state, entry)
+    if not resolved.members:
+        raise ProviderHubInstallError(resolved.refusal or "The plugins this one needs could not be resolved.")
+    return resolved
+
+
+def _closure_needs_consent(resolved) -> bool:
+    """Whether installing this closure asks for the person's consent: any plugin in it that is not a subtitle provider."""
+    return any(member.plugin.kind != SUBTITLE_PROVIDER for member in resolved.members)
+
+
 def install_consent(
     source_id: Any, provider_id: Any, version: Any, entry_key: Any = None, catalog_list: Any = None,
 ) -> dict[str, Any]:
@@ -3457,20 +3487,35 @@ def install_consent(
     state = load_state()
     _key, entry = _requested_entry(
         state, source_id, provider_id, version, entry_key=entry_key, catalog_list=catalog_list)
-    return consent.install_summary(_closure_of(state, entry), _source_description(state), consent.sandbox_status())
+    summary = consent.install_summary(
+        _install_closure(state, entry), _source_description(state), consent.sandbox_status())
+    return summary
+
+
+def install_needs_consent(
+    source_id: Any, provider_id: Any, version: Any, entry_key: Any = None, catalog_list: Any = None,
+) -> bool:
+    """Whether installing the entry a request names, with its closure, asks for consent."""
+    state = load_state()
+    _key, entry = _requested_entry(
+        state, source_id, provider_id, version, entry_key=entry_key, catalog_list=catalog_list)
+    if catalog_kind_of(entry) == SUBTITLE_PROVIDER and not closure.has_needs(entry.get("manifest")):
+        return False
+    return _closure_needs_consent(_install_closure(state, entry))
 
 
 def check_install_consent(
     digest: Any, source_id: Any, provider_id: Any, version: Any, entry_key: Any = None, catalog_list: Any = None,
 ) -> dict[str, Any]:
-    """Refuse an install whose consent digest is missing, for a plugin of a new kind, or no longer matches.
+    """Refuse an install whose consent digest is missing, when anything it installs is not a subtitle
+    provider, or no longer matches.
 
-    A subtitle provider installs without one, as it always has; when it sends one, it must match too.
-    Returns the summary it checked.
+    A subtitle provider with only subtitle providers behind it installs without one, as it always has;
+    when it sends one, it must match too. Returns the summary it checked.
     """
     summary = install_consent(source_id, provider_id, version, entry_key=entry_key, catalog_list=catalog_list)
     if digest is None or digest == "":
-        if summary["plugin"]["kind"] != SUBTITLE_PROVIDER:
+        if any(member["kind"] != SUBTITLE_PROVIDER for member in summary["members"]):
             raise ProviderHubConsentError(CONSENT_MISSING_REASON)
         return summary
     if digest != summary["digest"]:
@@ -3485,24 +3530,25 @@ def install_catalog_entry(
     """Install the entry ``source_id`` lists for ``provider_id`` at ``version``.
 
     ``entry_key`` pins the stored entry a request resolved to, which matters when
-    the source lists the same id and version in both catalog lists.
+    the source lists the same id and version in both catalog lists. When anything the install adds is not a
+    subtitle provider, ``consent_digest`` is required and must match what the install would add now, so the
+    job refuses a set nobody saw however it was queued.
     """
     state = load_state()
     _key, entry = _requested_entry(state, source_id, provider_id, version, entry_key=entry_key)
+    resolved = None
+    if closure.has_needs(entry.get("manifest")) or catalog_kind_of(entry) != SUBTITLE_PROVIDER:
+        resolved = _install_closure(state, entry)
+        if consent_digest is None and _closure_needs_consent(resolved):
+            raise ProviderHubConsentError(CONSENT_MISSING_REASON)
     if consent_digest is not None:
         # The set may have changed since the request was accepted, so the job checks it again.
-        shown = consent.install_summary(_closure_of(state, entry), _source_description(state))
+        shown = consent.install_summary(resolved or _install_closure(state, entry), _source_description(state))
         if shown["digest"] != consent_digest:
             raise ProviderHubConsentError(CONSENT_CHANGED_REASON, changed=True)
     # The plugins it extends or needs are installed first, from the same source, by the same rules.
-    if closure.has_needs(entry.get("manifest")):
-        for member in _closure_of(state, entry).members:
-            if member.reason == "root":
-                continue
-            stage_install(
-                member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
-                catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
-            )
+    if resolved is not None:
+        _stage_closure_members(resolved, source_id, checkpoint)
     # An entry stored before the plugins list existed carries no list and came from providers.
     return stage_install(
         entry["manifest"], checkpoint=checkpoint, source_id=source_id,
@@ -3877,6 +3923,11 @@ def remove_installation(provider_id: str) -> bool:
             item = installations.get(provider_id)
             if not isinstance(item, dict):
                 return "missing"
+            # Checked against the document this write commits to, so a dependent installed since the
+            # early check above still blocks the removal.
+            names = closure.dependents(state, provider_id)
+            if names:
+                raise ProviderHubInstallError(closure.dependents_text(provider_id, names, "removed"))
             if not item.get("active_version"):
                 del installations[provider_id]
                 return "removed_pending"
@@ -4052,7 +4103,7 @@ def _update_delta(state: dict[str, Any], provider: dict[str, Any], manifest: dic
     ``marks`` asks the sandbox probe which permissions this host enforces, which only a summary shown to
     a person needs; the digest and the decision do not.
     """
-    if kind_of(provider) == SUBTITLE_PROVIDER:
+    if kind_of(provider) == SUBTITLE_PROVIDER and not closure.has_needs(manifest):
         # The Subtitle Hub has no consent step: a provider's update has always been applied as offered.
         return None
     found = _find_catalog_entry(state, source_id, manifest_provider_id(manifest), manifest.get("version"),
@@ -4060,9 +4111,12 @@ def _update_delta(state: dict[str, Any], provider: dict[str, Any], manifest: dic
     if found is None:
         return None
     entry = found[1]
+    resolved = _closure_of(state, entry)
+    if kind_of(provider) == SUBTITLE_PROVIDER and not any(
+            member.reason != "root" and member.plugin.kind != SUBTITLE_PROVIDER for member in resolved.members):
+        return None
     return consent.update_delta(
-        state, provider.get("manifest"), entry, _closure_of(state, entry),
-        consent.sandbox_status() if marks else None)
+        state, provider.get("manifest"), entry, resolved, consent.sandbox_status() if marks else None)
 
 
 def update_consent(provider_id: str) -> dict[str, Any] | None:
@@ -4104,12 +4158,22 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
             source_id,
             catalog_list,
             installed_kind=kind_of(provider),
-        ) or "No update manifest is available"
+        ) or (_supply_refusal(state) if source_id == OFFICIAL_CATALOG_SOURCE_ID else None) \
+            or "No update manifest is available"
         return _record_failed_update(provider_id, provider, message)
     # An update that adds a destination, a permission, a binary or a plugin asks again first.
     delta = _update_delta(state, provider, manifest, source_id)
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
         return _record_failed_update(provider_id, provider, consent.delta_text(delta))
+    if closure.has_needs(manifest):
+        # A plugin the new release needs is staged first, as an install does.
+        found = _find_catalog_entry(state, source_id, manifest_provider_id(manifest), manifest.get("version"),
+                                    manifest=manifest)
+        if found is not None:
+            try:
+                _stage_closure_members(_closure_of(state, found[1]), source_id, checkpoint)
+            except ProviderHubInstallError as error:
+                return _record_failed_update(provider_id, provider, refusal_text(error))
     try:
         return stage_install(manifest, checkpoint=checkpoint, source_id=source_id)
     except ProviderHubInstallError:

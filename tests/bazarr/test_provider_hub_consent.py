@@ -346,3 +346,136 @@ def test_the_update_check_lists_what_needs_consent_and_the_route_serves_the_delt
     assert delta.status_code == 200 and delta.json["added"]["permissions"] == [
         {"name": "network", "mark": "enforced"}]
     assert client.get("/api/plugins/updates/consent?id=ghost", headers=KEYED).status_code == 404
+
+
+# --- a closure with a plugin that is not a subtitle provider ----------------------------------------------
+
+
+def _subtitle_with_service():
+    from plugin_platform_helpers import provider_manifest_v2
+
+    helper = _plugin("helper", provides=["translit.v1"])
+    subtitle = provider_manifest_v2("closuresub")
+    subtitle["requires"] = ["translit.v1"]
+    return helper, subtitle
+
+
+def test_a_provider_that_pulls_in_another_kind_needs_consent_to_install(world, monkeypatch):
+    from provider_hub import service
+
+    helper, subtitle = _subtitle_with_service()
+    world([helper, subtitle])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, **kwargs: staged.append(manifest.get("id")))
+
+    summary = _summary("closuresub")
+    assert [member["kind"] for member in summary["members"]] == ["test_service", "subtitle_provider"]
+    assert service.install_needs_consent("official", "closuresub", "1.0.0", catalog_list="plugins") is True
+    with pytest.raises(service.ProviderHubConsentError, match="needs your consent"):
+        service.check_install_consent(None, "official", "closuresub", "1.0.0", catalog_list="plugins")
+    # The install job refuses it as well, however it was queued.
+    with pytest.raises(service.ProviderHubConsentError, match="needs your consent"):
+        service.install_catalog_entry("official", "closuresub", "1.0.0")
+    assert staged == []
+    service.install_catalog_entry("official", "closuresub", "1.0.0", consent_digest=summary["digest"])
+    assert staged == ["helper", "closuresub"]
+
+
+def test_the_subtitle_hub_route_refuses_a_provider_whose_closure_has_another_kind(client, world, monkeypatch):
+    from provider_hub import jobs as hub_jobs
+
+    helper, subtitle = _subtitle_with_service()
+    world([helper, subtitle])
+    queued = []
+    monkeypatch.setattr(hub_jobs, "_enqueue", lambda label, func, kwargs: queued.append(func) or "job-1")
+
+    refused = client.post("/api/provider-hub/installations",
+                          json={"source": "official", "provider_id": "closuresub", "version": "1.0.0"},
+                          headers=KEYED)
+    over_plugins = client.post("/api/plugins/installations",
+                               json={"source": "official", "id": "closuresub", "version": "1.0.0"}, headers=KEYED)
+
+    assert refused.status_code == 400 and "subtitle providers only" in refused.get_data(as_text=True)
+    assert over_plugins.status_code == 400 and "needs your consent" in over_plugins.get_data(as_text=True)
+    assert queued == []
+
+
+def test_a_plain_subtitle_provider_still_installs_without_consent(world, monkeypatch):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import service
+
+    plain = provider_manifest_v2("plainsub")
+    world([plain])
+    staged = []
+    monkeypatch.setattr(service, "stage_install", lambda manifest, **kwargs: staged.append(manifest.get("id")))
+
+    assert service.install_needs_consent("official", "plainsub", "1.0.0", catalog_list="plugins") is False
+    service.install_catalog_entry("official", "plainsub", "1.0.0")
+    assert staged == ["plainsub"]
+
+
+def test_an_empty_closure_is_refused_with_its_reason_and_never_summarised(world, monkeypatch):
+    from provider_hub import service
+    from provider_hub.closure import Closure
+    from provider_hub.consent import install_summary
+
+    world([_plugin("addon")])
+    monkeypatch.setattr(service, "_closure_of", lambda *args, **kwargs: Closure(unresolved=["nothing resolves"]))
+
+    with pytest.raises(service.ProviderHubInstallError, match="nothing resolves"):
+        _summary()
+    with pytest.raises(ValueError):
+        install_summary(Closure(), lambda source_id: {})
+
+
+# --- updates stage what the new release needs, and say why a block is a block --------------------------------
+
+
+def test_an_update_stages_the_plugins_the_new_release_needs_before_the_plugin(world, monkeypatch):
+    from provider_hub import service
+
+    old = _plugin("addon", "1.0.0")
+    helper = _plugin("helper", provides=["translit.v1"])
+    new = _plugin("addon", "1.1.0", requires=["translit.v1"])
+    _update_world(world, old, new, extra_manifests=[helper])
+    staged = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest["id"]) or {"state": "staged"})
+
+    refused = service.apply_update("addon")
+    assert staged == [] and "needs your consent" in refused["last_error"]
+    service.apply_update("addon", consent_digest=service.update_consent("addon")["digest"])
+
+    assert staged == ["helper", "addon"]
+
+
+def test_an_update_of_a_provider_that_would_pull_in_another_kind_asks_for_consent(world, monkeypatch):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub import service
+
+    helper = _plugin("helper", provides=["translit.v1"])
+    old = provider_manifest_v2("closuresub")
+    new = provider_manifest_v2("closuresub", "1.1.0")
+    new["requires"] = ["translit.v1"]
+    world([new, helper], {**_installed(old, kind="subtitle_provider")})
+    staged = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest["id"]) or {"state": "staged"})
+
+    refused = service.apply_update("closuresub")
+
+    assert staged == [] and "needs your consent" in refused["last_error"]
+
+
+def test_an_update_blocked_by_an_expired_catalog_says_so(world, monkeypatch):
+    from provider_hub import service
+
+    old = _plugin("addon", "1.0.0")
+    expired = verified_official_source(
+        last_checked_at="2026-01-01T00:00:00Z", catalog_signature="verified", catalog_channel="main",
+        catalog_signed_version=1, catalog_expires_at="2020-01-01T00:00:00Z")
+    world([_plugin("addon", "1.1.0")], _installed(old), sources={"official": expired})
+
+    refused = service.apply_update("addon")
+
+    assert "signed main catalog expired" in refused["last_error"]

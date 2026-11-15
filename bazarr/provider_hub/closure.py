@@ -185,32 +185,48 @@ def resolve_closure(
     return closure
 
 
+def _row_manifests(row: dict[str, Any]) -> list[PluginManifest]:
+    """The manifests an installation holds: the active one and a staged update's, which will replace it."""
+    found = []
+    for manifest in (row.get("manifest") if row.get("active_version") else None, row.get("staged_manifest")):
+        plugin = _parse(manifest) if isinstance(manifest, dict) else None
+        if plugin is not None:
+            found.append(plugin)
+    return found
+
+
 def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = False) -> list[str]:
     """The ids of installed plugins that depend on ``plugin_id``.
 
     A plugin depends on another when it extends it, or requires a capability the other provides and
-    nothing else installed provides. With ``enabled_only``, plugins that are switched off do not count,
-    which is the rule for switching a dependency off; removing one counts every installed dependent.
+    no other enabled plugin provides. Its staged update counts as well as its active release, because
+    the staged one is what runs after the next restart. With ``enabled_only``, plugins that are switched
+    off do not count, which is the rule for switching a dependency off; removing one counts every
+    installed dependent.
     """
     installed = installed_plugins(state)
     target = installed.get(plugin_id)
     if target is None:
         return []
     found = []
-    for other_id, (plugin, row) in sorted(installed.items()):
+    for other_id, (_active, row) in sorted(installed.items()):
         if other_id == plugin_id:
             continue
-        depends = plugin.extends is not None and plugin.extends.plugin_id == plugin_id
-        if not depends:
+        depends = False
+        for plugin in _row_manifests(row):
+            if plugin.extends is not None and plugin.extends.plugin_id == plugin_id:
+                depends = True
             for capability in plugin.requires:
                 if capability not in target[0].provides or capability in plugin.provides:
                     continue
+                # A plugin that is switched off supplies nothing.
                 elsewhere = any(
-                    capability in held.provides for held_id, (held, _r) in installed.items()
-                    if held_id not in (plugin_id, other_id))
+                    capability in held.provides for held_id, (held, held_row) in installed.items()
+                    if held_id not in (plugin_id, other_id) and _enabled(held_row))
                 if not elsewhere:
                     depends = True
-                    break
+            if depends:
+                break
         if not depends:
             continue
         if enabled_only and not _enabled(row):

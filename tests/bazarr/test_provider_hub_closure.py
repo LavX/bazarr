@@ -160,7 +160,10 @@ def test_installing_an_add_on_installs_what_it_extends_first(tmp_path, monkeypat
     staged = []
     monkeypatch.setattr(service, "stage_install", lambda manifest, **kwargs: staged.append((manifest["id"], kwargs["source_id"])))
 
-    service.install_catalog_entry("official", "addon", "1.0.0")
+    monkeypatch.setattr("provider_hub.consent.sandbox_status", lambda: {})
+    digest = service.install_consent("official", "addon", "1.0.0", catalog_list="plugins")["digest"]
+
+    service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
 
     assert staged == [("parent", "official"), ("addon", "official")]
 
@@ -207,3 +210,49 @@ def test_a_capability_another_installed_plugin_also_provides_leaves_each_removab
     _world(tmp_path, monkeypatch, [], {**_installed(first), **_installed(second), **_installed(user)})
 
     assert remove_installation("first") is True
+
+
+# --- staged updates and switched-off suppliers count ------------------------------------------------
+
+
+def test_a_staged_update_that_extends_a_plugin_protects_it_from_removal(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import ProviderHubInstallError, remove_installation
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    plain = _manifest("addon")
+    staged = _manifest("addon", "2.0.0", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    _world(tmp_path, monkeypatch, [], {**_installed(parent), **_installed(
+        plain, staged_version="2.0.0", staged_manifest=staged, state="staged", pending_restart=True)})
+
+    with pytest.raises(ProviderHubInstallError, match="parent cannot be removed while addon depends on it"):
+        remove_installation("parent")
+
+
+def test_a_switched_off_plugin_is_no_substitute_for_the_supplier_being_removed(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import ProviderHubInstallError, remove_installation
+
+    first = _manifest("first", provides=["translit.v1"])
+    second = _manifest("second", provides=["translit.v1"])
+    user = _manifest("user", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [],
+           {**_installed(first), **_installed(second, enabled=False), **_installed(user)})
+
+    with pytest.raises(ProviderHubInstallError, match="first cannot be removed while user depends on it"):
+        remove_installation("first")
+
+
+def test_the_removal_checks_dependents_in_the_write_it_commits(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    _world(tmp_path, monkeypatch, [], {**_installed(parent), **_installed(addon)})
+    # The early check saw nothing, as when the dependent is installed a moment later.
+    monkeypatch.setattr(service, "dependent_refusal", lambda *args, **kwargs: None)
+
+    with pytest.raises(service.ProviderHubInstallError, match="addon depends on it"):
+        service.remove_installation("parent")
+
+    assert load_state()["installations"]["parent"]["state"] == "active"
+    assert service_kind.calls[-1] == ("enabled", "parent", True)

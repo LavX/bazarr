@@ -109,11 +109,11 @@ class VerifiedFeed:
 def feed_channel(dev_ref: Any) -> str | None:
     """The signed channel an official source reads, or None when it reads none.
 
-    The official source on its default branch is ``main`` and on ``beta`` is ``beta``. Any other
-    ``dev_ref`` points at a branch or commit that no signing run answers for, so it reads the
-    legacy catalog only and never carries plugins.
+    The official source on its default branch (named or not) is ``main`` and on ``beta`` is ``beta``.
+    Any other ``dev_ref`` points at a branch or commit that no signing run answers for, so it reads
+    the legacy catalog only and never carries plugins.
     """
-    if not dev_ref:
+    if not dev_ref or dev_ref == CHANNEL_MAIN:
         return CHANNEL_MAIN
     if dev_ref == CHANNEL_BETA:
         return CHANNEL_BETA
@@ -245,11 +245,24 @@ def feeds(state: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def stored_record(state: Mapping[str, Any], channel: str) -> ChannelRecord:
-    """What this host has accepted for ``channel``: the larger of the database and the file."""
-    item = feeds(state).get(channel)
-    item = item if isinstance(item, dict) else {}
-    database = ChannelRecord(_positive_int(item.get("signed_version")), _positive_int(item.get("key_file_version")))
-    return _larger(database, read_counter_file().get(channel))
+    """What this host has accepted for ``channel``: the larger of the database and the file.
+
+    The key file is one file for every channel, so its version is the highest accepted on any of them.
+    """
+    file_records = read_counter_file()
+    key_file_version = None
+    signed_version = None
+    for name in (CHANNEL_MAIN, CHANNEL_BETA):
+        item = feeds(state).get(name)
+        item = item if isinstance(item, dict) else {}
+        database = ChannelRecord(
+            _positive_int(item.get("signed_version")), _positive_int(item.get("key_file_version")))
+        merged = _larger(database, file_records.get(name))
+        key_file_version = _larger(
+            ChannelRecord(None, key_file_version), ChannelRecord(None, merged.key_file_version)).key_file_version
+        if name == channel:
+            signed_version = merged.signed_version
+    return ChannelRecord(signed_version, key_file_version)
 
 
 def record_accepted(state: dict[str, Any], verified: VerifiedFeed, now: datetime) -> ChannelRecord:
@@ -378,27 +391,74 @@ def verify_fetched(
 # --- what the signed state means for installs ------------------------------------------------
 
 
+def _expiry_text(expires: Any, channel: str, now: datetime, build: datetime | None) -> str | None:
+    if build is not None and now < build:
+        return None
+    try:
+        moment = datetime.strptime(expires, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    if now - moment > signing.CLOCK_SKEW:
+        return (f"The signed {channel} catalog expired on {expires} (host time {_iso(now)}), so "
+                "installs and updates are blocked until it is renewed. Plugins that are installed keep running.")
+    return None
+
+
 def expiry_refusal(state: Mapping[str, Any], channel: str | None, now: datetime | None = None,
                    host_build_time: datetime | None = None) -> str | None:
-    """Why installs and updates from ``channel`` are blocked, or None.
-
-    An expired signed catalog blocks installs and updates, never plugins that already run. The
-    answer is worked out from the stored expiry each time, so it needs no refresh to take effect.
-    """
+    """Why installs and updates from ``channel`` are blocked by its stored expiry, or None."""
     if channel is None:
         return None
     item = feeds(state).get(channel)
     if not isinstance(item, dict) or not item.get("expires"):
         return None
+    return _expiry_text(item["expires"], channel, now or current_time(),
+                        host_build_time if host_build_time is not None else build_time())
+
+
+STALE_CATALOG_REASON = (
+    "The catalog this host holds is older than one it already accepted for the {channel} channel, so nothing "
+    "installs from it. Refresh the catalog to install again."
+)
+
+
+def supply_channel(source: Mapping[str, Any]) -> str | None:
+    """The signed channel the official source's cached entries came from.
+
+    Recorded by the refresh that stored them. A source stored before that was recorded falls back to the
+    channel its ref asks for now.
+    """
+    if "catalog_channel" in source:
+        return source.get("catalog_channel")
+    return feed_channel(source.get("dev_ref"))
+
+
+def supply_refusal(state: Mapping[str, Any], source: Mapping[str, Any], now: datetime | None = None,
+                   host_build_time: datetime | None = None) -> str | None:
+    """Why the official source's cached catalog cannot be installed from right now, or None.
+
+    Judged on the channel that supplied the cached entries, never on the ref the source asks for now. A
+    cached catalog expired by its own date, or older than what this host's database or counter file says it
+    accepted (a restored database, a latch the cache never saw), is not installable until a fresh verified
+    refresh replaces it. A catalog read before any signed one existed, on a channel that has never latched,
+    installs as it always did.
+    """
+    channel = supply_channel(source)
+    if channel is None:
+        return None
     now = now or current_time()
     build = host_build_time if host_build_time is not None else build_time()
-    if build is not None and now < build:
+    item = feeds(state).get(channel)
+    expires = source.get("catalog_expires_at") or (item.get("expires") if isinstance(item, dict) else None)
+    if source.get("catalog_signature") == SIGNATURE_VERIFIED and expires:
+        expired = _expiry_text(expires, channel, now, build)
+        if expired:
+            return expired
+    stored = stored_record(state, channel)
+    if not stored.latched:
         return None
-    try:
-        expires = datetime.strptime(item["expires"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return None
-    if now - expires > signing.CLOCK_SKEW:
-        return (f"The signed {channel} catalog expired on {item['expires']} (host time {_iso(now)}), so "
-                "installs and updates are blocked until it is renewed. Plugins that are installed keep running.")
+    cached = source.get("catalog_signed_version")
+    if source.get("catalog_signature") != SIGNATURE_VERIFIED or not isinstance(cached, int) \
+            or cached < stored.signed_version:
+        return STALE_CATALOG_REASON.format(channel=channel)
     return None

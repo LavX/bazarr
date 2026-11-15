@@ -52,6 +52,7 @@ def staged_world(tmp_path, monkeypatch):
             (tmp_path / "env" / "bin" / "python").write_text("", encoding="utf-8")
             return tmp_path / "env"
 
+    monkeypatch.setattr("provider_hub.consent.sandbox_status", lambda: {})
     monkeypatch.setattr("provider_hub.service._fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
     monkeypatch.setattr("provider_hub.service.python_executable", lambda env_path: tmp_path / "python")
@@ -79,10 +80,12 @@ def staged_world(tmp_path, monkeypatch):
 
 
 def test_a_translator_entry_is_staged_by_its_own_kind(staged_world):
-    from provider_hub.service import install_catalog_entry
+    from provider_hub.service import install_catalog_entry, install_consent
     from provider_hub.state import load_state
 
-    row = install_catalog_entry("official", PLUGIN, "1.0.0")
+    digest = install_consent("official", PLUGIN, "1.0.0", catalog_list="plugins")["digest"]
+
+    row = install_catalog_entry("official", PLUGIN, "1.0.0", consent_digest=digest)
 
     assert row["state"] == "staged" and row["kind"] == "translator"
     assert load_state()["installations"][PLUGIN]["staged_manifest"]["kind"] == "translator"
@@ -190,7 +193,8 @@ def test_every_kind_is_told_about_a_first_install_with_the_missing_fields(monkey
             tmp_path / "state.json", catalog_sources={"official": verified_official_source()},
             catalog_entries={"official:plugins:recorded:1.0.0": _official_entry(manifest)})))
 
-        service.install_catalog_entry("official", "recorded", "1.0.0")
+        digest = service.install_consent("official", "recorded", "1.0.0", catalog_list="plugins")["digest"]
+        service.install_catalog_entry("official", "recorded", "1.0.0", consent_digest=digest)
     finally:
         unregister_kind("recording")
     assert seen == [("recorded", ())]

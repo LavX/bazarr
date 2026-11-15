@@ -117,6 +117,8 @@ def install_summary(
             # No manifest field declares a memory request yet.
             "memory_request": None,
         })
+    if not closure.members:
+        raise ValueError("a consent summary needs a plugin to describe")
     root = closure.members[-1]
     facts = {
         "members": [_member_facts(member) for member in closure.members],
