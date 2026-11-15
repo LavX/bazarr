@@ -335,13 +335,14 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             Number of days to go back in history to upgrade subtitles.
           </Message>
           <Check
-            label="Upgrade Manually Downloaded or Uploaded Subtitles"
+            label="Upgrade Manually Downloaded Subtitles"
             settingKey="settings-general-upgrade_manual"
           ></Check>
           <Message>
-            Upgrade subtitles that were downloaded from a manual search or
-            uploaded. Off by default on a new install. Existing installs keep
-            this on if they already had it on.
+            Upgrade subtitles that were downloaded from a manual search.
+            Subtitles you upload yourself are never upgraded. Off by default on
+            a new install. Existing installs keep this on if they already had it
+            on.
           </Message>
           <Check
             label="Upgrade Translated Subtitles"
