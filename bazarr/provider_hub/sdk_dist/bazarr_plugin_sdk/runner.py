@@ -38,6 +38,7 @@ import sys
 import threading
 import traceback
 
+from collections.abc import Callable
 from typing import Any, BinaryIO, Sequence
 
 from . import __version__
@@ -45,6 +46,7 @@ from ._protocol import frames
 from ._protocol.worker_channel import ChannelClosed, Operation, OperationCancelled, OperationError, OperationResult, WorkerChannel
 from .context import PluginContext
 from .errors import INTERNAL, PluginError
+from ._grace import Grace
 from ._scrub import held_secrets, scrub
 from .kinds import KindSpec, MethodSpec, get_kind
 
@@ -57,6 +59,8 @@ EXIT_START = 66
 INLINE_RESULT_BYTES = 512 * 1024
 # Seconds a finished request's tasks and executor threads get to wind down.
 SHUTDOWN_TIMEOUT = 5.0
+# Extra seconds the reply waits for the cleanup thread beyond the budget its steps keep to.
+CLEANUP_SLACK = 0.25
 # A request param the SDK takes for itself: what a paid ``test`` may spend.
 BUDGET_PARAM = "budget"
 
@@ -134,8 +138,10 @@ class PluginWorker:
             raise OperationError(frames.Codes.INVALID_REQUEST, f"{method.name} takes exactly {list(method.params)}")
         if method.embed_secrets_in and not isinstance(params[method.embed_secrets_in], dict):
             raise OperationError(frames.Codes.INVALID_REQUEST, f"{method.embed_secrets_in} must be an object")
+        grace = Grace(SHUTDOWN_TIMEOUT)
         ctx = PluginContext(
             operation,
+            grace=grace,
             kind_api=self.spec.kind_api,
             heartbeat_interval=self.channel._heartbeat_interval or frames.DEFAULT_HEARTBEAT_INTERVAL,
             budget=float(budget) if isinstance(budget, (int, float)) and not isinstance(budget, bool) else None,
@@ -143,11 +149,11 @@ class PluginWorker:
         func = getattr(self.plugin, method.name)
         kwargs = self._kwargs(method, func, params, operation.secrets, ctx)
         if inspect.iscoroutinefunction(func):
-            value = _run_coroutine(operation, ctx, func(**kwargs))
+            value = _run_coroutine(operation, ctx, func(**kwargs), grace)
         else:
-            value = func(**kwargs)
+            value = call_bounded(operation, grace, func, kwargs)
             if inspect.isawaitable(value):
-                value = _run_coroutine(operation, ctx, value)
+                value = _run_coroutine(operation, ctx, value, grace)
         if operation.cancelled.is_set():
             raise OperationCancelled(operation.cancel_reason or "cancelled")
         return pack_result(value)
@@ -180,55 +186,137 @@ def pack_result(value: Any) -> dict[str, Any] | OperationResult:
     return OperationResult({"json_in_data": True}, data)
 
 
-def _run_coroutine(operation: Operation, ctx: PluginContext, awaitable: Any) -> Any:
-    """Run ``awaitable`` on a private event loop; a cancel cancels its task and sets ``ctx.cancelled``."""
+def _supervise(operation: Operation, grace: Grace, finished: threading.Event, on_cancel: Callable[[], None]) -> bool:
+    """Wait for ``finished``. A cancel starts the grace clock; a request still running when it
+    runs out is given up on. Returns False for a request that was given up on."""
+    sent = False
+    while not finished.wait(0.02):
+        if operation.cancelled.is_set():
+            if not sent:
+                sent = True
+                grace.start()
+                on_cancel()
+            if grace.expired():
+                return False
+    return True
+
+
+def _abandoned(operation: Operation) -> OperationCancelled:
+    log.warning("the request did not stop within %.1f seconds of its cancel and was abandoned", SHUTDOWN_TIMEOUT)
+    return OperationCancelled(operation.cancel_reason or "cancelled")
+
+
+def call_bounded(operation: Operation, grace: Grace, func: Callable[..., Any], kwargs: dict[str, Any]) -> Any:
+    """Run a plain method on a thread of its own. After a cancel it has the grace period to
+    return; then the reply goes out without it and the thread is left behind."""
+    box: dict[str, Any] = {}
+    finished = threading.Event()
+
+    def run() -> None:
+        try:
+            box["value"] = func(**kwargs)
+        except BaseException as error:  # handed to the request thread, which re-raises it
+            box["error"] = error
+        finally:
+            finished.set()
+
+    threading.Thread(target=run, name="bazarr-plugin-call", daemon=True).start()
+    if not _supervise(operation, grace, finished, lambda: None):
+        raise _abandoned(operation)
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def _run_coroutine(operation: Operation, ctx: PluginContext | None, awaitable: Any, grace: Grace | None = None) -> Any:
+    """Run ``awaitable`` on a private event loop, on a thread of its own, and bound all of it.
+
+    A cancel cancels its task and sets ``ctx.cancelled``. From a cancel, or from the
+    moment the request ends, everything left to do (cancelling leftover tasks, closing
+    async generators, joining executor threads, closing the loop) shares one
+    :class:`Grace` budget. A request that ignores its cancel, a stalled cleanup step and
+    a plugin that blocks the loop with a plain call all end with the reply going out when
+    the budget is spent; what overran is logged and abandoned.
+    """
+    grace = grace or Grace(SHUTDOWN_TIMEOUT)
     loop = asyncio.new_event_loop()
-    done = threading.Event()
 
     async def wrap() -> Any:
         return await awaitable
 
     task = loop.create_task(wrap())
+    box: dict[str, Any] = {}
+    finished = threading.Event()
+    cleaned = threading.Event()
 
-    def watch() -> None:
-        while not done.is_set():
-            if operation.cancelled.wait(0.02):
-                try:
-                    loop.call_soon_threadsafe(ctx.cancelled.set)
-                    loop.call_soon_threadsafe(task.cancel)
-                except RuntimeError:
-                    pass
-                return
-
-    watcher = threading.Thread(target=watch, name="bazarr-plugin-cancel", daemon=True)
-    watcher.start()
-    try:
-        return loop.run_until_complete(task)
-    except asyncio.CancelledError:
-        raise OperationCancelled(operation.cancel_reason or "cancelled") from None
-    finally:
-        done.set()
-        closable = True
+    def run() -> None:
         try:
-            _cancel_remaining_tasks(loop)
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            closable = _shutdown_executor(loop)
+            try:
+                box["value"] = loop.run_until_complete(task)
+            except BaseException as error:  # includes CancelledError; handed to the request thread
+                box["error"] = error
+            finished.set()
+            grace.start()
+            _clean_up(loop, grace)
         finally:
-            if closable:
-                loop.close()
+            finished.set()
+            cleaned.set()
+
+    def on_cancel() -> None:
+        try:
+            if ctx is not None:
+                loop.call_soon_threadsafe(ctx.cancelled.set)
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:  # the loop is already closed
+            pass
+
+    threading.Thread(target=run, name="bazarr-plugin-loop", daemon=True).start()
+    if not _supervise(operation, grace, finished, on_cancel):
+        raise _abandoned(operation)
+    grace.start()
+    # A little over the budget: the steps time themselves out first, this is the backstop for
+    # a step that blocks the loop thread where no timeout can reach it.
+    if not cleaned.wait(grace.remaining() + CLEANUP_SLACK):
+        log.warning("cleanup after the request did not finish within %.1f seconds and was abandoned", SHUTDOWN_TIMEOUT)
+    error = box.get("error")
+    if isinstance(error, asyncio.CancelledError):
+        raise OperationCancelled(operation.cancel_reason or "cancelled") from None
+    if error is not None:
+        raise error
+    return box["value"]
 
 
-def _cancel_remaining_tasks(loop: asyncio.AbstractEventLoop) -> None:
+def _clean_up(loop: asyncio.AbstractEventLoop, grace: Grace) -> None:
+    """Every step after the request, each within what is left of the shared budget.
+
+    The loop is closed only when every step finished; after an overrun something may
+    still be using it.
+    """
+    steps = (_cancel_remaining_tasks, _shutdown_asyncgens, _shutdown_executor)
+    clean = True
+    for step in steps:
+        try:
+            clean = step(loop, grace) and clean
+        except Exception:
+            log.warning("a cleanup step failed", exc_info=True)
+            clean = False
+    if clean:
+        try:
+            loop.close()
+        except Exception:
+            log.warning("closing the event loop failed", exc_info=True)
+
+
+def _cancel_remaining_tasks(loop: asyncio.AbstractEventLoop, grace: Grace) -> bool:
     """Cancel what the request left running and let it clean up, as ``asyncio.run`` does."""
     pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
     if not pending:
-        return
+        return True
     for task in pending:
         task.cancel()
-
     # Not wait_for: that waits for a cancelled task to finish, and a task that swallows
-    # the cancel never does. Give them a few seconds, then leave the rest behind.
-    done, still_running = loop.run_until_complete(asyncio.wait(pending, timeout=SHUTDOWN_TIMEOUT))
+    # the cancel never does. Give them what is left of the budget, then leave the rest.
+    done, still_running = loop.run_until_complete(asyncio.wait(pending, timeout=grace.remaining()))
     for task in still_running:
         log.warning("a task started by the request ignored its cancel and was abandoned: %r", task)
     for task in done:
@@ -236,15 +324,26 @@ def _cancel_remaining_tasks(loop: asyncio.AbstractEventLoop) -> None:
             loop.call_exception_handler(
                 {"message": "unhandled exception during request shutdown", "exception": task.exception(), "task": task}
             )
+    return not still_running
 
 
-def _shutdown_executor(loop: asyncio.AbstractEventLoop) -> bool:
-    """Wait for the loop's executor threads, but only a few seconds: one may be stuck.
+def _shutdown_asyncgens(loop: asyncio.AbstractEventLoop, grace: Grace) -> bool:
+    """Close the async generators the request left open; one that stalls in its ``finally`` is abandoned."""
+    closing = loop.create_task(loop.shutdown_asyncgens())
+    _, still_running = loop.run_until_complete(asyncio.wait({closing}, timeout=grace.remaining()))
+    if still_running:
+        log.warning("an async generator left open by the request did not close in time and was abandoned")
+        return False
+    return True
+
+
+def _shutdown_executor(loop: asyncio.AbstractEventLoop, grace: Grace) -> bool:
+    """Wait for the loop's executor threads, but only as long as the budget allows.
 
     ``shutdown_default_executor`` cannot be bounded from the loop on Python 3.10 and
     3.11: cancelling it still joins the threads without a limit. It runs on a helper
-    thread here and is given :data:`SHUTDOWN_TIMEOUT` seconds. Returns False when it
-    did not finish; the loop is then still in use by that thread and must not be closed.
+    thread here. Returns False when it did not finish; that thread is then still using
+    the loop.
     """
 
     def run() -> None:
@@ -255,9 +354,9 @@ def _shutdown_executor(loop: asyncio.AbstractEventLoop) -> bool:
 
     helper = threading.Thread(target=run, name="bazarr-plugin-executor-shutdown", daemon=True)
     helper.start()
-    helper.join(SHUTDOWN_TIMEOUT)
+    helper.join(grace.remaining())
     if helper.is_alive():
-        log.warning("a thread started by the request did not finish within %.0f seconds", SHUTDOWN_TIMEOUT)
+        log.warning("a thread started by the request did not finish in time and was abandoned")
         return False
     return True
 
@@ -333,16 +432,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 def run_process(argv: Sequence[str] | None = None) -> None:
     """Run a worker and end the process, so a plugin thread cannot keep a finished worker alive."""
     code = main(argv)
-    _flush(sys.stdout)
-    _flush(sys.stderr)
+    grace = Grace(SHUTDOWN_TIMEOUT)
+    grace.start()
+    for stream in (sys.stdout, sys.stderr):
+        _flush(stream, grace)
     os._exit(code)
 
 
-def _flush(stream: Any) -> None:
-    try:
-        stream.flush()
-    except (OSError, ValueError):
-        pass
+def _flush(stream: Any, grace: Grace) -> None:
+    """Flush a stream, waiting only as long as the budget allows: a full pipe nobody reads blocks."""
+
+    def run() -> None:
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    flusher = threading.Thread(target=run, name="bazarr-plugin-flush", daemon=True)
+    flusher.start()
+    flusher.join(grace.remaining())
 
 
 if __name__ == "__main__":

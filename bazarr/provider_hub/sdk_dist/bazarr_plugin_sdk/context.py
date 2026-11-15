@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence, TypeVar
 
 from ._protocol.worker_channel import HostCallFailed, Operation, OperationCancelled
+from ._grace import Grace
 from ._scrub import channel_secrets, scrub
 from .errors import CANCELLED, ERROR_CODES, INTERNAL, PluginError
 
@@ -56,9 +57,12 @@ class PluginContext:
         heartbeat_interval: float,
         budget: float | None = None,
         logger: logging.Logger | None = None,
+        grace: Grace | None = None,
     ) -> None:
         # The wire-level operation. Not part of the plugin API.
         self._operation = operation
+        # The budget for what happens after a cancel; set by the runner.
+        self._grace = grace
         self.op = operation.op
         self.kind_api = kind_api
         # Seconds between keep-alives the host expects while a request makes progress.
@@ -161,8 +165,14 @@ class PluginContext:
     def _call(self, name: str, params: dict[str, Any], *, cancellable: bool) -> dict[str, Any]:
         """A host call. A cancellable one gives up when the host cancels the request; a settle
         (usage) or a store (checkpoint) that has gone out is waited for."""
+        timeout = HOST_CALL_TIMEOUT
+        if self._grace is not None and self.is_cancelled:
+            # A settle or a store still goes out after a cancel, but the reply to the host
+            # does not wait for its ack longer than the budget for everything after a cancel.
+            self._grace.start()
+            timeout = min(timeout, max(self._grace.remaining(), 0.05))
         try:
-            return self._operation.call(name, params, timeout=HOST_CALL_TIMEOUT, cancellable=cancellable)
+            return self._operation.call(name, params, timeout=timeout, cancellable=cancellable)
         except OperationCancelled:
             raise PluginError(CANCELLED, "the host cancelled this request") from None
         except HostCallFailed as failure:
