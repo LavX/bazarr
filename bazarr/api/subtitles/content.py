@@ -633,22 +633,30 @@ def _refresh_media_subtitles(media_type, media_id, metadata):
         event_stream(type='sports', action='update', payload=metadata.get('episodeId', media_id))
 
 
-def _history_path_for_local_subtitle(media_type, subtitle_path, arr_instance_id=None):
-    if media_type == 'sports':
-        return path_mappings.path_replace_reverse_instance(subtitle_path, arr_instance_id, 'sports')
-    if media_type == 'episode':
-        return path_mappings.path_replace_reverse(subtitle_path)
-    return path_mappings.path_replace_reverse_movie(subtitle_path)
+def _history_paths_for_local_subtitle(media_type, subtitle_path, arr_instance_id=None):
+    """The forms a local subtitle path can have in the history.
+
+    Rows are stored through the owning instance's path mapping. Older rows were
+    stored through the global one, so both forms are returned, the instance's
+    first, and the two are the same when the instance has no mapping of its own.
+    """
+    forms = [path_mappings.path_replace_reverse_instance(subtitle_path, arr_instance_id, media_type)]
+    if media_type != 'sports':
+        global_form = (path_mappings.path_replace_reverse if media_type == 'episode'
+                       else path_mappings.path_replace_reverse_movie)(subtitle_path)
+        if global_form not in forms:
+            forms.append(global_form)
+    return forms
 
 
 def _latest_sync_history_for_path(media_type, media_id, subtitle_path, arr_instance_id=None):
-    history_path = _history_path_for_local_subtitle(media_type, subtitle_path, arr_instance_id)
+    history_paths = _history_paths_for_local_subtitle(media_type, subtitle_path, arr_instance_id)
     if media_type == 'sports':
         query = (
             select(TableHistorySports.timestamp)
             .where(TableHistorySports.event_id == media_id)
             .where(TableHistorySports.action == 5)
-            .where(TableHistorySports.subtitles_path == history_path)
+            .where(TableHistorySports.subtitles_path.in_(history_paths))
             .order_by(TableHistorySports.timestamp.desc())
             .limit(1)
         )
@@ -660,7 +668,7 @@ def _latest_sync_history_for_path(media_type, media_id, subtitle_path, arr_insta
             select(TableHistory.timestamp)
             .where(TableHistory.sonarrEpisodeId == media_id)
             .where(TableHistory.action == 5)
-            .where(TableHistory.subtitles_path == history_path)
+            .where(TableHistory.subtitles_path.in_(history_paths))
             .order_by(TableHistory.timestamp.desc())
             .limit(1)
         )
@@ -672,7 +680,7 @@ def _latest_sync_history_for_path(media_type, media_id, subtitle_path, arr_insta
             select(TableHistoryMovie.timestamp)
             .where(TableHistoryMovie.radarrId == media_id)
             .where(TableHistoryMovie.action == 5)
-            .where(TableHistoryMovie.subtitles_path == history_path)
+            .where(TableHistoryMovie.subtitles_path.in_(history_paths))
             .order_by(TableHistoryMovie.timestamp.desc())
             .limit(1)
         )
