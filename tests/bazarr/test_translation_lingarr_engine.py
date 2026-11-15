@@ -25,7 +25,7 @@ class FakeLingarr:
 
     def __init__(self):
         self.address = legacy_engines.DEFAULT_URL
-        self.token = ""
+        self.token_value = ""
         self.fail = False
 
     def lock(self):
@@ -36,15 +36,15 @@ class FakeLingarr:
     def url(self):
         return self.address
 
-    def token_set(self):
-        return bool(self.token)
+    def token(self):
+        return self.token_value
 
     def set(self, url, token):
         if self.fail:
             return False
         self.address = url
         if token is not None:
-            self.token = token
+            self.token_value = token
         return True
 
 
@@ -119,19 +119,32 @@ def _nothing_leaked(world, caplog):
 
 # ------------------------------------------------------------------- listing
 
-def test_lingarr_is_listed_as_an_engine_with_its_small_schema(world):
+def test_lingarr_is_listed_in_exactly_the_shape_the_page_reads(world):
     state = world.call("get", "state").json
     (engine,) = state["instances"]
-    assert (engine["plugin_id"], engine["name"], engine["legacy"], engine["official"]) == (
-        "lingarr", "Lingarr", True, False)
-    assert engine["enabled"] is True and engine["configured"] is True and engine["revision"] == 1
-    assert engine["connections"] == [] and engine["awaiting_secrets"] is False
-    assert engine["plugin"] == {"name": "Lingarr", "version": "built in", "active": True, "update_version": None}
-    fields = {item["key"]: item for item in engine["schema"]["fields"]}
-    assert set(fields) == {"lingarr_url", "lingarr_token"}
-    assert fields["lingarr_url"]["destination"] is True and fields["lingarr_token"]["type"] == "secret"
-    assert engine["schema"]["backend_types"] == {}
-    assert engine["values"] == {"lingarr_url": legacy_engines.DEFAULT_URL} and engine["secrets"] == {}
+    assert engine == {
+        "id": engine["id"], "plugin_id": "lingarr", "name": "Lingarr", "official": False, "legacy": True,
+        "description": "Sends each job to your own Lingarr service.", "enabled": True, "revision": 1,
+        "awaiting_secrets": False, "configured": True, "settings_version": 1, "plugin_version": None,
+        "plugin": None,
+        "schema": {
+            "settings_version": 1, "endpoints": [], "backend_types": {},
+            "fields": [
+                {"key": "url", "type": "text", "label": "Lingarr URL", "required": True, "destination": True,
+                 "placeholder": "http://lingarr:9876", "help": "The address Bazarr+ reaches your Lingarr at."},
+                {"key": "token", "type": "secret", "label": "API token", "help": "Only when your Lingarr asks for one."},
+            ]},
+        "values": {"url": "http://lingarr:9876"}, "secrets": {}, "connections": []}
+    assert isinstance(engine["id"], int)
+
+
+def test_a_stored_token_is_reported_as_configured_with_its_last_four_and_nothing_more(world, caplog):
+    world.fake.token_value = TOKEN
+    assert world.lingarr()["secrets"] == {"token": {"configured": True, "last4": TOKEN[-4:]}}
+    world.fake.token_value = "short"
+    assert world.lingarr()["secrets"] == {"token": {"configured": True}}
+    world.fake.token_value = TOKEN
+    _nothing_leaked(world, caplog)
 
 
 def test_listing_it_twice_keeps_one_engine(world):
@@ -148,11 +161,11 @@ def test_a_service_that_does_not_ask_for_legacy_engines_lists_none(world):
 def test_it_is_configured_once_its_address_is_set_and_not_before(world):
     world.fake.address = ""
     engine = world.lingarr()
-    assert engine["configured"] is False and engine["values"] == {"lingarr_url": ""}
+    assert engine["configured"] is False and engine["values"] == {"url": ""}
     world.fake.address = URL
     assert world.lingarr()["configured"] is True
     # The token is optional, as it always was.
-    assert world.fake.token == ""
+    assert world.fake.token_value == ""
 
 
 def test_a_turned_off_engine_is_not_configured(world):
@@ -210,11 +223,11 @@ def test_turning_it_off_lets_the_pointer_go_with_a_notice(world):
 
 def test_the_token_goes_to_the_existing_setting_and_never_comes_back(world, caplog):
     caplog.set_level(logging.DEBUG)
-    response = world.save({"lingarr_token": TOKEN})
+    response = world.save({"token": TOKEN})
     assert response.status_code == 200, response.json
-    assert world.fake.token == TOKEN
-    assert response.json["engine"]["secrets"] == {"lingarr_token": {"configured": True, "stale": False}}
-    assert "lingarr_token" not in response.json["engine"]["values"]
+    assert world.fake.token_value == TOKEN
+    assert response.json["engine"]["secrets"] == {"token": {"configured": True, "last4": TOKEN[-4:]}}
+    assert "token" not in response.json["engine"]["values"]
     _nothing_leaked(world, caplog)
     # Nothing of it is in the runtime's own tables.
     from app.database import TableTranslatorSecret
@@ -224,65 +237,74 @@ def test_the_token_goes_to_the_existing_setting_and_never_comes_back(world, capl
 
 
 def test_an_empty_token_keeps_the_stored_one_and_a_new_one_replaces_it(world, caplog):
-    world.save({"lingarr_token": TOKEN})
-    world.save({"lingarr_token": "", "lingarr_url": legacy_engines.DEFAULT_URL})
-    assert world.fake.token == TOKEN
-    world.save({"lingarr_token": OTHER_TOKEN})
-    assert world.fake.token == OTHER_TOKEN
+    world.save({"token": TOKEN})
+    world.save({"token": ""})
+    assert world.fake.token_value == TOKEN
+    world.save({"token": OTHER_TOKEN})
+    assert world.fake.token_value == OTHER_TOKEN
     _nothing_leaked(world, caplog)
 
 
 def test_clearing_the_token_removes_it(world):
-    world.save({"lingarr_token": TOKEN})
-    response = world.save(clear_secrets=["lingarr_token"])
+    world.save({"token": TOKEN})
+    response = world.save(clear_secrets=["token"])
     assert response.status_code == 200 and response.json["engine"]["secrets"] == {}
-    assert world.fake.token == ""
-    assert world.save(clear_secrets=["lingarr_url"]).status_code == 400
+    assert world.fake.token_value == ""
+    assert world.save(clear_secrets=["url"]).status_code == 400
 
 
 def test_a_new_address_needs_consent_in_the_same_request(world):
-    response = world.save({"lingarr_url": URL})
+    response = world.save({"url": URL})
     assert response.status_code == 409 and response.json["error"] == "consent_required"
     assert response.json["destinations"] == [URL] and world.fake.address == legacy_engines.DEFAULT_URL
     assert world.lingarr()["revision"] == 1
-    saved = world.save({"lingarr_url": URL}, accept_destinations=[URL])
+    saved = world.save({"url": URL}, accept_destinations=[URL])
     assert saved.status_code == 200 and world.fake.address == URL
-    assert saved.json["engine"]["values"] == {"lingarr_url": URL} and saved.json["engine"]["revision"] == 2
+    assert saved.json["engine"]["values"] == {"url": URL} and saved.json["engine"]["revision"] == 2
 
 
-def test_the_default_address_needs_no_consent(world):
-    world.save({"lingarr_url": URL}, accept_destinations=[URL])
-    assert world.save({"lingarr_url": ""}).status_code == 200
-    assert world.fake.address == legacy_engines.DEFAULT_URL
+def test_an_emptied_address_is_refused_as_required_and_nothing_changes(world):
+    response = world.save({"url": ""})
+    assert response.status_code == 400 and response.json["field_errors"] == {"url": "is required"}
+    assert world.fake.address == legacy_engines.DEFAULT_URL and world.lingarr()["revision"] == 1
 
 
-def test_a_changed_address_never_keeps_the_stored_token(world, caplog):
-    world.save({"lingarr_token": TOKEN})
-    world.save({"lingarr_url": URL}, accept_destinations=[URL])
-    assert world.fake.token == ""
-    assert world.lingarr()["secrets"] == {}
+def test_going_back_to_the_default_address_follows_the_same_consent_rule(world):
+    world.save({"url": URL}, accept_destinations=[URL])
+    refused = world.save({"url": legacy_engines.DEFAULT_URL})
+    assert refused.status_code == 409 and refused.json["destinations"] == [legacy_engines.DEFAULT_URL]
+    assert world.save({"url": legacy_engines.DEFAULT_URL},
+                      accept_destinations=[legacy_engines.DEFAULT_URL]).status_code == 200
+
+
+def test_a_changed_address_never_keeps_the_stored_token_and_the_engine_does_not_wait_for_its_key(world, caplog):
+    world.save({"token": TOKEN})
+    saved = world.save({"url": URL}, accept_destinations=[URL])
+    assert world.fake.token_value == ""
+    assert saved.json["engine"]["secrets"] == {} and saved.json["engine"]["awaiting_secrets"] is False
+    assert saved.json["engine"]["configured"] is True
     _nothing_leaked(world, caplog)
 
 
 def test_a_changed_address_with_a_new_token_keeps_the_new_one(world):
-    world.save({"lingarr_url": URL, "lingarr_token": TOKEN}, accept_destinations=[URL])
-    assert (world.fake.address, world.fake.token) == (URL, TOKEN)
+    world.save({"url": URL, "token": TOKEN}, accept_destinations=[URL])
+    assert (world.fake.address, world.fake.token_value) == (URL, TOKEN)
 
 
 def test_the_same_address_keeps_the_token(world):
-    world.save({"lingarr_url": URL, "lingarr_token": TOKEN}, accept_destinations=[URL])
-    world.save({"lingarr_url": URL.upper().replace("HTTP", "http")})
-    assert world.fake.token == TOKEN
+    world.save({"url": URL, "token": TOKEN}, accept_destinations=[URL])
+    world.save({"url": URL.upper().replace("HTTP", "http")})
+    assert world.fake.token_value == TOKEN
 
 
 @pytest.mark.parametrize("values,field", [
-    ({"lingarr_url": "ftp://host"}, "lingarr_url"),
-    ({"lingarr_url": "http://user:pw@host:9876"}, "lingarr_url"),
-    ({"lingarr_url": "not a url"}, "lingarr_url"),
-    ({"lingarr_url": 5}, "lingarr_url"),
-    ({"lingarr_url": "http://h/" + "a" * 3000}, "lingarr_url"),
-    ({"lingarr_token": 5}, "lingarr_token"),
-    ({"lingarr_token": ["a"]}, "lingarr_token"),
+    ({"url": "ftp://host"}, "url"),
+    ({"url": "http://user:pw@host:9876"}, "url"),
+    ({"url": "not a url"}, "url"),
+    ({"url": 5}, "url"),
+    ({"url": "http://h/" + "a" * 3000}, "url"),
+    ({"token": 5}, "token"),
+    ({"token": ["a"]}, "token"),
     ({"unknown": 1}, "unknown"),
 ])
 def test_an_invalid_value_is_refused_by_field_and_nothing_is_saved(world, values, field, caplog):
@@ -295,19 +317,19 @@ def test_an_invalid_value_is_refused_by_field_and_nothing_is_saved(world, values
 
 def test_a_save_without_the_loaded_revision_is_refused_and_a_stale_one_is_409(world):
     engine_id = world.lingarr()["id"]
-    missing = world.call("patch", f"engines/{engine_id}", {"values": {"lingarr_token": TOKEN}})
+    missing = world.call("patch", f"engines/{engine_id}", {"values": {"token": TOKEN}})
     assert missing.status_code == 400 and missing.json["error"] == "expected_revision_required"
-    assert world.save({"lingarr_token": TOKEN}).status_code == 200
-    stale = world.call("patch", f"engines/{engine_id}", {"expected_revision": 1, "values": {"lingarr_token": OTHER_TOKEN}})
+    assert world.save({"token": TOKEN}).status_code == 200
+    stale = world.call("patch", f"engines/{engine_id}", {"expected_revision": 1, "values": {"token": OTHER_TOKEN}})
     assert stale.status_code == 409 and stale.json["error"] == "stale_revision" and stale.json["revision"] == 2
-    assert world.fake.token == TOKEN
+    assert world.fake.token_value == TOKEN
 
 
 def test_settings_that_cannot_be_written_leave_everything_as_it_was(world, caplog):
     world.fake.fail = True
-    response = world.save({"lingarr_token": TOKEN})
+    response = world.save({"token": TOKEN})
     assert response.status_code == 400
-    assert world.lingarr()["revision"] == 1 and world.fake.token == ""
+    assert world.lingarr()["revision"] == 1 and world.fake.token_value == ""
     _nothing_leaked(world, caplog)
 
 
@@ -326,7 +348,7 @@ def test_the_routes_that_serve_it_are_404_while_the_switch_is_off(world, monkeyp
     assert world.call(method, path, body, key=False).status_code == 404
     # Nothing was created behind the refusal.
     assert world.store.list_instances("lingarr") == []
-    assert world.fake.token == "" and world.fake.address == legacy_engines.DEFAULT_URL
+    assert world.fake.token_value == "" and world.fake.address == legacy_engines.DEFAULT_URL
 
 
 def test_the_config_backed_settings_are_the_existing_lingarr_keys(monkeypatch):
@@ -341,6 +363,6 @@ def test_the_config_backed_settings_are_the_existing_lingarr_keys(monkeypatch):
     monkeypatch.setattr(config, "write_config", lambda *args, **kwargs: True)
     assert store.set(URL, TOKEN) is True
     assert (settings.translator.lingarr_url, settings.translator.lingarr_token) == (URL, TOKEN)
-    assert store.url() == URL and store.token_set() is True
+    assert store.url() == URL and store.token() == TOKEN
     assert store.set(URL, None) is True and settings.translator.lingarr_token == TOKEN
     settings.translator.lingarr_url, settings.translator.lingarr_token = before

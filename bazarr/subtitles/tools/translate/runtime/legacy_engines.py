@@ -26,18 +26,22 @@ from typing import Any, Mapping
 logger = logging.getLogger(__name__)
 
 LINGARR_PLUGIN_ID = "lingarr"
-URL_KEY = "lingarr_url"
-TOKEN_KEY = "lingarr_token"
+# The page's names for the two fields. The values live in the settings Lingarr always used.
+URL_KEY = "url"
+TOKEN_KEY = "token"
+URL_SETTING = "lingarr_url"
+TOKEN_SETTING = "lingarr_token"
 DEFAULT_URL = "http://lingarr:9876"
 URL_LIMIT = 2048
+DESCRIPTION = "Sends each job to your own Lingarr service."
+# A token shorter than this shows only that it is set, like every other secret.
+LAST_FOUR_MIN_LENGTH = 16
 
 # The schema the Translation page draws: the same shape a manifest's fields take.
 LINGARR_FIELDS: tuple[Mapping[str, Any], ...] = (
-    {"key": URL_KEY, "type": "text", "label": "Lingarr address", "destination": True, "required": True,
-     "default": DEFAULT_URL, "max_length": URL_LIMIT,
-     "help": "Where Lingarr runs, reachable from the Bazarr+ container."},
-    {"key": TOKEN_KEY, "type": "secret", "label": "API token",
-     "help": "Only if your Lingarr asks for one. It is kept write-only and sent only to this address."},
+    {"key": URL_KEY, "type": "text", "label": "Lingarr URL", "required": True, "destination": True,
+     "placeholder": DEFAULT_URL, "help": "The address Bazarr+ reaches your Lingarr at."},
+    {"key": TOKEN_KEY, "type": "secret", "label": "API token", "help": "Only when your Lingarr asks for one."},
 )
 
 
@@ -71,14 +75,15 @@ class ConfigLingarr:
     def url(self) -> str:
         from app.config import settings
 
-        value = getattr(settings.translator, URL_KEY, "")
+        value = getattr(settings.translator, URL_SETTING, "")
         return value.strip() if isinstance(value, str) else ""
 
-    def token_set(self) -> bool:
+    def token(self) -> str:
+        """The stored token, for the length and last characters a response may say. Never sent out whole."""
         from app.config import settings
 
-        value = getattr(settings.translator, TOKEN_KEY, "")
-        return isinstance(value, str) and bool(value.strip())
+        value = getattr(settings.translator, TOKEN_SETTING, "")
+        return value.strip() if isinstance(value, str) else ""
 
     def set(self, url: str, token: str | None) -> bool:
         """Write the address, and the token unless it is None. False, with the live values put back, on failure."""

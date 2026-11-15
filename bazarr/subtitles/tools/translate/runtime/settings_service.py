@@ -324,7 +324,8 @@ class TranslatorSettingsService:
         owner = (INSTANCE, instance.id)
         settings = store.settings_of(instance)
         destinations = effective_destinations(schema, settings)
-        return {
+        description = self._parsed(plugin).raw.get("description") if plugin is not None and self._parsed(plugin) else None
+        view = {
             "id": instance.id, "plugin_id": instance.plugin_id, "name": instance.name or (plugin.name if plugin else ""),
             "official": instance.plugin_id == OFFICIAL_ENGINE_PLUGIN_ID, "enabled": bool(instance.enabled),
             "revision": instance.revision, "awaiting_secrets": bool(instance.awaiting_secrets),
@@ -337,22 +338,29 @@ class TranslatorSettingsService:
             "secrets": self._secret_view(owner, schema.fields, destinations),
             "connections": [self.connection_view(instance, row) for row in store.list_connections(instance.id)],
         }
+        if isinstance(description, str) and description.strip():
+            view["description"] = description.strip()[:300]
+        return view
 
     def _legacy_view(self, instance, legacy) -> dict[str, Any]:
-        """An engine served by code in Bazarr+: its address and whether a token is set, never the token."""
+        """An engine Bazarr+ runs itself: its address, and whether a token is set, never the token."""
         fields = legacy_engines.LINGARR_FIELDS
-        values = _without_unsafe_addresses(fields, {legacy_engines.URL_KEY: self._lingarr.url()})
+        token = self._lingarr.token()
+        secrets: dict[str, Any] = {}
+        if token:
+            secrets[legacy_engines.TOKEN_KEY] = {"configured": True}
+            if len(token) >= legacy_engines.LAST_FOUR_MIN_LENGTH:
+                secrets[legacy_engines.TOKEN_KEY]["last4"] = token[-4:]
         return {
             "id": instance.id, "plugin_id": instance.plugin_id, "name": instance.name or legacy.name,
-            "official": False, "legacy": True, "enabled": bool(instance.enabled), "revision": instance.revision,
-            "awaiting_secrets": False, "configured": self._store.instance_configured(instance),
-            "settings_version": 1, "plugin_version": None,
-            "plugin": {"name": legacy.name, "version": "built in", "active": True, "update_version": None},
-            "schema": {"settings_version": 1, "fields": [dict(item) for item in fields], "endpoints": [],
-                       "backend_types": {}},
-            "values": values,
-            "secrets": ({legacy_engines.TOKEN_KEY: {"configured": True, "stale": False}}
-                        if self._lingarr.token_set() else {}),
+            "official": False, "legacy": True, "description": legacy_engines.DESCRIPTION,
+            "enabled": bool(instance.enabled), "revision": instance.revision, "awaiting_secrets": False,
+            "configured": self._store.instance_configured(instance), "settings_version": 1, "plugin_version": None,
+            "plugin": None,
+            "schema": {"settings_version": 1, "endpoints": [], "backend_types": {},
+                       "fields": [dict(item) for item in fields]},
+            "values": _without_unsafe_addresses(fields, {legacy_engines.URL_KEY: self._lingarr.url()}),
+            "secrets": secrets,
             "connections": [],
         }
 
@@ -517,7 +525,7 @@ class TranslatorSettingsService:
         if legacy_engines.URL_KEY in values:
             raw = values[legacy_engines.URL_KEY]
             if raw is None or (isinstance(raw, str) and not raw.strip()):
-                url = legacy_engines.DEFAULT_URL  # emptied: the default applies, like any field
+                errors[legacy_engines.URL_KEY] = "is required"
             elif not isinstance(raw, str):
                 errors[legacy_engines.URL_KEY] = "must be text"
             elif len(raw) > legacy_engines.URL_LIMIT:
