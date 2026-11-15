@@ -122,6 +122,42 @@ def _rename(job_id, replacement):
         jobs_queue.update_job_name(job_id=job_id, new_job_name=replacement + name[len('Translating'):])
 
 
+class _RuntimeEditorService:
+    """The v2 runtime behind the editor job: the selected engine, with its failover, fallback and history.
+
+    It stands where ``OpenRouterTranslatorService`` stands in ``translate_editor_lines``, so the job's
+    progress, results and failure reasons are the ones the editor already knows.
+    """
+
+    def __init__(self, media_type):
+        self.media_type = media_type
+        self.partial_error = None
+
+    def submit_content(self, lines, source_language, target_language, title, bazarr_job_id=None, **_ignored):
+        from .runtime import failure
+        from .runtime.dispatch import Declined, GateClosed
+        from .runtime.service import TranslationRuntimeError, translate_lines
+        try:
+            result = translate_lines(lines, source_language, target_language, title, self.media_type,
+                                     job_id=bazarr_job_id)
+        except GateClosed as closed:
+            raise TranslationRuntimeError(f'{closed.reason}. Fix it on the Translation page.',
+                                          failure.GATE_CLOSED) from closed
+        except Declined as declined:
+            raise TranslationRuntimeError(f'The translator could not take this job: {declined}',
+                                          failure.DECLINED) from declined
+        if result is None:
+            raise TranslationRuntimeError('This translation is already running.', 'skipped')
+        self.partial_error = result.partial_error
+        return [{'position': index, 'line': line} for index, line in enumerate(result.lines)]
+
+
+def _runtime_editor_service(media_type):
+    """The runtime's stand-in for the editor's translation service, or None with the runtime off."""
+    from .availability import runtime_active
+    return _RuntimeEditorService(media_type) if runtime_active() else None
+
+
 def translate_editor_lines(lines, positions, source_language, target_language, title, media_type,
                            job_id=None):
     """Translate editor lines through the AI Subtitle Translator.
@@ -137,7 +173,7 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
                                    progress_message='Sending to the AI Subtitle Translator')
 
     try:
-        service = OpenRouterTranslatorService(
+        service = _runtime_editor_service(media_type) or OpenRouterTranslatorService(
             source_srt_file=None, dest_srt_file=None, lang_obj=None, to_lang=None, from_lang=None,
             media_type=media_type, video_path=None, orig_to_lang=None, forced=False, hi=False,
             sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None)
