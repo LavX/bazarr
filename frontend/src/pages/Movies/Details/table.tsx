@@ -22,6 +22,7 @@ import {
   useMovieSubtitleModification,
   useSubtitleFileDownload,
   useSubtitleSyncStatus,
+  useSystemSettings,
 } from "@/apis/hooks";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
@@ -368,6 +369,13 @@ interface MovieTableValue {
   availableSources: Subtitle[];
   historyMap: Map<string, History.Movie>;
   embeddedScoreMap: Map<string, History.Movie>;
+  // The score of a file by its path, for the files a record replaced or
+  // pinned: undefined when that record carries none. A path that is not in
+  // the map has no record at all.
+  fileScoreMap: Map<string, string | undefined>;
+  // general.local_subtitle_score: the percentage a hand upload or a file with
+  // no history record is scored at, 0 for none. The subtitle lists use it too.
+  localScore: number;
   statusMap: Map<string, Set<number>>;
   setCompareSelection: Dispatch<SetStateAction<CompareSelection>>;
 }
@@ -396,9 +404,22 @@ function historyRecordFor(
 }
 
 const ScoreCell: FunctionComponent<{ subtitle: Subtitle }> = ({ subtitle }) => {
-  const { historyMap, embeddedScoreMap } = useMovieTable();
-  const record = historyRecordFor(subtitle, historyMap, embeddedScoreMap);
-  return <ScoreBadge score={record?.score} />;
+  const { historyMap, embeddedScoreMap, fileScoreMap, localScore } =
+    useMovieTable();
+  if (isSubtitleTrack(subtitle.path)) {
+    const record = historyRecordFor(subtitle, historyMap, embeddedScoreMap);
+    return <ScoreBadge score={record?.score} />;
+  }
+  if (isSubtitleMissing(subtitle.path)) {
+    return <ScoreBadge />;
+  }
+  const path = subtitle.path!;
+  if (fileScoreMap.has(path)) {
+    return <ScoreBadge score={fileScoreMap.get(path)} />;
+  }
+  // A file with no history record is scored at the local score, as in the
+  // movie list. 0 leaves it unscored.
+  return <ScoreBadge score={localScore > 0 ? `${localScore}%` : undefined} />;
 };
 
 const ProviderCell: FunctionComponent<{ subtitle: Subtitle }> = ({
@@ -777,6 +798,8 @@ const Table: FunctionComponent<Props> = ({
   metadataPending = false,
 }) => {
   const onlyDesired = useShowOnlyDesired();
+  const { data: settings } = useSystemSettings();
+  const localScore = settings?.general?.local_subtitle_score ?? 0;
   const [compareSelection, setCompareSelection] =
     useState<CompareSelection>(null);
   const tableColumns = useMemo(
@@ -814,6 +837,26 @@ const Table: FunctionComponent<Props> = ({
     });
     return map;
   }, [history]);
+
+  // The score a file shows: that of the newest record that replaced the file
+  // or pinned a score on it (action 9). An upload takes the local score.
+  const fileScoreMap = useMemo(() => {
+    const map = new Map<string, string | undefined>();
+    newestFirst(history).forEach((h) => {
+      if (!h.subtitles_path || map.has(h.subtitles_path)) return;
+      if (h.action === 9 || [1, 2, 3, 8].includes(h.action)) {
+        map.set(h.subtitles_path, h.score || undefined);
+      } else if (h.action === 4) {
+        map.set(
+          h.subtitles_path,
+          localScore > 0 ? `${localScore}%` : undefined,
+        );
+      } else if (replacesFile(h.action)) {
+        map.set(h.subtitles_path, undefined);
+      }
+    });
+    return map;
+  }, [history, localScore]);
 
   const embeddedScoreMap = useMemo(() => {
     const map = new Map<string, History.Movie>();
@@ -896,6 +939,8 @@ const Table: FunctionComponent<Props> = ({
       availableSources,
       historyMap,
       embeddedScoreMap,
+      fileScoreMap,
+      localScore,
       statusMap,
       setCompareSelection,
     }),
@@ -905,6 +950,8 @@ const Table: FunctionComponent<Props> = ({
       availableSources,
       historyMap,
       embeddedScoreMap,
+      fileScoreMap,
+      localScore,
       statusMap,
     ],
   );
