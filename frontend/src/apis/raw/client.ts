@@ -13,6 +13,15 @@ declare module "axios" {
   interface AxiosRequestConfig {
     // Set by withInlineErrors: the caller shows this request's failure itself.
     inlineErrors?: boolean;
+    // Set by a sign-out request: its own answer never announces a sign-in.
+    signingOut?: boolean;
+    // Set by a login request: the one answer that may announce a sign-in while
+    // the sign-out block is in place.
+    signingIn?: boolean;
+    // Stamped on a login request when it is dispatched: the logout generation
+    // it left under. Only a login whose generation is still current lifts the
+    // sign-out block.
+    signingInGeneration?: number;
   }
 }
 
@@ -31,9 +40,16 @@ class BazarrClient {
   axios!: AxiosInstance;
   source!: CancelTokenSource;
   bIsAuthenticated: boolean;
+  // Set by markSignedOut, lifted by a successful login.
+  bSignInBlocked: boolean;
+  // Counts accepted logouts. A login that was dispatched before one of them
+  // belongs to the session that logout revoked.
+  logoutGeneration: number;
 
   constructor() {
     this.bIsAuthenticated = false;
+    this.bSignInBlocked = false;
+    this.logoutGeneration = 0;
     const baseUrl = `${Environment.baseUrl}/api/`;
 
     this.initialize(baseUrl, Environment.apiKey);
@@ -58,6 +74,9 @@ class BazarrClient {
     this.axios.interceptors.request.use(
       (config) => {
         config.cancelToken = this.source.token;
+        if (config.signingIn === true) {
+          config.signingInGeneration = this.logoutGeneration;
+        }
         if (inlineErrorsRequested()) {
           config.inlineErrors = true;
         }
@@ -70,7 +89,22 @@ class BazarrClient {
     this.axios.interceptors.response.use(
       (resp) => {
         if (resp.status >= 200 && resp.status < 300) {
-          if (!this.bIsAuthenticated) {
+          // A login answer lifts the block first, so that it can announce. A
+          // login that left before the latest accepted logout answers late
+          // for a session that is already revoked, so it lifts nothing.
+          if (
+            resp.config?.signingIn === true &&
+            resp.config.signingInGeneration === this.logoutGeneration
+          ) {
+            this.bSignInBlocked = false;
+          }
+          // Nothing announces a sign-in while the block is in place, and a
+          // sign-out's own answer never does.
+          if (
+            !this.bIsAuthenticated &&
+            !this.bSignInBlocked &&
+            resp.config?.signingOut !== true
+          ) {
             this.bIsAuthenticated = true;
             setAuthenticated(true);
           }
@@ -127,6 +161,17 @@ class BazarrClient {
         return Promise.reject(error);
       },
     );
+  }
+
+  // Called once the server has accepted a logout. Until a login dispatched
+  // after it succeeds, no answer announces a sign-in, so requests already on
+  // their way and the polls that keep running cannot undo the sign-out. A login
+  // that was already on its way is one of them. The logout request's own answer
+  // is excluded by signingOut, since it arrives before this call.
+  markSignedOut() {
+    this.logoutGeneration += 1;
+    this.bSignInBlocked = true;
+    this.bIsAuthenticated = false;
   }
 
   handleError(error: BackendError, silent = false) {

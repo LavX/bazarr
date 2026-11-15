@@ -1,4 +1,5 @@
 import BaseApi from "./base";
+import client from "./client";
 
 /**
  * Whether a 2xx body is the settings object at all.
@@ -27,11 +28,24 @@ class SystemApi extends BaseApi {
   }
 
   async login(username: string, password: string) {
-    await this.post("/account", { username, password }, { action: "login" });
+    await this.post(
+      "/account",
+      { username, password },
+      { action: "login" },
+      { signingIn: true },
+    );
   }
 
   async logout() {
-    await this.post("/account", undefined, { action: "logout" });
+    await this.post(
+      "/account",
+      undefined,
+      { action: "logout" },
+      { signingOut: true },
+    );
+    // Recorded only once the server has accepted the logout. A refused logout
+    // (basic auth answers 406) leaves the session as it was.
+    client.markSignedOut();
   }
 
   // Verifies the password the way login does, for a short-lived confirmation
