@@ -174,11 +174,42 @@ const JobRow: FunctionComponent<{
   );
 };
 
+/**
+ * A list that could not be loaded, or could not be updated. It says which, and offers the way to ask
+ * again: a section that is simply missing would read as "nothing is running".
+ */
+const LoadProblem: FunctionComponent<{
+  /** The list, as the sentence starts: "The running jobs". */
+  what: string;
+  /** Rows from an earlier load are still shown. */
+  stale: boolean;
+  busy: boolean;
+  onRetry: () => void;
+}> = ({ what, stale, busy, onRetry }) => (
+  <div className={styles.loadProblem} role="alert">
+    <span>
+      {stale
+        ? `${what} could not be updated. What is listed may be out of date.`
+        : `${what} could not be loaded.`}
+    </span>
+    <Button
+      size="compact-xs"
+      variant="default"
+      loading={busy}
+      onClick={onRetry}
+    >
+      Try again
+    </Button>
+  </div>
+);
+
 const JobList: FunctionComponent<{
   jobs: TranslationHistoryJob[];
   state: TranslationState;
   label: string;
-}> = ({ jobs, state, label }) => (
+  /** The rows come from an earlier load that could not be updated. */
+  stale?: boolean;
+}> = ({ jobs, state, label, stale = false }) => (
   <>
     <div className={styles.jobsHead} aria-hidden="true">
       <span>Subtitle</span>
@@ -188,7 +219,7 @@ const JobList: FunctionComponent<{
       <span className={styles.right}>Status</span>
       <span />
     </div>
-    <ul className={styles.jobs} aria-label={label}>
+    <ul className={styles.jobs} aria-label={label} data-stale={stale}>
       {jobs.map((job) => (
         <JobRow key={job.id} job={job} state={state} />
       ))}
@@ -223,21 +254,49 @@ const ActivityPanel: FunctionComponent<{
 
   return (
     <div>
-      {now.length > 0 && (
+      {(now.length > 0 || running.isError) && (
         <section className={styles.section}>
           <div className={styles.sectionHead}>
             <h2 className={styles.sectionTitle}>Translating now</h2>
           </div>
-          <JobList jobs={now} state={state} label="Translating now" />
+          {running.isError && (
+            <LoadProblem
+              what="The running jobs"
+              stale={now.length > 0}
+              busy={running.isFetching}
+              onRetry={() => void running.refetch()}
+            />
+          )}
+          {now.length > 0 && (
+            <JobList
+              jobs={now}
+              state={state}
+              label="Translating now"
+              stale={running.isError}
+            />
+          )}
         </section>
       )}
 
-      {waiting.length > 0 && (
+      {(waiting.length > 0 || queue.isError) && (
         <section className={styles.section}>
           <div className={styles.sectionHead}>
             <h2 className={styles.sectionTitle}>Waiting</h2>
           </div>
-          <ul className={styles.jobs} aria-label="Waiting">
+          {queue.isError && (
+            <LoadProblem
+              what="The waiting jobs"
+              stale={waiting.length > 0}
+              busy={queue.isFetching}
+              onRetry={() => void queue.refetch()}
+            />
+          )}
+          <ul
+            className={styles.jobs}
+            aria-label="Waiting"
+            data-stale={queue.isError}
+            hidden={waiting.length === 0}
+          >
             {waiting.map((item, index) => (
               <li key={item.job_id} className={styles.waiting}>
                 <span className={styles.position} aria-hidden="true">
@@ -317,7 +376,20 @@ const ActivityPanel: FunctionComponent<{
           )
         ) : (
           <>
-            <JobList jobs={past} state={state} label="History" />
+            {history.isError && (
+              <LoadProblem
+                what="The history"
+                stale
+                busy={history.isFetching}
+                onRetry={() => void history.refetch()}
+              />
+            )}
+            <JobList
+              jobs={past}
+              state={state}
+              label="History"
+              stale={history.isError}
+            />
             {total > length && length < MOST && (
               <Button
                 mt="md"

@@ -66,7 +66,7 @@ function usePointerChoices() {
           // What is saved stands; a choice made meanwhile was made on top of the refused one.
           waiting.current = null;
           setProblem(
-            readRefusal(error)?.message ??
+            readRefusal(error)?.message ||
               "The choice could not be saved. Try again.",
           );
         }
@@ -94,14 +94,13 @@ function usePointerChoices() {
   };
 }
 
+/** What "Legacy" means, said in words wherever the mark is shown. */
+export const LEGACY_NOTE =
+  "Kept from earlier versions: it is not a plugin, so there is nothing to install or update.";
+
 /** For an engine kept from earlier versions, which Bazarr+ runs itself. */
 export const LegacyMark: FunctionComponent = () => (
-  <span
-    className={styles.legacy}
-    title="Kept from earlier versions. It is not a plugin: there is nothing to install or update."
-  >
-    Legacy
-  </span>
+  <span className={styles.legacy}>Legacy</span>
 );
 
 export const OfficialMark: FunctionComponent = () => (
@@ -186,6 +185,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           </label>
           <p className={styles.engineText} id={`${id}-text`}>
             {engineLine(engine)}
+            {engine.legacy && ` ${LEGACY_NOTE}`}
           </p>
           <div className={styles.engineMeta}>
             <StatusBadge tone={status.tone} label={status.label} />

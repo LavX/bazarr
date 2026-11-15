@@ -167,7 +167,11 @@ export const job = (
   ...patch,
 });
 
-/** Lingarr as the server lists it: run by Bazarr+ itself, no plugin, a URL and a token from a small schema. */
+/**
+ * Lingarr as the server lists it: run by Bazarr+ itself, no plugin, a URL and a token from a small
+ * schema. This mirrors the server's contract for the state snapshot (the `legacy` flag, a null
+ * `plugin`, the two fields and the write-only token); keep the two in step.
+ */
 export const lingarr = (
   patch: Partial<TranslationEngine> = {},
 ): TranslationEngine => ({

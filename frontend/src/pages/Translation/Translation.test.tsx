@@ -421,7 +421,7 @@ describe("Translation page", () => {
                 {
                   error: "consent_required",
                   message: "These addresses are new.",
-                  destinations: ["http://192.168.1.5:1234/v1"],
+                  destinations: ["http://192.0.2.10:1234/v1"],
                 },
                 { status: 409 },
               )
@@ -437,7 +437,7 @@ describe("Translation page", () => {
     );
     await user.type(
       await screen.findByLabelText("Base URL"),
-      "http://192.168.1.5:1234/v1",
+      "http://192.0.2.10:1234/v1",
     );
     await user.type(screen.getByLabelText("API key"), SECRET);
     await user.click(screen.getByRole("button", { name: "Add back end" }));
@@ -446,7 +446,7 @@ describe("Translation page", () => {
     });
     // The question fades in: visible once it has.
     await waitFor(() =>
-      expect(within(ask).getByText("http://192.168.1.5:1234/v1")).toBeVisible(),
+      expect(within(ask).getByText("http://192.0.2.10:1234/v1")).toBeVisible(),
     );
     expect(
       within(ask).getByText(/never sent to a changed address/),
@@ -461,10 +461,10 @@ describe("Translation page", () => {
       backend_type: "openai_compatible",
       values: {
         preset: "custom",
-        base_url: "http://192.168.1.5:1234/v1",
+        base_url: "http://192.0.2.10:1234/v1",
         api_key: SECRET,
       },
-      accept_destinations: ["http://192.168.1.5:1234/v1"],
+      accept_destinations: ["http://192.0.2.10:1234/v1"],
     });
     await waitFor(() =>
       expect(

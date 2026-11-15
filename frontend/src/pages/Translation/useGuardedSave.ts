@@ -36,7 +36,7 @@ export function useGuardedSave(
       } else if (refusal) {
         setAsking([]);
         setFieldErrors(refusal.fieldErrors);
-        setMessage(refusal.message);
+        setMessage(refusal.message || "The request failed. Try again.");
         setStale(refusal.code === "stale_revision");
         if (refusal.code === "stale_revision") {
           onStale?.();

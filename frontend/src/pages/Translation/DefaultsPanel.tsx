@@ -112,7 +112,7 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
       setDraft({});
     } catch (error) {
       setProblem(
-        readRefusal(error)?.message ??
+        readRefusal(error)?.message ||
           "The defaults were not saved. Try again.",
       );
     }

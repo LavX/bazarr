@@ -5,11 +5,15 @@ import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
-import type { TranslationState } from "@/types/translation";
+import type {
+  TranslationHistoryJob,
+  TranslationState,
+} from "@/types/translation";
 import {
   connection,
   engine,
   inputsHolding,
+  job,
   lingarr,
   second,
   SECRET,
@@ -71,6 +75,12 @@ async function showPage() {
   customRender(<TranslationView />);
   return screen.findByRole("radiogroup", { name: "Engine" });
 }
+
+/** The alert that holds this sentence, to reach the button beside it. */
+const alertSaying = (text: string) =>
+  screen
+    .getAllByRole("alert")
+    .find((alert) => within(alert).queryByText(text) !== null)!;
 
 const editNames = () =>
   screen
@@ -1035,9 +1045,16 @@ describe("Translation page, an engine Bazarr+ runs itself", () => {
     expect(radio).toHaveAccessibleName(/Legacy/);
     // It has no plugin, and that is not reported as a plugin that stopped.
     expect(screen.queryByText("Plugin not running")).not.toBeInTheDocument();
+    // What it does, and what "Legacy" means, are both said in words on the card.
     expect(
-      screen.getByText("Sends each job to your own Lingarr service."),
-    ).toBeInTheDocument();
+      screen.getByText(/Sends each job to your own Lingarr service\./),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/Kept from earlier versions: it is not a plugin/),
+    ).toBeVisible();
+    expect(radio).toHaveAccessibleDescription(
+      /Kept from earlier versions: it is not a plugin/,
+    );
     await user.click(radio);
     await waitFor(() =>
       expect(calls).toEqual([
@@ -1186,5 +1203,463 @@ describe("Translation page, an engine Bazarr+ runs itself", () => {
         { method: "put", path: "pointers", body: { engine: 5 } },
       ]),
     );
+  });
+});
+
+describe("Translation page, one thing at a time", () => {
+  it("lets nothing else be chosen on the first-run panel while a start is on its way", async () => {
+    const held = gate();
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [
+        engine({ configured: false, connections: [] }),
+        second,
+        lingarr({ configured: false, values: {}, secrets: {} }),
+      ],
+      available_engines: [
+        {
+          plugin_id: "other_engine",
+          name: "Other Engine",
+          version: "1.0.0",
+          source: "official",
+          free: true,
+        },
+      ],
+    };
+    server.use(
+      http.post("/api/translation/engines/:id/connections", async () => {
+        record("post", "connection", null);
+        await held.opened;
+        return HttpResponse.json(
+          { error: "invalid", message: "The values are not valid." },
+          { status: 400 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await user.type(await screen.findByLabelText("OpenRouter key"), SECRET);
+    const others = () => [
+      screen.getByRole("button", { name: "Use Google Translate" }),
+      screen.getByRole("button", { name: "Set up Lingarr" }),
+      screen.getByRole("button", { name: "Install Other Engine" }),
+      screen.getByRole("button", { name: "Set it up by hand" }),
+    ];
+    others().forEach((button) => expect(button).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "Start translating" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    // The start is open: every other way out of the panel waits for it.
+    others().forEach((button) => expect(button).toBeDisabled());
+    await user.click(screen.getByRole("button", { name: "Set it up by hand" }));
+    expect(
+      screen.getByRole("heading", {
+        name: "Translate the subtitles you cannot find",
+      }),
+    ).toBeVisible();
+    held.open();
+    await screen.findByText("The values are not valid.");
+    others().forEach((button) => expect(button).toBeEnabled());
+  });
+
+  it("locks the key form while another engine is being picked", async () => {
+    const held = gate();
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [engine({ configured: false, connections: [] }), second],
+    };
+    server.use(
+      http.put("/api/translation/pointers", async ({ request }) => {
+        record("put", "pointers", await request.json());
+        await held.opened;
+        return HttpResponse.json(
+          { error: "bad_request", message: "Not now." },
+          { status: 400 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await user.click(
+      await screen.findByRole("button", { name: "Use Google Translate" }),
+    );
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(
+      screen.getByRole("button", { name: "Start translating" }),
+    ).toBeDisabled();
+    expect(screen.getByLabelText("OpenRouter key")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Set it up by hand" }),
+    ).toBeDisabled();
+    held.open();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Start translating" }),
+      ).toBeEnabled(),
+    );
+  });
+
+  it("does not let a back end be removed while its save is on its way, or saved while it is being removed", async () => {
+    const saving = gate();
+    const removing = gate();
+    server.use(
+      http.patch("/api/translation/connections/:id", async () => {
+        record("patch", "connection", null);
+        await saving.opened;
+        return HttpResponse.json(
+          { error: "invalid", message: "The values are not valid." },
+          { status: 400 },
+        );
+      }),
+      http.delete("/api/translation/connections/:id", async () => {
+        record("delete", "connection", null);
+        await removing.opened;
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(
+      screen.getByRole("button", { name: "Edit OpenAI compatible, model-1" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save back end" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    // Saving: the removal cannot be started.
+    expect(
+      screen.getByRole("button", { name: "Remove back end" }),
+    ).toBeDisabled();
+    saving.open();
+    await screen.findByText("The values are not valid.");
+    await user.click(screen.getByRole("button", { name: "Remove back end" }));
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    // Removing: no save, no way out of the form, no typing.
+    expect(
+      screen.getByRole("button", { name: "Save back end" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Keep" })).toBeDisabled();
+    expect(screen.getByLabelText("Base URL")).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Save back end" }));
+    expect(calls).toHaveLength(2);
+    removing.open();
+    // The removal failed: the reason is shown and the form is usable again.
+    expect(
+      await screen.findByText("The back end could not be removed. Try again."),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save back end" })).toBeEnabled();
+    expect(screen.getByLabelText("Base URL")).toBeEnabled();
+  });
+
+  it("does not let a back end be removed while a conflict answer loads what is saved", async () => {
+    const held = gate();
+    let holding = false;
+    server.use(
+      http.get("/api/translation/state", async () => {
+        if (holding) {
+          await held.opened;
+        }
+        return HttpResponse.json(state);
+      }),
+      http.patch("/api/translation/connections/:id", () => {
+        holding = true;
+        return HttpResponse.json(
+          {
+            error: "stale_revision",
+            message: "The back end changed since it was loaded.",
+            revision: 2,
+          },
+          { status: 409 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(
+      screen.getByRole("button", { name: "Edit OpenAI compatible, model-1" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save back end" }));
+    await screen.findByText(/changed somewhere else/);
+    await user.click(
+      screen.getByRole("button", { name: "Discard and reload" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Remove back end" }),
+    ).toBeDisabled();
+    held.open();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Remove back end" }),
+      ).toBeEnabled(),
+    );
+  });
+
+  it("drops the waiting choice, says why, and goes back to what is saved when a pointer write is refused", async () => {
+    const held = gate();
+    server.use(
+      http.put("/api/translation/pointers", async ({ request }) => {
+        record("put", "pointers", await request.json());
+        await held.opened;
+        return HttpResponse.json(
+          { error: "bad_request", message: "That engine cannot be selected." },
+          { status: 400 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    const group = await showPage();
+    const official = within(group).getByRole("radio", {
+      name: /AI Subtitle Translator/,
+    });
+    const google = within(group).getByRole("radio", {
+      name: "Google Translate",
+    });
+    const none = within(group).getByRole("radio", { name: "None" });
+    expect(official).toBeChecked();
+    await user.click(google);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    // A second choice waits behind the first.
+    await user.click(none);
+    expect(none).toBeChecked();
+    held.open();
+    expect(
+      await screen.findByText("That engine cannot be selected."),
+    ).toBeVisible();
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    // The choice that waited was made on top of the refused one: it is not sent.
+    expect(calls.map((call) => call.body)).toEqual([{ engine: 2 }]);
+    // The list shows what is saved again.
+    await waitFor(() => expect(official).toBeChecked());
+    expect(google).not.toBeChecked();
+    expect(none).not.toBeChecked();
+  });
+});
+
+describe("Translation page, what a test result and a disabled switch say", () => {
+  it("forgets a test result once the back end has changed, and says the result aloud", async () => {
+    state = { ...state, capabilities: ["test"] };
+    server.use(
+      http.post("/api/translation/connections/:id/test", () =>
+        HttpResponse.json({ ok: true, message: "", latency_ms: 820 }),
+      ),
+      http.patch("/api/translation/connections/:id", ({ params }) => {
+        const id = Number(params.id);
+        // The switch moved the back end on to its next revision.
+        state = {
+          ...state,
+          instances: [
+            second,
+            engine({
+              connections: [
+                connection(1),
+                connection(2, { enabled: false, revision: 2 }),
+              ],
+            }),
+          ],
+        };
+        return HttpResponse.json({
+          connection: connection(id, { enabled: false, revision: 2 }),
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(
+      screen.getByRole("button", { name: "Test OpenAI compatible, model-2" }),
+    );
+    expect(
+      await screen.findByText("It works. Answered in 820 ms."),
+    ).toBeVisible();
+    // The same answer goes through the live region, named after its row.
+    const said = screen
+      .getAllByRole("status")
+      .find(
+        (region) =>
+          region.textContent ===
+          "OpenAI compatible, model-2: It works. Answered in 820 ms.",
+      );
+    expect(said).toHaveAttribute("aria-live", "polite");
+    await user.click(screen.getByLabelText("Use OpenAI compatible, model-2"));
+    // It is a different back end now: what was tested is not what is saved.
+    await waitFor(() =>
+      expect(
+        screen.queryByText("It works. Answered in 820 ms."),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("says why a row's switch cannot be used while its form is open", async () => {
+    const user = userEvent.setup();
+    await showPage();
+    const toggle = screen.getByLabelText("Use OpenAI compatible, model-1");
+    expect(toggle).not.toHaveAccessibleDescription();
+    await user.click(
+      screen.getByRole("button", { name: "Edit OpenAI compatible, model-1" }),
+    );
+    expect(toggle).toHaveAccessibleDescription(
+      "Save or close the form to switch this back end on or off.",
+    );
+  });
+});
+
+describe("Translation page, Activity when a list cannot be loaded", () => {
+  const rows = (status: string | null): TranslationHistoryJob[] =>
+    [
+      job(1, { status: "running", finished_at: null }),
+      job(2, { media_title: "Dune: Part Two" }),
+    ].filter((item) => !status || item.status === status);
+
+  it("says the running jobs could not be loaded, and loads them on Try again", async () => {
+    let fail = true;
+    server.use(
+      http.get("/api/translation/history", ({ request }) => {
+        const status = new URL(request.url).searchParams.get("status");
+        if (status === "running" && fail) {
+          return new HttpResponse(null, { status: 500 });
+        }
+        const data = rows(status);
+        return HttpResponse.json({ data, total: data.length });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    const problem = await screen.findByText(
+      "The running jobs could not be loaded.",
+    );
+    expect(problem).toBeVisible();
+    // The history, which did load, is still there.
+    expect(await screen.findByText("Dune: Part Two")).toBeVisible();
+    fail = false;
+    await user.click(
+      within(alertSaying(problem.textContent ?? "")).getByRole("button", {
+        name: "Try again",
+      }),
+    );
+    const now = await screen.findByRole("list", { name: "Translating now" });
+    expect(within(now).getByText("Film 1")).toBeVisible();
+    expect(
+      screen.queryByText("The running jobs could not be loaded."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the rows it has, marked as possibly out of date, when an update fails", async () => {
+    let fail = false;
+    server.use(
+      http.get("/api/translation/history", ({ request }) => {
+        if (fail) {
+          return new HttpResponse(null, { status: 500 });
+        }
+        const data = rows(new URL(request.url).searchParams.get("status"));
+        return HttpResponse.json({ data, total: data.length });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    const now = await screen.findByRole("list", { name: "Translating now" });
+    expect(now).toHaveAttribute("data-stale", "false");
+    fail = true;
+    await queryClient.invalidateQueries();
+    expect(
+      await screen.findByText(
+        "The running jobs could not be updated. What is listed may be out of date.",
+      ),
+    ).toBeVisible();
+    expect(
+      await screen.findByText(
+        "The history could not be updated. What is listed may be out of date.",
+      ),
+    ).toBeVisible();
+    // Nothing was thrown away: the rows are still listed, and marked.
+    expect(within(now).getByText("Film 1")).toBeVisible();
+    expect(now).toHaveAttribute("data-stale", "true");
+    expect(screen.getByRole("list", { name: "History" })).toHaveAttribute(
+      "data-stale",
+      "true",
+    );
+  });
+
+  it("says the waiting jobs could not be loaded, and loads them on Try again", async () => {
+    state = { ...state, capabilities: ["queue"] };
+    let fail = true;
+    server.use(
+      http.get("/api/translation/queue", () =>
+        fail
+          ? new HttpResponse(null, { status: 500 })
+          : HttpResponse.json({
+              data: [
+                {
+                  job_id: "a",
+                  media_type: "movie",
+                  media_id: 1,
+                  media_title: "Arrival",
+                  source_language: "en",
+                  target_language: "hu",
+                  engine_instance_id: 1,
+                  status: "queued",
+                  queued_at: null,
+                },
+              ],
+              total: 1,
+            }),
+      ),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    const problem = await screen.findByText(
+      "The waiting jobs could not be loaded.",
+    );
+    fail = false;
+    await user.click(
+      within(alertSaying(problem.textContent ?? "")).getByRole("button", {
+        name: "Try again",
+      }),
+    );
+    const waiting = await screen.findByRole("list", { name: "Waiting" });
+    expect(within(waiting).getByText("Arrival")).toBeVisible();
+    expect(
+      screen.queryByText("The waiting jobs could not be loaded."),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("Translation page, first run with the official engine installed but not running", () => {
+  it("says what the engine reports, not that it is not installed", async () => {
+    state = {
+      enabled: true,
+      engine: null,
+      fallback_engine: null,
+      instances: [
+        engine({
+          configured: false,
+          connections: [],
+          plugin: {
+            name: "AI Subtitle Translator",
+            version: "2.2.0",
+            active: false,
+          },
+        }),
+      ],
+      available_engines: [],
+    };
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    expect(screen.getByText("Plugin not running")).toBeVisible();
+    expect(
+      screen.getByText(
+        /Its plugin is not installed or not running\. Repair or reinstall it in the Subtitle Hub\./,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/^It is not installed/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Start translating" }),
+    ).not.toBeInTheDocument();
   });
 });

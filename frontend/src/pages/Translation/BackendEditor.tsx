@@ -169,6 +169,11 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
     await save();
   };
 
+  // One thing at a time on this form: a save, a reload for a conflict answer, or the removal. While
+  // one is on its way the others cannot be started, so two writes to the same back end never overlap.
+  const working = form.busy || loadingFor !== null;
+  const busy = working || remove.isPending;
+
   const name = connection
     ? backendLabel(engine, connection)
     : (start?.label ?? definition?.label ?? "back end");
@@ -194,7 +199,7 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
           errors={form.fieldErrors}
           // Locked while a conflict answer loads what is saved now: the save that follows sends what the
           // form held when the answer was given, so nothing may be typed in between.
-          disabled={form.busy || loadingFor !== null}
+          disabled={busy}
           pendingClear={cleared}
           optionsFor={(key) =>
             key === "model"
@@ -216,6 +221,7 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
             saving={form.busy || loadingFor === "mine"}
             reloading={loadingFor === "discard"}
             problem={reloadProblem}
+            disabled={remove.isPending}
             onSaveMine={() => void saveMine()}
             onDiscard={() => void discard()}
           />
@@ -241,6 +247,7 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
                 size="xs"
                 color="red"
                 loading={remove.isPending}
+                disabled={working}
                 onClick={() =>
                   remove.mutate(
                     { id: connection.id, revision: connection.revision },
@@ -249,7 +256,7 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
                       onError: (error) => {
                         setRemoving(false);
                         setRemoveProblem(
-                          readRefusal(error)?.message ??
+                          readRefusal(error)?.message ||
                             "The back end could not be removed. Try again.",
                         );
                       },
@@ -262,6 +269,7 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
               <Button
                 size="xs"
                 variant="default"
+                disabled={remove.isPending}
                 onClick={() => setRemoving(false)}
               >
                 Keep
@@ -272,6 +280,7 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
               variant="subtle"
               color="red"
               size="sm"
+              disabled={working}
               onClick={() => {
                 setRemoveProblem("");
                 setRemoving(true);
@@ -285,10 +294,14 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
         )}
         {!form.stale && (
           <Group gap="xs">
-            <Button variant="default" onClick={onClose} disabled={form.busy}>
+            <Button variant="default" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button loading={form.busy} onClick={() => void save()}>
+            <Button
+              loading={form.busy}
+              disabled={remove.isPending || loadingFor !== null}
+              onClick={() => void save()}
+            >
               {connection ? "Save back end" : "Add back end"}
             </Button>
           </Group>

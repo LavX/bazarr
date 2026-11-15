@@ -1,5 +1,5 @@
 /* eslint-disable camelcase -- transport names. */
-import { FunctionComponent, useRef, useState } from "react";
+import { FunctionComponent, useId, useRef, useState } from "react";
 import { Alert, Button, Menu, Switch, VisuallyHidden } from "@mantine/core";
 import {
   faCircleCheck,
@@ -34,7 +34,13 @@ import styles from "./Translation.module.scss";
 interface TestOutcome {
   ok: boolean;
   message: string;
+  /** The revision of the back end the test ran against. A changed back end has not been tested. */
+  revision: number;
 }
+
+/** Why a row's switch cannot be used while that row's form is open. */
+const SWITCH_WAITS =
+  "Save or close the form to switch this back end on or off.";
 
 const seconds = (ms: number) =>
   ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
@@ -54,6 +60,7 @@ const BackendList: FunctionComponent<{
   const [adding, setAdding] = useState<StartingPoint | null>(null);
   const [problem, setProblem] = useState("");
   const [announcement, setAnnouncement] = useState("");
+  const hintId = useId();
   const [tests, setTests] = useState<Record<number, TestOutcome>>({});
   const [testing, setTesting] = useState<number | null>(null);
   // The order as the user just set it, shown until the saved order comes back.
@@ -74,7 +81,7 @@ const BackendList: FunctionComponent<{
     setProblem(
       refusal?.code === "stale_revision"
         ? "That back end was changed somewhere else. The list now shows what is saved; try again."
-        : (refusal?.message ?? "The request failed. Try again."),
+        : refusal?.message || "The request failed. Try again.",
     );
   };
 
@@ -154,34 +161,32 @@ const BackendList: FunctionComponent<{
   );
 
   const runTest = (item: TranslationConnection) => {
+    // The answer belongs to the back end as it was when the test ran, and is said aloud as well as shown.
+    const report = (ok: boolean, message: string) => {
+      setTests((current) => ({
+        ...current,
+        [item.id]: { ok, message, revision: item.revision },
+      }));
+      setAnnouncement(backendName(engine, item) + ": " + message);
+    };
     setTesting(item.id);
     test.mutate(item.id, {
       onSuccess: (result) =>
-        setTests((current) => ({
-          ...current,
-          [item.id]: {
-            ok: result.ok,
-            message: result.ok
-              ? `It works.${
-                  typeof result.latency_ms === "number"
-                    ? ` Answered in ${seconds(result.latency_ms)}.`
-                    : ""
-                }`
-              : result.message,
-          },
-        })),
-      onError: (error) => {
-        const refusal = readRefusal(error);
-        setTests((current) => ({
-          ...current,
-          [item.id]: {
-            ok: false,
-            message:
-              refusal?.message ??
-              "The test could not run. Check that Bazarr+ is reachable and try again.",
-          },
-        }));
-      },
+        report(
+          result.ok,
+          result.ok
+            ? "It works." +
+                (typeof result.latency_ms === "number"
+                  ? " Answered in " + seconds(result.latency_ms) + "."
+                  : "")
+            : result.message,
+        ),
+      onError: (error) =>
+        report(
+          false,
+          readRefusal(error)?.message ||
+            "The test could not run. Check that Bazarr+ is reachable and try again.",
+        ),
       onSettled: () => setTesting(null),
     });
   };
@@ -293,21 +298,27 @@ const BackendList: FunctionComponent<{
                   // the back end on to the next one: the form's save would then be refused as a conflict
                   // with this page's own write.
                   disabled={editing}
-                  title={
-                    editing
-                      ? "Save or close the form to switch this back end on or off"
-                      : undefined
-                  }
+                  aria-describedby={editing ? hintId + item.id : undefined}
+                  title={editing ? SWITCH_WAITS : undefined}
                   onChange={(event) =>
                     void setEnabled(item, event.currentTarget.checked)
                   }
                 />
+                {editing && (
+                  <VisuallyHidden id={hintId + item.id}>
+                    {SWITCH_WAITS}
+                  </VisuallyHidden>
+                )}
               </div>
             </div>
           );
         }}
         renderDetail={(item) => {
-          const outcome = tests[item.id];
+          // A result is shown only for the back end it was run against: any change since makes it old.
+          const outcome =
+            tests[item.id]?.revision === item.revision
+              ? tests[item.id]
+              : undefined;
           const editing = editingId === item.id;
           if (!outcome && !editing) {
             return null;
@@ -318,7 +329,6 @@ const BackendList: FunctionComponent<{
                 <div
                   className={styles.result}
                   data-tone={outcome.ok ? "success" : "danger"}
-                  role="status"
                 >
                   <FontAwesomeIcon
                     icon={outcome.ok ? faCircleCheck : faTriangleExclamation}

@@ -15,7 +15,7 @@ import type {
   TranslationState,
 } from "@/types/translation";
 import ConsentModal from "./ConsentModal";
-import { LegacyMark, OfficialMark } from "./EnginePanel";
+import { LEGACY_NOTE, LegacyMark, OfficialMark } from "./EnginePanel";
 import InstallConsent from "./InstallConsent";
 import {
   canRun,
@@ -31,7 +31,11 @@ import styles from "./Translation.module.scss";
 const KeyStart: FunctionComponent<{
   engine: TranslationEngine;
   onPin: (pinned: boolean) => void;
-}> = ({ engine, onPin }) => {
+  /** Told while a start is on its way, so the rest of the panel can wait for it. */
+  onBusy: (busy: boolean) => void;
+  /** Another choice on the panel is on its way: this form waits for it. */
+  locked: boolean;
+}> = ({ engine, onPin, onBusy, locked }) => {
   const types = keyOnlyTypes(engine);
   const [typeId, setTypeId] = useState(types[0]?.typeId ?? "");
   const [key, setKey] = useState("");
@@ -45,6 +49,7 @@ const KeyStart: FunctionComponent<{
     // The panel stays up from here until the start has gone through: a refresh in between would
     // otherwise replace it, and the reason a step failed would go with it.
     onPin(true);
+    onBusy(true);
     try {
       await start.mutateAsync({
         instanceId: engine.id,
@@ -74,6 +79,8 @@ const KeyStart: FunctionComponent<{
         onPin(false);
       }
       throw error;
+    } finally {
+      onBusy(false);
     }
     onPin(false);
   });
@@ -114,7 +121,7 @@ const KeyStart: FunctionComponent<{
             label: item.type.label,
           }))}
           value={picked.typeId}
-          disabled={form.busy}
+          disabled={form.busy || locked}
           onChange={(next) => {
             setTypeId(next);
             setKey("");
@@ -145,7 +152,7 @@ const KeyStart: FunctionComponent<{
         }
         value={key}
         placeholder={keySaved ? "Saved" : undefined}
-        disabled={form.busy || keySaved}
+        disabled={form.busy || keySaved || locked}
         error={keyError}
         onChange={(event) => {
           setKey(event.currentTarget.value);
@@ -164,7 +171,7 @@ const KeyStart: FunctionComponent<{
         </Alert>
       )}
       <div>
-        <Button type="submit" loading={form.busy}>
+        <Button type="submit" loading={form.busy} disabled={locked}>
           {keySaved ? "Switch the engine on" : "Start translating"}
         </Button>
       </div>
@@ -197,6 +204,10 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
   onPin,
 }) => {
   const pointers = usePointersMutation();
+  // One choice at a time on the whole panel: while a start or a pick is on its way, nothing else can
+  // be chosen, so an answer that comes back late cannot replace a newer choice.
+  const [starting, setStarting] = useState(false);
+  const busy = starting || pointers.isPending;
   const [installing, setInstalling] =
     useState<TranslationAvailableEngine | null>(null);
   const engines = orderedEngines(state.instances);
@@ -232,11 +243,16 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
         </p>
         {official && canRun(official) ? (
           keyOnlyTypes(official).length > 0 ? (
-            <KeyStart engine={official} onPin={onPin} />
+            <KeyStart
+              engine={official}
+              onPin={onPin}
+              onBusy={setStarting}
+              locked={pointers.isPending}
+            />
           ) : (
             <div className={styles.startForm}>
               <div>
-                <Button onClick={() => onByHand(official.id)}>
+                <Button disabled={busy} onClick={() => onByHand(official.id)}>
                   Set up its back ends
                 </Button>
               </div>
@@ -245,11 +261,23 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
         ) : officialOffer ? (
           <div className={styles.startForm}>
             <div>
-              <Button onClick={() => setInstalling(officialOffer)}>
+              <Button
+                disabled={busy}
+                onClick={() => setInstalling(officialOffer)}
+              >
                 Install {officialOffer.name}
               </Button>
             </div>
           </div>
+        ) : official ? (
+          // Installed and not able to run: what it reports, not "not installed".
+          <p className={styles.startOptionText}>
+            <StatusBadge
+              tone={engineStatus(official).tone}
+              label={engineStatus(official).label}
+            />{" "}
+            {engineStatus(official).next}
+          </p>
         ) : (
           <p className={styles.startOptionText}>
             {catalogKnown
@@ -276,19 +304,25 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
                   {ready
                     ? engine.description || "Installed. It works as it is."
                     : status.next}
+                  {engine.legacy && ` ${LEGACY_NOTE}`}
                 </p>
               </div>
               {ready ? (
                 <Button
                   variant="default"
                   loading={pointers.isPending}
+                  disabled={starting}
                   onClick={() => pointers.mutate({ engine: engine.id })}
                 >
                   Use {engineName(engine)}
                 </Button>
               ) : (
                 canRun(engine) && (
-                  <Button variant="default" onClick={() => onByHand(engine.id)}>
+                  <Button
+                    variant="default"
+                    disabled={busy}
+                    onClick={() => onByHand(engine.id)}
+                  >
                     Set up {engineName(engine)}
                   </Button>
                 )
@@ -308,7 +342,11 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
                   "Free, with no key. Plainer translations than the AI engine."}
               </p>
             </div>
-            <Button variant="default" onClick={() => setInstalling(engine)}>
+            <Button
+              variant="default"
+              disabled={busy}
+              onClick={() => setInstalling(engine)}
+            >
               Install {engine.name}
             </Button>
           </div>
@@ -347,6 +385,8 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
           component="button"
           type="button"
           size="sm"
+          disabled={busy}
+          className={styles.startLink}
           onClick={() => onByHand()}
         >
           Set it up by hand

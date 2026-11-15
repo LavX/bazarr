@@ -39,7 +39,11 @@ export function useTranslationState() {
   });
 }
 
-/** A refusal from the typed API in the shape the page shows; null for anything else. */
+/**
+ * A refusal from the typed API in the shape the page shows; null for anything else. `message` is the
+ * server's own sentence, or empty when it sent none: the caller then says what failed in its own words,
+ * and a bare "Request failed with status code 500" never reaches the page.
+ */
 export function readRefusal(error: unknown): TranslationRefusal | null {
   if (!isAxiosError(error) || !error.response) {
     return null;
@@ -48,7 +52,7 @@ export function readRefusal(error: unknown): TranslationRefusal | null {
   return {
     status: error.response.status,
     code: typeof data.error === "string" ? data.error : "",
-    message: typeof data.message === "string" ? data.message : error.message,
+    message: typeof data.message === "string" ? data.message : "",
     fieldErrors:
       typeof data.field_errors === "object" && data.field_errors !== null
         ? (data.field_errors as Record<string, string>)

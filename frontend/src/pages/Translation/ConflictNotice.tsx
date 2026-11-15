@@ -11,6 +11,8 @@ export interface ConflictNoticeProps {
   reloading?: boolean;
   /** Why what is saved now could not be loaded. */
   problem?: string;
+  /** Something else on the form is on its way: neither answer can be given yet. */
+  disabled?: boolean;
   onSaveMine: () => void;
   onDiscard: () => void;
 }
@@ -27,6 +29,7 @@ const ConflictNotice: FunctionComponent<ConflictNoticeProps> = ({
   saving,
   reloading,
   problem,
+  disabled,
   onSaveMine,
   onDiscard,
 }) => (
@@ -43,7 +46,7 @@ const ConflictNotice: FunctionComponent<ConflictNoticeProps> = ({
       <Button
         size="xs"
         loading={saving}
-        disabled={reloading}
+        disabled={reloading || disabled}
         onClick={onSaveMine}
       >
         Save my version
@@ -52,7 +55,7 @@ const ConflictNotice: FunctionComponent<ConflictNoticeProps> = ({
         size="xs"
         variant="default"
         loading={reloading}
-        disabled={saving}
+        disabled={saving || disabled}
         onClick={onDiscard}
       >
         Discard and reload
