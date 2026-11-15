@@ -2860,10 +2860,14 @@ RUNTIME_OWNED_SETTING_PATHS = frozenset({
 
 def is_server_owned_setting(path):
     """Whether the settings API must leave this setting alone: always for the server's own, and for the
-    runtime's while its switch is on."""
+    runtime's while the runtime is on, which is when the switch is set and its tables exist (the same condition
+    the translation routes use)."""
     if path in SERVER_OWNED_SETTING_PATHS:
         return True
-    return path in RUNTIME_OWNED_SETTING_PATHS and getattr(settings.translator, 'runtime_v2', False) is True
+    if path not in RUNTIME_OWNED_SETTING_PATHS or getattr(settings.translator, 'runtime_v2', False) is not True:
+        return False
+    from subtitles.tools.translate.runtime import runtime_v2_enabled
+    return runtime_v2_enabled()
 
 
 def _auth_identity():

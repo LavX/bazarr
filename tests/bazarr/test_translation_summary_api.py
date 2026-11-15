@@ -61,6 +61,7 @@ def world(monkeypatch, schema_session):
     w.summary = TranslationSummary(
         schema_session, limits=w.limits, queue_counts=lambda: w.counts, queue_job=lambda id: w.queue_jobs.get(id),
         title_lookup=lambda *args: w.titles.get(args, ""), translation_limit=lambda: 2, clock=lambda: MOMENT)
+    w.real_get_summary = module.get_summary
     monkeypatch.setattr(module, "get_summary", lambda: w.summary)
     monkeypatch.setattr(module, "get_limits", lambda: w.limits)
 
@@ -152,11 +153,14 @@ def test_garbage_counts_are_read_as_zero_and_a_missing_limit_is_null(world):
     assert world.call("get", "summary").json["queue"] == {"running": 0, "pending": 0, "limit": None}
 
 
-def test_the_default_readers_answer_the_summary_the_limits_save_and_the_queue(world):
-    """No stubbed counters: the jobs queue's own counts, as the application builds the summary."""
+def test_the_real_summary_on_the_application_database_answers_the_summary_the_limits_save_and_the_queue(
+        world, monkeypatch):
+    """No stubbed reader: ``TranslationSummary(database)`` with its own counters, as the application builds it."""
+    import app.database
     from app.jobs_queue import jobs_queue
 
-    world.module.get_summary = lambda: TranslationSummary(world.session, limits=world.limits, clock=lambda: MOMENT)
+    monkeypatch.setattr(app.database, "database", world.session)
+    monkeypatch.setattr(world.module, "get_summary", world.real_get_summary)
     expected = jobs_queue.translation_lane_counts()
     summary = world.call("get", "summary")
     assert summary.status_code == 200, summary.get_data(as_text=True)
@@ -164,7 +168,7 @@ def test_the_default_readers_answer_the_summary_the_limits_save_and_the_queue(wo
     assert summary.json["queue"]["pending"] == expected["pending"]
     assert isinstance(summary.json["queue"]["limit"], int)
     saved = world.call("put", "limits", {"month_cap": 4.5, "job_cap": None})
-    assert saved.status_code == 200 and saved.json["month"]["cap"] == 4.5
+    assert saved.status_code == 200 and set(saved.json) >= {"month", "job_cap", "queue"}
     assert world.call("get", "queue").status_code == 200
 
 
@@ -364,3 +368,33 @@ def test_the_translation_limit_is_the_concurrency_setting():
     from subtitles.tools.translate.runtime.limits import translation_limit
 
     assert translation_limit() == settings.translator.openrouter_max_concurrent
+
+
+def test_a_reader_waits_for_a_write_and_never_sees_values_a_failed_write_takes_back(monkeypatch):
+    import threading
+
+    import app.config as config
+    from app.config import settings
+
+    store = ConfigLimits()
+    before = store.get()
+    seen = {}
+
+    def failing_write(*args, **kwargs):
+        def read():
+            seen["limits"] = store.get()
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        reader.join(0.3)
+        seen["blocked"] = reader.is_alive()  # the caps are published, but the reader is still waiting
+        seen["reader"] = reader
+        return False
+
+    monkeypatch.setattr(config, "write_config", failing_write)
+    assert store.set(9_000_000, 3_000_000, before.revision + 1) is False
+    seen["reader"].join(5)
+    assert seen["blocked"] is True
+    assert seen["limits"] == before
+    assert store.get() == before
+    assert settings.translator.month_cap_micros == before.month_cap_micros

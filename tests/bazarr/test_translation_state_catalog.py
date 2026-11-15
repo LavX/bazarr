@@ -36,10 +36,10 @@ def translator_kind():
             kinds._KINDS["translator"] = before
 
 
-@pytest.fixture(autouse=True)
-def installer_stages_translators(monkeypatch):
-    """The installer accepts translator manifests, which the real one does not yet, so the rest of this file can
-    see what the catalog offers. The tests that need the real refusal put it back."""
+@pytest.fixture
+def stageable(monkeypatch):
+    """The installer accepts translator manifests, which the real one does not yet, so the tests that
+    list what the catalog offers can see it. The tests that need the real refusal do not use this."""
     import provider_hub.service as hub
 
     monkeypatch.setattr(hub, "real_validate_manifest", hub.validate_manifest, raising=False)
@@ -105,7 +105,7 @@ def test_a_description_is_trimmed_and_a_manifest_that_does_not_parse_is_skipped(
 
 # ---------------------------------------------------------------- the hub side
 
-def test_an_uninstalled_engine_is_installable_and_an_installed_one_is_not(tmp_path, monkeypatch):
+def test_an_uninstalled_engine_is_installable_and_an_installed_one_is_not(tmp_path, monkeypatch, stageable):
     from provider_hub.service import installable_catalog_plugins
 
     _state(tmp_path, monkeypatch, [_entry(_ai_manifest()), _entry(_google_manifest())],
@@ -114,7 +114,7 @@ def test_an_uninstalled_engine_is_installable_and_an_installed_one_is_not(tmp_pa
     assert [entry["provider_id"] for entry in installable_catalog_plugins("translator")] == [PLUGIN]
 
 
-def test_the_newest_version_of_each_engine_is_the_one_offered(tmp_path, monkeypatch):
+def test_the_newest_version_of_each_engine_is_the_one_offered(tmp_path, monkeypatch, stageable):
     from provider_hub.service import installable_catalog_plugins
 
     _state(tmp_path, monkeypatch, [_entry(_google_manifest("1.0.0")), _entry(_google_manifest("1.2.0")),
@@ -123,7 +123,7 @@ def test_the_newest_version_of_each_engine_is_the_one_offered(tmp_path, monkeypa
     assert entry["version"] == "1.2.0"
 
 
-def test_a_subtitle_provider_is_not_an_engine_and_a_trusted_source_wins_a_tie(tmp_path, monkeypatch):
+def test_a_subtitle_provider_is_not_an_engine_and_a_trusted_source_wins_a_tie(tmp_path, monkeypatch, stageable):
     from provider_hub.service import installable_catalog_plugins
 
     provider = provider_manifest(provider_id="examplehub", version="1.0.0")
@@ -136,10 +136,8 @@ def test_a_subtitle_provider_is_not_an_engine_and_a_trusted_source_wins_a_tie(tm
 
 
 def test_an_engine_the_install_path_would_refuse_is_not_offered(tmp_path, monkeypatch):
-    import provider_hub.service as hub
     from provider_hub.service import installable_catalog_plugins, stage_install
 
-    monkeypatch.setattr(hub, "validate_manifest", hub.real_validate_manifest)
     manifest = _google_manifest()
     _state(tmp_path, monkeypatch, [_entry(manifest)])
     # The install path refuses a translator manifest, so the page must not start that install.
@@ -149,7 +147,7 @@ def test_an_engine_the_install_path_would_refuse_is_not_offered(tmp_path, monkey
     assert catalog_view.available_engines() == []
 
 
-def test_an_entry_whose_manifest_is_not_a_valid_translator_is_not_offered(tmp_path, monkeypatch):
+def test_an_entry_whose_manifest_is_not_a_valid_translator_is_not_offered(tmp_path, monkeypatch, stageable):
     from provider_hub.service import installable_catalog_plugins
 
     wrong_api = _google_manifest(version="1.0.1")

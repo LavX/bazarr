@@ -66,34 +66,40 @@ class ConfigLimits:
         return CONFIG_LOCK
 
     def get(self) -> StoredLimits:
+        """Both caps and the revision as one snapshot. A reader waits for a write in progress, so it never sees
+        a cap that a failed write is about to take back."""
         from app.config import settings
 
-        section = settings.translator
-        revision = getattr(section, "limits_revision", 1)
-        return StoredLimits(_micros_or_none(getattr(section, "month_cap_micros", None)),
-                            _micros_or_none(getattr(section, "job_cap_micros", None)),
-                            revision if isinstance(revision, int) and not isinstance(revision, bool) else 1)
+        with self.lock():
+            section = settings.translator
+            revision = getattr(section, "limits_revision", 1)
+            return StoredLimits(_micros_or_none(getattr(section, "month_cap_micros", None)),
+                                _micros_or_none(getattr(section, "job_cap_micros", None)),
+                                revision if isinstance(revision, int) and not isinstance(revision, bool) else 1)
 
     def set(self, month_cap_micros: int | None, job_cap_micros: int | None, revision: int) -> bool:
         """Write both caps and the new revision. False, with the live values put back, when the file could not be written."""
         from app.config import settings, write_config
 
-        section = settings.translator
-        previous = self.get()
-        try:
-            section.month_cap_micros = month_cap_micros
-            section.job_cap_micros = job_cap_micros
-            section.limits_revision = revision
-            saved = write_config()
-        except Exception:
-            logger.exception("Could not save the translation cost limits")
-            saved = False
-        if saved is not True:
-            section.month_cap_micros = previous.month_cap_micros
-            section.job_cap_micros = previous.job_cap_micros
-            section.limits_revision = previous.revision
-            return False
-        return True
+        # The caps are published and persisted under the config lock, which readers take too: a reader sees the
+        # old caps or the new ones, never a half-written pair or values a failed write is about to put back.
+        with self.lock():
+            section = settings.translator
+            previous = self.get()
+            try:
+                section.month_cap_micros = month_cap_micros
+                section.job_cap_micros = job_cap_micros
+                section.limits_revision = revision
+                saved = write_config()
+            except Exception:
+                logger.exception("Could not save the translation cost limits")
+                saved = False
+            if saved is not True:
+                section.month_cap_micros = previous.month_cap_micros
+                section.job_cap_micros = previous.job_cap_micros
+                section.limits_revision = previous.revision
+                return False
+            return True
 
 
 def _micros_or_none(value: Any) -> int | None:

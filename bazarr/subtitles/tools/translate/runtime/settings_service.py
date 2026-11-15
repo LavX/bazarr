@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Mapping
@@ -120,6 +121,10 @@ OptionsSource = Callable[[int, str, str, Mapping[str, Any]], Mapping[str, Any] |
 TEST_INPUT_TOKENS = 64
 TEST_OUTPUT_TOKENS = 16
 TEST_MESSAGE_LIMIT = 300
+# A probe is told to give up after this long, and is not waited for much longer: a hung worker must not hold a
+# request thread, and its worst-case charge stays counted.
+TEST_TIMEOUT_SECONDS = 20.0
+TEST_TIMEOUT_GRACE_SECONDS = 5.0
 OPEN_TEST = "The translation engine is not running, so this back end cannot be tested yet."
 
 
@@ -140,6 +145,7 @@ class ProbeRequest:
     destinations: frozenset[str]
     input_token_limit: int
     output_token_limit: int
+    timeout_seconds: float = TEST_TIMEOUT_SECONDS
     secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
 
 
@@ -212,19 +218,24 @@ def _configured_limits() -> "CostLimits":
     return current_cost_limits()
 
 
-def _cap_message(reason: str | None, limits: "CostLimits") -> str:
-    """Why a priced test was not sent, naming the cap that is actually set."""
+def _cap_message(reason: str | None, caps: "CostLimits", remainder: int | None) -> str:
+    """Why a priced test was not sent, naming the cap that binds.
+
+    With both caps set, the one that leaves less room is named: ``remainder`` is what is left of the month.
+    """
     if reason == "wait":
         return "Other translations are holding this month's budget. Try the test again in a moment."
     month = ("This back end is priced and what is left of this month's cost limit cannot cover a test, so no "
              "test was sent. Raise the monthly limit, or wait for next month.")
     job = ("This back end is priced and the cost limit for one translation is too low to cover a test, so no "
            "test was sent. Raise that limit, or test a free back end.")
-    if reason in ("job_cap_spent", "job_budget") and limits.job_cap is not None:
+    if caps.month_cap is None:
         return job
-    if limits.month_cap is not None:
+    if caps.job_cap is None or reason == "month_spent":
         return month
-    return job
+    if reason == "job_cap_spent":
+        return job
+    return month if remainder is not None and remainder < caps.job_cap else job
 
 
 class TranslatorSettingsService:
@@ -583,8 +594,14 @@ class TranslatorSettingsService:
             if not self._lingarr.set(url, token):
                 raise ServiceError("The Lingarr settings could not be saved.")
 
+            wrote = (url, before_token if token is None else token)
+
             def undo() -> None:
+                # Compare and restore: only the values this save wrote are put back. Anything that changed
+                # them since belongs to a newer save and stays.
                 with self._lingarr.lock():
+                    if (self._lingarr.url(), self._lingarr.token()) != wrote:
+                        return
                     if not self._lingarr.set(before, before_token):
                         logger.error("The Lingarr settings could not be put back after a failed save")
 
@@ -716,7 +733,7 @@ class TranslatorSettingsService:
 
     # ------------------------------------------------------------ options
     def options(self, instance_id: int, backend_type: str, field_key: str,
-                draft: Mapping[str, Any]) -> dict[str, Any]:
+                draft: Mapping[str, Any], *, plugin: InstalledPlugin | None = None) -> dict[str, Any]:
         """The live choices of an ``options`` field, or ``available: false`` so the page offers free text.
 
         The request is checked against the manifest before a source sees it: the back-end type and the
@@ -725,7 +742,7 @@ class TranslatorSettingsService:
         ``TranslatorStore.secrets_for_request`` covers that address, and no redirect is followed.
         """
         instance = self._instance(instance_id)
-        plugin = self._plugin(instance.plugin_id)
+        plugin = plugin or self._plugin(instance.plugin_id)  # a connection served by an extension names its own
         display = self._display_schema(plugin)
         unavailable = {"available": False, "items": [], "reason": "The model list could not be fetched."}
         if display is None:
@@ -797,16 +814,16 @@ class TranslatorSettingsService:
             if self._probe is not None:
                 return self._paid_test(connection, instance, values, destinations, secrets, held, where)
             return self._listing_test(connection, instance, values, where)
-        except ServiceError:
-            raise
         except Exception as error:
-            # What went wrong may carry an address or a key in its text: only its type is said.
+            # Whatever a probe or a model list raised, a refusal of ours included, may carry an address or a key
+            # in its text or its fields: only its type is said.
             logger.warning("A connection test failed with %s", type(error).__name__)
             return self._test_result(False, "The test could not be completed. Check the Bazarr+ log for the cause.")
 
     def _listing_test(self, connection, instance, values, where) -> dict[str, Any]:
         """Ask for the model list, which the engine fetches with no charge. It answers when the back end does."""
-        definition = (self._display_schema(self._plugin(instance.plugin_id)) or {}).get("backend_types", {})
+        plugin = self._serving_plugin(instance, connection)
+        definition = (self._display_schema(plugin) or {}).get("backend_types", {})
         fields = (definition.get(connection.backend_type) or {}).get("fields") or []
         listing = next((item["key"] for item in fields if item.get("type") == "options"), None)
         if listing is None:
@@ -814,7 +831,7 @@ class TranslatorSettingsService:
         draft = {**values, **({MODEL_KEY: connection.model} if connection.model else {})}
         started = time.monotonic()
         try:
-            answer = self.options(instance.id, connection.backend_type, listing, draft)
+            answer = self.options(instance.id, connection.backend_type, listing, draft, plugin=plugin)
         except InvalidValuesError:
             return self._test_result(False, "The saved settings no longer fit this version of the plugin. Open "
                                             "this back end and save it again.")
@@ -825,34 +842,51 @@ class TranslatorSettingsService:
     def _paid_test(self, connection, instance, values, destinations, secrets, held, where) -> dict[str, Any]:
         # Imported here: the ledger reads the database tables at import, and a caller that only lists
         # engines or saves settings must not need them.
-        from .usage import RESERVED, UsageLedger, worst_case_micros
+        from .usage import RESERVED, CostLimits, UsageLedger, worst_case_micros
 
         worst = worst_case_micros(TEST_INPUT_TOKENS, TEST_OUTPUT_TOKENS, _price(connection.price_input_per_million),
                                   _price(connection.price_output_per_million))
         ledger = UsageLedger(self._store.session)
-        limits = self._cost_limits() if self._cost_limits is not None else _configured_limits()
+        caps = self._cost_limits() if self._cost_limits is not None else _configured_limits()
+        # The test holds what it may cost, not a whole job's share of the month.
+        limits = CostLimits(caps.month_cap, worst if caps.job_cap is None else min(caps.job_cap, worst),
+                            caps.translation_limit)
         job_id = f"connection-test-{connection.id}-{uuid4().hex[:12]}"
         call_id = "test"
         if worst > 0:
             # A priced test is a call like any other: it fits the month and job caps or it does not run.
-            budget = ledger.reserve_job_budget(job_id, limits)
-            if budget.status != RESERVED:
-                return self._test_result(False, _cap_message(budget.status, limits))
-            reservation = ledger.reserve_call(job_id, call_id, worst_case_micros=worst, limits=limits,
-                                              connection_id=connection.id, backend_type=connection.backend_type,
-                                              model=connection.model)
-            if not reservation.admitted:
-                ledger.release_job(job_id)
-                return self._test_result(False, _cap_message(reservation.reason, limits))
+            def refused(reason):
+                remainder = (ledger.month_remainder(caps)
+                             if caps.month_cap is not None and caps.job_cap is not None else None)
+                return self._test_result(False, _cap_message(reason, caps, remainder))
+
+            try:
+                budget = ledger.reserve_job_budget(job_id, limits)
+                if budget.status != RESERVED:
+                    return refused(budget.status)
+                reservation = ledger.reserve_call(job_id, call_id, worst_case_micros=worst, limits=limits,
+                                                  connection_id=connection.id, backend_type=connection.backend_type,
+                                                  model=connection.model)
+                if not reservation.admitted:
+                    ledger.release_job(job_id)
+                    return refused(reservation.reason)
+            except BaseException:
+                # Whatever failed part way, the budget the first step committed is given back.
+                try:
+                    ledger.release_job(job_id)
+                except Exception:
+                    logger.warning("A connection test could not give back its budget")
+                raise
         request = ProbeRequest(
             instance_id=instance.id, connection_id=connection.id, backend_type=connection.backend_type,
             model=connection.model, values=dict(values), destinations=destinations,
-            input_token_limit=TEST_INPUT_TOKENS, output_token_limit=TEST_OUTPUT_TOKENS, secrets=dict(secrets))
+            input_token_limit=TEST_INPUT_TOKENS, output_token_limit=TEST_OUTPUT_TOKENS,
+            timeout_seconds=TEST_TIMEOUT_SECONDS, secrets=dict(secrets))
         started = time.monotonic()
         answer: Mapping[str, Any] = {}
         failure: Exception | None = None
         try:
-            answer = self._probe(request) or {}
+            answer = self._run_probe(request)
         except Exception as error:  # settled below, then said as a failure without its text
             failure = error
         finally:
@@ -862,10 +896,30 @@ class TranslatorSettingsService:
                 finally:
                     ledger.release_job(job_id)
         if failure is not None:
-            raise failure
+            logger.warning("A connection test failed with %s", type(failure).__name__)
+            return self._test_result(False, "The test could not be completed. Check the Bazarr+ log for the cause.")
         if answer.get("ok") is True:
             return self._test_result(True, "", started)
         return self._test_result(False, self._said(answer.get("message"), held) or self._unanswered(where))
+
+    def _run_probe(self, request: ProbeRequest) -> Mapping[str, Any]:
+        """Call the probe, and stop waiting for it a little after the time it was given."""
+        box: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                box["answer"] = self._probe(request)
+            except Exception as error:  # handed to the caller, which says only its type
+                box["error"] = error
+
+        thread = threading.Thread(target=run, name="translation-connection-test", daemon=True)
+        thread.start()
+        thread.join(request.timeout_seconds + TEST_TIMEOUT_GRACE_SECONDS)
+        if thread.is_alive():
+            raise TimeoutError("the probe did not answer in time")
+        if "error" in box:
+            raise box["error"]
+        return box.get("answer") or {}
 
     @staticmethod
     def _settle_test(ledger: "UsageLedger", job_id: str, call_id: str, connection, answer: Mapping[str, Any],

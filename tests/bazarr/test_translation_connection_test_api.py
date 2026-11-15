@@ -478,7 +478,7 @@ def test_saved_settings_that_no_longer_fit_the_plugin_are_a_failed_test_not_a_se
     world.hooks["options_source"] = lambda *args: {"items": []}
     connection_id = world.lan_connection()
 
-    def refuse(self, *args):
+    def refuse(self, *args, **kwargs):
         raise InvalidValuesError("The values are not valid.", field_errors={"base_url": "must be an address"})
 
     monkeypatch.setattr(TranslatorSettingsService, "options", refuse)
@@ -502,3 +502,118 @@ def test_the_refusal_names_the_job_cap_when_that_is_the_one_set(world):
     connection_id = _priced(world)
     message = world.call("post", f"connections/{connection_id}/test", {}).json["message"]
     assert "one translation" in message and "monthly" not in message
+
+
+# ------------------------------------------------------- redaction, rollback, timeout
+
+def test_a_probe_that_raises_one_of_our_own_refusals_with_a_key_in_it_is_still_redacted(world, caplog):
+    from subtitles.tools.translate.runtime.settings_service import InvalidValuesError
+
+    world.probe(InvalidValuesError(f"bad key {SECRET}", field_errors={"api_key": SECRET}))
+    connection_id = world.lan_connection()
+    caplog.set_level(logging.DEBUG)
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 200 and response.json["ok"] is False
+    assert "field_errors" not in response.json and "Bazarr+ log" in response.json["message"]
+    _nothing_leaked(world, caplog)
+
+
+def test_a_model_list_source_that_raises_a_refusal_with_a_key_is_redacted_too(world, caplog):
+    from subtitles.tools.translate.runtime.settings_service import PluginUnavailableError
+
+    def source(*args):
+        raise PluginUnavailableError(f"down for {SECRET}", extra=SECRET)
+
+    world.hooks["options_source"] = source
+    connection_id = world.lan_connection()
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 200 and response.json["ok"] is False
+    _nothing_leaked(world, caplog)
+
+
+def test_a_failure_while_reserving_gives_the_budget_back_and_sends_nothing(world, monkeypatch, caplog):
+    world.probe({"ok": True})
+    connection_id = _priced(world)
+
+    def broken(self, *args, **kwargs):
+        raise RuntimeError(f"ledger gone {SECRET}")
+
+    monkeypatch.setattr(UsageLedger, "reserve_call", broken)
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 200 and response.json["ok"] is False
+    assert world.requests == []
+    usage, budgets = _calls(world)
+    assert usage == [] and [item.state for item in budgets] == ["released"]
+    _nothing_leaked(world, caplog)
+
+
+def test_a_priced_test_holds_only_what_it_may_cost_not_a_whole_job_budget(world):
+    world.probe({"ok": True, "input_tokens": 1, "output_tokens": 1})
+    world.limits = CostLimits(month_cap=50_000_000, translation_limit=1)  # a whole month's share would be 50 dollars
+    connection_id = _priced(world)
+    assert world.call("post", f"connections/{connection_id}/test", {}).json["ok"] is True
+    (budget,) = _calls(world)[1]
+    assert budget.budget_micros == 432
+
+
+def test_the_probe_is_given_a_timeout_and_a_hung_one_is_a_failed_test_that_keeps_its_charge(world, monkeypatch):
+    import threading
+
+    from subtitles.tools.translate.runtime import settings_service
+
+    monkeypatch.setattr(settings_service, "TEST_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(settings_service, "TEST_TIMEOUT_GRACE_SECONDS", 0.1)
+    release = threading.Event()
+    seen = []
+
+    def hang(request):
+        seen.append(request.timeout_seconds)
+        release.wait(5)
+        return {"ok": True}
+
+    world.hooks["connection_probe"] = hang
+    connection_id = _priced(world)
+    try:
+        # The request carries the limit as it was when the service was built.
+        response = world.call("post", f"connections/{connection_id}/test", {})
+    finally:
+        release.set()
+    assert response.status_code == 200 and response.json["ok"] is False and "Bazarr+ log" in response.json["message"]
+    assert seen and seen[0] > 0
+    (call,), (budget,) = _calls(world)
+    assert (call.actual_micros, budget.state) == (432, "released")
+
+
+def test_the_default_timeout_is_part_of_every_probe_request(world):
+    world.probe({"ok": True})
+    connection_id = world.lan_connection()
+    world.call("post", f"connections/{connection_id}/test", {})
+    assert world.requests[0].timeout_seconds == 20.0
+
+
+def test_both_caps_set_names_the_one_that_leaves_less_room(world):
+    world.probe({"ok": True})
+    connection_id = _priced(world)
+    world.limits = CostLimits(month_cap=100, job_cap=5_000_000, translation_limit=1)
+    assert "monthly limit" in world.call("post", f"connections/{connection_id}/test", {}).json["message"]
+    world.limits = CostLimits(month_cap=50_000_000, job_cap=100, translation_limit=1)
+    assert "one translation" in world.call("post", f"connections/{connection_id}/test", {}).json["message"]
+    assert world.requests == []
+
+
+def test_a_back_end_served_by_an_extension_is_tested_against_that_plugin_s_model_list(world):
+    extension = service_manifest(
+        "extension_backend", settings_version=1, kind="translator", kind_api="bazarr.translator.v1",
+        settings={"fields": [], "backend_types": {"ext": {"label": "Ext", "fields": [
+            {"key": "base_url", "type": "text", "destination": True, "default": "https://ext.example.test"}]}}})
+    world.plugins["extension_backend"] = InstalledPlugin("extension_backend", "Ext", "1.0.0", True, extension)
+    asked = []
+    world.hooks["options_source"] = lambda *args: asked.append(args) or {"items": []}
+    response = world.call("post", f"engines/{world.instance.id}/connections", {
+        "backend_type": "ext", "plugin_id": "extension_backend", "values": {"model": "m"},
+        "accept_destinations": []})
+    assert response.status_code == 201, response.json
+    connection_id = response.json["connection"]["id"]
+    result = world.call("post", f"connections/{connection_id}/test", {})
+    assert result.status_code == 200 and result.json["ok"] is True, result.json
+    assert asked and asked[0][1] == "ext"

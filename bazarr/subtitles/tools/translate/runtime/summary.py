@@ -99,10 +99,11 @@ class TranslationSummary:
 
     # --------------------------------------------------------------- queue
     def queue(self, limit: int = QUEUE_PAGE) -> dict[str, Any]:
-        """The jobs that have not started, in the order they will run, and how many there are in all.
+        """The jobs that have not started, and how many there are in all, roughly in the order they will run.
 
         Queued jobs come first, oldest first, then the jobs awaiting a retry by the time they are due. A
-        retry goes to the back of the queue when its time comes, so it runs after what is waiting now.
+        retry goes to the back of the queue when its time comes, so it usually runs after what is waiting
+        now. This is a good guess, not a promise: the queue itself decides what starts next.
         """
         waiting = TableTranslatorJob.state.in_((QUEUED, AWAITING_RETRY))
         total = int(self._session.execute(select(func.count()).select_from(TableTranslatorJob)

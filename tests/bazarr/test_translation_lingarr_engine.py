@@ -433,36 +433,89 @@ def test_a_failure_after_the_config_write_puts_the_old_settings_back(world, monk
     _nothing_leaked(world, caplog)
 
 
+def test_an_undo_never_overwrites_values_a_newer_save_wrote(world, monkeypatch):
+    from subtitles.tools.translate.runtime.store import StaleRevisionError as StoreStale
+
+    def lose_the_race(*args, **kwargs):
+        # While this save fails, another writer changes the address.
+        world.fake.address = "http://10.9.9.9:9876"
+        raise StoreStale("changed", 9)
+
+    monkeypatch.setattr(world.store, "set_instance_enabled", lose_the_race)
+    response = world.save({"url": URL}, accept_destinations=[URL], enabled=False)
+    assert response.status_code == 409
+    assert world.fake.address == "http://10.9.9.9:9876"
+
+
 def test_the_address_is_server_owned_for_the_old_settings_route_only_while_the_runtime_is_on(monkeypatch):
+    from subtitles.tools.translate import runtime
+
     from app.config import is_server_owned_setting, settings
 
     monkeypatch.setattr(settings.translator, "runtime_v2", False)
+    monkeypatch.setattr(runtime, "runtime_v2_enabled", lambda: True)
     assert is_server_owned_setting("translator.lingarr_url") is False
     monkeypatch.setattr(settings.translator, "runtime_v2", True)
     assert is_server_owned_setting("translator.lingarr_url") is True
+    # The switch is set but the tables are not there yet: the same answer the translation routes give.
+    monkeypatch.setattr(runtime, "runtime_v2_enabled", lambda: False)
+    assert is_server_owned_setting("translator.lingarr_url") is False
+    monkeypatch.setattr(runtime, "runtime_v2_enabled", lambda: True)
     assert is_server_owned_setting("translator.lingarr_token") is False
     assert is_server_owned_setting("translator.engine") is True
 
 
 # ------------------------------------------------------------ one instance only
 
-def _file_database(tmp_path):
+@pytest.fixture(params=["sqlite", "postgres"])
+def database(request, tmp_path):
+    """A database with the runtime tables built from the models, on SQLite or a PostgreSQL schema of its own."""
+    import os
+    from uuid import uuid4
+
     import sqlalchemy as sa
     from sqlalchemy.orm import sessionmaker
 
     from app.database import Base
 
-    engine = sa.create_engine(f"sqlite:///{tmp_path / 'engines.db'}", connect_args={"timeout": 30})
+    if request.param == "sqlite":
+        engine = sa.create_engine(f"sqlite:///{tmp_path / 'engines.db'}", connect_args={"timeout": 30})
+        Base.metadata.create_all(engine)
+        yield engine, sessionmaker(bind=engine)
+        engine.dispose()
+        return
+    url = os.environ.get("BAZARR_PG_TEST_URL")
+    if not url:
+        pytest.skip("BAZARR_PG_TEST_URL is required for the PostgreSQL lane")
+    schema = "lingarr_" + uuid4().hex
+    admin = sa.create_engine(url)
+    with admin.begin() as connection:
+        connection.execute(sa.text(f"CREATE SCHEMA {schema}"))
+    # The application runs PostgreSQL in AUTOCOMMIT, where rollback() does nothing.
+    engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+
+    @sa.event.listens_for(engine, "connect")
+    def _path(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"SET search_path TO {schema}")
+        cursor.close()
+
     Base.metadata.create_all(engine)
-    return engine, sessionmaker(bind=engine)
+    try:
+        yield engine, sessionmaker(bind=engine)
+    finally:
+        engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(sa.text(f"DROP SCHEMA {schema} CASCADE"))
+        admin.dispose()
 
 
-def test_many_first_listings_at_once_create_one_lingarr_engine(tmp_path):
+def test_many_first_listings_at_once_create_one_lingarr_engine(database):
     import threading
 
     import sqlalchemy as sa
 
-    engine, make_session = _file_database(tmp_path)
+    engine, make_session = database
     barrier = threading.Barrier(8)
     ids, errors = [], []
 
@@ -488,13 +541,12 @@ def test_many_first_listings_at_once_create_one_lingarr_engine(tmp_path):
     assert session.execute(sa.text(
         "SELECT count(*) FROM translator_engine_instances WHERE plugin_id = 'lingarr'")).scalar() == 1
     session.close()
-    engine.dispose()
 
 
-def test_the_database_refuses_a_second_lingarr_engine_and_the_loser_reads_the_winner(tmp_path):
+def test_the_database_refuses_a_second_lingarr_engine_and_the_loser_reads_the_winner(database):
     import sqlalchemy as sa
 
-    engine, make_session = _file_database(tmp_path)
+    engine, make_session = database
     session = make_session()
     store = TranslatorStore(session, pointers=MemoryPointers(), plugin_active=lambda plugin_id: False)
     first_id = store.create_instance("lingarr", name="Lingarr").id
@@ -517,4 +569,3 @@ def test_the_database_refuses_a_second_lingarr_engine_and_the_loser_reads_the_wi
     store.list_instances = blind_first
     assert store.ensure_instance("lingarr").id == first_id
     session.close()
-    engine.dispose()
