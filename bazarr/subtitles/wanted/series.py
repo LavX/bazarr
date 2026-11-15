@@ -207,13 +207,14 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                             )
                             continue
                         # The source wait is measured from when the history says the file being
-                        # translated was downloaded or uploaded, so a sync or a modification that
-                        # rewrites it does not restart the wait. A source with no row (a sidecar
-                        # the disk scan found) goes by its modification time. Only the newest row
-                        # stored for source_srt counts: a newer upload of another file does not
-                        # vouch for this one, and a hand upload is never held back. The rows are
-                        # read only while the wait is on, so the default wait of 0 never runs
-                        # this query.
+                        # translated was downloaded or uploaded. Only a sync keeps that time: it
+                        # rewrites the file in place. Any other change to the file (an edit, a
+                        # modification tool, a copy or an import from outside) counts from the file
+                        # time and loses the hand-upload exemption, and so does a source with no
+                        # row (a sidecar the disk scan found). Only the newest row stored for
+                        # source_srt counts: a newer upload of another file does not vouch for
+                        # this one. The rows are read only while the wait is on, so the default
+                        # wait of 0 never runs this query.
                         held = False
                         if source_wait_enabled():
                             source_rows = database.execute(

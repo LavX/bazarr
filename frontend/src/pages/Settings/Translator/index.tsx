@@ -345,7 +345,7 @@ const SettingsTranslatorView: FunctionComponent = () => {
               size="xs"
             />
             <Tooltip
-              label="Waits until the source subtitle was downloaded or uploaded this long ago before translating it automatically. A sync or an edit does not restart the wait. A file with no download or upload on record, or one replaced since, counts from its modification time. 0 translates as soon as a source exists. Wanted scans never hold a hand upload back, and sports processing ignores this setting."
+              label="Waits until the source subtitle was downloaded or uploaded this long ago before translating it automatically. Only a sync keeps that time: an edit or a replacement of the file counts from the file time, and a file with no download or upload on record does too. 0 translates as soon as a source exists. Wanted scans never hold a hand upload back unless its file was changed afterwards, and sports processing ignores this setting."
               multiline
               w={280}
               withArrow

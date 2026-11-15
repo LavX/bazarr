@@ -3,7 +3,6 @@
 
 import logging
 import os
-from datetime import datetime
 from media_servers.events import observe_subtitle_change
 
 from app.config import settings, sync_checker as _defaul_sync_checker
@@ -90,7 +89,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         from subtitles.tools.translate.core.translator_utils import translated_destination_path
         from subtitles.tools.translate.main import translate_subtitles_file
         from subtitles.download import check_missing_languages
-        from subtitles.wanted.utils import source_wait_elapsed
+        from subtitles.wanted.utils import source_wait_enabled
         from app.database import (TableEpisodes, TableShows, TableMovies,
                                   database, select)
 
@@ -177,14 +176,14 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
             )
             return
 
-        # This trigger runs right after the save, so the source arrived now. The
-        # file's own time is not consulted: a file system whose clock runs behind
-        # this one would date it in the past and let it through the wait. The
-        # next wanted scan measures from the history instead.
-        if not source_wait_elapsed(subtitle_path, written_at=datetime.now()):
+        # This trigger runs right after the save, so the source arrived just now and
+        # is always inside the wait. The file's own time is not consulted: a file
+        # system whose clock runs behind this one would date it in the past. The
+        # next wanted scan measures the wait from the history instead.
+        if source_wait_enabled():
             logging.info(
-                'BAZARR auto-translate skipped: source subtitle is younger than '
-                'translator.min_source_wait_minutes for %s',
+                'BAZARR auto-translate skipped: translator.min_source_wait_minutes holds a '
+                'just-saved source subtitle for %s',
                 video_path,
             )
             return

@@ -1120,10 +1120,10 @@ def test_a_file_replaced_after_its_row_but_old_enough_by_its_own_time_translates
 
 @pytest.mark.parametrize("model", ["movie", "episode"])
 def test_a_sync_rewrite_does_not_restart_the_wait(schema_session, monkeypatch, tmp_path, model):
-    """A sync rewrites the file in place and logs its own row. The download is
-    two hours old, so the wait stays elapsed though the file and the sync row
-    are brand new."""
-    source = _source_subtitle(tmp_path, minutes_old=0)
+    """A sync rewrites the file in place and logs its own row afterwards. The
+    download is two hours old, so the wait stays elapsed though the file and the
+    sync row are brand new."""
+    source = _source_subtitle(tmp_path, minutes_old=1)
     _record_download(schema_session, model, source, minutes_ago=120)
     _insert_history_row(schema_session, model, 5, source, seconds_after=-30)
 
@@ -1131,6 +1131,38 @@ def test_a_sync_rewrite_does_not_restart_the_wait(schema_session, monkeypatch, t
 
     translations.assert_called_once()
     assert searches == [[]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_source_replaced_after_a_sync_does_not_inherit_the_old_age(
+        schema_session, monkeypatch, tmp_path, model):
+    """Download two hours ago, sync an hour and a half ago, then something other
+    than a sync wrote the file a moment ago. The sync row only explains the
+    modification time up to its own, so the file time decides."""
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _record_download(schema_session, model, source, minutes_ago=120)
+    _insert_history_row(schema_session, model, 5, source, seconds_after=-90 * 60)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_file_dated_far_ahead_does_not_count_as_a_later_write(
+        schema_session, monkeypatch, tmp_path, model):
+    """A modification time hours ahead of now cannot be told from a clock
+    disagreement, so the row it sits next to keeps standing."""
+    source = _source_subtitle(tmp_path, minutes_old=-4 * 60)
+    _record_download(schema_session, model, source, minutes_ago=5)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    # The row says five minutes. Read as the file's own time the date would be
+    # hours ahead of the wait and release it.
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
 
 
 @pytest.mark.parametrize("model", ["movie", "episode"])

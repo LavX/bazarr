@@ -751,8 +751,13 @@ def test_a_download_is_held_for_the_minimum_wait_whatever_the_file_time_says(tmp
         aged = time.time() - 120 * 60
         os.utime(source, (aged, aged))
         _trigger_auto_translation(**trigger)
+        mock_translate.assert_not_called()
 
-    mock_translate.assert_not_called()
+        # With the wait off the same source is translated at once.
+        mock_wait_settings.translator.min_source_wait_minutes = 0
+        _trigger_auto_translation(**trigger)
+
+    mock_translate.assert_called_once()
 
 
 def test_a_sports_download_is_queued_without_the_minimum_source_wait(tmp_path):

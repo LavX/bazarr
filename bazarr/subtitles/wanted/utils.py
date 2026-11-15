@@ -41,9 +41,22 @@ def source_wait_enabled():
 SOURCE_HISTORY_ACTIONS = FILE_REPLACING_ACTIONS + (5,)
 
 # How far a file's modification time may run ahead of the history row that
-# recorded it before the file counts as replaced afterwards. Some file systems
-# round a modification time up by a couple of seconds.
+# recorded it, or of the present, before it counts as a later write. Some file
+# systems round a modification time up by a couple of seconds.
 _MTIME_SLACK_SECONDS = 2
+
+
+def _written_after(source_path, reference):
+    """Whether the file was written after ``reference`` (a history timestamp).
+
+    A modification time dated further ahead than now cannot be told from a clock
+    disagreement, so it does not count as a later write: the row stands.
+    """
+    try:
+        modified_at = os.path.getmtime(source_path)
+    except OSError:
+        return False
+    return reference.timestamp() + _MTIME_SLACK_SECONDS < modified_at <= time.time() + _MTIME_SLACK_SECONDS
 
 
 def source_history_for_wait(rows, source_path, path_replace):
@@ -55,30 +68,27 @@ def source_history_for_wait(rows, source_path, path_replace):
     of another file says nothing about it.
 
     The newest row that put the file there (not a sync) gives the time and
-    whether it was a hand upload. It stands for the file on disk only while the
-    file has not been replaced since: a file with a later modification time was
-    written after the row (a concurrent save not recorded yet, an arr import or
-    a copy by hand), so the row's time and its upload exemption do not apply and
-    the modification time decides. A sync row newer than that row explains a
-    later modification time, since the sync rewrote the file in place, so the
-    row still stands. A removal, or no row at all, leaves the modification time
-    to decide too: ``written_at`` is then None.
+    whether it was a hand upload. Only a sync keeps that row standing for a
+    changed file: the sync rewrote the file in place and logged it, so a
+    modification time up to the newest sync row's is the sync's own. Any other
+    rewrite (an edit, a modification tool, a copy or an import from outside, a
+    save not recorded yet) leaves a later modification time, and then the row's
+    time and its upload exemption no longer apply: the file time decides and the
+    wait starts over. A removal, or no row at all, leaves the file time to
+    decide too, and ``written_at`` is then None.
     """
-    synced = False
+    synced_at = None
     for row in rows:
         if not row.subtitles_path or path_replace(row.subtitles_path) != source_path:
             continue
         if row.action == 5:
-            synced = True
+            if synced_at is None:
+                synced_at = row.timestamp
             continue
         if row.action == 0:
             return None, False
-        if not synced:
-            try:
-                if os.path.getmtime(source_path) > row.timestamp.timestamp() + _MTIME_SLACK_SECONDS:
-                    return None, False
-            except OSError:
-                pass
+        if _written_after(source_path, synced_at or row.timestamp):
+            return None, False
         return row.timestamp, row.action == 4
     return None, False
 
@@ -87,11 +97,13 @@ def source_wait_elapsed(source_path, written_at=None):
     """Whether a source subtitle is old enough to translate automatically.
 
     translator.min_source_wait_minutes is measured from ``written_at``, the
-    history timestamp of the download or upload that put the source there. A
-    sync or a modification rewrites the file in place and does not restart the
-    wait, which is why the file's modification time is only the fallback, for a
-    source with no history row (a sidecar a disk scan found). 0 turns the wait
-    off. A source whose modification time cannot be read is not held back.
+    history timestamp of the download or upload that put the source there. Only
+    a sync keeps that time: it rewrites the file in place and does not restart
+    the wait. Any other change to the file (an edit, a modification tool, a copy
+    or an import from outside) counts from the file's modification time, which
+    is the fallback for a source with no history row too (a sidecar a disk scan
+    found). 0 turns the wait off. A source whose modification time cannot be
+    read is not held back.
 
     A source dated in the future is a clock disagreement: it counts as written
     just now, so it is held for the wait, unless it is dated further ahead than
