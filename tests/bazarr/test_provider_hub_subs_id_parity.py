@@ -83,8 +83,8 @@ def test_the_audit_tally_holds():
     classes = list(LEGACY_ID_CLASS.values())
     assert classes.count(PREFIX) == 5
     assert classes.count(DERIVED) == 11
-    assert classes.count(DERIVED) + classes.count(DERIVABLE) == 37
-    assert classes.count(LOST) == 14
+    assert classes.count(DERIVED) + classes.count(DERIVABLE) == 40
+    assert classes.count(LOST) == 11
 
 
 def test_every_written_rule_is_a_derived_or_prefix_provider_and_only_those():
@@ -154,8 +154,12 @@ def test_the_module_does_not_reach_the_database():
     ("subtitrarinoi", LOST),  # same: a result position
     ("opensubtitles", LOST),  # rows do not say which mode wrote them
     ("subsynchro", DERIVABLE),  # the stored URL, hashed on the legacy AJAX path
+    ("subs4series", DERIVABLE),  # the stored detail URL and the alpha3
+    ("zimuku", DERIVABLE),  # the stored page link and a tag of a closed set
+    ("napiprojekt", DERIVABLE),  # the stored video hash and one of a few sources
+    ("yavkanet", LOST),  # several per-file rows collapse onto one archive id
 ])
-def test_classes_follow_the_plugin_id_formulas(provider, kind):
+def test_the_reviewed_classes_are_pinned(provider, kind):
     assert LEGACY_ID_CLASS[provider] == kind
     assert rewrite_legacy_subs_id(provider, "https://x/y", "en") is None
 

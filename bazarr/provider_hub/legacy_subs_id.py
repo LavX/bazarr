@@ -75,12 +75,16 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "greeksubs": DERIVED,
     "greeksubtitles": DERIVABLE,  # the number is parsed out of the old URL
     "hdbits": DERIVED,
-    "jimaku": LOST,  # embeds the entry id
+    # Unconfirmed: read as embedding the entry id, which no row holds, but
+    # not checked against a recorded response.
+    "jimaku": LOST,
     "karagarga": PREFIX,
     "ktuvit": PREFIX,
     "legendasdivx": DERIVABLE,
     "legendasnet": DERIVABLE,
-    "napiprojekt": LOST,  # digest over a source value the old row lacks
+    # sha1 over the video hash (the old id) and the plugin's source tag, one of
+    # a short fixed set, so a rule can try each.
+    "napiprojekt": DERIVABLE,
     "napisy24": LOST,  # old id is the video hash, new id the site's own id
     "nekur": DERIVABLE,
     # The plugin's ids are ``opensubtitles-native-<id>`` from the site's pages;
@@ -101,7 +105,9 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "subdl": PREFIX,  # single files only; pack members and AI rows are lost
     "subf2m": DERIVABLE,
     "subs4free": DERIVABLE,
-    "subs4series": LOST,  # digest over the detail URL
+    # sha1 over the detail URL (the link the built-in stored as its id) and the
+    # alpha3 the site's flag gives.
+    "subs4series": DERIVABLE,
     "subsarr": DERIVABLE,
     "subsource": PREFIX,
     "subsro": DERIVED,
@@ -132,9 +138,14 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "tvsubtitles": DERIVED,
     "whisperai": LOST,  # digest, and the old id held the video's original name
     "wizdom": DERIVED,
-    "yavkanet": LOST,  # digest over the page URL
+    # The built-in id is the page link plus a file name, one row per file in
+    # an archive. The plugin hashes the page URL and alpha3 once per archive,
+    # so several old rows collapse onto one new id and none can be told apart.
+    "yavkanet": LOST,
     "yifysubtitles": DERIVABLE,
-    "zimuku": LOST,  # digest over the language label of the detail page
+    # sha1 over the detail page link (the old id) and a language tag from a
+    # closed set (zho-CN, zho-TW, eng) that follows from the row's language.
+    "zimuku": DERIVABLE,
 }
 
 # The prefix rows read but not run, where the two sides may still differ in
