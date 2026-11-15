@@ -2,8 +2,9 @@
 """Copy the plugin SDK into ``bazarr/provider_hub/sdk_dist`` and check that the copy is intact.
 
     scripts/vendor_plugin_sdk.py --source ../bazarr-plugin-sdk
-        copies <source>/src/bazarr_plugin_sdk and rewrites VENDORED.json. The source must
-        be a clean git checkout. The manifest records the tag the checkout is exactly at,
+        copies the files of <source>/src/bazarr_plugin_sdk that are committed at the
+        source's HEAD, and rewrites VENDORED.json. The source must be a clean git checkout,
+        ignored files included. The manifest records the tag the checkout is exactly at,
         or null when it is at no tag
     scripts/vendor_plugin_sdk.py --check [--source ../bazarr-plugin-sdk]
         fails when the files differ from VENDORED.json, and from the source when one is given
@@ -20,10 +21,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import shutil
 import subprocess
 import sys
+import tarfile
 
 from pathlib import Path
 
@@ -71,24 +74,60 @@ def git_tag(source: Path) -> str | None:
 
 
 def git_dirty(source: Path) -> bool:
-    """True when the checkout has uncommitted or untracked files (ignored ones do not count)."""
-    status = _git(source, "status", "--porcelain")
+    """True when the checkout has uncommitted, untracked or ignored files."""
+    status = _git(source, "status", "--porcelain", "--ignored")
     return status is None or bool(status)
 
 
+def committed_files(source: Path) -> dict[str, bytes]:
+    """The package's files as they are at the source's HEAD: relative path (posix) to bytes.
+
+    Read from the commit with ``git archive``, never from the working tree, so what is
+    vendored is exactly what the manifest's ``source_commit`` names.
+    """
+    prefix = f"src/{PACKAGE}/"
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(source), "archive", "--format=tar", "HEAD", f"src/{PACKAGE}"],
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        sys.exit(f"cannot read {PACKAGE} from the commit of {source}: {error}")
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(out.stdout)) as archive:
+        for member in archive:
+            if not member.name.startswith(prefix):
+                continue
+            if not member.isfile():
+                if member.isdir():
+                    continue
+                sys.exit(f"{member.name} in the SDK commit is not a regular file or folder")
+            relative = member.name[len(prefix):]
+            if relative.startswith("/") or ".." in relative.split("/") or "__pycache__" in relative.split("/"):
+                sys.exit(f"{member.name} is not a safe path")
+            handle = archive.extractfile(member)
+            assert handle is not None
+            files[relative] = handle.read()
+    return files
+
+
 def vendor(source: Path) -> None:
-    source_package = source / "src" / PACKAGE
-    if not source_package.is_dir():
-        sys.exit(f"{source_package} is not a directory")
     commit = git_commit(source)
     if commit is None:
         sys.exit(f"{source} is not a git checkout")
     if git_dirty(source):
-        sys.exit(f"{source} has uncommitted or untracked changes; commit them first so the manifest names real source")
+        sys.exit(f"{source} has uncommitted, untracked or ignored files; clean it so the manifest names real source")
+    files = committed_files(source)
+    if not files:
+        sys.exit(f"{PACKAGE} has no files at the commit of {source}")
     target = DIST / PACKAGE
     if target.exists():
         shutil.rmtree(target)
-    shutil.copytree(source_package, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    for relative, content in files.items():
+        path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
     version = read_version(target)
     manifest = {
         "package": PACKAGE,
@@ -117,7 +156,10 @@ def check(source: Path | None) -> list[str]:
         elif actual[name] != expected[name]:
             problems.append(f"{name} differs from the manifest")
     if source is not None:
-        from_source = tree_hashes(source / "src" / PACKAGE)
+        from_source = {name: hashlib.sha256(content).hexdigest() for name, content in committed_files(source).items()}
+        commit = git_commit(source)
+        if commit != manifest.get("source_commit"):
+            problems.append(f"the SDK source is at {commit}, the manifest names {manifest.get('source_commit')}")
         problems.extend(
             f"{name} differs from the SDK source at {source}"
             for name in sorted(set(actual) | set(from_source))

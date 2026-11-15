@@ -2491,6 +2491,21 @@ class ChannelHarness:
             pass
 
 
+def test_the_channel_lock_can_be_taken_again_by_the_thread_that_holds_it():
+    harness = ChannelHarness(lambda operation: {})
+    try:
+        assert harness.channel._lock.acquire(timeout=5)
+        try:
+            again = harness.channel._lock.acquire(timeout=1)
+            if again:
+                harness.channel._lock.release()
+            assert again, "a thread holding the channel lock cannot take it again"
+        finally:
+            harness.channel._lock.release()
+    finally:
+        harness.finish()
+
+
 def _reply_to(harness, request):
     harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}, **request})
     assert wait_until(lambda: any(m["t"] == "res" for m in harness.messages))

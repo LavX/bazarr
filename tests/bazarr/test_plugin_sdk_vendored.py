@@ -108,6 +108,47 @@ def test_the_manifest_tag_is_null_without_a_tag_and_set_at_one(tmp_path, monkeyp
     assert json.loads((dist / "VENDORED.json").read_text(encoding="utf-8"))["tag"] == "v9.9.9"
 
 
+def test_vendoring_refuses_an_ignored_file_in_the_source(tmp_path, monkeypatch):
+    script = _load_script()
+    source = tmp_path / "sdk"
+    shutil.copytree(PACKAGE, source / "src" / "bazarr_plugin_sdk", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    (source / ".gitignore").write_text("local_only.py\n", encoding="utf-8")
+    _git(source, "init", "-q")
+    _git(source, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "add", "-A")
+    _git(source, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "sdk")
+    dist = _vendor_into(script, monkeypatch, tmp_path)
+    (source / "src" / "bazarr_plugin_sdk" / "local_only.py").write_text("secret = 1\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        script.vendor(source)
+    assert not (dist / "VENDORED.json").exists()
+
+
+def test_only_the_files_committed_at_the_source_commit_are_vendored(tmp_path):
+    script = _load_script()
+    source = _source_checkout(tmp_path)
+    package = source / "src" / "bazarr_plugin_sdk"
+    committed = (package / "errors.py").read_bytes()
+    (package / "errors.py").write_text("# edited after the commit\n", encoding="utf-8")
+    (package / "untracked.py").write_text("", encoding="utf-8")
+    files = script.committed_files(source)
+    assert files["errors.py"] == committed and "untracked.py" not in files
+    assert set(files) == {path.relative_to(PACKAGE).as_posix() for path in PACKAGE.rglob("*") if path.is_file() and "__pycache__" not in path.parts}
+
+
+def test_the_check_names_a_source_that_is_not_the_manifests_commit(tmp_path, monkeypatch):
+    script = _load_script()
+    source = _source_checkout(tmp_path)
+    dist = _vendor_into(script, monkeypatch, tmp_path)
+    script.vendor(source)
+    monkeypatch.setattr(script, "RUNTIME", tmp_path / "no-runtime")
+    assert not [p for p in script.check(source) if "manifest names" in p or "differs" in p]
+    (source / "extra.txt").write_text("x", encoding="utf-8")
+    _git(source, "add", "-A")
+    _git(source, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "more")
+    assert any("the manifest names" in problem for problem in script.check(source))
+    assert dist.exists()
+
+
 def test_vendoring_refuses_a_dirty_source_tree(tmp_path, monkeypatch):
     script = _load_script()
     source = _source_checkout(tmp_path)
