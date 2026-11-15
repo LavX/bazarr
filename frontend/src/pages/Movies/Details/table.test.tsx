@@ -238,9 +238,9 @@ describe("score and provider of a subtitle file", () => {
 
   it("shows a pinned score of 0", async () => {
     withLocalScore(0);
-    const row = await rowFor([record(9, 2, { score: "0" }), download]);
+    const row = await rowFor([record(9, 2, { score: "0.0%" }), download]);
 
-    expect(await within(row).findByText("0")).toBeInTheDocument();
+    expect(await within(row).findByText("0.0%")).toBeInTheDocument();
     expect(within(row).queryByText("81.0%")).not.toBeInTheDocument();
   });
 

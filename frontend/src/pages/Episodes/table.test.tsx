@@ -640,7 +640,7 @@ describe("Episodes Detail Table, manual and local scores", () => {
         episodes={[makeEpisode([file])]}
         history={[
           fileHistory({ history_id: 1, score: "98.0%" }),
-          fileHistory({ action: 9, history_id: 2, score: "0" }),
+          fileHistory({ action: 9, history_id: 2, score: "0.0%" }),
         ]}
       />,
     );
