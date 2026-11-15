@@ -493,6 +493,14 @@ jobs:
             tests/subliminal_patch/test_video.py \
             -v --tb=short
 
+      # The sandbox tests skip where the host cannot enforce a sandbox. On the
+      # runner that would hide a regression, so here a skip is a failure. See
+      # the module docstring of the test file.
+      - name: pytest worker sandbox (a skipped enforcement test is a failure)
+        env:
+          BAZARR_REQUIRE_SANDBOX_TESTS: "1"
+        run: pytest tests/bazarr/test_plugin_sandbox_launcher.py -v --tb=short
+
   backend-suites:
     name: Backend suites (Python ${{ matrix.python-version }})
     needs: [changes, frontend-build]
@@ -858,6 +866,8 @@ jobs:
             tests/bazarr/test_episode_parser_scope.py \
             tests/bazarr/test_files_browse_instance_scope.py \
             tests/bazarr/test_provider_hub_worker_errors.py \
+            tests/bazarr/test_provider_hub_worker_protocol_v2.py \
+            tests/bazarr/test_provider_hub_worker_pool.py \
             tests/bazarr/test_provider_hub_ai_events.py \
             tests/bazarr/test_ai_translated_history.py \
             tests/bazarr/test_embedded_translate_api_scope.py \

@@ -22,7 +22,10 @@ type Connected = {
   buildCommit?: string;
   buildDate?: string;
   packageVersion?: string;
+  sandbox?: System.SandboxStatus;
 };
+
+const BAZARR_VERSION = "9.9.9-status-test";
 
 function statusWith({
   sonarr = false,
@@ -32,6 +35,7 @@ function statusWith({
   buildCommit = "",
   buildDate = "",
   packageVersion = "",
+  sandbox,
 }: Connected) {
   const instances = [
     ...(sonarr ? [sonarrDefault] : []),
@@ -42,6 +46,9 @@ function statusWith({
     http.get("/api/system/status", () =>
       HttpResponse.json({
         data: {
+          // A value no other row shows, so a test can wait for the answer to
+          // land before it asserts that something is absent.
+          bazarr_version: BAZARR_VERSION,
           sonarr_version: sonarr ? "4.0.0" : "",
           radarr_version: radarr ? "5.0.0" : "",
           sportarr_version: sports ? "4.1.6" : "",
@@ -49,6 +56,7 @@ function statusWith({
           build_date: buildDate,
           package_version: packageVersion,
           ...(mediaServers ? { media_servers: mediaServers } : {}),
+          ...(sandbox ? { sandbox } : {}),
         },
       }),
     ),
@@ -156,7 +164,7 @@ describe("System Status", () => {
     customRender(<SystemStatusView />);
 
     expect(
-      await screen.findByText("Bazarr Version", undefined, { timeout: 8000 }),
+      await screen.findByText(BAZARR_VERSION, undefined, { timeout: 8000 }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Sonarr Version")).toBeNull();
     expect(screen.queryByText("Radarr Version")).toBeNull();
@@ -308,7 +316,7 @@ describe("System Status", () => {
     customRender(<SystemStatusView />);
 
     expect(
-      await screen.findByText("Bazarr Version", undefined, { timeout: 8000 }),
+      await screen.findByText(BAZARR_VERSION, undefined, { timeout: 8000 }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Emby Version")).toBeNull();
     expect(screen.queryByText("Plex Version")).toBeNull();
@@ -340,6 +348,151 @@ describe("System Status", () => {
     ).toBeInTheDocument();
   });
 
+  it("states a host without a sandbox as a plain fact", async () => {
+    statusWith({
+      sandbox: {
+        abi: 0,
+        enforced: false,
+        workers_sandboxed: false,
+        filesystem: "declared",
+        network: "declared",
+        signal_scope: "declared",
+        capabilities: "declared",
+        label: "Not sandboxed on this host",
+        reason: "kernel has no Landlock (ENOSYS)",
+        limitations: [],
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Plugin Worker Sandbox", undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Not sandboxed on this host"),
+    ).toBeInTheDocument();
+  });
+
+  it("says the sandbox is available but not active for workers yet", async () => {
+    statusWith({
+      sandbox: {
+        abi: 6,
+        enforced: true,
+        workers_sandboxed: false,
+        filesystem: "enforced",
+        network: "enforced",
+        signal_scope: "enforced",
+        capabilities: "dropped",
+        label:
+          "Sandbox available: Landlock ABI 6. Not active for plugin workers yet.",
+        reason: "",
+        limitations: [],
+      },
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText(
+        "Sandbox available: Landlock ABI 6. Not active for plugin workers yet.",
+        undefined,
+        { timeout: 8000 },
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^Sandboxed/)).toBeNull();
+  });
+
+  it("says the sandbox check is still running, then shows the answer when it lands", async () => {
+    const pending: System.SandboxStatus = {
+      abi: 0,
+      enforced: false,
+      workers_sandboxed: false,
+      filesystem: "declared",
+      network: "declared",
+      signal_scope: "declared",
+      capabilities: "declared",
+      label: "Checking the worker sandbox",
+      reason: "",
+      limitations: [],
+      pending: true,
+    };
+    statusWith({ sandbox: pending });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Checking the worker sandbox", undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^Sandboxed/)).toBeNull();
+
+    // The check finishes in the background; the page asks again by itself.
+    statusWith({
+      sandbox: {
+        ...pending,
+        label: "Not sandboxed on this host",
+        reason: "kernel has no Landlock (ENOSYS)",
+        pending: false,
+      },
+    });
+    expect(
+      await screen.findByText("Not sandboxed on this host", undefined, {
+        timeout: 15000,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Checking the worker sandbox")).toBeNull();
+  }, 20000);
+
+  it("keeps asking about a pending sandbox check while a media server holds a fresh answer", async () => {
+    // The server above settled for ten minutes. That schedule must not slow
+    // the poll for the sandbox check, which lands within seconds.
+    const pending: System.SandboxStatus = {
+      abi: 0,
+      enforced: false,
+      workers_sandboxed: false,
+      filesystem: "declared",
+      network: "declared",
+      signal_scope: "declared",
+      capabilities: "declared",
+      label: "Checking the worker sandbox",
+      reason: "",
+      limitations: [],
+      pending: true,
+    };
+    statusWith({ mediaServers: [mediaServer()], sandbox: pending });
+    let requests = 0;
+    const count = ({ request }: { request: Request }) => {
+      if (new URL(request.url).pathname === "/api/system/status") {
+        requests += 1;
+      }
+    };
+    server.events.on("request:start", count);
+    try {
+      customRender(<SystemStatusView />);
+      expect(
+        await screen.findByText("Checking the worker sandbox", undefined, {
+          timeout: 8000,
+        }),
+      ).toBeInTheDocument();
+      const first = requests;
+      await new Promise((resolve) => setTimeout(resolve, 6000));
+      expect(requests).toBeGreaterThan(first);
+    } finally {
+      server.events.removeListener("request:start", count);
+    }
+  }, 20000);
+
+  it("leaves the sandbox row out when the endpoint does not report one", async () => {
+    statusWith({});
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText(BAZARR_VERSION, undefined, { timeout: 8000 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Plugin Worker Sandbox")).toBeNull();
+  });
+
   it("shows no build row for a source checkout", async () => {
     // A checkout is not a build: no BUILD file is written, so the fields
     // come back empty and the row stays out rather than render a blank. The
@@ -349,7 +502,7 @@ describe("System Status", () => {
     customRender(<SystemStatusView />);
 
     expect(
-      await screen.findByText("Bazarr Version", undefined, { timeout: 8000 }),
+      await screen.findByText(BAZARR_VERSION, undefined, { timeout: 8000 }),
     ).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByText("Build")).toBeNull();

@@ -646,7 +646,11 @@ _REQUIRES_SERVICE = {
 # The only `env:` key a job or step that runs tests needs in this repo. An env
 # key is as good as a command-line option for deciding what a run does, so a new
 # one is a decision, not a detail: name it here once you have made it.
-_ALLOWED_TEST_ENV = frozenset({"BAZARR_PG_TEST_URL"})
+#
+# BAZARR_REQUIRE_SANDBOX_TESTS=1 turns the sandbox tests' "this host cannot
+# enforce a sandbox" skips into failures. It can only make a run stricter: with
+# it unset the same tests skip, and no test reads it to skip more.
+_ALLOWED_TEST_ENV = frozenset({"BAZARR_PG_TEST_URL", "BAZARR_REQUIRE_SANDBOX_TESTS"})
 
 # A step writing to $GITHUB_ENV or $GITHUB_PATH changes the environment of every
 # later step in the same job. The step doing it need not mention pytest or a
@@ -2824,6 +2828,15 @@ def test_the_one_allowed_test_environment_key_still_counts(constructed_workflow)
                 "run": f"pytest {_REAL}\n",
             }
         )
+    )
+    covered, problems = _read_workflow()
+    assert covered == {_REAL} and not problems
+
+
+def test_the_sandbox_strictness_flag_is_an_allowed_test_environment_key(constructed_workflow):
+    """It can only turn skips into failures, so it is allowed on a test step."""
+    constructed_workflow(
+        _one_job({"env": {"BAZARR_REQUIRE_SANDBOX_TESTS": "1"}, "run": f"pytest {_REAL}\n"})
     )
     covered, problems = _read_workflow()
     assert covered == {_REAL} and not problems

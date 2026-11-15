@@ -143,6 +143,33 @@ declare namespace System {
      * tolerate undefined.
      */
     ai_translator_configured?: boolean;
+    /**
+     * What confines plugin workers on this host. Absent on responses from
+     * before the field existed, so every reader must tolerate undefined.
+     */
+    sandbox?: System.SandboxStatus;
+  }
+
+  interface SandboxStatus {
+    abi: number;
+    enforced: boolean;
+    /**
+     * Whether plugin workers actually run sandboxed. The host can be able to
+     * sandbox (enforced) while workers still start the old way.
+     */
+    workers_sandboxed: boolean;
+    filesystem: "enforced" | "declared";
+    network: "enforced" | "declared";
+    signal_scope: "enforced" | "declared";
+    capabilities: "dropped" | "declared";
+    label: string;
+    reason: string;
+    limitations: string[];
+    /**
+     * True while the host's one-time sandbox check is still running. The other
+     * fields then carry placeholders and the label says it is checking.
+     */
+    pending?: boolean;
   }
 
   interface TranslationAvailability {

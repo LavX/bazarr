@@ -126,6 +126,13 @@ function mediaServerTitle(
     : `${label} Version`;
 }
 
+function sandboxValue(sandbox: System.SandboxStatus): string {
+  // The backend words this: a host that cannot sandbox says so as a plain
+  // fact, and a host that can says what is available and whether workers use
+  // it yet. Never dressed up as protection.
+  return sandbox.label;
+}
+
 function mediaServerValue(server: System.MediaServerStatus): string {
   if (server.state === "checking") {
     // No probe has answered yet. The page polls until one does.
@@ -214,10 +221,20 @@ const SystemStatusView: FunctionComponent = () => {
   // could be something new: while a probe is running, and once a cached
   // answer has expired. Between those it waits, because every request in
   // that window returns exactly what the page already shows.
+  const sandboxPending = status?.sandbox?.pending === true;
   const pollDelay = useMemo(() => {
+    // The worker sandbox check runs once, in the background, after boot. It
+    // outranks a media server's own schedule: a server holding a fresh answer
+    // for minutes must not keep the page on "Checking" for as long.
+    if (sandboxPending) {
+      return probePollMs;
+    }
     const soonest = Math.min(...mediaServers.map(mediaServerPollDelay));
-    return Number.isFinite(soonest) ? Math.max(soonest, probePollMs) : null;
-  }, [mediaServers]);
+    if (Number.isFinite(soonest)) {
+      return Math.max(soonest, probePollMs);
+    }
+    return null;
+  }, [mediaServers, sandboxPending]);
   const { refetch: refetchStatus } = statusQuery;
   const pollVersions = useCallback(() => {
     if (pollDelay !== null) {
@@ -330,6 +347,11 @@ const SystemStatusView: FunctionComponent = () => {
           ))}
           <Row title="Operating System">{status?.operating_system}</Row>
           <Row title="Python Version">{status?.python_version}</Row>
+          {status?.sandbox ? (
+            <Row title="Plugin Worker Sandbox">
+              {sandboxValue(status.sandbox)}
+            </Row>
+          ) : null}
           <Row title="Database Engine">{status?.database_engine}</Row>
           <Row title="Database Version">{status?.database_migration}</Row>
           <Row title="Bazarr Directory">{status?.bazarr_directory}</Row>
