@@ -226,17 +226,15 @@ def _cancel_remaining_tasks(loop: asyncio.AbstractEventLoop) -> None:
     for task in pending:
         task.cancel()
 
-    async def gather() -> list[Any]:
-        return await asyncio.gather(*pending, return_exceptions=True)
-
-    try:
-        results = loop.run_until_complete(asyncio.wait_for(gather(), SHUTDOWN_TIMEOUT))
-    except asyncio.TimeoutError:
-        return  # a task that ignores its cancel must not hold the worker
-    for task, result in zip(pending, results):
-        if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+    # Not wait_for: that waits for a cancelled task to finish, and a task that swallows
+    # the cancel never does. Give them a few seconds, then leave the rest behind.
+    done, still_running = loop.run_until_complete(asyncio.wait(pending, timeout=SHUTDOWN_TIMEOUT))
+    for task in still_running:
+        log.warning("a task started by the request ignored its cancel and was abandoned: %r", task)
+    for task in done:
+        if not task.cancelled() and task.exception() is not None:
             loop.call_exception_handler(
-                {"message": "unhandled exception during request shutdown", "exception": result, "task": task}
+                {"message": "unhandled exception during request shutdown", "exception": task.exception(), "task": task}
             )
 
 

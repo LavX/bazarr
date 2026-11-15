@@ -120,15 +120,20 @@ def copy_tree(src: PathLike, dst: PathLike, *, dirs_exist_ok: bool = False, syml
 
     Only regular files, directories and links can be copied. Everything else in
     the tree (a named pipe, a socket, a device) is left out, the rest is copied,
-    and a :class:`shutil.Error` naming each of them is raised at the end.
+    and a :class:`shutil.Error` naming each of them is raised at the end. A
+    destination inside ``src`` is refused with a :class:`shutil.Error`.
     """
     source = Path(src)
     target = Path(dst)
     if not source.is_dir():
         raise NotADirectoryError(str(source))
+    if _inside(target, source):
+        raise shutil.Error(f"Cannot copy the directory {str(source)!r} into itself, {str(target)!r}.")
+    # Read the source before the destination exists, so nothing made below can be listed.
+    entries = sorted(os.scandir(source), key=lambda item: item.name)
     target.mkdir(parents=True, exist_ok=dirs_exist_ok)
     failures: list[tuple[str, str, str]] = []
-    for entry in sorted(os.scandir(source), key=lambda item: item.name):
+    for entry in entries:
         destination = target / entry.name
         try:
             if entry.is_symlink() and symlinks:
@@ -144,6 +149,12 @@ def copy_tree(src: PathLike, dst: PathLike, *, dirs_exist_ok: bool = False, syml
     if failures:
         raise shutil.Error(failures)
     return target
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    """True when ``path`` is ``folder`` or lies under it, after resolving links."""
+    resolved, base = os.path.realpath(path), os.path.realpath(folder)
+    return resolved == base or resolved.startswith(base + os.sep)
 
 
 def copy_link(src: PathLike, dst: PathLike) -> Path:
