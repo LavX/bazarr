@@ -213,4 +213,89 @@ describe("score and provider of a subtitle file", () => {
     expect(within(row).queryByText("81.0%")).not.toBeInTheDocument();
     expect(within(row).queryByText("opensubtitles")).not.toBeInTheDocument();
   });
+
+  function withLocalScore(localScore: number) {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto", local_subtitle_score: localScore },
+        }),
+      ),
+    );
+  }
+
+  it("shows a pinned score in place of the download's and keeps its provider", async () => {
+    withLocalScore(0);
+    const row = await rowFor([
+      record(9, 2, { score: "40.0%", provider: undefined }),
+      download,
+    ]);
+
+    expect(await within(row).findByText("40.0%")).toBeInTheDocument();
+    expect(within(row).queryByText("81.0%")).not.toBeInTheDocument();
+    expect(within(row).getByText("opensubtitles")).toBeInTheDocument();
+  });
+
+  it("shows a pinned score of 0", async () => {
+    withLocalScore(0);
+    const row = await rowFor([record(9, 2, { score: "0.0%" }), download]);
+
+    expect(await within(row).findByText("0.0%")).toBeInTheDocument();
+    expect(within(row).queryByText("81.0%")).not.toBeInTheDocument();
+  });
+
+  it("drops a pinned score once a newer download replaced the file", async () => {
+    withLocalScore(0);
+    const row = await rowFor([
+      record(2, 3, { score: "92.0%", provider: "podnapisi" }),
+      record(9, 2, { score: "40.0%" }),
+      download,
+    ]);
+
+    expect(await within(row).findByText("92.0%")).toBeInTheDocument();
+    expect(within(row).queryByText("40.0%")).not.toBeInTheDocument();
+  });
+
+  it("scores a hand upload at the local score", async () => {
+    withLocalScore(65);
+    const row = await rowFor([
+      record(4, 2, { score: "100.0%", provider: undefined }),
+      download,
+    ]);
+
+    expect(await within(row).findByText("65%")).toBeInTheDocument();
+    expect(within(row).queryByText("81.0%")).not.toBeInTheDocument();
+  });
+
+  it("scores a file with no history record at the local score", async () => {
+    withLocalScore(65);
+    const row = await rowFor([]);
+
+    expect(await within(row).findByText("65%")).toBeInTheDocument();
+  });
+
+  it("does not score a translation at the local score", async () => {
+    withLocalScore(65);
+    const row = await rowFor([record(6, 2, { score: undefined })]);
+
+    await within(row).findByText("Test Movie.en.srt");
+    expect(within(row).queryByText("65%")).not.toBeInTheDocument();
+  });
+
+  it("does not score a missing subtitle at the local score", async () => {
+    withLocalScore(65);
+    customRender(
+      <Table
+        movie={{
+          ...movie,
+          subtitles: [],
+          missing_subtitles: [{ ...english, path: null }],
+        }}
+        history={[]}
+      />,
+    );
+
+    await screen.findAllByRole("row");
+    expect(screen.queryByText("65%")).not.toBeInTheDocument();
+  });
 });

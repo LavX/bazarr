@@ -163,6 +163,11 @@ interface EpisodesTableValue {
   // The raw profile: its items carry the audio rules the languages above lack.
   profile?: Language.Profile;
   historyMap: Map<string, History.Episode>;
+  // The manual score (action 9) of a file that no newer record replaced.
+  manualScoreMap: Map<string, History.Episode>;
+  // general.local_subtitle_score: the percentage a hand upload or a file with
+  // no history record is scored at, 0 for none. The subtitle lists use it too.
+  localScore: number;
   embeddedScoreMap: Map<string, History.Episode>;
   download: (item: Item.Episode, result: SearchResultType) => Promise<void>;
 }
@@ -185,6 +190,8 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
     onlyDesired,
     profileItems,
     historyMap,
+    manualScoreMap,
+    localScore,
     embeddedScoreMap,
   } = useEpisodesTable();
   const seriesId = episode.sonarrSeriesId;
@@ -204,10 +211,22 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
         }
         return undefined;
       }
-      const record = historyMap.get(JSON.stringify([episode.id, val.path]));
-      return record && [1, 2, 3, 8].includes(record.action)
-        ? scoreInfoFromHistory(record)
-        : undefined;
+      const key = JSON.stringify([episode.id, val.path]);
+      const record = historyMap.get(key);
+      const base =
+        record && [1, 2, 3, 8].includes(record.action)
+          ? scoreInfoFromHistory(record)
+          : undefined;
+      // A pinned score replaces the one the file came with and keeps the rest.
+      const manual = manualScoreMap.get(key);
+      if (manual?.score) return { ...base, score: manual.score };
+      if (base) return base;
+      // A hand upload and a file with no history record take the local score,
+      // as in the subtitle lists. 0 leaves them unscored.
+      if ((record === undefined || record.action === 4) && localScore > 0) {
+        return { score: `${localScore}%` };
+      }
+      return undefined;
     };
 
     // The API does not expose embedded track ids. Distinguish repeated tracks
@@ -274,6 +293,8 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
     onlyDesired,
     profileItems,
     historyMap,
+    manualScoreMap,
+    localScore,
     embeddedScoreMap,
   ]);
 
@@ -570,6 +591,23 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
       return map;
     }, [orderedHistory]);
 
+    // A pinned score (action 9) applies to a file until a newer record puts a
+    // different file at the path: keyed like historyMap, newest first.
+    const manualScoreMap = useMemo(() => {
+      const map = new Map<string, History.Episode>();
+      const settled = new Set<string>();
+      orderedHistory.forEach((h) => {
+        if (!h.subtitles_path) return;
+        const key = JSON.stringify([h.id, h.subtitles_path]);
+        if (h.action === 9) {
+          if (!settled.has(key) && !map.has(key)) map.set(key, h);
+        } else if ([0, 1, 2, 3, 4, 6, 8].includes(h.action)) {
+          settled.add(key);
+        }
+      });
+      return map;
+    }, [orderedHistory]);
+
     // Score for an embedded track: keyed by (episode local id, language key)
     // from the "treat embedded as downloaded" action=7 records.
     const embeddedScoreMap = useMemo(() => {
@@ -595,6 +633,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
 
     const { data: settings } = useSystemSettings();
     const embeddedAsDownloaded = settings?.general?.use_embedded_subs === true;
+    const localScore = settings?.general?.local_subtitle_score ?? 0;
 
     const episodeIds = useMemo(
       () => (episodes ?? []).map((episode) => episode.id),
@@ -655,6 +694,8 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         profileItems,
         profile,
         historyMap,
+        manualScoreMap,
+        localScore,
         embeddedScoreMap,
         download,
       }),
@@ -666,6 +707,8 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         profileItems,
         profile,
         historyMap,
+        manualScoreMap,
+        localScore,
         embeddedScoreMap,
         download,
       ],

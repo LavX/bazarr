@@ -30,6 +30,7 @@ import {
   faRotateRight,
   faSearch,
   faSpellCheck,
+  faStar,
   faTextHeight,
   faTrash,
   IconDefinition,
@@ -44,6 +45,7 @@ import {
 } from "@/apis/hooks";
 import { ColorToolModal } from "@/components/forms/ColorToolForm";
 import { FrameRateModal } from "@/components/forms/FrameRateForm";
+import { ScoreOverrideModal } from "@/components/forms/ScoreOverrideForm";
 import { TimeOffsetModal } from "@/components/forms/TimeOffsetForm";
 import { TranslationModal } from "@/components/forms/TranslationForm";
 import { useModals } from "@/modules/modals";
@@ -199,6 +201,17 @@ export function useToolGroups() {
           },
         ],
       },
+      {
+        label: "Score",
+        tools: [
+          {
+            key: "score_override",
+            icon: faStar,
+            name: "Set Score...",
+            modal: ScoreOverrideModal,
+          },
+        ],
+      },
     ],
     [],
   );
@@ -322,6 +335,17 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   const toolGroups = useToolGroups();
   const modals = useModals();
 
+  // A manual score is kept for the files listed for a movie or an episode. A
+  // sports event, a combined output and a missing subtitle have none, so the
+  // group is left out for them.
+  const hasScoreGroup =
+    !isCombinedOutput &&
+    !missingLanguage &&
+    !selections.some((s) => s.type === "sports");
+  const visibleGroups = toolGroups.filter(
+    (group) => group.label !== "Score" || hasScoreGroup,
+  );
+
   const disabledTools = selections.length === 0;
   const isMissing = !!missingLanguage;
   const hasSources = (translationSources ?? []).length > 0;
@@ -350,7 +374,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             <Divider />
           </>
         )}
-        {toolGroups.map((group, groupIdx) => (
+        {visibleGroups.map((group, groupIdx) => (
           <div key={group.label}>
             {groupIdx > 0 && <Divider />}
             <Menu.Label>{group.label}</Menu.Label>
@@ -374,7 +398,9 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
               const toolDisabled =
                 disabledTools ||
                 embeddedMode === "bitmap" ||
-                (isEmbedded && tool.key === "two_point_fit");
+                (isEmbedded &&
+                  (tool.key === "two_point_fit" ||
+                    tool.key === "score_override"));
               return (
                 <Menu.Item
                   key={tool.key}

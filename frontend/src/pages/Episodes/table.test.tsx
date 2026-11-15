@@ -592,3 +592,118 @@ describe("Episodes Detail Table, subtitle scores", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });
+
+describe("Episodes Detail Table, manual and local scores", () => {
+  const file: Subtitle = {
+    code2: "en",
+    name: "English",
+    hi: false,
+    forced: false,
+    path: "/tv/Show/Season 1/Show S01E01.en.srt",
+  };
+
+  const fileHistory = (overrides: Partial<History.Episode>) =>
+    makeHistoryEntry({ subtitles_path: file.path!, ...overrides });
+
+  function withLocalScore(localScore: number) {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: {
+            embedded_subs_show_desired: false,
+            local_subtitle_score: localScore,
+          },
+        }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+  }
+
+  it("shows a pinned score in place of the download's", async () => {
+    withLocalScore(0);
+    customRender(
+      <TableHarness
+        episodes={[makeEpisode([file])]}
+        history={[
+          fileHistory({ history_id: 1, score: "98.0%", provider: "podnapisi" }),
+          fileHistory({ action: 9, history_id: 2, score: "40.0%" }),
+        ]}
+      />,
+    );
+    expect(await findScoredBadge(/^en 40%$/i)).toBeInTheDocument();
+  });
+
+  it("shows a pinned score of 0", async () => {
+    withLocalScore(0);
+    customRender(
+      <TableHarness
+        episodes={[makeEpisode([file])]}
+        history={[
+          fileHistory({ history_id: 1, score: "98.0%" }),
+          fileHistory({ action: 9, history_id: 2, score: "0.0%" }),
+        ]}
+      />,
+    );
+    expect(await findScoredBadge(/^en 0%$/i)).toBeInTheDocument();
+  });
+
+  it("drops a pinned score once a newer download replaced the file", async () => {
+    withLocalScore(0);
+    customRender(
+      <TableHarness
+        episodes={[makeEpisode([file])]}
+        history={[
+          fileHistory({ action: 9, history_id: 1, score: "40.0%" }),
+          fileHistory({ action: 2, history_id: 2, score: "91.0%" }),
+        ]}
+      />,
+    );
+    expect(await findScoredBadge(/^en 91%$/i)).toBeInTheDocument();
+  });
+
+  it("scores a hand upload at the local score", async () => {
+    withLocalScore(65);
+    customRender(
+      <TableHarness
+        episodes={[makeEpisode([file])]}
+        history={[
+          fileHistory({ history_id: 1, score: "98.0%" }),
+          fileHistory({ action: 4, history_id: 2, score: "100.0%" }),
+        ]}
+      />,
+    );
+    expect(await findScoredBadge(/^en 65%$/i)).toBeInTheDocument();
+  });
+
+  it("leaves a hand upload unscored while the local score is 0", async () => {
+    withLocalScore(0);
+    customRender(
+      <TableHarness
+        episodes={[makeEpisode([file])]}
+        history={[fileHistory({ action: 4, history_id: 2, score: "100.0%" })]}
+      />,
+    );
+    const badge = await screen.findByTitle("File: Show S01E01.en.srt");
+    expect(badge).not.toHaveTextContent("%");
+  });
+
+  it("scores a file with no history record at the local score", async () => {
+    withLocalScore(65);
+    customRender(
+      <TableHarness episodes={[makeEpisode([file])]} history={[]} />,
+    );
+    expect(await findScoredBadge(/^en 65%$/i)).toBeInTheDocument();
+  });
+
+  it("does not score a translation at the local score", async () => {
+    withLocalScore(65);
+    customRender(
+      <TableHarness
+        episodes={[makeEpisode([file])]}
+        history={[fileHistory({ action: 6, history_id: 2 })]}
+      />,
+    );
+    const badge = await screen.findByTitle("File: Show S01E01.en.srt");
+    expect(badge).not.toHaveTextContent("%");
+  });
+});

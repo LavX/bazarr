@@ -10,6 +10,7 @@ import { AxiosError } from "axios";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
+import { scheduleSubtitleScoresRefresh } from "@/apis/queries/subtitleScores";
 import api from "@/apis/raw";
 import {
   BatchAction,
@@ -18,6 +19,7 @@ import {
   EmbeddedHiddenTrack,
   EmbeddedTrackForm,
   HiddenTrackMediaType,
+  ScoreOverrideForm,
   SubtitleSource,
 } from "@/apis/raw/subtitles";
 import { notification } from "@/modules/notification";
@@ -131,6 +133,40 @@ export function useSubtitleAction() {
           ? data?.job_id
           : undefined;
       return refreshWhenJobFinishes(client, jobId, refresh);
+    },
+  });
+}
+
+/**
+ * Pin a manual score on one subtitle file. The write is a history row, so the
+ * history and the score lists refresh with the media tables.
+ */
+export function useSubtitleScoreOverride() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: [QueryKeys.Subtitles, "score-override"],
+    mutationFn: (form: ScoreOverrideForm) =>
+      api.subtitles.setScoreOverride(form),
+    onSuccess: (_, form) => {
+      showNotification(
+        notification.info("Score set", `The score is now ${form.score}%`),
+      );
+      if (form.type === "episode") {
+        void invalidateEpisodeHistory(client, {
+          episodeId: form.id,
+          arrInstanceId: form.arr_instance_id,
+        });
+      }
+      refreshSubtitleOwner(client, {
+        id: form.id,
+        type: form.type,
+        path: form.path,
+        language: "",
+      });
+      scheduleSubtitleScoresRefresh(
+        client,
+        form.type === "episode" ? QueryKeys.Series : QueryKeys.Movies,
+      );
     },
   });
 }

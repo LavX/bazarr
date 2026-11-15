@@ -43,6 +43,17 @@ export type BatchAction =
   | "extract"
   | "ocr";
 
+/** One manual score for a listed subtitle file of a movie or an episode. */
+export interface ScoreOverrideForm {
+  type: "movie" | "episode";
+  /** radarrId for a movie, sonarrEpisodeId for an episode. */
+  id: number;
+  path: string;
+  /** A whole percentage from 0 to 100. */
+  score: number;
+  arr_instance_id?: number;
+}
+
 /** What Extract to file answers: the queued job and the file it will write. */
 export interface EmbeddedExtractResult {
   job_id: number | null;
@@ -267,6 +278,21 @@ class SubtitlesApi extends BaseApi {
       { action },
     );
     return response.data;
+  }
+
+  /**
+   * Pin a score from 0 to 100 on one listed subtitle file of a movie or an
+   * episode. `id` is the radarrId or the sonarrEpisodeId, as in a modify form.
+   */
+  async setScoreOverride(form: ScoreOverrideForm) {
+    await this.post("/score-override", {
+      subtitlesPath: form.path,
+      score: form.score,
+      radarrMovieId: form.type === "movie" ? form.id : undefined,
+      sonarrEpisodeId: form.type === "episode" ? form.id : undefined,
+      // eslint-disable-next-line camelcase
+      arr_instance_id: form.arr_instance_id,
+    });
   }
 
   /** Extract an embedded track to a file next to the video, as a queued job. */

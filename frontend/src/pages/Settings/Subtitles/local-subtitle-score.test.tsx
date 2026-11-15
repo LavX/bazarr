@@ -11,7 +11,11 @@ describe("Subtitles settings, local subtitle score", () => {
     server.use(
       http.get("/api/system/settings", () =>
         HttpResponse.json({
-          general: { theme: "auto", use_embedded_subs: true },
+          general: {
+            theme: "auto",
+            use_embedded_subs: true,
+            upgrade_subs: true,
+          },
           ocr: { tessdata_dir: "" },
         }),
       ),
@@ -28,5 +32,18 @@ describe("Subtitles settings, local subtitle score", () => {
     expect(
       screen.getByRole("textbox", { name: "Local subtitle score (%)" }),
     ).toBeInTheDocument();
+  });
+
+  it("names the manual upgrade option for downloads only", async () => {
+    customRender(<SettingsSubtitlesView />);
+
+    expect(
+      await screen.findByRole("switch", {
+        name: "Upgrade Manually Downloaded Subtitles",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Downloaded or Uploaded/),
+    ).not.toBeInTheDocument();
   });
 });

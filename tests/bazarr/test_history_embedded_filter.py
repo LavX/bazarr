@@ -398,3 +398,38 @@ def test_history_pagination_orders_timestamp_ties_by_event_id(media_type, schema
     assert [page["data"][0]["action"] for page in pages] == [row.action for row in sorted(
         rows, key=lambda row: row.id, reverse=True)]
     assert {page["total"] for page in pages} == {len(rows)}
+
+
+def test_a_zero_score_with_a_scale_is_formatted_as_a_percentage(schema_session, monkeypatch):
+    """A manual score of 0 is stored as 0 out of the full scale. A falsy check
+    skipped it, so the detail pages showed the old score or none."""
+    from app.database import TableHistory, TableHistoryMovie, TableMovies
+
+    _series_fixture(schema_session)
+    schema_session.add(TableHistory(
+        id=9, series_id=1, episode_id=1, sonarrSeriesId=10, sonarrEpisodeId=100,
+        arr_instance_id=1, action=9, language="en", description="pinned",
+        score=0, score_out_of=360, subtitles_path="/tv/alpha/s01e01.en.srt",
+        timestamp=datetime(2026, 8, 29, 13, 0, 0),
+    ))
+    schema_session.add(TableMovies(
+        id=1, radarrId=1, arr_instance_id=1, title="alpha movie", path="/movies/alpha.mkv",
+        tmdbId="1", profileId=None, tags="[]", monitored="True", subtitles="[]",
+        missing_subtitles="[]",
+    ))
+    schema_session.flush()
+    schema_session.add(TableHistoryMovie(
+        id=1, movie_id=1, radarrId=1, arr_instance_id=1, action=9, language="en",
+        description="pinned", score=0, score_out_of=180,
+        subtitles_path="/movies/alpha.en.srt", video_path="/movies/alpha.mkv",
+        timestamp=datetime(2026, 8, 29, 13, 0, 0),
+    ))
+    schema_session.flush()
+    _patch_episode_endpoint(monkeypatch, schema_session)
+    _patch_movie_endpoint(monkeypatch, schema_session)
+
+    episode = _get_episode_history("?episodeid=100")
+    movie = _get_movie_history("?id=1")
+
+    assert [item["score"] for item in episode["data"] if item["action"] == 9] == ["0.0%"]
+    assert [item["score"] for item in movie["data"]] == ["0.0%"]

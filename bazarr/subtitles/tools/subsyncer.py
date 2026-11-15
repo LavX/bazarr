@@ -521,10 +521,13 @@ class SubSyncer:
             def prr(path):
                 return path_mappings.path_replace_reverse_instance(
                     path, sports_context.arr_instance_id, 'sports')
-        elif sonarr_series_id:
-            prr = path_mappings.path_replace_reverse
         else:
-            prr = path_mappings.path_replace_reverse_movie
+            # The rows downloads write go through the owning instance's mapping,
+            # so a sync row has to as well, or the two name one file differently.
+            history_media_type = 'series' if sonarr_series_id else 'movie'
+
+            def prr(path):
+                return path_mappings.path_replace_reverse_instance(path, arr_instance_id, history_media_type)
 
         result = ProcessSubtitlesResult(message=message,
                                         reversed_path=(sports_context.original_path if sports_context is not None

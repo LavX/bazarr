@@ -29,7 +29,9 @@ from ..download import generate_subtitles
 from ..language_profiles import build_translate_from_map
 from ..tools.translate.failure_record import translation_recently_failed
 from .forced_flag import run_flagged_search
-from .utils import _find_existing_subtitle_path, _provider_file_on_disk, evaluate_translation_gate
+from .utils import (SOURCE_HISTORY_ACTIONS, _find_existing_subtitle_path, _provider_file_on_disk,
+                    evaluate_translation_gate, source_history_for_wait, source_wait_elapsed,
+                    source_wait_enabled, translation_capture_paths)
 
 
 def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True):
@@ -106,8 +108,9 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                     # instead of silently falling back to provider search, whatever
                     # local_subtitle_score is.
                     source_score_pct = min_score
-                # A hand upload is used below the threshold too, as a sidecar is, when
-                # a local score is set.
+                # The score gate lets a hand upload through below the threshold when a
+                # local score is set. The source wait never holds a hand upload, whatever
+                # the local score.
                 local_upload = history is not None and history.action == 4 and local_score > 0
                 if source_score_pct < min_score and not local_upload:
                     logging.debug(
@@ -195,52 +198,92 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                         # is the provider's, landed after the last index pass,
                         # and the better track. A translation would replace it,
                         # so this target is served already and queues nothing.
-                        expected_versions = capture_subtitle_versions(video_path, (destination,))
+                        expected_versions = capture_subtitle_versions(
+                            video_path, translation_capture_paths(destination, source_srt))
                         if expected_versions[0].version is not None:
                             logging.info(
                                 "BAZARR auto-translate (wanted-scan) skipped: %s is already "
                                 "on disk for %s", lang_code, video_path,
                             )
                             continue
-                        translate_kwargs = dict(
-                            video_path=video_path,
-                            source_srt_file=source_srt,
-                            from_lang=translate_cfg['from'],
-                            to_lang=lang_code,
-                            forced=translate_cfg['forced'],
-                            hi=translate_cfg['hi'],
-                            media_type='episode',
-                            sonarr_series_id=episode.sonarrSeriesId,
-                            sonarr_episode_id=episode.sonarrEpisodeId,
-                            radarr_id=None,
-                            metadata=metadata,
-                            arr_instance_id=arr_instance_id,
-                            sports_operation=None,
-                            embedded_source=None,
-                            expected_destination_versions=expected_versions,
-                        )
-                        # Guard: skip if an identical translate job is already
-                        # pending or running. Why: history guard (action=6) only
-                        # blocks re-queue after successful completion; without
-                        # this check, every wanted-scan tick during a pending
-                        # translation would enqueue a duplicate job.
-                        # The kwargs have to name every parameter the queued
-                        # job binds, including the defaulted ones: the queue
-                        # compares the whole dict, so a partial dict never
-                        # matched and this guard never fired.
-                        if jobs_queue._is_an_existing_job(
-                            module='subtitles.tools.translate.main',
-                            func='translate_subtitles_file',
-                            args=[],
-                            kwargs=translate_kwargs,
-                        ):
+                        # The source wait is measured from when the history says the file being
+                        # translated was downloaded or uploaded. Only a sync keeps that time: it
+                        # rewrites the file in place. Any other change to the file (an edit, a
+                        # modification tool, a copy or an import from outside) counts from the file
+                        # time and loses the hand-upload exemption, and so does a source with no
+                        # row (a sidecar the disk scan found). Only the newest row stored for
+                        # source_srt counts: a newer upload of another file does not vouch for
+                        # this one. The rows are read only while the wait is on, so the default
+                        # wait of 0 never runs this query.
+                        held = False
+                        if source_wait_enabled():
+                            source_rows = database.execute(
+                                scoped(
+                                    select(TableHistory.subtitles_path, TableHistory.action, TableHistory.timestamp)
+                                    .where(TableHistory.sonarrEpisodeId == episode.sonarrEpisodeId)
+                                    .where(TableHistory.language.like(f"{translate_cfg['from']}%"))
+                                    .where(TableHistory.action.in_(SOURCE_HISTORY_ACTIONS))
+                                    .order_by(TableHistory.timestamp.desc()),
+                                    TableHistory.arr_instance_id,
+                                    arr_instance_id,
+                                )
+                            ).all()
+                            def local_forms(stored_path, _owner=arr_instance_id):
+                                return (
+                                    path_mappings.path_replace_instance(stored_path, _owner, 'episode'),
+                                    path_mappings.path_replace(stored_path),
+                                )
+
+                            written_at, hand_upload = source_history_for_wait(
+                                source_rows, source_srt, local_forms)
+                            held = not hand_upload and not source_wait_elapsed(source_srt, written_at)
+                        if held:
+                            logging.debug(
+                                "BAZARR auto-translate (wanted-scan) skipped for %s: "
+                                "source subtitle is younger than translator.min_source_wait_minutes "
+                                "(falling back to provider search)",
+                                video_path,
+                            )
+                        else:
+                            translate_kwargs = dict(
+                                video_path=video_path,
+                                source_srt_file=source_srt,
+                                from_lang=translate_cfg['from'],
+                                to_lang=lang_code,
+                                forced=translate_cfg['forced'],
+                                hi=translate_cfg['hi'],
+                                media_type='episode',
+                                sonarr_series_id=episode.sonarrSeriesId,
+                                sonarr_episode_id=episode.sonarrEpisodeId,
+                                radarr_id=None,
+                                metadata=metadata,
+                                arr_instance_id=arr_instance_id,
+                                sports_operation=None,
+                                embedded_source=None,
+                                expected_destination_versions=expected_versions,
+                            )
+                            # Guard: skip if an identical translate job is already
+                            # pending or running. Why: history guard (action=6) only
+                            # blocks re-queue after successful completion; without
+                            # this check, every wanted-scan tick during a pending
+                            # translation would enqueue a duplicate job.
+                            # The kwargs have to name every parameter the queued
+                            # job binds, including the defaulted ones: the queue
+                            # compares the whole dict, so a partial dict never
+                            # matched and this guard never fired.
+                            if jobs_queue._is_an_existing_job(
+                                module='subtitles.tools.translate.main',
+                                func='translate_subtitles_file',
+                                args=[],
+                                kwargs=translate_kwargs,
+                            ):
+                                continue
+                            logging.info(
+                                "BAZARR auto-translate (wanted-scan) queuing %s -> %s for %s",
+                                translate_cfg['from'], lang_code, video_path,
+                            )
+                            translate_subtitles_file(**translate_kwargs)
                             continue
-                        logging.info(
-                            "BAZARR auto-translate (wanted-scan) queuing %s -> %s for %s",
-                            translate_cfg['from'], lang_code, video_path,
-                        )
-                        translate_subtitles_file(**translate_kwargs)
-                        continue
                     except Exception:
                         logging.exception(
                             "BAZARR failed to queue auto-translate for %s",

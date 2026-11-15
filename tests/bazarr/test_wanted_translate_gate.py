@@ -11,6 +11,8 @@ profile had no translate-from for it at all.
 """
 
 import logging
+import os
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -578,6 +580,717 @@ def test_a_hand_upload_follows_the_local_score_when_the_local_score_changes_for_
         translator=SimpleNamespace(min_source_score=70),
     ))
     wanted_series._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def _source_subtitle(tmp_path, minutes_old):
+    source = tmp_path / "fixture.en.srt"
+    source.write_text("fixture", encoding="utf-8")
+    stamp = time.time() - minutes_old * 60
+    os.utime(source, (stamp, stamp))
+    return str(source)
+
+
+def _point_source_at(monkeypatch, module, source):
+    monkeypatch.setattr(module, "_find_existing_subtitle_path",
+                        lambda subtitles, source_lang, path_replace_fn=None: source)
+
+
+def _minimum_source_wait(monkeypatch, minutes):
+    monkeypatch.setattr("subtitles.wanted.utils.settings",
+                        SimpleNamespace(translator=SimpleNamespace(min_source_wait_minutes=minutes)))
+
+
+def test_a_source_written_just_now_translates_when_no_minimum_wait_is_set(schema_session, monkeypatch, tmp_path):
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_movies, _source_subtitle(tmp_path, minutes_old=0))
+    _minimum_source_wait(monkeypatch, 0)
+
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_movie_source_younger_than_the_minimum_wait_is_left_to_the_provider_search(
+        schema_session, monkeypatch, tmp_path):
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_movies, _source_subtitle(tmp_path, minutes_old=5))
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    assert searches == [[("hu", "False", "False")]]
+    translations.assert_not_called()
+
+
+def test_an_episode_source_younger_than_the_minimum_wait_is_left_to_the_provider_search(
+        schema_session, monkeypatch, tmp_path):
+    searches, translations = [], Mock()
+    wanted_series = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_series, _source_subtitle(tmp_path, minutes_old=5))
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_series._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    assert searches == [[("hu", "False", "False")]]
+    translations.assert_not_called()
+
+
+def test_a_movie_source_older_than_the_minimum_wait_is_translated(schema_session, monkeypatch, tmp_path):
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_movies, _source_subtitle(tmp_path, minutes_old=120))
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_hand_upload_movie_at_the_local_score_is_translated_without_waiting(schema_session, monkeypatch, tmp_path):
+    """A hand upload is a translation source as soon as it exists, so the
+    minimum wait does not hold it back."""
+    from subliminal_patch.score import MAX_SCORES
+
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _insert_hand_upload(schema_session, "movie", round(MAX_SCORES["movie"] * 40 / 100),
+                        MAX_SCORES["movie"], "/movies/fixture.mkv", source)
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_movies, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=40),
+        translator=SimpleNamespace(min_source_score=90),
+    ))
+    _point_source_at(monkeypatch, wanted_movies, source)
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_hand_upload_episode_at_the_local_score_is_translated_without_waiting(schema_session, monkeypatch, tmp_path):
+    """A hand upload is a translation source as soon as it exists, so the
+    minimum wait does not hold it back."""
+    from subliminal_patch.score import MAX_SCORES
+
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _insert_hand_upload(schema_session, "episode", round(MAX_SCORES["episode"] * 40 / 100),
+                        MAX_SCORES["episode"], "/series/fixture/s01e01.mkv", source)
+    searches, translations = [], Mock()
+    wanted_series = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_series, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=40),
+        translator=SimpleNamespace(min_source_score=90),
+    ))
+    _point_source_at(monkeypatch, wanted_series, source)
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_series._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_hand_upload_movie_at_local_zero_is_translated_without_waiting(schema_session, monkeypatch, tmp_path):
+    """A hand upload at local 0 is scored at the full scale, so it clears the
+    threshold, and the minimum wait never holds a hand upload back."""
+    from subliminal_patch.score import MAX_SCORES
+
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _insert_hand_upload(schema_session, "movie", MAX_SCORES["movie"], MAX_SCORES["movie"],
+                        "/movies/fixture.mkv", source)
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_movies, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=0),
+        translator=SimpleNamespace(min_source_score=90),
+    ))
+    _point_source_at(monkeypatch, wanted_movies, source)
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_hand_upload_episode_at_local_zero_is_translated_without_waiting(schema_session, monkeypatch, tmp_path):
+    """A hand upload at local 0 is scored at the full scale, so it clears the
+    threshold, and the minimum wait never holds a hand upload back."""
+    from subliminal_patch.score import MAX_SCORES
+
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _insert_hand_upload(schema_session, "episode", MAX_SCORES["episode"], MAX_SCORES["episode"],
+                        "/series/fixture/s01e01.mkv", source)
+    searches, translations = [], Mock()
+    wanted_series = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    monkeypatch.setattr(wanted_series, "settings", SimpleNamespace(
+        general=SimpleNamespace(use_whisper_fallback=False, local_subtitle_score=0),
+        translator=SimpleNamespace(min_source_score=90),
+    ))
+    _point_source_at(monkeypatch, wanted_series, source)
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_series._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+def test_a_movie_sidecar_is_held_when_the_newest_hand_upload_is_another_file(
+        schema_session, monkeypatch, tmp_path):
+    """The newest English row is a hand upload of another file. That upload
+    does not vouch for this sidecar, which is younger than the minimum wait."""
+    from subliminal_patch.score import MAX_SCORES
+
+    _insert_hand_upload(schema_session, "movie", MAX_SCORES["movie"], MAX_SCORES["movie"],
+                        "/movies/fixture.mkv", "/movies/fixture.en.srt")
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_movies, _source_subtitle(tmp_path, minutes_old=5))
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+def test_an_episode_sidecar_is_held_when_the_newest_hand_upload_is_another_file(
+        schema_session, monkeypatch, tmp_path):
+    """The newest English row is a hand upload of another file. That upload
+    does not vouch for this sidecar, which is younger than the minimum wait."""
+    from subliminal_patch.score import MAX_SCORES
+
+    _insert_hand_upload(schema_session, "episode", MAX_SCORES["episode"], MAX_SCORES["episode"],
+                        "/series/fixture/s01e01.mkv", "/series/fixture/s01e01.en.srt")
+    searches, translations = [], Mock()
+    wanted_series = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_series, _source_subtitle(tmp_path, minutes_old=5))
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_series._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+def test_a_held_movie_source_with_its_translation_on_disk_skips_the_provider_search(
+        schema_session, monkeypatch, tmp_path):
+    """A source still younger than the minimum wait does not send the language
+    to the provider search when its translated file already exists. This test
+    pins the order of the already-translated guard against the hold on source-
+    age, and not the wait itself."""
+    from datetime import datetime
+
+    from sqlalchemy import insert
+
+    from app.database import TableHistoryMovie
+
+    translated = tmp_path / "fixture.hu.srt"
+    translated.write_text("translated", encoding="utf-8")
+    schema_session.execute(insert(TableHistoryMovie).values(
+        action=6, description="Subtitle translated.", language="hu", provider=None,
+        radarrId=30, arr_instance_id=1, timestamp=datetime.now(), video_path="/movies/fixture.mkv",
+        subtitles_path=str(translated)))
+    schema_session.commit()
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_movies, _source_subtitle(tmp_path, minutes_old=5))
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_movies._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_not_called()
+    assert searches == [[]]
+
+
+def test_a_held_episode_source_with_its_translation_on_disk_skips_the_provider_search(
+        schema_session, monkeypatch, tmp_path):
+    """A source still younger than the minimum wait does not send the language
+    to the provider search when its translated file already exists. This test
+    pins the order of the already-translated guard against the hold on source-
+    age, and not the wait itself."""
+    from datetime import datetime
+
+    from sqlalchemy import insert
+
+    from app.database import TableHistory
+
+    translated = tmp_path / "fixture.hu.srt"
+    translated.write_text("translated", encoding="utf-8")
+    schema_session.execute(insert(TableHistory).values(
+        action=6, description="Subtitle translated.", language="hu", provider=None,
+        sonarrSeriesId=10, sonarrEpisodeId=20, arr_instance_id=1, timestamp=datetime.now(),
+        video_path="/series/fixture/s01e01.mkv", subtitles_path=str(translated)))
+    schema_session.commit()
+    searches, translations = [], Mock()
+    wanted_series = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_series, _source_subtitle(tmp_path, minutes_old=5))
+    _minimum_source_wait(monkeypatch, 60)
+
+    wanted_series._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_not_called()
+    assert searches == [[]]
+
+
+def test_a_held_movie_source_with_a_subtitle_at_the_destination_skips_the_provider_search(
+        schema_session, monkeypatch, tmp_path):
+    """A source still younger than the minimum wait does not send the language
+    to the provider search when a subtitle already sits at its translation
+    destination. This test pins the order of the destination check against the
+    hold on source-age, and not the wait itself."""
+    (tmp_path / "fixture.hu.srt").write_text("provider", encoding="utf-8")
+    movie = _wanted_movie_row()
+    movie.path = str(tmp_path / "fixture.mkv")
+    searches, translations = [], Mock()
+    wanted_movies = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_movies, _source_subtitle(tmp_path, minutes_old=5))
+    _minimum_source_wait(monkeypatch, 60)
+    monkeypatch.setattr("subtitles.indexer.utils.settings",
+                        SimpleNamespace(general=SimpleNamespace(subfolder="current")))
+
+    wanted_movies._wanted_movie(movie, providers_list=[], translation_gate=True)
+
+    translations.assert_not_called()
+    assert searches == [[]]
+
+
+def test_a_held_episode_source_with_a_subtitle_at_the_destination_skips_the_provider_search(
+        schema_session, monkeypatch, tmp_path):
+    """A source still younger than the minimum wait does not send the language
+    to the provider search when a subtitle already sits at its translation
+    destination. This test pins the order of the destination check against the
+    hold on source-age, and not the wait itself."""
+    (tmp_path / "s01e01.hu.srt").write_text("provider", encoding="utf-8")
+    episode = _wanted_episode_row()
+    episode.path = str(tmp_path / "s01e01.mkv")
+    searches, translations = [], Mock()
+    wanted_series = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, wanted_series, _source_subtitle(tmp_path, minutes_old=5))
+    _minimum_source_wait(monkeypatch, 60)
+    monkeypatch.setattr("subtitles.indexer.utils.settings",
+                        SimpleNamespace(general=SimpleNamespace(subfolder="current")))
+
+    wanted_series._wanted_episode(episode, providers_list=[], translation_gate=True)
+
+    translations.assert_not_called()
+    assert searches == [[]]
+
+
+def test_a_source_that_is_missing_is_not_held_back_by_the_minimum_wait(monkeypatch, tmp_path):
+    from subtitles.wanted.utils import source_wait_elapsed
+
+    _minimum_source_wait(monkeypatch, 60)
+
+    assert source_wait_elapsed(str(tmp_path / "missing.en.srt")) is True
+
+
+def test_a_source_older_than_the_minimum_wait_has_elapsed_it(monkeypatch, tmp_path):
+    from subtitles.wanted.utils import source_wait_elapsed
+
+    _minimum_source_wait(monkeypatch, 60)
+
+    assert source_wait_elapsed(_source_subtitle(tmp_path, minutes_old=120)) is True
+
+
+def test_a_source_younger_than_the_minimum_wait_has_not_elapsed_it(monkeypatch, tmp_path):
+    from subtitles.wanted.utils import source_wait_elapsed
+
+    _minimum_source_wait(monkeypatch, 60)
+
+    assert source_wait_elapsed(_source_subtitle(tmp_path, minutes_old=5)) is False
+
+
+def test_a_source_dated_far_in_the_future_is_not_held_back_by_the_minimum_wait(monkeypatch, tmp_path):
+    """A date further ahead than the wait itself cannot be a file written a
+    moment ago, so holding it would hold it for as long as the date stays ahead."""
+    from subtitles.wanted.utils import source_wait_elapsed
+
+    source = tmp_path / "fixture.en.srt"
+    source.write_text("fixture", encoding="utf-8")
+    future = time.time() + 3 * 60 * 60
+    os.utime(source, (future, future))
+    _minimum_source_wait(monkeypatch, 60)
+
+    assert source_wait_elapsed(str(source)) is True
+
+
+def test_a_source_dated_a_few_seconds_ahead_is_held_for_the_minimum_wait(monkeypatch, tmp_path):
+    """A clock that runs a little ahead of this one dates a file written just
+    now in the future. Its age is 0, so it waits like any fresh source."""
+    from subtitles.wanted.utils import source_wait_elapsed
+
+    source = tmp_path / "fixture.en.srt"
+    source.write_text("fixture", encoding="utf-8")
+    future = time.time() + 5
+    os.utime(source, (future, future))
+    _minimum_source_wait(monkeypatch, 60)
+
+    assert source_wait_elapsed(str(source)) is False
+
+
+def _insert_history_row(session, model, action, subtitles_path, seconds_after, score=None, score_out_of=None,
+                        now=None):
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import insert
+
+    if model == "movie":
+        from app.database import TableHistoryMovie as table
+        keys = dict(radarrId=30, video_path="/movies/fixture.mkv")
+    else:
+        from app.database import TableHistory as table
+        keys = dict(sonarrSeriesId=10, sonarrEpisodeId=20, video_path="/series/fixture/s01e01.mkv")
+    session.execute(insert(table).values(
+        action=action, description="Later event.", language="en", provider=None,
+        score=score, score_out_of=score_out_of, arr_instance_id=1,
+        timestamp=(now or datetime.now()) + timedelta(seconds=seconds_after),
+        subtitles_path=subtitles_path, **keys))
+    session.commit()
+
+
+@pytest.mark.parametrize("later_action", [5, 9])
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_hand_upload_stays_unheld_after_a_sync_or_a_manual_score(
+        schema_session, monkeypatch, tmp_path, model, later_action):
+    """A sync rewrites the same file and a manual score only rescores it, so
+    neither says the file did not come from the upload."""
+    from subliminal_patch.score import MAX_SCORES
+
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    video = "/movies/fixture.mkv" if model == "movie" else "/series/fixture/s01e01.mkv"
+    _insert_hand_upload(schema_session, model, MAX_SCORES[model], MAX_SCORES[model], video, source)
+    _insert_history_row(schema_session, model, later_action, source, seconds_after=30)
+    searches, translations = [], Mock()
+    if model == "movie":
+        scan = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    else:
+        scan = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, scan, source)
+    _minimum_source_wait(monkeypatch, 60)
+
+    if model == "movie":
+        scan._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+    else:
+        scan._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+@pytest.mark.parametrize("wait,captured", [(60, 2), (0, 1)])
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_queued_scan_translation_captures_its_source_only_while_the_wait_is_on(
+        schema_session, monkeypatch, tmp_path, model, wait, captured):
+    searches, translations = [], Mock()
+    source = _source_subtitle(tmp_path, minutes_old=120)
+    if model == "movie":
+        scan = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    else:
+        scan = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, scan, source)
+    _minimum_source_wait(monkeypatch, wait)
+
+    if model == "movie":
+        scan._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+    else:
+        scan._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    expected = translations.call_args.kwargs["expected_destination_versions"]
+    assert len(expected) == captured
+    assert expected[0].path.endswith(".hu.srt")
+    if captured == 2:
+        assert expected[1].path == source
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_scan_translation_cancels_when_its_source_is_replaced_while_it_waits(
+        schema_session, monkeypatch, tmp_path, model):
+    """The wait is decided for the file seen at queueing. A new file in the
+    source's place has not waited, so the captured version refuses it and the
+    next scan applies the wait."""
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged, validate_subtitle_versions
+
+    searches, translations = [], Mock()
+    source = _source_subtitle(tmp_path, minutes_old=120)
+    if model == "movie":
+        scan = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    else:
+        scan = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, scan, source)
+    _minimum_source_wait(monkeypatch, 60)
+    if model == "movie":
+        scan._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+    else:
+        scan._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+    expected = translations.call_args.kwargs["expected_destination_versions"]
+    validate_subtitle_versions(expected)
+
+    with open(source, "w", encoding="utf-8") as handle:
+        handle.write("a replacement written just now")
+
+    with pytest.raises(SubtitleSourceChanged):
+        validate_subtitle_versions(expected)
+
+
+def _scan_once(model, monkeypatch, schema_session, source, minutes, global_forward=None):
+    searches, translations = [], Mock()
+    if model == "movie":
+        scan = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    else:
+        scan = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    if global_forward is not None:
+        # The scan's global forward mapping, in place of the identity the preparation installs.
+        monkeypatch.setattr(scan.path_mappings, "path_replace_movie" if model == "movie" else "path_replace",
+                            global_forward)
+    _point_source_at(monkeypatch, scan, source)
+    _minimum_source_wait(monkeypatch, minutes)
+    if model == "movie":
+        scan._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+    else:
+        scan._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+    return searches, translations
+
+
+def _record_download(session, model, source, minutes_ago, action=1, now=None):
+    from subliminal_patch.score import MAX_SCORES
+
+    _insert_history_row(session, model, action, source, seconds_after=-minutes_ago * 60,
+                        score=MAX_SCORES[model], score_out_of=MAX_SCORES[model], now=now)
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_the_wait_counts_from_the_download_on_record_not_the_file_time(
+        schema_session, monkeypatch, tmp_path, model):
+    """The file is old, but the history says it was downloaded five minutes
+    ago, so it is still inside the wait."""
+    source = _source_subtitle(tmp_path, minutes_old=120)
+    _record_download(schema_session, model, source, minutes_ago=5)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_file_replaced_after_its_download_row_is_measured_from_the_file(
+        schema_session, monkeypatch, tmp_path, model):
+    """The download row is two hours old, but the file was written a moment ago
+    by something the history does not know: a concurrent save not recorded yet,
+    an arr import or a copy by hand. The old row does not vouch for it."""
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _record_download(schema_session, model, source, minutes_ago=120)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_file_replaced_after_a_hand_upload_row_does_not_inherit_the_exemption(
+        schema_session, monkeypatch, tmp_path, model):
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _record_download(schema_session, model, source, minutes_ago=180, action=4)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_file_replaced_after_its_row_but_old_enough_by_its_own_time_translates(
+        schema_session, monkeypatch, tmp_path, model):
+    source = _source_subtitle(tmp_path, minutes_old=90)
+    _record_download(schema_session, model, source, minutes_ago=180)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_sync_rewrite_does_not_restart_the_wait(schema_session, monkeypatch, tmp_path, model):
+    """A sync rewrites the file in place and logs its own row afterwards. The
+    download is two hours old, so the wait stays elapsed though the file and the
+    sync row are brand new."""
+    source = _source_subtitle(tmp_path, minutes_old=1)
+    _record_download(schema_session, model, source, minutes_ago=120)
+    _insert_history_row(schema_session, model, 5, source, seconds_after=-30)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_source_replaced_after_a_sync_does_not_inherit_the_old_age(
+        schema_session, monkeypatch, tmp_path, model):
+    """Download two hours ago, sync an hour and a half ago, then something other
+    than a sync wrote the file a moment ago. The sync row only explains the
+    modification time up to its own, so the file time decides."""
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _record_download(schema_session, model, source, minutes_ago=120)
+    _insert_history_row(schema_session, model, 5, source, seconds_after=-90 * 60)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_file_dated_far_ahead_does_not_count_as_a_later_write(
+        schema_session, monkeypatch, tmp_path, model):
+    """A modification time hours ahead of now cannot be told from a clock
+    disagreement, so the row it sits next to keeps standing."""
+    source = _source_subtitle(tmp_path, minutes_old=-4 * 60)
+    _record_download(schema_session, model, source, minutes_ago=5)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    # The row says five minutes. Read as the file's own time the date would be
+    # hours ahead of the wait and release it.
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_source_with_no_history_row_goes_by_the_file_time(
+        schema_session, monkeypatch, tmp_path, model):
+    young = _source_subtitle(tmp_path, minutes_old=5)
+    searches, translations = _scan_once(model, monkeypatch, schema_session, young, 60)
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+    old = _source_subtitle(tmp_path, minutes_old=120)
+    searches, translations = _scan_once(model, monkeypatch, schema_session, old, 60)
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_removal_on_record_leaves_the_file_time_to_decide(
+        schema_session, monkeypatch, tmp_path, model):
+    """The newest row for the path removed the file, so it says nothing about
+    when the file that is there now arrived."""
+    source = _source_subtitle(tmp_path, minutes_old=5)
+    _insert_history_row(schema_session, model, 0, source, seconds_after=-3 * 3600)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+def test_a_written_time_in_the_history_is_measured_like_a_file_time(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta
+
+    from subtitles.wanted.utils import source_wait_elapsed
+
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _minimum_source_wait(monkeypatch, 60)
+
+    assert source_wait_elapsed(source, datetime.now() - timedelta(minutes=5)) is False
+    assert source_wait_elapsed(source, datetime.now() - timedelta(minutes=120)) is True
+    # A few seconds ahead is a clock disagreement and waits; hours ahead cannot be a fresh file.
+    assert source_wait_elapsed(source, datetime.now() + timedelta(seconds=5)) is False
+    assert source_wait_elapsed(source, datetime.now() + timedelta(hours=3)) is True
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+@pytest.mark.parametrize("stored_through", ["instance", "global"])
+def test_history_rows_are_matched_through_the_instance_and_the_global_mapping(
+        schema_session, monkeypatch, tmp_path, model, stored_through):
+    """Rows are stored through the owning instance's mapping, older ones through
+    the global mapping. The scans resolve the source through the global mapping,
+    so matching a row through the instance mapping as well is defensive: it only
+    matters when the two agree on the source. Both forms must match, and the
+    global one is the fallback when the instance's mapping does not apply to the
+    stored path."""
+    import utilities.path_mappings as mapping_module
+
+    source = _source_subtitle(tmp_path, minutes_old=120)
+    global_forward = None
+    if stored_through == "instance":
+        monkeypatch.setattr(mapping_module, "_instance_path_mapping",
+                            lambda arr_instance_id, media_type: [["/remote", str(tmp_path)]])
+        stored = "/remote/fixture.en.srt"
+    else:
+        # The instance has a mapping of its own that leaves this path alone, so
+        # only the global mapping turns the stored path back into the source.
+        monkeypatch.setattr(mapping_module, "_instance_path_mapping",
+                            lambda arr_instance_id, media_type: [["/unrelated", "/elsewhere"]])
+        stored = "/global/fixture.en.srt"
+
+        def global_forward(path):
+            return str(tmp_path) + path[len("/global"):] if path.startswith("/global") else path
+    _record_download(schema_session, model, stored, minutes_ago=5)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60,
+                                        global_forward=global_forward)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_limit_a_sync_vouches_for_an_unlogged_rewrite_before_it(schema_session, monkeypatch, tmp_path, model):
+    """Download two hours ago, an outside replacement ten minutes ago that the
+    history does not know, then a sync a minute ago. The sync row covers the
+    file's time, so the download's age stands. This is an accepted limit."""
+    source = _source_subtitle(tmp_path, minutes_old=1.5)
+    _record_download(schema_session, model, source, minutes_ago=120)
+    _insert_history_row(schema_session, model, 5, source, seconds_after=-60)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_limit_a_file_system_clock_ahead_delays_the_wait_by_the_skew(
+        schema_session, monkeypatch, tmp_path, model):
+    """The row says the wait ended three seconds ago. The file system's clock
+    runs five seconds ahead, so the file is dated later than the row and the
+    wait counts from the file time, which is still two seconds short. This is an
+    accepted limit: the delay is at most the skew. The clock is pinned, and the
+    row is written from the same instant."""
+    from datetime import datetime
+
+    now = datetime(2026, 6, 1, 12, 0, 0)
+    monkeypatch.setattr("subtitles.wanted.utils.time", SimpleNamespace(time=lambda: now.timestamp()))
+    source = tmp_path / "fixture.en.srt"
+    source.write_text("fixture", encoding="utf-8")
+    _record_download(schema_session, model, str(source), minutes_ago=(3600 + 3) / 60, now=now)
+
+    skewed = now.timestamp() - 3600 + 2
+    os.utime(source, (skewed, skewed))
+    searches, translations = _scan_once(model, monkeypatch, schema_session, str(source), 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+    # In step with this clock the file is dated at the row, and the same download translates.
+    in_step = now.timestamp() - 3603
+    os.utime(source, (in_step, in_step))
+    searches, translations = _scan_once(model, monkeypatch, schema_session, str(source), 60)
 
     translations.assert_called_once()
     assert searches == [[]]

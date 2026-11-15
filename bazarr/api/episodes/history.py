@@ -209,7 +209,8 @@ class EpisodesHistory(Resource):
             del item['external_subtitles']
             del item['profileId']
 
-            if item['score']:
+            # A score of 0 is a score, so it is formatted like any other when its scale is known.
+            if item['score'] is not None and item['score_out_of']:
                 item['score'] = f"{round((int(item['score']) * 100 / item['score_out_of']), 2)}%"
 
             # Make timestamp pretty

@@ -520,3 +520,83 @@ def test_movie_subtitle_content_routes_pass_arr_instance_id(monkeypatch):
         ('status', 'movie', 50, 'en', 7),
         ('create', 'movie', 50, None, 7),
     ]
+
+
+def _sync_rows_fixture(schema_session, monkeypatch, media, stored_paths):
+    """A movie or an episode of instance 7 with one sync row per stored path, and
+    a per-instance mapping that differs from the global one."""
+    import utilities.path_mappings as mapping_module
+    from utilities.path_mappings import path_mappings
+
+    from app.database import (TableEpisodes, TableHistory, TableHistoryMovie, TableMovies,
+                              TableShows)
+
+    content = _real_module('api.subtitles.content')
+    monkeypatch.setattr(content, 'database', schema_session)
+    monkeypatch.setattr(mapping_module, '_instance_path_mapping',
+                        lambda arr_instance_id, media_type: [['/remote', '/local']])
+    monkeypatch.setattr(path_mappings, 'path_mapping_movies', [['/global', '/local']])
+    monkeypatch.setattr(path_mappings, 'path_mapping_series', [['/global', '/local']])
+    if media == 'movie':
+        schema_session.add(TableMovies(
+            id=1, radarrId=30, arr_instance_id=7, title='m', path='/remote/m.mkv', tmdbId='1',
+            monitored='True', subtitles='[]', tags='[]'))
+        schema_session.flush()
+        rows = [TableHistoryMovie(
+            id=index + 1, movie_id=1, radarrId=30, arr_instance_id=7, action=5, language='hu', description='sync',
+            subtitles_path=path, video_path='/remote/m.mkv',
+            timestamp=datetime(2026, 5, 27, 12, 0, index)) for index, path in enumerate(stored_paths)]
+    else:
+        schema_session.add(TableShows(
+            id=1, sonarrSeriesId=10, arr_instance_id=7, title='s', path='/remote', tags='[]',
+            seriesType='standard', monitored='True'))
+        schema_session.flush()
+        schema_session.add(TableEpisodes(
+            id=1, series_id=1, sonarrSeriesId=10, sonarrEpisodeId=20, arr_instance_id=7, title='e',
+            path='/remote/e.mkv', season=1, episode=1, subtitles='[]', monitored='True'))
+        schema_session.flush()
+        rows = [TableHistory(
+            id=index + 1, series_id=1, episode_id=1, sonarrSeriesId=10, sonarrEpisodeId=20,
+            arr_instance_id=7, action=5, language='hu', description='sync', subtitles_path=path,
+            video_path='/remote/e.mkv', timestamp=datetime(2026, 5, 27, 12, 0, index))
+            for index, path in enumerate(stored_paths)]
+    schema_session.add_all(rows)
+    schema_session.flush()
+    return content, (30 if media == 'movie' else 20)
+
+
+@pytest.mark.parametrize('media', ['movie', 'episode'])
+def test_a_fresh_sync_row_stored_through_the_instance_mapping_is_found(schema_session, monkeypatch, media):
+    """The sync row names the file through the instance's mapping. Looking it up
+    through the global mapping missed it and reported the file as not synced."""
+    content, media_id = _sync_rows_fixture(schema_session, monkeypatch, media, ['/remote/a.hu.srt'])
+
+    found = content._latest_sync_history_for_path(media, media_id, '/local/a.hu.srt', arr_instance_id=7)
+
+    assert found is not None
+    assert found.timestamp == datetime(2026, 5, 27, 12, 0, 0)
+
+
+@pytest.mark.parametrize('media', ['movie', 'episode'])
+def test_an_older_sync_row_stored_through_the_global_mapping_is_still_found(schema_session, monkeypatch, media):
+    content, media_id = _sync_rows_fixture(schema_session, monkeypatch, media, ['/global/a.hu.srt'])
+
+    found = content._latest_sync_history_for_path(media, media_id, '/local/a.hu.srt', arr_instance_id=7)
+
+    assert found is not None
+
+
+@pytest.mark.parametrize('media', ['movie', 'episode'])
+def test_the_newest_sync_row_wins_across_both_path_forms(schema_session, monkeypatch, media):
+    content, media_id = _sync_rows_fixture(
+        schema_session, monkeypatch, media, ['/global/a.hu.srt', '/remote/a.hu.srt'])
+
+    found = content._latest_sync_history_for_path(media, media_id, '/local/a.hu.srt', arr_instance_id=7)
+
+    assert found.timestamp == datetime(2026, 5, 27, 12, 0, 1)
+
+
+def test_another_files_sync_row_is_not_found(schema_session, monkeypatch):
+    content, media_id = _sync_rows_fixture(schema_session, monkeypatch, 'movie', ['/remote/b.hu.srt'])
+
+    assert content._latest_sync_history_for_path('movie', media_id, '/local/a.hu.srt', arr_instance_id=7) is None

@@ -91,6 +91,29 @@ def test_a_subtitle_that_landed_after_queueing_is_left_alone(monkeypatch, tmp_pa
     assert not _failed_hold()
 
 
+def test_a_source_replaced_after_queueing_is_left_alone(monkeypatch, tmp_path):
+    """While the minimum source wait is on, the queueing sighting also captures
+    the source. A file written in its place while the job waited has not waited
+    itself, so the job does no work and the next scan applies the wait."""
+    from subtitles.tools.subsync_engines import capture_subtitle_versions
+
+    destination = tmp_path / 'fixture.hu.srt'
+    source = tmp_path / 'fixture.en.srt'
+    source.write_text('the source that was old enough')
+    expectation = capture_subtitle_versions(
+        str(tmp_path / 'fixture.mkv'), (str(destination), str(source)))
+    translator = Mock()
+
+    # The job helper writes a different source over the captured one.
+    result, renames, factory_calls = _run_translation_job(monkeypatch, tmp_path, translator, expectation)
+
+    assert result is None
+    assert factory_calls == []
+    translator.translate.assert_not_called()
+    assert renames == ['Skipped Fixture (EN to HU)']
+    assert not _failed_hold()
+
+
 def test_the_write_refusal_mid_run_is_also_a_skip(monkeypatch, tmp_path):
     """A file that lands while the AI work runs is refused at publish time;
     that refusal is the same skip, not a job the user files as broken."""

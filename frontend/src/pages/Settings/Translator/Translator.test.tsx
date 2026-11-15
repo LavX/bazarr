@@ -2,6 +2,7 @@ import { FunctionComponent } from "react";
 import { useForm } from "@mantine/form";
 import { notifications } from "@mantine/notifications";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TranslatorTestResponse } from "@/apis/hooks/translator";
 import {
@@ -10,7 +11,8 @@ import {
 } from "@/pages/Settings/utilities/FormValues";
 import { SettingsProvider } from "@/pages/Settings/utilities/SettingsProvider";
 import { customRender, screen } from "@/tests";
-import { TestConnectionButton } from "./index";
+import server from "@/tests/mocks/node";
+import SettingsTranslatorView, { TestConnectionButton } from "./index";
 import {
   aiTranslatorConcurrentOptions,
   aiTranslatorModelOptions,
@@ -248,5 +250,46 @@ describe("Translator Test Connection button", () => {
     await user.click(button);
 
     expect(mutate).not.toHaveBeenCalled();
+  });
+});
+
+describe("Translator minimum source wait field", () => {
+  it("renders the saved minimum wait in minutes", async () => {
+    // The page loads its own settings, so the saved value is served the way
+    // the settings query receives it. A body without the general section is
+    // refused by that query, so the general section is served as well.
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto" },
+          // eslint-disable-next-line camelcase -- the settings API names this field
+          translator: { min_source_wait_minutes: 45 },
+        }),
+      ),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+      http.get("/api/translator/status", () =>
+        HttpResponse.json({
+          service: "ai-subtitle-translator",
+          version: "1.3.4",
+          healthy: true,
+          config: { model: "gpt-x", apiKeyConfigured: true },
+          queue: {
+            maxConcurrent: 2,
+            processing: 1,
+            queued: 4,
+            completed: 20,
+            failed: 2,
+            total: 27,
+          },
+        }),
+      ),
+    );
+
+    customRender(<SettingsTranslatorView />);
+
+    expect(
+      await screen.findByText("Minimum wait before translating (minutes)"),
+    ).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("45")).toBeInTheDocument();
   });
 });

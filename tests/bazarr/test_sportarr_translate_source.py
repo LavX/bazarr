@@ -82,6 +82,64 @@ def test_a_zero_score_source_is_rejected(sports_history, monkeypatch):
     assert _source_score_below_threshold(_context(), 'hu') is True
 
 
+@pytest.mark.parametrize('local_score', [0, 40])
+def test_a_hand_upload_over_a_low_scoring_download_is_accepted(sports_history, monkeypatch, local_score):
+    """An upload stores no score, so the older download's low score used to
+    decide for a file the upload had replaced."""
+    from datetime import timedelta
+
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    now = datetime.now()
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
+                        timestamp=now - timedelta(hours=1), language='hu', score=10))
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=4,
+                        timestamp=now, language='hu', score=None))
+    session.commit()
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+    monkeypatch.setattr(settings.general, 'local_subtitle_score', local_score)
+
+    assert _source_score_below_threshold(_context(), 'hu') is False
+
+
+def test_a_download_after_a_hand_upload_is_held_to_the_threshold(sports_history, monkeypatch):
+    from datetime import timedelta
+
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    now = datetime.now()
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=4,
+                        timestamp=now - timedelta(hours=1), language='hu', score=None))
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
+                        timestamp=now, language='hu', score=10))
+    session.commit()
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(_context(), 'hu') is True
+
+
+def test_a_hand_upload_of_another_language_does_not_vouch_for_this_one(sports_history, monkeypatch):
+    from datetime import timedelta
+
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    now = datetime.now()
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
+                        timestamp=now - timedelta(hours=1), language='hu', score=10))
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=4,
+                        timestamp=now, language='en', score=None))
+    session.commit()
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(_context(), 'hu') is True
+
+
 def test_no_history_row_is_treated_as_at_threshold(sports_history):
     """The series path proceeds rather than silently falling back to providers
     when a subtitle predates history tracking or was placed by hand."""
@@ -140,3 +198,64 @@ def test_no_translation_history_means_nothing_blocks_it(sports_history):
     from sportarr.profile_hooks import _already_translated_on_disk
 
     assert _already_translated_on_disk(_context(), 'en') is False
+
+
+def _history_rows(session, history, rows):
+    from datetime import timedelta
+
+    now = datetime.now()
+    for offset, (language, action, score, path) in enumerate(rows):
+        session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=action,
+                            timestamp=now - timedelta(hours=len(rows) - offset), language=language,
+                            score=score, subtitles_path=path))
+    session.commit()
+
+
+def test_a_forced_upload_does_not_exempt_a_plain_download_of_the_same_language(sports_history, monkeypatch):
+    """Both files carry the language prefix hu. The newest record under that
+    prefix is the upload of the forced file, which says nothing about the plain
+    file the translation would read."""
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    _history_rows(session, history, [
+        ('hu', 1, 10, '/sports/race.hu.srt'),
+        ('hu:forced', 4, None, '/sports/race.hu.forced.srt'),
+    ])
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.srt') is True
+    assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.forced.srt') is False
+
+
+def test_a_plain_upload_does_not_hide_the_low_score_of_a_forced_download(sports_history, monkeypatch):
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    _history_rows(session, history, [
+        ('hu:forced', 1, 10, '/sports/race.hu.forced.srt'),
+        ('hu', 4, None, '/sports/race.hu.srt'),
+    ])
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.forced.srt') is True
+    assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.srt') is False
+
+
+def test_the_source_path_is_matched_through_the_instance_path_mapping(sports_history, monkeypatch):
+    from app.config import settings
+    from app.database import TableArrInstances
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    session.get(TableArrInstances, 42).path_mappings = '[["/remote/sports", "/sports"]]'
+    _history_rows(session, history, [
+        ('hu', 1, 10, '/remote/sports/race.hu.srt'),
+        ('hu:forced', 4, None, '/remote/sports/race.hu.forced.srt'),
+    ])
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.srt') is True
+    assert _source_score_below_threshold(_context(), 'hu', '/sports/race.hu.forced.srt') is False

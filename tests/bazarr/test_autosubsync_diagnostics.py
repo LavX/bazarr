@@ -109,8 +109,7 @@ def test_the_history_entry_carries_the_quality_it_measured(monkeypatch, tmp_path
     # database; the label is not what this test is about.
     monkeypatch.setattr(module, "language_from_alpha2", lambda code: "English")
     monkeypatch.setattr(module, "path_mappings",
-                        SimpleNamespace(path_replace_reverse=lambda p: p,
-                                        path_replace_reverse_movie=lambda p: p))
+                        SimpleNamespace(path_replace_reverse_instance=lambda p, i, m: p))
 
     syncer = module.SubSyncer()
     syncer.srtin = str(tmp_path / "Movie.en.srt")
@@ -236,8 +235,7 @@ def test_the_measured_skew_reaches_the_history_entry(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "history_log",
                         lambda **kwargs: recorded.append(kwargs["result"].message))
     monkeypatch.setattr(module, "path_mappings",
-                        SimpleNamespace(path_replace_reverse=lambda p: p,
-                                        path_replace_reverse_movie=lambda p: p))
+                        SimpleNamespace(path_replace_reverse_instance=lambda p, i, m: p))
     syncer.reference = str(tmp_path / "Movie.mkv")
 
     syncer._log_sync_history(
@@ -286,3 +284,33 @@ def test_a_clear_miss_stays_readable(monkeypatch, tmp_path):
                                        video_path=str(tmp_path / "Movie.mkv"))
 
     assert "0.43," in str(raised.value)
+
+
+@pytest.mark.parametrize("series,media_type", [(1, "series"), (None, "movie")])
+def test_a_sync_row_is_stored_through_the_owning_instance_mapping(monkeypatch, tmp_path, series, media_type):
+    """Download rows go through path_replace_reverse_instance, so a sync row has
+    to store its paths the same way or the two name one file differently under a
+    per-instance mapping."""
+    from types import SimpleNamespace
+
+    from subtitles.tools import subsyncer as module
+
+    stored = []
+    monkeypatch.setattr(module, "language_from_alpha2", lambda code: "English")
+    monkeypatch.setattr(module, "history_log", lambda **kwargs: stored.append(kwargs["result"]))
+    monkeypatch.setattr(module, "history_log_movie", lambda **kwargs: stored.append(kwargs["result"]))
+    monkeypatch.setattr(
+        module, "path_mappings",
+        SimpleNamespace(path_replace_reverse_instance=lambda path, instance, media: f"{media}:{instance}:{path}"))
+
+    syncer = module.SubSyncer()
+    syncer.reference = "/data/video.mkv"
+    syncer._log_sync_history(
+        SimpleNamespace(engine="ffsubsync", output_path="/data/video.en.srt", raw_result={}),
+        "overwrite", "en", False, False,
+        sonarr_series_id=series, sonarr_episode_id=2 if series else None,
+        radarr_id=None if series else 3, arr_instance_id=7)
+
+    assert stored, "nothing was written to history"
+    assert stored[0].subs_path == f"{media_type}:7:/data/video.en.srt"
+    assert stored[0].path == f"{media_type}:7:/data/video.mkv"

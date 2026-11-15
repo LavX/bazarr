@@ -89,6 +89,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         from subtitles.tools.translate.core.translator_utils import translated_destination_path
         from subtitles.tools.translate.main import translate_subtitles_file
         from subtitles.download import check_missing_languages
+        from subtitles.wanted.utils import source_wait_enabled
         from app.database import (TableEpisodes, TableShows, TableMovies,
                                   database, select)
 
@@ -172,6 +173,18 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
                 'BAZARR auto-translate skipped: source score %.1f%% '
                 'below threshold %.1f%% for %s',
                 source_score_percent, min_score, video_path,
+            )
+            return
+
+        # This trigger runs right after the save, so the source arrived just now and
+        # is always inside the wait. The file's own time is not consulted: a file
+        # system whose clock runs behind this one would date it in the past. The
+        # next wanted scan measures the wait from the history instead.
+        if source_wait_enabled():
+            logging.info(
+                'BAZARR auto-translate skipped: translator.min_source_wait_minutes holds a '
+                'just-saved source subtitle for %s',
+                video_path,
             )
             return
 
