@@ -422,7 +422,7 @@ def translate_from_existing(context, target_code, cancel=None, translation_gate=
     if not source_srt:
         return False
 
-    if _source_score_below_threshold(context, source_lang):
+    if _source_score_below_threshold(context, source_lang, source_srt):
         return False
     if _already_translated_on_disk(context, target_code):
         return False
@@ -494,7 +494,7 @@ def _instance_mappings(context):
     return require_sportarr(database, context.arr_instance_id).path_mappings
 
 
-def _source_score_below_threshold(context, source_lang):
+def _source_score_below_threshold(context, source_lang, source_path=None):
     """Mirror of the series guard: too poor a source makes a poor translation.
 
     No history row means the subtitle was placed by hand or predates history
@@ -509,11 +509,17 @@ def _source_score_below_threshold(context, source_lang):
     the full scale when the setting is 0 and is let through below the
     threshold when it is above 0. An older provider score for the file the
     upload replaced no longer applies.
+
+    ``source_path`` is the file the translation will read. The records that
+    count are the ones stored for that file, matched through the instance's path
+    mapping: a language prefix alone also takes in the records of a ``hu:forced``
+    or ``hu:hi`` file, and an upload of one of those says nothing about a plain
+    ``hu`` download. Without a path every record of the language counts.
     """
     from app.database import TableHistorySports
 
-    record = database.execute(
-        select(TableHistorySports.score, TableHistorySports.action)
+    rows = database.execute(
+        select(TableHistorySports.score, TableHistorySports.action, TableHistorySports.subtitles_path)
         .where(TableHistorySports.event_id == context.event_id)
         .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
         .where(TableHistorySports.language.like(f"{source_lang}%"))
@@ -522,8 +528,14 @@ def _source_score_below_threshold(context, source_lang):
             | (TableHistorySports.action == 4)
         )
         .order_by(TableHistorySports.timestamp.desc(), TableHistorySports.id.desc())
-        .limit(1)
-    ).first()
+    ).all()
+    if source_path is not None:
+        mappings = read_sports_mappings(_instance_mappings(context))
+        rows = [
+            row for row in rows
+            if row.subtitles_path and apply_sports_mapping(row.subtitles_path, mappings) == source_path
+        ]
+    record = rows[0] if rows else None
     if record is None:
         return False
     if record.action == 4:
