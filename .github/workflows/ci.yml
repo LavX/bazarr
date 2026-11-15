@@ -939,6 +939,7 @@ jobs:
             tests/bazarr/test_provider_hub_state_migration.py \
             tests/bazarr/test_provider_hub_state_flows.py \
             tests/bazarr/test_provider_hub_state_safety.py \
+            tests/bazarr/test_provider_hub_signed_feed.py \
             tests/bazarr/test_translator_runtime_store.py \
             tests/bazarr/test_translator_runtime_switch.py \
             tests/bazarr/test_translator_output_checks.py \

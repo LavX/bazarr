@@ -4702,17 +4702,21 @@ def test_an_id_the_official_plugins_list_publishes_is_reserved_from_community_so
     from provider_hub.service import RESERVED_ID_REASON, add_catalog_source, list_catalog, refresh_catalog
     from provider_hub.state import load_state
 
+    from signed_feed_helpers import SignedWorld
+
     official_plugin = service_manifest("reservedsvc")
     community_provider = _manifest(provider_id="reservedsvc")
 
-    def fake_get(url, timeout, **_kwargs):
+    # Only a verified catalog carries a plugins list, so the official one is signed.
+    world = SignedWorld(monkeypatch)
+    world.publish(plugins=[official_plugin])
+
+    def community(url, timeout):
         if url.endswith("/info/refs?service=git-upload-pack"):
             return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
-        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
-            return _FakeResponse({"providers": [], "plugins": [{"manifest": official_plugin}]})
         return _FakeResponse({"providers": [{"manifest": community_provider}]})
 
-    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    world.community = community
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
 
     add_catalog_source("community", "https://github.com/example/providers/blob/main/catalog.json")

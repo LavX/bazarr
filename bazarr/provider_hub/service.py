@@ -29,7 +29,7 @@ from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
-from . import floor
+from . import catalog_feed, floor
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -493,6 +493,73 @@ def _fetch_github_catalog(
     if not isinstance(payload, dict):
         raise CatalogSourceError("Catalog payload must be a JSON object")
     return payload, commit
+
+
+def _fetch_raw_file(owner: str, repo: str, commit: str, path: str) -> bytes | None:
+    """One file of the catalog repository at ``commit``, or None when the commit has no such file."""
+    response = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/{commit}/{path}", timeout=30)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.content
+
+
+def _fetch_signed_feed(owner: str, repo: str, commit: str, channel: str):
+    """The signed files of ``channel`` at ``commit``, or None when the commit has no signed catalog."""
+    body = _fetch_raw_file(owner, repo, commit, catalog_feed.SIGNED_CATALOG_PATH.format(channel=channel))
+    if body is None:
+        return None
+    return catalog_feed.FetchedFeed(
+        catalog=body,
+        envelope=_fetch_raw_file(owner, repo, commit, catalog_feed.SIGNED_ENVELOPE_PATH.format(channel=channel)),
+        key_file=_fetch_raw_file(owner, repo, commit, catalog_feed.KEY_FILE_PATH),
+    )
+
+
+def _fetch_official_catalog(
+    source: dict[str, Any], state: dict[str, Any], ancestry, unchanged_commit: str | None = None,
+    advertisement_sink=None,
+):
+    """The official catalog, read through the signature check.
+
+    Returns ``(catalog, head, feed)``: the catalog dictionary (None when the head is unchanged), the
+    commit the source's ref resolved to, and the ``VerifiedFeed`` when the catalog came from the signed
+    feed (None for the legacy catalog). The head is the commit trust is judged on; the manifests of a
+    verified catalog are pinned to the signed body's ``source_commit`` instead. The legacy catalog never
+    carries a plugins list. Raises ``catalog_feed.FeedRefused`` when a signed catalog fails its check.
+    """
+    channel = catalog_feed.feed_channel(source.get("dev_ref"))
+    if channel is None or not catalog_feed.signed_feed_enabled():
+        payload, head = _fetch_github_catalog(
+            source["url"], override_ref=source.get("dev_ref"), unchanged_commit=unchanged_commit,
+            advertisement_sink=advertisement_sink,
+        )
+        if payload is not None:
+            payload.pop("plugins", None)
+        return payload, head, None
+    owner, repo, ref, _path = _parse_github_file_url(source["url"])
+    ref = source.get("dev_ref") or ref
+    head = _resolve_github_ref(owner, repo, ref, advertisement_sink=advertisement_sink)
+    if unchanged_commit is not None and head == unchanged_commit.lower() and not _is_commit_sha(ref):
+        return None, head, None
+    feed = catalog_feed.verify_fetched(
+        _fetch_signed_feed(owner, repo, head, channel),
+        origin=catalog_feed.ORIGIN_RAW, channel=channel,
+        stored=catalog_feed.stored_record(state, channel), now=catalog_feed.current_time(),
+        host_build_time=catalog_feed.build_time(),
+    )
+    if feed is None:
+        # No signed file at this commit and the channel has never latched: the legacy catalog.
+        payload, _same = _fetch_github_catalog(source["url"], override_ref=head)
+        payload.pop("plugins", None)
+        return payload, head, None
+    if feed.source_commit != head:
+        verdict, _reason = ancestry.check(feed.source_commit)
+        if verdict is False:
+            raise catalog_feed.FeedRefused(
+                catalog_feed.Status.MALFORMED,
+                "The signed catalog names a commit that is not on the official catalog's main or beta.")
+    return feed.catalog, head, feed
 
 
 # The official source is trusted only on these branches of the official catalog
@@ -1182,6 +1249,31 @@ def _rejected_plugin(source: dict[str, Any], manifest: dict[str, Any], reason: s
     }
 
 
+def _note_catalog_signature(
+    state: dict[str, Any], source: dict[str, Any], feed, accepted: dict[str, catalog_feed.ChannelRecord],
+) -> None:
+    """Record on the official source and in the state document what its signature check came to.
+
+    A verified catalog latches its channel and raises the stored counters. The legacy catalog is
+    shown as "unsigned (legacy)" and changes nothing a channel remembers.
+    """
+    if feed is None:
+        source["catalog_signature"] = catalog_feed.SIGNATURE_LEGACY
+        source["signature_verified"] = False
+        source["catalog_channel"] = catalog_feed.feed_channel(source.get("dev_ref"))
+        source["catalog_expires_at"] = None
+        source.pop("catalog_signed_commit", None)
+        return
+    source["catalog_signature"] = catalog_feed.SIGNATURE_VERIFIED
+    source["signature_verified"] = True
+    source["catalog_channel"] = feed.channel
+    source["catalog_expires_at"] = catalog_feed._iso(feed.result.expires)
+    source["catalog_signed_commit"] = feed.source_commit
+    if feed.may_advance_state:
+        accepted[feed.channel] = catalog_feed.record_accepted(state, feed, catalog_feed.current_time())
+        catalog_feed.clear_refusal(state, feed.channel)
+
+
 def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict[str, Any]:
     """Refresh catalog sources. When ``source_ids`` is given, only those source ids
     are fetched (e.g. the startup migration refreshes only the official source so an
@@ -1201,6 +1293,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
             sources_count = 0
             failed_sources: list[str] = []
             rejected_plugins: list[dict[str, Any]] = []
+            accepted_feeds: dict[str, catalog_feed.ChannelRecord] = {}
             ancestry = _OfficialAncestry(state)
             for source_key, source in (state.get("catalog_sources") or {}).items():
                 if not isinstance(source, dict):
@@ -1239,7 +1332,12 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 ):
                     if not is_official:
                         skip_commit = previous_commit
-                    elif not source.get("dev_ref") and source.get("trusted") is True:
+                    elif (not source.get("dev_ref") and source.get("trusted") is True
+                          and (not catalog_feed.signed_feed_enabled() or (
+                              source.get("catalog_signature")
+                              and source.get("catalog_channel") == catalog_feed.CHANNEL_MAIN))):
+                        # A source refreshed before the signature check existed, or on another
+                        # channel, is fetched once more.
                         try:
                             url_ref = _parse_github_file_url(source["url"])[2]
                         except CatalogSourceError:
@@ -1247,17 +1345,29 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         if url_ref in _TRUSTED_BRANCHES:
                             skip_commit = previous_commit
                 from_floor = False
+                feed = None
                 try:
-                    catalog, commit = _fetch_github_catalog(
-                        source["url"], override_ref=source.get("dev_ref"),
-                        unchanged_commit=skip_commit,
-                        advertisement_sink=ancestry.note_advertisement,
-                    )
+                    if is_official:
+                        catalog, commit, feed = _fetch_official_catalog(
+                            source, state, ancestry, unchanged_commit=skip_commit,
+                            advertisement_sink=ancestry.note_advertisement,
+                        )
+                    else:
+                        catalog, commit = _fetch_github_catalog(
+                            source["url"], override_ref=source.get("dev_ref"),
+                            unchanged_commit=skip_commit,
+                            advertisement_sink=ancestry.note_advertisement,
+                        )
                     source["resolved_commit"] = commit
                     source["last_checked_at"] = now
                     source["last_error"] = None
                     floor.clear_seed(source)
                 except Exception as error:
+                    if isinstance(error, catalog_feed.FeedRefused):
+                        refused_channel = catalog_feed.feed_channel(source.get("dev_ref"))
+                        if refused_channel is not None:
+                            catalog_feed.record_refusal(
+                                state, refused_channel, error, catalog_feed.current_time())
                     source["last_error"] = refusal_text(_catalog_source_error_message(error))
                     failed_sources.append(source.get("name") or source.get("id") or "?")
                     # An official source that has never refreshed falls back to
@@ -1290,12 +1400,16 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     )
                     continue
                 refreshed_sources.add(source_id)
+                # The commit the manifests and their bundles are pinned to: the signed body names it,
+                # and it can sit behind the head the source resolved to.
+                entry_commit = feed.source_commit if feed is not None else commit
 
                 if is_official:
                     if from_floor:
                         floor.trust_source(source)
                     else:
                         _set_official_trust(source, commit, previous_commit, ancestry)
+                        _note_catalog_signature(state, source, feed, accepted_feeds)
                     published_ids = set()
                 claimed_kinds: dict[str, set[str]] = {}
                 for item in catalog.get("providers", []):
@@ -1304,7 +1418,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     manifest = item.get("manifest") if isinstance(item.get("manifest"), dict) else item
                     if not isinstance(manifest, dict):
                         continue
-                    manifest = _normalize_catalog_manifest(manifest, source, commit)
+                    manifest = _normalize_catalog_manifest(manifest, source, entry_commit)
                     provider_id = manifest_provider_id(manifest)
                     version = manifest.get("version") or item.get("version")
                     if not provider_id or not version:
@@ -1324,7 +1438,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         "version": version,
                         "trusted": bool(source.get("trusted", False)),
                         "manifest": manifest,
-                        "resolved_commit": commit,
+                        "resolved_commit": entry_commit,
                         "catalog_list": CATALOG_LIST_PROVIDERS,
                     }
                     refreshed_entry_keys.add(key)
@@ -1341,7 +1455,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if not isinstance(manifest, dict):
                         continue
                     try:
-                        manifest = _normalize_catalog_manifest(manifest, source, commit)
+                        manifest = _normalize_catalog_manifest(manifest, source, entry_commit)
                         parsed = parse_plugin_manifest(manifest)
                     except ManifestValidationError as error:
                         rejected_plugins.append(_rejected_plugin(
@@ -1404,7 +1518,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         "version": version,
                         "trusted": bool(source.get("trusted", False)),
                         "manifest": claim["manifest"],
-                        "resolved_commit": commit,
+                        "resolved_commit": entry_commit,
                         "catalog_list": CATALOG_LIST_PLUGINS,
                     }
                     refreshed_entry_keys.add(key)
@@ -1429,11 +1543,14 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 "sources_ok": ok_sources,
                 "failed_sources": failed_sources,
                 "rejected_plugins": rejected_plugins,
+                "accepted_feeds": accepted_feeds,
             }
 
         # The fetches above run inside this mutation, so a lost race must not
         # run it again: it fails with a conflict and the refresh is retried.
         result = mutate_state(refresh, retry_on_conflict=False)
+        if result["accepted_feeds"]:
+            catalog_feed.write_counter_file(result["accepted_feeds"])
         sources_count = result["sources"]
         entries_count = result["entries"]
         ok_sources = result["sources_ok"]
@@ -2706,6 +2823,11 @@ def _reserved_provider_ids(state: dict[str, Any]) -> set[str]:
 def _install_refusal(state: dict[str, Any], source_id: str | None, provider_id: Any) -> str | None:
     if source_id != OFFICIAL_CATALOG_SOURCE_ID and str(provider_id) in _reserved_provider_ids(state):
         return RESERVED_ID_REASON
+    if source_id == OFFICIAL_CATALOG_SOURCE_ID:
+        # An expired signed catalog blocks installs and updates from its channel, never running plugins.
+        official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
+        dev_ref = official.get("dev_ref") if isinstance(official, dict) else None
+        return catalog_feed.expiry_refusal(state, catalog_feed.feed_channel(dev_ref))
     return None
 
 
