@@ -30,7 +30,8 @@ from ..language_profiles import build_translate_from_map
 from ..tools.translate.failure_record import translation_recently_failed
 from .forced_flag import run_flagged_search
 from .utils import (FILE_REPLACING_ACTIONS, _find_existing_subtitle_path, _provider_file_on_disk,
-                    evaluate_translation_gate, source_wait_elapsed, translation_capture_paths)
+                    evaluate_translation_gate, newest_source_row, source_wait_elapsed,
+                    source_wait_enabled, source_written_at, translation_capture_paths)
 
 
 def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True):
@@ -205,16 +206,19 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                                 "on disk for %s", lang_code, video_path,
                             )
                             continue
-                        # The source wait is decided for the file being translated. Only the newest
-                        # row stored for source_srt can make it a hand upload: a newer upload of
-                        # another file does not vouch for this one, and a source with no row is a
-                        # sidecar. The rows are read only while the wait has not elapsed, so the
-                        # default wait of 0 never runs this query.
-                        hand_upload = False
-                        if not source_wait_elapsed(source_srt):
+                        # The source wait is measured from when the history says the file being
+                        # translated was downloaded or uploaded, so a sync or a modification that
+                        # rewrites it does not restart the wait. A source with no row (a sidecar
+                        # the disk scan found) goes by its modification time. Only the newest row
+                        # stored for source_srt counts: a newer upload of another file does not
+                        # vouch for this one, and a hand upload is never held back. The rows are
+                        # read only while the wait is on, so the default wait of 0 never runs
+                        # this query.
+                        held = False
+                        if source_wait_enabled():
                             source_rows = database.execute(
                                 scoped(
-                                    select(TableHistory.subtitles_path, TableHistory.action)
+                                    select(TableHistory.subtitles_path, TableHistory.action, TableHistory.timestamp)
                                     .where(TableHistory.sonarrEpisodeId == episode.sonarrEpisodeId)
                                     .where(TableHistory.language.like(f"{translate_cfg['from']}%"))
                                     .where(TableHistory.action.in_(FILE_REPLACING_ACTIONS))
@@ -223,11 +227,12 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                                     arr_instance_id,
                                 )
                             ).all()
-                            for row in source_rows:
-                                if row.subtitles_path and path_mappings.path_replace(row.subtitles_path) == source_srt:
-                                    hand_upload = row.action == 4
-                                    break
-                        if not hand_upload and not source_wait_elapsed(source_srt):
+                            source_row = newest_source_row(source_rows, source_srt, path_mappings.path_replace)
+                            held = (
+                                (source_row is None or source_row.action != 4)
+                                and not source_wait_elapsed(source_srt, source_written_at(source_row))
+                            )
+                        if held:
                             logging.debug(
                                 "BAZARR auto-translate (wanted-scan) skipped for %s: "
                                 "source subtitle is younger than translator.min_source_wait_minutes "

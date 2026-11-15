@@ -31,25 +31,64 @@ def evaluate_translation_gate():
 FILE_REPLACING_ACTIONS = (0, 1, 2, 3, 4, 6, 8)
 
 
-def source_wait_elapsed(source_path):
+def source_wait_enabled():
+    """Whether translator.min_source_wait_minutes asks automatic translation to wait."""
+    return bool(settings.translator.min_source_wait_minutes)
+
+
+def newest_source_row(rows, source_path, path_replace):
+    """The newest history row that put a file at ``source_path`` or removed it.
+
+    ``rows`` come newest first and carry the stored (reverse-mapped) path, which
+    ``path_replace`` maps to the path the scan works with. Only the newest row
+    stored for this very file counts: a newer upload of another file says
+    nothing about it.
+    """
+    for row in rows:
+        if row.subtitles_path and path_replace(row.subtitles_path) == source_path:
+            return row
+    return None
+
+
+def source_written_at(row):
+    """When the history says the source subtitle was downloaded or uploaded.
+
+    None when there is no such row, or when the newest row removed the file: a
+    file that is there anyway came back without a record and has only its
+    modification time to go by.
+    """
+    if row is None or row.action == 0:
+        return None
+    return row.timestamp
+
+
+def source_wait_elapsed(source_path, written_at=None):
     """Whether a source subtitle is old enough to translate automatically.
 
-    translator.min_source_wait_minutes is measured from the modification time
-    of the source file, and 0 turns the wait off. A source whose modification
-    time cannot be read is not held back by the wait. A source dated in the
-    future is a clock disagreement: it counts as written just now, so it is held
-    for the wait, unless it is dated further ahead than the wait itself. A date
-    that far out cannot be a file written a moment ago, and holding it would
-    hold it for as long as the date stays ahead.
+    translator.min_source_wait_minutes is measured from ``written_at``, the
+    history timestamp of the download or upload that put the source there. A
+    sync or a modification rewrites the file in place and does not restart the
+    wait, which is why the file's modification time is only the fallback, for a
+    source with no history row (a sidecar a disk scan found). 0 turns the wait
+    off. A source whose modification time cannot be read is not held back.
+
+    A source dated in the future is a clock disagreement: it counts as written
+    just now, so it is held for the wait, unless it is dated further ahead than
+    the wait itself. A date that far out cannot be a file written a moment ago,
+    and holding it would hold it for as long as the date stays ahead.
     """
     wait_minutes = settings.translator.min_source_wait_minutes
     if not wait_minutes:
         return True
-    try:
-        modified_at = os.path.getmtime(source_path)
-    except OSError:
-        return True
-    age = time.time() - modified_at
+    if written_at is not None:
+        # History timestamps are naive local times, as datetime.now() writes them.
+        written = written_at.timestamp()
+    else:
+        try:
+            written = os.path.getmtime(source_path)
+        except OSError:
+            return True
+    age = time.time() - written
     if age < 0:
         return -age > wait_minutes * 60
     return age >= wait_minutes * 60
