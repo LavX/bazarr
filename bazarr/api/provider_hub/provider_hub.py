@@ -181,6 +181,9 @@ class ProviderHubInstallations(Resource):
             )
         except service.ProviderHubInstallError as error:
             return str(error), 400
+        if entry["kind"] != SUBTITLE_PROVIDER:
+            # Another kind installs through the plugin routes, which ask for the person's consent first.
+            return 'The Subtitle Hub installs subtitle providers only', 400
         # Validation, the bundle download and the smoke test run in the job,
         # which raises with the reason when any of them fails.
         return {"job_id": hub_jobs.queue_install(entry["source"], entry["provider_id"],
