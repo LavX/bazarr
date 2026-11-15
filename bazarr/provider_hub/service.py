@@ -29,7 +29,7 @@ from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
-from . import catalog_feed, closure, consent, floor
+from . import catalog_feed, closure, consent, dev_source, floor
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -961,7 +961,8 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
             # Named from the source record as it is now. Marked when its source
             # may not install it, or when this Bazarr+ cannot run it.
             source = catalog_source_for_entry(sources, entry)
-            entry = {**entry, "source_name": source.get("name") or entry.get("source")}
+            entry = {**entry, "source_name": source.get("name") or entry.get("source"),
+                     "development_source": dev_source.is_dev_source(entry.get("source"), source)}
             refusal = (_install_refusal(state, entry.get("source"), entry.get("provider_id"),
                                         catalog_kind_of(entry))
                        or _host_refusal(entry, host)
@@ -970,7 +971,11 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
                 entry["blocked_reason"] = refusal
         entries.append(entry)
     return {
-        "sources": list((state.get("catalog_sources") or {}).values()),
+        "sources": [
+            {**source, "development_source": dev_source.is_dev_source(source.get("id"), source)}
+            if isinstance(source, dict) else source
+            for source in (state.get("catalog_sources") or {}).values()
+        ],
         "entries": entries,
     }
 
@@ -1492,7 +1497,9 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         rejected_plugins.append(_rejected_plugin(
                             source, manifest, PLUGIN_KIND_MISMATCH_REASON))
                         continue
-                    if kind.name != SUBTITLE_PROVIDER and not (is_official and source.get("trusted") is True):
+                    if kind.name != SUBTITLE_PROVIDER and not (
+                            (is_official and source.get("trusted") is True)
+                            or dev_source.is_dev_source(source_key, source)):
                         rejected_plugins.append(_rejected_plugin(
                             source, manifest, NEW_KIND_OFFICIAL_ONLY_REASON))
                         continue
@@ -2842,10 +2849,13 @@ def _reserved_provider_ids(state: dict[str, Any]) -> set[str]:
 def _source_may_carry_new_kinds(state: dict[str, Any], source_id: str | None) -> bool:
     """Whether ``source_id`` may supply plugins of a kind other than the subtitle provider.
 
-    Only the official source may, and only while Bazarr+ trusts it. A community source never may.
+    Only the official source may, and only while Bazarr+ trusts it. A community source never may, except
+    the one source the development install path names, which stays untrusted all the same.
     """
     source = (state.get("catalog_sources") or {}).get(source_id) if source_id else None
-    return source_id == OFFICIAL_CATALOG_SOURCE_ID and isinstance(source, dict) and source.get("trusted") is True
+    if source_id == OFFICIAL_CATALOG_SOURCE_ID:
+        return isinstance(source, dict) and source.get("trusted") is True
+    return isinstance(source, dict) and dev_source.is_dev_source(source_id, source)
 
 
 def _install_refusal(
@@ -2913,6 +2923,8 @@ def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, A
     source = (state.get("catalog_sources") or {}).get(source_id) if source_id else None
     result["source_id"] = source_id
     result["source_name"] = source.get("name") if isinstance(source, dict) else None
+    # An install from the development source says so, and is never shown as official.
+    result["development_source"] = dev_source.is_dev_source(source_id, source)
     return result
 
 
@@ -3423,6 +3435,7 @@ def _source_description(state: dict[str, Any]):
             "name": source.get("name") or source_id,
             "official": official,
             "trusted": bool(source.get("trusted")),
+            "development": dev_source.is_dev_source(source_id, source),
             "signature": source.get("catalog_signature") if official else None,
         }
 

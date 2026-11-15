@@ -77,7 +77,7 @@ def test_the_summary_names_the_plugin_its_closure_and_what_each_asks_for(world):
                                       {"name": "network", "mark": "enforced"}]
     assert summary["members"][1]["source"] == {
         "id": "official", "name": "Official Bazarr Provider Catalog", "official": True, "trusted": True,
-        "signature": None}
+        "development": False, "signature": None}
     assert summary["digest"].startswith("sha256:")
     assert summary["external_requirements"] == [] and summary["already_installed"] == []
 

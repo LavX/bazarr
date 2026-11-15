@@ -154,6 +154,12 @@ declare namespace System {
      * before the field existed, so every reader must tolerate undefined.
      */
     sandbox?: System.SandboxStatus;
+    /**
+     * The name of the catalog source that may install plugins of every kind
+     * without the official catalog's checks. Null on a normal install, and
+     * absent on responses from before the field existed.
+     */
+    dev_plugin_source?: string | null;
   }
 
   interface SandboxStatus {
