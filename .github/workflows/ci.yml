@@ -869,6 +869,7 @@ jobs:
             tests/bazarr/test_provider_hub_worker_protocol_v2.py \
             tests/bazarr/test_provider_hub_worker_pool.py \
             tests/bazarr/test_plugin_runtime_environment.py \
+            tests/bazarr/test_plugin_sandbox_sweep.py \
             tests/bazarr/test_provider_hub_ai_events.py \
             tests/bazarr/test_ai_translated_history.py \
             tests/bazarr/test_embedded_translate_api_scope.py \

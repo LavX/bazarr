@@ -65,6 +65,16 @@ else:
     fix_languages_profiles_with_duplicate_ids()
     activate_staged_installations()
 
+# Mark the launchers this run starts, then end the ones a previous run left
+# behind. The mark goes first so nothing this run starts can be mistaken for a
+# leftover. The sweep runs on its own thread: a launcher gets a grace to finish.
+try:
+    from provider_hub.sandbox import sweep as sandbox_sweep
+    sandbox_sweep.configure_owner(args.config_dir)
+    sandbox_sweep.start_sweep_in_background(args.config_dir)
+except Exception:
+    logging.exception("BAZARR cannot start the leftover plugin process sweep")
+
 # Measure what confines plugin workers on this host without holding up boot or
 # the first System > Status request.
 try:
