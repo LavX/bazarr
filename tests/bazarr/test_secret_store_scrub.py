@@ -308,6 +308,17 @@ def test_a_refresh_waits_for_the_one_in_progress_instead_of_skipping(scrub_regis
     assert scrub_text(ANOTHER_FAKE_KEY) == MASK
 
 
+def test_the_repr_form_of_a_credential_survives_a_refresh(scrub_registry):
+    """A refresh replaces the whole value set, so every registration carries the ``%r`` spelling itself."""
+    value = "refresh'quote\\back-ünï"
+    refresh_secret_values({"sonarr": {"apikey": value}})
+    assert scrub_text(f"key {value}") == f"key {MASK}"
+    assert scrub_text(f"key {value!r}") == f'key "{MASK}"'
+    refresh_secret_values({"sonarr": {"apikey": value}})
+    assert scrub_text(f"key {value!r}") == f'key "{MASK}"'
+    assert registered_secret_values() == {value}
+
+
 def test_the_registry_publishes_values_and_their_regex_together(scrub_registry):
     """A reader that sees a new value must see the regex that masks it: the
     set and the pattern are one assignment, so there is no window where the

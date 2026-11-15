@@ -160,19 +160,31 @@ def test_upgrading_a_schema_that_is_already_current_changes_nothing(tmp_path):
         assert _shape(connection) == before
 
 
-def test_the_migration_is_the_only_head_of_the_chain():
+def test_the_migration_is_on_the_one_chain():
+    """The chain has exactly one head, and this revision is that head or one of its ancestors."""
     # Read the revision ids from the source: older migrations run database
     # calls when imported, so the chain cannot be loaded outside an upgrade.
-    revisions, parents = set(), set()
+    parents_of = {}
     for path in (ROOT / "migrations/versions").glob("*.py"):
+        revision, down = None, ()
         for node in ast.parse(path.read_text(encoding="utf-8")).body:
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                 if node.targets[0].id == "revision":
-                    revisions.add(ast.literal_eval(node.value))
+                    revision = ast.literal_eval(node.value)
                 elif node.targets[0].id == "down_revision":
                     value = ast.literal_eval(node.value)
-                    parents.update(value if isinstance(value, tuple) else (value,))
-    assert revisions - parents == {REVISION}
+                    down = value if isinstance(value, tuple) else (value,)
+        if revision:
+            parents_of[revision] = tuple(item for item in down if item)
+    heads = set(parents_of) - {parent for parents in parents_of.values() for parent in parents}
+    assert len(heads) == 1, f"expected a single head, found {sorted(heads)}"
+    reachable, pending = set(), [heads.pop()]
+    while pending:
+        current = pending.pop()
+        if current not in reachable:
+            reachable.add(current)
+            pending.extend(parents_of.get(current, ()))
+    assert REVISION in reachable
 
 
 def test_a_fresh_schema_already_has_the_nullable_column():

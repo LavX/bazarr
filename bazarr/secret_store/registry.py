@@ -881,12 +881,21 @@ def _historical_config_secret_paths(state) -> set[str]:
     return paths
 
 
+_PENDING_PERSISTED_PATHS: set[str] = set()
+
+
 def _persist_plugin_secret_paths(paths) -> None:
     """Add `paths` to the persisted set in state.json so they survive the
     removal of the plugin that owns them."""
     if not paths:
         return
-    from provider_hub.state import mutate_state
+    from provider_hub.state import database_held, mutate_state
+
+    if database_held():
+        # Settings are still loading and the state cannot be written yet. The
+        # paths are kept and written with the first write after it opens.
+        _PENDING_PERSISTED_PATHS.update(paths)
+        return
 
     def add_paths(state):
         known = _valid_persisted_paths(state.get("plugin_secret_paths"))
@@ -894,6 +903,52 @@ def _persist_plugin_secret_paths(paths) -> None:
             state["plugin_secret_paths"] = sorted(known | set(paths))
 
     mutate_state(add_paths)
+
+
+def _sync_state_file_copy() -> None:
+    """Leave no plaintext credential in the state.json copy.
+
+    The database holds the state; the file is a copy refreshed after each
+    write, and that refresh is best effort. The migration cannot rely on it:
+    a credential encrypted in the database must not stay readable in the file
+    because the refresh failed, or because an earlier run left them apart. A
+    copy that cannot be made to match fails the boot, like any other
+    credential the migration cannot secure.
+    """
+    try:
+        from provider_hub.state import StateCorruptError, sync_snapshot
+    except ImportError:
+        return
+    try:
+        sync_snapshot()
+    except StateCorruptError:
+        # The database document is damaged, which is not this migration's to
+        # fix: the file copy was left as it was and a copy of the damaged
+        # document was kept, which pauses the environment cleanup. Starting up
+        # on a damaged plugin state is better than not starting at all.
+        logger.error("The Provider Hub state document is damaged, so the state file was left as it is; "
+                     "a copy of the damaged document was kept beside it")
+        return
+    except Exception as error:
+        raise HubSecretMigrationError(
+            "The Provider Hub state file could not be rewritten to match the "
+            "encrypted credentials; startup does not complete while they may "
+            "remain readable in the clear in it"
+        ) from error
+
+
+def _flush_pending_persisted_paths() -> None:
+    """Write the paths the boot loader found while the state was read-only."""
+    if not _PENDING_PERSISTED_PATHS:
+        return
+    pending = set(_PENDING_PERSISTED_PATHS)
+    try:
+        _persist_plugin_secret_paths(pending)
+    except Exception as error:
+        logger.warning("Cannot persist the discovered plugin secret paths: %s",
+                       type(error).__name__)
+        return
+    _PENDING_PERSISTED_PATHS.difference_update(pending)
 
 
 def _encrypted_leftover_keys(settings_obj) -> set[str]:
@@ -982,6 +1037,7 @@ def migrate_installation_config_secrets(state=None) -> None:
     `state` is the state as the boot loader just read it, used to decide
     whether there is anything to migrate before the locked write; None
     loads it fresh."""
+    _flush_pending_persisted_paths()
     try:
         from provider_hub.state import load_state, mutate_state
     except Exception as error:
@@ -995,7 +1051,14 @@ def migrate_installation_config_secrets(state=None) -> None:
             "may remain readable in the clear"
         ) from error
     if state is None:
-        state = load_state()
+        try:
+            state = load_state()
+        except ValueError as error:
+            # A stored document that is not JSON: nothing in it can be
+            # enumerated, and the file copy sync below reports the damage.
+            logger.error("The Provider Hub state document could not be read to enumerate the "
+                         "installation credentials: %s", type(error).__name__)
+            state = {}
     if not isinstance(state, dict):
         state = {}
 
@@ -1075,6 +1138,9 @@ def migrate_installation_config_secrets(state=None) -> None:
             "in the clear"
         )
     if not plaintext and not canonicalize:
+        # Nothing to encrypt in the database, but the file copy may still hold
+        # what an earlier run encrypted there.
+        _sync_state_file_copy()
         return
 
     if plaintext:
@@ -1150,6 +1216,7 @@ def migrate_installation_config_secrets(state=None) -> None:
             "(encryption failed); they stay covered and are rewritten when "
             "the key works"
         ) from error
+    _sync_state_file_copy()
     logger.info("Encrypted %d Provider Hub plugin credential(s) left "
                 "in the clear by an earlier version", len(plaintext))
 

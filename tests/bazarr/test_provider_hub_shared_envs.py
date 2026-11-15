@@ -1835,3 +1835,54 @@ def test_an_unreadable_process_of_someone_elses_session_is_not_a_candidate(tmp_p
             os.kill(stray, 9)  # not our child, so there is nothing to reap
         except ProcessLookupError:
             pass
+
+
+def test_boot_reconcile_never_points_a_row_at_an_environment_a_cleanup_is_deleting(hub, no_subprocess, monkeypatch):
+    """The cleanup commits its plan, reconcile tries to write a reference, then the deletion runs."""
+    import threading
+
+    first = _legacy_env(hub, "alpha", [REQ_A], old_fp="fp1")
+    second = _legacy_env(hub, "beta_plugin", [REQ_A], old_fp="fp2")
+    fingerprint = environment_fingerprint(_manifest("alpha", [REQ_A]))
+    # The shared environment is recorded and nothing references it any more; one row runs from its own.
+    state = load_state()
+    state["installations"] = {"beta_plugin": _row("beta_plugin", second, [REQ_A])}
+    state["plugin_envs"] = {fingerprint: {"path": str(first)}}
+    save_state(state)
+
+    probing = threading.Event()
+    go_on = threading.Event()
+    deleting = threading.Event()
+    go_delete = threading.Event()
+    real_rmtree = env_registry.shutil.rmtree
+
+    def probe(manifest, bundle, python):
+        probing.set()
+        assert go_on.wait(60)
+
+    def slow_rmtree(path, *args, **kwargs):
+        deleting.set()
+        assert go_delete.wait(60)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(env_registry.shutil, "rmtree", slow_rmtree)
+    summaries = []
+    reconciler = threading.Thread(
+        target=lambda: summaries.append(env_registry.reconcile_environments(validate=_validate, probe=probe)))
+    reconciler.start()
+    assert probing.wait(60)
+    cleaner = threading.Thread(target=lambda: env_registry.cleanup_environments(hub))
+    cleaner.start()
+    assert deleting.wait(60)
+    go_on.set()  # reconcile now tries to repoint the row at the environment being deleted
+    reconciler.join(1.0)
+    assert reconciler.is_alive()  # it waits for the cleanup to finish
+    go_delete.set()
+    cleaner.join(60)
+    reconciler.join(60)
+
+    assert not first.exists()
+    row = load_state()["installations"]["beta_plugin"]
+    assert row["python_path"] == str(second / "bin" / "python")
+    assert Path(row["python_path"]).exists()
+    assert summaries == [{"adopted": [], "repointed": [], "needs_repair": [], "kept": []}]

@@ -117,7 +117,28 @@ def _provider_zip(manifest, file_payloads, *, manifest_name="provider.json", pre
     return buffer.getvalue()
 
 
+def _skip_environment_presence_check(monkeypatch):
+    """The install tests stub the environment builder, so the directory it names never exists.
+
+    Recording refuses a row whose environment is gone; that is covered on its own.
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def lock_only(env_path):
+        yield
+
+    monkeypatch.setattr("provider_hub.env_registry.recording_environment", lock_only)
+
+
+@pytest.fixture(autouse=True)
+def _environment_presence_is_not_checked_here(monkeypatch):
+    _skip_environment_presence_check(monkeypatch)
+
+
 def _patch_local_install_env(monkeypatch, tmp_path):
+    _skip_environment_presence_check(monkeypatch)
+
     class FakeEnvironment:
         def __init__(self, root):
             self.root = Path(root)
@@ -1469,30 +1490,16 @@ def test_get_providers_retries_provider_hub_registration_after_failure(monkeypat
 
 
 def test_provider_hub_database_tables_are_registered():
-    from app.database import (
-        TableProviderHubCatalogEntry,
-        TableProviderHubCatalogSource,
-        TableProviderHubConfig,
-        TableProviderHubInstallation,
-        TableProviderHubInstallEvent,
-        TableProviderHubJob,
-        TableProviderHubSecret,
-        metadata,
-    )
+    from app.database import TableProviderHubState, metadata
 
-    expected = {
-        "provider_hub_catalog_sources": TableProviderHubCatalogSource,
-        "provider_hub_catalog_entries": TableProviderHubCatalogEntry,
-        "provider_hub_installations": TableProviderHubInstallation,
-        "provider_hub_config": TableProviderHubConfig,
-        "provider_hub_secrets": TableProviderHubSecret,
-        "provider_hub_jobs": TableProviderHubJob,
-        "provider_hub_install_events": TableProviderHubInstallEvent,
-    }
-
-    for table_name, model in expected.items():
-        assert table_name in metadata.tables
-        assert model.__tablename__ == table_name
+    assert "provider_hub_state" in metadata.tables
+    assert TableProviderHubState.__tablename__ == "provider_hub_state"
+    assert set(metadata.tables["provider_hub_state"].columns.keys()) == {
+        "id", "schema_version", "revision", "document", "updated_at"}
+    # The first revision's per-record tables were never written to; the state
+    # is one document row now, so nothing else carries the provider_hub_ prefix.
+    assert [name for name in metadata.tables
+            if name.startswith("provider_hub_") and name != "provider_hub_state"] == []
 
 
 def test_provider_hub_api_namespace_is_registered():

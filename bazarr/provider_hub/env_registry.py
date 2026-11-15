@@ -18,6 +18,7 @@ Two entry points, both free of pip and of the network:
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import platform
@@ -30,8 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from .state import (
-    corrupt_copies, provider_hub_dir, load_state, load_state_strict, mutate_state, mutate_state_checked, read_state_document,
+    corrupt_copies, process_lock, provider_hub_dir, load_state, load_state_strict, mutate_state, mutate_state_checked,
+    read_state_document,
 )
+from .state_store import StateConflictError
 from .venv import (
     SHARED_ENV_DIR, _ENV_LOCK, environment_fingerprint, has_parent_reference, is_pinned, path_key, pinned_paths,
     processes_using_directory, python_executable, validated_bundle_path, validated_hub_path, validated_interpreter,
@@ -197,6 +200,7 @@ def reconcile_environments(
         return summary
     envs = {fp: dict(entry) for fp, entry in registry(state).items() if isinstance(entry, dict)}
     adoptions: dict[str, str] = {}
+    adopted_by: dict[str, list[str]] = {}
     flags: list[str] = []
     unflags: list[str] = []
     repoints: list[tuple[str, str, str, str]] = []
@@ -267,6 +271,7 @@ def reconcile_environments(
                     envs[fingerprint] = {"path": str(env_dir)}
                     adoptions[fingerprint] = str(env_dir)
                     summary["adopted"].append(provider_id)
+                    adopted_by.setdefault(fingerprint, []).append(provider_id)
                 continue
             if path_key(recorded) == str(env_dir) or staged or not row.get("active_path"):
                 continue
@@ -298,8 +303,15 @@ def reconcile_environments(
     def apply(state: dict[str, Any]) -> None:
         installations = state.get("installations") or {}
         stored = registry(state)
+        dropped_adoptions.clear()
+        dropped_repoints.clear()
         for fingerprint, path in adoptions.items():
-            stored[fingerprint] = {"path": path}
+            # Checked again here, under the environment lock: a cleanup that
+            # committed first may have removed the directory since the probes.
+            if lock_held[0] and python_executable(Path(path)).exists():
+                stored[fingerprint] = {"path": path}
+            else:
+                dropped_adoptions.append(fingerprint)
         for provider_id in flags:
             row = installations.get(provider_id)
             if isinstance(row, dict):
@@ -316,9 +328,30 @@ def reconcile_environments(
         for provider_id, python_key, old, new in repoints:
             row = installations.get(provider_id)
             if isinstance(row, dict) and row.get(python_key) == old:
-                row[python_key] = new
+                if lock_held[0] and Path(new).exists():
+                    row[python_key] = new
+                else:
+                    dropped_repoints.append(provider_id)
 
-    mutate_state(apply)
+    # A row or record that points at an environment is committed under the lock
+    # a cleanup deletes under, with the target checked again inside it, so a
+    # reference never lands on a directory a cleanup has removed.
+    lock_held = [False]
+    dropped_adoptions: list[str] = []
+    dropped_repoints: list[str] = []
+    with environment_lock() as held:
+        lock_held[0] = bool(held)
+        if not held:
+            logger.warning("Provider Hub: another process holds the environment lock, "
+                           "so no environment was adopted or repointed")
+        mutate_state(apply)
+    for fingerprint in dropped_adoptions:
+        for provider_id in adopted_by.get(fingerprint, []):
+            if provider_id in summary["adopted"]:
+                summary["adopted"].remove(provider_id)
+    for provider_id in dropped_repoints:
+        if provider_id in summary["repointed"]:
+            summary["repointed"].remove(provider_id)
     return summary
 
 
@@ -430,25 +463,76 @@ def _overlaps(target: Path, others) -> bool:
     return False
 
 
-def _remove_environment(root: str | Path, target: str | Path, protected, stuck: set | None = None) -> bool:
-    """Remove one environment directory if it is safe to. Callers hold ``_ENV_LOCK``.
+def _removable_environment(root: str | Path, target: str | Path, protected, stuck: set | None = None) -> Path | None:
+    """The directory to remove for ``target``, or None when it is not safe to.
 
     Refused when the target is not an environment directory strictly inside the
     hub, when a symlink lies on the way to it, or when a referenced, recorded
-    or pinned environment is the target, lies inside it or contains it.
+    or pinned environment is the target, lies inside it or contains it. Removes
+    nothing.
     """
     located = _locate(root, target)
     if located is None:
-        return False
+        return None
     if _overlaps(located, (*protected, *pinned_paths())):
-        return False
+        return None
     if processes_using_directory(located, stuck=stuck):
         # A process the worker's groups do not cover (one that started its own
         # session) still runs from it: leave it for a later run.
         logger.info("Provider Hub: %s is still in use by a running process; not removed", located)
+        return None
+    return located
+
+
+def _remove_environment(root: str | Path, target: str | Path, protected, stuck: set | None = None) -> bool:
+    """Remove one environment directory if it is safe to. Callers hold ``environment_lock``."""
+    located = _removable_environment(root, target, protected, stuck)
+    if located is None:
         return False
     shutil.rmtree(located, ignore_errors=True)
     return True
+
+
+class EnvironmentGone(RuntimeError):
+    """The environment a row is about to point at was removed in the meantime."""
+
+
+class EnvironmentLockUnavailable(EnvironmentGone):
+    """The environment lock could not be had, so a row is not recorded without it."""
+
+
+def environment_lock():
+    """The lock every process takes to decide about, delete or record an environment.
+
+    A cleanup reads the references, deletes and commits under it, and an install
+    or repair takes it around the commit of a row that points at an environment.
+    A reference committed by another process is therefore either seen by the
+    cleanup or refused because its directory is already gone, never left
+    pointing at a directory a cleanup removed. Yields False when the lock cannot
+    be had.
+    """
+    return process_lock(provider_hub_dir() / ".environments.lock")
+
+
+@contextlib.contextmanager
+def recording_environment(env_path: str | Path):
+    """Hold the environment lock while a row that points at ``env_path`` is committed.
+
+    Raises ``EnvironmentLockUnavailable`` when the lock cannot be taken and
+    ``EnvironmentGone`` when the interpreter is no longer there, so the row is
+    never stored without the exclusion or against a directory a cleanup has
+    removed.
+    """
+    with environment_lock() as held:
+        if not held:
+            # Without the lock a cleanup that already planned its removal could
+            # delete this environment right after the row points at it.
+            raise EnvironmentLockUnavailable(
+                f"the environment {env_path} was not recorded: the environment lock could not be taken"
+            )
+        if not python_executable(env_path).exists():
+            raise EnvironmentGone(f"the environment {env_path} was removed before it could be recorded")
+        yield
 
 
 def is_environment_path(root: str | Path, target: str | Path) -> bool:
@@ -519,7 +603,10 @@ def discard_if_unused(root: str | Path, env_path: str | Path) -> bool:
     Referenced, recorded and pinned environments stay. Call it after
     ``venv.release_pins`` so this install's own hold does not count.
     """
-    with _ENV_LOCK:
+    with _ENV_LOCK, environment_lock() as held:
+        if not held:
+            logger.warning("Provider Hub: another process holds the environment lock, so no environment was removed")
+            return False
         try:
             state = _checked_state()
         except (StateUnreadable, OSError, ValueError):
@@ -562,12 +649,29 @@ def cleanup_environments(root: str | Path) -> list[str]:
     right now is pinned and stays. Only environment directories strictly inside
     ``root`` are removed, reached without crossing a symlink, and never one that
     contains or sits inside a referenced or pinned environment.
+
+    The decision is a plain change to the document. Directories go only after
+    that change is committed, under the environment lock, so a cleanup that
+    loses a race removes nothing.
     """
     root = Path(root)
-    removed: list[str] = []
+    planned: list[tuple[str, Path]] = []
     stuck: set[tuple[str, int]] = set()  # processes that stayed unreadable earlier in this pass
 
-    def apply(state: dict[str, Any]) -> None:
+    def plan(state: dict[str, Any]) -> None:
+        planned.clear()
+        stuck.clear()
+        chosen: set[Path] = set()
+
+        def choose(path: str | Path, protected) -> bool:
+            located = _removable_environment(root, path, protected, stuck)
+            if located is None:
+                return False
+            if located not in chosen:
+                chosen.add(located)
+                planned.append((str(path), located))
+            return True
+
         referenced = referenced_env_paths(state)
         envs = registry(state)
         for fingerprint, entry in list(envs.items()):
@@ -577,10 +681,8 @@ def cleanup_environments(root: str | Path) -> list[str]:
                 continue
             if path_key(path) in referenced or is_pinned(path):
                 continue
-            if os.path.lexists(path):
-                if not _remove_environment(root, path, referenced, stuck):
-                    continue
-                removed.append(path)
+            if os.path.lexists(path) and not choose(path, referenced):
+                continue
             del envs[fingerprint]
         recorded = {
             path_key(entry["path"]) for entry in envs.values()
@@ -589,17 +691,23 @@ def cleanup_environments(root: str | Path) -> list[str]:
         # Environments built into a new directory leave the replaced one behind,
         # and a failed install can leave one nothing recorded. Both are swept
         # here once nothing references or pins them.
-        removed.extend(
-            str(old) for old in _legacy_environment_dirs(root)
-            if _remove_environment(root, old, referenced | recorded, stuck)
-        )
+        for old in _legacy_environment_dirs(root):
+            choose(old, referenced | recorded)
 
-    # The decision and the state write happen under the lock an install takes
-    # to read the record and pin, so an install never sees a record whose
-    # directory a cleanup is about to remove.
-    with _ENV_LOCK:
+    # The decision, the state write and the deletion happen under the lock an
+    # install takes to read the record and pin, and under the one every process
+    # takes around recording an environment.
+    with _ENV_LOCK, environment_lock() as held:
+        if not held:
+            logger.warning("Provider Hub: another process holds the environment lock, so no environment was removed")
+            return []
         try:
-            mutate_state_checked(apply, validate_inventory)
-        except (StateUnreadable, OSError, ValueError):
+            mutate_state_checked(plan, validate_inventory)
+        except (StateUnreadable, StateConflictError, OSError, ValueError):
             logger.warning("Provider Hub: the state could not be read, so no environment was removed", exc_info=True)
+            return []
+        removed: list[str] = []
+        for path, located in planned:
+            shutil.rmtree(located, ignore_errors=True)
+            removed.append(path)
     return removed

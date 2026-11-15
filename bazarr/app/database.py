@@ -118,6 +118,9 @@ if postgresql:
         pool_pre_ping=True,
         pool_recycle=1800,
         isolation_level="AUTOCOMMIT",
+        # Statements bind credentials (the plugin state document); a failed one
+        # must not print its values into the log.
+        hide_parameters=True,
     )
 else:
     # insert is different between database types
@@ -129,7 +132,7 @@ else:
     # across threads, so the safest pattern is one fresh connection per
     # statement and let the WAL / busy_timeout PRAGMAs below absorb
     # contention. Do NOT switch this to QueuePool.
-    engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    engine = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT", hide_parameters=True)
 
     from sqlalchemy.engine import Engine
     from sqlalchemy import event
@@ -937,95 +940,20 @@ class TableSportsLeaguesRootfolder(Base):
         return {column.name: getattr(self, column.name) for column in self.__table__.columns}
 
 
-class TableProviderHubCatalogSource(Base):
-    __tablename__ = 'provider_hub_catalog_sources'
+class TableProviderHubState(Base):
+    """The Plugin Hub state as one versioned JSON document.
 
-    id = mapped_column(Integer, primary_key=True)
-    name = mapped_column(Text, nullable=False, unique=True)
-    type = mapped_column(Text, nullable=False)
-    url = mapped_column(Text, nullable=False)
-    enabled = mapped_column(Integer, nullable=False, default=1)
-    trust_key = mapped_column(Text)
-    etag = mapped_column(Text)
-    last_checked_at = mapped_column(DateTime)
-    last_error = mapped_column(Text)
+    A single row (id is always 1). ``revision`` is the compare-and-swap token
+    every write checks, ``schema_version`` the shape of ``document``.
+    """
+    __tablename__ = 'provider_hub_state'
+    __table_args__ = (CheckConstraint('id = 1', name='ck_provider_hub_state_single_row'),)
 
-
-class TableProviderHubCatalogEntry(Base):
-    __tablename__ = 'provider_hub_catalog_entries'
-
-    id = mapped_column(Integer, primary_key=True)
-    source_id = mapped_column(Integer, ForeignKey('provider_hub_catalog_sources.id', ondelete='CASCADE'), index=True)
-    provider_id = mapped_column(Text, nullable=False, index=True)
-    version = mapped_column(Text, nullable=False)
-    manifest_json = mapped_column(Text, nullable=False)
-    bundle_url = mapped_column(Text)
-    sha256 = mapped_column(Text)
-    signature = mapped_column(Text)
-    compatibility = mapped_column(Text)
-    published_at = mapped_column(DateTime)
-    deprecated = mapped_column(Integer, nullable=False, default=0)
-
-
-class TableProviderHubInstallation(Base):
-    __tablename__ = 'provider_hub_installations'
-
-    provider_id = mapped_column(Text, primary_key=True)
-    active_version = mapped_column(Text)
-    staged_version = mapped_column(Text)
-    active_path = mapped_column(Text)
-    staged_path = mapped_column(Text)
-    state = mapped_column(Text, nullable=False, default='inactive')
-    pending_restart = mapped_column(Integer, nullable=False, default=0)
-    installed_at = mapped_column(DateTime)
-    activated_at = mapped_column(DateTime)
-    last_error = mapped_column(Text)
-    manifest_json = mapped_column(Text)
-
-
-class TableProviderHubConfig(Base):
-    __tablename__ = 'provider_hub_config'
-
-    provider_id = mapped_column(Text, primary_key=True)
-    enabled = mapped_column(Integer, nullable=False, default=0)
-    priority = mapped_column(Integer)
-    config_json = mapped_column(Text, nullable=False, default='{}')
+    id = mapped_column(Integer, primary_key=True, autoincrement=False)
     schema_version = mapped_column(Integer, nullable=False, default=1)
+    revision = mapped_column(Integer, nullable=False, default=1)
+    document = mapped_column(Text, nullable=False)
     updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
-
-
-class TableProviderHubSecret(Base):
-    __tablename__ = 'provider_hub_secrets'
-
-    id = mapped_column(Integer, primary_key=True)
-    provider_id = mapped_column(Text, nullable=False, index=True)
-    field = mapped_column(Text, nullable=False)
-    encrypted_value = mapped_column(Text, nullable=False)
-    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
-
-
-class TableProviderHubJob(Base):
-    __tablename__ = 'provider_hub_jobs'
-
-    id = mapped_column(Text, primary_key=True)
-    provider_id = mapped_column(Text, index=True)
-    action = mapped_column(Text, nullable=False)
-    state = mapped_column(Text, nullable=False)
-    message = mapped_column(Text)
-    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
-    updated_at = mapped_column(DateTime, nullable=False, default=datetime.now)
-
-
-class TableProviderHubInstallEvent(Base):
-    __tablename__ = 'provider_hub_install_events'
-
-    id = mapped_column(Integer, primary_key=True)
-    provider_id = mapped_column(Text, nullable=False, index=True)
-    job_id = mapped_column(Text, index=True)
-    action = mapped_column(Text, nullable=False)
-    state = mapped_column(Text, nullable=False)
-    message = mapped_column(Text)
-    created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
 # Database triggers include direct SQL and bulk native imports in publication checks.

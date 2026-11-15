@@ -152,7 +152,16 @@ def register_secret_values(values: Iterable[Any]) -> int:
     registered = frozenset(cleaned)
     # Longest first: a credential that contains another is masked whole
     # rather than in pieces.
-    ordered = sorted(registered, key=len, reverse=True)
+    # A log line can quote a credential through ``%r``, which escapes quotes,
+    # backslashes and non-printable characters, so that spelling is masked too.
+    # It is derived here, for every registration path, and the value set itself
+    # stays the credentials.
+    spellings = set(registered)
+    for value in registered:
+        quoted = repr(value)[1:-1]
+        if len(quoted) >= _MIN_VALUE_LENGTH:
+            spellings.add(quoted)
+    ordered = sorted(spellings, key=len, reverse=True)
     regex = re.compile('|'.join(re.escape(value) for value in ordered)) if ordered else None
     _VALUE_STATE = (registered, regex)
     return len(registered)
@@ -177,7 +186,7 @@ def scrub_text(text: str) -> str:
     text = _mask_patterns(text)
 
     values, regex = _VALUE_STATE
-    if values and regex is not None and any(value in text for value in values):
+    if values and regex is not None:
         text = regex.sub(MASK, text)
     return text
 
@@ -447,6 +456,16 @@ def scrub_job_secrets(job) -> bool:
     return changed
 
 
+def _sync_state_file_copy() -> None:
+    """Make the state.json copy match the scrubbed database, best effort."""
+    try:
+        from provider_hub.state import sync_snapshot
+        sync_snapshot()
+    except Exception as error:
+        logger.warning("The Provider Hub state file could not be refreshed after the "
+                       "scrub: %s", type(error).__name__)
+
+
 def scrub_persisted_secrets(state=None) -> bool:
     """Rewrite the secrets an earlier version left in Provider Hub's
     state.json, atomically, or leave the file untouched. Returns True when
@@ -466,10 +485,12 @@ def scrub_persisted_secrets(state=None) -> bool:
                            "stored diagnostics: %s", type(error).__name__)
             return False
     if not scrub_state_secrets(state):
+        _sync_state_file_copy()
         return False
     try:
         from provider_hub.state import mutate_state
         mutate_state(lambda current: scrub_state_secrets(current))
+        _sync_state_file_copy()
     except Exception as error:
         logger.warning("The scrubbed Provider Hub state could not be written: %s",
                        type(error).__name__)

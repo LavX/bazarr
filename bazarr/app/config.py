@@ -982,26 +982,33 @@ migrate_legacy_plex_encryption(settings)
 # pass: the plaintext detection and the in-place decrypt below have to
 # walk them, or a plugin credential stays in the clear (and one left by a
 # removed plugin never decrypts). Reads state.json directly; the service
-# layer is not up while settings load.
+# layer is not up while settings load. The state lives in the database, which
+# cannot be opened until the credentials below are decrypted (its own password
+# is one of them), so until then the state is read from its state.json copy.
+from provider_hub.state import hold_database, release_database  # noqa: E402
+hold_database()
 try:
-    from secret_store.registry import load_plugin_secret_paths
-    load_plugin_secret_paths(settings)
-except HubSecretRegistrationError:
-    # No covering of the plaintext plugin leftovers could be vouched for,
-    # so the boot does not complete while they stay readable. The broad
-    # catch below is for the failures the durable registrations survive.
-    raise
-except Exception:
-    logging.exception("Unable to load the Provider Hub plugin secret registry")
+    try:
+        from secret_store.registry import load_plugin_secret_paths
+        load_plugin_secret_paths(settings)
+    except HubSecretRegistrationError:
+        # No covering of the plaintext plugin leftovers could be vouched for,
+        # so the boot does not complete while they stay readable. The broad
+        # catch below is for the failures the durable registrations survive.
+        raise
+    except Exception:
+        logging.exception("Unable to load the Provider Hub plugin secret registry")
 
-# Detect plaintext credentials BEFORE decrypt_settings_in_place runs - it
-# is a passthrough on plaintext, so afterwards the in-memory state and
-# the on-disk state match for plaintext fields and write_config's
-# comparison would skip the rewrite. Capture the "needs migration" bit
-# now and force a write below.
-_force_first_save_migration = has_plaintext_secrets_on_disk(settings)
+    # Detect plaintext credentials BEFORE decrypt_settings_in_place runs - it
+    # is a passthrough on plaintext, so afterwards the in-memory state and
+    # the on-disk state match for plaintext fields and write_config's
+    # comparison would skip the rewrite. Capture the "needs migration" bit
+    # now and force a write below.
+    _force_first_save_migration = has_plaintext_secrets_on_disk(settings)
 
-decrypt_settings_in_place(settings)
+    decrypt_settings_in_place(settings)
+finally:
+    release_database()
 
 # A stored API key that will not decrypt is the one failure Bazarr can and
 # must repair itself: the key is Bazarr's own, the SPA sends it on every
