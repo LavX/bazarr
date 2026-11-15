@@ -33,6 +33,7 @@ from app.database import (TableTranslatorConnection, TableTranslatorEngineInstan
 
 from secret_store.scrub import MASK, mask_credential_refusal
 
+from . import legacy_engines
 from .field_schema import is_finite_number, is_secret_field
 from .destinations import DestinationSchema, added_destinations, covers, effective_destinations
 from .transaction import inside_write_transaction, write_transaction
@@ -217,6 +218,10 @@ class TranslatorStore:
         return _loads(row.settings_json, {})
 
     # ---------------------------------------------------------- usable rules
+    def plugin_active(self, plugin_id: str) -> bool:
+        """The plugin is installed with a running release and switched on."""
+        return bool(self._plugin_active(plugin_id))
+
     def connection_usable(self, connection) -> bool:
         """On, served by an installed and enabled plugin, and not waiting for its secrets."""
         return bool(connection.enabled) and not connection.awaiting_secrets and self._serving_plugin_active(connection)
@@ -234,6 +239,9 @@ class TranslatorStore:
         """
         if instance is None or not instance.enabled or instance.awaiting_secrets:
             return False
+        if legacy_engines.legacy_engine_for(instance.plugin_id) is not None:
+            # Served by code in Bazarr+ itself: it needs no plugin, only its address.
+            return legacy_engines.configured(instance_settings=self.settings_of(instance))
         if not self._plugin_active(instance.plugin_id):
             return False
         connections = self.list_connections(instance.id)
@@ -594,6 +602,10 @@ class TranslatorStore:
                     entry["last4"] = plain[-4:]
             summary[row.field] = entry
         return summary
+
+    def has_stale_secrets(self, owner: Owner, destinations: frozenset[str]) -> bool:
+        """A stored secret of the owner was entered for other destinations than these: it must not be sent."""
+        return self._stale_secrets(owner, destinations)
 
     def refresh_awaiting(self, owner: Owner, destinations: frozenset[str]) -> bool:
         """Recompute and store whether the owner waits for its secrets. Returns the new flag."""
