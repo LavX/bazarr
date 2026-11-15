@@ -1,4 +1,10 @@
-import { CSSProperties, ReactNode, useCallback } from "react";
+import {
+  CSSProperties,
+  ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+} from "react";
 import { ActionIcon, Group } from "@mantine/core";
 import {
   closestCenter,
@@ -30,7 +36,8 @@ export interface SortableListProps<T> {
   /** A name for an item, used in the labels of its handle and buttons. */
   getName: (item: T) => string;
   renderItem: (item: T, index: number) => ReactNode;
-  onReorder: (ids: string[]) => void;
+  /** The new order, and which item was moved to which place (0-based) in it. */
+  onReorder: (ids: string[], moved: { id: string; index: number }) => void;
   disabled?: boolean;
   /** A class for each row, so a caller can draw the row as a card. */
   rowClassName?: string;
@@ -69,6 +76,20 @@ function SortableRow({
     transition,
     isDragging,
   } = useSortable({ id, disabled });
+  const upRef = useRef<HTMLButtonElement>(null);
+  const downRef = useRef<HTMLButtonElement>(null);
+  // The button that was pressed, until the row has taken its new place.
+  const pressed = useRef<"up" | "down" | null>(null);
+  // A move to the first or last place disables the button that made it, and a disabled button drops the
+  // focus. The focus goes to the row's other button, so the keyboard stays on the row that was moved.
+  useEffect(() => {
+    if (pressed.current === "up" && index === 0) {
+      downRef.current?.focus();
+    } else if (pressed.current === "down" && index === count - 1) {
+      upRef.current?.focus();
+    }
+    pressed.current = null;
+  }, [index, count]);
   const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -93,18 +114,26 @@ function SortableRow({
         <ActionIcon
           variant="subtle"
           color="gray"
+          ref={upRef}
           aria-label={`Move ${name} up`}
           disabled={disabled || index === 0}
-          onClick={() => onMove(index, index - 1)}
+          onClick={() => {
+            pressed.current = "up";
+            onMove(index, index - 1);
+          }}
         >
           <FontAwesomeIcon icon={faArrowUp} />
         </ActionIcon>
         <ActionIcon
           variant="subtle"
           color="gray"
+          ref={downRef}
           aria-label={`Move ${name} down`}
           disabled={disabled || index === count - 1}
-          onClick={() => onMove(index, index + 1)}
+          onClick={() => {
+            pressed.current = "down";
+            onMove(index, index + 1);
+          }}
         >
           <FontAwesomeIcon icon={faArrowDown} />
         </ActionIcon>
@@ -141,7 +170,7 @@ export function SortableList<T>({
       if (to < 0 || to >= ids.length || from === to) {
         return;
       }
-      onReorder(arrayMove(ids, from, to));
+      onReorder(arrayMove(ids, from, to), { id: ids[from], index: to });
     },
     [ids, onReorder],
   );
