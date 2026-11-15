@@ -282,6 +282,7 @@ class Dispatcher:
         row = self._ensure_job(jobs, spec)
         if row is None:
             return DispatchOutcome("skipped")
+        _maintain_when_due(self.session, self.clock, self.monotonic, self.limits)
         state = _Run(row.id, str(row.id), DeadlineWatch(clock=self.monotonic, **self.deadlines))
         try:
             chain, state.notices = self._plan(spec)
@@ -718,24 +719,53 @@ def _is_free(connection) -> bool:
     return not connection.price_input_per_million and not connection.price_output_per_million
 
 
-# ---------------------------------------------------------------------------------------------- restarts
+# ----------------------------------------------------------------------------------------------- upkeep
 
-def recover_after_restart(session=None, *, clock: Callable[[], datetime] = datetime.now) -> dict[str, int]:
-    """What the dispatcher does once at startup: jobs the restart cut off await a retry, and budgets that no
-    live job holds are given back. Checkpoints stay, so the retry resumes after the last finished batch."""
-    from .jobs import ACTIVE_STATES, TranslationJobs
+MAINTENANCE_SECONDS = 3600.0
+_maintained_at: float | None = None
+
+
+def maintain(session=None, *, clock: Callable[[], datetime] = datetime.now, limits: CostLimits | None = None) -> dict[str, int]:
+    """The ledger's and the checkpoints' upkeep: give back the budgets no live job holds, move running jobs'
+    budgets into the new month, and delete the checkpoints that ran out. Nothing else schedules these."""
+    from sqlalchemy import select
+
+    from app.database import TableTranslatorJob
+
+    from .jobs import ACTIVE_STATES
 
     if session is None:
         from app.database import database
 
         session = database
-    jobs = TranslationJobs(session, clock=clock)
-    recovered = jobs.recover_interrupted()
-    from app.database import TableTranslatorJob
-    from sqlalchemy import select
-
     live = [str(row) for row in session.execute(
         select(TableTranslatorJob.id).where(TableTranslatorJob.state.in_(ACTIVE_STATES))).scalars().all()]
-    released = UsageLedger(session, clock=clock).release_stale(live)
-    jobs.sweep()
-    return {"recovered": len(recovered), "released": released}
+    ledger = UsageLedger(session, clock=clock)
+    released = ledger.release_stale(live)
+    moved = ledger.roll_month(limits if limits is not None else configured_cost_limits())
+    swept = TranslationJobs(session, clock=clock).sweep()
+    return {"released": released, "moved": moved, "swept": swept}
+
+
+def _maintain_when_due(session, clock, monotonic, limits) -> None:
+    """Run the upkeep at most once an hour from the jobs that dispatch. A failure never stops the job."""
+    global _maintained_at
+    now = monotonic()
+    if _maintained_at is not None and now - _maintained_at < MAINTENANCE_SECONDS:
+        return
+    _maintained_at = now
+    try:
+        maintain(session, clock=clock, limits=limits())
+    except Exception:
+        logger.warning("The translation upkeep failed", exc_info=True)
+
+
+def recover_after_restart(session=None, *, clock: Callable[[], datetime] = datetime.now) -> dict[str, int]:
+    """What the dispatcher does once at startup: jobs the restart cut off await a retry, and the upkeep runs.
+    Checkpoints stay, so the retry resumes after the last finished batch."""
+    if session is None:
+        from app.database import database
+
+        session = database
+    recovered = TranslationJobs(session, clock=clock).recover_interrupted()
+    return {"recovered": len(recovered), **maintain(session, clock=clock)}

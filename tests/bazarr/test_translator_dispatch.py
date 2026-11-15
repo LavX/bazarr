@@ -9,154 +9,20 @@ import time
 from datetime import datetime
 
 import pytest
-from sqlalchemy.orm import scoped_session, sessionmaker
 
 import translator_dispatch_helpers as helpers
-from translator_dispatch_helpers import (KEY, LINES, PLUGIN, SECOND_PLUGIN, SOURCE, FakeClock, FakeMonotonic,
-                                         MemoryPointers, usd)
-from provider_hub.runtime.pool import PoolLimits, WorkerDefinition, WorkerPool
-from provider_hub.runtime.session import SessionLimits
-from provider_hub.runtime.testing.fake_translator import fake_translator_command, fake_translator_env
+from translator_dispatch_helpers import KEY, LINES, PLUGIN, SECOND_PLUGIN, SOURCE, TARGET, make_spec, usd
 from subtitles.tools.translate.runtime import failure as fail
 from subtitles.tools.translate.runtime.dispatch import (
-    DispatchFailed, Declined, Dispatcher, GateClosed, JobSpec, LegacyDeclined, LegacyResult, PluginInfo, RetryWindows)
-from subtitles.tools.translate.runtime.gate import GateHolds
-from subtitles.tools.translate.runtime.history import HistoryStore
-from subtitles.tools.translate.runtime.host_calls import host_calls
-from subtitles.tools.translate.runtime.jobs import TranslationJobs, target_key
-from subtitles.tools.translate.runtime.store import CONNECTION, TranslatorStore
+    DispatchFailed, Declined, GateClosed, LegacyDeclined, LegacyResult)
+from subtitles.tools.translate.runtime.jobs import TranslationJobs
+from subtitles.tools.translate.runtime.store import CONNECTION
 from subtitles.tools.translate.runtime.usage import CostLimits, UsageLedger
-from subtitles.tools.translate.runtime.workers import PoolWorkers
-
-TARGET = "fr"
-
-
-def _fast_session(**overrides):
-    values = dict(handshake_timeout=10.0, heartbeat_interval=0.1, heartbeat_timeout=3.0, cancel_grace=0.5,
-                  kill_grace=3.0, tick=0.02)
-    values.update(overrides)
-    return SessionLimits(**values)
-
-
-class Env:
-    """A database, a store, a pool of fake translator workers and a dispatcher, wired as production wires them."""
-
-    def __init__(self, session, tmp_path):
-        self.session = session
-        self.tmp_path = tmp_path
-        self.pointers = MemoryPointers()
-        self.active = {PLUGIN, SECOND_PLUGIN}
-        self.store = TranslatorStore(session, pointers=self.pointers, plugin_active=lambda pid: pid in self.active)
-        self.clock = FakeClock()
-        self.monotonic = FakeMonotonic()
-        self.scripts = {}
-        self.limits = CostLimits()
-        self.report = tmp_path / "report.jsonl"
-        self.session_overrides = {}
-        self.pool = WorkerPool(PoolLimits(tick=0.05, heartbeat_interval=0.1, acquire_timeout=2.0, close_grace=1.0,
-                                          budget_interval=0.0, backoff_base=0.05, backoff_cap=0.2),
-                               autostart=True)
-        self.workers = PoolWorkers(self.pool, self._definition)
-        self.abandoned = []
-        self.holds = GateHolds()
-        self.windows = RetryWindows(self.monotonic)
-        self.installed = {PLUGIN: PluginInfo(PLUGIN, "AI Subtitle Translator", "2.2.0", "digest-a",
-                                             helpers.manifest(PLUGIN)),
-                          SECOND_PLUGIN: PluginInfo(SECOND_PLUGIN, "Second Engine", "1.0.0", "digest-b",
-                                                    helpers.manifest(SECOND_PLUGIN))}
-
-    def _definition(self, plugin_id):
-        script = self.scripts.get(plugin_id, {})
-        return WorkerDefinition(plugin_id, kind="translator", command=fake_translator_command(),
-                                env=fake_translator_env(script, self.report, self.tmp_path / "attempts.json"), host_calls=host_calls(),
-                                session_limits=_fast_session(**self.session_overrides))
-
-    def dispatcher(self, **overrides):
-        values = dict(store=self.store, workers=self.workers, plugins=lambda pid: self.installed.get(pid),
-                      limits=lambda: self.limits, clock=self.clock, monotonic=self.monotonic, holds=self.holds,
-                      windows=self.windows, poll=0.05, sleep=lambda _s: None)
-        values.update(overrides)
-        return Dispatcher(self.session, **values)
-
-    # --- setup helpers
-    def engine(self, plugin_id=PLUGIN, select=True, **kwargs):
-        instance = self.store.create_instance(plugin_id, **kwargs)
-        if select:
-            self.pointers.engine = instance.id
-        return instance
-
-    def ai_engine(self, select=True, **kwargs):
-        """The official engine with one free connection, which is what makes it configured."""
-        instance = self.engine(PLUGIN, select=select, **kwargs)
-        self.connection(instance)
-        return instance
-
-    def connection(self, instance, backend="openrouter", model="model-a", **kwargs):
-        return self.store.add_connection(instance.id, backend, model=model, **kwargs)
-
-    def requests(self):
-        if not self.report.exists():
-            return []
-        return [json.loads(line) for line in self.report.read_text().splitlines()]
-
-    def served(self):
-        """The connection ids the worker was asked for, in order."""
-        return [item["connection"] for item in self.requests()]
-
-    # --- reads
-    def job(self, job_id=None):
-        jobs = TranslationJobs(self.session, clock=self.clock)
-        return jobs.get(job_id) if job_id else jobs.active_for(SOURCE, TARGET)
-
-    def last_job(self):
-        from sqlalchemy import select
-
-        from app.database import TableTranslatorJob
-
-        return self.session.execute(select(TableTranslatorJob).order_by(TableTranslatorJob.id.desc())
-                                    .execution_options(populate_existing=True)).scalars().first()
-
-    def history(self, job):
-        return HistoryStore(self.session, clock=self.clock).get_by_job(str(job.id))
-
-    def checkpoints(self):
-        from sqlalchemy import select
-
-        from app.database import TableTranslatorCheckpoint
-
-        return self.session.execute(select(TableTranslatorCheckpoint).execution_options(
-            populate_existing=True)).scalars().all()
-
-    def close(self):
-        self.pool.close()
-
-
-def make_spec(lines=LINES, target=TARGET, **overrides):
-    values = dict(source_key=SOURCE, target_key=target_key(target), lines=list(lines), target_language=target,
-                  source_language="en", history_media={"media_type": "movie", "media_id": 7, "media_title": "Film"},
-                  media={"type": "movie", "title": "Film", "year": 2020})
-    values.update(overrides)
-    return JobSpec(**values)
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
 def env(request, tmp_path):
-    import sqlalchemy as sa
-
-    engine, pg = helpers.make_engine(request.param, tmp_path)
-    scoped = scoped_session(sessionmaker(bind=engine, autoflush=False, expire_on_commit=False))
-    holder = Env(scoped, tmp_path)
-    try:
-        yield holder
-    finally:
-        holder.close()
-        scoped.remove()
-        engine.dispose()
-        if pg:
-            admin, schema = pg
-            with admin.begin() as connection:
-                connection.execute(sa.text(f"DROP SCHEMA {schema} CASCADE"))
-            admin.dispose()
+    yield from helpers.build_env(request.param, tmp_path)
 
 
 def two_connections(env):
@@ -710,6 +576,39 @@ def test_recovery_after_a_restart_makes_cut_off_jobs_await_a_retry_and_gives_bac
     counts = recover_after_restart(env.session, clock=env.clock)
     assert counts["recovered"] == 1 and counts["released"] == 1
     assert env.job(job_id).state == "awaiting_retry" and env.job(job_id).error_class == "interrupted"
+
+
+def test_the_upkeep_runs_from_the_first_job_and_then_once_an_hour(env, monkeypatch):
+    from subtitles.tools.translate.runtime import dispatch
+
+    ran = []
+    monkeypatch.setattr(dispatch, "maintain", lambda *args, **kwargs: ran.append(1) or {})
+    env.ai_engine()
+    dispatcher = env.dispatcher()
+    dispatcher.run(make_spec())
+    dispatcher.run(make_spec(source_key="/media/b.en.srt"))
+    assert len(ran) == 1
+    env.monotonic.advance(3601)
+    dispatcher.run(make_spec(source_key="/media/c.en.srt"))
+    assert len(ran) == 2
+
+
+def test_the_upkeep_gives_back_stale_budgets_moves_running_ones_and_sweeps_expired_checkpoints(env):
+    from subtitles.tools.translate.runtime.dispatch import maintain
+
+    jobs = TranslationJobs(env.session, clock=env.clock)
+    job_id = jobs.request(SOURCE, TARGET).job_id
+    jobs.start(job_id, source_digest="d", engine_instance_id=1, settings_revision=1)
+    jobs.save_batch(job_id, 0, ["x"])
+    jobs.await_retry(job_id, "rate_limited", "later")
+    ledger = UsageLedger(env.session, clock=env.clock)
+    limits = CostLimits(month_cap=usd(10), translation_limit=1)
+    ledger.reserve_job_budget(str(job_id), limits)
+    ledger.reserve_job_budget("gone", limits)
+    env.clock.advance(days=8)  # past the checkpoint retention, and the budget of the live job is in an old month
+    counts = maintain(env.session, clock=env.clock, limits=limits)
+    assert counts["released"] == 1 and counts["swept"] == 1
+    assert env.checkpoints() == []
 
 
 def test_a_job_that_is_already_running_elsewhere_is_skipped(env):
