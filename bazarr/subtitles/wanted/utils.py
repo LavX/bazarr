@@ -23,13 +23,24 @@ def evaluate_translation_gate():
     return availability.available
 
 
+# The history actions that put a different file at a subtitle path or remove it:
+# delete, the downloads and upgrade, upload, translation and extraction from an
+# embedded track. A sync (5) rewrites the same file, an embedded track (7) has
+# no path and a manual score (9) only rescored it, so none of those says where
+# the file at the path came from.
+FILE_REPLACING_ACTIONS = (0, 1, 2, 3, 4, 6, 8)
+
+
 def source_wait_elapsed(source_path):
     """Whether a source subtitle is old enough to translate automatically.
 
     translator.min_source_wait_minutes is measured from the modification time
     of the source file, and 0 turns the wait off. A source whose modification
-    time cannot be read is not held back by the wait. A source whose modification
-    time is in the future is not held back either, since its age cannot be measured.
+    time cannot be read is not held back by the wait. A source dated in the
+    future is a clock disagreement: it counts as written just now, so it is held
+    for the wait, unless it is dated further ahead than the wait itself. A date
+    that far out cannot be a file written a moment ago, and holding it would
+    hold it for as long as the date stays ahead.
     """
     wait_minutes = settings.translator.min_source_wait_minutes
     if not wait_minutes:
@@ -38,9 +49,24 @@ def source_wait_elapsed(source_path):
         modified_at = os.path.getmtime(source_path)
     except OSError:
         return True
-    if modified_at > time.time():
-        return True
-    return time.time() - modified_at >= wait_minutes * 60
+    age = time.time() - modified_at
+    if age < 0:
+        return -age > wait_minutes * 60
+    return age >= wait_minutes * 60
+
+
+def translation_capture_paths(destination, source_path):
+    """The files whose versions an automatic translation captures when it queues.
+
+    The destination is always captured: a subtitle that lands there while the
+    job waits is the better one. While the source wait is on, the source is
+    captured as well, so a source replaced while the job waits cancels the job
+    and the next scan applies the wait to the new file. The destination stays
+    first.
+    """
+    if settings.translator.min_source_wait_minutes:
+        return (destination, source_path)
+    return (destination,)
 
 
 def _find_existing_subtitle_path(subtitles_field, source_lang, path_replace_fn=None):

@@ -89,7 +89,7 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         from subtitles.tools.translate.core.translator_utils import translated_destination_path
         from subtitles.tools.translate.main import translate_subtitles_file
         from subtitles.download import check_missing_languages
-        from subtitles.wanted.utils import source_wait_elapsed
+        from subtitles.wanted.utils import source_wait_elapsed, translation_capture_paths
         from app.database import (TableEpisodes, TableShows, TableMovies,
                                   database, select)
 
@@ -218,7 +218,8 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
             item_forced = item.get('forced') == 'True'
             item_hi = item.get('hi') == 'True'
             destination = translated_destination_path(video_path, target_lang, item_forced, item_hi)
-            expected_destination_versions = capture_subtitle_versions(video_path, (destination,))
+            expected_destination_versions = capture_subtitle_versions(
+                video_path, translation_capture_paths(destination, subtitle_path))
             # The capture holds the media write lock, so this answers for the
             # instant it recorded: a subtitle already at the destination is the
             # provider's, landed after the last index pass, and the better

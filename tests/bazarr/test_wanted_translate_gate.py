@@ -911,13 +911,133 @@ def test_a_source_younger_than_the_minimum_wait_has_not_elapsed_it(monkeypatch, 
     assert source_wait_elapsed(_source_subtitle(tmp_path, minutes_old=5)) is False
 
 
-def test_a_source_dated_in_the_future_is_not_held_back_by_the_minimum_wait(monkeypatch, tmp_path):
+def test_a_source_dated_far_in_the_future_is_not_held_back_by_the_minimum_wait(monkeypatch, tmp_path):
+    """A date further ahead than the wait itself cannot be a file written a
+    moment ago, so holding it would hold it for as long as the date stays ahead."""
     from subtitles.wanted.utils import source_wait_elapsed
 
     source = tmp_path / "fixture.en.srt"
     source.write_text("fixture", encoding="utf-8")
-    future = time.time() + 60 * 60
+    future = time.time() + 3 * 60 * 60
     os.utime(source, (future, future))
     _minimum_source_wait(monkeypatch, 60)
 
     assert source_wait_elapsed(str(source)) is True
+
+
+def test_a_source_dated_a_few_seconds_ahead_is_held_for_the_minimum_wait(monkeypatch, tmp_path):
+    """A clock that runs a little ahead of this one dates a file written just
+    now in the future. Its age is 0, so it waits like any fresh source."""
+    from subtitles.wanted.utils import source_wait_elapsed
+
+    source = tmp_path / "fixture.en.srt"
+    source.write_text("fixture", encoding="utf-8")
+    future = time.time() + 5
+    os.utime(source, (future, future))
+    _minimum_source_wait(monkeypatch, 60)
+
+    assert source_wait_elapsed(str(source)) is False
+
+
+def _insert_history_row(session, model, action, subtitles_path, seconds_after):
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import insert
+
+    if model == "movie":
+        from app.database import TableHistoryMovie as table
+        keys = dict(radarrId=30, video_path="/movies/fixture.mkv")
+    else:
+        from app.database import TableHistory as table
+        keys = dict(sonarrSeriesId=10, sonarrEpisodeId=20, video_path="/series/fixture/s01e01.mkv")
+    session.execute(insert(table).values(
+        action=action, description="Later event.", language="en", provider=None,
+        score=None, score_out_of=None, arr_instance_id=1,
+        timestamp=datetime.now() + timedelta(seconds=seconds_after),
+        subtitles_path=subtitles_path, **keys))
+    session.commit()
+
+
+@pytest.mark.parametrize("later_action", [5, 9])
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_hand_upload_stays_unheld_after_a_sync_or_a_manual_score(
+        schema_session, monkeypatch, tmp_path, model, later_action):
+    """A sync rewrites the same file and a manual score only rescores it, so
+    neither says the file did not come from the upload."""
+    from subliminal_patch.score import MAX_SCORES
+
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    video = "/movies/fixture.mkv" if model == "movie" else "/series/fixture/s01e01.mkv"
+    _insert_hand_upload(schema_session, model, MAX_SCORES[model], MAX_SCORES[model], video, source)
+    _insert_history_row(schema_session, model, later_action, source, seconds_after=30)
+    searches, translations = [], Mock()
+    if model == "movie":
+        scan = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    else:
+        scan = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, scan, source)
+    _minimum_source_wait(monkeypatch, 60)
+
+    if model == "movie":
+        scan._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+    else:
+        scan._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+@pytest.mark.parametrize("wait,captured", [(60, 2), (0, 1)])
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_queued_scan_translation_captures_its_source_only_while_the_wait_is_on(
+        schema_session, monkeypatch, tmp_path, model, wait, captured):
+    searches, translations = [], Mock()
+    source = _source_subtitle(tmp_path, minutes_old=120)
+    if model == "movie":
+        scan = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    else:
+        scan = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, scan, source)
+    _minimum_source_wait(monkeypatch, wait)
+
+    if model == "movie":
+        scan._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+    else:
+        scan._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+
+    translations.assert_called_once()
+    expected = translations.call_args.kwargs["expected_destination_versions"]
+    assert len(expected) == captured
+    assert expected[0].path.endswith(".hu.srt")
+    if captured == 2:
+        assert expected[1].path == source
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_scan_translation_cancels_when_its_source_is_replaced_while_it_waits(
+        schema_session, monkeypatch, tmp_path, model):
+    """The wait is decided for the file seen at queueing. A new file in the
+    source's place has not waited, so the captured version refuses it and the
+    next scan applies the wait."""
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged, validate_subtitle_versions
+
+    searches, translations = [], Mock()
+    source = _source_subtitle(tmp_path, minutes_old=120)
+    if model == "movie":
+        scan = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
+    else:
+        scan = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    _point_source_at(monkeypatch, scan, source)
+    _minimum_source_wait(monkeypatch, 60)
+    if model == "movie":
+        scan._wanted_movie(_wanted_movie_row(), providers_list=[], translation_gate=True)
+    else:
+        scan._wanted_episode(_wanted_episode_row(), providers_list=[], translation_gate=True)
+    expected = translations.call_args.kwargs["expected_destination_versions"]
+    validate_subtitle_versions(expected)
+
+    with open(source, "w", encoding="utf-8") as handle:
+        handle.write("a replacement written just now")
+
+    with pytest.raises(SubtitleSourceChanged):
+        validate_subtitle_versions(expected)

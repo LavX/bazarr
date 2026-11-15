@@ -27,7 +27,8 @@ from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
 from ..language_profiles import build_translate_from_map
 from ..tools.translate.failure_record import translation_recently_failed
-from .utils import _find_existing_subtitle_path, _provider_file_on_disk, evaluate_translation_gate, source_wait_elapsed
+from .utils import (FILE_REPLACING_ACTIONS, _find_existing_subtitle_path, _provider_file_on_disk,
+                    evaluate_translation_gate, source_wait_elapsed, translation_capture_paths)
 
 
 def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
@@ -183,7 +184,8 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                         # is the provider's, landed after the last index pass,
                         # and the better track. A translation would replace it,
                         # so this target is served already and queues nothing.
-                        expected_versions = capture_subtitle_versions(video_path, (destination,))
+                        expected_versions = capture_subtitle_versions(
+                            video_path, translation_capture_paths(destination, source_srt))
                         if expected_versions[0].version is not None:
                             logging.info(
                                 "BAZARR auto-translate (wanted-scan) skipped: %s is already "
@@ -202,6 +204,7 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                                     select(TableHistoryMovie.subtitles_path, TableHistoryMovie.action)
                                     .where(TableHistoryMovie.radarrId == movie.radarrId)
                                     .where(TableHistoryMovie.language.like(f"{translate_cfg['from']}%"))
+                                    .where(TableHistoryMovie.action.in_(FILE_REPLACING_ACTIONS))
                                     .order_by(TableHistoryMovie.timestamp.desc()),
                                     TableHistoryMovie.arr_instance_id,
                                     arr_instance_id,
