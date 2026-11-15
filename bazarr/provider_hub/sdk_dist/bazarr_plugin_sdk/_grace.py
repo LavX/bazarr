@@ -18,6 +18,7 @@ class Grace:
         self.seconds = float(seconds)
         self._deadline: float | None = None
         self._lock = threading.Lock()
+        self._abandoned: list[str] = []
 
     def start(self) -> None:
         """Start the clock. Later calls change nothing."""
@@ -36,3 +37,14 @@ class Grace:
 
     def expired(self) -> bool:
         return self.started and self.remaining() <= 0.0
+
+    def abandon(self, what: str) -> None:
+        """Record that something was left running after the budget ran out."""
+        with self._lock:
+            self._abandoned.append(what)
+
+    @property
+    def abandoned(self) -> list[str]:
+        """What was left running, in the order it was given up on. Empty when everything ended."""
+        with self._lock:
+            return list(self._abandoned)

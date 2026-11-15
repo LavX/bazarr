@@ -239,3 +239,19 @@ def test_a_plugin_runs_on_the_vendored_copy_in_an_isolated_interpreter(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     last = result.stdout.strip().splitlines()[-1]
     assert last.startswith("OK structure") and "cancel" in last[3:].split(","), result.stdout
+
+
+def _runner_constant(name):
+    tree = ast.parse((PACKAGE / "runner.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"runner.py has no {name}")
+
+
+def test_the_hosts_cancel_grace_exceeds_the_sdks_whole_cleanup_budget_with_a_margin():
+    from provider_hub.runtime.session import SessionLimits
+
+    sdk_budget = _runner_constant("SHUTDOWN_TIMEOUT") + _runner_constant("CLEANUP_SLACK")
+    # a healthy worker's answer after a cancel comes within sdk_budget; the host kills at cancel_grace
+    assert SessionLimits().cancel_grace >= sdk_budget + 1.0, (sdk_budget, SessionLimits().cancel_grace)

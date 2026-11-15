@@ -21,9 +21,16 @@ The channel keeps the original stdin and stdout for frames and points fd 1 at
 stderr and fd 0 at the null device before any plugin code runs.
 
 A call that is cancelled and still running when the grace period ends is answered
-as cancelled and left behind on its thread. The worker then refuses new calls and
-exits, so the host starts a fresh one: a new call must never run beside code that
-was told to stop and did not.
+as cancelled and left behind on its thread. So is anything a finished or cancelled
+call leaves running that does not stop in time: a task that swallows its cancel, an
+async generator that will not close, an executor thread (``asyncio.to_thread``). The
+worker then refuses new calls and exits after the answer, so the host starts a fresh
+one: a new call must never run beside code that was told to stop and did not.
+
+The whole cleanup, from a cancel to the answer, takes at most SHUTDOWN_TIMEOUT plus
+CLEANUP_SLACK seconds. That is kept well under the host's ``cancel_grace``
+(``provider_hub/runtime/session.py``, 5 seconds), so a healthy worker's answer never
+races the host's kill. Change one only with the other.
 
 Exit codes: 0 normal, 3 the host broke the protocol or refused the worker, 64
 bad command line or entry, 66 the plugin would not start, 70 a cancelled call would
@@ -65,8 +72,10 @@ EXIT_ABANDONED = 70
 
 # A result whose JSON is longer than this travels as data frames.
 INLINE_RESULT_BYTES = 512 * 1024
-# Seconds a finished request's tasks and executor threads get to wind down.
-SHUTDOWN_TIMEOUT = 5.0
+# Seconds a cancelled or finished request's tasks and executor threads get to wind down, in all.
+# Together with CLEANUP_SLACK this stays well below the host's cancel_grace (5 seconds): a
+# worker that overruns is answered and retired before the host would kill it.
+SHUTDOWN_TIMEOUT = 3.5
 # Extra seconds the reply waits for the cleanup thread beyond the budget its steps keep to.
 CLEANUP_SLACK = 0.25
 # A request param the SDK takes for itself: what a paid ``test`` may spend.
@@ -90,6 +99,8 @@ class SdkChannel(WorkerChannel):
         New requests get ``shutting_down``; the drain that follows cancels what runs,
         says goodbye and closes, and the worker exits with ``status``.
         """
+        if self._ended.is_set():
+            return  # the host is already shutting this worker down; it exits as it was told to
         self.exit_status = status
         self._stopping.set()
         self._ended.set()
@@ -177,11 +188,13 @@ class PluginWorker:
                 value = call_bounded(operation, grace, func, kwargs)
                 if inspect.isawaitable(value):
                     value = _run_coroutine(operation, ctx, value, grace)
-        except _Abandoned:
-            # The slot is freed once this returns, but the plugin's thread is still running.
-            # Nothing else may run beside it: end the worker after the answer is written.
-            self.channel.retire(EXIT_ABANDONED)
-            raise
+        finally:
+            if grace.abandoned:
+                # The slot is freed once this returns, but code that was told to stop is still
+                # running: the request itself, or what it left behind. Nothing else may run beside
+                # it, so the worker ends once the answer (a result or a cancel) is written.
+                log.warning("retiring the worker, left running: %s", ", ".join(grace.abandoned))
+                self.channel.retire(EXIT_ABANDONED)
         if operation.cancelled.is_set():
             raise OperationCancelled(operation.cancel_reason or "cancelled")
         return pack_result(value)
@@ -233,8 +246,9 @@ def _supervise(operation: Operation, grace: Grace, finished: threading.Event, on
     return True
 
 
-def _abandoned(operation: Operation) -> OperationCancelled:
+def _abandoned(operation: Operation, grace: Grace) -> OperationCancelled:
     log.warning("the request did not stop within %.1f seconds of its cancel and was abandoned", SHUTDOWN_TIMEOUT)
+    grace.abandon("request")
     return _Abandoned(operation.cancel_reason or "cancelled")
 
 
@@ -254,7 +268,7 @@ def call_bounded(operation: Operation, grace: Grace, func: Callable[..., Any], k
 
     threading.Thread(target=run, name="bazarr-plugin-call", daemon=True).start()
     if not _supervise(operation, grace, finished, lambda: None):
-        raise _abandoned(operation)
+        raise _abandoned(operation, grace)
     if "error" in box:
         raise box["error"]
     return box["value"]
@@ -306,12 +320,13 @@ def _run_coroutine(operation: Operation, ctx: PluginContext | None, awaitable: A
 
     threading.Thread(target=run, name="bazarr-plugin-loop", daemon=True).start()
     if not _supervise(operation, grace, finished, on_cancel):
-        raise _abandoned(operation)
+        raise _abandoned(operation, grace)
     grace.start()
     # A little over the budget: the steps time themselves out first, this is the backstop for
     # a step that blocks the loop thread where no timeout can reach it.
     if not cleaned.wait(grace.remaining() + CLEANUP_SLACK):
         log.warning("cleanup after the request did not finish within %.1f seconds and was abandoned", SHUTDOWN_TIMEOUT)
+        grace.abandon("cleanup")
     error = box.get("error")
     if isinstance(error, asyncio.CancelledError):
         raise OperationCancelled(operation.cancel_reason or "cancelled") from None
@@ -346,7 +361,10 @@ def _clean_up(loop: asyncio.AbstractEventLoop, grace: Grace, operation: Any = No
     clean = True
     for step in steps:
         try:
-            clean = step(loop, grace) and clean
+            finished = step(loop, grace)
+            if not finished:
+                grace.abandon(step.__name__.lstrip("_"))
+            clean = finished and clean
         except Exception as error:
             log.warning("a cleanup step failed: %s", scrubbed_traceback(error, channel_secrets(operation)))
             clean = False

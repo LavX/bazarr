@@ -87,6 +87,10 @@ class SessionLimits:
     heartbeat_interval: float = frames.DEFAULT_HEARTBEAT_INTERVAL
     # The worker is dead if no frame arrives within this long.
     heartbeat_timeout: float = frames.DEFAULT_HEARTBEAT_INTERVAL * frames.DEFAULT_HEARTBEAT_MISSES
+    # How long a worker has to answer a cancel before it is killed. The SDK's own cleanup after a
+    # cancel (SHUTDOWN_TIMEOUT plus CLEANUP_SLACK in its runner) must finish well inside this, so
+    # a healthy worker's answer never races the kill. Change one only with the other; a test in
+    # test_plugin_sdk_vendored.py holds the margin.
     cancel_grace: float = 5.0
     kill_grace: float = 5.0
     # close() asks with a shutdown frame for the caller's grace, then SIGTERM,
