@@ -99,6 +99,9 @@ def test_a_subtitle_update_is_still_selected_and_staged(tmp_path, monkeypatch):
             self.root = root
 
         def install(self, validated, timeout=None):
+            # Recording a row refuses an environment whose interpreter is not there.
+            (tmp_path / "env" / "bin").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "env" / "bin" / "python").write_text("", encoding="utf-8")
             return tmp_path / "env"
 
     monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
