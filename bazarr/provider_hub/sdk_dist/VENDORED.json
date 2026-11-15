@@ -6,11 +6,11 @@
     "_grace.py": "a2ee4ad84d625a929af4fecf1329a7bfa4003a181634f3f78ecafae8a2fe255e",
     "_protocol/__init__.py": "4a53bc8fd53033e754d70df21ec17a5fa4f48606b750c0ad69951fe1cdeb7602",
     "_protocol/frames.py": "f3920c413b6257a14672e2abda5ddc907a81d0410f485c537b825a1e0914f288",
-    "_protocol/worker_channel.py": "0db8aeb63fb23edb497f615c60deae1831a8a87264f43b071dda2d13c920bdf6",
+    "_protocol/worker_channel.py": "68548d480b71fbf63f2940d2ea3933785b1cefe4cd3544abd51959b403b420c6",
     "_scrub.py": "55d0a07425236b76857633c4c97c2f826817617d7d0b69ad223d0210be5681c0",
     "context.py": "7a672740ea086d0b0c6befb17471500bb66f61017b78290cea5406f3752ee8a4",
     "errors.py": "5031056f09e6db8d934aeab6d0ef298801a35cbd3feb8b74356e03eddc0930df",
-    "fs.py": "bc2135dfac99c07f993e370a9e28662c58eb203e153bbb4612d923e393674b6b",
+    "fs.py": "024699daa149d99f6e2613b9aa039da021b051af0ddc3476e574205e5f678737",
     "kinds.py": "dc225a61b3f41293d759493b1e463f3b75afedd2fee6b85ad983b30484c72e9d",
     "protocol.py": "be0480366543156bc52f7586fb30d5a90c1838533fd37786a1780d86a51c6ab7",
     "py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -22,7 +22,7 @@
     "translator/v1.py": "edf65cd90819f5886cd9479ca4e69e2392425b3a7b453866018b657ab6fa8292"
   },
   "package": "bazarr_plugin_sdk",
-  "source_commit": "20c84926d140ce2163af736e06fd88299320967e",
+  "source_commit": "d8e776737842c202c44b26a366a22dcf969765c7",
   "tag": null,
   "version": "0.1.0"
 }

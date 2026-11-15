@@ -16,6 +16,10 @@ source, and nothing here calls a metadata function.
 
 Every write goes to a uniquely named temporary file beside the target, is
 flushed to disk and is renamed into place, so a reader never sees a half-written file.
+That has three consequences. The folder of the target must be writable, not only
+the target. A symbolic link at the target is replaced, not written through. A
+rewritten file keeps the permission bits of the one it replaces (the umask still
+applies); a new file gets the default mode.
 """
 
 from __future__ import annotations
@@ -34,6 +38,11 @@ PathLike = Union[str, "os.PathLike[str]"]
 __all__ = ["copy_file", "copy_link", "copy_tree", "move", "touch", "write_file"]
 
 
+def _temp_name() -> str:
+    """A short temporary name, whatever the name of the target is, so it never exceeds NAME_MAX."""
+    return f".bazarr-{secrets.token_hex(6)}.part"
+
+
 def _create_temp(target: Path) -> tuple[int, Path]:
     """Create a new, empty file beside ``target`` that no other writer can hold.
 
@@ -43,12 +52,12 @@ def _create_temp(target: Path) -> tuple[int, Path]:
     when there is none (the process umask applies either way).
     """
     try:
-        mode = stat.S_IMODE(os.stat(target).st_mode)
+        mode = os.stat(target).st_mode & 0o777
     except OSError:
         mode = 0o666
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
     while True:
-        temp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.part")
+        temp = target.with_name(_temp_name())
         try:
             return os.open(temp, flags, mode), temp
         except FileExistsError:
@@ -118,10 +127,11 @@ def copy_tree(src: PathLike, dst: PathLike, *, dirs_exist_ok: bool = False, syml
     to is copied. ``dirs_exist_ok`` allows ``dst`` to exist already, as in
     ``shutil.copytree``.
 
-    Only regular files, directories and links can be copied. Everything else in
-    the tree (a named pipe, a socket, a device) is left out, the rest is copied,
-    and a :class:`shutil.Error` naming each of them is raised at the end. A
-    destination inside ``src`` is refused with a :class:`shutil.Error`.
+    The copy goes on past what it cannot copy, and a :class:`shutil.Error` naming
+    each of those is raised at the end. That covers a named pipe, a socket or a
+    device, a folder or file that cannot be read, and with ``symlinks=False`` a
+    link that leads back into the folder being copied. A destination inside
+    ``src`` is refused at once with a :class:`shutil.Error`.
     """
     source = Path(src)
     target = Path(dst)
@@ -129,6 +139,11 @@ def copy_tree(src: PathLike, dst: PathLike, *, dirs_exist_ok: bool = False, syml
         raise NotADirectoryError(str(source))
     if _inside(target, source):
         raise shutil.Error(f"Cannot copy the directory {str(source)!r} into itself, {str(target)!r}.")
+    return _copy_tree(source, target, dirs_exist_ok, symlinks, frozenset())
+
+
+def _copy_tree(source: Path, target: Path, dirs_exist_ok: bool, symlinks: bool, above: frozenset[str]) -> Path:
+    here = above | {os.path.realpath(source)}
     # Read the source before the destination exists, so nothing made below can be listed.
     entries = sorted(os.scandir(source), key=lambda item: item.name)
     target.mkdir(parents=True, exist_ok=dirs_exist_ok)
@@ -139,12 +154,14 @@ def copy_tree(src: PathLike, dst: PathLike, *, dirs_exist_ok: bool = False, syml
             if entry.is_symlink() and symlinks:
                 copy_link(entry.path, destination)
             elif entry.is_dir():
-                copy_tree(entry.path, destination, dirs_exist_ok=dirs_exist_ok, symlinks=symlinks)
+                if os.path.realpath(entry.path) in here:
+                    raise shutil.Error([(entry.path, str(destination), "a link that leads back into the folder being copied")])
+                _copy_tree(Path(entry.path), destination, dirs_exist_ok, symlinks, here)
             else:
                 copy_file(entry.path, destination)
         except shutil.Error as error:
             failures.extend(error.args[0])
-        except shutil.SpecialFileError as error:
+        except OSError as error:  # a special file, an unreadable entry, a name that cannot be made
             failures.append((entry.path, str(destination), str(error)))
     if failures:
         raise shutil.Error(failures)
@@ -167,7 +184,7 @@ def copy_link(src: PathLike, dst: PathLike) -> Path:
     target = Path(dst)
     pointing_at = os.readlink(src)
     while True:
-        temp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.part")
+        temp = target.with_name(_temp_name())
         try:
             os.symlink(pointing_at, temp)
             break
