@@ -170,11 +170,14 @@ def pack_result(value: Any) -> dict[str, Any] | OperationResult:
     payload = value if isinstance(value, dict) else {"value": value}
     try:
         encoded = frames.encode_control(payload)
+        if len(encoded) <= INLINE_RESULT_BYTES:
+            return payload
+        # The data is the JSON of the real result, a list or a scalar as it is: the
+        # ``{"value": ...}`` wrapper is only for a result that travels inline.
+        data = encoded if isinstance(value, dict) else frames.encode_control(value)
     except (TypeError, ValueError) as error:
         raise PluginError(INTERNAL, f"the result is not JSON: {error}", reason="result_not_json") from None
-    if len(encoded) <= INLINE_RESULT_BYTES:
-        return payload
-    return OperationResult({"json_in_data": True}, encoded)
+    return OperationResult({"json_in_data": True}, data)
 
 
 def _run_coroutine(operation: Operation, ctx: PluginContext, awaitable: Any) -> Any:
@@ -205,12 +208,14 @@ def _run_coroutine(operation: Operation, ctx: PluginContext, awaitable: Any) -> 
         raise OperationCancelled(operation.cancel_reason or "cancelled") from None
     finally:
         done.set()
+        closable = True
         try:
             _cancel_remaining_tasks(loop)
             loop.run_until_complete(loop.shutdown_asyncgens())
-            _shutdown_executor(loop)
+            closable = _shutdown_executor(loop)
         finally:
-            loop.close()
+            if closable:
+                loop.close()
 
 
 def _cancel_remaining_tasks(loop: asyncio.AbstractEventLoop) -> None:
@@ -235,12 +240,28 @@ def _cancel_remaining_tasks(loop: asyncio.AbstractEventLoop) -> None:
             )
 
 
-def _shutdown_executor(loop: asyncio.AbstractEventLoop) -> None:
-    """Wait for the loop's executor threads, but only a few seconds: one may be stuck."""
-    try:
-        loop.run_until_complete(asyncio.wait_for(loop.shutdown_default_executor(), SHUTDOWN_TIMEOUT))
-    except asyncio.TimeoutError:
+def _shutdown_executor(loop: asyncio.AbstractEventLoop) -> bool:
+    """Wait for the loop's executor threads, but only a few seconds: one may be stuck.
+
+    ``shutdown_default_executor`` cannot be bounded from the loop on Python 3.10 and
+    3.11: cancelling it still joins the threads without a limit. It runs on a helper
+    thread here and is given :data:`SHUTDOWN_TIMEOUT` seconds. Returns False when it
+    did not finish; the loop is then still in use by that thread and must not be closed.
+    """
+
+    def run() -> None:
+        try:
+            loop.run_until_complete(loop.shutdown_default_executor())
+        except BaseException:  # nothing to report: the request is over
+            log.debug("the executor shutdown failed", exc_info=True)
+
+    helper = threading.Thread(target=run, name="bazarr-plugin-executor-shutdown", daemon=True)
+    helper.start()
+    helper.join(SHUTDOWN_TIMEOUT)
+    if helper.is_alive():
         log.warning("a thread started by the request did not finish within %.0f seconds", SHUTDOWN_TIMEOUT)
+        return False
+    return True
 
 
 # Process entry

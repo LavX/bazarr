@@ -147,10 +147,26 @@ def copy_tree(src: PathLike, dst: PathLike, *, dirs_exist_ok: bool = False, syml
 
 
 def copy_link(src: PathLike, dst: PathLike) -> Path:
-    """Recreate the symbolic link ``src`` as ``dst``, whatever it points at. Returns ``dst``."""
+    """Recreate the symbolic link ``src`` as ``dst``, whatever it points at. Returns ``dst``.
+
+    The link is read first and the new one is made under a temporary name beside
+    ``dst``, then renamed over it, so an existing ``dst`` is never missing and a
+    failure leaves it as it was.
+    """
     target = Path(dst)
-    _discard(target)
-    os.symlink(os.readlink(src), target)
+    pointing_at = os.readlink(src)
+    while True:
+        temp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.part")
+        try:
+            os.symlink(pointing_at, temp)
+            break
+        except FileExistsError:
+            continue
+    try:
+        os.replace(temp, target)
+    except BaseException:
+        _discard(temp)
+        raise
     return target
 
 
