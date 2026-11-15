@@ -6,7 +6,7 @@ import queryClient from "@/apis/queries";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type { TranslationState } from "@/types/translation";
-import { connection, engine, second, SECRET } from "./fixtures";
+import { connection, engine, inputsHolding, second, SECRET } from "./fixtures";
 import TranslationView from ".";
 
 // The page's longer flows: what stays on screen while a request is on its way,
@@ -132,20 +132,19 @@ describe("Translation page, first run that fails half way", () => {
       }),
     ).toBeVisible();
     expect(calls.map((call) => call.path)).toEqual(["connection", "pointers"]);
-    // Nothing was loaded again after the failure.
+    // The state was loaded again once the back end existed, so the rest of the page knows about it.
+    // That load reports a back end, and it did not take the panel away.
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-    expect(loads).toBe(before);
-
-    // Even a refresh from elsewhere, which now reports a back end, does not take the panel away.
-    await queryClient.invalidateQueries();
-    await waitFor(() => expect(loads).toBeGreaterThan(before));
+    expect(loads).toBeGreaterThan(before);
     expect(
       screen.getByText(
         /Your key is saved, but the engine could not be switched on/,
       ),
     ).toBeVisible();
-    // The key is not asked for again.
+    // The key is not asked for again, and is not kept in the page.
     expect(screen.getByLabelText("OpenRouter key")).toBeDisabled();
+    expect(screen.getByLabelText("OpenRouter key")).toHaveValue("");
+    expect(inputsHolding(SECRET)).toHaveLength(0);
 
     pointerFails = false;
     await user.click(
@@ -341,6 +340,12 @@ describe("Translation page, a conflict answered before the reload has come back"
     await user.click(screen.getByRole("button", { name: "Save my version" }));
     // Nothing is sent with the old revision while the reload is open.
     expect(sent.map((body) => body.expected_revision)).toEqual([3]);
+    // The form is locked meanwhile: what is saved is what it held when the answer was given.
+    expect(screen.getByLabelText("Credit line")).toBeDisabled();
+    await user.type(screen.getByLabelText("Credit line"), " and more");
+    expect(screen.getByLabelText("Credit line")).toHaveValue(
+      "Translated by Bazarr+!",
+    );
     held.open();
     await waitFor(() =>
       expect(sent.map((body) => body.expected_revision)).toEqual([3, 7]),
@@ -651,5 +656,355 @@ describe("Translation page, switches, tabs and install", () => {
     expect(within(waiting).getByText("Queued")).toBeVisible();
     expect(within(waiting).getByText("Waiting to retry")).toBeVisible();
     expect(screen.getByText("And 3 more.")).toBeVisible();
+  });
+});
+
+describe("Translation page, choices made faster than they are saved", () => {
+  // A server that keeps the pointers it is sent, and answers the first write only when let through.
+  function pointerServer() {
+    const held = gate();
+    let first = true;
+    server.use(
+      http.put("/api/translation/pointers", async ({ request }) => {
+        const body = (await request.json()) as {
+          engine?: number | null;
+          fallback_engine?: number | null;
+        };
+        record("put", "pointers", body);
+        if (first) {
+          first = false;
+          await held.opened;
+        }
+        state = { ...state, ...body };
+        return HttpResponse.json({
+          engine: state.engine,
+          fallback_engine: state.fallback_engine,
+          notices: [],
+        });
+      }),
+    );
+    return held;
+  }
+
+  it("writes one choice at a time, and None followed by an engine ends on the engine", async () => {
+    const held = pointerServer();
+    const user = userEvent.setup();
+    const group = await showPage();
+    const none = within(group).getByRole("radio", { name: "None" });
+    const google = within(group).getByRole("radio", {
+      name: "Google Translate",
+    });
+    await user.click(none);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(none).toBeChecked();
+    // Chosen while the first write is still open: shown at once, sent only after it.
+    await user.click(google);
+    expect(google).toBeChecked();
+    expect(calls).toHaveLength(1);
+    held.open();
+    await waitFor(() =>
+      expect(calls.map((call) => call.body)).toEqual([
+        { engine: null },
+        { engine: 2 },
+      ]),
+    );
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(google).toBeChecked();
+    expect(state.engine).toBe(2);
+  });
+
+  it("sends only the last of several choices made during one write", async () => {
+    const held = pointerServer();
+    const user = userEvent.setup();
+    const group = await showPage();
+    const none = within(group).getByRole("radio", { name: "None" });
+    const google = within(group).getByRole("radio", {
+      name: "Google Translate",
+    });
+    const official = within(group).getByRole("radio", {
+      name: /AI Subtitle Translator/,
+    });
+    await user.click(google);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await user.click(none);
+    await user.click(official);
+    await user.click(none);
+    expect(calls).toHaveLength(1);
+    held.open();
+    await waitFor(() =>
+      expect(calls.map((call) => call.body)).toEqual([
+        { engine: 2 },
+        { engine: null },
+      ]),
+    );
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(none).toBeChecked();
+    expect(state.engine).toBeNull();
+  });
+});
+
+describe("Translation page, a form and the controls around it", () => {
+  it("keeps the row's switch off limits while that row's form is open", async () => {
+    const user = userEvent.setup();
+    await showPage();
+    const toggle = screen.getByLabelText("Use OpenAI compatible, model-1");
+    expect(toggle).toBeEnabled();
+    await user.click(
+      screen.getByRole("button", { name: "Edit OpenAI compatible, model-1" }),
+    );
+    expect(toggle).toBeDisabled();
+    // The other row's switch is not affected.
+    expect(
+      screen.getByLabelText("Use OpenAI compatible, model-2"),
+    ).toBeEnabled();
+    await user.click(
+      screen.getByRole("button", { name: "Edit OpenAI compatible, model-1" }),
+    );
+    expect(toggle).toBeEnabled();
+  });
+
+  it("does not let the consent question be closed while its answer is on its way", async () => {
+    const held = gate();
+    let attempt = 0;
+    server.use(
+      http.patch("/api/translation/connections/:id", async ({ request }) => {
+        attempt += 1;
+        record("patch", "connection", await request.json());
+        if (attempt === 1) {
+          return HttpResponse.json(
+            {
+              error: "consent_required",
+              message: "These addresses are new.",
+              destinations: ["http://new:1/v1"],
+            },
+            { status: 409 },
+          );
+        }
+        await held.opened;
+        return HttpResponse.json({ connection: connection(1) });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(
+      screen.getByRole("button", { name: "Edit OpenAI compatible, model-1" }),
+    );
+    const url = screen.getByLabelText("Base URL");
+    await user.clear(url);
+    await user.type(url, "http://new:1/v1");
+    await user.click(screen.getByRole("button", { name: "Save back end" }));
+    const ask = await screen.findByRole("dialog", {
+      name: "Send subtitles to a new address?",
+    });
+    await user.click(
+      within(ask).getByRole("button", { name: "Send to this address" }),
+    );
+    await waitFor(() => expect(calls).toHaveLength(2));
+    // The answer is still open. Escape does not hide the question, and there is no Cancel to press.
+    await user.keyboard("{Escape}");
+    expect(
+      screen.getByRole("dialog", { name: "Send subtitles to a new address?" }),
+    ).toBeVisible();
+    expect(within(ask).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    held.open();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", {
+          name: "Send subtitles to a new address?",
+        }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("keeps Activity as it was left when the page was opened on that tab", async () => {
+    window.history.replaceState({}, "", "/?tab=activity");
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await screen.findByText("Nothing has been translated yet");
+    await user.click(screen.getByRole("radio", { name: "Failed" }));
+    await user.click(screen.getByRole("tab", { name: "Engine" }));
+    await screen.findByRole("radiogroup", { name: "Engine" });
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByRole("radio", { name: "Failed" })).toBeChecked();
+  });
+});
+
+describe("Translation page, first run with what is really installed", () => {
+  const firstRun = (
+    patch: Partial<TranslationState> = {},
+  ): TranslationState => ({
+    enabled: true,
+    engine: null,
+    fallback_engine: null,
+    instances: [engine({ configured: false, connections: [] })],
+    ...patch,
+  });
+
+  it("offers an installed engine for use only when it can take a job", async () => {
+    const broken = {
+      ...second,
+      id: 3,
+      plugin_id: "lingarr",
+      name: "Lingarr",
+      plugin: { name: "Lingarr", version: "1.0.0", active: false },
+    };
+    const unfinished = {
+      ...second,
+      id: 4,
+      plugin_id: "other_engine",
+      name: "Other Engine",
+      configured: false,
+      plugin: { name: "Other Engine", version: "1.0.0", active: true },
+    };
+    state = firstRun({
+      instances: [
+        engine({ configured: false, connections: [] }),
+        second,
+        broken,
+        unfinished,
+      ],
+    });
+    server.use(
+      http.put("/api/translation/pointers", async ({ request }) => {
+        record("put", "pointers", await request.json());
+        return HttpResponse.json({
+          engine: 2,
+          fallback_engine: null,
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    // Not running: its state and the way out, no Use.
+    expect(screen.getByText("Plugin not running")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Use Lingarr" }),
+    ).not.toBeInTheDocument();
+    // Running but not set up: it is sent to its set-up, not offered as ready.
+    expect(screen.getByText("Not set up")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Use Other Engine" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Set up Other Engine" }),
+    ).toBeVisible();
+    // Ready: offered, and picking it selects it.
+    await user.click(
+      screen.getByRole("button", { name: "Use Google Translate" }),
+    );
+    await waitFor(() =>
+      expect(calls).toEqual([
+        { method: "put", path: "pointers", body: { engine: 2 } },
+      ]),
+    );
+  });
+
+  it("says nothing about the catalog when the server does not list what can be installed", async () => {
+    state = firstRun({ instances: [] });
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    expect(
+      screen.getByText(
+        "It is not installed. Install it in the Subtitle Hub, then come back.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/plugin catalog/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Google Translate")).not.toBeInTheDocument();
+  });
+
+  it("says the catalog offers none when the server lists an empty one", async () => {
+    state = firstRun({ instances: [], available_engines: [] });
+    customRender(<TranslationView />);
+    await screen.findByRole("heading", {
+      name: "Translate the subtitles you cannot find",
+    });
+    expect(
+      screen.getByText(/the plugin catalog does not list it right now/),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/It is not in the plugin catalog yet/),
+    ).toBeVisible();
+  });
+
+  it("shows the back end it saved once the start failed half way, so it is not added twice by hand", async () => {
+    state = firstRun();
+    server.use(
+      http.post(
+        "/api/translation/engines/:id/connections",
+        async ({ request }) => {
+          record("post", "connection", await request.json());
+          const created = connection(3, {
+            backend_type: "openrouter",
+            model: "vendor/starter-model",
+          });
+          state = {
+            ...state,
+            instances: [engine({ connections: [created] })],
+          };
+          return HttpResponse.json({ connection: created }, { status: 201 });
+        },
+      ),
+      http.put("/api/translation/pointers", () =>
+        HttpResponse.json(
+          { error: "bad_request", message: "The engine is not ready." },
+          { status: 400 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<TranslationView />);
+    await user.type(await screen.findByLabelText("OpenRouter key"), SECRET);
+    await user.click(screen.getByRole("button", { name: "Start translating" }));
+    await screen.findByText(
+      /Your key is saved, but the engine could not be switched on/,
+    );
+    await user.click(screen.getByRole("button", { name: "Set it up by hand" }));
+    await screen.findByRole("radiogroup", { name: "Engine" });
+    // The page already has the back end: nothing says one is still needed.
+    expect(
+      screen.getByRole("button", {
+        name: "Edit OpenRouter, vendor/starter-model",
+      }),
+    ).toBeVisible();
+    expect(screen.queryByText("No back ends yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("Needs a back end")).not.toBeInTheDocument();
+    expect(calls.map((call) => call.path)).toEqual(["connection"]);
+  });
+});
+
+describe("Translation page, turning translation off on the full page", () => {
+  it("stays on the full page when None is picked and nothing has a back end", async () => {
+    // Only an engine that needs no set-up, selected: after None the state looks like a first run.
+    state = { ...state, engine: 2, instances: [second] };
+    server.use(
+      http.put("/api/translation/pointers", async ({ request }) => {
+        const body = (await request.json()) as { engine: number | null };
+        record("put", "pointers", body);
+        state = { ...state, engine: body.engine };
+        return HttpResponse.json({
+          engine: body.engine,
+          fallback_engine: null,
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    const group = await showPage();
+    await user.click(within(group).getByRole("radio", { name: "None" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(screen.getByRole("radiogroup", { name: "Engine" })).toBeVisible();
+    expect(within(group).getByRole("radio", { name: "None" })).toBeChecked();
+    expect(
+      screen.queryByRole("heading", {
+        name: "Translate the subtitles you cannot find",
+      }),
+    ).not.toBeInTheDocument();
   });
 });

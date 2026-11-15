@@ -6,7 +6,14 @@ import queryClient from "@/apis/queries";
 import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type { TranslationState } from "@/types/translation";
-import { connection, engine, job, second, SECRET } from "./fixtures";
+import {
+  connection,
+  engine,
+  inputsHolding,
+  job,
+  second,
+  SECRET,
+} from "./fixtures";
 import TranslationView from ".";
 
 let state: TranslationState;
@@ -205,7 +212,14 @@ describe("Translation page", () => {
       clear_secrets: [],
       accept_destinations: [],
     });
+    // Once saved, the secret is nowhere on the page: not in the text, and not left in its input.
+    await waitFor(() => expect(inputsHolding(SECRET)).toHaveLength(0));
     expect(document.body.textContent).not.toContain(SECRET);
+    expect(
+      screen.getByPlaceholderText(
+        "Saved, ending WXYZ. Leave empty to keep it.",
+      ),
+    ).toHaveValue("");
   });
 
   it("shows a field error beside its field", async () => {
@@ -430,7 +444,10 @@ describe("Translation page", () => {
     const ask = await screen.findByRole("dialog", {
       name: "Send subtitles to a new address?",
     });
-    expect(within(ask).getByText("http://192.168.1.5:1234/v1")).toBeVisible();
+    // The question fades in: visible once it has.
+    await waitFor(() =>
+      expect(within(ask).getByText("http://192.168.1.5:1234/v1")).toBeVisible(),
+    );
     expect(
       within(ask).getByText(/never sent to a changed address/),
     ).toBeVisible();
@@ -454,6 +471,8 @@ describe("Translation page", () => {
         screen.queryByRole("heading", { name: /^New back end/ }),
       ).not.toBeInTheDocument(),
     );
+    expect(inputsHolding(SECRET)).toHaveLength(0);
+    expect(document.body.textContent).not.toContain(SECRET);
   });
 
   it("declining the question sends nothing more", async () => {
@@ -1056,7 +1075,10 @@ describe("Translation page, first run", () => {
       },
       { method: "put", path: "pointers", body: { engine: 1 } },
     ]);
+    // The key was stored with the first request: it is not on the page any more, in text or in an input.
     expect(document.body.textContent).not.toContain(SECRET);
+    expect(inputsHolding(SECRET)).toHaveLength(0);
+    expect(screen.getByLabelText("OpenRouter key")).toHaveValue("");
   });
 
   it("asks for the key before sending anything", async () => {

@@ -131,7 +131,9 @@ export function useCreateConnection() {
 /**
  * First run in one step: add the engine's first back end, then select the
  * engine. `created` skips the first request on a retry after only the second
- * one failed, so a retry never adds the back end twice.
+ * one failed, so a retry never adds the back end twice. The state is loaded
+ * again as soon as the back end exists: if the second request then fails, the
+ * rest of the page already shows that back end and does not ask for it again.
  */
 export function useStartEngine() {
   const refresh = useRefresh();
@@ -152,13 +154,12 @@ export function useStartEngine() {
           api.translation.createConnection(instanceId, body),
         );
         onCreated();
+        await refresh();
       }
       return withInlineErrors(() =>
         api.translation.setPointers({ engine: instanceId }),
       );
     },
-    // Only a start that went through loads the state again. After a failure
-    // the page keeps the first-run panel as it is, with the reason on it.
     onSuccess: refresh,
   });
 }

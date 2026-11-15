@@ -1,14 +1,19 @@
 /* eslint-disable camelcase -- transport names. */
-import { FunctionComponent, useId, useState } from "react";
+import { FunctionComponent, useId, useRef, useState } from "react";
 import { Link } from "react-router";
 import { Alert, Button, Select } from "@mantine/core";
 import { faArrowUp, faCircleCheck } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { readRefusal, usePointersMutation } from "@/apis/hooks/translation";
+import {
+  afterStateDelivered,
+  readRefusal,
+  usePointersMutation,
+} from "@/apis/hooks/translation";
 import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
 import type {
   TranslationAvailableEngine,
   TranslationEngine,
+  TranslationNotice,
   TranslationState,
 } from "@/types/translation";
 import InstallConsent from "./InstallConsent";
@@ -23,6 +28,71 @@ import {
 import styles from "./Translation.module.scss";
 
 const NONE = "none";
+
+interface PointerChoice {
+  engine?: number | null;
+  fallback_engine?: number | null;
+}
+
+/**
+ * The engine and fallback choices, written one request at a time. A choice made while a write is on
+ * its way waits, and replaces any other that was waiting: requests never overlap, so they cannot land
+ * out of order, and the last choice is the one that ends up saved. The choice shows at once.
+ */
+function usePointerChoices() {
+  const pointers = usePointersMutation();
+  // What was chosen and is not confirmed yet.
+  const [chosen, setChosen] = useState<PointerChoice>({});
+  const [notices, setNotices] = useState<TranslationNotice[]>([]);
+  const [problem, setProblem] = useState("");
+  const waiting = useRef<PointerChoice | null>(null);
+  const writing = useRef(false);
+
+  const write = async () => {
+    if (writing.current) {
+      return;
+    }
+    writing.current = true;
+    try {
+      while (waiting.current) {
+        const next = waiting.current;
+        waiting.current = null;
+        try {
+          const answer = await pointers.mutateAsync(next);
+          if (!waiting.current) {
+            setNotices(answer.notices ?? []);
+          }
+        } catch (error) {
+          // What is saved stands; a choice made meanwhile was made on top of the refused one.
+          waiting.current = null;
+          setProblem(
+            readRefusal(error)?.message ??
+              "The choice could not be saved. Try again.",
+          );
+        }
+      }
+    } finally {
+      writing.current = false;
+      afterStateDelivered(() => {
+        if (!writing.current) {
+          setChosen({});
+        }
+      });
+    }
+  };
+
+  return {
+    chosen,
+    notices,
+    problem,
+    choose: (change: PointerChoice) => {
+      setProblem("");
+      setChosen((current) => ({ ...current, ...change }));
+      waiting.current = { ...waiting.current, ...change };
+      void write();
+    },
+  };
+}
 
 export const OfficialMark: FunctionComponent = () => (
   <span className={styles.official}>
@@ -61,7 +131,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
   onOpen,
 }) => {
   const group = useId();
-  const pointers = usePointersMutation();
+  const pointers = usePointerChoices();
   const [installing, setInstalling] =
     useState<TranslationAvailableEngine | null>(null);
   const engines = orderedEngines(state.instances);
@@ -69,12 +139,13 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
     (a, b) => Number(b.official ?? false) - Number(a.official ?? false),
   );
   // The choice shows at once; the saved one replaces it when the save comes back.
-  const sent = pointers.isPending ? pointers.variables : undefined;
   const chosen =
-    sent && "engine" in sent ? (sent.engine ?? null) : state.engine;
+    "engine" in pointers.chosen
+      ? (pointers.chosen.engine ?? null)
+      : state.engine;
   const fallback =
-    sent && "fallback_engine" in sent
-      ? (sent.fallback_engine ?? null)
+    "fallback_engine" in pointers.chosen
+      ? (pointers.chosen.fallback_engine ?? null)
       : state.fallback_engine;
   const toId = (value: string | null) =>
     value === null || value === NONE ? null : Number(value);
@@ -95,7 +166,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           name={group}
           checked={chosen === engine.id}
           aria-describedby={`${id}-text`}
-          onChange={() => pointers.mutate({ engine: engine.id })}
+          onChange={() => pointers.choose({ engine: engine.id })}
         />
         <div className={styles.engineBody}>
           <label className={styles.engineLabel} htmlFor={id}>
@@ -213,7 +284,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
             name={group}
             checked={chosen === null}
             aria-describedby={`${group}-none-text`}
-            onChange={() => pointers.mutate({ engine: null })}
+            onChange={() => pointers.choose({ engine: null })}
           />
           <div className={styles.engineBody}>
             <label className={styles.engineLabel} htmlFor={`${group}-none`}>
@@ -225,7 +296,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           </div>
         </div>
       </div>
-      {(pointers.data?.notices ?? []).map((notice) => (
+      {pointers.notices.map((notice) => (
         <Alert
           key={notice.code + String(notice.instance_id)}
           color="yellow"
@@ -234,10 +305,9 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
           {notice.message}
         </Alert>
       ))}
-      {pointers.error && (
+      {pointers.problem && (
         <Alert color="red" role="alert" mt="sm">
-          {readRefusal(pointers.error)?.message ??
-            "The choice could not be saved. Try again."}
+          {pointers.problem}
         </Alert>
       )}
       <Select
@@ -255,7 +325,7 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
         ]}
         value={fallback === null ? NONE : String(fallback)}
         allowDeselect={false}
-        onChange={(next) => pointers.mutate({ fallback_engine: toId(next) })}
+        onChange={(next) => pointers.choose({ fallback_engine: toId(next) })}
       />
       <InstallConsent
         key={installing?.plugin_id ?? "none"}

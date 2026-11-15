@@ -123,12 +123,14 @@ export function engineStatus(engine: TranslationEngine): Status {
   return { tone: "success", label: "Ready", next: "" };
 }
 
-/** First run: nothing is selected and no engine has been set up. */
+/**
+ * First run: nothing is selected and nobody has added a back end. An engine that needs no set-up
+ * counts as installed, not as set up: installing one from the first-run panel leaves the panel up,
+ * with that engine ready to pick.
+ */
 export const isFirstRun = (state: TranslationState) =>
   state.engine === null &&
-  !state.instances.some(
-    (engine) => engine.configured || engine.connections.length > 0,
-  );
+  !state.instances.some((engine) => engine.connections.length > 0);
 
 export interface StartingPoint {
   key: string;

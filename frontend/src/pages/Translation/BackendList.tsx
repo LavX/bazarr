@@ -289,6 +289,15 @@ const BackendList: FunctionComponent<{
                   aria-label={`Use ${name}`}
                   checked={switching[item.id] ?? item.enabled}
                   aria-busy={item.id in switching}
+                  // The open form belongs to the revision it was opened with, and the switch would move
+                  // the back end on to the next one: the form's save would then be refused as a conflict
+                  // with this page's own write.
+                  disabled={editing}
+                  title={
+                    editing
+                      ? "Save or close the form to switch this back end on or off"
+                      : undefined
+                  }
                   onChange={(event) =>
                     void setEnabled(item, event.currentTarget.checked)
                   }

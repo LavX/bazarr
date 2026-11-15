@@ -111,7 +111,15 @@ export const second: TranslationEngine = engine({
   plugin_id: "google_translate",
   name: "Google Translate",
   official: false,
-  schema: null,
+  // An installed engine always has a schema; one without settings has an empty one.
+  schema: {
+    settings_version: 1,
+    endpoints: ["https://translate.googleapis.com"],
+    fields: [],
+    backend_types: {},
+  },
+  values: {},
+  secrets: {},
   connections: [],
   plugin: { name: "Google Translate", version: "1.0.0", active: true },
 });
@@ -158,3 +166,9 @@ export const job = (
   ],
   ...patch,
 });
+
+/** The inputs on the page that hold exactly this text, whether or not they show it. */
+export const inputsHolding = (text: string) =>
+  Array.from(document.querySelectorAll("input, textarea")).filter(
+    (field) => (field as HTMLInputElement).value === text,
+  );

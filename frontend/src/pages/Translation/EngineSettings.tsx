@@ -94,7 +94,9 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
         values={values}
         secrets={engine.secrets}
         errors={form.fieldErrors}
-        disabled={form.busy}
+        // Locked while a conflict answer loads what is saved now: the save that follows sends what the
+        // form held when the answer was given, so nothing may be typed in between.
+        disabled={form.busy || loadingFor !== null}
         pendingClear={cleared}
         onChange={setValues}
         onClearSecret={(key) =>

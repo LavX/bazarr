@@ -8,6 +8,7 @@ import {
   SegmentedControl,
 } from "@mantine/core";
 import { usePointersMutation, useStartEngine } from "@/apis/hooks/translation";
+import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
 import type {
   TranslationAvailableEngine,
   TranslationEngine,
@@ -16,7 +17,12 @@ import type {
 import ConsentModal from "./ConsentModal";
 import { OfficialMark } from "./EnginePanel";
 import InstallConsent from "./InstallConsent";
-import { engineName, keyOnlyTypes, orderedEngines } from "./model";
+import {
+  engineName,
+  engineStatus,
+  keyOnlyTypes,
+  orderedEngines,
+} from "./model";
 import { useGuardedSave } from "./useGuardedSave";
 import styles from "./Translation.module.scss";
 
@@ -57,6 +63,8 @@ const KeyStart: FunctionComponent<{
         onCreated: () => {
           created.current = true;
           setKeySaved(true);
+          // The key is stored. It has no reason to stay in the page.
+          setKey("");
         },
       });
     } catch (error) {
@@ -135,6 +143,7 @@ const KeyStart: FunctionComponent<{
           </>
         }
         value={key}
+        placeholder={keySaved ? "Saved" : undefined}
         disabled={form.busy || keySaved}
         error={keyError}
         onChange={(event) => {
@@ -191,9 +200,12 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
     useState<TranslationAvailableEngine | null>(null);
   const engines = orderedEngines(state.instances);
   const official = engines.find((item) => item.official) ?? null;
+  // A server that does not list what can be installed has said nothing about the catalog, which is
+  // not the same as a catalog that offers nothing.
+  const catalogKnown = state.available_engines !== undefined;
   const available = state.available_engines ?? [];
   const officialOffer = available.find((item) => item.official) ?? null;
-  const freeInstalled = engines.filter((item) => !item.official);
+  const otherInstalled = engines.filter((item) => !item.official);
   const freeOffers = available.filter((item) => !item.official && item.free);
 
   return (
@@ -237,31 +249,48 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
           </div>
         ) : (
           <p className={styles.startOptionText}>
-            It is not installed, and the plugin catalog does not list it right
-            now. Refresh the catalog in the Subtitle Hub, then come back.
+            {catalogKnown
+              ? "It is not installed, and the plugin catalog does not list it right now. Refresh the catalog in the Subtitle Hub, then come back."
+              : "It is not installed. Install it in the Subtitle Hub, then come back."}
           </p>
         )}
       </section>
 
-      {freeInstalled.map((engine) => (
-        <section className={styles.startOption} key={engine.id}>
-          <div className={styles.startRow}>
-            <div>
-              <h3 className={styles.startOptionHead}>{engineName(engine)}</h3>
-              <p className={styles.startOptionText}>
-                Installed and ready. No key needed.
-              </p>
+      {otherInstalled.map((engine) => {
+        // What the engine itself reports: it is offered for use only when it can take a job.
+        const status = engineStatus(engine);
+        const ready = status.tone === "success";
+        return (
+          <section className={styles.startOption} key={engine.id}>
+            <div className={styles.startRow}>
+              <div>
+                <h3 className={styles.startOptionHead}>
+                  {engineName(engine)}
+                  <StatusBadge tone={status.tone} label={status.label} />
+                </h3>
+                <p className={styles.startOptionText}>
+                  {ready ? "Installed. It works as it is." : status.next}
+                </p>
+              </div>
+              {ready ? (
+                <Button
+                  variant="default"
+                  loading={pointers.isPending}
+                  onClick={() => pointers.mutate({ engine: engine.id })}
+                >
+                  Use {engineName(engine)}
+                </Button>
+              ) : (
+                engine.plugin?.active && (
+                  <Button variant="default" onClick={onByHand}>
+                    Set up {engineName(engine)}
+                  </Button>
+                )
+              )}
             </div>
-            <Button
-              variant="default"
-              loading={pointers.isPending}
-              onClick={() => pointers.mutate({ engine: engine.id })}
-            >
-              Use {engineName(engine)}
-            </Button>
-          </div>
-        </section>
-      ))}
+          </section>
+        );
+      })}
 
       {freeOffers.map((engine) => (
         <section className={styles.startOption} key={engine.plugin_id}>
@@ -280,15 +309,25 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
         </section>
       ))}
 
-      {freeInstalled.length === 0 && freeOffers.length === 0 && (
-        <section className={styles.startOption}>
-          <h3 className={styles.startOptionHead}>Google Translate</h3>
-          <p className={styles.startOptionText}>
-            Free, with no key, and plainer translations. It is not in the plugin
-            catalog yet. When it is, you can install it from here.
-          </p>
-        </section>
-      )}
+      {otherInstalled.length === 0 &&
+        freeOffers.length === 0 &&
+        (catalogKnown ? (
+          <section className={styles.startOption}>
+            <h3 className={styles.startOptionHead}>Google Translate</h3>
+            <p className={styles.startOptionText}>
+              Free, with no key, and plainer translations. It is not in the
+              plugin catalog yet. When it is, you can install it from here.
+            </p>
+          </section>
+        ) : (
+          <section className={styles.startOption}>
+            <h3 className={styles.startOptionHead}>Other engines</h3>
+            <p className={styles.startOptionText}>
+              An engine you install in the Subtitle Hub shows up here, ready to
+              pick.
+            </p>
+          </section>
+        ))}
 
       {pointers.error && (
         <Alert color="red" role="alert" mt="md">

@@ -20,7 +20,9 @@ const ConsentModal: FunctionComponent<ConsentModalProps> = ({
   return (
     <Modal
       opened={destinations.length > 0}
-      onClose={onCancel}
+      // The answer is on its way: closing now would hide a request that is still running.
+      onClose={busy ? () => undefined : onCancel}
+      withCloseButton={!busy}
       title="Send subtitles to a new address?"
       centered
     >

@@ -101,14 +101,15 @@ const TranslationView: FunctionComponent = () => {
   const requested = params.get("tab") as TabKey | null;
   const tab: TabKey =
     requested && TABS.includes(requested) ? requested : "engine";
-  // First run can be left for the full page; the choice lasts while the page is open.
-  const [byHand, setByHand] = useState(false);
+  // Once the full page has been shown it stays: by choice ("Set it up by hand"), or because there was
+  // something to show. Picking None there does not swap the page for the first-run panel.
+  const [full, setFull] = useState(false);
   // A start that is under way keeps the first-run panel up until it has gone through, whatever a refresh
   // in between says: the panel holds the reason a step failed and the way to try again.
   const [starting, setStarting] = useState(false);
   // Activity is loaded when it is first opened. After that every panel stays mounted, so a draft typed
   // on one tab is still there after a look at another.
-  const [activitySeen, setActivitySeen] = useState(false);
+  const [activitySeen, setActivitySeen] = useState(tab === "activity");
 
   if (isLoading && !data) {
     return (
@@ -147,17 +148,21 @@ const TranslationView: FunctionComponent = () => {
     </Alert>
   ) : null;
 
-  if ((isFirstRun(data) || starting) && !byHand) {
+  if (!full && (isFirstRun(data) || starting)) {
     return (
       <Container fluid px="md" className={styles.page}>
         {refreshFailed}
         <QuickStart
           state={data}
-          onByHand={() => setByHand(true)}
+          onByHand={() => setFull(true)}
           onPin={setStarting}
         />
       </Container>
     );
+  }
+  if (!full) {
+    // Latched during this draw, so the full page is what the next one starts from.
+    setFull(true);
   }
   const showActivity = activitySeen || tab === "activity";
 
