@@ -502,19 +502,31 @@ def _source_score_below_threshold(context, source_lang):
     rather than silently falling back to a provider search, so this does too.
     A stored score of 0 is a real score, not a missing row, and is held to the
     threshold like any other.
+
+    A hand upload (action 4) stores no score. When it is the newest record that
+    scores or replaces the source, it is never below the threshold, as on the
+    movie and series paths: those read it at the local subtitle score, which is
+    the full scale when the setting is 0 and is let through below the
+    threshold when it is above 0. An older provider score for the file the
+    upload replaced no longer applies.
     """
     from app.database import TableHistorySports
 
     record = database.execute(
-        select(TableHistorySports.score)
+        select(TableHistorySports.score, TableHistorySports.action)
         .where(TableHistorySports.event_id == context.event_id)
         .where(TableHistorySports.arr_instance_id == context.arr_instance_id)
         .where(TableHistorySports.language.like(f"{source_lang}%"))
-        .where(TableHistorySports.score.is_not(None))
-        .order_by(TableHistorySports.timestamp.desc())
+        .where(
+            TableHistorySports.score.is_not(None)
+            | (TableHistorySports.action == 4)
+        )
+        .order_by(TableHistorySports.timestamp.desc(), TableHistorySports.id.desc())
         .limit(1)
     ).first()
     if record is None:
+        return False
+    if record.action == 4:
         return False
     from subtitles.utils import MAX_SCORES
 
