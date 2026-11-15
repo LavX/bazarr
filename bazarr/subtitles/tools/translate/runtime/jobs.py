@@ -429,11 +429,28 @@ class TranslationJobs:
                                 release_digest=release_digest, started_at=now,
                                 _with=self.checkpoints._prune_stmt(key))
 
+    def switch_engine(self, job_id: int, *, engine_instance_id: int, settings_revision: int,
+                      release_digest: str = "") -> bool:
+        """A running job moves to another engine (the fallback). False when it is no longer running.
+
+        The key of its checkpoints changes with the engine instance, so the new engine starts from its own;
+        what the key makes useless (an older revision or release of the same instance) is dropped.
+        """
+        job = self.get(job_id)
+        if job is None or job.source_digest is None:
+            return False
+        key = CheckpointKey(job.source_path, job.source_digest, job.target, engine_instance_id, settings_revision,
+                            release_digest)
+        return self._transition(job_id, (RUNNING,), RUNNING, engine_instance_id=engine_instance_id,
+                                settings_revision=settings_revision, release_digest=release_digest,
+                                _with=self.checkpoints._prune_stmt(key))
+
     def complete(self, job_id: int) -> bool:
         return self._end(job_id, COMPLETED)
 
-    def cancel(self, job_id: int) -> bool:
-        return self._end(job_id, CANCELLED)
+    def cancel(self, job_id: int, error_class: str | None = None, message: str | None = None) -> bool:
+        """The job ends without a result. ``error_class`` says why when it was not a person's Stop."""
+        return self._end(job_id, CANCELLED, error_class=error_class, message=message)
 
     def fail(self, job_id: int, error_class: str, message: str | None = None) -> bool:
         """A failure that will not be retried."""
