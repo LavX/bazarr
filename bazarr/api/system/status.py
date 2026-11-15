@@ -119,7 +119,7 @@ class SystemStatus(Resource):
             system_status.update({'compat_active': False})
 
         # Present only while the v2 translation runtime is switched on; that is what makes
-        # Settings > Translation exist. An install with it off sees no new field.
+        # the Translation page exist. An install with it off sees no new field.
         try:
             from app.config import settings
             # The switch is read from the settings first, so a switched-off install imports nothing from the runtime.

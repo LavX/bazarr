@@ -953,6 +953,10 @@ jobs:
             tests/bazarr/test_translator_runtime_usage.py \
             tests/bazarr/test_translator_field_schema.py \
             tests/bazarr/test_translation_api.py \
+            tests/bazarr/test_translation_summary_api.py \
+            tests/bazarr/test_translation_connection_test_api.py \
+            tests/bazarr/test_translation_state_catalog.py \
+            tests/bazarr/test_translation_lingarr_engine.py \
             tests/bazarr/test_translator_settings_transaction.py \
             tests/bazarr/test_translator_plugin_activation.py \
             tests/bazarr/test_translator_gate.py \

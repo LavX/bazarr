@@ -1,5 +1,5 @@
 # coding=utf-8
-"""The typed settings service behind the Settings > Translation page.
+"""The typed settings service behind the Translation page.
 
 It reads and writes engine instances, their back-end connections, their secrets and the two engine pointers
 through ``TranslatorStore``, with the manifest as the only source of what a setting is. Nothing here knows
@@ -21,17 +21,23 @@ from __future__ import annotations
 import json
 import logging
 import math
-from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable, Mapping
+from uuid import uuid4
 
 from provider_hub.plugin_manifest import parse_plugin_manifest
 
+from . import catalog_view, legacy_engines
 from .destinations import DestinationError, DestinationSchema, effective_destinations, normalize_destination
 from .field_schema import (ValidatedValues, field_visible, is_finite_number, is_secret_field, validate_draft)
 from .host_fields import (HOST_FIELDS, HOST_KEYS, MODEL_KEY, PRICE_KEYS, host_default, host_definitions, host_of,
                           validate_owner)
 from .store import (CONNECTION, INSTANCE, OFFICIAL_ENGINE_PLUGIN_ID, StaleRevisionError as StoreStale,
                     TranslatorStore, TranslatorStoreError)
+
+if TYPE_CHECKING:
+    from .usage import CostLimits, UsageLedger
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +115,38 @@ PluginValidator = Callable[[str, str, str, Mapping[str, Any]], Mapping[str, str]
 # (engine instance id, back-end type or '' for the engine's own field, field key, draft values without secrets)
 OptionsSource = Callable[[int, str, str, Mapping[str, Any]], Mapping[str, Any] | None]
 
+# The most a connection test may send and receive, so its worst-case charge is small and known before it runs.
+TEST_INPUT_TOKENS = 64
+TEST_OUTPUT_TOKENS = 16
+TEST_MESSAGE_LIMIT = 300
+OPEN_TEST = "The translation engine is not running, so this back end cannot be tested yet."
+
+
+@dataclass(frozen=True)
+class ProbeRequest:
+    """One small request to a saved connection, as the engine's worker is asked to make it.
+
+    ``secrets`` holds only what the connection's stored secrets may carry to ``destinations``: a secret bound
+    to other addresses is left out, exactly as for a real translation. The worker must send them nowhere else,
+    follow no redirect, and put none of them in what it answers.
+    """
+
+    instance_id: int
+    connection_id: int
+    backend_type: str
+    model: str
+    values: Mapping[str, Any]
+    destinations: frozenset[str]
+    input_token_limit: int
+    output_token_limit: int
+    secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
+
+
+# A probe answers ``{"ok": bool, "message": str, "input_tokens": int, "output_tokens": int}``. The tokens are
+# what the request used, settled against the cost caps; an answer without them is charged at its worst case
+# when it succeeded.
+ConnectionProbe = Callable[[ProbeRequest], Mapping[str, Any]]
+
 
 def _json_secret(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value)
@@ -155,13 +193,53 @@ def _price(value: Any) -> float:
     return value if is_finite_number(value) else 0
 
 
+def _entries_of(secret: str) -> list[str]:
+    """The entries of a list secret (a JSON array of strings), so each one is masked on its own."""
+    if not secret.startswith("["):
+        return []
+    try:
+        parsed = json.loads(secret)
+    except ValueError:
+        return []
+    return [item for item in parsed if isinstance(item, str)] if isinstance(parsed, list) else []
+
+
+def _configured_limits() -> "CostLimits":
+    from .limits import current_cost_limits
+
+    return current_cost_limits()
+
+
+def _cap_message(reason: str | None) -> str:
+    if reason == "wait":
+        return "Other translations are holding this month's budget. Try the test again in a moment."
+    if reason == "job_cap_spent" or reason == "job_budget":
+        return ("This back end is priced and the cost limit for one translation is too low to run a test. "
+                "Raise the limit, or test a free back end.")
+    return ("This back end is priced and this month's cost limit is used up, so no test was sent. "
+            "Raise the monthly limit, or wait for next month.")
+
+
 class TranslatorSettingsService:
     def __init__(self, store: TranslatorStore, *, plugin_lookup: Callable[[str], InstalledPlugin | None] | None = None,
-                 plugin_validator: PluginValidator | None = None, options_source: OptionsSource | None = None):
+                 plugin_validator: PluginValidator | None = None, options_source: OptionsSource | None = None,
+                 connection_probe: ConnectionProbe | None = None,
+                 catalog_engines: Callable[[], list[dict[str, Any]]] | None = None,
+                 update_lookup: Callable[[str], str | None] | None = None,
+                 cost_limits: Callable[[], "CostLimits"] | None = None, legacy: bool = False,
+                 lingarr: legacy_engines.ConfigLingarr | None = None):
         self._store = store
         self._plugin = plugin_lookup or installed_plugin
         self._validator = plugin_validator
         self._options_source = options_source
+        self._probe = connection_probe
+        self._catalog_engines = catalog_engines or catalog_view.available_engines
+        self._update_lookup = update_lookup or catalog_view.update_version
+        self._cost_limits = cost_limits
+        # Whether the engines served by code in Bazarr+ itself (Lingarr) are listed. Their settings stay in the
+        # settings they always used, so nothing is migrated.
+        self._legacy = legacy
+        self._lingarr = lingarr or legacy_engines.ConfigLingarr()
 
     # ------------------------------------------------------------- schema
     def _parsed(self, plugin: InstalledPlugin | None):
@@ -217,11 +295,29 @@ class TranslatorSettingsService:
         return self._store.pointers()
 
     def snapshot(self) -> dict[str, Any]:
+        if self._legacy:
+            for legacy in legacy_engines.LEGACY_ENGINES.values():
+                self._store.ensure_instance(legacy.plugin_id, name=legacy.name, settings_version=1)
         engine, fallback = self.pointers()
         return {"enabled": True, "engine": engine, "fallback_engine": fallback,
-                "instances": [self.instance_view(row) for row in self._store.list_instances()]}
+                "instances": [self.instance_view(row) for row in self._store.list_instances()],
+                "capabilities": self.capabilities(), "available_engines": self._catalog_engines()}
+
+    def can_test(self) -> bool:
+        """Whether a connection test has anything to ask: a probe, or the model list the engine can fetch."""
+        return self._probe is not None or self._options_source is not None
+
+    def capabilities(self) -> list[str]:
+        """The routes of the page that work now. The page shows a control only for one listed here."""
+        listed = ["summary", "limits"]
+        if self.can_test():
+            listed.append("test")
+        return listed + ["queue"]
 
     def instance_view(self, instance) -> dict[str, Any]:
+        legacy = legacy_engines.legacy_engine_for(instance.plugin_id)
+        if legacy is not None:
+            return self._legacy_view(instance, legacy)
         store = self._store
         plugin = self._plugin(instance.plugin_id)
         schema = self._engine_schema(plugin)
@@ -235,10 +331,29 @@ class TranslatorSettingsService:
             "configured": store.instance_configured(instance), "settings_version": instance.settings_version,
             "plugin_version": instance.plugin_version,
             "plugin": None if plugin is None else {"name": plugin.name, "version": plugin.version,
-                                                    "active": plugin.active},
+                                                    "active": plugin.active,
+                                                    "update_version": self._update_lookup(plugin.plugin_id)},
             "schema": self._display_schema(plugin), "values": _clean(_shown_settings(schema.fields, settings)),
             "secrets": self._secret_view(owner, schema.fields, destinations),
             "connections": [self.connection_view(instance, row) for row in store.list_connections(instance.id)],
+        }
+
+    def _legacy_view(self, instance, legacy) -> dict[str, Any]:
+        """An engine served by code in Bazarr+: its address and whether a token is set, never the token."""
+        fields = legacy_engines.LINGARR_FIELDS
+        values = _without_unsafe_addresses(fields, {legacy_engines.URL_KEY: self._lingarr.url()})
+        return {
+            "id": instance.id, "plugin_id": instance.plugin_id, "name": instance.name or legacy.name,
+            "official": False, "legacy": True, "enabled": bool(instance.enabled), "revision": instance.revision,
+            "awaiting_secrets": False, "configured": self._store.instance_configured(instance),
+            "settings_version": 1, "plugin_version": None,
+            "plugin": {"name": legacy.name, "version": "built in", "active": True, "update_version": None},
+            "schema": {"settings_version": 1, "fields": [dict(item) for item in fields], "endpoints": [],
+                       "backend_types": {}},
+            "values": values,
+            "secrets": ({legacy_engines.TOKEN_KEY: {"configured": True, "stale": False}}
+                        if self._lingarr.token_set() else {}),
+            "connections": [],
         }
 
     def connection_view(self, instance, connection) -> dict[str, Any]:
@@ -322,10 +437,13 @@ class TranslatorSettingsService:
         # The settings and the switch are one save: if the switch loses a race, the settings are not kept either.
         with self._store.transaction():
             if values is not None or clear:
-                plugin = self._plugin(instance.plugin_id)
-                if plugin is None or not plugin.active:
-                    raise PluginUnavailableError("The plugin for this engine is not installed.")
-                self._save_engine_values(instance, plugin, values, clear, payload, expected)
+                if legacy_engines.legacy_engine_for(instance.plugin_id) is not None:
+                    self._save_legacy_values(instance, values or {}, clear, payload, expected)
+                else:
+                    plugin = self._plugin(instance.plugin_id)
+                    if plugin is None or not plugin.active:
+                        raise PluginUnavailableError("The plugin for this engine is not installed.")
+                    self._save_engine_values(instance, plugin, values, clear, payload, expected)
             elif enabled is True:
                 self._check_engine_before_turning_on(instance)
             if enabled is not None and bool(instance.enabled) != enabled:
@@ -380,9 +498,67 @@ class TranslatorSettingsService:
                                          revision=error.revision) from error
             self._write_secrets(owner, validated, clear, effective_destinations(schema, after))
 
+    def _save_legacy_values(self, instance, values: Mapping[str, Any], clear: list[str], payload, expected) -> None:
+        """Save the address and token of an engine served by code in Bazarr+, in the settings it always used.
+
+        The rules are those of any engine: the address is a destination, so a new one needs the person's
+        consent in the same request, a changed address never keeps the stored token, a token goes in and never
+        comes out, and the save claims the revision the caller loaded.
+        """
+        errors: dict[str, str] = {}
+        for key in values:
+            if key not in (legacy_engines.URL_KEY, legacy_engines.TOKEN_KEY):
+                errors[str(key)] = "is not a setting of this engine"
+        for name in clear:
+            if name != legacy_engines.TOKEN_KEY:
+                errors[name] = "is not a secret of this engine"
+        before = self._lingarr.url()
+        url = before
+        if legacy_engines.URL_KEY in values:
+            raw = values[legacy_engines.URL_KEY]
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                url = legacy_engines.DEFAULT_URL  # emptied: the default applies, like any field
+            elif not isinstance(raw, str):
+                errors[legacy_engines.URL_KEY] = "must be text"
+            elif len(raw) > legacy_engines.URL_LIMIT:
+                errors[legacy_engines.URL_KEY] = f"must be at most {legacy_engines.URL_LIMIT} characters"
+            else:
+                try:
+                    url = normalize_destination(raw)
+                except DestinationError as error:
+                    errors[legacy_engines.URL_KEY] = error.message
+        token: str | None = None  # None keeps the stored token
+        if legacy_engines.TOKEN_KEY in values:
+            given = values[legacy_engines.TOKEN_KEY]
+            if given is not None and not isinstance(given, str):
+                errors[legacy_engines.TOKEN_KEY] = "must be text"
+            elif isinstance(given, str) and given.strip():
+                token = given.strip()
+        if legacy_engines.TOKEN_KEY in clear and token is None:
+            token = ""
+        if errors:
+            raise InvalidValuesError("The values are not valid.", field_errors=errors)
+        schema = DestinationSchema(fields=legacy_engines.LINGARR_FIELDS)
+        self._require_consent(schema, {legacy_engines.URL_KEY: before}, {legacy_engines.URL_KEY: url}, payload,
+                              new_owner=False)
+        if (effective_destinations(schema, {legacy_engines.URL_KEY: before})
+                != effective_destinations(schema, {legacy_engines.URL_KEY: url}) and token is None):
+            token = ""  # a changed address never reuses a stored token
+        with self._store.transaction():
+            try:
+                self._store.save_instance_settings(instance.id, {}, schema=DestinationSchema(), settings_version=1,
+                                                   expected_revision=expected)
+            except StoreStale as error:
+                raise StaleRevisionError("The engine settings changed since they were loaded.",
+                                         revision=error.revision) from error
+            if not self._lingarr.set(url, token):
+                raise ServiceError("The Lingarr settings could not be saved.")
+
     # -------------------------------------------------------- connections
     def create_connection(self, instance_id: int, payload: Mapping[str, Any]) -> dict[str, Any]:
         instance = self._instance(instance_id)
+        if legacy_engines.legacy_engine_for(instance.plugin_id) is not None:
+            raise ServiceError("This engine has no back ends to add.")
         backend_type = payload.get("backend_type")
         if not isinstance(backend_type, str) or not backend_type:
             raise ServiceError("backend_type is required")
@@ -543,6 +719,177 @@ class TranslatorSettingsService:
         if not answer or not isinstance(answer.get("items"), list):
             return unavailable
         return {"available": True, "items": answer["items"], "reason": ""}
+
+    # --------------------------------------------------------------- test
+    def test_connection(self, connection_id: int, payload: Any = None) -> dict[str, Any]:
+        """Send one small request to a saved connection and say whether it answered.
+
+        The connection is tested as it is saved, never as a draft, and under the rules a save and a
+        translation keep: its stored secrets reach only the addresses they were entered under, an
+        address that is not a clean web address is refused before anything is sent, and a connection that
+        waits for its secrets is not tested with stale ones. A refusal of this kind and a back end that
+        does not answer are both ``ok: false`` with a sentence that says what to do; the answer never carries a
+        key. A priced test is reserved against the cost caps and settled in the usage ledger like any call.
+        """
+        if payload not in (None, {}):
+            raise InvalidValuesError("A test uses the settings as they are saved. Save your changes first.")
+        connection = self._connection(connection_id)
+        instance = self._instance(connection.instance_id)
+        plugin = self._serving_plugin(instance, connection)
+        schema = self._backend_schema(plugin, connection.backend_type) if plugin is not None and plugin.active else None
+        if schema is None:
+            raise PluginUnavailableError("The plugin that serves this back end is not installed or not running.")
+        if not self.can_test():
+            raise PluginUnavailableError(OPEN_TEST)
+        owner = (CONNECTION, connection.id)
+        saved = self._store.settings_of(connection)
+        # The addresses are read from what is stored, not from what a response may show: an address that is not
+        # clean must stop the test, not be swapped for the manifest's default.
+        destinations = effective_destinations(schema, saved)
+        values = _shown_settings(schema.fields, saved)
+        if any(item.startswith("invalid:") for item in destinations):
+            return self._test_result(False, "The saved address is not a valid web address. Open this back end, "
+                                            "correct the address and save it.")
+        summary = self._store.secret_summary(owner, destinations)
+        if connection.awaiting_secrets or any(entry.get("stale") for entry in summary.values()):
+            return self._test_result(False, "The address changed after the key was saved, so the saved key is not "
+                                            "sent to the new one. Enter the key again and save.")
+        secrets = self._store.secrets_for_request(owner, destinations)
+        where = self._typed_origin(schema, values)
+        try:
+            if self._probe is not None:
+                return self._paid_test(connection, instance, values, destinations, secrets, where)
+            return self._listing_test(connection, instance, values, where)
+        except ServiceError:
+            raise
+        except Exception as error:
+            # What went wrong may carry an address or a key in its text: only its type is said.
+            logger.warning("A connection test failed with %s", type(error).__name__)
+            return self._test_result(False, "The test could not be completed. Check the Bazarr+ log for the cause.")
+
+    def _listing_test(self, connection, instance, values, where) -> dict[str, Any]:
+        """Ask for the model list, which the engine fetches with no charge. It answers when the back end does."""
+        definition = (self._display_schema(self._plugin(instance.plugin_id)) or {}).get("backend_types", {})
+        fields = (definition.get(connection.backend_type) or {}).get("fields") or []
+        listing = next((item["key"] for item in fields if item.get("type") == "options"), None)
+        if listing is None:
+            return self._test_result(False, "This back end has no check that can run without translating.")
+        draft = {**values, **({MODEL_KEY: connection.model} if connection.model else {})}
+        started = time.monotonic()
+        try:
+            answer = self.options(instance.id, connection.backend_type, listing, draft)
+        except InvalidValuesError:
+            return self._test_result(False, "The saved settings no longer fit this version of the plugin. Open "
+                                            "this back end and save it again.")
+        if answer.get("available") is True:
+            return self._test_result(True, "", started)
+        return self._test_result(False, self._unanswered(where))
+
+    def _paid_test(self, connection, instance, values, destinations, secrets, where) -> dict[str, Any]:
+        # Imported here: the ledger reads the database tables at import, and a caller that only lists
+        # engines or saves settings must not need them.
+        from .usage import RESERVED, UsageLedger, worst_case_micros
+
+        worst = worst_case_micros(TEST_INPUT_TOKENS, TEST_OUTPUT_TOKENS, _price(connection.price_input_per_million),
+                                  _price(connection.price_output_per_million))
+        ledger = UsageLedger(self._store.session)
+        limits = self._cost_limits() if self._cost_limits is not None else _configured_limits()
+        job_id = f"connection-test-{connection.id}-{uuid4().hex[:12]}"
+        call_id = "test"
+        if worst > 0:
+            # A priced test is a call like any other: it fits the month and job caps or it does not run.
+            budget = ledger.reserve_job_budget(job_id, limits)
+            if budget.status != RESERVED:
+                return self._test_result(False, _cap_message(budget.status))
+            reservation = ledger.reserve_call(job_id, call_id, worst_case_micros=worst, limits=limits,
+                                              connection_id=connection.id, backend_type=connection.backend_type,
+                                              model=connection.model)
+            if not reservation.admitted:
+                ledger.release_job(job_id)
+                return self._test_result(False, _cap_message(reservation.reason))
+        request = ProbeRequest(
+            instance_id=instance.id, connection_id=connection.id, backend_type=connection.backend_type,
+            model=connection.model, values=dict(values), destinations=destinations,
+            input_token_limit=TEST_INPUT_TOKENS, output_token_limit=TEST_OUTPUT_TOKENS, secrets=dict(secrets))
+        started = time.monotonic()
+        answer: Mapping[str, Any] = {}
+        failure: Exception | None = None
+        try:
+            answer = self._probe(request) or {}
+        except Exception as error:  # settled below, then said as a failure without its text
+            failure = error
+        finally:
+            if worst > 0:
+                self._settle_test(ledger, job_id, call_id, connection, answer, failure is None, limits)
+                ledger.release_job(job_id)
+        if failure is not None:
+            raise failure
+        if answer.get("ok") is True:
+            return self._test_result(True, "", started)
+        return self._test_result(False, self._said(answer.get("message"), secrets) or self._unanswered(where))
+
+    @staticmethod
+    def _settle_test(ledger: "UsageLedger", job_id: str, call_id: str, connection, answer: Mapping[str, Any],
+                     answered: bool, limits: "CostLimits") -> None:
+        """Replace the test's worst-case charge with what it used. A call that never got an answer used nothing."""
+        from .usage import UsageError, worst_case_micros
+
+        used_in, used_out = answer.get("input_tokens"), answer.get("output_tokens")
+        counted = all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in (used_in, used_out))
+        if counted:
+            actual = worst_case_micros(used_in, used_out, _price(connection.price_input_per_million),
+                                       _price(connection.price_output_per_million))
+        elif answered and answer.get("ok") is True:
+            used_in, used_out = TEST_INPUT_TOKENS, TEST_OUTPUT_TOKENS
+            actual = worst_case_micros(used_in, used_out, _price(connection.price_input_per_million),
+                                       _price(connection.price_output_per_million))
+        else:
+            used_in = used_out = actual = 0
+        try:
+            ledger.settle_call(job_id, call_id, input_tokens=used_in, output_tokens=used_out, actual_micros=actual,
+                               limits=limits)
+        except UsageError:
+            logger.warning("A connection test could not be settled in the usage ledger")
+
+    @staticmethod
+    def _typed_origin(schema: DestinationSchema, values: Mapping[str, Any]) -> str:
+        """The first address the person typed for this back end, as scheme and host, or an empty string."""
+        typed = DestinationSchema(fields=schema.fields)
+        baseline = effective_destinations(typed, {})
+        for item in sorted(effective_destinations(typed, values) - baseline):
+            try:
+                return catalog_view._shown(normalize_destination(item))
+            except DestinationError:
+                continue
+        return ""
+
+    @staticmethod
+    def _unanswered(where: str) -> str:
+        at = f" at {where}" if where else ""
+        return (f"No answer{at}. Check the address and the key, and that the server is running and reachable "
+                "from the Bazarr+ container.")
+
+    def _said(self, message: Any, secrets: Mapping[str, str]) -> str:
+        """A probe's message as it may leave: one short line with every secret and credential shape masked."""
+        if not isinstance(message, str):
+            return ""
+        text = " ".join(message.split())
+        held = [piece for value in secrets.values() for piece in ([value] + _entries_of(value)) if len(piece) >= 4]
+        for piece in sorted(set(held), key=len, reverse=True):
+            text = text.replace(piece, "***")
+        try:
+            from secret_store.scrub import scrub_text
+
+            text = scrub_text(text)
+        except Exception:
+            logger.warning("Could not scrub a connection test message")
+            return ""
+        return text[:TEST_MESSAGE_LIMIT]
+
+    @staticmethod
+    def _test_result(ok: bool, message: str, started: float | None = None) -> dict[str, Any]:
+        latency = int((time.monotonic() - started) * 1000) if ok and started is not None else None
+        return {"ok": ok, "message": message, "latency_ms": latency}
 
     # ------------------------------------------------------------ helpers
     @staticmethod

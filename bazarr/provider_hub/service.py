@@ -4358,6 +4358,57 @@ def _latest_catalog_manifest(
     return entry["manifest"] if entry else None
 
 
+def offered_update_version(provider_id: str) -> str | None:
+    """The newer version the hub offers for an installed plugin, or None. Reads the stored catalog, changes nothing.
+
+    It is the same answer an update check gives, so a page that shows an "update available" chip never
+    names a version the Updates tab would not offer.
+    """
+    state = load_state()
+    installation = (state.get("installations") or {}).get(provider_id)
+    if not isinstance(installation, dict) or installation.get("origin") == "local":
+        return None
+    active_version = installation.get("active_version")
+    if not active_version or installation.get("state") == "removed":
+        return None
+    latest = _latest_catalog_manifest(
+        state, provider_id, active_version, _bound_source_id(installation), _installed_catalog_list(installation),
+        installed_kind=kind_of(installation))
+    version = latest.get("version") if isinstance(latest, dict) else None
+    return str(version) if version else None
+
+
+def installable_catalog_plugins(kind: str) -> list[dict[str, Any]]:
+    """The newest installable entry of each catalog plugin of ``kind`` that has no installation at all.
+
+    An entry is left out when its source may not install it, when this host cannot run it, or when its
+    manifest is not valid for its kind. A trusted source is preferred when two list the same version.
+    Each item is the stored entry: ``source``, ``provider_id``, ``name``, ``version``, ``trusted`` and
+    ``manifest``.
+    """
+    state = load_state()
+    installed = set((state.get("installations") or {}).keys())
+    host = current_host()
+    entries = sorted((entry for entry in _stored_manifest_entries(state) if catalog_kind_of(entry) == kind),
+                     key=lambda entry: not bool(entry.get("trusted", False)))
+
+    def usable(entry: dict[str, Any]) -> bool:
+        if _install_refusal(state, entry.get("source"), entry.get("provider_id")) or _host_refusal(entry, host):
+            return False
+        try:
+            get_kind(kind).validate_manifest(entry["manifest"], bool(entry.get("trusted", False)))
+        except ValueError:
+            return False
+        return True
+
+    found = []
+    for provider_id in sorted({str(entry.get("provider_id") or "") for entry in entries} - installed - {""}):
+        entry = select_entry(entries, provider_id, usable=usable)
+        if entry is not None:
+            found.append(entry)
+    return found
+
+
 def _refused_update_reason(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
     catalog_list: str | None = None, installed_kind: str = SUBTITLE_PROVIDER,

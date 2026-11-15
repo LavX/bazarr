@@ -10,7 +10,8 @@ from functools import wraps
 from flask import request
 from flask_restx import Namespace, Resource
 
-from subtitles.tools.translate.runtime.settings_service import ServiceError, TranslatorSettingsService
+from subtitles.tools.translate.runtime.settings_service import (InvalidValuesError, ServiceError,
+                                                                TranslatorSettingsService)
 
 from ..utils import authenticate
 from .guard import runtime_v2_only
@@ -24,7 +25,7 @@ def get_service():
     from app.database import database
     from subtitles.tools.translate.runtime.store import TranslatorStore
 
-    return TranslatorSettingsService(TranslatorStore(database))
+    return TranslatorSettingsService(TranslatorStore(database), legacy=True)
 
 
 def refusal(method):
@@ -153,3 +154,24 @@ class TranslationConnection(Resource):
         """Remove a connection and its secrets."""
         get_service().delete_connection(connection_id, request.args.get("expected_revision"))
         return '', 204
+
+
+@api_ns_translation.route('translation/connections/<int:connection_id>/test')
+class TranslationConnectionTest(Resource):
+    @runtime_v2_only
+    @authenticate
+    @refusal
+    @api_ns_translation.response(200, 'Answered, whether or not the back end did')
+    @api_ns_translation.response(400, 'The request carries a draft instead of an empty body')
+    @api_ns_translation.response(404, 'No such connection')
+    @api_ns_translation.response(409, 'The plugin or the engine is not running')
+    def post(self, connection_id):
+        """Send one small request to a saved back end. A back end that does not answer is a 200 with ``ok: false``.
+
+        The test uses the connection as it is saved and the rules a save keeps: a key goes only to the address
+        it was entered under, and a response never carries one. A priced test counts against the cost limits.
+        """
+        payload = request.get_json(silent=True)
+        if payload is not None and not isinstance(payload, dict):
+            raise InvalidValuesError("The request body must be a JSON object.")
+        return get_service().test_connection(connection_id, payload)

@@ -474,6 +474,15 @@ validators = [
     Validator('translator.runtime_v2', must_exist=True, default=False, is_type_of=bool),
     Validator('translator.engine', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('translator.fallback_engine', must_exist=True, default='', is_type_of=str, cast=str),
+    # The translation cost caps, in whole micro-dollars (millionths of a dollar), None for no cap. They are
+    # server-owned for the same reason as the pointers: the typed limits route checks the revision a client
+    # loaded, and a plain write would skip that. limits_revision goes up on every save of either cap.
+    Validator('translator.month_cap_micros', must_exist=True, default=None, is_type_of=(NoneType, int),
+              condition=lambda value: value is None or (not isinstance(value, bool) and value >= 0)),
+    Validator('translator.job_cap_micros', must_exist=True, default=None, is_type_of=(NoneType, int),
+              condition=lambda value: value is None or (not isinstance(value, bool) and value >= 0)),
+    Validator('translator.limits_revision', must_exist=True, default=1, is_type_of=int, gte=1,
+              condition=is_not_bool),
 
     # sonarr section
     Validator('sonarr.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
@@ -2836,6 +2845,9 @@ SERVER_OWNED_SETTING_PATHS = frozenset({
     'translator.runtime_v2',
     'translator.engine',
     'translator.fallback_engine',
+    'translator.month_cap_micros',
+    'translator.job_cap_micros',
+    'translator.limits_revision',
 })
 
 

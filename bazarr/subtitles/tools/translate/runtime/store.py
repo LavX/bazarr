@@ -195,6 +195,11 @@ class TranslatorStore:
         self._pointers = pointers if pointers is not None else ConfigPointers()
         self._plugin_active = plugin_active if plugin_active is not None else default_plugin_active
 
+    @property
+    def session(self):
+        """The session the store reads and writes through, for a caller that keeps its own ledger rows in it."""
+        return self._session
+
     # ------------------------------------------------------------------ reads
     def get_instance(self, instance_id: int, *, fresh: bool = False):
         """The instance. ``fresh`` reads it from the database even if this session has seen it before; use it at
@@ -242,7 +247,7 @@ class TranslatorStore:
             return False
         if legacy_engines.legacy_engine_for(instance.plugin_id) is not None:
             # Served by code in Bazarr+ itself: it needs no plugin, only its address.
-            return legacy_engines.configured(instance_settings=self.settings_of(instance))
+            return legacy_engines.configured()
         if not self._plugin_active(instance.plugin_id):
             return False
         connections = self.list_connections(instance.id)
