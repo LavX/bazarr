@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from .destinations import DestinationSchema, effective_destinations
 from .field_schema import is_secret_field
+from .legacy_engines import LEGACY_ENGINES
 from .store import OFFICIAL_ENGINE_PLUGIN_ID
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,9 @@ def available_engines() -> list[dict[str, Any]]:
         return []
     items = []
     for entry in entries:
+        # An engine Bazarr+ runs itself is already in the engine list, and a catalog entry must not shadow it.
+        if str(entry.get("provider_id") or "") in LEGACY_ENGINES:
+            continue
         item = describe_entry(entry)
         if item is not None:
             items.append(item)

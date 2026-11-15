@@ -411,8 +411,10 @@ def test_the_config_lock_is_held_from_the_read_of_the_old_address_to_the_write(w
         "expected_revision": 1, "values": {"url": URL}, "accept_destinations": [URL]})
     assert response.status_code == 200
     # The first read (the old address) and the write both happened with the lock held.
-    assert world.fake.calls[0] == ("url", 1)
-    assert ("set", 1) in world.fake.calls
+    # Held by the whole save (and again by the settings write, which re-enters it).
+    assert world.fake.calls[0][0] == "url" and world.fake.calls[0][1] >= 1
+    assert any(name == "set" for name, _ in world.fake.calls)
+    assert all(depth >= 1 for name, depth in world.fake.calls if name == "set")
     assert world.fake.depth == 0
 
 
@@ -569,3 +571,94 @@ def test_the_database_refuses_a_second_lingarr_engine_and_the_loser_reads_the_wi
     store.list_instances = blind_first
     assert store.ensure_instance("lingarr").id == first_id
     session.close()
+
+
+# ----------------------------------------------------------------- lock order
+
+def test_overlapping_writers_of_the_config_and_the_tables_never_deadlock(database):
+    """The engine save, a turn-off that releases a pointer, and a config writer that then writes a row all keep
+    the one order: the config lock first, the write transaction second."""
+    import threading
+
+    import sqlalchemy as sa
+
+    from app.database import TableTranslatorEngineInstance
+
+    engine, make_session = database
+    config_lock = threading.RLock()
+
+    class OneLockLingarr(FakeLingarr):
+        def lock(self):
+            return config_lock
+
+    class LockedPointers(MemoryPointers):
+        def lock(self):
+            return config_lock
+
+    pointers, fake = LockedPointers(), OneLockLingarr()
+
+    def build(session):
+        store = TranslatorStore(session, pointers=pointers, plugin_active=lambda plugin_id: True)
+        return store, TranslatorSettingsService(
+            store, plugin_lookup=lambda plugin_id: None, catalog_engines=lambda: [],
+            update_lookup=lambda plugin_id: None, legacy=True, lingarr=fake)
+
+    setup = make_session()
+    store, service = build(setup)
+    service.snapshot()
+    lingarr_id = store.list_instances("lingarr")[0].id
+    other_id = store.create_instance("example_engine").id
+    failures = []
+
+    for turn in range(12):
+        url = f"http://10.0.1.{turn + 1}:9876"
+        pointers.engine = other_id
+        setup.execute(sa.text("UPDATE translator_engine_instances SET enabled = 1 WHERE id = :id"), {"id": other_id})
+        setup.commit()
+        start = threading.Barrier(3)
+
+        def save():
+            session = make_session()
+            try:
+                _, own = build(session)
+                row = session.get(TableTranslatorEngineInstance, lingarr_id)
+                start.wait(10)
+                own.save_engine(lingarr_id, {"expected_revision": row.revision, "values": {"url": url},
+                                             "accept_destinations": [url]})
+            except Exception as error:  # reported below
+                failures.append(("save", error))
+            finally:
+                session.close()
+
+        def turn_off():
+            session = make_session()
+            try:
+                own, _ = build(session)
+                start.wait(10)
+                own.set_instance_enabled(other_id, False)
+            except Exception as error:
+                failures.append(("turn_off", error))
+            finally:
+                session.close()
+
+        def config_writer():
+            session = make_session()
+            try:
+                own, _ = build(session)
+                start.wait(10)
+                with config_lock:  # a writer of config.yaml that then writes a row, like a pointer change
+                    own.create_instance("example_engine")
+            except Exception as error:
+                failures.append(("config_writer", error))
+            finally:
+                session.close()
+
+        threads = [threading.Thread(target=target, daemon=True) for target in (save, turn_off, config_writer)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(20)
+        assert not any(thread.is_alive() for thread in threads), f"deadlock on turn {turn}"
+    assert failures == []
+    assert fake.address == "http://10.0.1.12:9876"
+    setup.close()

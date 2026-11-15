@@ -286,7 +286,7 @@ def test_a_probe_that_raises_never_puts_its_text_in_the_answer_or_the_log(world,
     assert response.status_code == 200 and response.json["ok"] is False
     assert "Bazarr+ log" in response.json["message"]
     _nothing_leaked(world, caplog)
-    assert "192.168.1.20" not in caplog.text
+    assert "192.168.1.20" not in response.get_data(as_text=True)
 
 
 # --------------------------------------------------- destination and key rules
@@ -617,3 +617,50 @@ def test_a_back_end_served_by_an_extension_is_tested_against_that_plugin_s_model
     result = world.call("post", f"connections/{connection_id}/test", {})
     assert result.status_code == 200 and result.json["ok"] is True, result.json
     assert asked and asked[0][1] == "ext"
+
+
+def test_our_own_programming_errors_are_not_turned_into_a_failed_test(world, caplog):
+    world.probe(TypeError(f"bug near {SECRET}"))
+    connection_id = _priced(world)
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 500
+    assert SECRET not in response.get_data(as_text=True)
+    # The charge was still settled and the hold given back.
+    (call,), (budget,) = _calls(world)
+    assert (call.actual_micros, budget.state) == (432, "released")
+
+
+def test_the_probe_failure_traceback_goes_to_the_debug_log_with_every_secret_masked(world, caplog):
+    world.probe(RuntimeError(f"boom with {SECRET}"))
+    connection_id = world.lan_connection()
+    caplog.set_level(logging.DEBUG)
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.json["ok"] is False and "debug logging" in response.json["message"]
+    debug = [record.getMessage() for record in caplog.records if record.levelno == logging.DEBUG
+             and "connection test failed" in record.getMessage()]
+    assert debug and "RuntimeError" in debug[0] and "Traceback" in debug[0] and "***" in debug[0]
+    _nothing_leaked(world, caplog)
+
+
+def test_only_one_test_runs_per_connection_and_the_claim_is_always_given_back(world):
+    from subtitles.tools.translate.runtime import settings_service
+
+    world.probe({"ok": True})
+    connection_id = world.lan_connection()
+    other_id = world.lan_connection()
+    assert settings_service._claim_test(connection_id) is True
+    try:
+        busy = world.call("post", f"connections/{connection_id}/test", {})
+        assert busy.status_code == 200 and busy.json["ok"] is False and "already running" in busy.json["message"]
+        assert world.requests == []
+        # Another connection is not held up by it.
+        assert world.call("post", f"connections/{other_id}/test", {}).json["ok"] is True
+    finally:
+        settings_service._release_test(connection_id)
+    assert world.call("post", f"connections/{connection_id}/test", {}).json["ok"] is True
+    # A failed test and a refused one give the claim back too.
+    world.probe(RuntimeError("down"))
+    assert world.call("post", f"connections/{connection_id}/test", {}).json["ok"] is False
+    world.probe({"ok": True})
+    assert world.call("post", f"connections/{connection_id}/test", {}).json["ok"] is True
+    assert settings_service._RUNNING_TESTS == set()

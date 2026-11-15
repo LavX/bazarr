@@ -338,7 +338,9 @@ class TranslatorStore:
         instance = self._require_instance(instance_id)
         if expected_revision is not None and instance.revision != expected_revision:
             raise StaleRevisionError("the engine settings changed since they were loaded", instance.revision)
-        with write_transaction(self._session):
+        # The config lock first, then the write transaction: the one order every writer of both keeps, so a
+        # turn-off that has to release a pointer cannot wait on a transaction that waits on it.
+        with self._pointer_cycle(), write_transaction(self._session):
             current = int(instance.revision)
             claimed = self._session.execute(
                 update(TableTranslatorEngineInstance)
@@ -761,7 +763,8 @@ class TranslatorStore:
         that was turned off lets the pointers go.
         """
         engine_ids: set[int] = set()
-        with self.transaction():
+        # Config lock first, then the transaction, as in ``set_instance_enabled``.
+        with self._pointer_cycle(), self.transaction():
             for kind, owner_id in owners:
                 row = self._require_owner((kind, owner_id))
                 row.enabled = 0

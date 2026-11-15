@@ -1118,6 +1118,13 @@ class JobsQueue:
                 'running': sum(1 for job in self.jobs_running_queue if is_translation_job(job)),
             }
 
+    def translation_queue_positions(self) -> dict:
+        """Where each waiting translation stands: its job id mapped to its place among the waiting translations,
+        0 for the one at the front. Read under the queue lock, as the lane counts are."""
+        with self._queue_lock:
+            waiting = [job for job in self.jobs_pending_queue if is_translation_job(job)]
+        return {job.job_id: place for place, job in enumerate(waiting)}
+
     def _reserve_next_job(self):
         """Take the next runnable job off pending and put it on running, or None.
 

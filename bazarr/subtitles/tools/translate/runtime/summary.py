@@ -30,6 +30,7 @@ QUEUE_PAGE = 50
 
 QueueCounts = Callable[[], Mapping[str, int]]
 QueueJob = Callable[[int], Mapping[str, Any] | None]
+QueuePositions = Callable[[], Mapping[int, int]]
 TitleLookup = Callable[[Any, Any, Any, Any, Any], str]
 
 
@@ -37,6 +38,12 @@ def _queue_counts() -> Mapping[str, int]:
     from app.jobs_queue import jobs_queue
 
     return jobs_queue.translation_lane_counts()
+
+
+def _queue_positions() -> Mapping[int, int]:
+    from app.jobs_queue import jobs_queue
+
+    return jobs_queue.translation_queue_positions()
 
 
 def _queue_job(queue_job_id: int) -> Mapping[str, Any] | None:
@@ -65,13 +72,15 @@ def _count(value: Any) -> int:
 
 class TranslationSummary:
     def __init__(self, session, *, limits: TranslationLimits | None = None, queue_counts: QueueCounts | None = None,
-                 queue_job: QueueJob | None = None, title_lookup: TitleLookup | None = None,
+                 queue_job: QueueJob | None = None, queue_positions: QueuePositions | None = None,
+                 title_lookup: TitleLookup | None = None,
                  translation_limit: Callable[[], int | None] | None = None,
                  clock: Callable[[], datetime] = datetime.now):
         self._session = session
         self._limits = limits or TranslationLimits()
         self._queue_counts = queue_counts or _queue_counts
         self._queue_job = queue_job or _queue_job
+        self._queue_positions = queue_positions or _queue_positions
         self._title = title_lookup or _title
         self._translation_limit = translation_limit or configured_translation_limit
         self._clock = clock
@@ -101,21 +110,37 @@ class TranslationSummary:
     def queue(self, limit: int = QUEUE_PAGE) -> dict[str, Any]:
         """The jobs that have not started, and how many there are in all, roughly in the order they will run.
 
-        Queued jobs come first, oldest first, then the jobs awaiting a retry by the time they are due. A
-        retry goes to the back of the queue when its time comes, so it usually runs after what is waiting
-        now. This is a good guess, not a promise: the queue itself decides what starts next.
+        A job whose place on the queue is known comes first, in that order. The rest follow by the time they
+        were asked for. Jobs awaiting a retry come last, by the time they are due: a retry goes to the back of
+        the queue when its time comes. This is a good guess, not a promise: the queue itself decides what
+        starts next.
         """
         waiting = TableTranslatorJob.state.in_((QUEUED, AWAITING_RETRY))
         total = int(self._session.execute(select(func.count()).select_from(TableTranslatorJob)
                                           .where(waiting)).scalar() or 0)
-        rows = self._session.execute(
-            select(TableTranslatorJob).where(waiting)
-            .order_by((TableTranslatorJob.state == AWAITING_RETRY).asc(),
-                      func.coalesce(TableTranslatorJob.retry_at, TableTranslatorJob.created_at).asc(),
-                      TableTranslatorJob.id.asc())
-            .limit(max(0, limit)).execution_options(populate_existing=True)).scalars().all()
+        try:
+            places = dict(self._queue_positions())
+        except Exception:
+            logger.debug("Could not read the queue positions", exc_info=True)
+            places = {}
+        light = self._session.execute(
+            select(TableTranslatorJob.id, TableTranslatorJob.state, TableTranslatorJob.queue_job_id,
+                   TableTranslatorJob.created_at, TableTranslatorJob.retry_at).where(waiting)).all()
+        epoch = datetime.min
+
+        def order(row):
+            if row.state == AWAITING_RETRY:
+                return (2, 0, row.retry_at or row.created_at or epoch, row.id)
+            place = places.get(row.queue_job_id) if row.queue_job_id else None
+            return (0, place, epoch, row.id) if place is not None else (1, 0, row.created_at or epoch, row.id)
+
+        chosen = [row.id for row in sorted(light, key=order)[:max(0, limit)]]
+        by_id = {row.id: row for row in self._session.execute(
+            select(TableTranslatorJob).where(TableTranslatorJob.id.in_(chosen))
+            .execution_options(populate_existing=True)).scalars().all()} if chosen else {}
         history = HistoryStore(self._session)
-        return {"data": [self._queued(row, history) for row in rows], "total": total}
+        return {"data": [self._queued(by_id[job_id], history) for job_id in chosen if job_id in by_id],
+                "total": total}
 
     def _queued(self, row, history: HistoryStore) -> dict[str, Any]:
         known = history.get_by_job(str(row.id)) or {}

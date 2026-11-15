@@ -197,6 +197,16 @@ def test_a_catalog_that_cannot_be_read_leaves_the_list_empty_and_the_chip_off(mo
     assert catalog_view.update_version(PLUGIN) is None
 
 
+def test_an_engine_bazarr_runs_itself_is_never_offered_from_the_catalog(monkeypatch):
+    import provider_hub.service as hub
+
+    lingarr = service_manifest("lingarr", kind="translator", kind_api="bazarr.translator.v1", name="Lingarr",
+                               settings_version=1, settings={"fields": []})
+    monkeypatch.setattr(hub, "installable_catalog_plugins",
+                        lambda kind: [_entry(lingarr), _entry(_google_manifest())])
+    assert [item["plugin_id"] for item in catalog_view.available_engines()] == [GOOGLE]
+
+
 def test_the_official_engine_is_listed_first(monkeypatch):
     import provider_hub.service as hub
 

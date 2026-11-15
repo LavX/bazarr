@@ -57,12 +57,15 @@ def world(monkeypatch, schema_session):
     w.limits = TranslationLimits(w.memory)
     w.counts = {"pending": 2, "running": 1}
     w.queue_jobs = {}
+    w.positions = {}
     w.titles = {}
     w.summary = TranslationSummary(
         schema_session, limits=w.limits, queue_counts=lambda: w.counts, queue_job=lambda id: w.queue_jobs.get(id),
+        queue_positions=lambda: w.positions,
         title_lookup=lambda *args: w.titles.get(args, ""), translation_limit=lambda: 2, clock=lambda: MOMENT)
     w.real_get_summary = module.get_summary
     monkeypatch.setattr(module, "get_summary", lambda: w.summary)
+    w.real_get_limits = module.get_limits
     monkeypatch.setattr(module, "get_limits", lambda: w.limits)
 
     blueprint = Blueprint("translation_summary_test", __name__, url_prefix="/api")
@@ -155,12 +158,19 @@ def test_garbage_counts_are_read_as_zero_and_a_missing_limit_is_null(world):
 
 def test_the_real_summary_on_the_application_database_answers_the_summary_the_limits_save_and_the_queue(
         world, monkeypatch):
-    """No stubbed reader: ``TranslationSummary(database)`` with its own counters, as the application builds it."""
+    """No stubbed reader or writer: ``TranslationSummary(database)`` and the config-backed limits, as built."""
+    import app.config as config
     import app.database
+    from app.config import settings
     from app.jobs_queue import jobs_queue
 
+    # The live settings are put back when the test ends, and nothing is written to disk.
+    for name in ("month_cap_micros", "job_cap_micros", "limits_revision"):
+        monkeypatch.setattr(settings.translator, name, getattr(settings.translator, name))
+    monkeypatch.setattr(config, "write_config", lambda *args, **kwargs: True)
     monkeypatch.setattr(app.database, "database", world.session)
     monkeypatch.setattr(world.module, "get_summary", world.real_get_summary)
+    monkeypatch.setattr(world.module, "get_limits", world.real_get_limits)
     expected = jobs_queue.translation_lane_counts()
     summary = world.call("get", "summary")
     assert summary.status_code == 200, summary.get_data(as_text=True)
@@ -168,8 +178,10 @@ def test_the_real_summary_on_the_application_database_answers_the_summary_the_li
     assert summary.json["queue"]["pending"] == expected["pending"]
     assert isinstance(summary.json["queue"]["limit"], int)
     saved = world.call("put", "limits", {"month_cap": 4.5, "job_cap": None})
-    assert saved.status_code == 200 and set(saved.json) >= {"month", "job_cap", "queue"}
+    assert saved.status_code == 200 and saved.json["month"]["cap"] == 4.5 and saved.json["job_cap"] is None
+    assert world.call("get", "summary").json["month"]["cap"] == 4.5
     assert world.call("get", "queue").status_code == 200
+    assert isinstance(jobs_queue.translation_queue_positions(), dict)
 
 
 # ---------------------------------------------------------------------- limits
@@ -270,6 +282,30 @@ def test_the_queue_lists_waiting_jobs_in_the_order_they_will_run(world):
     assert [item["job_id"] for item in body["data"]] == [str(first.id), str(second.id), str(retry.id)]
     assert [item["status"] for item in body["data"]] == ["queued", "queued", "awaiting_retry"]
     assert body["data"][0]["queued_at"] == MOMENT.isoformat()
+
+
+def test_a_job_whose_place_on_the_queue_is_known_goes_first_in_that_order(world):
+    a = _job(world.session, "queued", path="/media/a.en.srt", queue_job_id=21)
+    b = _job(world.session, "queued", path="/media/b.en.srt", queue_job_id=22)
+    c = _job(world.session, "queued", path="/media/c.en.srt")
+    d = _job(world.session, "queued", path="/media/d.en.srt", queue_job_id=99)  # no longer on the queue
+    retry = _job(world.session, "awaiting_retry", path="/media/r.en.srt", queue_job_id=23)
+    world.positions = {21: 5, 22: 0, 23: 1}
+    ids = [item["job_id"] for item in world.call("get", "queue").json["data"]]
+    # Known places first (b, then a), the rest by the time they were asked for, retries last.
+    assert ids == [str(b.id), str(a.id), str(c.id), str(d.id), str(retry.id)]
+
+
+def test_a_queue_that_cannot_be_read_falls_back_to_the_time_they_were_asked_for(world):
+    first = _job(world.session, "queued", path="/media/first.en.srt", queue_job_id=1)
+    second = _job(world.session, "queued", path="/media/second.en.srt", queue_job_id=2)
+
+    def broken():
+        raise RuntimeError("queue gone")
+
+    world.summary = TranslationSummary(world.session, limits=world.limits, queue_counts=lambda: world.counts,
+                                       queue_positions=broken, translation_limit=lambda: 2, clock=lambda: MOMENT)
+    assert [item["job_id"] for item in world.call("get", "queue").json["data"]] == [str(first.id), str(second.id)]
 
 
 def test_a_waiting_job_is_named_from_its_history_row_first(world):

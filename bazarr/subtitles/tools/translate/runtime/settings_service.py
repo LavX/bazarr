@@ -24,6 +24,7 @@ import math
 import re
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 from uuid import uuid4
@@ -125,6 +126,29 @@ TEST_MESSAGE_LIMIT = 300
 # request thread, and its worst-case charge stays counted.
 TEST_TIMEOUT_SECONDS = 20.0
 TEST_TIMEOUT_GRACE_SECONDS = 5.0
+# What a probe may fail with and still be a failed test. A bug in our own code or in a binding (a wrong type, a
+# missing attribute or key) is not turned into "the back end did not answer": it is raised.
+PROGRAMMING_ERRORS = (TypeError, AttributeError, NameError, LookupError, AssertionError, ImportError,
+                      NotImplementedError, SyntaxError)
+UNFINISHED_TEST = "The test could not be completed. The Bazarr+ log has the cause when debug logging is on."
+# One test at a time per connection: a second request while one runs is told so instead of starting another.
+_RUNNING_TESTS: set[int] = set()
+_RUNNING_LOCK = threading.Lock()
+
+
+def _claim_test(connection_id: int) -> bool:
+    with _RUNNING_LOCK:
+        if connection_id in _RUNNING_TESTS:
+            return False
+        _RUNNING_TESTS.add(connection_id)
+        return True
+
+
+def _release_test(connection_id: int) -> None:
+    with _RUNNING_LOCK:
+        _RUNNING_TESTS.discard(connection_id)
+
+
 OPEN_TEST = "The translation engine is not running, so this back end cannot be tested yet."
 
 
@@ -149,6 +173,10 @@ class ProbeRequest:
     secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
 
 
+# A probe runs on a thread of its own, not the request's. It must not use the request's database session, must be
+# safe to call from any thread, and must give up within ``ProbeRequest.timeout_seconds``: the caller stops waiting
+# a few seconds after that and the test counts as failed.
+#
 # A probe answers ``{"ok": bool, "message": str, "input_tokens": int, "output_tokens": int, "sent": bool}``.
 # The tokens are what the request used, settled against the cost caps. Without them the test keeps its
 # worst-case charge, because the provider may have billed a request whose answer never came; only ``sent:
@@ -460,36 +488,41 @@ class TranslatorSettingsService:
         expected = self._expected(payload, required=values is not None or bool(clear) or enabled is not None)
         if expected is not None and instance.revision != expected:
             raise StaleRevisionError("The engine settings changed since they were loaded.", revision=instance.revision)
+        # The config lock is taken before the write transaction, the one order every writer of both keeps, and it
+        # is held to the end, the undo included, so nothing else writes config.yaml between the save and its undo.
+        #
         # The settings and the switch are one save: if the switch loses a race, the settings are not kept either.
         # An engine that keeps its settings in config.yaml has already written them when the database part fails,
         # so it hands back an undo that puts them as they were.
-        undo: Callable[[], None] | None = None
-        try:
-            with self._store.transaction():
-                if values is not None or clear:
-                    if legacy_engines.legacy_engine_for(instance.plugin_id) is not None:
-                        undo = self._save_legacy_values(instance, values or {}, clear, payload, expected)
-                    else:
-                        plugin = self._plugin(instance.plugin_id)
-                        if plugin is None or not plugin.active:
-                            raise PluginUnavailableError("The plugin for this engine is not installed.")
-                        self._save_engine_values(instance, plugin, values, clear, payload, expected)
-                elif enabled is True:
-                    self._check_engine_before_turning_on(instance)
-                if enabled is not None and bool(instance.enabled) != enabled:
-                    # The switch is swapped against the revision the client sent. Only when this request's own save
-                    # has just moved it on does the switch use the revision that save produced.
-                    produced = expected + 1 if (values is not None or clear) else expected
-                    try:
-                        change = self._store.set_instance_enabled(instance_id, enabled, expected_revision=produced)
-                    except StoreStale as error:
-                        raise StaleRevisionError("The engine settings changed since they were loaded.",
-                                                 revision=error.revision) from error
-                    notices += [self._notice(item) for item in change.notices]
-        except BaseException:
-            if undo is not None:
-                undo()
-            raise
+        with self._lingarr.lock():
+            undo: Callable[[], None] | None = None
+            try:
+                with self._store.transaction():
+                    if values is not None or clear:
+                        if legacy_engines.legacy_engine_for(instance.plugin_id) is not None:
+                            undo = self._save_legacy_values(instance, values or {}, clear, payload, expected)
+                        else:
+                            plugin = self._plugin(instance.plugin_id)
+                            if plugin is None or not plugin.active:
+                                raise PluginUnavailableError("The plugin for this engine is not installed.")
+                            self._save_engine_values(instance, plugin, values, clear, payload, expected)
+                    elif enabled is True:
+                        self._check_engine_before_turning_on(instance)
+                    if enabled is not None and bool(instance.enabled) != enabled:
+                        # The switch is swapped against the revision the client sent. Only when this request's own
+                        # save has just moved it on does the switch use the revision that save produced.
+                        produced = expected + 1 if (values is not None or clear) else expected
+                        try:
+                            change = self._store.set_instance_enabled(instance_id, enabled,
+                                                                      expected_revision=produced)
+                        except StoreStale as error:
+                            raise StaleRevisionError("The engine settings changed since they were loaded.",
+                                                     revision=error.revision) from error
+                        notices += [self._notice(item) for item in change.notices]
+            except BaseException:
+                if undo is not None:
+                    undo()
+                raise
         return {"engine": self.instance_view(self._instance(instance_id)), "notices": notices}
 
     def _check_engine_before_turning_on(self, instance) -> None:
@@ -810,15 +843,28 @@ class TranslatorSettingsService:
         secrets = self._store.secrets_for_request(owner, destinations)
         held = self._store.secrets_for_request(owner, frozenset())  # every saved secret, for masking only
         where = self._typed_origin(schema, values)
+        if not _claim_test(connection.id):
+            return self._test_result(False, "A test of this back end is already running. Wait for it to finish.")
         try:
             if self._probe is not None:
                 return self._paid_test(connection, instance, values, destinations, secrets, held, where)
             return self._listing_test(connection, instance, values, where)
         except Exception as error:
+            if isinstance(error, PROGRAMMING_ERRORS):
+                raise
             # Whatever a probe or a model list raised, a refusal of ours included, may carry an address or a key
-            # in its text or its fields: only its type is said.
-            logger.warning("A connection test failed with %s", type(error).__name__)
-            return self._test_result(False, "The test could not be completed. Check the Bazarr+ log for the cause.")
+            # in its text or its fields: only its type is said, and the scrubbed traceback goes to the debug log.
+            self._log_failure(error, held)
+            return self._test_result(False, UNFINISHED_TEST)
+        finally:
+            _release_test(connection.id)
+
+    @classmethod
+    def _log_failure(cls, error: BaseException, held: Mapping[str, str]) -> None:
+        logger.warning("A connection test failed with %s", type(error).__name__)
+        if logger.isEnabledFor(logging.DEBUG):
+            text = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+            logger.debug("The connection test failed:\n%s", cls._mask(text, held))
 
     def _listing_test(self, connection, instance, values, where) -> dict[str, Any]:
         """Ask for the model list, which the engine fetches with no charge. It answers when the back end does."""
@@ -896,8 +942,10 @@ class TranslatorSettingsService:
                 finally:
                     ledger.release_job(job_id)
         if failure is not None:
-            logger.warning("A connection test failed with %s", type(failure).__name__)
-            return self._test_result(False, "The test could not be completed. Check the Bazarr+ log for the cause.")
+            if isinstance(failure, PROGRAMMING_ERRORS):
+                raise failure
+            self._log_failure(failure, held)
+            return self._test_result(False, UNFINISHED_TEST)
         if answer.get("ok") is True:
             return self._test_result(True, "", started)
         return self._test_result(False, self._said(answer.get("message"), held) or self._unanswered(where))
@@ -966,16 +1014,12 @@ class TranslatorSettingsService:
                 "from the Bazarr+ container.")
 
     @staticmethod
-    def _said(message: Any, held: Mapping[str, str]) -> str:
-        """A probe's message as it may leave: one short line with every saved secret and credential masked.
+    def _mask(text: str, held: Mapping[str, str]) -> str:
+        """The text with every saved secret and credential shape masked, whitespace left as it was.
 
-        ``held`` is every secret the connection stores, whatever its length. The masking runs on the text as it
-        came, before whitespace is collapsed, so a value cannot hide across a line break. A short value is
-        masked only as a whole word, so it does not eat the letters of an ordinary word.
+        ``held`` is every secret the connection stores, whatever its length. A short value is masked only as a
+        whole word, so it does not eat the letters of an ordinary word.
         """
-        if not isinstance(message, str):
-            return ""
-        text = message
         pieces = {piece for value in held.values() for piece in [value, *_entries_of(value)] if piece}
         for piece in sorted(pieces, key=len, reverse=True):
             pattern = re.escape(piece) if len(piece) >= 4 else r"(?<!\w)" + re.escape(piece) + r"(?!\w)"
@@ -983,9 +1027,21 @@ class TranslatorSettingsService:
         try:
             from secret_store.scrub import scrub_text
 
-            text = scrub_text(text)
+            return scrub_text(text)
         except Exception:
-            logger.warning("Could not scrub a connection test message")
+            return "[the text could not be scrubbed and is left out]"
+
+    @classmethod
+    def _said(cls, message: Any, held: Mapping[str, str]) -> str:
+        """A probe's message as it may leave: one short line with every saved secret and credential masked.
+
+        The masking runs on the text as it came, before whitespace is collapsed, so a value cannot hide across
+        a line break.
+        """
+        if not isinstance(message, str):
+            return ""
+        text = cls._mask(message, held)
+        if text.startswith("[the text could not"):
             return ""
         return " ".join(text.split())[:TEST_MESSAGE_LIMIT]
 
