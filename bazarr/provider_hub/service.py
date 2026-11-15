@@ -4381,8 +4381,8 @@ def offered_update_version(provider_id: str) -> str | None:
 def installable_catalog_plugins(kind: str) -> list[dict[str, Any]]:
     """The newest installable entry of each catalog plugin of ``kind`` that has no installation at all.
 
-    An entry is left out when its source may not install it, when this host cannot run it, or when its
-    manifest is not valid for its kind. A trusted source is preferred when two list the same version.
+    An entry is left out when its source may not install it, when this host cannot run it, when its
+    manifest is not valid for its kind, or when the install path would refuse it. A trusted source is preferred when two list the same version.
     Each item is the stored entry: ``source``, ``provider_id``, ``name``, ``version``, ``trusted`` and
     ``manifest``.
     """
@@ -4395,8 +4395,13 @@ def installable_catalog_plugins(kind: str) -> list[dict[str, Any]]:
     def usable(entry: dict[str, Any]) -> bool:
         if _install_refusal(state, entry.get("source"), entry.get("provider_id")) or _host_refusal(entry, host):
             return False
+        trusted = bool(entry.get("trusted", False))
         try:
-            get_kind(kind).validate_manifest(entry["manifest"], bool(entry.get("trusted", False)))
+            get_kind(kind).validate_manifest(entry["manifest"], trusted)
+            # The install path must accept it too: an engine it would refuse is not offered, so the page never
+            # starts an install that cannot succeed. A kind the installer learns to stage passes with no change.
+            validate_manifest(entry["manifest"], built_in_provider_ids=_validation_built_in_provider_ids(
+                entry["manifest"], trusted))
         except ValueError:
             return False
         return True

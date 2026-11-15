@@ -257,6 +257,27 @@ def test_a_probe_message_is_one_short_line_with_every_key_and_credential_masked(
     assert len(message) <= 300
 
 
+def test_a_short_saved_secret_is_masked_as_a_whole_word_and_never_inside_another_word(world):
+    world.probe({"ok": False, "message": "bad key abc, a cabinet is not a key"})
+    connection_id = world.connection(values={"base_url": LAN, "api_key": "abc", "model": "m"}, accept=[LAN])
+    message = world.call("post", f"connections/{connection_id}/test", {}).json["message"]
+    assert message == "bad key ***, a cabinet is not a key"
+
+
+def test_a_secret_is_masked_before_whitespace_is_collapsed_so_it_cannot_hide_in_a_gap(world):
+    spaced = "sk-first-part  second-part"
+    world.probe({"ok": False, "message": f"rejected {spaced} today"})
+    connection_id = world.connection(values={"base_url": LAN, "api_key": spaced, "model": "m"}, accept=[LAN])
+    message = world.call("post", f"connections/{connection_id}/test", {}).json["message"]
+    assert message == "rejected *** today"
+
+
+def test_every_saved_secret_is_masked_not_only_the_ones_the_probe_was_given():
+    held = {"api_key": "xy", "extra": json.dumps(["first-key-0123", "ab"])}
+    said = TranslatorSettingsService._said("xy and first-key-0123 and ab and xyz", held)
+    assert said == "*** and *** and *** and xyz"
+
+
 def test_a_probe_that_raises_never_puts_its_text_in_the_answer_or_the_log(world, caplog):
     world.probe(RuntimeError(f"boom with {SECRET} at {LAN}"))
     connection_id = world.lan_connection()
@@ -351,22 +372,46 @@ def test_a_priced_test_that_reports_no_tokens_is_charged_at_its_worst_case(world
     assert call.actual_micros == call.worst_case_micros == 432
 
 
-def test_a_priced_test_that_failed_costs_nothing(world):
+def test_a_priced_test_that_failed_keeps_its_worst_case_charge_because_the_provider_may_have_billed(world):
     world.probe({"ok": False, "message": "refused"})
     connection_id = _priced(world)
     assert world.call("post", f"connections/{connection_id}/test", {}).json["ok"] is False
     (call,), (budget,) = _calls(world)
-    assert (call.actual_micros, call.state, budget.state) == (0, "settled", "released")
+    assert (call.actual_micros, call.state, budget.state) == (432, "settled", "released")
 
 
-def test_a_priced_test_whose_probe_raised_is_settled_at_nothing_and_released(world, caplog):
+def test_a_priced_test_that_never_left_is_the_one_failure_settled_at_nothing(world):
+    world.probe({"ok": False, "sent": False, "message": "connection refused"})
+    connection_id = _priced(world)
+    assert world.call("post", f"connections/{connection_id}/test", {}).json["ok"] is False
+    (call,), (budget,) = _calls(world)
+    assert (call.actual_micros, call.input_tokens, call.output_tokens, budget.state) == (0, 0, 0, "released")
+
+
+def test_a_priced_test_whose_probe_raised_keeps_its_worst_case_charge_and_is_released(world, caplog):
     world.probe(RuntimeError(SECRET))
     connection_id = _priced(world)
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.json["ok"] is False
     (call,), (budget,) = _calls(world)
-    assert (call.actual_micros, budget.state) == (0, "released")
+    assert (call.actual_micros, budget.state) == (432, "released")
     _nothing_leaked(world, caplog)
+
+
+def test_the_hold_is_released_even_when_settling_fails(world, monkeypatch):
+    world.probe({"ok": True, "input_tokens": 1, "output_tokens": 1})
+    connection_id = _priced(world)
+
+    def broken(self, *args, **kwargs):
+        raise RuntimeError("ledger gone")
+
+    monkeypatch.setattr(UsageLedger, "settle_call", broken)
+    response = world.call("post", f"connections/{connection_id}/test", {})
+    assert response.status_code == 200 and response.json["ok"] is False
+    usage, budgets = _calls(world)
+    # The call was never settled, so it keeps counting at its worst case, and the budget is given back.
+    assert [(item.state, item.actual_micros) for item in usage] == [("reserved", None)]
+    assert [item.state for item in budgets] == ["released"]
 
 
 def test_a_priced_test_is_refused_when_the_month_cap_is_used_up_and_nothing_is_sent(world):
@@ -440,3 +485,20 @@ def test_saved_settings_that_no_longer_fit_the_plugin_are_a_failed_test_not_a_se
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False
     assert "save it again" in response.json["message"]
+
+
+def test_the_refusal_names_the_month_cap_when_only_that_one_is_set(world):
+    world.probe({"ok": True})
+    world.limits = CostLimits(month_cap=100, translation_limit=1)  # fits the budget, not the 432 a test may cost
+    connection_id = _priced(world)
+    message = world.call("post", f"connections/{connection_id}/test", {}).json["message"]
+    assert "monthly limit" in message and "one translation" not in message
+    assert world.requests == []
+
+
+def test_the_refusal_names_the_job_cap_when_that_is_the_one_set(world):
+    world.probe({"ok": True})
+    world.limits = CostLimits(job_cap=100, translation_limit=1)
+    connection_id = _priced(world)
+    message = world.call("post", f"connections/{connection_id}/test", {}).json["message"]
+    assert "one translation" in message and "monthly" not in message

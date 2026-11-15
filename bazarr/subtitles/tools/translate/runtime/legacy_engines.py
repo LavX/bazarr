@@ -7,15 +7,17 @@ Lingarr is not a Provider Hub plugin and has no worker. It stays what it was: a 
 runtime only gives it an engine instance, so it can be listed, chosen as the engine or the fallback and
 configured from the Translation page like any other engine.
 
-What makes it an engine, in one place:
+What exists today, in one place:
 
 * ``LINGARR_FIELDS`` is its small schema: an address (a destination, so the consent rules apply to it) and a
   token (a secret, so it never comes out).
-* ``configured`` is true once the address is set, the same rule the availability gate applies to Lingarr.
-* ``legacy_engine_for`` is the seam for dispatch. A job whose engine instance has a plugin id this returns
-  an engine for does not go to a worker: it runs the in-core service named by ``translator_type`` through
-  ``TranslatorFactory.create_translator``, exactly as the old path did. Its connections list is empty, its
-  cost is 0 and its history rows name the plugin id ``lingarr``.
+* ``configured`` is true once the person has set an address: a value other than the shipped default, an
+  address saved from the page, or an install that already ran Lingarr (it was the selected translator).
+* ``legacy_engine_for`` is a seam for dispatch, which is not wired to it yet. Nothing runs a job through it
+  today. When dispatch lands, a job whose engine instance has a plugin id this returns an engine for should
+  not go to a worker: it should run the in-core service named by ``translator_type`` through
+  ``TranslatorFactory.create_translator``, as the old path did, with no connections, no cost and history rows
+  that name the plugin id ``lingarr``.
 """
 from __future__ import annotations
 
@@ -33,6 +35,9 @@ URL_SETTING = "lingarr_url"
 TOKEN_SETTING = "lingarr_token"
 DEFAULT_URL = "http://lingarr:9876"
 URL_LIMIT = 2048
+# Kept in the engine instance's settings once the person has saved an address from the page, so the shipped
+# default address does not count as set up until they have.
+SAVED_FLAG = "address_saved"
 DESCRIPTION = "Sends each job to your own Lingarr service."
 # A token shorter than this shows only that it is set, like every other secret.
 LAST_FOUR_MIN_LENGTH = 16
@@ -78,6 +83,12 @@ class ConfigLingarr:
         value = getattr(settings.translator, URL_SETTING, "")
         return value.strip() if isinstance(value, str) else ""
 
+    def selected(self) -> bool:
+        """Whether this install already ran Lingarr: it was the translator the old settings page selected."""
+        from app.config import settings
+
+        return getattr(settings.translator, "translator_type", "") == "lingarr"
+
     def token(self) -> str:
         """The stored token, for the length and last characters a response may say. Never sent out whole."""
         from app.config import settings
@@ -105,6 +116,17 @@ class ConfigLingarr:
         return True
 
 
-def configured(config: ConfigLingarr | None = None) -> bool:
-    """Whether Lingarr may serve a job: its address is set. The token is optional, as it always was."""
-    return bool((config or ConfigLingarr()).url())
+def configured(config: ConfigLingarr | None = None, instance_settings: Mapping[str, Any] | None = None) -> bool:
+    """Whether Lingarr may serve a job: the person has set its address. The token is optional, as it always was.
+
+    The shipped default address alone does not count, because nothing has been set up yet. An address that
+    differs from it, one saved from the page (``instance_settings`` carries the flag) and an install that
+    already used Lingarr do.
+    """
+    config = config or ConfigLingarr()
+    url = config.url()
+    if not url:
+        return False
+    if url != DEFAULT_URL:
+        return True
+    return bool((instance_settings or {}).get(SAVED_FLAG)) or config.selected()

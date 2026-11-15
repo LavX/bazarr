@@ -1394,7 +1394,7 @@ def _get_settings():
             secret_descriptors = {}
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
-                if full_path in SERVER_OWNED_SETTING_PATHS:
+                if is_server_owned_setting(full_path):
                     continue
                 if is_write_only_secret(full_path):
                     continue
@@ -2850,6 +2850,21 @@ SERVER_OWNED_SETTING_PATHS = frozenset({
     'translator.limits_revision',
 })
 
+# Settings only the server writes while the v2 translation runtime is on. The old settings route could change
+# the Lingarr address without the consent the typed API asks for, so while the runtime owns the engine it does
+# not show or write it.
+RUNTIME_OWNED_SETTING_PATHS = frozenset({
+    'translator.lingarr_url',
+})
+
+
+def is_server_owned_setting(path):
+    """Whether the settings API must leave this setting alone: always for the server's own, and for the
+    runtime's while its switch is on."""
+    if path in SERVER_OWNED_SETTING_PATHS:
+        return True
+    return path in RUNTIME_OWNED_SETTING_PATHS and getattr(settings.translator, 'runtime_v2', False) is True
+
 
 def _auth_identity():
     """The login settings a session depends on: the mode, the account and its password."""
@@ -2979,7 +2994,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         settings_keys = key.split('-')
 
-        if '.'.join(part.lower() for part in settings_keys[1:3]) in SERVER_OWNED_SETTING_PATHS:
+        if is_server_owned_setting('.'.join(part.lower() for part in settings_keys[1:3])):
             continue
 
         if settings_keys[-1].startswith('__'):

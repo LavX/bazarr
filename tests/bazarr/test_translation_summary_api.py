@@ -152,6 +152,22 @@ def test_garbage_counts_are_read_as_zero_and_a_missing_limit_is_null(world):
     assert world.call("get", "summary").json["queue"] == {"running": 0, "pending": 0, "limit": None}
 
 
+def test_the_default_readers_answer_the_summary_the_limits_save_and_the_queue(world):
+    """No stubbed counters: the jobs queue's own counts, as the application builds the summary."""
+    from app.jobs_queue import jobs_queue
+
+    world.module.get_summary = lambda: TranslationSummary(world.session, limits=world.limits, clock=lambda: MOMENT)
+    expected = jobs_queue.translation_lane_counts()
+    summary = world.call("get", "summary")
+    assert summary.status_code == 200, summary.get_data(as_text=True)
+    assert summary.json["queue"]["running"] == expected["running"]
+    assert summary.json["queue"]["pending"] == expected["pending"]
+    assert isinstance(summary.json["queue"]["limit"], int)
+    saved = world.call("put", "limits", {"month_cap": 4.5, "job_cap": None})
+    assert saved.status_code == 200 and saved.json["month"]["cap"] == 4.5
+    assert world.call("get", "queue").status_code == 200
+
+
 # ---------------------------------------------------------------------- limits
 
 def test_saving_limits_answers_with_the_summary_and_keeps_micro_dollars(world):

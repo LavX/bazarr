@@ -36,6 +36,16 @@ def translator_kind():
             kinds._KINDS["translator"] = before
 
 
+@pytest.fixture(autouse=True)
+def installer_stages_translators(monkeypatch):
+    """The installer accepts translator manifests, which the real one does not yet, so the rest of this file can
+    see what the catalog offers. The tests that need the real refusal put it back."""
+    import provider_hub.service as hub
+
+    monkeypatch.setattr(hub, "real_validate_manifest", hub.validate_manifest, raising=False)
+    monkeypatch.setattr(hub, "validate_manifest", lambda manifest, **kwargs: None)
+
+
 def _ai_manifest(version="2.2.0", **extra):
     return service_manifest(
         PLUGIN, version, kind="translator", kind_api="bazarr.translator.v1", name="AI Subtitle Translator",
@@ -123,6 +133,20 @@ def test_a_subtitle_provider_is_not_an_engine_and_a_trusted_source_wins_a_tie(tm
                                    _entry(_google_manifest(), source="official", trusted=True)])
     (found,) = installable_catalog_plugins("translator")
     assert (found["provider_id"], found["source"]) == (GOOGLE, "official")
+
+
+def test_an_engine_the_install_path_would_refuse_is_not_offered(tmp_path, monkeypatch):
+    import provider_hub.service as hub
+    from provider_hub.service import installable_catalog_plugins, stage_install
+
+    monkeypatch.setattr(hub, "validate_manifest", hub.real_validate_manifest)
+    manifest = _google_manifest()
+    _state(tmp_path, monkeypatch, [_entry(manifest)])
+    # The install path refuses a translator manifest, so the page must not start that install.
+    with pytest.raises(ValueError):
+        stage_install(manifest, source_id="official")
+    assert installable_catalog_plugins("translator") == []
+    assert catalog_view.available_engines() == []
 
 
 def test_an_entry_whose_manifest_is_not_a_valid_translator_is_not_offered(tmp_path, monkeypatch):

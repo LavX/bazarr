@@ -36,7 +36,7 @@ TitleLookup = Callable[[Any, Any, Any, Any, Any], str]
 def _queue_counts() -> Mapping[str, int]:
     from app.jobs_queue import jobs_queue
 
-    return jobs_queue.translation_queue_counts()
+    return jobs_queue.translation_lane_counts()
 
 
 def _queue_job(queue_job_id: int) -> Mapping[str, Any] | None:

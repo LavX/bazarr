@@ -27,19 +27,35 @@ class FakeLingarr:
         self.address = legacy_engines.DEFAULT_URL
         self.token_value = ""
         self.fail = False
+        self.was_selected = False
+        self.depth = 0
+        self.calls = []
 
     def lock(self):
-        import threading
+        import contextlib
 
-        return threading.RLock()
+        @contextlib.contextmanager
+        def held():
+            self.depth += 1
+            try:
+                yield
+            finally:
+                self.depth -= 1
+
+        return held()
 
     def url(self):
+        self.calls.append(("url", self.depth))
         return self.address
 
     def token(self):
         return self.token_value
 
+    def selected(self):
+        return self.was_selected
+
     def set(self, url, token):
+        self.calls.append(("set", self.depth))
         if self.fail:
             return False
         self.address = url
@@ -125,7 +141,7 @@ def test_lingarr_is_listed_in_exactly_the_shape_the_page_reads(world):
     assert engine == {
         "id": engine["id"], "plugin_id": "lingarr", "name": "Lingarr", "official": False, "legacy": True,
         "description": "Sends each job to your own Lingarr service.", "enabled": True, "revision": 1,
-        "awaiting_secrets": False, "configured": True, "settings_version": 1, "plugin_version": None,
+        "awaiting_secrets": False, "configured": False, "settings_version": 1, "plugin_version": None,
         "plugin": None,
         "schema": {
             "settings_version": 1, "endpoints": [], "backend_types": {},
@@ -158,17 +174,35 @@ def test_a_service_that_does_not_ask_for_legacy_engines_lists_none(world):
     assert world.call("get", "state").json["instances"] == []
 
 
-def test_it_is_configured_once_its_address_is_set_and_not_before(world):
+def test_the_shipped_default_address_alone_is_not_set_up(world):
+    assert world.fake.address == legacy_engines.DEFAULT_URL
+    assert world.lingarr()["configured"] is False
+
+
+def test_it_is_configured_once_the_person_has_set_an_address(world):
     world.fake.address = ""
-    engine = world.lingarr()
-    assert engine["configured"] is False and engine["values"] == {"url": ""}
+    assert world.lingarr()["configured"] is False
     world.fake.address = URL
     assert world.lingarr()["configured"] is True
     # The token is optional, as it always was.
     assert world.fake.token_value == ""
 
 
+def test_saving_the_default_address_from_the_page_sets_it_up_and_needs_no_consent(world):
+    saved = world.save({"url": legacy_engines.DEFAULT_URL})
+    assert saved.status_code == 200 and saved.json["engine"]["configured"] is True
+    assert world.store.get_instance(saved.json["engine"]["id"]).settings_json == '{"address_saved": true}'
+    assert world.lingarr()["configured"] is True
+
+
+def test_an_install_that_already_ran_lingarr_is_set_up_without_a_save(world):
+    world.fake.was_selected = True
+    assert world.lingarr()["configured"] is True
+
+
 def test_a_turned_off_engine_is_not_configured(world):
+    world.fake.address = URL
+    assert world.lingarr()["configured"] is True
     assert world.save(enabled=False).status_code == 200
     assert world.lingarr()["configured"] is False
 
@@ -184,7 +218,7 @@ def test_the_seam_for_dispatch_names_the_in_core_service():
     assert f"'{engine.translator_type}'" in open(translator_factory.__file__).read()
 
 
-def test_the_availability_gate_and_the_engine_agree_on_when_lingarr_is_ready(monkeypatch):
+def test_the_availability_gate_and_the_engine_agree_on_an_address_the_person_set(monkeypatch):
     from app.config import settings
     from subtitles.tools.translate.availability import translation_available
 
@@ -366,3 +400,121 @@ def test_the_config_backed_settings_are_the_existing_lingarr_keys(monkeypatch):
     assert store.url() == URL and store.token() == TOKEN
     assert store.set(URL, None) is True and settings.translator.lingarr_token == TOKEN
     settings.translator.lingarr_url, settings.translator.lingarr_token = before
+
+
+# ----------------------------------------------------- locking, undo, ownership
+
+def test_the_config_lock_is_held_from_the_read_of_the_old_address_to_the_write(world):
+    engine_id = world.lingarr()["id"]
+    world.fake.calls.clear()
+    response = world.call("patch", f"engines/{engine_id}", {
+        "expected_revision": 1, "values": {"url": URL}, "accept_destinations": [URL]})
+    assert response.status_code == 200
+    # The first read (the old address) and the write both happened with the lock held.
+    assert world.fake.calls[0] == ("url", 1)
+    assert ("set", 1) in world.fake.calls
+    assert world.fake.depth == 0
+
+
+def test_a_failure_after_the_config_write_puts_the_old_settings_back(world, monkeypatch, caplog):
+    from subtitles.tools.translate.runtime.store import StaleRevisionError as StoreStale
+
+    world.save({"token": TOKEN})
+    before = (world.fake.address, world.fake.token_value)
+
+    def lose_the_race(*args, **kwargs):
+        raise StoreStale("changed", 9)
+
+    monkeypatch.setattr(world.store, "set_instance_enabled", lose_the_race)
+    response = world.save({"url": URL, "token": OTHER_TOKEN}, accept_destinations=[URL], enabled=False)
+    assert response.status_code == 409 and response.json["error"] == "stale_revision"
+    assert (world.fake.address, world.fake.token_value) == before
+    assert world.fake.depth == 0
+    _nothing_leaked(world, caplog)
+
+
+def test_the_address_is_server_owned_for_the_old_settings_route_only_while_the_runtime_is_on(monkeypatch):
+    from app.config import is_server_owned_setting, settings
+
+    monkeypatch.setattr(settings.translator, "runtime_v2", False)
+    assert is_server_owned_setting("translator.lingarr_url") is False
+    monkeypatch.setattr(settings.translator, "runtime_v2", True)
+    assert is_server_owned_setting("translator.lingarr_url") is True
+    assert is_server_owned_setting("translator.lingarr_token") is False
+    assert is_server_owned_setting("translator.engine") is True
+
+
+# ------------------------------------------------------------ one instance only
+
+def _file_database(tmp_path):
+    import sqlalchemy as sa
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import Base
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'engines.db'}", connect_args={"timeout": 30})
+    Base.metadata.create_all(engine)
+    return engine, sessionmaker(bind=engine)
+
+
+def test_many_first_listings_at_once_create_one_lingarr_engine(tmp_path):
+    import threading
+
+    import sqlalchemy as sa
+
+    engine, make_session = _file_database(tmp_path)
+    barrier = threading.Barrier(8)
+    ids, errors = [], []
+
+    def first_listing():
+        session = make_session()
+        try:
+            store = TranslatorStore(session, pointers=MemoryPointers(), plugin_active=lambda plugin_id: False)
+            barrier.wait()
+            ids.append(store.ensure_instance("lingarr", name="Lingarr", settings_version=1).id)
+        except Exception as error:  # reported below
+            errors.append(error)
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=first_listing) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+    assert errors == []
+    assert len(ids) == 8 and len(set(ids)) == 1
+    session = make_session()
+    assert session.execute(sa.text(
+        "SELECT count(*) FROM translator_engine_instances WHERE plugin_id = 'lingarr'")).scalar() == 1
+    session.close()
+    engine.dispose()
+
+
+def test_the_database_refuses_a_second_lingarr_engine_and_the_loser_reads_the_winner(tmp_path):
+    import sqlalchemy as sa
+
+    engine, make_session = _file_database(tmp_path)
+    session = make_session()
+    store = TranslatorStore(session, pointers=MemoryPointers(), plugin_active=lambda plugin_id: False)
+    first_id = store.create_instance("lingarr", name="Lingarr").id
+    with pytest.raises(sa.exc.IntegrityError):
+        store.create_instance("lingarr", name="Lingarr again")
+    session.rollback()
+    # Another plugin id is not limited to one instance.
+    store.create_instance("example_engine")
+    store.create_instance("example_engine")
+    assert store.ensure_instance("lingarr").id == first_id
+
+    # A caller that lost the race (its check saw none, its insert hit the index) returns the winner's row.
+    real_list = store.list_instances
+    seen = []
+
+    def blind_first(plugin_id=None):
+        seen.append(plugin_id)
+        return [] if len(seen) <= 2 and plugin_id == "lingarr" else real_list(plugin_id)
+
+    store.list_instances = blind_first
+    assert store.ensure_instance("lingarr").id == first_id
+    session.close()
+    engine.dispose()

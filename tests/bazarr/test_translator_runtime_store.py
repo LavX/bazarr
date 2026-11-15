@@ -404,18 +404,18 @@ def test_a_plugin_update_masks_the_secret_it_moved_in_the_very_next_log_line(sto
     seen = []
     monkeypatch.setattr(scrub, "refresh_secret_values", lambda *args, **kwargs: seen.append(collect_secret_values()))
     after = DestinationSchema(fields=({"key": "token", "type": "secret"},))
-    store.create_instance("lingarr", settings={"token": KEY})
-    store.apply_plugin_update("lingarr", _resolver({INSTANCE: after, CONNECTION: after}))
+    store.create_instance("example_engine", settings={"token": KEY})
+    store.apply_plugin_update("example_engine", _resolver({INSTANCE: after, CONNECTION: after}))
     assert seen and KEY in seen[-1]
 
 
 def test_every_plugin_update_that_changes_what_an_owner_stores_moves_its_revision(store):
     after = DestinationSchema(fields=({"key": "token", "type": "secret"}, {"key": "label", "type": "text"}))
-    instance = store.create_instance("lingarr", settings={"token": KEY, "label": "x"})
-    moved_only = store.create_instance("lingarr", settings={"token": "", "label": "y"})
-    untouched = store.create_instance("lingarr", settings={"label": "z"})
-    connection = store.add_connection(instance.id, "t", plugin_id="lingarr", settings={"label": "c"})
-    store.apply_plugin_update("lingarr", _resolver({INSTANCE: after, CONNECTION: after}),
+    instance = store.create_instance("example_engine", settings={"token": KEY, "label": "x"})
+    moved_only = store.create_instance("example_engine", settings={"token": "", "label": "y"})
+    untouched = store.create_instance("example_engine", settings={"label": "z"})
+    connection = store.add_connection(instance.id, "t", plugin_id="example_engine", settings={"label": "c"})
+    store.apply_plugin_update("example_engine", _resolver({INSTANCE: after, CONNECTION: after}),
                               new_settings=lambda kind, row: {"label": "migrated"} if kind == CONNECTION else None)
     store._session.expire_all()
     assert store.get_instance(instance.id).revision == 2  # the token left its settings
@@ -711,7 +711,7 @@ def test_a_changed_destination_without_a_stored_secret_needs_nothing_entered(sto
 def test_an_instance_save_with_a_new_destination_marks_it_awaiting(store):
     schema = DestinationSchema(fields=({"key": "server", "type": "text", "destination": True},
                                        {"key": "token", "type": "secret"}))
-    instance = store.create_instance("lingarr", settings={"server": "http://a:9876"})
+    instance = store.create_instance("example_engine", settings={"server": "http://a:9876"})
     owner = (INSTANCE, instance.id)
     store.set_secret(owner, "token", KEY, destinations=effective_destinations(schema, {"server": "http://a:9876"}))
     result = store.save_instance_settings(instance.id, {"server": "http://b:9876"}, schema=schema)
@@ -761,15 +761,15 @@ def test_a_plugin_update_drops_a_stored_mask_text_instead_of_failing(store, capl
 def test_a_renamed_destination_field_with_a_new_value_is_caught(store):
     old = DestinationSchema(fields=({"key": "base_url", "type": "text", "destination": True},))
     new = DestinationSchema(fields=({"key": "server_url", "type": "text", "destination": True},))
-    instance = store.create_instance("lingarr", settings={"base_url": "http://a:1", "server_url": "http://evil:1"})
+    instance = store.create_instance("example_engine", settings={"base_url": "http://a:1", "server_url": "http://evil:1"})
     store.set_secret((INSTANCE, instance.id), "token", KEY, destinations=effective_destinations(
         old, {"base_url": "http://a:1"}))
     changes = store.destination_changes_for_update(
-        "lingarr", _resolver({INSTANCE: old, CONNECTION: old}), _resolver({INSTANCE: new, CONNECTION: new}))
+        "example_engine", _resolver({INSTANCE: old, CONNECTION: old}), _resolver({INSTANCE: new, CONNECTION: new}))
     assert [(c.owner, c.added, c.has_secrets) for c in changes] == [((INSTANCE, instance.id), {"http://evil:1"}, True)]
     # Nothing is written until the update is activated.
     assert store.get_instance(instance.id).awaiting_secrets == 0
-    waiting = store.apply_plugin_update("lingarr", _resolver({INSTANCE: new, CONNECTION: new}))
+    waiting = store.apply_plugin_update("example_engine", _resolver({INSTANCE: new, CONNECTION: new}))
     assert waiting == [(INSTANCE, instance.id)]
     assert store.secrets_for_request((INSTANCE, instance.id), effective_destinations(
         new, {"base_url": "http://a:1", "server_url": "http://evil:1"})) == {}
@@ -780,10 +780,10 @@ def test_a_field_that_becomes_a_secret_moves_its_stored_plaintext_into_the_secre
                                       {"key": "token", "type": "secret"},
                                       {"key": "tokens", "type": "key_list", "secret": True},
                                       {"key": "label", "type": "text"}))
-    instance = store.create_instance("lingarr", settings={"base_url": "http://a:1", "token": KEY, "label": "x",
+    instance = store.create_instance("example_engine", settings={"base_url": "http://a:1", "token": KEY, "label": "x",
                                                           "tokens": ["k1-0123456789", "k2-0123456789"]})
-    connection = store.add_connection(instance.id, "t", plugin_id="lingarr", settings={"token": "", "label": "y"})
-    waiting = store.apply_plugin_update("lingarr", _resolver({INSTANCE: after, CONNECTION: after}))
+    connection = store.add_connection(instance.id, "t", plugin_id="example_engine", settings={"token": "", "label": "y"})
+    waiting = store.apply_plugin_update("example_engine", _resolver({INSTANCE: after, CONNECTION: after}))
     assert waiting == []
     assert store.settings_of(store.get_instance(instance.id)) == {"base_url": "http://a:1", "label": "x"}
     held = store.secrets_for_request((INSTANCE, instance.id), effective_destinations(after, {"base_url": "http://a:1"}))
@@ -798,14 +798,14 @@ def test_a_changed_default_is_a_new_destination(store):
                                      "default": "https://api.example.com"},))
     new = DestinationSchema(fields=({"key": "base_url", "type": "text", "destination": True,
                                      "default": "https://api.other.example"},))
-    instance = store.create_instance("lingarr", settings={})
+    instance = store.create_instance("example_engine", settings={})
     changes = store.destination_changes_for_update(
-        "lingarr", _resolver({INSTANCE: old, CONNECTION: old}), _resolver({INSTANCE: new, CONNECTION: new}))
+        "example_engine", _resolver({INSTANCE: old, CONNECTION: old}), _resolver({INSTANCE: new, CONNECTION: new}))
     assert changes[0].added == {"https://api.other.example"} and changes[0].has_secrets is False
     # A value the user typed wins over the default, so the changed default is not a new destination.
     store.save_instance_settings(instance.id, {"base_url": "https://api.example.com"}, schema=old)
     assert store.destination_changes_for_update(
-        "lingarr", _resolver({INSTANCE: old, CONNECTION: old}), _resolver({INSTANCE: new, CONNECTION: new})) == []
+        "example_engine", _resolver({INSTANCE: old, CONNECTION: old}), _resolver({INSTANCE: new, CONNECTION: new})) == []
 
 
 def test_a_changed_endpoint_origin_is_a_new_destination_for_its_connections(store):
@@ -839,12 +839,12 @@ def test_an_update_that_adds_no_destination_changes_nothing(store):
 
 def test_a_migration_that_changes_a_destination_is_caught_through_its_settings(store):
     schema = DestinationSchema(fields=({"key": "base_url", "type": "text", "destination": True},))
-    instance = store.create_instance("lingarr", settings={"base_url": "http://a:1"})
+    instance = store.create_instance("example_engine", settings={"base_url": "http://a:1"})
     resolver = _resolver({INSTANCE: schema, CONNECTION: schema})
     changes = store.destination_changes_for_update(
-        "lingarr", resolver, resolver, new_settings=lambda kind, row: {"base_url": "http://migrated:1"})
+        "example_engine", resolver, resolver, new_settings=lambda kind, row: {"base_url": "http://migrated:1"})
     assert changes[0].added == {"http://migrated:1"}
-    store.apply_plugin_update("lingarr", resolver, new_settings=lambda kind, row: {"base_url": "http://migrated:1"})
+    store.apply_plugin_update("example_engine", resolver, new_settings=lambda kind, row: {"base_url": "http://migrated:1"})
     assert store.settings_of(store.get_instance(instance.id)) == {"base_url": "http://migrated:1"}
     assert store.get_instance(instance.id).revision == 2
 

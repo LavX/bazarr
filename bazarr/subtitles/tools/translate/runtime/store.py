@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.database import (TableTranslatorConnection, TableTranslatorEngineInstance,
                           TableTranslatorSecret)
@@ -247,7 +248,7 @@ class TranslatorStore:
             return False
         if legacy_engines.legacy_engine_for(instance.plugin_id) is not None:
             # Served by code in Bazarr+ itself: it needs no plugin, only its address.
-            return legacy_engines.configured()
+            return legacy_engines.configured(instance_settings=self.settings_of(instance))
         if not self._plugin_active(instance.plugin_id):
             return False
         connections = self.list_connections(instance.id)
@@ -271,9 +272,25 @@ class TranslatorStore:
         return row
 
     def ensure_instance(self, plugin_id: str, **kwargs):
-        """The plugin's first instance, created when it has none."""
+        """The plugin's first instance, created when it has none.
+
+        The check is made again inside the write transaction, so two callers that both saw none do not both
+        create one. A second process is stopped by the unique index of an engine served by Bazarr+ itself,
+        and the loser reads the row the winner made.
+        """
         existing = self.list_instances(plugin_id)
-        return existing[0] if existing else self.create_instance(plugin_id, **kwargs)
+        if existing:
+            return existing[0]
+        try:
+            with write_transaction(self._session):
+                existing = self.list_instances(plugin_id)
+                return existing[0] if existing else self.create_instance(plugin_id, **kwargs)
+        except IntegrityError:
+            self._session.expire_all()
+            existing = self.list_instances(plugin_id)
+            if existing:
+                return existing[0]
+            raise
 
     def save_instance_settings(self, instance_id: int, settings: Mapping[str, Any], *,
                                schema: DestinationSchema, settings_version: int | None = None,
