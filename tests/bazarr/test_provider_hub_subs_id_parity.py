@@ -4,8 +4,11 @@
 A blacklist row names a subtitle by ``(provider, subs_id)``. The pool drops a
 candidate when that pair is in the blacklist, so a switch from the built-in to
 the plugin only keeps a row working if the plugin's host id equals the stored
-one, or the row is rewritten to it. The fixtures below pair what each built-in
-stored with what its plugin reports for the same subtitle.
+one, or the row is rewritten to it. The fixtures pair what each built-in
+stores with the id its plugin builds. The built-in side comes from this
+repository's provider classes; the plugin side is transcribed from the id
+formulas of the catalog at ``beta`` commit f51d041 and was not executed, so a
+catalog change to an id format is not caught here.
 """
 import pytest
 from babelfish import Language
@@ -80,8 +83,9 @@ def test_the_table_covers_exactly_the_migrated_built_ins():
 def test_the_audit_tally_holds():
     classes = list(LEGACY_ID_CLASS.values())
     assert classes.count(PREFIX) == 5
-    assert classes.count(DERIVED) + classes.count(DERIVABLE) == 37
-    assert classes.count(LOST) == 14
+    assert classes.count(DERIVED) == 12
+    assert classes.count(DERIVED) + classes.count(DERIVABLE) == 38
+    assert classes.count(LOST) == 13
 
 
 def test_every_written_rule_is_a_derived_or_prefix_provider_and_only_those():
@@ -141,3 +145,50 @@ def test_two_providers_never_rewrite_to_the_same_id():
 def test_the_module_does_not_reach_the_database():
     assert not hasattr(legacy, "mutate_state")
     assert not any(name in vars(legacy) for name in ("database", "TableBlacklist", "TableHistory"))
+
+
+@pytest.mark.parametrize("provider", ["animetosho", "subtis"])
+def test_animetosho_and_subtis_are_classified_from_their_plugin_formulas(provider):
+    # animetosho hashes an entry id the row never held, subtis hashes the
+    # lookup URL built from the media file: only the second can be followed.
+    assert LEGACY_ID_CLASS[provider] == {"animetosho": LOST, "subtis": DERIVABLE}[provider]
+    assert rewrite_legacy_subs_id(provider, "https://x/y", "en") is None
+
+
+# Language column forms as Bazarr persists them: code2 for the history rows and
+# for the UI, basename for a pool-recorded blacklist row, each with a variant.
+PERSISTED_LANGUAGES = [
+    ("en", "eng", False), ("pt", "por", False), ("pt-BR", "por", False), ("sr-Cyrl", "srp", False),
+    ("pb", "por", False), ("zt", "zho", False), ("ea", "spa", False),
+    ("pb:forced", "por", True), ("zt:forced", "zho", True), ("ea:forced", "spa", True),
+    ("pb:hi", "por", False), ("zt:HI", "zho", False), ("ea:hi", "spa", False),
+    ("en:forced", "eng", True), ("en:hi", "eng", False), ("hu:Forced", "hun", True),
+]
+
+
+@pytest.mark.parametrize("stored, alpha3, forced", PERSISTED_LANGUAGES)
+def test_every_persisted_language_form_reaches_the_plugin_alpha3(stored, alpha3, forced):
+    assert rewrite_legacy_subs_id("titlovi", "77", stored) == f"titlovi:titlovi-77-{alpha3}"
+    expected = f"supersubtitles:supersubtitles-77-{alpha3}{'-forced' if forced else ''}"
+    assert rewrite_legacy_subs_id("supersubtitles", "77", stored) == expected
+
+
+def test_the_bazarr_codes_map_to_the_alpha3_the_plugins_report():
+    from languages.custom_lang import BrazilianPortuguese, ChineseTraditional, LatinAmericanSpanish
+
+    for custom in (BrazilianPortuguese(), ChineseTraditional(), LatinAmericanSpanish()):
+        assert rewrite_legacy_subs_id("titlovi", "1", custom.alpha2) == (
+            f"titlovi:titlovi-1-{custom.official_alpha3}")
+
+
+def test_a_plain_row_for_a_site_marked_forced_subtitle_is_the_documented_gap():
+    # The plugin would have called this subtitle supersubtitles-77-hun-forced.
+    assert rewrite_legacy_subs_id("supersubtitles", "77", "hu") == "supersubtitles:supersubtitles-77-hun"
+
+
+def test_confirmed_only_withholds_the_unread_prefix_rules():
+    for provider in PREFIX_UNCONFIRMED:
+        assert rewrite_legacy_subs_id(provider, "9", None) == f"{provider}:9"
+        assert rewrite_legacy_subs_id(provider, "9", None, confirmed_only=True) is None
+    assert rewrite_legacy_subs_id("subsource", "9", None, confirmed_only=True) == "subsource:9"
+    assert rewrite_legacy_subs_id("betaseries", "9", "en", confirmed_only=True) == "betaseries:betaseries-9-eng"

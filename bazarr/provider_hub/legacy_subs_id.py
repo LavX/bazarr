@@ -20,13 +20,27 @@ Classes (``LEGACY_ID_CLASS``):
     The plugin id is a function of the old id and the row's language. A rule is
     written, in ``rewrite_legacy_subs_id``.
 ``derivable``
-    The plugin id is a function of the old id plus context a row may hold (the
-    language, the season and episode, a value parsed from a URL). Read from the
-    plugin code, no rule written yet.
+    The plugin id is a function of the old id plus context a row, or the media
+    file it belongs to, can supply (the language, the season and episode, a
+    value parsed from a URL, the video's hash or size). Read from the plugin
+    code, no rule written yet.
 ``lost``
     The plugin id embeds data an old row never recorded (a file hash, an entry
-    id, a digest). The row cannot be rewritten: its entry stops suppressing and
-    that is documented rather than fixed.
+    id, a digest over a value only the provider's site can return). The row
+    cannot be rewritten: its entry stops suppressing and that is documented
+    rather than fixed.
+
+Languages. A blacklist row stores the language the search used, with
+``:forced`` or ``:hi`` appended for those variants, and the History page stores
+Bazarr's own two-letter code the same way. That includes Bazarr's custom codes
+``pb``, ``zt`` and ``ea``, which a plugin reports as ``por``, ``zho`` and
+``spa``; they are mapped before the code is parsed.
+
+One limit: the supersubtitles plugin appends ``-forced`` when the subtitle
+itself is a forced one, which it reads from the listing. A row records only the
+variant that was requested, so a ``:forced`` row maps to the ``-forced`` id and
+any other row to the plain one. A subtitle the site marks as forced but that
+was blacklisted under a plain request keeps an old id that no rule reaches.
 
 Plugin ids carry no stability promise beyond what each plugin does today, so a
 catalog update can change a format. The tests pin each written rule to the
@@ -48,7 +62,10 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "addic7ed": DERIVABLE,  # needs the season and episode
     "animekalesi": DERIVABLE,  # sha1 of the old id, a colon and the alpha3
     "animesubinfo": DERIVABLE,
-    "animetosho": LOST,  # embeds the entry id
+    # sha1 over the torrent entry id, the download URL, the alpha3 and the
+    # country. The old row holds the URL and the language but never the entry
+    # id, which only the site's feed can give back.
+    "animetosho": LOST,
     "assrt": DERIVABLE,  # needs the site's own language code
     "avistaz": DERIVABLE,
     "betaseries": DERIVED,
@@ -85,7 +102,11 @@ LEGACY_ID_CLASS: dict[str, str] = {
     "subssabbz": LOST,  # digest over the download URL and the file name
     "subsunacs": LOST,  # digest over the download URL and an identity
     "subsynchro": LOST,  # the file id comes from the download page
-    "subtis": LOST,  # digest over a method the old row lacks
+    # sha1 over the lookup method and the API URL built from the video's hash,
+    # size or file name. Everything but the method comes from the media file
+    # the row belongs to, and the method is one of four, so a rule needs the
+    # file and may try each.
+    "subtis": DERIVABLE,
     "subtitrarinoi": DERIVABLE,
     "subtitriid": DERIVABLE,
     "subtitulamostv": PREFIX,
@@ -105,8 +126,14 @@ LEGACY_ID_CLASS: dict[str, str] = {
 
 # The prefix rows whose plugin side was read but not run on a recorded
 # response: the plugin takes its id from a normalised URL or an id the old
-# class built from a differently named field.
+# class built from a differently named field. A rewrite that is wrong here
+# yields an id no subtitle has, so the default applies the rule; a caller that
+# wants only confirmed rules passes ``confirmed_only=True``.
 PREFIX_UNCONFIRMED = frozenset({"karagarga", "ktuvit", "subtitulamostv"})
+
+# Bazarr's own codes for the languages babelfish has no plain code for, and the
+# ISO 639-3 code a plugin reports for each.
+_BAZARR_CODES = {"pb": "por", "zt": "zho", "ea": "spa"}
 
 # Derived rules whose plugin id ends in the row's language as an ISO 639-3
 # code, in the form ``<provider>-<old id>-<alpha3>``.
@@ -123,32 +150,41 @@ def host_subtitle_id(provider_id: str, worker_id: str) -> str:
 
 
 def _row_language(language: str | None) -> tuple[str, bool] | None:
-    """``(alpha3, forced)`` for a blacklist row's language, or None.
+    """``(alpha3, forced)`` for a row's language, or None.
 
-    A row stores ``Language.basename`` with ``:forced`` or ``:hi`` appended for
-    those variants, for example ``en``, ``pt-BR``, ``sr-Cyrl`` or ``en:forced``.
+    Stored forms: ``Language.basename`` (``en``, ``pt-BR``, ``sr-Cyrl``) or
+    Bazarr's code2 (``en``, ``pb``, ``zt``, ``ea``), each with ``:forced`` or
+    ``:hi`` (any case) appended for those variants.
     """
     if not language or not isinstance(language, str):
         return None
-    base, _, variant = language.partition(":")
-    try:
-        alpha3 = Language.fromietf(base).alpha3
-    except (BabelfishError, ValueError, KeyError):
-        return None
-    return alpha3, variant == "forced"
+    base, _, variant = language.strip().partition(":")
+    base = base.strip()
+    alpha3 = _BAZARR_CODES.get(base.lower())
+    if alpha3 is None:
+        try:
+            alpha3 = Language.fromietf(base).alpha3
+        except (BabelfishError, ValueError, KeyError):
+            return None
+    return alpha3, variant.strip().lower() == "forced"
 
 
-def rewrite_legacy_subs_id(provider_id: str, subs_id: str, language: str | None = None) -> str | None:
+def rewrite_legacy_subs_id(
+    provider_id: str, subs_id: str, language: str | None = None, *, confirmed_only: bool = False,
+) -> str | None:
     """The id the catalog plugin of ``provider_id`` gives the subtitle that the
     built-in stored as ``subs_id``, or None when the row cannot be followed.
 
     ``language`` is the row's language column. None is returned, never a
     guess, for a provider whose class is not ``prefix`` or ``derived``, for an
     id that does not have the built-in's shape, and for a derived rule whose
-    language is missing or unreadable.
+    language is missing or unreadable. ``confirmed_only`` also withholds the
+    rules in ``PREFIX_UNCONFIRMED``.
     """
     kind = LEGACY_ID_CLASS.get(provider_id)
     if kind not in (PREFIX, DERIVED) or not isinstance(subs_id, str) or not subs_id:
+        return None
+    if confirmed_only and provider_id in PREFIX_UNCONFIRMED:
         return None
     if kind == PREFIX:
         return host_subtitle_id(provider_id, subs_id)
