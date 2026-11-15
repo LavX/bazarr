@@ -939,7 +939,8 @@ def test_a_source_dated_a_few_seconds_ahead_is_held_for_the_minimum_wait(monkeyp
     assert source_wait_elapsed(str(source)) is False
 
 
-def _insert_history_row(session, model, action, subtitles_path, seconds_after, score=None, score_out_of=None):
+def _insert_history_row(session, model, action, subtitles_path, seconds_after, score=None, score_out_of=None,
+                        now=None):
     from datetime import datetime, timedelta
 
     from sqlalchemy import insert
@@ -953,7 +954,7 @@ def _insert_history_row(session, model, action, subtitles_path, seconds_after, s
     session.execute(insert(table).values(
         action=action, description="Later event.", language="en", provider=None,
         score=score, score_out_of=score_out_of, arr_instance_id=1,
-        timestamp=datetime.now() + timedelta(seconds=seconds_after),
+        timestamp=(now or datetime.now()) + timedelta(seconds=seconds_after),
         subtitles_path=subtitles_path, **keys))
     session.commit()
 
@@ -1043,12 +1044,16 @@ def test_a_scan_translation_cancels_when_its_source_is_replaced_while_it_waits(
         validate_subtitle_versions(expected)
 
 
-def _scan_once(model, monkeypatch, schema_session, source, minutes):
+def _scan_once(model, monkeypatch, schema_session, source, minutes, global_forward=None):
     searches, translations = [], Mock()
     if model == "movie":
         scan = _prepare_movie_scan(monkeypatch, schema_session, searches, translations)
     else:
         scan = _prepare_series_scan(monkeypatch, schema_session, searches, translations)
+    if global_forward is not None:
+        # The scan's global forward mapping, in place of the identity the preparation installs.
+        monkeypatch.setattr(scan.path_mappings, "path_replace_movie" if model == "movie" else "path_replace",
+                            global_forward)
     _point_source_at(monkeypatch, scan, source)
     _minimum_source_wait(monkeypatch, minutes)
     if model == "movie":
@@ -1058,11 +1063,11 @@ def _scan_once(model, monkeypatch, schema_session, source, minutes):
     return searches, translations
 
 
-def _record_download(session, model, source, minutes_ago, action=1):
+def _record_download(session, model, source, minutes_ago, action=1, now=None):
     from subliminal_patch.score import MAX_SCORES
 
     _insert_history_row(session, model, action, source, seconds_after=-minutes_ago * 60,
-                        score=MAX_SCORES[model], score_out_of=MAX_SCORES[model])
+                        score=MAX_SCORES[model], score_out_of=MAX_SCORES[model], now=now)
 
 
 @pytest.mark.parametrize("model", ["movie", "episode"])
@@ -1206,3 +1211,86 @@ def test_a_written_time_in_the_history_is_measured_like_a_file_time(monkeypatch,
     # A few seconds ahead is a clock disagreement and waits; hours ahead cannot be a fresh file.
     assert source_wait_elapsed(source, datetime.now() + timedelta(seconds=5)) is False
     assert source_wait_elapsed(source, datetime.now() + timedelta(hours=3)) is True
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+@pytest.mark.parametrize("stored_through", ["instance", "global"])
+def test_history_rows_are_matched_through_the_instance_and_the_global_mapping(
+        schema_session, monkeypatch, tmp_path, model, stored_through):
+    """Rows are stored through the owning instance's mapping, older ones through
+    the global mapping. The scans resolve the source through the global mapping,
+    so matching a row through the instance mapping as well is defensive: it only
+    matters when the two agree on the source. Both forms must match, and the
+    global one is the fallback when the instance's mapping does not apply to the
+    stored path."""
+    import utilities.path_mappings as mapping_module
+
+    source = _source_subtitle(tmp_path, minutes_old=120)
+    global_forward = None
+    if stored_through == "instance":
+        monkeypatch.setattr(mapping_module, "_instance_path_mapping",
+                            lambda arr_instance_id, media_type: [["/remote", str(tmp_path)]])
+        stored = "/remote/fixture.en.srt"
+    else:
+        # The instance has a mapping of its own that leaves this path alone, so
+        # only the global mapping turns the stored path back into the source.
+        monkeypatch.setattr(mapping_module, "_instance_path_mapping",
+                            lambda arr_instance_id, media_type: [["/unrelated", "/elsewhere"]])
+        stored = "/global/fixture.en.srt"
+
+        def global_forward(path):
+            return str(tmp_path) + path[len("/global"):] if path.startswith("/global") else path
+    _record_download(schema_session, model, stored, minutes_ago=5)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60,
+                                        global_forward=global_forward)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_limit_a_sync_vouches_for_an_unlogged_rewrite_before_it(schema_session, monkeypatch, tmp_path, model):
+    """Download two hours ago, an outside replacement ten minutes ago that the
+    history does not know, then a sync a minute ago. The sync row covers the
+    file's time, so the download's age stands. This is an accepted limit."""
+    source = _source_subtitle(tmp_path, minutes_old=1.5)
+    _record_download(schema_session, model, source, minutes_ago=120)
+    _insert_history_row(schema_session, model, 5, source, seconds_after=-60)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_called_once()
+    assert searches == [[]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_limit_a_file_system_clock_ahead_delays_the_wait_by_the_skew(
+        schema_session, monkeypatch, tmp_path, model):
+    """The row says the wait ended three seconds ago. The file system's clock
+    runs five seconds ahead, so the file is dated later than the row and the
+    wait counts from the file time, which is still two seconds short. This is an
+    accepted limit: the delay is at most the skew. The clock is pinned, and the
+    row is written from the same instant."""
+    from datetime import datetime
+
+    now = datetime(2026, 6, 1, 12, 0, 0)
+    monkeypatch.setattr("subtitles.wanted.utils.time", SimpleNamespace(time=lambda: now.timestamp()))
+    source = tmp_path / "fixture.en.srt"
+    source.write_text("fixture", encoding="utf-8")
+    _record_download(schema_session, model, str(source), minutes_ago=(3600 + 3) / 60, now=now)
+
+    skewed = now.timestamp() - 3600 + 2
+    os.utime(source, (skewed, skewed))
+    searches, translations = _scan_once(model, monkeypatch, schema_session, str(source), 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+    # In step with this clock the file is dated at the row, and the same download translates.
+    in_step = now.timestamp() - 3603
+    os.utime(source, (in_step, in_step))
+    searches, translations = _scan_once(model, monkeypatch, schema_session, str(source), 60)
+
+    translations.assert_called_once()
+    assert searches == [[]]

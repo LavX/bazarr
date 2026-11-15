@@ -228,8 +228,14 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                                     arr_instance_id,
                                 )
                             ).all()
+                            def local_forms(stored_path, _owner=arr_instance_id):
+                                return (
+                                    path_mappings.path_replace_instance(stored_path, _owner, 'episode'),
+                                    path_mappings.path_replace(stored_path),
+                                )
+
                             written_at, hand_upload = source_history_for_wait(
-                                source_rows, source_srt, path_mappings.path_replace)
+                                source_rows, source_srt, local_forms)
                             held = not hand_upload and not source_wait_elapsed(source_srt, written_at)
                         if held:
                             logging.debug(

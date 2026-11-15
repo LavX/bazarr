@@ -59,13 +59,15 @@ def _written_after(source_path, reference):
     return reference.timestamp() + _MTIME_SLACK_SECONDS < modified_at <= time.time() + _MTIME_SLACK_SECONDS
 
 
-def source_history_for_wait(rows, source_path, path_replace):
+def source_history_for_wait(rows, source_path, local_forms):
     """What the history says about when a source arrived and where it came from.
 
     Returns ``(written_at, hand_upload)``. ``rows`` come newest first with the
-    stored (reverse-mapped) path, which ``path_replace`` maps to the path the
-    scan works with. Only rows stored for this very file count: a newer upload
-    of another file says nothing about it.
+    stored (reverse-mapped) path, which ``local_forms`` maps to the paths the
+    scan may know it by: through the owning instance's mapping, which is how
+    rows are stored now, and through the global one, which older rows used. Only
+    rows stored for this very file count: a newer upload of another file says
+    nothing about it.
 
     The newest row that put the file there (not a sync) gives the time and
     whether it was a hand upload. Only a sync keeps that row standing for a
@@ -79,7 +81,7 @@ def source_history_for_wait(rows, source_path, path_replace):
     """
     synced_at = None
     for row in rows:
-        if not row.subtitles_path or path_replace(row.subtitles_path) != source_path:
+        if not row.subtitles_path or source_path not in local_forms(row.subtitles_path):
             continue
         if row.action == 5:
             if synced_at is None:
@@ -109,6 +111,13 @@ def source_wait_elapsed(source_path, written_at=None):
     just now, so it is held for the wait, unless it is dated further ahead than
     the wait itself. A date that far out cannot be a file written a moment ago,
     and holding it would hold it for as long as the date stays ahead.
+
+    Two limits are accepted. A sync vouches for an unlogged rewrite before it:
+    the sync row only tells that the file's time is the sync's own, so a file
+    replaced from outside and synced afterwards is still measured from its
+    download. And a file system whose clock runs a few seconds ahead of this one
+    dates a fresh download later than its history row, so the wait counts from
+    the file time and ends later, by up to that skew.
     """
     wait_minutes = settings.translator.min_source_wait_minutes
     if not wait_minutes:
