@@ -13,7 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_embedded_extract_to_file import HEARING, fixture_video, library  # noqa: F401
+import test_embedded_extract_to_file as to_file
+from test_embedded_extract_to_file import DVB_TRACKS, HEARING, fixture_video, library  # noqa: F401
 from test_embedded_track_hidden import hidden_db  # noqa: F401
 
 
@@ -85,6 +86,25 @@ def test_the_row_s_codec_names_the_file(endpoint, codec, name):
 
     assert status == 202 and os.path.basename(body["path"]) == name
     assert queued[0][2]["codec"] == codec
+
+
+def test_a_row_without_a_codec_beside_a_dvb_track_is_checked_and_named_as_the_mks(endpoint, monkeypatch):
+    """The job copies the DVB track as .mks, so an SRT already in the way is
+    no conflict, the path returned is the .mks, and an existing .mks is."""
+    call, queued, root = endpoint
+    film = root / "owner1/movies/Film (2020)"
+    monkeypatch.setattr(to_file, "TRACKS", DVB_TRACKS)
+    (film / "Film.en.srt").write_text("mine")
+
+    body, status = call()
+
+    assert status == 202 and body["path"] == str(film / "Film.en.mks")
+    # The text row names its codec and is still held up by the SRT.
+    assert call(codec="subrip")[1] == 409
+    (film / "Film.en.mks").write_text("mine")
+    assert call() == ("A subtitle file named Film.en.mks already exists. Delete it first to extract this "
+                      "track again.", 409)
+    assert [kind for kind, _args, _kwargs in queued] == ["extract"]
 
 
 def test_an_existing_file_answers_409_and_queues_nothing(endpoint, monkeypatch):

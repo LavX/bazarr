@@ -60,6 +60,30 @@ def fixture_video(tmp_path_factory):
     return source
 
 
+@pytest.fixture(scope="module")
+def dvb_video(tmp_path_factory):
+    """A DVB English stream, then a plain English SRT: one language key, two formats."""
+    ffmpeg = shutil.which("ffmpeg")
+    assert ffmpeg and shutil.which("ffprobe"), "these tests need ffmpeg and ffprobe on PATH (CI installs them)"
+    folder = tmp_path_factory.mktemp("dvb-media")
+    (folder / "plain.srt").write_text(PLAIN)
+    sup = os.path.join(FIXTURES, "eng_hd.sup")
+    bitmap = mux_mkv(ffmpeg, str(folder / "bitmap.mkv"), [(sup, "dvbsub", "eng")])
+    source = str(folder / "source.mkv")
+    subprocess.run([ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", bitmap, "-i", str(folder / "plain.srt"),
+                    "-map", "0", "-map", "1:s", "-c", "copy", "-c:s:1", "srt", "-metadata:s:s:1", "language=eng",
+                    source], check=True)
+    return source
+
+
+# The probe's answer for dvb_video: no format from knowit for the DVB stream
+# is filled with ffprobe's codec name before anything reads it.
+DVB_TRACKS = [
+    {"format": "dvb_subtitle", "language": "eng", "name": "", "forced": False, "hearing_impaired": False},
+    {"format": "SubRip", "language": "eng", "name": "", "forced": False, "hearing_impaired": False},
+]
+
+
 @pytest.fixture
 def library(hidden_db, fixture_video, monkeypatch, tmp_path):  # noqa: F811
     """A movie and an episode of one owner, a movie of a second owner, all real files."""
@@ -287,8 +311,9 @@ def test_tools_refuse_an_image_based_track(library):
 ])
 def test_a_row_without_a_codec_gets_its_own_track_and_never_another_variant(library, monkeypatch, tracks,
                                                                             flags, name):
-    """Rows indexed before the codec was stored carry none, so the text
-    extractor is asked first and must not stand another variant in."""
+    """A row with no codec asks for a DVB track of its key first, then for a
+    text track, then for any image track, and never stands another variant
+    of the language in for the one it names."""
     import sys
 
     from subtitles.tools.embedded_extract import materialise_embedded_track
@@ -434,3 +459,104 @@ def test_single_language_mode_ignores_the_sub_half_of_a_vobsub_pair(library, mon
     (film / "Film.sub").write_bytes(b"\x00\x00\x01\xba")
 
     assert materialise_embedded_track("movie", 30, 1, "en") == [str(film / "Film.en.srt")]
+
+
+def _use_dvb_video(root, dvb_video, monkeypatch, tracks=DVB_TRACKS):
+    import sys
+
+    shutil.copyfile(dvb_video, root / "owner1/movies/Film (2020)/Film.mkv")
+    monkeypatch.setattr(sys.modules[__name__], "TRACKS", tracks)
+
+
+def test_a_row_without_a_codec_takes_the_dvb_track_of_its_key_and_a_text_row_its_own_text(
+        library, dvb_video, monkeypatch):
+    """The default parser stores no codec for a DVB track, so its row looks
+    like a text row. The text track must not be written under the DVB row's
+    name: the DVB row gets the .mks, and the text row, which names its codec,
+    gets the SRT."""
+    from subtitles.tools.embedded_extract import materialise_embedded_track
+
+    _session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    _use_dvb_video(root, dvb_video, monkeypatch)
+
+    assert materialise_embedded_track("movie", 30, 1, "en") == [str(film / "Film.en.mks")]
+    assert materialise_embedded_track("movie", 30, 1, "en", codec="subrip") == [str(film / "Film.en.srt")]
+    assert "Plain English line" in (film / "Film.en.srt").read_text()
+
+
+def test_the_tools_still_read_the_text_track_beside_a_dvb_track(library, dvb_video, monkeypatch):
+    from subtitles.tools.embedded_extract import materialise_embedded_track
+
+    _session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    _use_dvb_video(root, dvb_video, monkeypatch)
+
+    assert materialise_embedded_track("movie", 30, 1, "en", text_only=True) == [str(film / "Film.en.srt")]
+
+
+@pytest.mark.parametrize("failure", ["timeout", "exit", "missing"])
+def test_a_failed_dvb_copy_never_falls_through_to_the_text_track(library, dvb_video, monkeypatch, failure):
+    import subprocess
+    from types import SimpleNamespace
+
+    import subtitles.tools.translate.batch as batch
+    from subtitles.tools.embedded_extract import NotExtractable, materialise_embedded_track
+
+    _session, root, _events, published = library
+    film = root / "owner1/movies/Film (2020)"
+    _use_dvb_video(root, dvb_video, monkeypatch)
+
+    def broken(command, *args, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, 600)
+        return SimpleNamespace(returncode=1, stderr="boom", stdout="")
+
+    def no_binary(name):
+        raise FileNotFoundError(name)
+
+    if failure == "missing":
+        monkeypatch.setattr(batch, "get_binary", no_binary)
+    else:
+        monkeypatch.setattr(batch.subprocess, "run", broken)
+
+    with pytest.raises(NotExtractable, match="ffmpeg could not copy"):
+        materialise_embedded_track("movie", 30, 1, "en")
+
+    assert {path.name for path in film.iterdir()} == {"Film.mkv"}
+    assert published == []
+
+
+# A WebVTT track: knowit maps no format, so its row stores no codec.
+@pytest.mark.parametrize("tracks", [[TRACKS[0], TRACKS[1], dict(TRACKS[2], format=None), TRACKS[3]]])
+def test_a_text_row_without_a_codec_beside_a_pgs_track_gets_the_text(library, monkeypatch, tracks):
+    import sys
+
+    from subtitles.tools.embedded_extract import materialise_embedded_track
+
+    _session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    monkeypatch.setattr(sys.modules[__name__], "TRACKS", tracks)
+
+    assert materialise_embedded_track("movie", 30, 1, "en") == [str(film / "Film.en.srt")]
+    assert "Plain English line" in (film / "Film.en.srt").read_text()
+    assert not (film / "Film.en.sup").exists()
+
+
+@pytest.mark.parametrize("order", [(None, "subrip"), ("subrip", None)])
+def test_a_mass_extract_writes_both_rows_of_a_dvb_and_a_text_track_sharing_a_key(
+        library, dvb_video, monkeypatch, order):
+    """Two items for one key: the DVB row (no codec) and the text row. Each
+    lands under its own name, in either order, and neither is skipped."""
+    from subtitles.mass_operations import _extract_items, _process_subtitle_item
+
+    _session, root, _events, _published = library
+    film = root / "owner1/movies/Film (2020)"
+    _use_dvb_video(root, dvb_video, monkeypatch)
+    listing = str([["en", None, None, codec] for codec in order])
+    items, skipped = _extract_items(listing, "/movies/Film (2020)/Film.mkv",
+                                    {"radarr_id": 30, "arr_instance_id": 1})
+
+    assert skipped == 0
+    assert [_process_subtitle_item(item, "extract", {}, 1) for item in items] == [True, True]
+    assert {path.name for path in film.iterdir()} == {"Film.mkv", "Film.en.mks", "Film.en.srt"}

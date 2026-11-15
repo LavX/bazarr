@@ -262,3 +262,35 @@ def test_a_dvb_track_ahead_of_a_text_track_of_its_language_is_passed_over(batch,
     work = tmp_path / "work"
     work.mkdir()
     assert batch.extract_embedded_bitmap(german, "de", "movie", str(work)) == [str(work / "track.mks")]
+
+
+def test_a_row_without_a_codec_takes_the_dvb_track_not_the_text_track_of_its_key(batch, ffmpeg, tmp_path,
+                                                                              monkeypatch):
+    """The default parser stores no codec for a DVB track, so its row looks
+    like a text row. A text track of the same language, HI and forced flags
+    must not be written under the DVB row's name; the tools, which need text,
+    still get the text track."""
+    import subtitles.tools.embedded_extract as extract
+    from subtitles.tools.embedded_extract import EmbeddedTrack
+
+    srt = tmp_path / "german.srt"
+    srt.write_text(SRT.replace("Hello there", "Guten Tag"))
+    sup = os.path.join(FIXTURES, "eng_hd.sup")
+    german = mux_mkv(ffmpeg, str(tmp_path / "German.mkv"), [(sup, "dvbsub", "deu"), (str(srt), "srt", "deu")])
+    monkeypatch.setattr(sys.modules[__name__], "TRACKS", [
+        dict(TRACKS[2]), {"format": "SubRip", "language": "deu", "name": "", "forced": False,
+                          "hearing_impaired": False}])
+    monkeypatch.setattr(batch, "extracted_subtitles_dir", lambda: str(tmp_path / "cache"))
+    monkeypatch.setattr(extract, "refuse_taken_name", lambda track, extensions: None)
+    track = EmbeddedTrack(media_type="movie", media_id=1, arr_instance_id=1, language="de", hi=False,
+                          forced=False, video_path=german, db_path=german, local_id=1, series_id=None,
+                          title="German")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    extensions, files = extract._extract_files(track, None, str(work))
+
+    assert (extensions, files) == ((".mks",), [str(work / "track.mks")])
+    extensions, files = extract._extract_files(track, None, str(work), text_only=True)
+    assert extensions == extract.TEXT_OUTPUT_EXTENSIONS
+    assert "Guten Tag" in open(files[0]).read()
