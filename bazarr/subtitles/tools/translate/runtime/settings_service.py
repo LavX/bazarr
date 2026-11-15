@@ -572,9 +572,14 @@ class TranslatorSettingsService:
 
     @staticmethod
     def _merged(stored: Mapping[str, Any], values: Mapping[str, Any], schema: DestinationSchema) -> dict[str, Any]:
-        """The stored settings with ``values`` laid over them. An empty value removes its key (the default applies)."""
+        """The stored settings the manifest still declares, with ``values`` laid over them. An empty value removes
+        its key (the default applies)."""
         toggles = {item["key"] for item in schema.fields if item.get("type") == "toggle"}
-        merged = dict(stored)
+        # A stored key the manifest no longer declares (a release dropped the field) is not carried into a save:
+        # the form cannot show it to remove it, and validation would refuse the whole save over it. Only keys
+        # sent now are checked against the manifest.
+        declared = {item["key"] for item in schema.fields}
+        merged = {key: value for key, value in stored.items() if key in declared}
         for key, value in values.items():
             if (value is None or value == "" or value == []) and key not in toggles:
                 merged.pop(key, None)

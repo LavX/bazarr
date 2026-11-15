@@ -289,6 +289,32 @@ def test_a_connection_whose_back_end_type_is_gone_shows_none_of_its_stored_setti
     assert SECRET not in json.dumps(view) and view["connections"][0]["values"].get("token") is None
 
 
+def test_a_held_back_engine_with_a_removed_plain_field_can_be_repaired_and_turned_back_on(lifecycle):
+    from subtitles.tools.translate.runtime.settings_service import TranslatorSettingsService
+
+    store = lifecycle.store
+    old_fields = [{"key": "label", "type": "text"}, {"key": "legacy", "type": "text"}]
+    new_fields = [{"key": "label", "type": "text"}, {"key": "region", "type": "text", "required": True}]
+    instance = store.create_instance(PLUGIN, settings={"label": "mine", "legacy": "old"})
+    lifecycle.stage(_manifest("1.0.0", old_fields), _manifest("2.0.0", new_fields))
+    # The release drops a populated field and requires one the engine does not have: it is held back as it was.
+    assert "Settings > Translation" in _activate()["last_error"]
+    store._session.expire_all()
+    held = store.get_instance(instance.id)
+    assert held.enabled == 0 and store.settings_of(held) == {"label": "mine", "legacy": "old"}
+
+    service = TranslatorSettingsService(store, plugin_lookup=lambda plugin_id: SimpleNamespace(
+        plugin_id=plugin_id, name="Lingarr", version="2.0.0", active=True, manifest=_manifest("2.0.0", new_fields)))
+    saved = service.save_engine(instance.id, {"expected_revision": held.revision, "values": {"region": "eu"}})
+    assert saved["engine"]["values"] == {"label": "mine", "region": "eu"}
+    turned_on = service.save_engine(instance.id, {"expected_revision": saved["engine"]["revision"], "enabled": True})
+    assert turned_on["engine"]["enabled"] is True
+    store._session.expire_all()
+    engine = store.get_instance(instance.id)
+    assert store.settings_of(engine) == {"label": "mine", "region": "eu"}
+    assert engine.enabled == 1 and store.instance_configured(engine) is True
+
+
 def test_a_release_that_tightens_a_secret_limit_holds_back_the_owners_whose_stored_secret_breaks_it(lifecycle):
     store = lifecycle.store
     instance = store.create_instance(PLUGIN, settings={"label": "mine"})
