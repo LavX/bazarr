@@ -31,7 +31,10 @@ FLARESOLVERR_PROVIDER_FIELD = "flaresolverr_url"
 # The name a FlareSolverr container gets next to Bazarr in the usual compose
 # stack. It can also resolve through a search domain to a host nobody set up
 # for this, which is why it is only ever offered, never used unasked.
-FLARESOLVERR_SIBLING_URL = "http://flaresolverr:8191"
+FLARESOLVERR_SIBLING_ROOT = "http://flaresolverr:8191"
+# What is probed is the service root, which answers a small JSON index. What is
+# offered, and handed to providers, is the /v1 endpoint they actually call.
+FLARESOLVERR_SIBLING_URL = FLARESOLVERR_SIBLING_ROOT + "/v1"
 SIBLING_PROBE_TIMEOUT_SECONDS = 2.0
 # The whole attempt, name lookup included. The request timeout alone does not
 # bound the lookup.
@@ -63,6 +66,22 @@ def normalize_endpoint_url(value) -> str:
     if parts.scheme not in ("http", "https") or not host:
         return ""
     return text
+
+
+def same_flaresolverr_service(first: str, second: str) -> bool:
+    """Whether two addresses name the same FlareSolverr service.
+
+    The service root and its ``/v1`` endpoint are one service, and so are
+    spellings that differ by a trailing slash or by case in the scheme or host.
+    """
+
+    def key(value: str) -> str:
+        text = value.strip().rstrip("/")
+        if text.lower().endswith("/v1"):
+            text = text[:-3].rstrip("/")
+        return text.lower()
+
+    return bool(first) and bool(second) and key(first) == key(second)
 
 
 def flaresolverr_url_source(settings=None) -> tuple[str, str]:
@@ -213,7 +232,7 @@ def _join_or_start_probe() -> tuple[dict, threading.Thread | None]:
     def run():
         found = False
         try:
-            found = bool(_probe_flaresolverr(FLARESOLVERR_SIBLING_URL))
+            found = bool(_probe_flaresolverr(FLARESOLVERR_SIBLING_ROOT))
         except Exception:
             logger.debug("FlareSolverr sibling probe failed", exc_info=True)
         finally:
@@ -307,7 +326,7 @@ def flaresolverr_status(settings=None, refresh: bool = False) -> dict:
         "url": url,
         "source": source,
         # Once an address is in use there is nothing to accept.
-        "detected": detected if detected and detected.rstrip("/") != url.rstrip("/") else None,
+        "detected": detected if detected and not same_flaresolverr_service(detected, url) else None,
         "detecting": detecting,
         # Whether the sibling answered at all, even when it is the address
         # already in use and so has nothing left to offer.

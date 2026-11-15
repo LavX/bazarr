@@ -44,7 +44,7 @@ const FlareSolverrIntegration: FunctionComponent = () => {
       </MantineText>
       <Text
         label="FlareSolverr address"
-        placeholder="http://flaresolverr:8191"
+        placeholder="http://flaresolverr:8191/v1"
         description={flaresolverrHelp}
         settingKey={flaresolverrSettingKey}
       />

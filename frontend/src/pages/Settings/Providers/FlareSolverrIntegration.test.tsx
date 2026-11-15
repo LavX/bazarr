@@ -30,7 +30,7 @@ const Harness: FunctionComponent<PropsWithChildren> = ({ children }) => {
   );
 };
 
-const sibling = "http://flaresolverr:8191";
+const sibling = "http://flaresolverr:8191/v1";
 const status = (overrides: Partial<System.FlareSolverrStatus> = {}) => ({
   data: {
     url: "",

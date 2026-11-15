@@ -399,12 +399,31 @@ class TestDetect:
         self._serve(monkeypatch, body)
         assert endpoints._probe_flaresolverr("http://x") is False
 
-    def test_a_hint_that_differs_only_by_a_trailing_slash_is_not_offered(self, monkeypatch):
+    def test_the_offered_address_is_the_v1_endpoint(self):
+        assert endpoints.FLARESOLVERR_SIBLING_URL == "http://flaresolverr:8191/v1"
+        assert endpoints.FLARESOLVERR_SIBLING_ROOT == "http://flaresolverr:8191"
+
+    @pytest.mark.parametrize("saved", [
+        "http://flaresolverr:8191/v1",
+        "http://flaresolverr:8191/v1/",
+        "http://flaresolverr:8191",
+        "http://flaresolverr:8191/",
+        "HTTP://FlareSolverr:8191/V1",
+    ])
+    def test_a_saved_address_for_the_same_service_is_not_offered_again(self, monkeypatch, saved):
         monkeypatch.setattr(endpoints, "_probe_flaresolverr", lambda url: True)
         endpoints.detect_flaresolverr_sibling(refresh=True)
-        status = endpoints.flaresolverr_status(_settings(endpoints.FLARESOLVERR_SIBLING_URL + "/"))
+        status = endpoints.flaresolverr_status(_settings(saved))
         assert status["detected"] is None
         assert status["sibling_found"] is True
+
+    @pytest.mark.parametrize("saved", ["http://other:8191/v1", "http://flaresolverr:8192/v1",
+                                       "http://flaresolverr:8191/proxy"])
+    def test_a_different_service_still_gets_the_offer(self, monkeypatch, saved):
+        monkeypatch.setattr(endpoints, "_probe_flaresolverr", lambda url: True)
+        endpoints.detect_flaresolverr_sibling(refresh=True)
+        status = endpoints.flaresolverr_status(_settings(saved))
+        assert status["detected"] == endpoints.FLARESOLVERR_SIBLING_URL
 
 
 class TestNeverBlocksTheCaller:
@@ -519,7 +538,8 @@ class TestNeverBlocksTheCaller:
         assert thread is not None
         thread.join(5)
         _join_background_threads()
-        assert calls == [endpoints.FLARESOLVERR_SIBLING_URL]
+        # The root is probed; the /v1 endpoint is what gets offered.
+        assert calls == [endpoints.FLARESOLVERR_SIBLING_ROOT]
         assert endpoints.flaresolverr_status(_settings(""))["detected"] == endpoints.FLARESOLVERR_SIBLING_URL
 
     def test_only_one_refresh_runs_at_a_time(self, monkeypatch):

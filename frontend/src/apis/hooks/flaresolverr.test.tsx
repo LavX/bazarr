@@ -91,7 +91,7 @@ describe("FlareSolverr status", () => {
           data: {
             url: "",
             source: "none",
-            detected: "http://flaresolverr:8191",
+            detected: "http://flaresolverr:8191/v1",
             detecting: false,
             sibling_found: true,
           },
@@ -113,7 +113,7 @@ describe("FlareSolverr status", () => {
       });
       await waitFor(() =>
         expect(result.current.status.data?.detected).toBe(
-          "http://flaresolverr:8191",
+          "http://flaresolverr:8191/v1",
         ),
       );
 
@@ -123,7 +123,7 @@ describe("FlareSolverr status", () => {
       });
 
       expect(result.current.status.data?.detected).toBe(
-        "http://flaresolverr:8191",
+        "http://flaresolverr:8191/v1",
       );
       expect(result.current.status.data?.sibling_found).toBe(true);
     } finally {
