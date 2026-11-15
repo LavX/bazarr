@@ -54,7 +54,7 @@ from .state import (
     running_installations,
     spoofs_official_catalog_source,
 )
-from . import env_registry
+from . import env_registry, transport
 from .venv import (
     _ENV_LOCK, PluginEnvironment, environment_fingerprint, hold_environment, pin_scope, python_executable,
     release_pins, validated_bundle_path, validated_interpreter,
@@ -670,49 +670,31 @@ class _OfficialAncestry:
 
 
 def _catalog_source_error_message(error: Exception) -> str:
-    if isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+    failure = transport.classify_failure(error)
+    if failure.kind in transport.UNREACHABLE_KINDS:
         return (
             "Could not reach GitHub while refreshing this catalog source. "
             "Check network or DNS and try again."
         )
-    if isinstance(error, requests.exceptions.HTTPError):
-        response = getattr(error, "response", None)
-        status_code = getattr(response, "status_code", None)
-        headers = getattr(response, "headers", {}) or {}
-        secondary_limit = False
-        if status_code == 403 and len(getattr(response, "content", b"") or b"") <= 8192:
-            try:
-                payload = response.json()
-                message = payload.get("message", "") if isinstance(payload, dict) else ""
-                secondary_limit = isinstance(message, str) and message.lower().startswith(
-                    "you have exceeded a secondary rate limit")
-            except (ValueError, TypeError):
-                pass
-        limited = status_code in (403, 429) and (
-            status_code == 429 or secondary_limit or headers.get("x-ratelimit-remaining") == "0"
-            or headers.get("retry-after") is not None
-        )
-        if limited:
-            retry_at = None
-            try:
-                if headers.get("retry-after") is not None:
-                    retry_at = time.time() + max(0, int(headers["retry-after"]))
-                elif headers.get("x-ratelimit-remaining") == "0" and headers.get("x-ratelimit-reset") is not None:
-                    retry_at = int(headers["x-ratelimit-reset"])
-                reset = datetime.fromtimestamp(retry_at, timezone.utc) if retry_at is not None else None
-            except (ValueError, TypeError, OverflowError, OSError):
-                reset = None
+    if failure.http:
+        if failure.kind is transport.FailureKind.RATE_LIMITED:
+            reset = None
+            if failure.retry_at is not None:
+                try:
+                    reset = datetime.fromtimestamp(failure.retry_at, timezone.utc)
+                except (ValueError, TypeError, OverflowError, OSError):
+                    reset = None
             recovery = (f"Retry after {reset:%Y-%m-%d %H:%M:%S} UTC."
                         if reset is not None else "GitHub did not provide a reset time. Retry later.")
             return f"GitHub temporarily limited catalog requests. {recovery} Your cached catalog is unchanged."
-        if status_code == 403:
+        if failure.kind is transport.FailureKind.FORBIDDEN:
             return "GitHub denied access to this catalog source. Check the repository URL and access permissions."
-        if status_code in (401, 404):
+        if failure.kind in (transport.FailureKind.UNAUTHORIZED, transport.FailureKind.NOT_FOUND):
             # github.com answers an anonymous request for a missing or private
             # repository with 401, so it means the same as a 404 here.
             return "GitHub does not have this catalog source. Check the repository URL and that its catalog file exists."
-        if status_code:
-            return f"GitHub returned HTTP {status_code} while refreshing this catalog source."
+        if failure.status:
+            return f"GitHub returned HTTP {failure.status} while refreshing this catalog source."
         return "GitHub returned an error while refreshing this catalog source."
     return str(error)
 
