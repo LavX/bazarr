@@ -954,7 +954,8 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
             # may not install it, or when this Bazarr+ cannot run it.
             source = catalog_source_for_entry(sources, entry)
             entry = {**entry, "source_name": source.get("name") or entry.get("source")}
-            refusal = (_install_refusal(state, entry.get("source"), entry.get("provider_id"))
+            refusal = (_install_refusal(state, entry.get("source"), entry.get("provider_id"),
+                                        catalog_kind_of(entry))
                        or _host_refusal(entry, host))
             if refusal:
                 entry["blocked_reason"] = refusal
@@ -1481,6 +1482,10 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if kind.name != parsed.kind:
                         rejected_plugins.append(_rejected_plugin(
                             source, manifest, PLUGIN_KIND_MISMATCH_REASON))
+                        continue
+                    if kind.name != SUBTITLE_PROVIDER and not (is_official and source.get("trusted") is True):
+                        rejected_plugins.append(_rejected_plugin(
+                            source, manifest, NEW_KIND_OFFICIAL_ONLY_REASON))
                         continue
                     try:
                         kind.validate_manifest(manifest, trusted=bool(source.get("trusted", False)))
@@ -2519,6 +2524,7 @@ def _manifest_provider_id(manifest: dict[str, Any]) -> str:
 
 
 PLUGIN_KIND_NOT_INSTALLED_REASON = "This Bazarr+ does not install this kind of plugin."
+NEW_KIND_OFFICIAL_ONLY_REASON = "Only the official catalog can install this kind of plugin."
 LOCAL_PACKAGE_KIND_REASON = (
     "A local package can only be a subtitle provider. Only the official catalog can install this kind of plugin."
 )
@@ -2820,7 +2826,20 @@ def _reserved_provider_ids(state: dict[str, Any]) -> set[str]:
     )
 
 
-def _install_refusal(state: dict[str, Any], source_id: str | None, provider_id: Any) -> str | None:
+def _source_may_carry_new_kinds(state: dict[str, Any], source_id: str | None) -> bool:
+    """Whether ``source_id`` may supply plugins of a kind other than the subtitle provider.
+
+    Only the official source may, and only while Bazarr+ trusts it. A community source never may.
+    """
+    source = (state.get("catalog_sources") or {}).get(source_id) if source_id else None
+    return source_id == OFFICIAL_CATALOG_SOURCE_ID and isinstance(source, dict) and source.get("trusted") is True
+
+
+def _install_refusal(
+    state: dict[str, Any], source_id: str | None, provider_id: Any, kind: str = SUBTITLE_PROVIDER,
+) -> str | None:
+    if kind != SUBTITLE_PROVIDER and not _source_may_carry_new_kinds(state, source_id):
+        return NEW_KIND_OFFICIAL_ONLY_REASON
     if source_id != OFFICIAL_CATALOG_SOURCE_ID and str(provider_id) in _reserved_provider_ids(state):
         return RESERVED_ID_REASON
     if source_id == OFFICIAL_CATALOG_SOURCE_ID:
@@ -3232,8 +3251,9 @@ def stage_install(
         source_id, source_trusted = None, False
         catalog_list = CATALOG_LIST_PROVIDERS
     # The entry's own kind validates it: a translator is not a subtitle provider.
-    validated = _kind_for_manifest(manifest).validate_manifest(manifest, source_trusted)
-    refusal = (_install_refusal(state, source_id, validated.provider_id)
+    kind = _kind_for_manifest(manifest)
+    validated = kind.validate_manifest(manifest, source_trusted)
+    refusal = (_install_refusal(state, source_id, validated.provider_id, kind.name)
                or _host_refusal({"manifest": manifest}, current_host()))
     if refusal:
         raise ProviderHubInstallError(refusal)
@@ -3314,7 +3334,7 @@ def _requested_entry(
             f"{source_id} does not list {provider_id} {version}; refresh the catalog and try again"
         )
     key, entry = found
-    refusal = (_install_refusal(state, source_id, provider_id)
+    refusal = (_install_refusal(state, source_id, provider_id, catalog_kind_of(entry))
                or _host_refusal(entry, current_host()))
     if refusal:
         raise ProviderHubInstallError(refusal)
@@ -3822,11 +3842,10 @@ def _offerable_as_update(entry: dict[str, Any], installed_kind: str) -> bool:
     """Whether a catalog entry may be offered as an update to an installation of ``installed_kind``.
 
     A candidate of another kind is never an update: a source replacing a subtitle provider with a
-    translator under the same id is not one. Updates are staged by ``stage_install``, which validates
-    as a subtitle provider, so only that kind is offered for now. A kind with its own staging lifts
-    the second condition.
+    translator under the same id is not one. ``stage_install`` stages every kind with that kind's own
+    rules, so an installation is offered updates of its own kind.
     """
-    return catalog_kind_of(entry) == installed_kind and installed_kind == SUBTITLE_PROVIDER
+    return catalog_kind_of(entry) == installed_kind
 
 
 def _latest_catalog_manifest(
@@ -3838,7 +3857,7 @@ def _latest_catalog_manifest(
     none gets no update, and a reserved id is updated only from the official one.
     ``catalog_list`` is the list the install came from: a version that list holds is
     never taken from the other one."""
-    if source_id is None or _install_refusal(state, source_id, provider_id):
+    if source_id is None or _install_refusal(state, source_id, provider_id, installed_kind):
         return None
     host = current_host()
 
@@ -3865,7 +3884,7 @@ def _refused_update_reason(
     """The host refusal of the newest refused version ``source_id`` lists for ``provider_id``
     above ``active_version``, or None when no refused version is above it. Callers pass the
     offered version, or the installed version (the staged version when nothing is active) when none is offered."""
-    if source_id is None or _install_refusal(state, source_id, provider_id):
+    if source_id is None or _install_refusal(state, source_id, provider_id, installed_kind):
         return None
     host = current_host()
 

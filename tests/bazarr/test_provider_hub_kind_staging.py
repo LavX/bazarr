@@ -185,10 +185,12 @@ def test_every_kind_is_told_about_a_first_install_with_the_missing_fields(monkey
         monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
         monkeypatch.setattr(service, "PluginEnvironment", FakeEnvironment)
         monkeypatch.setattr(service, "python_executable", lambda env_path: tmp_path / "python")
-        monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json")))
         manifest = service_manifest("recorded", "1.0.0", kind="recording", kind_api="bazarr.recording.v1")
+        monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(
+            tmp_path / "state.json", catalog_sources={"official": verified_official_source()},
+            catalog_entries={"official:plugins:recorded:1.0.0": _official_entry(manifest)})))
 
-        service.stage_install(manifest)
+        service.install_catalog_entry("official", "recorded", "1.0.0")
     finally:
         unregister_kind("recording")
     assert seen == [("recorded", ())]

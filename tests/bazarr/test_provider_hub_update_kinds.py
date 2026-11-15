@@ -56,20 +56,28 @@ def _fail_if_staged(monkeypatch):
                         lambda *args, **kwargs: pytest.fail("nothing is staged for this installation"))
 
 
-def test_a_translator_release_is_not_offered_to_a_translator_installation(tmp_path, monkeypatch):
+def test_a_translator_release_is_offered_to_a_translator_installation_and_staged_by_its_kind(tmp_path, monkeypatch):
     from provider_hub.service import _latest_catalog_manifest, apply_update, check_updates
     from provider_hub.state import load_state
 
     _write_state(tmp_path, monkeypatch, _translator_manifest("1.0.0"), "translator",
                  _entry(_translator_manifest("2.0.0")))
-    _fail_if_staged(monkeypatch)
+    state = load_state()
+    state["catalog_sources"]["official"] = {"id": "official", "trusted": True}
+    from provider_hub.state import save_state
+    save_state(state)
+    staged = []
+    monkeypatch.setattr("provider_hub.service.stage_install",
+                        lambda manifest, **kwargs: staged.append((manifest["version"], kwargs)) or
+                        {"state": "staged", "staged_version": manifest["version"]})
 
-    assert _latest_catalog_manifest(load_state(), PLUGIN, "1.0.0", "official", installed_kind="translator") is None
-    assert check_updates()["details"]["updates_available"] == 0
+    assert _latest_catalog_manifest(
+        load_state(), PLUGIN, "1.0.0", "official", installed_kind="translator")["version"] == "2.0.0"
+    assert check_updates()["details"]["updates_available"] == 1
     provider = apply_update(PLUGIN)
 
-    assert provider["state"] == "active"
-    assert provider.get("staged_version") in (None, "")
+    assert provider["staged_version"] == "2.0.0"
+    assert staged == [("2.0.0", {"checkpoint": None, "source_id": "official"})]
 
 
 def test_a_candidate_of_another_kind_is_not_offered_to_a_subtitle_installation(tmp_path, monkeypatch):
