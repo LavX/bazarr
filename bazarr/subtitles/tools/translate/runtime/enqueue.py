@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 FOLLOW = "follow"    # an equal job is on the queue: follow it
 QUEUE = "queue"      # queue a new queue job, then ``attach`` it
-NOTHING = "nothing"  # nothing to queue yet: the job waits for its retry time
+QUEUED_FOR_RETRY = "queued_for_retry"  # the job waits for its retry time: nothing is queued before it
 
 
 @dataclass(frozen=True)
@@ -32,15 +32,8 @@ class Decision:
     action: str
     translator_job_id: int | None = None
     queue_job_id: int | None = None
-
-
-def source_key_for(video_path, source_srt_file, embedded_source=None) -> str:
-    """What a job is keyed by as its source: the subtitle file, or the embedded track it will be read from."""
-    if embedded_source:
-        track = embedded_source
-        return (f"{video_path}#embedded:{track.get('language') or ''}:"
-                f"{'hi' if track.get('hi') else ''}:{'forced' if track.get('forced') else ''}")
-    return str(source_srt_file)
+    # For QUEUED_FOR_RETRY: when the job may be queued again.
+    retry_at: datetime | None = None
 
 
 def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False, *,
@@ -71,13 +64,13 @@ def decide(source_key: str, to_lang: str, forced: bool = False, hi: bool = False
     # Joined: an equal request already has a job.
     if row.state == AWAITING_RETRY:
         if row.retry_at is not None and row.retry_at > clock():
-            return Decision(NOTHING, row.id)
+            return Decision(QUEUED_FOR_RETRY, row.id, retry_at=row.retry_at)
         return Decision(QUEUE, row.id)
     if row.state in (QUEUED, RUNNING) and row.queue_job_id is not None \
             and JobsQueuePort().status(row.queue_job_id) in ("pending", "running"):
         return Decision(FOLLOW, row.id, row.queue_job_id)
     if row.state == RUNNING:
-        return Decision(NOTHING, row.id)
+        return Decision(FOLLOW, row.id)  # it runs, but no queue job of the queue's is known for it
     return Decision(QUEUE, row.id)
 
 

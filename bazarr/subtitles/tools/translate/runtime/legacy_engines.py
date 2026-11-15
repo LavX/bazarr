@@ -13,9 +13,8 @@ What exists today, in one place:
   token (a secret, so it never comes out).
 * ``configured`` is true once the person has set an address: a value other than the shipped default, an
   address saved from the page, or an install that already ran Lingarr (it was the selected translator).
-* ``legacy_engine_for`` is a seam for dispatch, which is not wired to it yet. Nothing runs a job through it
-  today. When dispatch lands, a job whose engine instance has a plugin id this returns an engine for should
-  not go to a worker: it should run the in-core service named by ``translator_type`` through
+* ``legacy_engine_for`` is the seam dispatch reads: a job whose engine instance has a plugin id this returns an
+  engine for does not go to a worker. It runs the in-core service named by ``translator_type`` through
   ``TranslatorFactory.create_translator``, as the old path did, with no connections, no cost and history rows
   that name the plugin id ``lingarr``.
 """

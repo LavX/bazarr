@@ -91,8 +91,8 @@ def _job_source_key(video_path, source_srt_file, embedded_source):
 
 
 def _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source):
-    """The queue job to follow for a request the runtime already has a job for, 0 when the request waits for
-    its job's retry time, or None when a new queue job is to be added (and always None with the runtime off).
+    """The queue job to follow for a request the runtime already has a job for, 0 when there is none to follow
+    (the job waits for its retry time and is logged as such, or runs with no queue job), or None when a new queue job is to be added (and always None with the runtime off).
 
     A manual pick of one back end is made before this call, through ``runtime.enqueue.decide`` with the
     connection, which records the pin on the job; the request here then joins that job.
@@ -110,8 +110,12 @@ def _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_s
         logging.exception('BAZARR could not record a translation request in the translation runtime')
         return None
     if decision.action == enqueue.FOLLOW:
-        return decision.queue_job_id
-    if decision.action == enqueue.NOTHING:
+        return decision.queue_job_id or 0
+    if decision.action == enqueue.QUEUED_FOR_RETRY:
+        # The job is queued for a retry and nothing may be queued before its time; there is no queue job to
+        # follow yet, which callers read as "nothing queued now".
+        logging.info('BAZARR translation is waiting for its retry time (%s) and is not queued again before it',
+                     decision.retry_at)
         return 0
     return None
 

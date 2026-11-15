@@ -122,7 +122,7 @@ class DispatchOutcome:
     # For lines the caller has still to write: the job is not over until it has. The caller ends it with
     # ``complete()`` once the subtitle is published, or ``publication_failed(error)`` when it could not be.
     complete: Callable[[], None] | None = field(default=None, repr=False)
-    publication_failed: Callable[[BaseException], None] | None = field(default=None, repr=False)
+    publication_failed: Callable[[BaseException], str] | None = field(default=None, repr=False)
 
     @property
     def partial(self) -> bool:
@@ -438,24 +438,28 @@ class Dispatcher:
         jobs.complete(state.job_id)
         self._finish_history(history, state, "partial" if output.partial_error else "completed")
 
-    def _publication_failed(self, jobs, history, state, error: BaseException) -> None:
+    def _publication_failed(self, jobs, history, state, error: BaseException) -> str:
         """The subtitle could not be written. The batches stay for a retry, unless the write was refused because
-        a subtitle arrived meanwhile or the person stopped the job: then nothing is left to retry."""
+        a subtitle arrived meanwhile or the person stopped the job: then nothing is left to retry. Says what was
+        recorded: ``"retry"``, ``"failed"`` or ``"cancelled"``."""
         from app.jobs_queue import JobCancelled
         from subtitles.tools.subsync_engines import SubtitleDestinationChanged, SubtitleSourceChanged
 
         if isinstance(error, JobCancelled):
             jobs.cancel(state.job_id)
             self._finish_history(history, state, "cancelled")
-        elif isinstance(error, (SubtitleDestinationChanged, SubtitleSourceChanged)):
+            return "cancelled"
+        if isinstance(error, (SubtitleDestinationChanged, SubtitleSourceChanged)):
             jobs.fail(state.job_id, fail.DESTINATION_CHANGED, fail.MESSAGES[fail.DESTINATION_CHANGED])
             self._finish_history(history, state, "failed", fail.DESTINATION_CHANGED,
                                  fail.MESSAGES[fail.DESTINATION_CHANGED])
+            return "failed"
         else:
             message = fail.MESSAGES[fail.PUBLISH_FAILED]
             jobs.await_retry(state.job_id, fail.PUBLISH_FAILED, message, retry_at=self.clock() +
                              timedelta(seconds=DEFAULT_RETRY_SECONDS))
             self._finish_history(history, state, "awaiting_retry", fail.PUBLISH_FAILED, type(error).__name__)
+            return "retry"
 
     def _finish_history(self, history, state, status, error_class=None, detail=None):
         try:
@@ -530,6 +534,7 @@ class Dispatcher:
         for index, connection in enumerate(candidates):
             try:
                 result = self._attempt(spec, state, jobs, ledger, instance, info, connection, source, target)
+                lines, partial_error = self._compose(spec, result, target)
             except AttemptFailure as failure:
                 last = failure
                 more = index < len(candidates) - 1
@@ -550,9 +555,9 @@ class Dispatcher:
                     continue
                 raise
             if connection is not None:
+                # Ok only now: the answer has passed Bazarr+'s checks as well.
                 history.note_attempt(state.ledger_id, connection_id=connection.id,
                                      backend_type=connection.backend_type, model=result.model or connection.model)
-            lines, partial_error = self._compose(spec, result, target)
             return DispatchOutcome("lines", lines=lines, partial_error=partial_error, plugin_id=info.plugin_id,
                                    engine_name=info.name)
         raise last if last is not None else AttemptFailure(fail.NO_USABLE_CONNECTION,
@@ -569,15 +574,15 @@ class Dispatcher:
         usable = [item for item in connections if store.connection_usable(item)]
         if not usable:
             raise AttemptFailure(fail.NO_USABLE_CONNECTION, fail.MESSAGES[fail.NO_USABLE_CONNECTION])
-        open_ones, last_waiting = [], None
+        open_ones, soonest = [], None
         for item in usable:
             waiting = self.windows.waiting(item.id)
             if waiting is None:
                 open_ones.append(item)
-            else:
-                last_waiting = waiting
+            elif soonest is None or waiting[0] < soonest[0]:
+                soonest = waiting
         if not open_ones:
-            remaining, error_class = last_waiting
+            remaining, error_class = soonest
             raise AttemptFailure(error_class, "Every back end of this engine asked to be left alone for now.",
                                  retry_after=remaining)
         return open_ones

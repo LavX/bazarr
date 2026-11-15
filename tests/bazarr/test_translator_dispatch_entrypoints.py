@@ -79,7 +79,8 @@ def test_a_job_awaiting_its_retry_waits_for_its_time_and_is_then_queued_again(en
     jobs.start(job_id, source_digest="d", engine_instance_id=1, settings_revision=1)
     jobs.await_retry(job_id, "rate_limited", "later", retry_at=env.clock() + timedelta(minutes=5))
     early = enqueue.decide(SOURCE, "fr", session=env.session, clock=env.clock)
-    assert (early.action, early.translator_job_id) == (enqueue.NOTHING, job_id)
+    assert (early.action, early.translator_job_id) == (enqueue.QUEUED_FOR_RETRY, job_id)
+    assert early.retry_at == env.clock() + timedelta(minutes=5)
     env.clock.advance(minutes=6)
     due = enqueue.decide(SOURCE, "fr", session=env.session, clock=env.clock)
     assert due.action == enqueue.QUEUE and due.translator_job_id == job_id
@@ -564,7 +565,7 @@ def test_with_the_switch_off_the_editor_uses_the_sidecar_service(monkeypatch):
     assert editor._runtime_editor_service("movie") is None
 
 
-def test_a_subtitle_that_cannot_be_written_leaves_the_job_awaiting_a_retry_with_its_batches(env, media, monkeypatch):
+def test_a_subtitle_that_cannot_be_written_leaves_the_job_awaiting_a_retry_and_says_so(env, media, monkeypatch):
     from subtitles.tools.translate.runtime import service
 
     env.ai_engine()
@@ -573,13 +574,46 @@ def test_a_subtitle_that_cannot_be_written_leaves_the_job_awaiting_a_retry_with_
         raise OSError("read-only file system")
 
     monkeypatch.setattr(service, "staged_subtitle_write", broken)
-    with pytest.raises(OSError):
+    with pytest.raises(service.TranslationRuntimeError) as caught:
         build_service(env, media).translate(job_id=None)
+    # What is raised matches what is recorded: a failure that will be retried, so the item is not held back.
+    assert (caught.value.reason, caught.value.retry_later) == ("publish_failed", True)
+    assert isinstance(caught.value.__cause__, OSError)
     job = env.last_job()
     assert (job.state, job.error_class) == ("awaiting_retry", "publish_failed")
     assert len(env.checkpoints()) == 1, "the batches wait for the retry"
     row = env.history(job)
     assert (row["status"], row["error_class"]) == ("awaiting_retry", "publish_failed")
+
+
+def test_a_write_refused_because_a_subtitle_arrived_is_raised_as_it_was_and_not_retried(env, media, monkeypatch):
+    from subtitles.tools.subsync_engines import SubtitleDestinationChanged
+    from subtitles.tools.translate.runtime import service
+
+    env.ai_engine()
+    monkeypatch.setattr(service, "staged_subtitle_write",
+                        lambda *a, **k: (_ for _ in ()).throw(SubtitleDestinationChanged("moved")))
+    with pytest.raises(SubtitleDestinationChanged):
+        build_service(env, media).translate(job_id=None)
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("failed", "destination_changed") and env.checkpoints() == []
+
+
+def test_a_failure_after_the_file_is_on_disk_is_not_a_failed_publication(env, media, monkeypatch):
+    from subtitles.tools.translate.runtime import service
+
+    env.ai_engine()
+
+    def broken(**kwargs):
+        raise RuntimeError("the history database is down")
+
+    monkeypatch.setattr(service, "history_log_movie", broken)
+    with pytest.raises(RuntimeError):
+        build_service(env, media).translate(job_id=None)
+    assert media.dest.exists()
+    job = env.last_job()
+    assert job.state == "completed" and job.error_class is None and env.checkpoints() == []
+    assert env.history(job)["status"] == "completed"
 
 
 def test_the_job_completes_only_once_the_subtitle_is_written(env, media):

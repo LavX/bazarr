@@ -22,7 +22,7 @@ import functools
 import json
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -56,7 +56,6 @@ class AttemptContext:
     # Called on every reserve, usage and checkpoint: the worker is alive and making headway.
     activity: Callable[[], None] | None = None
     batches: int = 0
-    held: list = field(default_factory=list)
 
     @property
     def ledger_id(self) -> str:
@@ -144,7 +143,6 @@ def reserve(call) -> dict:
         context.refusal = reservation.reason
         # The plugin ends its attempt as cancelled; the dispatcher reads ``refusal`` to tell that from a Stop.
         raise _refuse("cancelled", f"the cost budget does not cover this call ({reservation.reason})")
-    context.held.append(hold)
     _touch(context)
     return {"hold": hold}
 
@@ -186,7 +184,7 @@ def usage(call) -> dict:
             [(hold, tokens if index == 0 else 0, 0, actual if index == 0 else 0, model)
              for index, hold in enumerate(holds)], limits=limits)
     except UsageError:
-        raise _refuse("invalid_request", "that reservation is not one of this job's") from None
+        raise _refuse("invalid_request", "those reservations are not this job's to settle") from None
     over_budget = settlement.over_budget
     if over_budget:
         context.over_budget = True

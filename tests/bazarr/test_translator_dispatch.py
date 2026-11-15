@@ -775,7 +775,7 @@ def test_a_hold_that_fits_is_stored_before_it_is_answered(env):
     ledger.reserve_job_budget(str(job_id), limits)
     context, call = _host_call(env, job_id, {"amount": 0.25, "model": "m"}, limits=limits)
     hold = hc.reserve(call)["hold"]
-    assert ledger.job_cost(str(job_id)) == usd(0.25) and context.held == [hold]
+    assert ledger.job_cost(str(job_id)) == usd(0.25)
     settle = type("Call", (), {"context": context, "params": {"tokens": 5, "cost": 0.1, "model": "m",
                                                              "reservations": [hold]}})()
     hc.usage(settle)
@@ -936,21 +936,27 @@ def test_an_engine_that_published_by_itself_completes_the_job_at_once(env, linga
 # ---------------------------------------------------------------------------------------------- the budget
 
 
-def test_the_dispatcher_that_lost_the_race_for_a_job_does_not_give_back_the_winners_budget(env):
+def test_the_dispatcher_that_lost_the_race_for_a_job_does_not_give_back_the_winners_budget(env, monkeypatch):
+    """Both dispatchers saw the job queued. The winner starts it and reserves its budget between the loser's
+    look and the loser's start, so the loser goes through the whole of run() and finds the job taken."""
     env.ai_engine()
-    jobs = TranslationJobs(env.session, clock=env.clock)
-    job_id = jobs.request(SOURCE, TARGET).job_id
     ledger = UsageLedger(env.session, clock=env.clock)
     limits = CostLimits(month_cap=usd(10), translation_limit=1)
     env.limits = limits
-    # The winner has started the job and holds its budget.
-    jobs.start(job_id, source_digest="d", engine_instance_id=1, settings_revision=1)
-    ledger.reserve_job_budget(str(job_id), limits)
-    held = ledger.job_hold(str(job_id))
-    assert held == usd(10)
-    # The loser saw the same queued job and runs it: it finds the job taken.
+    job_id = TranslationJobs(env.session, clock=env.clock).request(SOURCE, TARGET).job_id
+    real_start = TranslationJobs.start
+
+    def winner_first(self, *args, **kwargs):
+        if not getattr(winner_first, "done", False):
+            winner_first.done = True
+            assert real_start(self, job_id, source_digest="d", engine_instance_id=1, settings_revision=1)
+            ledger.reserve_job_budget(str(job_id), limits)
+        return real_start(self, *args, **kwargs)
+
+    monkeypatch.setattr(TranslationJobs, "start", winner_first)
     assert env.dispatcher().run(make_spec()).kind == "skipped"
-    assert ledger.job_hold(str(job_id)) == held
+    assert ledger.job_hold(str(job_id)) == usd(10), "the winner's budget is still held"
+    assert env.requests() == []
 
 
 def test_a_dispatcher_gives_back_a_budget_it_reserved(env):
@@ -1163,3 +1169,56 @@ def test_a_dispatcher_with_no_worker_bound_closes_the_job_without_asking_for_one
     assert caught.value.cause == "workers_unbound" and "not available yet" in caught.value.reason
     assert env.requests() == []
     assert env.last_job().error_class == "gate_closed"
+
+
+def test_a_reading_tied_to_a_hold_that_is_already_settled_is_refused_and_settles_nothing(env):
+    from subtitles.tools.translate.runtime.usage import UsageError
+
+    job_id = _running_job(env)
+    limits = CostLimits(job_cap=usd(1), translation_limit=1)
+    ledger = UsageLedger(env.session, clock=env.clock)
+    ledger.reserve_job_budget(str(job_id), limits)
+    ledger.reserve_call(str(job_id), "a", worst_case_micros=usd(0.4), limits=limits)
+    ledger.reserve_call(str(job_id), "b", worst_case_micros=usd(0.4), limits=limits)
+    ledger.settle_calls(str(job_id), [("a", 1, 0, usd(0.1), "m")], limits=limits)
+    with pytest.raises(UsageError):
+        ledger.settle_calls(str(job_id), [("a", 1, 0, usd(0.1), "m"), ("b", 0, 0, 0, "m")], limits=limits)
+    assert ledger.job_cost(str(job_id)) == usd(0.1) + usd(0.4), "the later hold was not settled at nothing"
+    again = ledger.settle_calls(str(job_id), [("a", 1, 0, usd(0.1), "m")], limits=limits)
+    assert again.already_settled is True
+
+
+def test_two_holds_settled_across_a_month_rollover_refund_against_the_final_total(env):
+    job_id = _running_job(env)
+    limits = CostLimits(month_cap=usd(10), job_cap=usd(1), translation_limit=1)
+    ledger = UsageLedger(env.session, clock=env.clock)
+    ledger.reserve_job_budget(str(job_id), limits)
+    ledger.reserve_call(str(job_id), "a", worst_case_micros=usd(0.4), limits=limits)
+    ledger.reserve_call(str(job_id), "b", worst_case_micros=usd(0.4), limits=limits)
+    env.clock.advance(days=20)  # the budget moves into December; the holds were made in November
+    ledger.roll_month(limits)
+    settled = ledger.settle_calls(str(job_id), [("a", 10, 0, usd(0.7), "m"), ("b", 0, 0, 0, "m")], limits=limits)
+    assert settled.job_cost == usd(0.7) and settled.over_budget is False
+    # Judged once against 0.8 before and 0.7 after: the budget keeps the 0.2 it had left, and the 0.1 the call
+    # did not use goes back to November. Hold by hold it came to 0.
+    assert ledger.job_hold(str(job_id)) == usd(0.2)
+
+
+def test_an_answer_that_fails_the_checks_is_not_recorded_as_a_good_attempt(env):
+    instance, first, _second = two_connections(env)
+    env.scripts[PLUGIN] = {str(first.id): [{"corrupt": "bad_tag"}]}
+    with pytest.raises(DispatchFailed):
+        env.dispatcher().run(make_spec())
+    row = {item["connection_id"]: item for item in env.history(env.last_job())["connections"]}[first.id]
+    assert row["last_error_class"] == "output_check_failed" and row["attempts"] == 1
+
+
+def test_when_every_connection_is_waiting_the_soonest_window_decides(env):
+    instance, first, second = two_connections(env)
+    env.windows.note(first.id, fail.AttemptFailure("rate_limited", "x", retry_after=500.0))
+    env.windows.note(second.id, fail.AttemptFailure("quota_exhausted", "x", retry_after=60.0))
+    with pytest.raises(DispatchFailed) as caught:
+        env.dispatcher().run(make_spec())
+    assert caught.value.error_class == "quota_exhausted"
+    assert caught.value.retry_at == datetime(2026, 11, 15, 12, 1, 0)
+    assert env.requests() == []

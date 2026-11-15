@@ -181,18 +181,25 @@ class RuntimeTranslatorService:
         if outcome.kind == "published":
             return outcome.published
         try:
-            path = self._publish(subs, lines, outcome, job_id)
+            translated = self._write_file(subs, lines, outcome, job_id)
         except BaseException as error:
             # The job is not over until the subtitle is written: its batches stay for a retry and the failure is
-            # on record.
-            if outcome.publication_failed is not None:
-                outcome.publication_failed(error)
+            # on record. The error raised matches what was recorded, so the queue and the history agree.
+            recorded = outcome.publication_failed(error) if outcome.publication_failed is not None else None
+            if recorded == "retry":
+                raise TranslationRuntimeError(
+                    "The translation finished but the subtitle could not be written. It will be tried again later.",
+                    "publish_failed", retry_later=True) from error
             raise
-        if outcome.complete is not None:
-            outcome.complete()
-        return path
+        try:
+            return self._record(outcome, translated)
+        finally:
+            # The file is on disk: whatever the bookkeeping after it does, the translation is done.
+            if outcome.complete is not None:
+                outcome.complete()
 
-    def _publish(self, subs, source_lines, outcome, job_id):
+    def _write_file(self, subs, source_lines, outcome, job_id):
+        """Write the translated subtitle. Returns the word the credit line and the history message use."""
         with staged_subtitle_write(self.video_path, self.dest_srt_file,
                                    on_publish=publication_callback(self.media_type, self.video_path, "translate",
                                                                    self.arr_instance_id),
@@ -206,7 +213,10 @@ class RuntimeTranslatorService:
             subs.save(temporary)
             translated = "partially translated" if self.partial_error else "translated"
             add_translator_info(temporary, f"# Subtitles {translated} with {outcome.engine_name} #")
+        return translated
 
+    def _record(self, outcome, translated):
+        """The history, post-processing hooks and result of a subtitle that is on disk."""
         message = (f"{language_from_alpha2(self.from_lang)} subtitles {translated} to "
                    f"{language_from_alpha3(self.to_lang)} using {outcome.engine_name}.")
         if self.partial_error:

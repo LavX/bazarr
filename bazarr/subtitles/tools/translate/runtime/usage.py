@@ -271,9 +271,14 @@ class UsageLedger:
         reservation is settled in one transaction and ``over_budget`` is judged once, after the last of them: a
         call that reserved two holds and reports one reading settles one hold at that reading and the other at
         nothing, and no sum taken half way (the reading against the second hold still counted at its worst
-        case) ever counts. A reservation that is not the job's refuses the whole step.
+        case) ever counts. A reservation that is not the job's refuses the whole step, and so does a mix of settled
+        and unsettled holds: a reading tied to a hold that was already settled would otherwise settle a later one
+        at nothing. What a call did not use goes back to the job's hold, or not after a month rollover, once and
+        against the final total, not hold by hold.
         """
         items = list(settlements)
+        if not items:
+            raise UsageError("Nothing to settle")
         for _call_id, input_tokens, output_tokens, actual_micros, _model in items:
             _micros(actual_micros, "actual_micros")
             if input_tokens < 0 or output_tokens < 0:
@@ -286,12 +291,13 @@ class UsageLedger:
                 if row is None:
                     raise UsageError(f"No reservation for call {call_id} of job {job_id}")
                 rows.append(row)
-            if all(row.state == CALL_SETTLED for row in rows):
+            settled = [row.state == CALL_SETTLED for row in rows]
+            if all(settled):
                 return Settlement(self._job_counted(job_id), self._over_budget(job_id), already_settled=True)
+            if any(settled):
+                raise UsageError("Some of these reservations are already settled")
+            counted_before = self._job_counted(job_id)
             for row, (_call_id, input_tokens, output_tokens, actual_micros, model) in zip(rows, items):
-                if row.state == CALL_SETTLED:
-                    continue
-                counted_before = self._job_counted(job_id)
                 row.actual_micros = actual_micros
                 row.input_tokens = input_tokens
                 row.output_tokens = output_tokens
@@ -299,11 +305,14 @@ class UsageLedger:
                     row.model = model
                 row.state = CALL_SETTLED
                 row.settled_at = now
-                # Every read below reloads rows and sums from the database, and the session does not flush on
-                # its own: write the settlement first, and each adjustment before the next read.
-                self._session.flush()
-                self._keep_the_refund_in_the_calls_month(job_id, row.month, counted_before)
-                self._session.flush()
+            # Every read below reloads rows and sums from the database, and the session does not flush on
+            # its own: write the settlements first, and each adjustment before the next read.
+            self._session.flush()
+            budget_row = self._budget_row(job_id)
+            call_month = next((row.month for row in rows if budget_row is None or row.month != budget_row.month),
+                              rows[0].month)
+            self._keep_the_refund_in_the_calls_month(job_id, call_month, counted_before)
+            self._session.flush()
             if limits is not None:
                 budget = self._budget_row(job_id)
                 if budget is not None and budget.state == BUDGET_ACTIVE:
