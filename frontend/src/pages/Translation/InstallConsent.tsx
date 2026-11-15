@@ -13,14 +13,23 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { useProviderHubInstall } from "@/apis/hooks/providerHub";
+import { useFreshState } from "@/apis/hooks/translation";
 import { QueryKeys } from "@/apis/queries/keys";
 import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import type { TranslationAvailableEngine } from "@/types/translation";
 
-/** The server's own words in a refusal: a body that is text, or the message of one that is an object. */
+/** The longest text body that is taken for a sentence the server wrote for a person. */
+const SENTENCE_LIMIT = 300;
+
+/**
+ * The server's own words in a refusal: the message of a body that is an object, or a body that is
+ * plain text. An error page from a proxy is text too, so a body that is markup, or too long to be a
+ * sentence, is not shown: the page says what failed in its own words instead.
+ */
 function refusalText(body: unknown): string {
   if (typeof body === "string") {
-    return body.trim();
+    const text = body.trim();
+    return text.startsWith("<") || text.length >= SENTENCE_LIMIT ? "" : text;
   }
   if (typeof body === "object" && body !== null) {
     const message = (body as { message?: unknown }).message;
@@ -58,11 +67,27 @@ const InstallConsent: FunctionComponent<InstallConsentProps> = ({
   // Until all of it is over the buttons stay off, so a second install cannot be started on top.
   const [busy, setBusy] = useState(false);
   const running = useRef(false);
+  // The install itself went through. What can still fail is loading the page's new state.
+  const installedNow = useRef(false);
+  // That load failed: the question now offers the refresh, not the install.
+  const [behind, setBehind] = useState(false);
+  const fresh = useFreshState();
   const destinations = engine?.destinations ?? [];
   // A failure belongs to the attempt it came from: closing the question forgets it.
   const close = () => {
     setProblem("");
+    if (installedNow.current) {
+      // Closed before the page caught up: it is asked once more on the way out.
+      void client.invalidateQueries({ queryKey: [QueryKeys.Translation] });
+    }
     onClose();
+  };
+
+  // Loads the state the install changed. It rejects when the load fails, so a page that could not be
+  // refreshed is never taken for one that was.
+  const refresh = async () => {
+    await fresh();
+    void client.invalidateQueries({ queryKey: [QueryKeys.Translation] });
   };
 
   const run = async () => {
@@ -78,28 +103,44 @@ const InstallConsent: FunctionComponent<InstallConsentProps> = ({
         provider_id: engine.plugin_id,
         version: engine.version,
       });
-      await client.invalidateQueries({ queryKey: [QueryKeys.Translation] });
+      // From here on the plugin is installed, whatever happens to the page.
+      installedNow.current = true;
+      await refresh();
     };
     const action = `install ${engine.name}`;
     try {
-      // Installing runs code on this machine, so the server asks for the password first where a login
-      // is set up. The gate asks before the request goes out.
-      let confirmed: boolean;
-      try {
-        confirmed = await runGated(installIt, action);
-      } catch (error) {
-        if (!needsPassword(error)) {
-          throw error;
+      if (installedNow.current) {
+        // Installed on an earlier press; only the page is behind.
+        await refresh();
+      } else {
+        // Installing runs code on this machine, so the server asks for the password first where a
+        // login is set up. The gate asks before the request goes out.
+        let confirmed: boolean;
+        try {
+          confirmed = await runGated(installIt, action);
+        } catch (error) {
+          if (installedNow.current || !needsPassword(error)) {
+            throw error;
+          }
+          // The server wanted a confirmation the page believed it still had. The remembered one is
+          // gone now, so the gate asks, and the install goes out once more behind the answer.
+          confirmed = await runGated(installIt, action);
         }
-        // The server wanted a confirmation the page believed it still had. The remembered one is
-        // gone now, so the gate asks, and the install goes out once more behind the answer.
-        confirmed = await runGated(installIt, action);
+        if (!confirmed) {
+          return;
+        }
       }
-      if (confirmed) {
-        onInstalled?.(engine);
-        close();
-      }
+      onInstalled?.(engine);
+      close();
     } catch (error) {
+      if (installedNow.current) {
+        // Not a failed install: the page is what could not be loaded.
+        setBehind(true);
+        setProblem(
+          `${engine.name} is installed, but the page could not be refreshed, so it does not show it yet.`,
+        );
+        return;
+      }
       // A request that was refused says why in the server's words, when it has any. A job that
       // failed carries its own reason. Anything else gets the page's sentence, never the transport's.
       const reason = isAxiosError(error)
@@ -157,10 +198,10 @@ const InstallConsent: FunctionComponent<InstallConsentProps> = ({
           )}
           <Group justify="flex-end">
             <Button variant="default" onClick={close} disabled={busy}>
-              Cancel
+              {behind ? "Close" : "Cancel"}
             </Button>
             <Button onClick={() => void run()} loading={busy}>
-              Install
+              {behind ? "Refresh the page" : "Install"}
             </Button>
           </Group>
         </Stack>

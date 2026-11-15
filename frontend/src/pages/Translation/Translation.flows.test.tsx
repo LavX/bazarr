@@ -2289,3 +2289,224 @@ describe("Translation page, defaults after a save", () => {
     expect(score).toBeEnabled();
   });
 });
+
+describe("Translation page, an install whose answer is not a sentence", () => {
+  const offer = {
+    plugin_id: "other_engine",
+    name: "Other Engine",
+    version: "2.0.0",
+    source: "official",
+  };
+  const askToInstall = async (user: ReturnType<typeof userEvent.setup>) => {
+    state = { ...state, available_engines: [offer] };
+    await showPage();
+    await user.click(
+      screen.getByRole("button", { name: "Install Other Engine" }),
+    );
+    return screen.findByRole("dialog", { name: "Install Other Engine?" });
+  };
+
+  it("does not show an error page from a proxy as if the server had said it", async () => {
+    server.use(
+      http.post("/api/provider-hub/installations", () =>
+        HttpResponse.text(
+          "<html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1></body></html>",
+          { status: 502 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    const ask = await askToInstall(user);
+    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    expect(
+      await within(ask).findByText(
+        "The install did not finish. Check the Subtitle Hub activity for the reason.",
+      ),
+    ).toBeVisible();
+    expect(within(ask).queryByText(/Bad Gateway/)).not.toBeInTheDocument();
+    expect(within(ask).queryByText(/</)).not.toBeInTheDocument();
+  });
+
+  it("does not show a text body too long to be a sentence", async () => {
+    server.use(
+      http.post("/api/provider-hub/installations", () =>
+        HttpResponse.text("Traceback line. ".repeat(40), { status: 500 }),
+      ),
+    );
+    const user = userEvent.setup();
+    const ask = await askToInstall(user);
+    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    expect(
+      await within(ask).findByText(
+        "The install did not finish. Check the Subtitle Hub activity for the reason.",
+      ),
+    ).toBeVisible();
+    expect(within(ask).queryByText(/Traceback/)).not.toBeInTheDocument();
+  });
+
+  it("says the engine is installed when only the page could not be refreshed, and refreshes without installing again", async () => {
+    let installedOnServer = false;
+    let reloadFails = true;
+    server.use(
+      http.post("/api/provider-hub/installations", async ({ request }) => {
+        record("post", "install", await request.json());
+        installedOnServer = true;
+        return HttpResponse.json({ job_id: null });
+      }),
+      http.get("/api/translation/state", () =>
+        installedOnServer && reloadFails
+          ? new HttpResponse(null, { status: 500 })
+          : HttpResponse.json(
+              installedOnServer
+                ? {
+                    ...state,
+                    available_engines: [],
+                    instances: [
+                      ...state.instances,
+                      { ...second, id: 9, name: "Other Engine" },
+                    ],
+                  }
+                : state,
+            ),
+      ),
+    );
+    const user = userEvent.setup();
+    const ask = await askToInstall(user);
+    await user.click(within(ask).getByRole("button", { name: "Install" }));
+    // Installed, and the page could not be loaded: the question stays, and says exactly that.
+    expect(
+      await within(ask).findByText(
+        "Other Engine is installed, but the page could not be refreshed, so it does not show it yet.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(ask).queryByText(/The install did not finish/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Install Other Engine?" }),
+    ).toBeVisible();
+    expect(
+      within(ask).queryByRole("button", { name: "Install" }),
+    ).not.toBeInTheDocument();
+    reloadFails = false;
+    await user.click(
+      within(ask).getByRole("button", { name: "Refresh the page" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Install Other Engine?" }),
+      ).not.toBeInTheDocument(),
+    );
+    // One install, and the page now lists the engine.
+    expect(calls.filter((call) => call.path === "install")).toHaveLength(1);
+    expect(
+      await screen.findByRole("radio", { name: "Other Engine" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("Translation page, a switch write that is refused", () => {
+  it("holds the row until what is saved now has been loaded", async () => {
+    const held = gate();
+    let holding = false;
+    server.use(
+      http.get("/api/translation/state", async () => {
+        if (holding) {
+          await held.opened;
+        }
+        return HttpResponse.json(state);
+      }),
+      http.patch("/api/translation/connections/:id", () => {
+        record("patch", "connection", null);
+        holding = true;
+        return HttpResponse.json(
+          {
+            error: "stale_revision",
+            message: "The back end changed since it was loaded.",
+            revision: 4,
+          },
+          { status: 409 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    const toggle = screen.getByLabelText("Use OpenAI compatible, model-1");
+    const edit = screen.getByRole("button", {
+      name: "Edit OpenAI compatible, model-1",
+    });
+    await user.click(toggle);
+    expect(await screen.findByText(/was changed somewhere else/)).toBeVisible();
+    // Refused, and the reload is still open: the row is not released yet.
+    expect(toggle).toHaveAttribute("aria-busy", "true");
+    expect(edit).toBeDisabled();
+    await user.click(toggle);
+    expect(calls).toHaveLength(1);
+    held.open();
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-busy", "false"));
+    expect(edit).toBeEnabled();
+    expect(toggle).toBeChecked();
+  });
+});
+
+describe("Translation page, defaults saved in part", () => {
+  it("says the cost caps were not saved when only that write fails, and clears it when a retry starts", async () => {
+    state = { ...state, capabilities: ["summary", "limits"] };
+    const held = gate();
+    let capsFail = true;
+    const summary = (cap: number | null) => ({
+      month: { key: "2026-11", spent: 3.21, cap },
+      job_cap: 1,
+      queue: { running: 0, pending: 0, limit: 2 },
+    });
+    server.use(
+      http.get("/api/translation/summary", () =>
+        HttpResponse.json(summary(20)),
+      ),
+      http.post("/api/system/settings", () => {
+        record("post", "settings", null);
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.put("/api/translation/limits", async ({ request }) => {
+        const body = (await request.json()) as { month_cap: number | null };
+        record("put", "limits", body);
+        if (capsFail) {
+          return new HttpResponse(null, { status: 500 });
+        }
+        await held.opened;
+        return HttpResponse.json(summary(body.month_cap));
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("tab", { name: "Defaults" }));
+    const score = await screen.findByLabelText(
+      "Score of a translated subtitle",
+    );
+    await user.clear(score);
+    await user.type(score, "65");
+    const month = await screen.findByLabelText("Cost cap per month");
+    await user.clear(month);
+    await user.type(month, "35");
+    await user.click(screen.getByRole("button", { name: "Save defaults" }));
+    const said =
+      "Your other changes were saved. The cost caps were not saved. Try again.";
+    expect(await screen.findByText(said)).toBeVisible();
+    expect(calls.map((call) => call.path)).toEqual(["settings", "limits"]);
+    // What was typed is still there to send again.
+    expect(month).toHaveValue("$35");
+    capsFail = false;
+    await user.click(screen.getByRole("button", { name: "Save defaults" }));
+    // The retry is on its way: the old message is gone before its answer arrives.
+    await waitFor(() => expect(calls.at(-1)?.path).toBe("limits"));
+    await waitFor(() => expect(calls).toHaveLength(4));
+    expect(screen.queryByText(said)).not.toBeInTheDocument();
+    held.open();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Save defaults" }),
+      ).toBeDisabled(),
+    );
+    expect(screen.queryByText(said)).not.toBeInTheDocument();
+  });
+});

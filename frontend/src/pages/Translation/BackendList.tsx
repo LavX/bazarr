@@ -10,6 +10,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   afterStateDelivered,
   readRefusal,
+  useFreshState,
   useReorderConnections,
   useTestConnection,
   useUpdateConnection,
@@ -75,6 +76,7 @@ const BackendList: FunctionComponent<{
   // The switches whose write is on its way, with the value they were set to.
   const [switching, setSwitching] = useState<Record<number, boolean>>({});
   const switchingNow = useRef(new Set<number>());
+  const fresh = useFreshState();
   const reorder = useReorderConnections();
   const update = useUpdateConnection();
   const test = useTestConnection();
@@ -138,6 +140,9 @@ const BackendList: FunctionComponent<{
       });
     } catch (error) {
       note(error);
+      // The row stays held until the page has what is saved now: released earlier, the switch and
+      // the form would work from the revision that was just refused.
+      await fresh().catch(() => undefined);
     } finally {
       afterStateDelivered(() => {
         switchingNow.current.delete(item.id);

@@ -102,18 +102,12 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
       changes["settings-translator-openrouter_max_concurrent"] =
         draft.max_concurrent;
     }
+    // A new attempt starts clean: what is said below belongs to this one.
+    setProblem("");
+    const settingsChanged = Object.keys(changes).length > 0;
     try {
-      if (Object.keys(changes).length > 0) {
+      if (settingsChanged) {
         await saveSettings.mutateAsync(changes);
-      }
-      if (
-        summary &&
-        (draft.job_cap !== undefined || draft.month_cap !== undefined)
-      ) {
-        await saveLimits.mutateAsync({
-          job_cap: cap(draft.job_cap, summary.job_cap),
-          month_cap: cap(draft.month_cap, summary.month.cap),
-        });
       }
     } catch (error) {
       setProblem(
@@ -121,6 +115,26 @@ const DefaultsPanel: FunctionComponent<{ summary?: TranslationSummary }> = ({
           "The defaults were not saved. Try again.",
       );
       return;
+    }
+    if (
+      summary &&
+      (draft.job_cap !== undefined || draft.month_cap !== undefined)
+    ) {
+      try {
+        await saveLimits.mutateAsync({
+          job_cap: cap(draft.job_cap, summary.job_cap),
+          month_cap: cap(draft.month_cap, summary.month.cap),
+        });
+      } catch (error) {
+        // The two are separate writes: say which one did not go through.
+        const reason = readRefusal(error)?.message;
+        setProblem(
+          `${settingsChanged ? "Your other changes were saved. " : ""}The cost caps were not saved${
+            reason ? `: ${reason}` : ". Try again."
+          }`,
+        );
+        return;
+      }
     }
     // Saved. The fields keep what was sent until the saved values have been loaded back: dropping the
     // draft earlier would show the old values for a moment, or for good when the load fails.
