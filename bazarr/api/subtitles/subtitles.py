@@ -725,15 +725,18 @@ class Subtitles(Resource):
 def _embedded_track_action(action, args, language, hi, forced, media_type, media_id, arr_instance_id):
     """Queue Extract to file, or a tool that first extracts, for one embedded track.
 
-    Answers before any ffmpeg runs: 404 for an unknown row, 409 when the file
-    the extraction would write is already there (nothing is overwritten), 415
-    when a tool is asked of an image-based track, then 202 with the job id and
-    the file the job will write.
+    Answers before anything is copied out of the video: 404 for an unknown
+    row, 409 when the file the extraction would write is already there
+    (nothing is overwritten), 415 when a tool is asked of an image-based
+    track, then 202 with the job id and the file the job will write. A row
+    with no stored codec may read the video's cached probe to tell which file
+    that is.
     """
     from subtitles.tools.embedded_extract import (ExtractionError, embedded_tool_allowed,
                                                   extract_embedded_track, output_paths, resolve_track,
                                                   run_tool_on_embedded_track, taken_output, tool_output_paths)
-    from subtitles.tools.embedded_streams import bitmap_family, output_extensions
+    from subtitles.tools.embedded_streams import OUTPUT_EXTENSIONS, bitmap_family, output_extensions
+    from subtitles.tools.translate.batch import embedded_track_family
 
     if media_type not in ("movie", "episode", "sports"):
         return "Invalid media type", 400
@@ -755,7 +758,18 @@ def _embedded_track_action(action, args, language, hi, forced, media_type, media
     # language-less name a download takes counts too, and Remove HI saves its
     # result under the language's plain name: both may be a file the user
     # downloaded, and neither is ever replaced.
-    extensions = output_extensions(codec if action == "extract" else None)
+    if action != "extract":
+        extensions = output_extensions(None)
+    elif codec:
+        extensions = output_extensions(codec)
+    else:
+        # A row with no stored codec: the track the job will copy decides the
+        # file it writes, so the answer matches what lands (a DVB track is a
+        # .mks even though its row looks like text). This reads the cached
+        # probe of the video and may run ffprobe when there is none.
+        family = embedded_track_family(track.video_path, language, media_type, hi, forced,
+                                       track.arr_instance_id)
+        extensions = OUTPUT_EXTENSIONS.get(family) or output_extensions(None)
     destinations = output_paths(track.video_path, language, hi, forced, extensions)
     clash = taken_output(track, extensions, tool_output_paths(track, action))
     if clash:

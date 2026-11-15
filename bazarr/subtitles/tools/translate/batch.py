@@ -763,6 +763,41 @@ def detect_language_from_content(srt_path):
     return None
 
 
+class BitmapCopyFailed(Exception):
+    """ffmpeg could not copy an image-based track that is in the video."""
+
+
+def embedded_track_family(video_path, language_code2, media_type, hi=False, forced=False,
+                          arr_instance_id=None):
+    """What Extract to file writes for a row that stored no codec: "dvb", "text", "pgs" or "vobsub".
+
+    The same choice as the extraction makes. A DVB track of the row's key wins,
+    because its format is never stored under the default parser and its row is
+    otherwise indistinguishable from a text row. Then a text track of the key,
+    then any image-based track, as a row indexed before codecs were stored
+    may name one. None when the video has no track for the key.
+    """
+    target_alpha3 = alpha3_from_alpha2(language_code2) if language_code2 else None
+    tracks = embedded_subtitle_tracks(video_path, media_type, arr_instance_id) if target_alpha3 else None
+    if not tracks:
+        return None
+    und_setting = settings.general.default_und_embedded_subtitles_lang
+    und_default_language = alpha3_from_alpha2(und_setting) if und_setting else None
+
+    def found(accept):
+        return select_subtitle_stream(tracks, target_alpha3, hi=hi, forced=forced, exact=True,
+                                      und_default_language=und_default_language, accept=accept)
+
+    index = found(lambda codec: bitmap_family(codec) == "dvb")
+    if index is None:
+        index = found(None)
+    if index is None:
+        index = found(is_bitmap_codec)
+    if index is None:
+        return None
+    return bitmap_family(track_codec(tracks[index])) or "text"
+
+
 def extract_embedded_bitmap(video_path, language_code2, media_type, work_dir, hi=False, forced=False,
                             arr_instance_id=None, codec=None, before_copy=None):
     """Copy an image-based embedded track out of the video as it is, into ``work_dir``.
@@ -776,7 +811,9 @@ def extract_embedded_bitmap(video_path, language_code2, media_type, work_dir, hi
     ``before_copy`` is called with the chosen track's family before ffmpeg
     reads the container, and may raise to stop the copy. Returns the written
     paths (the .idx first for VobSub), or None when the language has no such
-    image-based track or ffmpeg fails.
+    image-based track. Raises BitmapCopyFailed when there is one and ffmpeg
+    cannot copy it, so a caller never mistakes that for "no such track" and
+    carries on with another track of the key.
     """
     target_alpha3 = alpha3_from_alpha2(language_code2) if language_code2 else None
     if not target_alpha3:
@@ -799,7 +836,7 @@ def extract_embedded_bitmap(video_path, language_code2, media_type, work_dir, hi
         ffmpeg = get_binary("ffmpeg")
     except Exception:
         logger.error("ffmpeg binary not found, cannot extract embedded subtitles")
-        return None
+        raise BitmapCopyFailed("ffmpeg binary not found")
     extension, muxer = BITMAP_CONTAINERS[family]
     output = os.path.join(work_dir, f"track{extension}")
     command = [ffmpeg, "-nostdin", "-y", "-loglevel", "error", "-i", video_path,
@@ -808,11 +845,11 @@ def extract_embedded_bitmap(video_path, language_code2, media_type, work_dir, hi
         result = subprocess.run(command, capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired:
         logger.error("ffmpeg timed out copying subtitle stream %s of %s", index, video_path)
-        return None
+        raise BitmapCopyFailed("ffmpeg timed out")
     if result.returncode != 0 or not os.path.isfile(output) or not os.path.getsize(output):
         logger.error("ffmpeg could not copy subtitle stream %s of %s: %s", index, video_path,
                      result.stderr.strip())
-        return None
+        raise BitmapCopyFailed("ffmpeg could not copy the track")
     if family != "vobsub":
         return [output]
     from subtitles.tools.vobsub import write_vobsub_index

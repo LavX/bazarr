@@ -251,16 +251,38 @@ def _extract_files(track, codec, work_dir, text_only=False):
     text under this row's name (the full English track as Film.en.forced.srt,
     which players then show as forced subtitles), so it is off here.
 
-    Text is tried first unless the row showed an image-based codec: a row
-    indexed before the codec was stored has none, and its track may still be
-    image-based, so that case falls back to copying it out as it is, unless
-    the caller needs text. An image copy reads the whole container, and its
-    files are never listed (so a second mass extract collects the same track
-    again): the names it would take are checked once the track is chosen,
-    before ffmpeg runs.
+    A row that names an image-based codec gets its own family's track. A row
+    with no codec is ambiguous. Text rows without one are common (a WebVTT
+    track, or any row indexed before codecs were stored), but the default
+    ffprobe parser also never learns a DVB track's format, so a DVB row has
+    none either. When the video has a DVB track for the row's key, a row with
+    no codec therefore takes it, unless the caller needs text, and the text
+    track that shares the key is then reached only by a row that names its
+    codec. Without a DVB track the text track is tried first, and an
+    image-based track is the fallback. PGS and VobSub rows carry their own
+    codec and are never guessed. A copy that fails is an error: it never
+    falls through to another track of the key. An image copy reads the whole
+    container, and its files are never listed (so a second mass extract
+    collects the same track again): the names it would take are checked once
+    the track is chosen, before ffmpeg runs.
     """
-    from subtitles.tools.translate.batch import extract_embedded_bitmap, extract_embedded_subtitle
+    from subtitles.tools.translate.batch import (BitmapCopyFailed, extract_embedded_bitmap,
+                                                 extract_embedded_subtitle)
 
+    def copy_bitmap(copy_codec):
+        try:
+            return extract_embedded_bitmap(
+                track.video_path, track.language, track.media_type, work_dir, hi=track.hi, forced=track.forced,
+                arr_instance_id=track.arr_instance_id, codec=copy_codec,
+                before_copy=lambda family: refuse_taken_name(track, OUTPUT_EXTENSIONS[family]))
+        except BitmapCopyFailed as error:
+            raise NotExtractable(
+                f"Could not extract the {track.label} track: ffmpeg could not copy it (see the log).") from error
+
+    if not codec and not text_only:
+        files = copy_bitmap("dvb_subtitle")
+        if files:
+            return output_extensions(_family_of(files)), files
     if not bitmap_family(codec):
         # A text codec picks between text tracks of one language key.
         text = extract_embedded_subtitle(track.video_path, track.language, track.media_type,
@@ -279,10 +301,7 @@ def _extract_files(track, codec, work_dir, text_only=False):
         raise NotExtractable(
             f"The {track.label} track could not be read as text, and the tools need text. If it is "
             f"image-based, Extract to file copies it out as it is, for players.")
-    files = extract_embedded_bitmap(track.video_path, track.language, track.media_type, work_dir,
-                                    hi=track.hi, forced=track.forced,
-                                    arr_instance_id=track.arr_instance_id, codec=codec,
-                                    before_copy=lambda family: refuse_taken_name(track, OUTPUT_EXTENSIONS[family]))
+    files = copy_bitmap(codec)
     if files:
         return output_extensions(_family_of(files)), files
     raise NotExtractable(
