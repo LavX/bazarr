@@ -2,7 +2,10 @@ import { FunctionComponent, useId, useState } from "react";
 import { Alert, Button, SegmentedControl, Skeleton } from "@mantine/core";
 import { faChevronRight, faLanguage } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useTranslationHistory } from "@/apis/hooks/translation";
+import {
+  useTranslationHistory,
+  useTranslationQueue,
+} from "@/apis/hooks/translation";
 import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
 import { StatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
 import {
@@ -194,17 +197,23 @@ const JobList: FunctionComponent<{
 );
 
 /** What is being translated now, and what was: each job with its back end, tokens, cost and outcome. */
-const ActivityPanel: FunctionComponent<{ state: TranslationState }> = ({
-  state,
-}) => {
+const ActivityPanel: FunctionComponent<{
+  state: TranslationState;
+  /** The tab is the one on screen. A hidden tab keeps what it has and stops asking for more. */
+  active?: boolean;
+  /** Whether the server lists the jobs that have not started yet. */
+  canQueue?: boolean;
+}> = ({ state, active = true, canQueue = false }) => {
   const [filter, setFilter] = useState("all");
   const [length, setLength] = useState(PAGE);
-  const running = useTranslationHistory("running", PAGE, 5000);
+  const running = useTranslationHistory("running", PAGE, active ? 5000 : false);
   const history = useTranslationHistory(
     filter === "all" ? null : filter,
     length,
-    30_000,
+    active ? 30_000 : false,
   );
+  const queue = useTranslationQueue(canQueue, active);
+  const waiting = queue.data?.data ?? [];
   const now = running.data?.data ?? [];
   // A running job is shown once, in the section above.
   const past = (history.data?.data ?? []).filter(
@@ -220,6 +229,47 @@ const ActivityPanel: FunctionComponent<{ state: TranslationState }> = ({
             <h2 className={styles.sectionTitle}>Translating now</h2>
           </div>
           <JobList jobs={now} state={state} label="Translating now" />
+        </section>
+      )}
+
+      {waiting.length > 0 && (
+        <section className={styles.section}>
+          <div className={styles.sectionHead}>
+            <h2 className={styles.sectionTitle}>Waiting</h2>
+          </div>
+          <ul className={styles.jobs} aria-label="Waiting">
+            {waiting.map((item, index) => (
+              <li key={item.job_id} className={styles.waiting}>
+                <span className={styles.position} aria-hidden="true">
+                  {index + 1}
+                </span>
+                <span className={styles.jobTitle}>
+                  {item.media_title || "Untitled"}
+                  <span className={styles.jobSub}>
+                    {`${language(item.source_language)} to ${language(item.target_language)}`}
+                    {item.queued_at
+                      ? `, queued ${formatRelativeTime(item.queued_at)}`
+                      : ""}
+                  </span>
+                </span>
+                <StatusBadge
+                  tone={
+                    item.status === "awaiting_retry" ? "warning" : "neutral"
+                  }
+                  label={
+                    item.status === "awaiting_retry"
+                      ? "Waiting to retry"
+                      : "Queued"
+                  }
+                />
+              </li>
+            ))}
+          </ul>
+          {(queue.data?.total ?? 0) > waiting.length && (
+            <p className={styles.sectionHint}>
+              {`And ${(queue.data?.total ?? 0) - waiting.length} more.`}
+            </p>
+          )}
         </section>
       )}
 

@@ -9,7 +9,9 @@ import styles from "./Translation.module.scss";
 const EngineSetup: FunctionComponent<{
   engine: TranslationEngine;
   selected: boolean;
-}> = ({ engine, selected }) => {
+  /** Whether the server can send a test request through a back end. */
+  canTest?: boolean;
+}> = ({ engine, selected, canTest }) => {
   const status = engineStatus(engine);
   const fields = engine.schema?.fields ?? [];
   const backends = hasBackends(engine);
@@ -34,7 +36,7 @@ const EngineSetup: FunctionComponent<{
               </p>
             </div>
           </div>
-          <BackendList engine={engine} />
+          <BackendList engine={engine} canTest={canTest} />
         </section>
       )}
 

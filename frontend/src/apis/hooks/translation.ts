@@ -1,5 +1,6 @@
 import {
   keepPreviousData,
+  notifyManager,
   useMutation,
   useQuery,
   useQueryClient,
@@ -56,6 +57,17 @@ export function readRefusal(error: unknown): TranslationRefusal | null {
       ? (data.destinations as string[])
       : [],
   };
+}
+
+/**
+ * Runs `callback` once the page has been handed the state a write just loaded.
+ * A control that shows its new value before the write is confirmed drops that
+ * value here, not the moment the write settles: the loaded state reaches the
+ * page a moment after the request does, and dropping the value earlier draws
+ * the old one for a frame (and moves the focus with it).
+ */
+export function afterStateDelivered(callback: () => void) {
+  notifyManager.schedule(callback);
 }
 
 function useRefresh() {
@@ -118,8 +130,7 @@ export function useCreateConnection() {
 
 /**
  * First run in one step: add the engine's first back end, then select the
- * engine. The two requests run to the end even when the page redraws between
- * them. `created` skips the first request on a retry after only the second
+ * engine. `created` skips the first request on a retry after only the second
  * one failed, so a retry never adds the back end twice.
  */
 export function useStartEngine() {
@@ -146,7 +157,9 @@ export function useStartEngine() {
         api.translation.setPointers({ engine: instanceId }),
       );
     },
-    onSettled: refresh,
+    // Only a start that went through loads the state again. After a failure
+    // the page keeps the first-run panel as it is, with the reason on it.
+    onSuccess: refresh,
   });
 }
 
@@ -222,18 +235,47 @@ export function useFieldOptions(
 }
 
 /**
- * Spend this month, the caps and the queue. A server that does not report them
- * answers 404: the page then leaves those readouts out, so the failure is
- * neither retried nor shown as an error.
+ * Spend this month, the caps and the queue counts. Asked only of a server
+ * whose state lists the `summary` capability, so a server without the route is
+ * never sent the request.
  */
-export function useTranslationSummary() {
+export function useTranslationSummary(enabled: boolean) {
   return useQuery({
     queryKey: summaryKey,
     queryFn: () => withInlineErrors(() => api.translation.summary()),
+    enabled,
     retry: false,
     refetchOnWindowFocus: false,
-    refetchInterval: (query) => (query.state.data ? 30_000 : false),
+    refetchInterval: 30_000,
   });
+}
+
+/** The waiting jobs, asked only of a server that lists the `queue` capability. */
+export function useTranslationQueue(enabled: boolean, live: boolean) {
+  return useQuery({
+    queryKey: [QueryKeys.Translation, "queue"],
+    queryFn: () => withInlineErrors(() => api.translation.queue()),
+    enabled,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: live ? 5000 : false,
+  });
+}
+
+/**
+ * Loads the state again and answers with it, for a form that replaces its
+ * draft with what is saved now. It rejects when the load fails, so the form
+ * never copies a state it could not confirm.
+ */
+export function useFreshState() {
+  const client = useQueryClient();
+  return () =>
+    client.fetchQuery({
+      queryKey: stateKey,
+      queryFn: () => api.translation.state(),
+      staleTime: 0,
+      retry: false,
+    });
 }
 
 export function useSaveLimits() {
@@ -257,8 +299,10 @@ export function useTranslationHistory(
   status: string | null,
   length: number,
   refetchInterval: number | false = false,
+  enabled = true,
 ) {
   return useQuery({
+    enabled,
     queryKey: [QueryKeys.Translation, "history", status ?? "all", length],
     queryFn: () =>
       withInlineErrors(() =>

@@ -74,6 +74,14 @@ export interface TranslationAvailableEngine {
   destinations?: string[];
 }
 
+/**
+ * What the server can do beyond the settings themselves. The page shows a
+ * control only when its capability is listed: spend and the queue counts
+ * (`summary`), the cost caps (`limits`), the Test button (`test`), the list of
+ * waiting jobs (`queue`). A server that lists none gets none of them.
+ */
+export type TranslationCapability = "summary" | "limits" | "test" | "queue";
+
 export interface TranslationState {
   enabled: true;
   engine: number | null;
@@ -81,6 +89,26 @@ export interface TranslationState {
   instances: TranslationEngine[];
   /** Absent when the server does not list installable engines. */
   available_engines?: TranslationAvailableEngine[];
+  /** Absent on a server that has none of them. */
+  capabilities?: TranslationCapability[];
+}
+
+/** A job that has not started yet, or waits to be tried again. */
+export interface TranslationQueuedJob {
+  job_id: string;
+  media_type: string | null;
+  media_id: number | null;
+  media_title: string | null;
+  source_language: string | null;
+  target_language: string | null;
+  engine_instance_id: number | null;
+  status: "queued" | "awaiting_retry";
+  queued_at: string | null;
+}
+
+export interface TranslationQueuePage {
+  data: TranslationQueuedJob[];
+  total: number;
 }
 
 /** Spend, caps and the queue. Dollar amounts; a cap of null is no cap. */

@@ -5,164 +5,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
-import type {
-  TranslationConnection,
-  TranslationEngine,
-  TranslationHistoryJob,
-  TranslationState,
-} from "@/types/translation";
+import type { TranslationState } from "@/types/translation";
+import { connection, engine, job, second, SECRET } from "./fixtures";
 import TranslationView from ".";
-
-const SECRET = "sk-page-test-0123456789"; // pragma: allowlist secret
-
-const connection = (
-  id: number,
-  patch: Partial<TranslationConnection> = {},
-): TranslationConnection => ({
-  id,
-  instance_id: 1,
-  position: id - 1,
-  backend_type: "openai_compatible",
-  plugin_id: "",
-  model: `model-${id}`,
-  enabled: true,
-  revision: 1,
-  awaiting_secrets: false,
-  usable: true,
-  settings_version: 1,
-  values: { base_url: "http://lms:1234/v1", model: `model-${id}` },
-  secrets: {},
-  ...patch,
-});
-
-const engine = (patch: Partial<TranslationEngine> = {}): TranslationEngine => ({
-  id: 1,
-  plugin_id: "ai_translator",
-  name: "AI Subtitle Translator",
-  official: true,
-  enabled: true,
-  revision: 3,
-  awaiting_secrets: false,
-  configured: true,
-  settings_version: 1,
-  plugin_version: "2.2.0",
-  plugin: { name: "AI Subtitle Translator", version: "2.2.0", active: true },
-  schema: {
-    settings_version: 1,
-    endpoints: [],
-    fields: [
-      { key: "credit_line", type: "text", label: "Credit line" },
-      { key: "service_token", type: "secret", label: "Service token" },
-    ],
-    backend_types: {
-      openrouter: {
-        label: "OpenRouter",
-        description: "",
-        endpoints: ["https://openrouter.ai"],
-        fields: [
-          {
-            key: "model",
-            type: "options",
-            label: "Model",
-            default: "vendor/starter-model",
-          },
-          {
-            key: "api_key",
-            type: "secret",
-            label: "API key",
-            help_url: "https://example.test/keys",
-          },
-        ],
-      },
-      openai_compatible: {
-        label: "OpenAI compatible",
-        description: "",
-        endpoints: [],
-        fields: [
-          {
-            key: "preset",
-            type: "choice",
-            label: "Preset",
-            default: "custom",
-            choices: [
-              {
-                value: "lmstudio",
-                label: "LM Studio",
-                sets: { base_url: "http://host.docker.internal:1234/v1" },
-              },
-              { value: "custom", label: "Custom" },
-            ],
-          },
-          { key: "model", type: "options", label: "Model" },
-          {
-            key: "base_url",
-            type: "text",
-            label: "Base URL",
-            destination: true,
-          },
-          { key: "api_key", type: "secret", label: "API key" },
-        ],
-      },
-    },
-  },
-  values: { credit_line: "Translated by Bazarr+" },
-  secrets: { service_token: { configured: true, last4: "WXYZ" } },
-  connections: [connection(1), connection(2)],
-  ...patch,
-});
-
-const second: TranslationEngine = engine({
-  id: 2,
-  plugin_id: "google_translate",
-  name: "Google Translate",
-  official: false,
-  schema: null,
-  connections: [],
-  plugin: { name: "Google Translate", version: "1.0.0", active: true },
-});
-
-const job = (
-  id: number,
-  patch: Partial<TranslationHistoryJob> = {},
-): TranslationHistoryJob => ({
-  id,
-  job_id: `job-${id}`,
-  media_type: "movie",
-  media_id: id,
-  media_title: `Film ${id}`,
-  source_language: "en",
-  target_language: "hu",
-  plugin_id: "ai_translator",
-  plugin_version: "2.2.0",
-  engine_instance_id: 1,
-  status: "completed",
-  input_tokens: 1200,
-  output_tokens: 900,
-  cost: 0.0124,
-  error_class: null,
-  error_detail: null,
-  failovers: 0,
-  declined_by_instance_id: null,
-  declined_reason: null,
-  taken_over_by_instance_id: null,
-  started_at: "2026-11-01T10:00:00Z",
-  finished_at: "2026-11-01T10:03:00Z",
-  connections: [
-    {
-      connection_id: 1,
-      backend_type: "openai_compatible",
-      models: ["model-1"],
-      attempts: 1,
-      batches: 4,
-      input_tokens: 1200,
-      output_tokens: 900,
-      cost: 0.0124,
-      failed_over: false,
-      last_error_class: null,
-    },
-  ],
-  ...patch,
-});
 
 let state: TranslationState;
 let calls: Array<{ method: string; path: string; body: unknown }>;
@@ -182,11 +27,15 @@ beforeEach(() => {
   };
   server.use(
     http.get("/api/translation/state", () => HttpResponse.json(state)),
-    // A server that does not report spend and the queue: the page leaves them out.
-    http.get(
-      "/api/translation/summary",
-      () => new HttpResponse(null, { status: 404 }),
-    ),
+    // The state lists no capabilities, so the page must not ask for any of these.
+    http.get("/api/translation/summary", () => {
+      record("get", "summary", null);
+      return new HttpResponse(null, { status: 404 });
+    }),
+    http.get("/api/translation/queue", () => {
+      record("get", "queue", null);
+      return new HttpResponse(null, { status: 404 });
+    }),
     http.get("/api/translation/history", () =>
       HttpResponse.json({ data: [], total: 0 }),
     ),
@@ -208,6 +57,8 @@ beforeEach(() => {
   );
 });
 
+// The add menu's items are asked for with `hidden`: the menu hides itself when its button has no
+// place on screen, and in these tests nothing has a size.
 async function showPage() {
   customRender(<TranslationView />);
   return screen.findByRole("radiogroup", { name: "Engine" });
@@ -527,7 +378,7 @@ describe("Translation page", () => {
     const user = userEvent.setup();
     await showPage();
     await user.click(screen.getByRole("button", { name: "Add a back end" }));
-    const items = await screen.findAllByRole("menuitem");
+    const items = await screen.findAllByRole("menuitem", { hidden: true });
     expect(items.map((item) => item.textContent)).toEqual([
       "OpenRouter",
       "LM Studio",
@@ -567,7 +418,9 @@ describe("Translation page", () => {
     const user = userEvent.setup();
     await showPage();
     await user.click(screen.getByRole("button", { name: "Add a back end" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Custom" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Custom", hidden: true }),
+    );
     await user.type(
       await screen.findByLabelText("Base URL"),
       "http://192.168.1.5:1234/v1",
@@ -623,7 +476,9 @@ describe("Translation page", () => {
     const user = userEvent.setup();
     await showPage();
     await user.click(screen.getByRole("button", { name: "Add a back end" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Custom" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Custom", hidden: true }),
+    );
     await user.type(await screen.findByLabelText("Base URL"), "http://x:1/v1");
     await user.click(screen.getByRole("button", { name: "Add back end" }));
     const ask = await screen.findByRole("dialog", {
@@ -793,7 +648,9 @@ describe("Translation page", () => {
     await user.click(
       screen.getByRole("button", { name: "Discard and reload" }),
     );
-    expect(screen.getByLabelText("Credit line")).toHaveValue("Theirs");
+    await waitFor(() =>
+      expect(screen.getByLabelText("Credit line")).toHaveValue("Theirs"),
+    );
     expect(
       screen.getByRole("button", { name: "Save engine settings" }),
     ).toBeVisible();
@@ -1029,6 +886,7 @@ describe("Translation page", () => {
   });
 
   it("tests a back end and shows the answer under its row", async () => {
+    state = { ...state, capabilities: ["test"] };
     server.use(
       http.post("/api/translation/connections/:id/test", ({ params }) => {
         record("post", `test ${String(params.id)}`, null);
@@ -1049,6 +907,7 @@ describe("Translation page", () => {
   });
 
   it("shows the reason when a test fails", async () => {
+    state = { ...state, capabilities: ["test"] };
     server.use(
       http.post("/api/translation/connections/:id/test", () =>
         HttpResponse.json({
@@ -1069,15 +928,31 @@ describe("Translation page", () => {
     ).toBeVisible();
   });
 
-  it("leaves spend and the queue out when the server does not report them", async () => {
+  it("shows no Test, spend, queue or caps, and asks for none of them, on a server that lists no capabilities", async () => {
+    const user = userEvent.setup();
     await showPage();
     const band = screen.getByRole("group", { name: "Translation status" });
     expect(within(band).getByText("AI Subtitle Translator")).toBeVisible();
     expect(within(band).queryByText("This month")).not.toBeInTheDocument();
     expect(within(band).queryByText("Queue")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^Test / }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Defaults" }));
+    await screen.findByLabelText("Score of a translated subtitle");
+    expect(
+      screen.queryByLabelText("Cost cap per month"),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    await screen.findByText("Nothing has been translated yet");
+    expect(screen.queryByText("Waiting")).not.toBeInTheDocument();
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    // Not one request went to a route the server did not list.
+    expect(calls).toEqual([]);
   });
 
   it("shows the queue and the month's spend against its cap", async () => {
+    state = { ...state, capabilities: ["summary"] };
     server.use(
       http.get("/api/translation/summary", () =>
         HttpResponse.json({
@@ -1305,6 +1180,7 @@ describe("Translation page, defaults and activity", () => {
   });
 
   it("saves the caps through the limits route, an emptied cap as none", async () => {
+    state = { ...state, capabilities: ["summary", "limits"] };
     server.use(
       http.get("/api/translation/summary", () =>
         HttpResponse.json({

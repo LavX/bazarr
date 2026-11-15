@@ -7,6 +7,7 @@ import type {
   TranslationLimitsBody,
   TranslationNotice,
   TranslationOptionsAnswer,
+  TranslationQueuePage,
   TranslationSaveBody,
   TranslationState,
   TranslationSummary,
@@ -88,6 +89,11 @@ class TranslationApi extends BaseApi {
 
   async history(params: { start: number; length: number; status?: string }) {
     return this.get<TranslationHistoryPage>("/history", params);
+  }
+
+  /** The jobs that have not started yet, in the order they will run. */
+  async queue() {
+    return this.get<TranslationQueuePage>("/queue");
   }
 
   /** Spend this month, the caps and the queue. */

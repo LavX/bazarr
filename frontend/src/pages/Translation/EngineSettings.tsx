@@ -1,7 +1,7 @@
 /* eslint-disable camelcase -- transport names. */
 import { FunctionComponent, useState } from "react";
 import { Alert, Button, Group, Stack } from "@mantine/core";
-import { useSaveEngine } from "@/apis/hooks/translation";
+import { useFreshState, useSaveEngine } from "@/apis/hooks/translation";
 import {
   initialValues,
   PluginSettingsForm,
@@ -47,11 +47,44 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
     return saved;
   }, revision.conflicted);
 
-  const discard = () => {
-    setValues(initialValues(fields, engine.values));
+  const fresh = useFreshState();
+  // Which answer to the conflict is waiting for what is saved now.
+  const [loadingFor, setLoadingFor] = useState<"mine" | "discard" | null>(null);
+  const [reloadProblem, setReloadProblem] = useState("");
+  // What is saved now, loaded for this answer. The cached state is not used: the refresh a conflict starts
+  // may still be on its way, and copying the old state would bring back the very revision that was refused.
+  const savedNow = async (action: "mine" | "discard") => {
+    setLoadingFor(action);
+    setReloadProblem("");
+    try {
+      const state = await fresh();
+      return state.instances.find((item) => item.id === engine.id) ?? null;
+    } catch {
+      setReloadProblem(
+        "What is saved now could not be loaded, so nothing was changed. Try again.",
+      );
+      return null;
+    } finally {
+      setLoadingFor(null);
+    }
+  };
+  const discard = async () => {
+    const saved = await savedNow("discard");
+    if (!saved) {
+      return;
+    }
+    setValues(initialValues(saved.schema?.fields ?? fields, saved.values));
     setCleared([]);
-    revision.reload(engine.revision);
+    revision.reload(saved.revision);
     form.dismiss();
+  };
+  const saveMine = async () => {
+    const saved = await savedNow("mine");
+    if (!saved) {
+      return;
+    }
+    revision.adopt(saved.revision);
+    await form.save();
   };
 
   return (
@@ -76,9 +109,11 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
       {form.stale ? (
         <ConflictNotice
           subject="These settings"
-          busy={form.busy}
-          onSaveMine={() => void form.save()}
-          onDiscard={discard}
+          saving={form.busy || loadingFor === "mine"}
+          reloading={loadingFor === "discard"}
+          problem={reloadProblem}
+          onSaveMine={() => void saveMine()}
+          onDiscard={() => void discard()}
         />
       ) : (
         form.message && (

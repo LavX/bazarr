@@ -13,7 +13,10 @@ import {
   useTranslationState,
   useTranslationSummary,
 } from "@/apis/hooks/translation";
-import type { TranslationState } from "@/types/translation";
+import type {
+  TranslationCapability,
+  TranslationState,
+} from "@/types/translation";
 import ActivityPanel from "./ActivityPanel";
 import DefaultsPanel from "./DefaultsPanel";
 import EnginePanel from "./EnginePanel";
@@ -46,9 +49,10 @@ const LoadingPage: FunctionComponent = () => (
   </div>
 );
 
-const EngineTab: FunctionComponent<{ state: TranslationState }> = ({
-  state,
-}) => {
+const EngineTab: FunctionComponent<{
+  state: TranslationState;
+  canTest: boolean;
+}> = ({ state, canTest }) => {
   const engines = orderedEngines(state.instances);
   // The engine whose set-up is shown: the one the user opened, else the selected one, else the first.
   const [opened, setOpened] = useState<number | null>(null);
@@ -61,11 +65,19 @@ const EngineTab: FunctionComponent<{ state: TranslationState }> = ({
     <div className={styles.layout}>
       <EnginePanel state={state} openId={open?.id ?? null} onOpen={setOpened} />
       {open ? (
-        <EngineSetup
-          key={open.id}
-          engine={open}
-          selected={state.engine === open.id}
-        />
+        // Every engine's set-up stays mounted and only the open one shows, so a draft typed for one
+        // engine is still there after a look at another.
+        <div>
+          {engines.map((engine) => (
+            <div key={engine.id} hidden={engine.id !== open.id}>
+              <EngineSetup
+                engine={engine}
+                selected={state.engine === engine.id}
+                canTest={canTest}
+              />
+            </div>
+          ))}
+        </div>
       ) : (
         <div className={styles.quiet}>
           <p className={styles.quietTitle}>No engine is installed</p>
@@ -80,13 +92,23 @@ const EngineTab: FunctionComponent<{ state: TranslationState }> = ({
 const TranslationView: FunctionComponent = () => {
   useDocumentTitle(`Translation - ${useAppTitle()}`);
   const { data, isLoading, error, refetch, isFetching } = useTranslationState();
-  const summary = useTranslationSummary();
+  // The server says what it can do beyond the settings. Nothing is asked of, or shown for, a route it
+  // does not list.
+  const can = (capability: TranslationCapability) =>
+    data?.capabilities?.includes(capability) === true;
+  const summary = useTranslationSummary(can("summary"));
   const [params, setParams] = useSearchParams();
   const requested = params.get("tab") as TabKey | null;
   const tab: TabKey =
     requested && TABS.includes(requested) ? requested : "engine";
   // First run can be left for the full page; the choice lasts while the page is open.
   const [byHand, setByHand] = useState(false);
+  // A start that is under way keeps the first-run panel up until it has gone through, whatever a refresh
+  // in between says: the panel holds the reason a step failed and the way to try again.
+  const [starting, setStarting] = useState(false);
+  // Activity is loaded when it is first opened. After that every panel stays mounted, so a draft typed
+  // on one tab is still there after a look at another.
+  const [activitySeen, setActivitySeen] = useState(false);
 
   if (isLoading && !data) {
     return (
@@ -125,14 +147,19 @@ const TranslationView: FunctionComponent = () => {
     </Alert>
   ) : null;
 
-  if (isFirstRun(data) && !byHand) {
+  if ((isFirstRun(data) || starting) && !byHand) {
     return (
       <Container fluid px="md" className={styles.page}>
         {refreshFailed}
-        <QuickStart state={data} onByHand={() => setByHand(true)} />
+        <QuickStart
+          state={data}
+          onByHand={() => setByHand(true)}
+          onPin={setStarting}
+        />
       </Container>
     );
   }
+  const showActivity = activitySeen || tab === "activity";
 
   return (
     <Container fluid px="md" className={styles.page}>
@@ -150,9 +177,11 @@ const TranslationView: FunctionComponent = () => {
           } else {
             updated.set("tab", next);
           }
+          if (next === "activity") {
+            setActivitySeen(true);
+          }
           setParams(updated, { replace: true });
         }}
-        keepMounted={false}
       >
         <Tabs.List>
           <Tabs.Tab
@@ -175,13 +204,19 @@ const TranslationView: FunctionComponent = () => {
           </Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="engine" pt="lg">
-          <EngineTab state={data} />
+          <EngineTab state={data} canTest={can("test")} />
         </Tabs.Panel>
         <Tabs.Panel value="defaults" pt="lg">
-          <DefaultsPanel summary={summary.data} />
+          <DefaultsPanel summary={can("limits") ? summary.data : undefined} />
         </Tabs.Panel>
         <Tabs.Panel value="activity" pt="lg">
-          <ActivityPanel state={data} />
+          {showActivity && (
+            <ActivityPanel
+              state={data}
+              active={tab === "activity"}
+              canQueue={can("queue")}
+            />
+          )}
         </Tabs.Panel>
       </Tabs>
     </Container>

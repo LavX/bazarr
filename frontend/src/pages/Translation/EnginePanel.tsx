@@ -257,7 +257,11 @@ const EnginePanel: FunctionComponent<EnginePanelProps> = ({
         allowDeselect={false}
         onChange={(next) => pointers.mutate({ fallback_engine: toId(next) })}
       />
-      <InstallConsent engine={installing} onClose={() => setInstalling(null)} />
+      <InstallConsent
+        key={installing?.plugin_id ?? "none"}
+        engine={installing}
+        onClose={() => setInstalling(null)}
+      />
     </section>
   );
 };

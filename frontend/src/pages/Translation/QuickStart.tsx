@@ -21,9 +21,10 @@ import { useGuardedSave } from "./useGuardedSave";
 import styles from "./Translation.module.scss";
 
 /** The key form of the official engine: pick a service, type its key, start. */
-const KeyStart: FunctionComponent<{ engine: TranslationEngine }> = ({
-  engine,
-}) => {
+const KeyStart: FunctionComponent<{
+  engine: TranslationEngine;
+  onPin: (pinned: boolean) => void;
+}> = ({ engine, onPin }) => {
   const types = keyOnlyTypes(engine);
   const [typeId, setTypeId] = useState(types[0]?.typeId ?? "");
   const [key, setKey] = useState("");
@@ -31,26 +32,42 @@ const KeyStart: FunctionComponent<{ engine: TranslationEngine }> = ({
   const start = useStartEngine();
   // Set once the back end exists, so a retry only selects the engine.
   const created = useRef(false);
+  const [keySaved, setKeySaved] = useState(false);
   const picked = types.find((item) => item.typeId === typeId) ?? types[0];
-  const form = useGuardedSave((accepted) =>
-    start.mutateAsync({
-      instanceId: engine.id,
-      body: {
-        backend_type: picked.typeId,
-        // A field that holds several keys takes this one as its first.
-        values: {
-          [picked.secret.key]: ["key_list", "list"].includes(picked.secret.type)
-            ? [key]
-            : key,
+  const form = useGuardedSave(async (accepted) => {
+    // The panel stays up from here until the start has gone through: a refresh in between would
+    // otherwise replace it, and the reason a step failed would go with it.
+    onPin(true);
+    try {
+      await start.mutateAsync({
+        instanceId: engine.id,
+        body: {
+          backend_type: picked.typeId,
+          // A field that holds several keys takes this one as its first.
+          values: {
+            [picked.secret.key]: ["key_list", "list"].includes(
+              picked.secret.type,
+            )
+              ? [key]
+              : key,
+          },
+          accept_destinations: accepted,
         },
-        accept_destinations: accepted,
-      },
-      created: created.current,
-      onCreated: () => {
-        created.current = true;
-      },
-    }),
-  );
+        created: created.current,
+        onCreated: () => {
+          created.current = true;
+          setKeySaved(true);
+        },
+      });
+    } catch (error) {
+      // Nothing was saved: the panel is where it would be anyway.
+      if (!created.current) {
+        onPin(false);
+      }
+      throw error;
+    }
+    onPin(false);
+  });
 
   if (!picked) {
     return null;
@@ -65,7 +82,7 @@ const KeyStart: FunctionComponent<{ engine: TranslationEngine }> = ({
     ([field]) => field !== picked.secret.key,
   );
   const submit = () => {
-    if (key.trim() === "") {
+    if (!keySaved && key.trim() === "") {
       setMissing(true);
       return;
     }
@@ -80,7 +97,7 @@ const KeyStart: FunctionComponent<{ engine: TranslationEngine }> = ({
         submit();
       }}
     >
-      {types.length > 1 && (
+      {types.length > 1 && !keySaved && (
         <SegmentedControl
           aria-label="Service"
           data={types.map((item) => ({
@@ -118,7 +135,7 @@ const KeyStart: FunctionComponent<{ engine: TranslationEngine }> = ({
           </>
         }
         value={key}
-        disabled={form.busy}
+        disabled={form.busy || keySaved}
         error={keyError}
         onChange={(event) => {
           setKey(event.currentTarget.value);
@@ -127,16 +144,18 @@ const KeyStart: FunctionComponent<{ engine: TranslationEngine }> = ({
       />
       {(form.message || otherErrors.length > 0) && !keyError && (
         <Alert color="red" role="alert">
-          {otherErrors.length > 0
-            ? `${picked.type.label} needs more than a key here: ${otherErrors
-                .map(([field, message]) => `${field} ${message}`)
-                .join("; ")}. Set it up by hand below.`
-            : form.message}
+          {keySaved
+            ? "Your key is saved, but the engine could not be switched on. Try again; nothing needs typing again."
+            : otherErrors.length > 0
+              ? `${picked.type.label} needs more than a key here: ${otherErrors
+                  .map(([field, message]) => `${field} ${message}`)
+                  .join("; ")}. Set it up by hand below.`
+              : form.message}
         </Alert>
       )}
       <div>
         <Button type="submit" loading={form.busy}>
-          Start translating
+          {keySaved ? "Switch the engine on" : "Start translating"}
         </Button>
       </div>
       <ConsentModal
@@ -153,6 +172,8 @@ export interface QuickStartProps {
   state: TranslationState;
   /** Leave the panel for the full page, with nothing selected. */
   onByHand: () => void;
+  /** Keep the panel up (true) until a start that is under way has gone through (false). */
+  onPin: (pinned: boolean) => void;
 }
 
 /**
@@ -163,6 +184,7 @@ export interface QuickStartProps {
 const QuickStart: FunctionComponent<QuickStartProps> = ({
   state,
   onByHand,
+  onPin,
 }) => {
   const pointers = usePointersMutation();
   const [installing, setInstalling] =
@@ -197,7 +219,7 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
         </p>
         {official?.plugin?.active ? (
           keyOnlyTypes(official).length > 0 ? (
-            <KeyStart engine={official} />
+            <KeyStart engine={official} onPin={onPin} />
           ) : (
             <div className={styles.startForm}>
               <div>
@@ -281,7 +303,11 @@ const QuickStart: FunctionComponent<QuickStartProps> = ({
         </Anchor>
       </p>
 
-      <InstallConsent engine={installing} onClose={() => setInstalling(null)} />
+      <InstallConsent
+        key={installing?.plugin_id ?? "none"}
+        engine={installing}
+        onClose={() => setInstalling(null)}
+      />
     </div>
   );
 };

@@ -33,6 +33,11 @@ const InstallConsent: FunctionComponent<InstallConsentProps> = ({
   const install = useProviderHubInstall({ inlineErrors: true });
   const [problem, setProblem] = useState("");
   const destinations = engine?.destinations ?? [];
+  // A failure belongs to the attempt it came from: closing the question forgets it.
+  const close = () => {
+    setProblem("");
+    onClose();
+  };
 
   const run = async () => {
     if (!engine) {
@@ -47,7 +52,7 @@ const InstallConsent: FunctionComponent<InstallConsentProps> = ({
       });
       await client.invalidateQueries({ queryKey: [QueryKeys.Translation] });
       onInstalled?.(engine);
-      onClose();
+      close();
     } catch (error) {
       setProblem(
         error instanceof Error && error.message
@@ -60,7 +65,7 @@ const InstallConsent: FunctionComponent<InstallConsentProps> = ({
   return (
     <Modal
       opened={engine !== null}
-      onClose={install.isPending ? () => undefined : onClose}
+      onClose={install.isPending ? () => undefined : close}
       title={engine ? `Install ${engine.name}?` : ""}
       centered
     >
@@ -96,7 +101,7 @@ const InstallConsent: FunctionComponent<InstallConsentProps> = ({
           <Group justify="flex-end">
             <Button
               variant="default"
-              onClick={onClose}
+              onClick={close}
               disabled={install.isPending}
             >
               Cancel

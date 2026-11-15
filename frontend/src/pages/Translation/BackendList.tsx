@@ -1,5 +1,5 @@
 /* eslint-disable camelcase -- transport names. */
-import { FunctionComponent, useState } from "react";
+import { FunctionComponent, useRef, useState } from "react";
 import { Alert, Button, Menu, Switch, VisuallyHidden } from "@mantine/core";
 import {
   faCircleCheck,
@@ -8,6 +8,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
+  afterStateDelivered,
   readRefusal,
   useReorderConnections,
   useTestConnection,
@@ -35,18 +36,6 @@ interface TestOutcome {
   message: string;
 }
 
-/** Which item a reorder moved, and where it landed (1-based). */
-function movedItem(before: string[], after: string[]) {
-  const first = before.findIndex((id, index) => id !== after[index]);
-  if (first < 0) {
-    return null;
-  }
-  // Moved down: everything after it shifted up by one. Moved up: it took this place.
-  const down = after[first] === before[first + 1];
-  const id = down ? before[first] : after[first];
-  return { id, position: after.indexOf(id) + 1 };
-}
-
 const seconds = (ms: number) =>
   ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
 
@@ -54,9 +43,11 @@ const seconds = (ms: number) =>
  * The engine's back ends in the order they are tried. Each row can be dragged,
  * moved with the keyboard, switched on and off, tested and opened for editing.
  */
-const BackendList: FunctionComponent<{ engine: TranslationEngine }> = ({
-  engine,
-}) => {
+const BackendList: FunctionComponent<{
+  engine: TranslationEngine;
+  /** Whether the server can send a test request through a back end. */
+  canTest?: boolean;
+}> = ({ engine, canTest = false }) => {
   // The editor finds its back end by id, so removing it closes the editor. The editor keeps the
   // revision it opened with: a refreshed list does not move its draft on to a newer revision.
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -67,6 +58,13 @@ const BackendList: FunctionComponent<{ engine: TranslationEngine }> = ({
   const [testing, setTesting] = useState<number | null>(null);
   // The order as the user just set it, shown until the saved order comes back.
   const [pendingOrder, setPendingOrder] = useState<string[] | null>(null);
+  // The newest order that still has to be saved. A move made while a save is on its way waits here, so
+  // the list stays usable and the last order asked for is the one that ends up saved.
+  const queued = useRef<{ ids: string[]; said: string } | null>(null);
+  const saving = useRef(false);
+  // The switches whose write is on its way, with the value they were set to.
+  const [switching, setSwitching] = useState<Record<number, boolean>>({});
+  const switchingNow = useRef(new Set<number>());
   const reorder = useReorderConnections();
   const update = useUpdateConnection();
   const test = useTestConnection();
@@ -78,6 +76,68 @@ const BackendList: FunctionComponent<{ engine: TranslationEngine }> = ({
         ? "That back end was changed somewhere else. The list now shows what is saved; try again."
         : (refusal?.message ?? "The request failed. Try again."),
     );
+  };
+
+  const saveOrders = async () => {
+    if (saving.current) {
+      return;
+    }
+    saving.current = true;
+    try {
+      while (queued.current) {
+        const next = queued.current;
+        queued.current = null;
+        try {
+          await reorder.mutateAsync({
+            instanceId: engine.id,
+            order: next.ids.map(Number),
+          });
+          if (!queued.current) {
+            setAnnouncement(next.said);
+          }
+        } catch (error) {
+          // The list goes back to what is saved; a move made meanwhile started from the refused order.
+          queued.current = null;
+          note(error);
+          setAnnouncement("The order was not saved.");
+        }
+      }
+    } finally {
+      saving.current = false;
+      // The saved order takes over once it is on the page, unless another move came in meanwhile.
+      afterStateDelivered(() => {
+        if (!saving.current) {
+          setPendingOrder(null);
+        }
+      });
+    }
+  };
+
+  const setEnabled = async (item: TranslationConnection, enabled: boolean) => {
+    // One write per switch at a time: a second press while the first is on its way changes nothing.
+    if (switchingNow.current.has(item.id)) {
+      return;
+    }
+    switchingNow.current.add(item.id);
+    setSwitching((current) => ({ ...current, [item.id]: enabled }));
+    setProblem("");
+    try {
+      await update.mutateAsync({
+        id: item.id,
+        body: { enabled, expected_revision: item.revision },
+      });
+    } catch (error) {
+      note(error);
+    } finally {
+      afterStateDelivered(() => {
+        switchingNow.current.delete(item.id);
+        setSwitching((current) => {
+          const rest = { ...current };
+          delete rest[item.id];
+          return rest;
+        });
+      });
+    }
   };
 
   const items = pendingOrder
@@ -117,10 +177,8 @@ const BackendList: FunctionComponent<{ engine: TranslationEngine }> = ({
           [item.id]: {
             ok: false,
             message:
-              refusal?.status === 404
-                ? "This server cannot test back ends yet."
-                : (refusal?.message ??
-                  "The test could not run. Check that Bazarr+ is reachable and try again."),
+              refusal?.message ??
+              "The test could not run. Check that Bazarr+ is reachable and try again.",
           },
         }));
       },
@@ -151,32 +209,18 @@ const BackendList: FunctionComponent<{ engine: TranslationEngine }> = ({
         items={items}
         getId={(item) => String(item.id)}
         getName={(item) => backendName(engine, item)}
-        disabled={reorder.isPending}
         rowClassName={styles.backendRow}
-        onReorder={(ids) => {
-          const moved = movedItem(
-            items.map((item) => String(item.id)),
-            ids,
-          );
-          const target = items.find((item) => String(item.id) === moved?.id);
+        onReorder={(ids, moved) => {
+          const target = items.find((item) => String(item.id) === moved.id);
           setPendingOrder(ids);
           setProblem("");
-          reorder.mutate(
-            { instanceId: engine.id, order: ids.map(Number) },
-            {
-              onSuccess: () =>
-                setAnnouncement(
-                  target && moved
-                    ? `${backendName(engine, target)} moved to position ${moved.position} of ${ids.length}.`
-                    : "",
-                ),
-              onError: (error) => {
-                note(error);
-                setAnnouncement("The order was not saved.");
-              },
-              onSettled: () => setPendingOrder(null),
-            },
-          );
+          queued.current = {
+            ids,
+            said: target
+              ? `${backendName(engine, target)} moved to position ${moved.index + 1} of ${ids.length}.`
+              : "",
+          };
+          void saveOrders();
         }}
         renderItem={(item, index) => {
           const name = backendName(engine, item);
@@ -217,16 +261,18 @@ const BackendList: FunctionComponent<{ engine: TranslationEngine }> = ({
                 </div>
               </div>
               <div className={styles.backendActions}>
-                <Button
-                  size="compact-sm"
-                  variant="default"
-                  loading={testing === item.id}
-                  disabled={testing !== null && testing !== item.id}
-                  aria-label={`Test ${name}`}
-                  onClick={() => runTest(item)}
-                >
-                  Test
-                </Button>
+                {canTest && (
+                  <Button
+                    size="compact-sm"
+                    variant="default"
+                    loading={testing === item.id}
+                    disabled={testing !== null && testing !== item.id}
+                    aria-label={`Test ${name}`}
+                    onClick={() => runTest(item)}
+                  >
+                    Test
+                  </Button>
+                )}
                 <Button
                   size="compact-sm"
                   variant={editing ? "light" : "default"}
@@ -241,20 +287,11 @@ const BackendList: FunctionComponent<{ engine: TranslationEngine }> = ({
                 </Button>
                 <Switch
                   aria-label={`Use ${name}`}
-                  checked={item.enabled}
-                  onChange={(event) => {
-                    setProblem("");
-                    update.mutate(
-                      {
-                        id: item.id,
-                        body: {
-                          enabled: event.currentTarget.checked,
-                          expected_revision: item.revision,
-                        },
-                      },
-                      { onError: note },
-                    );
-                  }}
+                  checked={switching[item.id] ?? item.enabled}
+                  aria-busy={item.id in switching}
+                  onChange={(event) =>
+                    void setEnabled(item, event.currentTarget.checked)
+                  }
                 />
               </div>
             </div>

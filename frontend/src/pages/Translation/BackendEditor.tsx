@@ -7,6 +7,7 @@ import {
   useCreateConnection,
   useDeleteConnection,
   useFieldOptions,
+  useFreshState,
   useUpdateConnection,
 } from "@/apis/hooks/translation";
 import {
@@ -118,14 +119,54 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
       onClose();
     }
   };
-  const discard = () => {
+  const fresh = useFreshState();
+  // Which answer to the conflict is waiting for what is saved now.
+  const [loadingFor, setLoadingFor] = useState<"mine" | "discard" | null>(null);
+  const [reloadProblem, setReloadProblem] = useState("");
+  // What is saved now, loaded for this answer. The cached state is not used: the refresh a conflict starts
+  // may still be on its way, and copying the old state would bring back the very revision that was refused.
+  const savedNow = async (action: "mine" | "discard") => {
     if (!connection) {
+      return null;
+    }
+    setLoadingFor(action);
+    setReloadProblem("");
+    try {
+      const state = await fresh();
+      const found = state.instances
+        .flatMap((item) => item.connections)
+        .find((item) => item.id === connection.id);
+      if (!found) {
+        // Removed somewhere else: there is nothing left to edit.
+        onClose();
+      }
+      return found ?? null;
+    } catch {
+      setReloadProblem(
+        "What is saved now could not be loaded, so nothing was changed. Try again.",
+      );
+      return null;
+    } finally {
+      setLoadingFor(null);
+    }
+  };
+  const discard = async () => {
+    const saved = await savedNow("discard");
+    if (!saved) {
       return;
     }
-    setValues(initialValues(fields, connection.values));
+    setValues(initialValues(fields, saved.values));
     setCleared([]);
-    revision.reload(connection.revision);
+    revision.reload(saved.revision);
     form.dismiss();
+  };
+  const saveMine = async () => {
+    const saved = await savedNow("mine");
+    if (!saved) {
+      return;
+    }
+    revision.adopt(saved.revision);
+    await save();
   };
 
   const name = connection
@@ -170,9 +211,11 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
         {form.stale ? (
           <ConflictNotice
             subject="This back end"
-            busy={form.busy}
-            onSaveMine={() => void save()}
-            onDiscard={discard}
+            saving={form.busy || loadingFor === "mine"}
+            reloading={loadingFor === "discard"}
+            problem={reloadProblem}
+            onSaveMine={() => void saveMine()}
+            onDiscard={() => void discard()}
           />
         ) : (
           form.message && (

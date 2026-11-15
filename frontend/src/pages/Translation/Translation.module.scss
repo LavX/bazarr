@@ -503,6 +503,13 @@
   color: var(--bz-text-secondary);
 }
 
+.conflictProblem {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--bz-stat-failed);
+}
+
 .card {
   padding: 20px;
   border: 1px solid var(--bz-border-card);
@@ -644,6 +651,25 @@
 
 .job {
   border-radius: var(--bz-radius-sm);
+}
+
+.waiting {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 12px;
+}
+
+.waiting .position {
+  margin-top: 0;
+}
+
+/* Its status lines up with the status column of the lists around it. */
+@media (min-width: 62em) {
+  .waiting {
+    padding-right: 48px;
+  }
 }
 
 .jobButton {
