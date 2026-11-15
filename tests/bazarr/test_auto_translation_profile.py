@@ -691,9 +691,10 @@ def test_wanted_movie_does_not_queue_over_a_subtitle_already_on_disk(tmp_path):
     assert destination.read_text() == 'already here'
 
 
-def test_a_download_waits_for_the_minimum_source_age_before_translating(tmp_path):
-    """A source younger than translator.min_source_wait_minutes is held back,
-    and the same source is translated once its modification time is old enough."""
+def test_a_download_is_held_for_the_minimum_wait_whatever_the_file_time_says(tmp_path):
+    """A subtitle that was just saved is held while translator.min_source_wait_minutes
+    is on, even when its modification time is old. The next wanted scan measures
+    the wait from the history and translates it once it has elapsed."""
     from subtitles.processing import _trigger_auto_translation
 
     mock_database = Mock()
@@ -744,62 +745,14 @@ def test_a_download_waits_for_the_minimum_source_age_before_translating(tmp_path
         _trigger_auto_translation(**trigger)
         mock_translate.assert_not_called()
 
+        # The trigger runs right after the save, so the source arrived now
+        # whatever the file's own time says. A file system whose clock runs
+        # behind would date it two hours back and let it through the wait.
         aged = time.time() - 120 * 60
         os.utime(source, (aged, aged))
         _trigger_auto_translation(**trigger)
 
-    mock_translate.assert_called_once()
-
-
-def test_a_download_queued_under_the_minimum_wait_cancels_when_its_source_is_replaced(tmp_path):
-    """The wait is decided for the file seen when the job is queued. If a new
-    file takes the source's place while the job waits, the captured version no
-    longer matches and the job is refused instead of translating a file that
-    never waited."""
-    import pytest
-
-    from subtitles.processing import _trigger_auto_translation
-    from subtitles.tools.subsync_engines import SubtitleSourceChanged, validate_subtitle_versions
-
-    mock_database = Mock()
-    mock_database.execute.return_value.first.return_value = SimpleNamespace(
-        sonarrSeriesId=10, season=1, episode=1, imdbId='tt1', tvdbId='1', profileId=1,
-    )
-    source = tmp_path / 'episode.en.srt'
-    source.write_text('provider subtitle')
-    aged = time.time() - 120 * 60
-    os.utime(source, (aged, aged))
-
-    with (
-        patch('subtitles.processing.settings') as mock_settings,
-        patch('subtitles.wanted.utils.settings') as mock_wait_settings,
-        patch('app.database.get_profile_id', return_value=1),
-        patch('app.database.get_profiles_list') as mock_profiles,
-        patch('app.database.database', mock_database),
-        patch('subtitles.download.check_missing_languages') as mock_missing,
-        patch('subtitles.processing.alpha2_from_alpha3', return_value='hu'),
-        patch('subtitles.tools.translate.main.translate_subtitles_file') as mock_translate,
-    ):
-        mock_settings.translator.min_source_score = 90
-        mock_wait_settings.translator.min_source_wait_minutes = 60
-        mock_profiles.return_value = {
-            'items': [{'language': 'hu', 'translate_from': 'en', 'forced': 'False', 'hi': 'False'}]
-        }
-        mock_missing.return_value = [_missing_language('hun')]
-
-        _trigger_auto_translation(
-            downloaded_lang='en', subtitle_path=str(source), video_path='/video/episode.mkv',
-            media_type='series', series_id=10, episode_id=20, source_score_percent=100,
-        )
-
-    mock_translate.assert_called_once()
-    expected = mock_translate.call_args.kwargs['expected_destination_versions']
-    assert [snapshot.path for snapshot in expected] == ['/video/episode.hu.srt', str(source)]
-    validate_subtitle_versions(expected)
-
-    source.write_text('a newer provider subtitle')
-    with pytest.raises(SubtitleSourceChanged):
-        validate_subtitle_versions(expected)
+    mock_translate.assert_not_called()
 
 
 def test_a_sports_download_is_queued_without_the_minimum_source_wait(tmp_path):

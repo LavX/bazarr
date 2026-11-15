@@ -27,9 +27,9 @@ from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
 from ..language_profiles import build_translate_from_map
 from ..tools.translate.failure_record import translation_recently_failed
-from .utils import (FILE_REPLACING_ACTIONS, _find_existing_subtitle_path, _provider_file_on_disk,
-                    evaluate_translation_gate, newest_source_row, source_wait_elapsed,
-                    source_wait_enabled, source_written_at, translation_capture_paths)
+from .utils import (SOURCE_HISTORY_ACTIONS, _find_existing_subtitle_path, _provider_file_on_disk,
+                    evaluate_translation_gate, source_history_for_wait, source_wait_elapsed,
+                    source_wait_enabled, translation_capture_paths)
 
 
 def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
@@ -208,17 +208,15 @@ def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
                                     select(TableHistoryMovie.subtitles_path, TableHistoryMovie.action, TableHistoryMovie.timestamp)
                                     .where(TableHistoryMovie.radarrId == movie.radarrId)
                                     .where(TableHistoryMovie.language.like(f"{translate_cfg['from']}%"))
-                                    .where(TableHistoryMovie.action.in_(FILE_REPLACING_ACTIONS))
+                                    .where(TableHistoryMovie.action.in_(SOURCE_HISTORY_ACTIONS))
                                     .order_by(TableHistoryMovie.timestamp.desc()),
                                     TableHistoryMovie.arr_instance_id,
                                     arr_instance_id,
                                 )
                             ).all()
-                            source_row = newest_source_row(source_rows, source_srt, path_mappings.path_replace_movie)
-                            held = (
-                                (source_row is None or source_row.action != 4)
-                                and not source_wait_elapsed(source_srt, source_written_at(source_row))
-                            )
+                            written_at, hand_upload = source_history_for_wait(
+                                source_rows, source_srt, path_mappings.path_replace_movie)
+                            held = not hand_upload and not source_wait_elapsed(source_srt, written_at)
                         if held:
                             logging.debug(
                                 "BAZARR auto-translate (wanted-scan) skipped for %s: "

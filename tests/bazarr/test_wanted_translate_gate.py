@@ -1080,11 +1080,37 @@ def test_the_wait_counts_from_the_download_on_record_not_the_file_time(
 
 
 @pytest.mark.parametrize("model", ["movie", "episode"])
-def test_a_download_older_than_the_wait_translates_whatever_the_file_time(
+def test_a_file_replaced_after_its_download_row_is_measured_from_the_file(
         schema_session, monkeypatch, tmp_path, model):
-    """The file was touched a moment ago, but it was downloaded two hours ago."""
+    """The download row is two hours old, but the file was written a moment ago
+    by something the history does not know: a concurrent save not recorded yet,
+    an arr import or a copy by hand. The old row does not vouch for it."""
     source = _source_subtitle(tmp_path, minutes_old=0)
     _record_download(schema_session, model, source, minutes_ago=120)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_file_replaced_after_a_hand_upload_row_does_not_inherit_the_exemption(
+        schema_session, monkeypatch, tmp_path, model):
+    source = _source_subtitle(tmp_path, minutes_old=0)
+    _record_download(schema_session, model, source, minutes_ago=180, action=4)
+
+    searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
+
+    translations.assert_not_called()
+    assert searches == [[("hu", "False", "False")]]
+
+
+@pytest.mark.parametrize("model", ["movie", "episode"])
+def test_a_file_replaced_after_its_row_but_old_enough_by_its_own_time_translates(
+        schema_session, monkeypatch, tmp_path, model):
+    source = _source_subtitle(tmp_path, minutes_old=90)
+    _record_download(schema_session, model, source, minutes_ago=180)
 
     searches, translations = _scan_once(model, monkeypatch, schema_session, source, 60)
 

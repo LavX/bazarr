@@ -29,9 +29,9 @@ from ..download import generate_subtitles
 from ..language_profiles import build_translate_from_map
 from ..tools.translate.failure_record import translation_recently_failed
 from .forced_flag import run_flagged_search
-from .utils import (FILE_REPLACING_ACTIONS, _find_existing_subtitle_path, _provider_file_on_disk,
-                    evaluate_translation_gate, newest_source_row, source_wait_elapsed,
-                    source_wait_enabled, source_written_at, translation_capture_paths)
+from .utils import (SOURCE_HISTORY_ACTIONS, _find_existing_subtitle_path, _provider_file_on_disk,
+                    evaluate_translation_gate, source_history_for_wait, source_wait_elapsed,
+                    source_wait_enabled, translation_capture_paths)
 
 
 def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True):
@@ -221,17 +221,15 @@ def _wanted_episode(episode, providers_list, job_id=None, translation_gate=True)
                                     select(TableHistory.subtitles_path, TableHistory.action, TableHistory.timestamp)
                                     .where(TableHistory.sonarrEpisodeId == episode.sonarrEpisodeId)
                                     .where(TableHistory.language.like(f"{translate_cfg['from']}%"))
-                                    .where(TableHistory.action.in_(FILE_REPLACING_ACTIONS))
+                                    .where(TableHistory.action.in_(SOURCE_HISTORY_ACTIONS))
                                     .order_by(TableHistory.timestamp.desc()),
                                     TableHistory.arr_instance_id,
                                     arr_instance_id,
                                 )
                             ).all()
-                            source_row = newest_source_row(source_rows, source_srt, path_mappings.path_replace)
-                            held = (
-                                (source_row is None or source_row.action != 4)
-                                and not source_wait_elapsed(source_srt, source_written_at(source_row))
-                            )
+                            written_at, hand_upload = source_history_for_wait(
+                                source_rows, source_srt, path_mappings.path_replace)
+                            held = not hand_upload and not source_wait_elapsed(source_srt, written_at)
                         if held:
                             logging.debug(
                                 "BAZARR auto-translate (wanted-scan) skipped for %s: "

@@ -36,30 +36,51 @@ def source_wait_enabled():
     return bool(settings.translator.min_source_wait_minutes)
 
 
-def newest_source_row(rows, source_path, path_replace):
-    """The newest history row that put a file at ``source_path`` or removed it.
+# The history rows a source's wait is read from: the actions that put a file at
+# the path or removed it, and the sync (5) that rewrites it in place.
+SOURCE_HISTORY_ACTIONS = FILE_REPLACING_ACTIONS + (5,)
 
-    ``rows`` come newest first and carry the stored (reverse-mapped) path, which
-    ``path_replace`` maps to the path the scan works with. Only the newest row
-    stored for this very file counts: a newer upload of another file says
-    nothing about it.
+# How far a file's modification time may run ahead of the history row that
+# recorded it before the file counts as replaced afterwards. Some file systems
+# round a modification time up by a couple of seconds.
+_MTIME_SLACK_SECONDS = 2
+
+
+def source_history_for_wait(rows, source_path, path_replace):
+    """What the history says about when a source arrived and where it came from.
+
+    Returns ``(written_at, hand_upload)``. ``rows`` come newest first with the
+    stored (reverse-mapped) path, which ``path_replace`` maps to the path the
+    scan works with. Only rows stored for this very file count: a newer upload
+    of another file says nothing about it.
+
+    The newest row that put the file there (not a sync) gives the time and
+    whether it was a hand upload. It stands for the file on disk only while the
+    file has not been replaced since: a file with a later modification time was
+    written after the row (a concurrent save not recorded yet, an arr import or
+    a copy by hand), so the row's time and its upload exemption do not apply and
+    the modification time decides. A sync row newer than that row explains a
+    later modification time, since the sync rewrote the file in place, so the
+    row still stands. A removal, or no row at all, leaves the modification time
+    to decide too: ``written_at`` is then None.
     """
+    synced = False
     for row in rows:
-        if row.subtitles_path and path_replace(row.subtitles_path) == source_path:
-            return row
-    return None
-
-
-def source_written_at(row):
-    """When the history says the source subtitle was downloaded or uploaded.
-
-    None when there is no such row, or when the newest row removed the file: a
-    file that is there anyway came back without a record and has only its
-    modification time to go by.
-    """
-    if row is None or row.action == 0:
-        return None
-    return row.timestamp
+        if not row.subtitles_path or path_replace(row.subtitles_path) != source_path:
+            continue
+        if row.action == 5:
+            synced = True
+            continue
+        if row.action == 0:
+            return None, False
+        if not synced:
+            try:
+                if os.path.getmtime(source_path) > row.timestamp.timestamp() + _MTIME_SLACK_SECONDS:
+                    return None, False
+            except OSError:
+                pass
+        return row.timestamp, row.action == 4
+    return None, False
 
 
 def source_wait_elapsed(source_path, written_at=None):
