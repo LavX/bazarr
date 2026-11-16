@@ -400,7 +400,9 @@ def supplier_map(state: dict[str, Any], plugin: PluginManifest, owner_id: str) -
             continue
         for held_id, (_held, held_row) in sorted(installed.items()):
             supplier = _manifest_in(held_row, "next")
-            if held_id != owner_id and supplier is not None and capability in supplier.provides:
+            # A plugin that is switched off supplies nothing.
+            if (held_id != owner_id and supplier is not None and capability in supplier.provides
+                    and _enabled(held_row)):
                 found[capability] = held_id
                 break
     return found
@@ -409,39 +411,42 @@ def supplier_map(state: dict[str, Any], plugin: PluginManifest, owner_id: str) -
 def unmet_needs(installations: dict[str, Any]) -> dict[str, list[str]]:
     """For each installation whose active release relies on a plugin that is not running, what is missing.
 
-    Judged on the set that actually activated: the plugin it extends must be active and provide the
-    capability, and each capability it once had an installed supplier for must still have that supplier
-    active and providing it. A plugin that is itself unmet is not running, so what relies on it is unmet too.
+    Judged on the set that actually activated and is switched on. The plugin it extends must be that
+    plugin, running and providing the capability. A capability it once had an installed supplier for is met
+    by any running supplier of it, not only the one recorded, and is unmet only when none runs. A plugin
+    that is itself unmet is not running, so what relies on it is unmet too, and a plugin that is switched
+    off supplies nothing (it is still judged, so switching it on cannot start it unmet).
     """
     rows = {
         str(pid): row for pid, row in installations.items()
         if isinstance(row, dict) and row.get("active_version") and row.get("state") != "removed"
     }
     parsed = {pid: _parse(row.get("manifest")) for pid, row in rows.items()}
-    running = {pid for pid, plugin in parsed.items() if plugin is not None}
+    candidates = {pid for pid, plugin in parsed.items() if plugin is not None}
+    suppliers = {pid for pid in candidates if _enabled(rows[pid])}
     blocked: dict[str, list[str]] = {}
     while True:
         newly: dict[str, list[str]] = {}
-        for pid in sorted(running):
+        for pid in sorted(candidates - set(blocked)):
             plugin = parsed[pid]
             missing = []
             if plugin.extends is not None:
-                parent = parsed.get(plugin.extends.plugin_id) if plugin.extends.plugin_id in running else None
+                parent_id = plugin.extends.plugin_id
+                parent = parsed.get(parent_id) if parent_id in suppliers and parent_id != pid else None
                 if parent is None or plugin.extends.capability not in parent.provides:
-                    missing.append(f"{plugin.extends.plugin_id} ({plugin.extends.capability})")
-            for capability, supplier in sorted((rows[pid].get("supplied_by") or {}).items()):
+                    missing.append(f"{parent_id} ({plugin.extends.capability})")
+            for capability, recorded in sorted((rows[pid].get("supplied_by") or {}).items()):
                 if capability not in plugin.requires:
                     continue
-                provider = parsed.get(supplier) if supplier in running else None
-                if provider is None or capability not in provider.provides:
-                    missing.append(f"{supplier} ({capability})")
+                if not any(capability in parsed[sid].provides for sid in suppliers if sid != pid):
+                    missing.append(f"{recorded} ({capability})")
             if missing:
                 newly[pid] = missing
         if not newly:
             return blocked
         # What is not running supplies nothing, so judge the rest again without it.
         blocked.update(newly)
-        running -= set(newly)
+        suppliers -= set(newly)
 
 
 def _enabled(row: dict[str, Any]) -> bool:

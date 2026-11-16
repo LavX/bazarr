@@ -1997,3 +1997,26 @@ def test_a_cleanup_removes_nothing_when_the_environment_lock_cannot_be_taken(hub
 
     assert unused.exists()
     assert load_state()["plugin_envs"] == {"fp": {"path": str(unused)}}
+
+
+def test_a_repair_does_not_clear_the_reason_a_plugin_was_held_back(hub, tmp_path, monkeypatch):
+    from provider_hub.service import repair_installation_environment
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    old = _env(hub / "shared_envs" / "old")
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(
+        bundle, old / "bin" / "python", needs_repair=True, last_error=env_registry.NEEDS_REPAIR_MESSAGE,
+        blocked=True, blocked_reason="It needs parent, which is not running, so it was not started.")}
+    save_state(state)
+    _patch_environment(monkeypatch)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker",
+                        lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.registry.register_active_provider_classes", lambda installations=None: [])
+
+    repair_installation_environment("examplehub")
+
+    row = load_state()["installations"]["examplehub"]
+    assert "needs_repair" not in row and row["blocked"] is True
+    assert row["last_error"] == "It needs parent, which is not running, so it was not started."

@@ -23,7 +23,7 @@ from .migration import (
     validation_built_in_provider_ids,
 )
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
-from .state import active_installations, provider_hub_dir
+from .state import active_installations, blocked_installations, provider_hub_dir
 from . import runtime_status
 from .env_registry import env_dir_of
 from .venv import hold_environment, validated_bundle_path, validated_interpreter
@@ -505,7 +505,12 @@ def register_active_provider_classes(installations=None) -> list[str]:
         | MIGRATED_BUILT_IN_PROVIDER_IDS
         | RETIRED_BUILT_IN_PROVIDER_IDS
     )
-    installations = installations if installations is not None else active_installations()
+    if installations is None:
+        installations = active_installations()
+        # A provider held back at boot is installed, only not started: it counts as a registration that was
+        # refused, so startup keeps its entries in the provider lists and its saved settings.
+        for held_back in blocked_installations():
+            _note_registration(held_back.provider_id, False)
 
     for installation in installations:
         provider_id = installation.provider_id

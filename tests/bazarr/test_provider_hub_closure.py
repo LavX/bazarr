@@ -705,3 +705,197 @@ def test_a_release_records_which_installed_plugin_supplies_each_need(tmp_path, m
     service.stage_install(user, source_id="official", catalog_list="plugins")
 
     assert load_state()["installations"]["user"]["staged_supplied_by"] == {PARENT_CAPABILITY: "parent"}
+
+
+# --- the boot re-check judges what runs, not what was recorded ----------------------------------------------
+
+
+def test_a_need_is_met_by_any_running_supplier_and_only_blocked_when_none_runs(tmp_path, monkeypatch, service_kind):
+    recorded = _manifest("recorded")
+    other = _manifest("other", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    bound = {"supplied_by": {PARENT_CAPABILITY: "recorded"}}
+
+    rows = _boot(tmp_path, monkeypatch, {**_installed(recorded), **_installed(other), **_installed(user, **bound)})
+    assert "blocked" not in rows["user"]
+
+    rows = _boot(tmp_path, monkeypatch, {**_installed(recorded), **_installed(user, **bound)})
+    assert rows["user"]["blocked"] is True
+    assert rows["user"]["last_error"] == (
+        "It needs recorded (demo_parent.backend.v1), which is not running, so it was not started.")
+
+
+def test_an_add_on_stays_bound_to_the_plugin_it_extends(tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent")
+    stranger = _manifest("stranger", provides=[PARENT_CAPABILITY])
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+
+    rows = _boot(tmp_path, monkeypatch, {**_installed(parent), **_installed(stranger), **_installed(addon)})
+
+    assert rows["addon"]["blocked"] is True
+
+
+def test_a_switched_off_supplier_supplies_nothing_at_boot(tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+
+    rows = _boot(tmp_path, monkeypatch, {
+        **_installed(parent, enabled=False), **_installed(user, supplied_by={PARENT_CAPABILITY: "parent"})})
+
+    assert rows["user"]["blocked"] is True
+
+
+def test_re_enabling_a_plugin_after_its_supplier_was_switched_off_does_not_start_it(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    _world(tmp_path, monkeypatch, [], {
+        **_installed(parent), **_installed(user, supplied_by={PARENT_CAPABILITY: "parent"})})
+
+    service.update_provider("user", enabled=False)
+    service.update_provider("parent", enabled=False)
+    service.update_provider("user", enabled=True)
+    service.activate_staged_installations()
+
+    from provider_hub.state import load_state
+    assert load_state()["installations"]["user"]["blocked"] is True
+
+
+def test_a_supplier_that_is_switched_off_is_not_recorded_as_the_supplier(tmp_path, monkeypatch, service_kind):
+    from provider_hub.closure import supplier_map
+    from provider_hub.plugin_manifest import parse_plugin_manifest
+    from provider_hub.state import load_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    _world(tmp_path, monkeypatch, [], _installed(parent, enabled=False))
+
+    assert supplier_map(load_state(), parse_plugin_manifest(user), "user") == {}
+    _world(tmp_path, monkeypatch, [], _installed(parent))
+    assert supplier_map(load_state(), parse_plugin_manifest(user), "user") == {PARENT_CAPABILITY: "parent"}
+
+
+def test_a_provider_held_back_at_boot_keeps_its_provider_list_entries_and_settings(
+        tmp_path, monkeypatch, service_kind):
+    from plugin_platform_helpers import provider_manifest_v1
+    from provider_hub import registry
+    from provider_hub.registry import register_active_provider_classes, registration_incomplete, settings_cleanup_plan
+
+    registry._REGISTRATION_INCOMPLETE.clear()
+    sub = provider_manifest_v1("heldsub")
+    row = {"provider_id": "heldsub", "name": "Held", "active_version": "1.0.0", "state": "active",
+           "pending_restart": False, "manifest": sub, "blocked": True, "blocked_reason": "held back"}
+    _world(tmp_path, monkeypatch, [], {"heldsub": row})
+    try:
+        register_active_provider_classes()
+
+        assert registration_incomplete() == {"heldsub"}
+        # Both ids are retired and have a saved section; the one held back keeps all three, the other loses them.
+        enabled, disabled, stale = settings_cleanup_plan(
+            set(), ["heldsub", "gone"], ["heldsub", "gone"], {"gone", "heldsub"}, lambda name: True,
+            registration_incomplete())
+        assert (enabled, disabled, stale) == (["heldsub"], ["heldsub"], ["gone"])
+    finally:
+        registry._REGISTRATION_INCOMPLETE.clear()
+
+
+# --- the same release protection for a first install that is still staged -------------------------------------
+
+
+def _staged_only_world(tmp_path, monkeypatch, extra=()):
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    staged = {"active_version": None, "staged_version": "1.0.0", "state": "staged", "pending_restart": True,
+              "source_id": "official", "source_bound": True}
+    _world(tmp_path, monkeypatch, list(extra), {
+        **_installed(parent, staged_manifest=parent, **staged),
+        **_installed(user, staged_manifest=user, supplied_by={}, **staged)})
+    return parent, user
+
+
+def test_a_first_install_still_staged_cannot_be_replaced_by_a_release_that_drops_what_a_staged_plugin_needs(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    dropped = _manifest("parent", "2.0.0")
+    _staged_only_world(tmp_path, monkeypatch, extra=[dropped])
+
+    with pytest.raises(service.ProviderHubInstallError, match="which user relies on"):
+        service.stage_install(dropped, source_id="official", catalog_list="plugins")
+
+
+def test_a_failed_restage_of_a_first_install_keeps_the_staged_release_a_staged_plugin_needs(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    again = _manifest("parent", "1.1.0", provides=[PARENT_CAPABILITY])
+    _staged_only_world(tmp_path, monkeypatch, extra=[again])
+    monkeypatch.setattr(service, "_fetch_bundle",
+                        lambda manifest, deadline=None: (_ for _ in ()).throw(
+                            service.ProviderHubInstallError("the download failed")))
+
+    with pytest.raises(service.ProviderHubInstallError, match="download failed"):
+        service.stage_install(again, source_id="official", catalog_list="plugins")
+
+    row = load_state()["installations"]["parent"]
+    assert row["state"] == "staged" and row["staged_manifest"]["version"] == "1.0.0"
+    assert row["last_error"] == "the download failed"
+
+
+# --- a held-back plugin is not launched, and keeps saying why --------------------------------------------------
+
+
+def _held(plugin_id="user"):
+    manifest = _manifest(plugin_id, requires=[PARENT_CAPABILITY])
+    return _installed(manifest, blocked=True, blocked_reason="held back", last_error="held back",
+                      active_path="/x", python_path="/y")
+
+
+def test_the_connection_test_refuses_a_held_back_plugin_without_launching_it(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    _world(tmp_path, monkeypatch, [], _held())
+    monkeypatch.setattr(service, "ProviderWorkerClient",
+                        lambda *args, **kwargs: pytest.fail("a held-back plugin is not launched"))
+
+    result = service.test_provider_connection("user")
+
+    assert result == {"provider_id": "user", "ok": False, "status": "blocked", "message": "held back"}
+
+
+def test_the_connection_test_refuses_a_plugin_held_back_after_the_first_read(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    _world(tmp_path, monkeypatch, [], _held())
+    real = service.get_provider
+    reads = []
+
+    def get_provider(provider_id, redact=True):
+        row = real(provider_id, redact=redact)
+        reads.append(1)
+        if row is not None and len(reads) == 1:
+            row = {**row, "blocked": False}
+        return row
+
+    monkeypatch.setattr(service, "get_provider", get_provider)
+    monkeypatch.setattr(service, "ProviderWorkerClient",
+                        lambda *args, **kwargs: pytest.fail("a held-back plugin is not launched"))
+
+    result = service.test_provider_connection("user")
+
+    assert result["status"] == "blocked" and result["message"] == "held back"
+
+
+def test_the_boot_check_writes_the_reason_back_when_something_cleared_it(tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent")
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    cleared = {"supplied_by": {PARENT_CAPABILITY: "parent"}, "blocked": True,
+               "blocked_reason": "It needs parent (demo_parent.backend.v1), which is not running, so it was not "
+                                 "started.", "last_error": None}
+
+    rows = _boot(tmp_path, monkeypatch, {**_installed(parent), **_installed(user, **cleared)})
+
+    assert rows["user"]["last_error"] == cleared["blocked_reason"]

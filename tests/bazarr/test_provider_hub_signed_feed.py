@@ -771,3 +771,22 @@ def test_a_host_that_never_latched_still_reads_the_other_channel_as_legacy(world
     _refresh()
 
     assert _official()["last_error"] is None and _official()["catalog_signature"] == "unsigned (legacy)"
+
+
+def test_a_channel_restored_from_an_unsigned_backup_installs_nothing_once_another_channel_has_latched(world):
+    from provider_hub.state import mutate_state
+
+    _latch(world)
+
+    def restore(state):
+        # A backup taken before beta ever latched: the cached catalog is beta's legacy one.
+        source = state["catalog_sources"]["official"]
+        source.update(dev_ref="beta", catalog_channel="beta", catalog_signature="unsigned (legacy)",
+                      signature_verified=False, catalog_expires_at=None)
+        for key in ("catalog_signed_version", "catalog_key_file_version"):
+            source.pop(key, None)
+
+    mutate_state(restore)
+
+    assert set(_blocked()) == {PROVIDER, SERVICE}
+    assert all("older than one it already accepted" in reason for reason in _blocked().values())

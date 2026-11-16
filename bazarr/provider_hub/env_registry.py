@@ -324,7 +324,7 @@ def reconcile_environments(
             row = installations.get(provider_id)
             if isinstance(row, dict) and row.get("last_error") == NEEDS_REPAIR_MESSAGE:
                 row.pop("needs_repair", None)
-                row["last_error"] = None
+                row["last_error"] = row.get("blocked_reason") if row.get("blocked") else None
         for provider_id, python_key, old, new in repoints:
             row = installations.get(provider_id)
             if isinstance(row, dict) and row.get(python_key) == old:
@@ -385,7 +385,7 @@ def clear_needs_repair(provider_id: str, python_path: str | None = None) -> None
         row = (state.get("installations") or {}).get(provider_id)
         if _row_uses(row, python_path) and isinstance(row, dict) and row.pop("needs_repair", None):
             if row.get("last_error") == NEEDS_REPAIR_MESSAGE:
-                row["last_error"] = None
+                row["last_error"] = row.get("blocked_reason") if row.get("blocked") else None
 
     mutate_state(clear)
 

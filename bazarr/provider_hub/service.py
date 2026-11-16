@@ -2440,6 +2440,15 @@ def _remove_bundle_runtime_artifacts(bundle_path: Path) -> None:
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
+def _blocked_connection_result(provider_id: str, provider: dict[str, Any], job) -> dict[str, Any]:
+    """The answer for a plugin that was not started because what it relies on is not running."""
+    message = provider.get("blocked_reason") or provider.get("last_error") or (
+        "This plugin was not started because what it relies on is not running.")
+    job.data["state"] = "failed"
+    job.update(error=message, message=message, details={"status": "blocked"})
+    return {"provider_id": provider_id, "ok": False, "status": "blocked", "message": message}
+
+
 def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
     provider = get_provider(provider_id, redact=False)
     if not provider:
@@ -2464,18 +2473,26 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "status": "pending_restart",
                 "message": "Restart Bazarr+ before testing this staged plugin",
             }
+        if provider.get("blocked"):
+            return _blocked_connection_result(provider_id, provider, job)
 
         # The row is read again under the lock a cleanup decides under, and the
         # environment is held in the same step: a repair and a cleanup that ran
         # since the first read cannot take it away while the test runs.
         with _ENV_LOCK:
             provider = get_provider(provider_id, redact=False) or provider
+            blocked_now = bool(provider.get("blocked"))
             manifest_data = provider.get("manifest")
             active_path = provider.get("active_path")
             python_path = provider.get("python_path")
             release_environment = (
                 hold_environment(env_registry.env_dir_of(python_path)) if python_path else (lambda: None)
             )
+
+        if blocked_now:
+            # Held back since the first read: nothing of it is started to be tested.
+            release_environment()
+            return _blocked_connection_result(provider_id, provider, job)
 
         client = None
         try:
@@ -3108,15 +3125,17 @@ def _failed_installation(
 ):
     existing = existing if isinstance(existing, dict) else {}
     message = refusal_text(error)
+    if (state is not None and existing.get("state") == "staged"
+            and isinstance(existing.get("staged_manifest"), dict)
+            and closure.broken_by(state, validated.provider_id, None)):
+        # The staged release, whether it updates an active one or is a first install still waiting for the
+        # restart, is what another plugin will rely on after it, so a restage that failed does not take it
+        # away.
+        installation = dict(existing)
+        installation["last_error"] = message
+        return installation
     if existing.get("active_version"):
         installation = dict(existing)
-        if (state is not None and installation.get("state") == "staged"
-                and isinstance(installation.get("staged_manifest"), dict)
-                and closure.broken_by(state, validated.provider_id, None)):
-            # The staged release is what another plugin will rely on after the restart, so a restage that
-            # failed does not take it away.
-            installation["last_error"] = message
-            return installation
         if installation.get("state") == "staged":
             # A restage that fails drops the staged update the row still holds.
             _abandon_staged_catalog_list(installation)
@@ -3160,7 +3179,7 @@ def _refuse_a_release_that_breaks_dependents(
 ) -> None:
     """Refuse a release of an installed plugin that drops a capability something installed or staged relies on."""
     row = (state.get("installations") or {}).get(provider_id)
-    if isinstance(row, dict) and row.get("active_version"):
+    if isinstance(row, dict) and (row.get("active_version") or row.get("staged_version")):
         broken = closure.broken_by(state, provider_id, manifest)
         if broken:
             raise ProviderHubInstallError(closure.breaks_text(provider_id, version, broken))
@@ -3843,8 +3862,12 @@ def activate_staged_installations() -> list[str]:
             continue
         if plugin_id in unmet:
             reason = f"It needs {', '.join(unmet[plugin_id])}, which is not running, so it was not started."
-            if row.get("blocked_reason") != reason:
+            if not row.get("blocked") or row.get("blocked_reason") != reason:
                 row.update(blocked=True, blocked_reason=reason, last_error=reason)
+                changed = True
+            elif not row.get("last_error"):
+                # Something cleared the reason (an activation, a repair): a held-back plugin always says why.
+                row["last_error"] = reason
                 changed = True
         elif row.get("blocked"):
             if row.get("last_error") == row.get("blocked_reason"):
@@ -3965,7 +3988,8 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
                 return {}
             current["python_path"] = str(python_path)
             if current.pop("needs_repair", None):
-                current["last_error"] = None
+                # A plugin held back at boot keeps saying why.
+                current["last_error"] = current.get("blocked_reason") if current.get("blocked") else None
             env_registry.register_environment(state, environment_fingerprint(validated), env_path)
             return dict(current)
 

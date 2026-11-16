@@ -489,15 +489,18 @@ def supply_refusal(state: Mapping[str, Any], source: Mapping[str, Any], now: dat
         if expired:
             return expired
     stored = stored_record(state, channel)
-    if not stored.latched:
+    latched_anywhere = any(stored_record(state, name).latched for name in (CHANNEL_MAIN, CHANNEL_BETA))
+    if not latched_anywhere:
         return None
     cached = source.get("catalog_signed_version")
     cached_keys = source.get("catalog_key_file_version")
-    # Older than the counter, or checked with an older key file than the host has accepted: a restored
-    # backup can bring either back, and an older key file may be the one that lacks a revocation.
+    # Once any channel has latched, only a verified cache installs, even one restored from a backup that
+    # never saw the latch on its own channel. A verified one must also be no older than the counter of its
+    # channel, nor checked with an older key file than the host has accepted: a restored backup can bring
+    # either back, and an older key file may be the one that lacks a revocation.
     stale = (
         source.get("catalog_signature") != SIGNATURE_VERIFIED
-        or not isinstance(cached, int) or cached < stored.signed_version
+        or not isinstance(cached, int) or (stored.latched and cached < stored.signed_version)
         or (stored.key_file_version is not None
             and (not isinstance(cached_keys, int) or cached_keys < stored.key_file_version))
     )

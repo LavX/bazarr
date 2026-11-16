@@ -830,6 +830,28 @@ def active_installations(
     return installations
 
 
+def blocked_installations(
+    path: str | os.PathLike[str] | None = None,
+    *,
+    kind: str | None = SUBTITLE_PROVIDER,
+) -> list[ProviderHubInstallation]:
+    """Installations held back at boot because what they rely on is not running.
+
+    They are installed and keep their settings, so a caller that decides what is gone from what is running
+    reads this to tell the two apart."""
+    data = load_state(path)
+    installations = []
+    for provider_id, item in (data.get("installations") or {}).items():
+        if not isinstance(item, dict) or not item.get("blocked") or not item.get("active_version"):
+            continue
+        if kind is not None and kind_of(item) != kind:
+            continue
+        manifest = item.get("manifest")
+        if isinstance(manifest, dict):
+            installations.append(_installation_from_row(provider_id, item, manifest))
+    return installations
+
+
 def running_installations(
     path: str | os.PathLike[str] | None = None,
     *,
