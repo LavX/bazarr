@@ -217,7 +217,11 @@ class RetryWindows:
 
     def note(self, connection_id: int, failure: AttemptFailure) -> None:
         if failure.retry_after:
-            self._until[connection_id] = (self._monotonic() + failure.retry_after, failure.error_class)
+            deadline = self._monotonic() + failure.retry_after
+            found = self._until.get(connection_id)
+            # A shorter answer later must not shorten a longer wait already asked for.
+            if found is None or deadline >= found[0]:
+                self._until[connection_id] = (deadline, failure.error_class)
 
     def waiting(self, connection_id: int) -> tuple[float, str] | None:
         found = self._until.get(connection_id)
@@ -439,9 +443,10 @@ class Dispatcher:
         self._finish_history(history, state, "partial" if output.partial_error else "completed")
 
     def _publication_failed(self, jobs, history, state, error: BaseException) -> str:
-        """The subtitle could not be written. The job awaits a retry with its batches, whether the write failed or
-        was refused because the source or the destination changed while the translation ran. Only a Stop ends
-        it. Says what was recorded: ``"cancelled"``, or the error class of the retry."""
+        """The subtitle could not be written. The job awaits a retry with its batches when the write failed or the
+        source was edited while the translation ran. A Stop ends it, and so does a subtitle that arrived at the
+        destination meanwhile: once the language is there nothing asks again. Says what was recorded:
+        ``"cancelled"``, ``"failed"``, or the error class of the retry."""
         from app.jobs_queue import JobCancelled
         from subtitles.tools.subsync_engines import SubtitleDestinationChanged, SubtitleSourceChanged
 
@@ -449,8 +454,12 @@ class Dispatcher:
             jobs.cancel(state.job_id)
             self._finish_history(history, state, "cancelled")
             return "cancelled"
-        error_class = (fail.INPUT_CHANGED if isinstance(error, (SubtitleDestinationChanged, SubtitleSourceChanged))
-                       else fail.PUBLISH_FAILED)
+        if isinstance(error, SubtitleDestinationChanged):
+            jobs.fail(state.job_id, fail.DESTINATION_CHANGED, fail.MESSAGES[fail.DESTINATION_CHANGED])
+            self._finish_history(history, state, "failed", fail.DESTINATION_CHANGED,
+                                 fail.MESSAGES[fail.DESTINATION_CHANGED])
+            return "failed"
+        error_class = fail.SOURCE_CHANGED if isinstance(error, SubtitleSourceChanged) else fail.PUBLISH_FAILED
         jobs.await_retry(state.job_id, error_class, fail.MESSAGES[error_class],
                          retry_at=self.clock() + timedelta(seconds=DEFAULT_RETRY_SECONDS))
         self._finish_history(history, state, "awaiting_retry", error_class, type(error).__name__)

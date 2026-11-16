@@ -13,6 +13,7 @@ publishes through its own service, which the dispatcher reaches through ``_legac
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -153,6 +154,15 @@ class RuntimeTranslatorService:
 
     def translate(self, job_id=None):
         self._job_id = job_id
+        if os.path.islink(self.dest_srt_file):
+            # Refused before anything is paid for: a translation replaces the file at the destination, and a
+            # link there is not something Bazarr+ replaces. It would never publish, so it is not retried.
+            raise TranslationRuntimeError(MESSAGES["destination_is_link"], "destination_is_link")
+        # The versions of the source and of the destination as they are when the job starts, before the source
+        # is read and before the engine is asked: whatever the remote call took, an edit made meanwhile must not
+        # be published over. A source that is a link is followed, as the old services followed it.
+        self._versions = capture_subtitle_versions(
+            self.video_path, (os.path.realpath(self.source_srt_file), self.dest_srt_file), self.cancel)
         subs = pysubs2.load(self.source_srt_file, encoding="utf-8")
         lines = [x.plaintext for x in subs]
         if not lines:
@@ -174,10 +184,6 @@ class RuntimeTranslatorService:
             history_media={"media_type": self.media_type, "media_id": media_id, "media_title": title or None,
                            "arr_instance_id": self.arr_instance_id},
             check_cancel=self._check, progress=self._progress, legacy=self._legacy)
-        # The versions of the source and of the destination as they are when the job starts, before the engine is
-        # asked: whatever the remote call took, an edit made meanwhile must not be published over.
-        self._versions = capture_subtitle_versions(self.video_path, (self.source_srt_file, self.dest_srt_file),
-                                                   self.cancel)
         try:
             outcome = (self._dispatcher or Dispatcher()).run(spec)
         except DispatchFailed as failed:
@@ -193,10 +199,11 @@ class RuntimeTranslatorService:
         except BaseException as error:
             # The job is not over until the subtitle is written: its batches stay for a retry and the failure is
             # on record. The error raised matches what was recorded, so the queue and the history agree.
+            error = self._precise(error)
             recorded = outcome.publication_failed(error) if outcome.publication_failed is not None else None
-            if recorded and recorded != "cancelled":
+            if isinstance(error, Exception) and recorded and recorded not in ("cancelled", "failed"):
                 raise TranslationRuntimeError(MESSAGES[recorded], recorded, retry_later=True) from error
-            raise
+            raise error
         try:
             return self._record(outcome, translated)
         finally:
@@ -227,6 +234,15 @@ class RuntimeTranslatorService:
             translated = "partially translated" if self.partial_error else "translated"
             add_translator_info(temporary, f"# Subtitles {translated} with {outcome.engine_name} #")
         return translated
+
+    def _precise(self, error):
+        """The staged write reports any change of its checked versions as a changed source. Say which one it was."""
+        if isinstance(error, SubtitleSourceChanged):
+            try:
+                self._check_inputs()
+            except (SubtitleSourceChanged, SubtitleDestinationChanged) as precise:
+                return precise
+        return error
 
     def _check_inputs(self):
         """Raise the same error the staged write would when the source or the destination is no longer as it

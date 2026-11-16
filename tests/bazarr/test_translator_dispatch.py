@@ -908,19 +908,36 @@ def test_a_publication_that_fails_keeps_the_batches_and_records_the_failure(env)
     assert (row["status"], row["error_class"]) == ("awaiting_retry", "publish_failed")
 
 
-def test_a_write_refused_because_the_source_or_destination_changed_is_retried_later(env):
-    from subtitles.tools.subsync_engines import SubtitleDestinationChanged, SubtitleSourceChanged
+def test_a_write_refused_because_the_source_was_edited_is_retried_later(env):
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged
 
     env.ai_engine()
     outcome = env.dispatcher().run(make_spec())
-    assert outcome.publication_failed(SubtitleDestinationChanged("moved")) == "input_changed"
+    assert outcome.publication_failed(SubtitleSourceChanged("edited")) == "source_changed"
     job = env.last_job()
-    assert (job.state, job.error_class) == ("awaiting_retry", "input_changed")
+    assert (job.state, job.error_class) == ("awaiting_retry", "source_changed")
     assert len(env.checkpoints()) == 1
     assert env.history(job)["status"] == "awaiting_retry"
-    TranslationJobs(env.session, clock=env.clock).requeue(job.id)
+
+
+def test_a_subtitle_that_arrived_at_the_destination_ends_the_job_and_does_not_retry(env):
+    from subtitles.tools.subsync_engines import SubtitleDestinationChanged
+
+    env.ai_engine()
     outcome = env.dispatcher().run(make_spec())
-    assert outcome.publication_failed(SubtitleSourceChanged("edited")) == "input_changed"
+    assert outcome.publication_failed(SubtitleDestinationChanged("moved")) == "failed"
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("failed", "destination_changed") and env.checkpoints() == []
+    assert env.history(job)["status"] == "failed"
+
+
+def test_a_shorter_retry_time_later_does_not_shorten_a_longer_one(env):
+    first = fail.AttemptFailure("rate_limited", "x", retry_after=600.0)
+    env.windows.note(1, first)
+    env.windows.note(1, fail.AttemptFailure("rate_limited", "x", retry_after=30.0))
+    assert env.windows.waiting(1)[0] > 500
+    env.windows.note(1, fail.AttemptFailure("quota_exhausted", "x", retry_after=900.0))
+    assert env.windows.waiting(1) == (900.0, "quota_exhausted")
 
 
 def test_a_stop_during_the_write_cancels_the_job(env):

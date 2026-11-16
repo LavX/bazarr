@@ -3,6 +3,7 @@
 The dispatcher itself is tested in test_translator_dispatch.py. Runs on SQLite, and on PostgreSQL when
 BAZARR_PG_TEST_URL is set.
 """
+import os
 import sys
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -603,29 +604,101 @@ def test_a_source_edited_while_the_engine_was_asked_is_not_published_over(env, m
     env.ai_engine()
     service = build_service(env, media)
     service._dispatcher = _EditsDuring(
-        env.dispatcher(), lambda: media.source.write_text(SRT.replace("One", "Uno"), encoding="utf-8"))
+        env.dispatcher(), lambda: media.source.write_text(SRT.replace("One", "Uno y mas"), encoding="utf-8"))
     with pytest.raises(TranslationRuntimeError) as caught:
         service.translate(job_id=None)
-    assert (caught.value.reason, caught.value.retry_later) == ("input_changed", True)
+    assert (caught.value.reason, caught.value.retry_later) == ("source_changed", True)
     assert not media.dest.exists(), "nothing was published"
     job = env.last_job()
-    assert (job.state, job.error_class) == ("awaiting_retry", "input_changed")
+    assert (job.state, job.error_class) == ("awaiting_retry", "source_changed")
     assert len(env.checkpoints()) == 1
     row = env.history(job)
-    assert (row["status"], row["error_class"]) == ("awaiting_retry", "input_changed")
+    assert (row["status"], row["error_class"]) == ("awaiting_retry", "source_changed")
 
 
-def test_a_subtitle_that_arrived_while_the_engine_was_asked_is_not_replaced(env, media):
-    from subtitles.tools.translate.runtime.service import TranslationRuntimeError
+def test_a_subtitle_that_arrived_while_the_engine_was_asked_is_not_replaced_and_the_job_ends(env, media):
+    from subtitles.tools.subsync_engines import SubtitleDestinationChanged
 
     env.ai_engine()
     service = build_service(env, media)
     service._dispatcher = _EditsDuring(env.dispatcher(), lambda: media.dest.write_text(SRT, encoding="utf-8"))
+    with pytest.raises(SubtitleDestinationChanged):
+        service.translate(job_id=None)
+    assert media.dest.read_text(encoding="utf-8") == SRT, "the subtitle that arrived is untouched"
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("failed", "destination_changed"), "nothing waits for a retry forever"
+    assert env.history(job)["status"] == "failed"
+
+
+def test_a_symlinked_source_is_followed_as_the_old_services_followed_it(env, media, tmp_path):
+    env.ai_engine()
+    real = tmp_path / "library" / "real.en.srt"
+    real.parent.mkdir()
+    real.write_text(SRT, encoding="utf-8")
+    link = tmp_path / "link.en.srt"
+    link.symlink_to(real)
+    service = build_service(env, media, source_srt_file=str(link))
+    assert service.translate(job_id=None) == str(media.dest)
+    assert "[fr] One" in media.dest.read_text(encoding="utf-8")
+    assert env.last_job().state == "completed"
+    assert [snapshot.path for snapshot in service._versions][0] == str(real.resolve())
+
+
+def test_a_source_edited_behind_a_link_is_still_caught(env, media, tmp_path):
+    from subtitles.tools.translate.runtime.service import TranslationRuntimeError
+
+    env.ai_engine()
+    real = tmp_path / "library" / "real.en.srt"
+    real.parent.mkdir()
+    real.write_text(SRT, encoding="utf-8")
+    link = tmp_path / "link.en.srt"
+    link.symlink_to(real)
+    service = build_service(env, media, source_srt_file=str(link))
+    service._dispatcher = _EditsDuring(env.dispatcher(),
+                                       lambda: real.write_text(SRT.replace("One", "Uno y mas"), encoding="utf-8"))
     with pytest.raises(TranslationRuntimeError) as caught:
         service.translate(job_id=None)
-    assert (caught.value.reason, caught.value.retry_later) == ("input_changed", True)
-    assert media.dest.read_text(encoding="utf-8") == SRT, "the subtitle that arrived is untouched"
-    assert env.last_job().state == "awaiting_retry"
+    assert caught.value.reason == "source_changed" and not media.dest.exists()
+
+
+def test_a_symlinked_destination_is_refused_before_anything_is_paid_for_and_is_not_retried(env, media, tmp_path):
+    from subtitles.tools.translate.runtime.service import TranslationRuntimeError
+
+    env.ai_engine()
+    target = tmp_path / "elsewhere.fr.srt"
+    target.write_text(SRT, encoding="utf-8")
+    media.dest.symlink_to(target)
+    with pytest.raises(TranslationRuntimeError) as caught:
+        build_service(env, media).translate(job_id=None)
+    assert (caught.value.reason, caught.value.retry_later) == ("destination_is_link", False)
+    assert env.requests() == [], "the engine was never asked"
+    assert env.last_job() is None, "and no job was made"
+    assert target.read_text(encoding="utf-8") == SRT
+
+
+def test_the_versions_are_taken_before_the_source_is_read(env, media, monkeypatch):
+    from subtitles.tools.translate.runtime import service
+
+    env.ai_engine()
+    order = []
+    real_capture, real_load = service.capture_subtitle_versions, service.pysubs2.load
+    monkeypatch.setattr(service, "capture_subtitle_versions",
+                        lambda *a, **k: order.append("capture") or real_capture(*a, **k))
+    monkeypatch.setattr(service.pysubs2, "load", lambda *a, **k: order.append("load") or real_load(*a, **k))
+    build_service(env, media).translate(job_id=None)
+    assert order[:2] == ["capture", "load"]
+
+
+def test_an_interpreter_exit_during_the_write_is_recorded_and_raised_as_it_was(env, media, monkeypatch):
+    from subtitles.tools.translate.runtime import service
+
+    env.ai_engine()
+    monkeypatch.setattr(service, "staged_subtitle_write",
+                        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        build_service(env, media).translate(job_id=None)
+    job = env.last_job()
+    assert (job.state, job.error_class) == ("awaiting_retry", "publish_failed")
 
 
 def test_the_versions_taken_at_the_start_are_handed_to_the_staged_write_for_the_check_at_publication(
@@ -642,7 +715,7 @@ def test_the_versions_taken_at_the_start_are_handed_to_the_staged_write_for_the_
 
     monkeypatch.setattr(service, "staged_subtitle_write", spy)
     build_service(env, media).translate(job_id=None)
-    assert [snapshot.path for snapshot in seen[0]] == [str(media.source), str(media.dest)]
+    assert [snapshot.path for snapshot in seen[0]] == [os.path.realpath(media.source), str(media.dest)]
 
 
 def test_a_failure_after_the_file_is_on_disk_is_not_a_failed_publication(env, media, monkeypatch):
