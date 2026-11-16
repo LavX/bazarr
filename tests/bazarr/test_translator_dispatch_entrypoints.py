@@ -293,6 +293,28 @@ def test_the_job_of_an_embedded_track_is_keyed_before_the_extraction_replaces_it
     assert made[0]["source_srt_file"] == "/cache/extracted.srt"
 
 
+@pytest.mark.parametrize("linked", ["destination", "source"])
+def test_an_auto_queued_job_whose_captured_file_is_a_link_is_refused_before_the_runtime_is_reached(
+        job, monkeypatch, tmp_path, linked):
+    """The queue-time capture refuses a link, in main.py and before any engine work, as it always did. It runs the
+    same with the runtime on: no service is built and nothing is dispatched."""
+    from subtitles.tools.subsync_engines import capture_subtitle_versions
+
+    monkeypatch.setattr(job.main, "_runtime_active", lambda: True)
+    made = _translator(monkeypatch)
+    real = tmp_path / "real.srt"
+    real.write_text(SRT, encoding="utf-8")
+    plain = tmp_path / "plain.srt"
+    plain.write_text(SRT, encoding="utf-8")
+    link = tmp_path / "link.srt"
+    link.symlink_to(real)
+    captured = capture_subtitle_versions(str(tmp_path / "film.mkv"),
+                                         (str(link), str(plain)) if linked == "destination"
+                                         else (str(plain), str(link)))
+    assert job(expected_destination_versions=captured) is None
+    assert made == [] and job.renamed[-1].startswith("Skipped")
+
+
 def test_a_job_that_found_itself_replaced_is_skipped_and_publishes_nothing(job, monkeypatch):
     monkeypatch.setattr(job.main, "_runtime_active", lambda: True)
     _translator(monkeypatch, skipped=True, returns=None)
