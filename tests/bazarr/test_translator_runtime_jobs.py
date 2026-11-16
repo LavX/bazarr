@@ -340,6 +340,17 @@ def test_recorded_error_messages_are_bounded_and_scrubbed(jobs, monkeypatch):
     assert job.error_class == "auth_required"
 
 
+def test_an_error_message_equal_to_a_short_secret_is_masked_whole(jobs):
+    import secret_store.scrub as scrub
+    scrub.register_secret_values(["ab12"])
+    try:
+        job_id = _running(jobs)
+        jobs.fail(job_id, "auth_required", "ab12")
+        assert jobs.get(job_id).error_message == scrub.MASK
+    finally:
+        scrub.clear_secret_values()
+
+
 # ----------------------------------------------------------------- checkpoints
 
 def test_a_batch_is_kept_and_read_back_in_order(jobs):

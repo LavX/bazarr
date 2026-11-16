@@ -296,9 +296,10 @@ def _scrubbed(message: str | None) -> str | None:
     if not message:
         return None
     try:
-        from secret_store.scrub import scrub_text
+        from secret_store.scrub import scrub_leaf
 
-        message = scrub_text(str(message))
+        # The message stands alone in its row, so one equal to a short credential is masked whole.
+        message = scrub_leaf(str(message))
     except Exception:  # a scrubber that fails must not lose the job's outcome
         message = str(message)
     return message[:MAX_ERROR_LENGTH]

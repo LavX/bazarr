@@ -44,9 +44,10 @@ def _counted_cost():
 def _scrubbed(value: str | None, limit: int = ERROR_DETAIL_LIMIT) -> str | None:
     if not value:
         return None
-    from secret_store.scrub import scrub_text
+    from secret_store.scrub import scrub_leaf
 
-    return str(scrub_text(str(value)))[:limit]
+    # The value stands alone in its row, so one equal to a short credential is masked whole.
+    return str(scrub_leaf(str(value)))[:limit]
 
 
 def _loads_list(text: str | None) -> list[str]:

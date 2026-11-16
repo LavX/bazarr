@@ -925,6 +925,19 @@ def test_an_error_detail_is_scrubbed_and_bounded(history):
     assert row["error_class"] == "auth_required"
 
 
+def test_values_equal_to_a_short_secret_are_masked_whole_in_a_history_row(history):
+    import secret_store.scrub as scrub
+    scrub.register_secret_values(["ab12"])
+    try:
+        _open(history)
+        history.note_declined("job-1", instance_id=1, reason="ab12")
+        history.finish_job("job-1", "failed", error_class="ab12", error_detail="ab12")
+        row = history.get_by_job("job-1")
+        assert (row["declined_reason"], row["error_class"], row["error_detail"]) == (scrub.MASK,) * 3
+    finally:
+        scrub.clear_secret_values()
+
+
 def test_a_job_that_will_be_retried_has_no_end_time(history):
     _open(history)
     history.finish_job("job-1", "awaiting_retry", error_class="quota_exhausted")
