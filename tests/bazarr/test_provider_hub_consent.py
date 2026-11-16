@@ -693,3 +693,51 @@ def test_a_root_that_stays_staged_keeps_its_dependencies(tmp_path, monkeypatch, 
 
     installations = load_state()["installations"]
     assert set(installations) == {"parent", "addon"} and installations["addon"]["state"] == "staged"
+
+
+def test_a_failed_install_keeps_an_adopted_intermediate_member_and_what_it_depends_on(world, staging, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, mutate_state
+
+    helper = _plugin("helper", provides=["translit.v1"])
+    parent = _plugin("parent", provides=[PARENT_CAPABILITY], requires=["translit.v1"])
+    addon = _plugin("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    world([helper, parent, addon])
+    digest = _summary()["digest"]
+    other = _plugin("other", requires=[PARENT_CAPABILITY])
+    real_fetch = service._fetch_bundle
+
+    def fetch(manifest, deadline=None):
+        if manifest.provider_id == "addon":
+            # Another install lands and relies on the parent while the root is being staged.
+            mutate_state(lambda state: state["installations"].update(_installed(other)))
+        return real_fetch(manifest, deadline)
+
+    monkeypatch.setattr(service, "_fetch_bundle", fetch)
+
+    with pytest.raises(service.ProviderHubInstallError, match="download failed"):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    # The parent was adopted, so it stays, and the helper it needs stays with it.
+    assert set(load_state()["installations"]) == {"helper", "parent", "other", "addon"}
+
+
+def test_a_member_that_cannot_be_enabled_is_discarded_and_named(world, staging, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    helper = _plugin("helper", provides=["translit.v1"])
+    parent = _plugin("parent", provides=[PARENT_CAPABILITY], requires=["translit.v1"])
+    addon = _plugin("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    world([helper, parent, addon])
+    digest = _summary()["digest"]
+    real = service_kind.on_installed
+    monkeypatch.setattr(service_kind, "on_installed",
+                        lambda plugin_id, missing_required=(): False if plugin_id == "parent"
+                        else real(plugin_id, missing_required))
+
+    with pytest.raises(service.ProviderHubInstallError, match="Parent could not be installed for it"):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    # Neither the member that could not be enabled nor the one staged before it is left behind.
+    assert load_state()["installations"] == {}

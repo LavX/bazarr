@@ -485,7 +485,7 @@ def test_nothing_installs_from_a_pinned_ref_once_a_channel_has_latched(world):
     reasons = _blocked()
     assert set(reasons) == {PROVIDER}
     assert "ref that is not signed" in reasons[PROVIDER] and "main or beta" in reasons[PROVIDER]
-    assert "BAZARR_DEV_PLUGIN_SOURCE" in reasons[PROVIDER]
+    assert "BAZARR_DEV_PLUGIN_SOURCE" not in reasons[PROVIDER]
     with pytest.raises(ProviderHubInstallError, match="ref that is not signed"):
         resolve_catalog_install("official", PROVIDER, "9.9.9")
 
@@ -525,8 +525,12 @@ def test_the_counter_file_is_parsed_once_for_many_checks(tmp_path, monkeypatch):
 # --- a refusal after the signature checked out still keeps the key file -------------------------------------
 
 
-@pytest.mark.parametrize("what", ["malformed_commit", "off_branch_commit"])
-def test_a_refusal_for_what_the_body_says_still_remembers_the_authenticated_key_file(world, tmp_path, what):
+@pytest.mark.parametrize("what,message", [
+    ("malformed_commit", "malformed source_commit"),
+    ("off_branch_commit", "not on the official catalog's main or beta"),
+])
+def test_a_refusal_for_what_the_body_says_still_remembers_the_authenticated_key_file(
+        world, tmp_path, what, message):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     _latch(world)
@@ -541,7 +545,7 @@ def test_a_refusal_for_what_the_body_says_still_remembers_the_authenticated_key_
 
     _refresh()
 
-    assert "source_commit" in _official()["last_error"] or "not on the official" in _official()["last_error"]
+    assert message in _official()["last_error"]
     assert _state()["catalog_feeds"]["main"]["key_file_version"] == 2
     assert _counter_file(tmp_path)["channels"]["main"]["key_file_version"] == 2
     assert all("older than one it already accepted" in reason for reason in _blocked().values())
@@ -706,3 +710,38 @@ def test_a_restore_that_drops_the_row_counter_is_held_by_the_file_on_each_databa
 
     assert "replayed" in _official()["last_error"]
     assert "catalog_feeds" not in _state() or "signed_version" not in _state()["catalog_feeds"].get("main", {})
+
+
+def test_an_update_is_refused_with_the_cause_on_a_latched_host_with_an_unsigned_ref(world):
+    from provider_hub.service import apply_update, update_catalog_source
+    from provider_hub.state import mutate_state
+
+    _latch(world)
+    mutate_state(lambda state: state["installations"].update({PROVIDER: {
+        "provider_id": PROVIDER, "name": "Feed Provider", "kind": "subtitle_provider", "active_version": "1.0.0",
+        "state": "active", "pending_restart": False, "source_id": "official", "source_bound": True,
+        "origin": "catalog", "catalog_list": "providers", "manifest": _provider("1.0.0")}}))
+    update_catalog_source("official", dev_ref=HEAD)
+    world.legacy(commit=HEAD, providers=[_provider("1.1.0")])
+    _refresh()
+
+    refused = apply_update(PROVIDER)
+
+    assert "ref that is not signed" in refused["last_error"] and refused["active_version"] == "1.0.0"
+
+
+@pytest.mark.parametrize("body,message", [(b"{", "could not be read"), (b"[]", "could not be read")])
+def test_a_verified_body_that_is_not_a_json_object_is_refused_and_keeps_the_key_file(
+        world, monkeypatch, body, message):
+    from provider_hub import catalog_feed, signing
+    from provider_hub.catalog_feed import FeedRefused, FetchedFeed
+
+    result = signing.VerificationResult(
+        signing.Status.OK, root_key_id="r" * 16, key_file_version=4, signed_version=9, channel="main",
+        host_time=world.now)
+    monkeypatch.setattr(catalog_feed.signing, "verify_catalog", lambda *args, **kwargs: result)
+
+    with pytest.raises(FeedRefused, match=message) as refused:
+        _verify(world, FetchedFeed(body, b"{}", b"{}"))
+
+    assert refused.value.key_file_version == 4

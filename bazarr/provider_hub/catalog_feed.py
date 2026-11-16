@@ -440,8 +440,7 @@ STALE_CATALOG_REASON = (
 )
 UNSIGNED_REF_REASON = (
     "This host has accepted a signed catalog, and the official source is set to a ref that is not signed, so "
-    "nothing installs from it. Set the source back to main or beta, or add the branch as a catalog source "
-    "named by BAZARR_DEV_PLUGIN_SOURCE for development."
+    "nothing installs from it. Set the source back to main or beta."
 )
 NO_ROOT_REASON = (
     "This host has accepted a signed {channel} catalog, but this release of Bazarr+ has no signing key to "

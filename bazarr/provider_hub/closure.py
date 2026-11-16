@@ -105,6 +105,8 @@ def resolve_closure(
     installed = installed_plugins(state)
     visiting: list[str] = []
     done: set[str] = set()
+    # The release chosen for each plugin this install adds, so a later need is judged against it.
+    selected: dict[str, PluginManifest] = {}
 
     def provides(entry: dict[str, Any], capability: str) -> bool:
         plugin = _parse(entry.get("manifest"))
@@ -122,14 +124,17 @@ def resolve_closure(
         held, row = installed[plugin_id]
         if not row.get("source_bound") or row.get("source_id") != root.get("source"):
             return None
+        # Above the release that runs after the next restart, which may already be the staged one.
+        running = _manifest_in(row, "next") or held
         return select_entry(
             entries, plugin_id, usable=lambda entry: usable(entry) and provides(entry, capability),
-            above_version=held.version)
+            above_version=running.version)
 
     def satisfy(owner: PluginManifest, how: str, needed_id: str | None, capability: str) -> None:
         if how == "extends":
             held = installed.get(needed_id)
             if held is not None:
+                running = _manifest_in(held[1], "next") or held[0]
                 if not _supplies(held[1], capability):
                     newer = upgrade(needed_id, capability)
                     closure.unresolved.append(
@@ -141,7 +146,14 @@ def resolve_closure(
                         f"{owner.name} extends {needed_id}, which is switched off. Switch it on first.")
                 else:
                     closure.satisfied_by.append(
-                        {"id": needed_id, "version": held[0].version, "capability": capability})
+                        {"id": needed_id, "version": running.version, "capability": capability})
+                return
+            chosen = selected.get(needed_id)
+            if chosen is not None:
+                if capability not in chosen.provides:
+                    closure.unresolved.append(
+                        f"{owner.name} extends {needed_id}, but the release of it already chosen for this "
+                        f"install ({chosen.version}) does not provide {capability}.")
                 return
             candidate = choose(needed_id, capability)
             if candidate is None:
@@ -154,18 +166,20 @@ def resolve_closure(
             closure.external.append(capability)
             return
         switched_off = []
-        partial = []
+        dropping = []
         for plugin_id, (held, row) in sorted(installed.items()):
             if plugin_id == owner.plugin_id:
                 continue
             if not _supplies(row, capability):
-                # Provides it in one release and not the other: a staged update adds or drops it.
-                if _supplies(row, capability, either=True):
-                    partial.append(plugin_id)
+                # Provides it now, and the update staged for it drops it.
+                if _provides_now(row, capability):
+                    dropping.append(plugin_id)
                 continue
             # A plugin that is switched off supplies nothing.
             if _enabled(row):
-                closure.satisfied_by.append({"id": plugin_id, "version": held.version, "capability": capability})
+                running = _manifest_in(row, "next") or held
+                closure.satisfied_by.append(
+                    {"id": plugin_id, "version": running.version, "capability": capability})
                 return
             switched_off.append(plugin_id)
         providers = sorted({
@@ -174,10 +188,10 @@ def resolve_closure(
             and provides(entry, capability)
         })
         if not providers:
-            if partial and not switched_off:
+            if dropping and not switched_off:
                 closure.unresolved.append(
-                    f"{owner.name} needs {capability}, which {', '.join(partial)} provides in only one of its "
-                    "current and staged releases. Restart Bazarr+ to finish its update first.")
+                    f"{owner.name} needs {capability}, which {', '.join(dropping)} provides now, but the "
+                    "update staged for it no longer does.")
                 return
             if switched_off:
                 closure.unresolved.append(
@@ -195,11 +209,24 @@ def resolve_closure(
             # No plugin provides it anywhere: a host capability or an address the user configures.
             closure.external.append(capability)
             return
+        conflicting = []
         for plugin_id in providers:
+            chosen = selected.get(plugin_id)
+            if chosen is not None:
+                if capability in chosen.provides:
+                    return
+                # Already chosen for another need, in a release that does not provide this one.
+                conflicting.append(plugin_id)
+                continue
             candidate = choose(plugin_id, capability)
             if candidate is not None:
                 visit(candidate, "requires", len(visiting))
                 return
+        if conflicting:
+            closure.unresolved.append(
+                f"{owner.name} needs {capability}, which {', '.join(conflicting)} provides only in a release "
+                "other than the one already chosen for this install.")
+            return
         closure.unresolved.append(
             f"{owner.name} needs {capability}, which no plugin this Bazarr+ can install provides.")
 
@@ -223,6 +250,7 @@ def resolve_closure(
         finally:
             visiting.pop()
         done.add(plugin.plugin_id)
+        selected[plugin.plugin_id] = plugin
         closure.members.append(Member(entry, plugin, reason))
 
     visit(root, "root", 0)
@@ -241,18 +269,20 @@ def _manifest_in(row: dict[str, Any], phase: str) -> PluginManifest | None:
     return None
 
 
-def _supplies(row: dict[str, Any], capability: str, *, either: bool = False) -> bool:
-    """Whether an installation provides ``capability`` in both the release that runs now and the one that
-    runs after the next restart (in either of them, with ``either``), so a plugin is only relied on for
-    what it will keep providing."""
-    seen = []
-    for phase in ("now", "next"):
-        plugin = _manifest_in(row, phase)
-        if plugin is not None:
-            seen.append(capability in plugin.provides)
-    if not seen:
-        return False
-    return any(seen) if either else all(seen)
+def _supplies(row: dict[str, Any], capability: str) -> bool:
+    """Whether an installation will provide ``capability`` once the pending restart has activated what is
+    staged: judged on the release that runs after the restart, its staged one when it has one.
+
+    A plugin installed now only starts at that same restart (staged installs activate at boot), so it never
+    runs beside the release a supplier has today. Removal is stricter and judges both releases.
+    """
+    plugin = _manifest_in(row, "next")
+    return plugin is not None and capability in plugin.provides
+
+
+def _provides_now(row: dict[str, Any], capability: str) -> bool:
+    plugin = _manifest_in(row, "now")
+    return plugin is not None and capability in plugin.provides
 
 
 def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = False) -> list[str]:

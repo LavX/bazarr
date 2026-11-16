@@ -378,18 +378,55 @@ def test_install_resolution_relies_on_a_supplier_only_for_what_it_keeps_providin
     closure = _closure("user")
 
     assert not closure.resolved and closure.satisfied_by == []
-    assert "provides in only one of its current and staged releases" in closure.refusal
+    assert "provides now, but the update staged for it no longer does" in closure.refusal
 
 
-def test_a_staged_release_that_adds_a_capability_is_not_relied_on_before_it_runs(
+def test_a_staged_release_that_adds_a_capability_supplies_a_plugin_installed_now(
         tmp_path, monkeypatch, service_kind):
+    # A plugin installed now starts at the restart that activates the staged release, not before it.
     helper = _manifest("helper")
     helper_next = _manifest("helper", "2.0.0", provides=["translit.v1"])
     user = _manifest("user", requires=["translit.v1"])
     _world(tmp_path, monkeypatch, [user], _installed(
         helper, staged_version="2.0.0", staged_manifest=helper_next, state="staged", pending_restart=True))
 
-    assert not _closure("user").resolved
+    closure = _closure("user")
+
+    assert closure.resolved
+    assert closure.satisfied_by == [{"id": "helper", "version": "2.0.0", "capability": "translit.v1"}]
+
+
+def test_a_parent_whose_staged_release_adds_the_capability_satisfies_an_add_on(tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent")
+    parent_next = _manifest("parent", "2.0.0", provides=[PARENT_CAPABILITY])
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    _world(tmp_path, monkeypatch, [addon], _installed(
+        parent, staged_version="2.0.0", staged_manifest=parent_next, state="staged", pending_restart=True))
+
+    closure = _closure("addon")
+
+    assert closure.resolved and closure.satisfied_by[0]["version"] == "2.0.0"
+
+
+def test_two_needs_that_only_different_releases_of_one_plugin_meet_do_not_resolve(
+        tmp_path, monkeypatch, service_kind):
+    first = _manifest("helper", "1.0.0", provides=["alpha.v1"])
+    second = _manifest("helper", "2.0.0", provides=["beta.v1"])
+    user = _manifest("user", requires=["alpha.v1", "beta.v1"])
+    _world(tmp_path, monkeypatch, [user, first, second])
+
+    closure = _closure("user")
+
+    assert not closure.resolved
+    assert "provides only in a release other than the one already chosen" in closure.refusal
+
+
+def test_two_needs_one_release_meets_resolve_once(tmp_path, monkeypatch, service_kind):
+    helper = _manifest("helper", provides=["alpha.v1", "beta.v1"])
+    user = _manifest("user", requires=["alpha.v1", "beta.v1"])
+    _world(tmp_path, monkeypatch, [user, helper])
+
+    assert _ids(_closure("user")) == [("helper", "requires"), ("user", "root")]
 
 
 def test_a_parent_whose_staged_release_drops_the_capability_does_not_satisfy_an_add_on(

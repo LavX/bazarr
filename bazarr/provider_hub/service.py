@@ -3502,18 +3502,23 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
         return [member.plugin_id for member in resolved.members
                 if member.reason != "root" and member.plugin_id not in before and member.plugin_id in rows]
 
+    current = None
     try:
         for member in resolved.members:
             if member.reason == "root":
                 continue
+            current = member
             stage_install(
                 member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
                 catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
             )
-    except ProviderHubSettingsError:
-        raise
-    except Exception:
+    except Exception as error:
         _discard_staged_members(written(), resolved.members[-1].plugin_id if resolved.members else None)
+        if isinstance(error, ProviderHubSettingsError) and current is not None:
+            # The member was staged and could not be enabled. It is discarded with the rest, and the
+            # failure names it, because the plugin being installed was never staged.
+            raise ProviderHubInstallError(
+                f"{current.plugin.name} could not be installed for it: {error}") from error
         raise
     return written()
 
@@ -3526,11 +3531,14 @@ def _discard_staged_members(plugin_ids: list[str], root_id: str | None = None) -
     one that failed, needed the capability before the member existed), but a plugin another install adopted
     them for does, and keeps them. A removal that is refused or fails is logged.
     """
-    own = frozenset(plugin_ids) | ({root_id} if root_id else frozenset())
+    own = set(plugin_ids) | ({root_id} if root_id else set())
     for plugin_id in reversed(plugin_ids):
         try:
-            remove_installation(plugin_id, ignoring_dependents=own)
+            remove_installation(plugin_id, ignoring_dependents=frozenset(own))
         except Exception:
+            # It stays, so it is no longer part of the failed closure: whatever it depends on is still
+            # needed, and the next member is judged with it counted as a dependent.
+            own.discard(plugin_id)
             logging.getLogger(__name__).exception(
                 "Could not discard %s, which was staged for a plugin that failed to install", plugin_id)
 
