@@ -31,11 +31,11 @@ from sqlalchemy import delete, func, select, update
 from app.database import (TableTranslatorConnection, TableTranslatorEngineInstance,
                           TableTranslatorSecret)
 
+from secret_store.scrub import MASK, mask_credential_refusal
+
 from .field_schema import is_finite_number, is_secret_field
 from .destinations import DestinationSchema, added_destinations, covers, effective_destinations
 from .transaction import inside_write_transaction, write_transaction
-
-MASK = "***"  # what the settings read shows in place of a hidden secret
 
 logger = logging.getLogger(__name__)
 
@@ -507,7 +507,6 @@ class TranslatorStore:
 
     def _mask_refusal(self, owner: Owner, field_name: str, value: str) -> str | None:
         from secret_store import decrypt_secret
-        from secret_store.scrub import mask_credential_refusal
 
         stored = None
         row = self._secret_row(owner, field_name)
@@ -516,7 +515,18 @@ class TranslatorStore:
                 stored = decrypt_secret(row.encrypted_value)
             except Exception:
                 stored = None
-        return mask_credential_refusal(f"translator.{field_name}", value, stored or None)
+        path = f"translator.{field_name}"
+        entries = _list_entries(value)
+        if not entries:
+            return mask_credential_refusal(path, value, stored or None)
+        # A key list is judged entry by entry, like the settings save does: an entry equal to one already stored
+        # is not new.
+        known = _list_entries(stored) if stored else []
+        for entry in entries:
+            refusal = mask_credential_refusal(path, entry, next((item for item in known if item.strip() == entry.strip()), None))
+            if refusal:
+                return refusal
+        return None
 
     def clear_secret(self, owner: Owner, field_name: str, *, destinations: frozenset[str]) -> None:
         with write_transaction(self._session):
@@ -745,7 +755,15 @@ class TranslatorStore:
         for key, value in moved.items():
             if value in (None, "", []):
                 continue
-            if isinstance(value, str) and value.strip() == MASK:
+            if isinstance(value, list):
+                kept = [item for item in value if not (isinstance(item, str) and item.strip() == MASK)]
+                if len(kept) != len(value):
+                    logger.warning("The stored %s secret of a translator engine held the mask text, which was "
+                                   "dropped and must be entered again", key)
+                    value = kept
+                    if not value:
+                        continue
+            elif isinstance(value, str) and value.strip() == MASK:
                 # Older versions could store the mask text as a value. It is no credential, so it is dropped
                 # and the secret reads as unset. An update never fails over it.
                 logger.warning("The stored value of the %s secret of a translator engine was the mask text, "

@@ -725,6 +725,26 @@ def _resolver(schema_by_kind):
     return lambda kind, _row: schema_by_kind[kind]
 
 
+def test_a_key_list_entry_equal_to_the_mask_text_is_refused_unless_it_is_already_stored(store):
+    owner = (INSTANCE, _ai_engine(store, with_connection=False).id)
+    with pytest.raises(TranslatorStoreError, match="translator.keys cannot be"):
+        store.set_secret(owner, "keys", json.dumps(["real-key-0123456789", "***"]), destinations=frozenset())
+    assert store.secrets_for_request(owner, frozenset()) == {}
+    store.set_secret(owner, "keys", json.dumps(["real-key-0123456789"]), destinations=frozenset())
+    with pytest.raises(TranslatorStoreError, match="cannot be"):
+        store.set_secret(owner, "keys", json.dumps(["real-key-0123456789", " *** "]), destinations=frozenset())
+    assert json.loads(store.secrets_for_request(owner, frozenset())["keys"]) == ["real-key-0123456789"]
+
+
+def test_a_plugin_update_drops_a_mask_entry_from_a_stored_key_list(store):
+    after = DestinationSchema(fields=({"key": "tokens", "type": "key_list", "secret": True},
+                                      {"key": "only", "type": "key_list", "secret": True}))
+    instance = store.create_instance("lingarr", settings={"tokens": ["k1-0123456789", "***"], "only": ["***"]})
+    store.apply_plugin_update("lingarr", _resolver({INSTANCE: after, CONNECTION: after}))
+    held = store.secrets_for_request((INSTANCE, instance.id), frozenset())
+    assert json.loads(held["tokens"]) == ["k1-0123456789"] and "only" not in held
+
+
 def test_a_plugin_update_drops_a_stored_mask_text_instead_of_failing(store, caplog):
     after = DestinationSchema(fields=({"key": "token", "type": "secret"}, {"key": "other", "type": "secret"},
                                       {"key": "label", "type": "text"}))
