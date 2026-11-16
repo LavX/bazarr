@@ -178,6 +178,7 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
     """
     from provider_hub import service as hub_service
     from provider_hub import state as hub_state
+    from provider_hub.endpoints import fill_flaresolverr_url
     from provider_hub.manifest import reserved_settings_sections
 
     try:
@@ -222,6 +223,9 @@ def apply_settings_overlay(provider_configs: dict[str, dict[str, Any]], settings
                 value = section.get(key) if hasattr(section, "get") else getattr(section, key, None)
                 if value not in (None, "", [], {}):
                     config[key] = value
+            # Last, so only an address still empty after the stored config, the
+            # schema defaults and the plugin's own section are merged is filled.
+            fill_flaresolverr_url(config, properties, installation, settings)
             provider_configs[installation.provider_id] = config
     except Exception:
         logger.exception("Unable to load Provider Hub settings config")

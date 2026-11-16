@@ -196,6 +196,18 @@ declare namespace System {
     retry: string;
   }
 
+  interface FlareSolverrStatus {
+    /** The address providers fall back to, empty when none is configured. */
+    url: string;
+    source: "setting" | "env" | "none";
+    /** A FlareSolverr container that answered next to Bazarr, never used until accepted. */
+    detected: string | null;
+    /** True until the first check has finished; the answer then arrives on a later read. */
+    detecting: boolean;
+    /** Whether the sibling answered at all, even when it is the address in use. */
+    sibling_found: boolean;
+  }
+
   interface ProviderSearchOutcome {
     name: string;
     status: "found" | "empty" | "failed" | "throttled" | "busy" | "excluded";

@@ -38,6 +38,7 @@ import { summarizeUpdates } from "@/pages/Settings/Providers/hub/utils";
 import { antiCaptchaOption } from "@/pages/Settings/Providers/options";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import { ProviderView } from "./components";
+import FlareSolverrIntegration from "./FlareSolverrIntegration";
 import {
   AvailableInput,
   IntegrationList,
@@ -289,6 +290,12 @@ const IntegrationsSection: FunctionComponent = () => (
         <Accordion.Control>TMDB</Accordion.Control>
         <Accordion.Panel>
           <TmdbIntegration />
+        </Accordion.Panel>
+      </Accordion.Item>
+      <Accordion.Item value="flaresolverr">
+        <Accordion.Control>FlareSolverr</Accordion.Control>
+        <Accordion.Panel>
+          <FlareSolverrIntegration />
         </Accordion.Panel>
       </Accordion.Item>
       <Accordion.Item value="omdb">

@@ -13,6 +13,20 @@ class ProviderApi extends BaseApi {
     return response.data;
   }
 
+  /** The effective FlareSolverr address, and a sibling container if one answered. */
+  async flaresolverr() {
+    const response =
+      await this.get<DataWrapper<System.FlareSolverrStatus>>("/flaresolverr");
+    return response.data;
+  }
+
+  /** Look for the sibling again. Reports only: it never saves anything. */
+  async detectFlaresolverr() {
+    const response =
+      await this.post<DataWrapper<System.FlareSolverrStatus>>("/flaresolverr");
+    return response.data.data;
+  }
+
   async reset() {
     await this.post("", { action: "reset" });
   }

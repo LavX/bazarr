@@ -12,6 +12,31 @@ export function useSystemProviders(history?: boolean) {
   });
 }
 
+export function useFlareSolverrStatus() {
+  return useQuery({
+    queryKey: [QueryKeys.System, QueryKeys.Providers, "flaresolverr"],
+    queryFn: () => api.providers.flaresolverr(),
+    retry: false,
+    // The server answers from a cache and probes behind the request, so the
+    // first read can say "still looking". Ask again until it has an answer.
+    refetchInterval: (query) => (query.state.data?.detecting ? 2000 : false),
+  });
+}
+
+export function useFlareSolverrDetect() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.providers.detectFlaresolverr(),
+    onSuccess: async (status) => {
+      const queryKey = [QueryKeys.System, QueryKeys.Providers, "flaresolverr"];
+      // A status read still in flight was asked before this answer existed.
+      // Left alone it would land afterwards and replace the newer result.
+      await client.cancelQueries({ queryKey });
+      client.setQueryData(queryKey, status);
+    },
+  });
+}
+
 // The manual searches run as standard jobs: the request queues one and the
 // query follows it to its rows. Closing the modal does not stop the job, and
 // pressing Search again for the same item follows the search that is running.
