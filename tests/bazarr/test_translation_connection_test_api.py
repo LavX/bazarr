@@ -21,8 +21,8 @@ API_KEY = "translation-test-route-key"  # pragma: allowlist secret
 SECRET = "sk-live-0123456789abcdef-WXYZ"  # pragma: allowlist secret
 LIST_KEYS = ["gem-key-one-0123456789", "gem-key-two-0123456789"]  # pragma: allowlist secret
 PLUGIN = OFFICIAL_ENGINE_PLUGIN_ID
-LAN = "http://192.168.1.20:1234/v1"
-LAN_ORIGIN = "http://192.168.1.20:1234"
+LAN = "http://192.0.2.20:1234/v1"
+LAN_ORIGIN = "http://192.0.2.20:1234"
 
 
 def _manifest():
@@ -296,7 +296,7 @@ def test_a_probe_that_raises_never_puts_its_text_in_the_answer_or_the_log(world,
     assert "Bazarr+ log" in response.json["message"]
     assert any("RuntimeError" in record.getMessage() for record in caplog.records)  # it was logged, with no key
     _nothing_leaked(world, caplog)
-    assert "192.168.1.20" not in response.get_data(as_text=True)
+    assert "192.0.2.20" not in response.get_data(as_text=True)
 
 
 # --------------------------------------------------- destination and key rules
@@ -304,7 +304,7 @@ def test_a_probe_that_raises_never_puts_its_text_in_the_answer_or_the_log(world,
 def test_a_key_is_not_sent_to_an_address_it_was_not_entered_under(world, caplog):
     world.probe({"ok": True})
     connection_id = world.lan_connection()
-    other = "http://10.0.0.9:9999/v1"
+    other = "http://198.51.100.9:9999/v1"
     changed = world.call("patch", f"connections/{connection_id}", {
         "expected_revision": world.store.get_connection(connection_id).revision,
         "values": {"base_url": other}, "accept_destinations": [other]})
@@ -320,7 +320,7 @@ def test_a_saved_address_that_is_not_a_clean_one_is_refused_before_anything_is_s
     world.probe({"ok": True})
     connection_id = world.lan_connection()
     row = world.store.get_connection(connection_id)
-    row.settings_json = json.dumps({"base_url": "http://admin:hunter2@192.168.1.20:1234/v1"})
+    row.settings_json = json.dumps({"base_url": "http://admin:hunter2@192.0.2.20:1234/v1"})
     world.session.commit()
     response = world.call("post", f"connections/{connection_id}/test", {})
     assert response.status_code == 200 and response.json["ok"] is False

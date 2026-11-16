@@ -339,6 +339,13 @@ def test_a_movie_on_the_in_memory_queue_names_its_radarr_id(world):
     assert (item["media_type"], item["media_id"]) == ("movie", 55)
 
 
+def test_a_movie_queued_as_movies_keeps_its_media_id(world):
+    _job(world.session, "queued", queue_job_id=13)
+    world.queue_jobs[13] = {"kwargs": {"media_type": "movies", "radarr_id": 56, "from_lang": "en", "to_lang": "hu"}}
+    (item,) = world.call("get", "queue").json["data"]
+    assert (item["media_type"], item["media_id"]) == ("movie", 56)
+
+
 def test_a_job_nothing_knows_is_named_by_its_file_and_target_and_leaks_no_directory(world):
     _job(world.session, "queued", path="/private/library/Some Movie (2020)/Some Movie.en.srt", target="hu:forced:hi")
     response = world.call("get", "queue")

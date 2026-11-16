@@ -173,8 +173,14 @@ class TranslationSummary:
         if not job:
             return {}
         kwargs = job.get("kwargs") or {}
+        from subtitles.tools.translate.core.translator_utils import is_movie_media_type
+
+        # Callers spell a movie "movie" or "movies"; the page is told "movie" either way.
         media_type = kwargs.get("media_type")
-        media_id = kwargs.get("radarr_id") if media_type == "movie" else kwargs.get("sonarr_episode_id")
+        is_movie = is_movie_media_type(media_type)
+        if is_movie:
+            media_type = "movie"
+        media_id = kwargs.get("radarr_id") if is_movie else kwargs.get("sonarr_episode_id")
         title = ""
         try:
             title = self._title(media_type, kwargs.get("radarr_id"), kwargs.get("sonarr_series_id"),

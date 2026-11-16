@@ -17,7 +17,7 @@ from subtitles.tools.translate.runtime.store import TranslatorStore
 API_KEY = "translation-lingarr-test-key"  # pragma: allowlist secret
 TOKEN = "lingarr-token-0123456789abcdef"  # pragma: allowlist secret
 OTHER_TOKEN = "lingarr-token-fedcba9876543210"  # pragma: allowlist secret
-URL = "http://192.168.1.30:9876"
+URL = "http://192.0.2.30:9876"
 
 
 class FakeLingarr:
@@ -516,13 +516,13 @@ def test_an_undo_never_overwrites_values_a_newer_save_wrote(world, monkeypatch):
 
     def lose_the_race(*args, **kwargs):
         # While this save fails, another writer changes the address.
-        world.fake.address = "http://10.9.9.9:9876"
+        world.fake.address = "http://198.51.100.99:9876"
         raise StoreStale("changed", 9)
 
     monkeypatch.setattr(world.store, "set_instance_enabled", lose_the_race)
     response = world.save({"url": URL}, accept_destinations=[URL], enabled=False)
     assert response.status_code == 409
-    assert world.fake.address == "http://10.9.9.9:9876"
+    assert world.fake.address == "http://198.51.100.99:9876"
 
 
 def test_the_address_is_server_owned_for_the_old_settings_route_only_while_the_runtime_is_on(monkeypatch):
