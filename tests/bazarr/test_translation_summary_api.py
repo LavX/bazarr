@@ -434,3 +434,32 @@ def test_a_reader_waits_for_a_write_and_never_sees_values_a_failed_write_takes_b
     assert seen["limits"] == before
     assert store.get() == before
     assert settings.translator.month_cap_micros == before.month_cap_micros
+
+
+def test_the_dispatcher_reads_the_caps_through_the_locked_reader_and_never_sees_a_failed_save(monkeypatch):
+    import threading
+
+    import app.config as config
+    from subtitles.tools.translate.runtime import dispatch, limits
+
+    store = ConfigLimits()
+    before = store.get()
+    seen = {}
+
+    def failing_write(*args, **kwargs):
+        def read():
+            seen["caps"] = dispatch.configured_cost_limits()
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        reader.join(0.3)
+        seen["blocked"] = reader.is_alive()
+        seen["reader"] = reader
+        return False
+
+    monkeypatch.setattr(config, "write_config", failing_write)
+    assert store.set(9_000_000, 3_000_000, before.revision + 1) is False
+    seen["reader"].join(5)
+    assert seen["blocked"] is True
+    assert (seen["caps"].month_cap, seen["caps"].job_cap) == (before.month_cap_micros, before.job_cap_micros)
+    assert seen["caps"] == limits.current_cost_limits()
