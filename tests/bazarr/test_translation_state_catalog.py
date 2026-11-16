@@ -89,6 +89,20 @@ def test_the_official_engine_needs_a_key_and_lists_every_address_it_may_send_to(
     assert "description" not in item
 
 
+def test_only_the_official_sources_entry_is_shown_and_sorted_as_the_official_engine(monkeypatch):
+    import provider_hub.service as hub
+
+    renamed = _ai_manifest()
+    renamed["name"] = "Zeta Translator"
+    imposter = _entry(renamed, source="dev", trusted=False)
+    assert catalog_view.describe_entry(imposter)["official"] is False
+    assert catalog_view.describe_entry(_entry(_ai_manifest()))["official"] is True
+    other = _entry(_google_manifest())
+    monkeypatch.setattr(hub, "installable_catalog_plugins", lambda kind: [imposter, other])
+    listed = catalog_view.available_engines()
+    assert [(item["plugin_id"], item["official"]) for item in listed] == [(GOOGLE, False), (PLUGIN, False)]
+
+
 def test_a_description_is_trimmed_and_a_manifest_that_does_not_parse_is_skipped():
     long_text = "word " * 200
     assert len(catalog_view.describe_entry(_entry(_google_manifest(description=long_text)))["description"]) <= 300
@@ -140,6 +154,20 @@ def test_an_engine_only_the_official_signed_catalog_may_supply_is_the_only_one_o
     assert [entry["provider_id"] for entry in installable_catalog_plugins("translator")] == [GOOGLE]
     _state(tmp_path, monkeypatch, [_entry(_google_manifest())], official=verified_official_source(trusted=False))
     assert installable_catalog_plugins("translator") == []
+
+
+def test_a_failed_first_install_does_not_count_as_installed_so_the_engine_is_offered_again(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    failed = {GOOGLE: {"provider_id": GOOGLE, "name": "Google Translate", "state": "failed", "kind": "translator",
+                       "last_error": "The download failed.", "source_bound": True, "source_id": "official"}}
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest())], installations=failed)
+    assert [entry["provider_id"] for entry in installable_catalog_plugins("translator")] == [GOOGLE]
+    # One that is installed, or staged, still is not offered.
+    for held in ({"active_version": "1.0.0"}, {"staged_version": "1.0.0"}):
+        _state(tmp_path, monkeypatch, [_entry(_google_manifest())],
+               installations={GOOGLE: {**failed[GOOGLE], **held}})
+        assert installable_catalog_plugins("translator") == []
 
 
 def test_an_engine_from_an_expired_signed_catalog_is_not_offered(tmp_path, monkeypatch):

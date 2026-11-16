@@ -39,7 +39,7 @@ def available_engines() -> list[dict[str, Any]]:
         item = describe_entry(entry)
         if item is not None:
             items.append(item)
-    items.sort(key=lambda item: (item["plugin_id"] != OFFICIAL_ENGINE_PLUGIN_ID, item["name"].casefold()))
+    items.sort(key=lambda item: (not item["official"], item["name"].casefold()))
     return items
 
 
@@ -57,6 +57,7 @@ def update_version(plugin_id: str) -> str | None:
 def describe_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     """One catalog entry as the page lists it, or None when its manifest cannot be read."""
     from provider_hub.plugin_manifest import parse_plugin_manifest
+    from provider_hub.service import OFFICIAL_CATALOG_SOURCE_ID
 
     try:
         manifest = parse_plugin_manifest(dict(entry["manifest"]))
@@ -76,7 +77,10 @@ def describe_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
         "name": manifest.name or manifest.plugin_id,
         "version": manifest.version,
         "source": str(entry.get("source") or ""),
-        "official": manifest.plugin_id == OFFICIAL_ENGINE_PLUGIN_ID,
+        # The official engine is the one the official source lists under its id: another source's entry with the
+        # same id is not it, however it is named.
+        "official": (manifest.plugin_id == OFFICIAL_ENGINE_PLUGIN_ID
+                     and entry.get("source") == OFFICIAL_CATALOG_SOURCE_ID),
         # No field asks for a key, so it needs no account and has no bill to cap.
         "free": not any(is_secret_field(field) for field in every_field),
         "destinations": destinations,

@@ -4379,7 +4379,7 @@ def offered_update_version(provider_id: str) -> str | None:
 
 
 def installable_catalog_plugins(kind: str) -> list[dict[str, Any]]:
-    """The newest installable entry of each catalog plugin of ``kind`` that has no installation at all.
+    """The newest installable entry of each catalog plugin of ``kind`` that is not installed or staged.
 
     It asks what the install path asks, with the same functions: the entry's source may supply its kind (a kind
     other than the subtitle provider only from the trusted official source, whose signed feed must be current),
@@ -4390,7 +4390,9 @@ def installable_catalog_plugins(kind: str) -> list[dict[str, Any]]:
     ``trusted`` and ``manifest``.
     """
     state = load_state()
-    installed = set((state.get("installations") or {}).keys())
+    # A row that only records a failed install is not an installation, so the engine can be offered again.
+    installed = {str(plugin_id) for plugin_id, row in (state.get("installations") or {}).items()
+                 if isinstance(row, dict) and (row.get("active_version") or row.get("staged_version"))}
     host = current_host()
     entries = sorted((entry for entry in _stored_manifest_entries(state) if catalog_kind_of(entry) == kind),
                      key=lambda entry: not bool(entry.get("trusted", False)))
