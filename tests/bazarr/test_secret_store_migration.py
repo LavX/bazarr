@@ -294,6 +294,12 @@ def test_failed_decrypt_ciphertext_survives_a_save_that_keeps_it_empty():
 
 @pytest.fixture
 def plugin_secret_paths():
+    # The first read of the Provider Hub state opens its database, which imports
+    # app.config, and that import runs the boot loader that rebuilds the plugin
+    # secret registry from the stored state. In the application the module is
+    # long loaded by then. Importing it here keeps a test's registered paths from
+    # being wiped by that first import, whichever test happens to run first.
+    import app.config  # noqa: F401
     from secret_store import registry
 
     saved = set(registry.plugin_secret_paths())
