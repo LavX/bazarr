@@ -13,6 +13,7 @@ import stat as stat_module
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Iterable, Mapping, Sequence
 
 # Read-only (with execute) system locations a Python worker needs: the dynamic
@@ -538,6 +539,17 @@ class RuntimeSpec:
     limits: Limits = field(default_factory=Limits)
     term_grace: float = 3.0
 
+    def __post_init__(self) -> None:
+        # The spec keeps its own validated copy, read-only: whoever built the mapping, a proxy
+        # variable cannot reach a worker through it, before or after construction.
+        env = dict(self.env)
+        for key, value in env.items():
+            if not isinstance(key, str) or not isinstance(value, str) or "=" in key or "\0" in key + value:
+                raise PolicyError("environment entries must be plain strings: %r" % (key,))
+            if is_proxy_key(key):
+                raise PolicyError("workers get no proxy variables: %s" % key)
+        object.__setattr__(self, "env", MappingProxyType(env))
+
     def to_launch_json(self, *, enforce: bool, min_abi: int) -> bytes:
         payload = {
             "interpreter": os.fspath(self.interpreter),
@@ -562,6 +574,17 @@ class RuntimeSpec:
 
 
 DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def is_proxy_key(key: str) -> bool:
+    """True for any environment name that could configure a proxy.
+
+    Workers get no proxy: a credential in a worker's environment is readable by
+    the worker, and Bazarr+ runs no forwarder. Matching is on the name alone and
+    deliberately wide (``HTTPS_PROXY``, ``all_proxy``, ``NO_PROXY``, ``PIP_PROXY``,
+    anything with "proxy" in it, in any case).
+    """
+    return "proxy" in key.lower()
 
 
 def clean_env(
@@ -590,6 +613,8 @@ def clean_env(
     for key, value in (extra or {}).items():
         if not isinstance(key, str) or not isinstance(value, str) or "=" in key or "\0" in key + value:
             raise PolicyError("environment entries must be plain strings: %r" % (key,))
+        if is_proxy_key(key):
+            raise PolicyError("workers get no proxy variables: %s" % key)
         env[key] = value
     return env
 

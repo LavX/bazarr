@@ -28,6 +28,7 @@ could.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -111,6 +112,24 @@ LAUNCHER_CLEANUP_SECONDS = 10.0
 # that for its own bounds) and makes the whole stream untrusted.
 STATUS_LIMIT = 16 * 1024
 STATUS_READ_PER_CALL = 64 * 1024
+
+# Names this host process as the owner of the workers it starts through the launcher: each
+# worker, and what it starts, carries it in its environment, so a later run can tell a leftover
+# of ours from a stranger's (see ``sweep``). The launcher itself is non-dumpable, so its own
+# environment cannot be read and does not carry it. Until ``sweep.configure_owner`` sets it, nothing
+# is marked.
+OWNER_VARIABLE = "BAZARR_SANDBOX_OWNER"
+_owner_marker: "str | None" = None
+
+
+def set_owner_marker(value: "str | None") -> None:
+    global _owner_marker
+    _owner_marker = value
+
+
+def owner_marker() -> "str | None":
+    return _owner_marker
+
 
 # Flipped when the worker spawner starts plugin workers through this launcher.
 # Until then the probe describes what the host could do, not what workers get.
@@ -1369,6 +1388,9 @@ def _start(
     launcher_python: str | None = None,
     **popen_kwargs,
 ) -> LauncherProcess:
+    marker = _owner_marker
+    if marker is not None:
+        spec = dataclasses.replace(spec, env={**spec.env, OWNER_VARIABLE: marker})
     data = spec.to_launch_json(enforce=enforce, min_abi=min_abi)
     python = launcher_python or sys.executable
     spec_fd = life_r = life_w = status_r = status_w = None
@@ -1385,7 +1407,7 @@ def _start(
         os.set_blocking(status_r, False)
         # Plain Popen, no preexec_fn. The launcher gets an empty environment:
         # nothing from the host's reaches it, and so nothing reaches the worker
-        # except what the spec lists.
+        # except what the spec lists (the owner marker among it).
         process = LauncherProcess(
             [python, "-I", "-S", "-B", str(LAUNCHER_PATH), str(spec_fd), str(life_r), str(status_w)],
             lifeline=life_w,
