@@ -459,7 +459,7 @@ describe("Settings > Translation", () => {
                 {
                   error: "consent_required",
                   message: "These addresses are new.",
-                  destinations: ["http://192.168.1.5:1234/v1"],
+                  destinations: ["http://translator.example:1234/v1"],
                 },
                 { status: 409 },
               )
@@ -475,7 +475,7 @@ describe("Settings > Translation", () => {
     });
     await user.type(
       within(dialog).getByLabelText("Base URL"),
-      "http://192.168.1.5:1234/v1",
+      "http://translator.example:1234/v1",
     );
     await user.type(within(dialog).getByLabelText("API key"), SECRET);
     await user.click(
@@ -484,7 +484,9 @@ describe("Settings > Translation", () => {
     const ask = await screen.findByRole("dialog", {
       name: "Send data to a new address?",
     });
-    expect(within(ask).getByText("http://192.168.1.5:1234/v1")).toBeVisible();
+    expect(
+      within(ask).getByText("http://translator.example:1234/v1"),
+    ).toBeVisible();
     expect(calls).toHaveLength(1);
     expect(calls[0].body).toMatchObject({ accept_destinations: [] });
     await user.click(
@@ -493,8 +495,11 @@ describe("Settings > Translation", () => {
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[1].body).toEqual({
       backend_type: "openai_compatible",
-      values: { base_url: "http://192.168.1.5:1234/v1", api_key: SECRET },
-      accept_destinations: ["http://192.168.1.5:1234/v1"],
+      values: {
+        base_url: "http://translator.example:1234/v1",
+        api_key: SECRET,
+      },
+      accept_destinations: ["http://translator.example:1234/v1"],
     });
     await waitFor(() =>
       expect(

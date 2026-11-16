@@ -454,12 +454,12 @@ describe("plugin settings fields", () => {
     expect(screen.getByLabelText("Input price")).toHaveValue("0");
     // Still editable: typed onto the preset's value, one key at a time.
     await user.clear(url);
-    await user.type(url, "http://192.168.1.5:1234/v1");
-    expect(url).toHaveValue("http://192.168.1.5:1234/v1");
+    await user.type(url, "http://translator.example:1234/v1");
+    expect(url).toHaveValue("http://translator.example:1234/v1");
     expect(seen).toHaveBeenLastCalledWith(
       expect.objectContaining({
         preset: "lmstudio",
-        base_url: "http://192.168.1.5:1234/v1",
+        base_url: "http://translator.example:1234/v1",
       }),
     );
     // Picking another preset overwrites what it names.
