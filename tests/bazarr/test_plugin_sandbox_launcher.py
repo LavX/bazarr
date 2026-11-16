@@ -14,7 +14,6 @@ for one specific test (need_abi) stay skips.
 """
 import dataclasses
 import errno
-import fcntl
 import gc
 import importlib.util
 import json
@@ -3760,10 +3759,13 @@ def test_the_launcher_closes_itself_off_before_it_starts_a_worker(tmp_path):
         process.stop(0.5)
 
 
+@linux_only
 def test_a_status_stream_that_overflows_is_not_trusted(tmp_path):
+    import fcntl
+
     read_fd, write_fd = os.pipe()
     os.set_blocking(read_fd, False)
-    # The smallest pipe the kernel hands out under pressure: one write cannot hold a flood.
+    # A pipe of a page, as the kernel hands out under pipe pressure: one write cannot hold a flood.
     fcntl.fcntl(write_fd, fcntl.F_SETPIPE_SZ, 4096)
     process = spawn.LauncherProcess([sys.executable, "-c", "pass"], lifeline=None, status=read_fd, env={},
                                     close_fds=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -3773,8 +3775,8 @@ def test_a_status_stream_that_overflows_is_not_trusted(tmp_path):
         os.write(write_fd, b'{"cleanup": "complete"}\n')
         assert process.launcher_cleanup() == "complete"
         # A flood follows: more than the host is willing to keep.
-        # The pipe's capacity is the kernel's to shrink (to one page when many pipes
-        # are open on the machine), so the flood is fed in as the host drains it
+        # The pipe's capacity is the kernel's to shrink (to a page or two under pipe
+        # pressure, when many pipes are open on the machine), so the flood is fed in as the host drains it
         # rather than sized to what one write can hold.
         os.set_blocking(write_fd, False)
         sent = 0
