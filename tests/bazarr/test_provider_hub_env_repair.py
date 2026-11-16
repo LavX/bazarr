@@ -1073,7 +1073,9 @@ def test_no_request_starts_a_worker_after_the_proxy_is_stopped(hub, hub_registry
 SURVIVOR_SCRIPT = (
     "import subprocess, sys\n"
     "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-    "open(sys.argv[1], 'w').write(str(child.pid))\n"
+    "import os\n"
+    "open(sys.argv[1] + '.tmp', 'w').write(str(child.pid))\n"
+    "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
     "sys.stdin.readline()\n"
 )
 
@@ -1102,11 +1104,15 @@ def test_a_failed_shutdown_still_ends_what_the_worker_started(tmp_path):
     pid_file = tmp_path / "child.pid"
     client = ProviderWorkerClient([sys.executable, "-c", SURVIVOR_SCRIPT, str(pid_file)])
     client.start()
-    deadline = time.monotonic() + 10
-    while not pid_file.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    child = int(pid_file.read_text(encoding="utf-8"))
+    child = None
     try:
+        deadline = time.monotonic() + 30
+        while child is None and time.monotonic() < deadline:
+            try:
+                child = int(pid_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                time.sleep(0.02)
+        assert child is not None, "the worker never recorded its child"
         assert _process_alive(child)
         # The worker dies on the shutdown request without answering: the shutdown fails after it exited.
         client.stop(grace_seconds=2)
@@ -1117,7 +1123,9 @@ def test_a_failed_shutdown_still_ends_what_the_worker_started(tmp_path):
         assert not _process_alive(child)
         assert client.group_gone(5)
     finally:
-        if _process_alive(child):
+        # A client left running here would be reaped by the next test that counts idle workers.
+        client.stop(grace_seconds=2)
+        if child is not None and _process_alive(child):
             os.kill(child, signal.SIGKILL)
 
 
