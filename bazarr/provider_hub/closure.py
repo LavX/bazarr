@@ -306,8 +306,10 @@ def dependents(
         return enabled[pid] if enabled is not None and pid in enabled else _enabled(row)
 
     def usable_alternative(pid: str, row: dict[str, Any]) -> bool:
-        # One that is held back or whose environment needs repair does not run, as the boot check sees it.
-        return on(pid, row) and not row.get("needs_repair") and not row.get("blocked")
+        # One that is held back, whose environment needs repair or whose kind this Bazarr+ does not define
+        # does not run, as the boot check sees it.
+        return (on(pid, row) and not row.get("needs_repair") and not row.get("blocked")
+                and _kind_defined(row))
 
     found = []
     for other_id, (_active, row) in sorted(installed.items()):
@@ -384,7 +386,8 @@ def broken_by(state: dict[str, Any], plugin_id: str, replacement: dict[str, Any]
 
 def _supplied_elsewhere(installed: dict[str, Any], capability: str, excluding: tuple[str, ...]) -> bool:
     for held_id, (_held, held_row) in installed.items():
-        if held_id in excluding or not _enabled(held_row) or held_row.get("needs_repair") or held_row.get("blocked"):
+        if (held_id in excluding or not _enabled(held_row) or held_row.get("needs_repair")
+                or held_row.get("blocked") or not _kind_defined(held_row)):
             continue
         supplier = _manifest_in(held_row, "next")
         if supplier is not None and capability in supplier.provides:
@@ -481,6 +484,12 @@ def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None =
         # What is not running supplies nothing, so judge the rest again without it.
         blocked.update(newly)
         suppliers -= set(newly)
+
+
+def _kind_defined(row: dict[str, Any]) -> bool:
+    from .kinds import kind_of, known_kinds
+
+    return kind_of(row) in set(known_kinds())
 
 
 def _enabled(row: dict[str, Any]) -> bool:

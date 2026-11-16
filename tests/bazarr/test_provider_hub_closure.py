@@ -1067,3 +1067,46 @@ def test_a_supplier_that_is_on_but_broken_is_not_an_alternative_when_switching_o
     # With the other one working, the same switch is allowed.
     _world(tmp_path, monkeypatch, [], {**_installed(first), **_installed(second), **_installed(user)})
     assert service.update_provider("first", enabled=False)["enabled"] is False
+
+
+@pytest.mark.parametrize("broken", [{"needs_repair": True}, {"blocked": True, "blocked_reason": "held"}])
+def test_an_update_that_drops_a_capability_is_refused_when_the_only_alternative_is_broken(
+        tmp_path, monkeypatch, service_kind, broken):
+    from provider_hub import service
+    from provider_hub.closure import broken_by
+    from provider_hub.state import load_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    dropped = _manifest("parent", "2.0.0")
+    other = _manifest("other", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    _world(tmp_path, monkeypatch, [dropped], {
+        **_installed(parent, source_id="official", source_bound=True), **_installed(other, **broken),
+        **_installed(user)})
+
+    assert broken_by(load_state(), "parent", dropped) == [("user", PARENT_CAPABILITY)]
+    with pytest.raises(service.ProviderHubInstallError, match="which user relies on"):
+        service.stage_install(dropped, source_id="official", catalog_list="plugins")
+
+    # With a working alternative the same release is not held up by it.
+    _world(tmp_path, monkeypatch, [dropped], {
+        **_installed(parent, source_id="official", source_bound=True), **_installed(other), **_installed(user)})
+    assert broken_by(load_state(), "parent", dropped) == []
+
+
+def test_an_alternative_of_a_kind_this_bazarr_does_not_define_is_not_counted(tmp_path, monkeypatch, service_kind):
+    from plugin_platform_helpers import service_manifest
+    from provider_hub import service
+    from provider_hub.closure import broken_by
+    from provider_hub.state import load_state
+
+    first = _manifest("first", provides=["translit.v1"])
+    ghost = service_manifest("ghost", "1.0.0", kind="translator", kind_api="bazarr.translator.v1",
+                             provides=["translit.v1"])
+    dropped = _manifest("first", "2.0.0")
+    user = _manifest("user", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [], {**_installed(first), **_installed(ghost), **_installed(user)})
+
+    with pytest.raises(ValueError, match="first cannot be switched off while user depends on it"):
+        service.update_provider("first", enabled=False)
+    assert broken_by(load_state(), "first", dropped) == [("user", "translit.v1")]

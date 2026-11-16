@@ -760,3 +760,97 @@ def test_a_helper_that_was_only_a_failed_row_is_discarded_with_a_root_that_fails
 
     installations = load_state()["installations"]
     assert "parent" not in installations and installations["addon"]["state"] == "failed"
+
+
+def test_a_later_member_that_was_never_reached_keeps_its_old_failed_row(world, staging, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, mutate_state
+
+    helper = _plugin("helper", provides=["translit.v1"])
+    parent = _plugin("parent", provides=[PARENT_CAPABILITY], requires=["translit.v1"])
+    addon = _plugin("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    world([helper, parent, addon])
+    digest = _summary()["digest"]
+    old_row = {"provider_id": "parent", "kind": "test_service", "name": "Parent", "state": "failed",
+               "active_version": None, "staged_version": None, "last_error": "an earlier download failed",
+               "manifest": parent}
+    mutate_state(lambda state: state["installations"].update({"parent": dict(old_row)}))
+    real_fetch = service._fetch_bundle
+
+    def fetch(manifest, deadline=None):
+        if manifest.provider_id == "helper":
+            raise service.ProviderHubInstallError("the helper download failed")
+        return real_fetch(manifest, deadline)
+
+    monkeypatch.setattr(service, "_fetch_bundle", fetch)
+
+    with pytest.raises(service.ProviderHubInstallError, match="helper download failed"):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    # The helper failed first, so the parent was never reached and its old record stays as it was.
+    installations = load_state()["installations"]
+    assert installations["parent"] == old_row and "helper" not in installations
+
+
+def test_a_failed_install_leaves_a_provider_the_person_had_on_switched_on(world, staging, monkeypatch):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub.kinds import subtitle_provider
+    from provider_hub import service
+
+    parent = provider_manifest_v2("subparent")
+    parent["provides"] = [PARENT_CAPABILITY]
+    addon = _plugin("addon", extends={"id": "subparent", "capability": PARENT_CAPABILITY})
+    world([parent, addon])
+    digest = _summary()["digest"]
+    enabled = ["subparent"]
+    calls = []
+
+    def set_enabled(provider_id, value):
+        calls.append((provider_id, value))
+        if value and provider_id not in enabled:
+            enabled.append(provider_id)
+        if not value and provider_id in enabled:
+            enabled.remove(provider_id)
+        return True
+
+    monkeypatch.setattr(subtitle_provider, "bazarr_enabled_providers", lambda: list(enabled))
+    monkeypatch.setattr(subtitle_provider, "set_bazarr_provider_enabled", set_enabled)
+    # The provider's worker check has no bundle to run in this test.
+    monkeypatch.setattr(service, "_smoke_validate_worker", lambda *args, **kwargs: None)
+
+    with pytest.raises(service.ProviderHubInstallError, match="download failed"):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    # Discarding the provider switched it off, and it was put back: it was on before this install.
+    assert ("subparent", False) in calls and calls[-1] == ("subparent", True)
+    assert enabled == ["subparent"]
+
+
+def test_a_provider_that_was_off_stays_off_after_a_failed_install(world, staging, monkeypatch):
+    from plugin_platform_helpers import provider_manifest_v2
+    from provider_hub.kinds import subtitle_provider
+    from provider_hub import service
+
+    parent = provider_manifest_v2("subparent")
+    parent["provides"] = [PARENT_CAPABILITY]
+    addon = _plugin("addon", extends={"id": "subparent", "capability": PARENT_CAPABILITY})
+    world([parent, addon])
+    digest = _summary()["digest"]
+    enabled = []
+
+    def set_enabled(provider_id, value):
+        if value and provider_id not in enabled:
+            enabled.append(provider_id)
+        if not value and provider_id in enabled:
+            enabled.remove(provider_id)
+        return True
+
+    monkeypatch.setattr(subtitle_provider, "bazarr_enabled_providers", lambda: list(enabled))
+    monkeypatch.setattr(subtitle_provider, "set_bazarr_provider_enabled", set_enabled)
+    # The provider's worker check has no bundle to run in this test.
+    monkeypatch.setattr(service, "_smoke_validate_worker", lambda *args, **kwargs: None)
+
+    with pytest.raises(service.ProviderHubInstallError, match="download failed"):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    assert enabled == []

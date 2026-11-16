@@ -3581,6 +3581,29 @@ CONSENT_CHANGED_REASON = (
 )
 
 
+class _StagedMembers(list):
+    """The ids of the plugins a call staged, and the kind of each one that was switched on before it started.
+
+    Removing a plugin switches it off, so a discard puts back the ones the person already had on."""
+
+    def __init__(self, ids=(), was_enabled=None):
+        super().__init__(ids)
+        self.was_enabled: dict[str, str] = dict(was_enabled or {})
+
+    @staticmethod
+    def snapshot_enabled(resolved) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for member in resolved.members:
+            if member.reason == "root":
+                continue
+            try:
+                if get_kind(member.plugin.kind).is_enabled({"provider_id": member.plugin_id}):
+                    found[member.plugin_id] = member.plugin.kind
+            except Exception:
+                continue
+        return found
+
+
 def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[str]:
     """Stage the plugins a closure adds, dependencies first, before the plugin that needs them.
 
@@ -3596,11 +3619,18 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
                 if isinstance(row, dict) and (row.get("active_version") or row.get("staged_version"))}
 
     before = installed_ids()
+    # Only members this call has started to stage can have a row it wrote: a later member it never reached keeps
+    # whatever row it had, a record of an earlier failure included.
+    attempted: set[str] = set()
+    was_enabled = _StagedMembers.snapshot_enabled(resolved)
 
-    def written() -> list[str]:
+    def written() -> "_StagedMembers":
         rows = load_state().get("installations") or {}
-        return [member.plugin_id for member in resolved.members
-                if member.reason != "root" and member.plugin_id not in before and member.plugin_id in rows]
+        return _StagedMembers(
+            [member.plugin_id for member in resolved.members
+             if member.reason != "root" and member.plugin_id in attempted and member.plugin_id not in before
+             and member.plugin_id in rows],
+            was_enabled)
 
     current = None
     try:
@@ -3608,6 +3638,7 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
             if member.reason == "root":
                 continue
             current = member
+            attempted.add(member.plugin_id)
             stage_install(
                 member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
                 catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
@@ -3633,9 +3664,13 @@ def _discard_staged_members(plugin_ids: list[str], root_id: str | None = None) -
     them for does, and keeps them. A removal that is refused or fails is logged.
     """
     own = set(plugin_ids) | ({root_id} if root_id else set())
+    was_enabled = getattr(plugin_ids, "was_enabled", {})
     for plugin_id in reversed(plugin_ids):
         try:
-            remove_installation(plugin_id, ignoring_dependents=frozenset(own))
+            removed = remove_installation(plugin_id, ignoring_dependents=frozenset(own))
+            if removed and plugin_id in was_enabled:
+                # The person had it on before this install, and removing it switched it off.
+                get_kind(was_enabled[plugin_id]).set_enabled({"provider_id": plugin_id}, True)
         except Exception:
             # It stays, so it is no longer part of the failed closure: whatever it depends on is still
             # needed, and the next member is judged with it counted as a dependent.
