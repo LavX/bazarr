@@ -348,6 +348,8 @@ class WorkerChannel:
         # shutdown frame carried no grace). A grace in the frame replaces it.
         self._wait_grace = wait_grace
         self._shutdown_grace = None
+        # What a result may weigh when a request names no cap; the welcome carries the host's.
+        self._result_limit = frames.DEFAULT_MAX_RESULT_BYTES
         if stdin is None or stdout is None:
             stdin, stdout = self._take_stdio(redirect_stdout)
         # The channel owns both streams from here on and releases them when run() ends.
@@ -357,7 +359,9 @@ class WorkerChannel:
         self._writer = frames.FrameWriter(self._output, sender="worker")
         self._reader_thread = None
         self._heartbeat_thread = None
-        self._lock = threading.Lock()
+        # Re-entrant: a log filter or a finaliser that runs on a thread already holding it
+        # (the garbage collector can start one anywhere) must not wait for itself.
+        self._lock = threading.RLock()
         # Operations whose handler is running; these are what the in-flight cap counts.
         self._operations = {}
         # Operations whose handler returned and whose reply is being written.
@@ -609,6 +613,9 @@ class WorkerChannel:
             interval = limits.get("heartbeat_interval_ms")
             self._heartbeat_interval = interval / 1000.0 if isinstance(interval, int) and interval > 0 \
                 else frames.DEFAULT_HEARTBEAT_INTERVAL
+        limit = limits.get("max_result_bytes")
+        if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+            self._result_limit = limit
         self._reader.caps[frames.FRAME_CONTROL] = frames.MAX_CONTROL_BYTES
 
     def _dispatch(self, message):
@@ -786,9 +793,14 @@ class WorkerChannel:
     def _respond_ok(self, operation, result, data):
         if not isinstance(result, dict):
             raise OperationError(Codes.PLUGIN_ERROR, "the result must be an object")
+        # The cap covers the whole result: the JSON of the inline part and every data byte.
+        # A request without one gets the host's limit from the welcome.
         cap = operation.max_result_bytes
-        if cap is not None and len(data) > cap:
-            raise OperationError(Codes.RESULT_TOO_LARGE, "result is %d bytes, the request allows %d" % (len(data), cap))
+        if cap is None or cap > self._result_limit:
+            cap = self._result_limit
+        size = len(data) + len(frames.encode_control(result))
+        if size > cap:
+            raise OperationError(Codes.RESULT_TOO_LARGE, "result is %d bytes, the request allows %d" % (size, cap))
         message = {"t": frames.RES, "id": operation.id, "ok": True, "result": result}
         if data:
             # A cancel is honoured between chunks, not only before the transfer.

@@ -806,6 +806,39 @@ def test_result_bound_by_the_request_is_enforced_and_the_session_survives(sessio
     assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
 
 
+def test_honest_worker_refuses_an_inline_result_over_the_request_bound(session):
+    with pytest.raises(RequestFailed) as caught:
+        session.request("inline_blob", {"size": 5000}, max_result_bytes=1000, timeout=10)
+    assert caught.value.code == frames.Codes.RESULT_TOO_LARGE
+    assert session.request("echo", timeout=5).result["echo"] == {}
+
+
+def test_host_refuses_an_inline_result_over_the_request_bound_from_a_worker_that_sends_it_anyway(session):
+    with pytest.raises(ResultTooLarge):
+        session.request("inline_blob", {"size": 5000, "overshoot": True}, max_result_bytes=1000, timeout=10)
+    assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
+
+
+def test_an_inline_result_within_the_request_bound_is_delivered(session):
+    outcome = session.request("inline_blob", {"size": 100}, max_result_bytes=1000, timeout=10)
+    assert outcome.result == {"text": "y" * 100}
+
+
+def test_the_bound_counts_the_inline_part_and_the_data_together_on_the_host(session):
+    # 600 data bytes and an inline part of about 20 bytes fit 700; 700 data bytes do not.
+    assert len(session.request("chunks", {"size": 600}, max_result_bytes=700, timeout=10).data) == 600
+    with pytest.raises(RequestFailed) as caught:
+        session.request("chunks", {"size": 690}, max_result_bytes=700, timeout=10)
+    assert caught.value.code == frames.Codes.RESULT_TOO_LARGE
+
+
+def test_host_counts_the_inline_part_with_the_data_bytes_it_received(session):
+    # 690 data bytes alone fit 700; with the inline reply that follows them they do not.
+    with pytest.raises(ResultTooLarge):
+        session.request("chunks", {"size": 690, "overshoot": True}, max_result_bytes=700, timeout=10)
+    assert session.request("echo", {"after": True}, timeout=5).result["echo"] == {"after": True}
+
+
 def test_in_flight_limit_refuses_without_sending(make_session):
     session = make_session({"max_in_flight": 2})
     session.start()
@@ -2403,7 +2436,8 @@ def test_a_call_pipelined_behind_a_rejected_hello_never_runs(tmp_path):
 class ChannelHarness:
     """A WorkerChannel on real pipes, with the test acting as the host."""
 
-    def __init__(self, handler, **kwargs):
+    def __init__(self, handler, welcome_limits=None, **kwargs):
+        self._welcome_limits = welcome_limits or {}
         to_worker_r, to_worker_w = os.pipe()
         from_worker_r, from_worker_w = os.pipe()
         self.channel = worker_channel.WorkerChannel(
@@ -2420,7 +2454,7 @@ class ChannelHarness:
     def start(self):
         self.host_out.write_control({
             "t": "welcome", "protocol": {"major": 2, "minor": 0}, "kind": None,
-            "limits": {"heartbeat_interval_ms": 50}, "session": "test"})
+            "limits": {"heartbeat_interval_ms": 50, **self._welcome_limits}, "session": "test"})
         self.thread.start()
         collector = threading.Thread(target=self._collect, daemon=True)
         collector.start()
@@ -2455,6 +2489,81 @@ class ChannelHarness:
             self.channel._writer._stream.close()
         except OSError:
             pass
+
+
+def test_the_channel_lock_can_be_taken_again_by_the_thread_that_holds_it():
+    harness = ChannelHarness(lambda operation: {})
+    harness.start()
+    try:
+        assert harness.channel._lock.acquire(timeout=5)
+        try:
+            again = harness.channel._lock.acquire(timeout=1)
+            if again:
+                harness.channel._lock.release()
+            assert again, "a thread holding the channel lock cannot take it again"
+        finally:
+            harness.channel._lock.release()
+    finally:
+        harness.finish()
+
+
+def _reply_to(harness, request):
+    harness.host_out.write_control({"t": "req", "id": 1, "op": "x", "params": {}, **request})
+    assert wait_until(lambda: any(m["t"] == "res" for m in harness.messages))
+    return next(m for m in harness.messages if m["t"] == "res")
+
+
+def test_an_inline_result_over_the_request_bound_is_refused_like_a_chunked_one():
+    harness = ChannelHarness(lambda operation: {"text": "y" * 5000})
+    harness.start()
+    try:
+        reply = _reply_to(harness, {"max_result_bytes": 1000})
+        assert reply["ok"] is False and reply["error"]["code"] == frames.Codes.RESULT_TOO_LARGE
+    finally:
+        harness.finish()
+
+
+def test_the_bound_counts_the_inline_part_and_the_data_together():
+    def handler(operation):
+        return worker_channel.OperationResult({"text": "y" * 600}, b"d" * 600)
+
+    harness = ChannelHarness(handler)
+    harness.start()
+    try:
+        reply = _reply_to(harness, {"max_result_bytes": 1000})
+        assert reply["ok"] is False and reply["error"]["code"] == frames.Codes.RESULT_TOO_LARGE
+    finally:
+        harness.finish()
+
+
+def test_a_result_within_the_bound_goes_through():
+    harness = ChannelHarness(lambda operation: {"text": "y" * 100})
+    harness.start()
+    try:
+        reply = _reply_to(harness, {"max_result_bytes": 1000})
+        assert reply["ok"] is True and reply["result"] == {"text": "y" * 100}
+    finally:
+        harness.finish()
+
+
+def test_a_request_without_a_bound_gets_the_limit_from_the_welcome():
+    harness = ChannelHarness(lambda operation: {"text": "y" * 5000}, welcome_limits={"max_result_bytes": 1000})
+    harness.start()
+    try:
+        reply = _reply_to(harness, {})
+        assert reply["ok"] is False and reply["error"]["code"] == frames.Codes.RESULT_TOO_LARGE
+    finally:
+        harness.finish()
+
+
+def test_a_request_cannot_raise_the_bound_above_the_welcome_limit():
+    harness = ChannelHarness(lambda operation: {"text": "y" * 5000}, welcome_limits={"max_result_bytes": 1000})
+    harness.start()
+    try:
+        reply = _reply_to(harness, {"max_result_bytes": 10_000_000})
+        assert reply["ok"] is False and reply["error"]["code"] == frames.Codes.RESULT_TOO_LARGE
+    finally:
+        harness.finish()
 
 
 def test_run_returns_when_the_output_fails_while_the_host_still_holds_the_input():
