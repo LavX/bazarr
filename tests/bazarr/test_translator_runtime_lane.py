@@ -166,16 +166,22 @@ def test_the_lane_is_still_the_same_two_functions():
     assert TRANSLATION_JOBS == frozenset({TRANSLATION, EDITOR_TRANSLATION})
 
 
-def test_the_old_translation_paths_do_not_reach_the_new_runtime():
-    """Enqueue, the gate and the editor are the old ones: the factory path, with no hook into the runtime."""
+def test_the_old_translation_paths_reach_the_new_runtime_only_inside_functions_behind_the_switch():
+    """Enqueue, the gate and the editor keep the factory path. The runtime is imported by no module-level
+    statement, so a switched-off process never loads it; every reference sits in a function that asks the switch."""
+    import ast
+
     from subtitles.tools.translate import main
     from subtitles.tools.translate.services.translator_factory import TranslatorFactory
 
     assert main.TranslatorFactory is TranslatorFactory
     base = Path(__file__).parents[2] / "bazarr/subtitles/tools/translate"
     for name in ("main.py", "editor.py", "availability.py"):
-        text = (base / name).read_text(encoding="utf-8")
-        assert "translate.runtime" not in text and "from .runtime" not in text and "import runtime" not in text, name
+        tree = ast.parse((base / name).read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                targets = [alias.name for alias in node.names] + [getattr(node, "module", None) or ""]
+                assert not any("runtime" in target.split(".") for target in targets), (name, ast.dump(node))
 
 
 def test_the_tables_only_the_migration_makes_are_left_out_of_the_boot_create_all(tmp_path):

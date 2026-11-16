@@ -37,6 +37,21 @@ NO_TRANSLATOR_SPELLINGS = (None, '', 'None', 'none')
 AI_TRANSLATOR_TYPES = ('openrouter', 'gemini')
 
 
+def runtime_active():
+    """Whether the v2 runtime owns the gate: its switch is on and its tables exist.
+
+    With the switch off this is one setting read, so the old gate below answers exactly as it always did and
+    the runtime package is not imported.
+    """
+    try:
+        if getattr(settings.translator, 'runtime_v2', False) is not True:
+            return False
+        from .runtime import runtime_v2_enabled
+        return runtime_v2_enabled()
+    except Exception:
+        return False
+
+
 def translation_available(translator_type=None):
     """The configured translator's answer to "can you translate", with a reason.
 
@@ -44,11 +59,18 @@ def translation_available(translator_type=None):
     build: a Google translation needs no credential, the AI services need their
     own URL and key, and anything the factory does not know is not a translator.
 
+    With the v2 runtime on, the selected engine decides (see ``runtime.gate``).
+
     ``translator_type`` asks about one named engine rather than the configured
     one. The subtitle editor translates through the AI Subtitle Translator
     service whatever the settings page has selected, so it asks about that
     engine and gets the answer that engine's own branch would give.
     """
+    if runtime_active():
+        # The runtime answers for the selected engine. A named type is one of the old engines, which the
+        # runtime does not have, so it is not asked about.
+        from .runtime.gate import translation_gate
+        return translation_gate()
     try:
         if translator_type is None:
             translator_type = settings.translator.translator_type

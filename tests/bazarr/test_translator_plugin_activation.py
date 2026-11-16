@@ -11,7 +11,7 @@ import pytest
 
 from plugin_platform_helpers import service_manifest
 
-PLUGIN = "lingarr"
+PLUGIN = "example_engine"
 SECRET = "plain-token-0123456789-abcdef"  # pragma: allowlist secret
 
 
@@ -58,7 +58,7 @@ def lifecycle(monkeypatch, tmp_path, schema_session):
 
     def stage(old, new):
         state = {"installations": {PLUGIN: {
-            "provider_id": PLUGIN, "name": "Lingarr", "kind": "translator", "active_version": "1.0.0",
+            "provider_id": PLUGIN, "name": "Example Engine", "kind": "translator", "active_version": "1.0.0",
             "staged_version": "2.0.0", "active_path": "/old", "python_path": "/old/python",
             "staged_path": str(tmp_path / "bundles" / PLUGIN / "2.0.0" / ("b" * 40)),
             "staged_python_path": str(tmp_path / "envs" / PLUGIN / "2.0.0" / "test" / "bin" / "python"),
@@ -283,7 +283,7 @@ def test_a_connection_whose_back_end_type_is_gone_shows_none_of_its_stored_setti
     _activate()
     store._session.expire_all()
     service = TranslatorSettingsService(store, plugin_lookup=lambda plugin_id: SimpleNamespace(
-        plugin_id=plugin_id, name="Lingarr", version="2.0.0", active=True,
+        plugin_id=plugin_id, name="Example Engine", version="2.0.0", active=True,
         manifest=_manifest("2.0.0", [{"key": "label", "type": "text"}])))
     view = service.instance_view(store.get_instance(instance.id))
     assert SECRET not in json.dumps(view) and view["connections"][0]["values"].get("token") is None
@@ -304,7 +304,7 @@ def test_a_held_back_engine_with_a_removed_plain_field_can_be_repaired_and_turne
     assert held.enabled == 0 and store.settings_of(held) == {"label": "mine", "legacy": "old"}
 
     service = TranslatorSettingsService(store, plugin_lookup=lambda plugin_id: SimpleNamespace(
-        plugin_id=plugin_id, name="Lingarr", version="2.0.0", active=True, manifest=_manifest("2.0.0", new_fields)))
+        plugin_id=plugin_id, name="Example Engine", version="2.0.0", active=True, manifest=_manifest("2.0.0", new_fields)))
     saved = service.save_engine(instance.id, {"expected_revision": held.revision, "values": {"region": "eu"}})
     assert saved["engine"]["values"] == {"label": "mine", "region": "eu"}
     turned_on = service.save_engine(instance.id, {"expected_revision": saved["engine"]["revision"], "enabled": True})

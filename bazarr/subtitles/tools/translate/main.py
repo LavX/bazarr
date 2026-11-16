@@ -5,6 +5,7 @@ import logging
 
 from .core.translator_utils import (validate_translation_params, convert_language_codes, get_title,
                                     translated_destination_path)
+from .availability import runtime_active as _runtime_active
 from .failure_record import clear_failed_translation, record_failed_translation
 from .services.translator_factory import TranslatorFactory
 from languages.get_languages import alpha3_from_alpha2
@@ -76,6 +77,100 @@ OCR_SOURCE_UNLISTED_REASON = 'ocr_track_unlisted'
 NO_HOLD_REASONS = frozenset({OCR_BUSY_REASON, OCR_SOURCE_TAKEN_REASON, OCR_SOURCE_UNLISTED_REASON})
 
 
+# The v2 translation runtime is reached from this module at two points only, the enqueue and the dispatch of the
+# job, and only through the functions below. With its switch off none of them imports the runtime package.
+_RUNTIME_MODULE = 'subtitles.tools.translate.runtime'
+
+
+def _job_source_key(video_path, source_srt_file, embedded_source):
+    """What the runtime keys a translation job by as its source: the file, or the embedded track it is read from."""
+    if embedded_source:
+        return (f"{video_path}#embedded:{embedded_source.get('language') or ''}:"
+                f"{'hi' if embedded_source.get('hi') else ''}:{'forced' if embedded_source.get('forced') else ''}")
+    return str(source_srt_file)
+
+
+def _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source):
+    """The queue job to follow for a request the runtime already has a job for, 0 when there is none to follow
+    (the job waits for its retry time and is logged as such, or runs with no queue job), or None when a new queue job is to be added (and always None with the runtime off).
+
+    A manual pick of one back end is made before this call, through ``runtime.enqueue.decide`` with the
+    connection, which records the pin on the job; the request here then joins that job.
+    """
+    if not _runtime_active():
+        return None
+    from .runtime import enqueue
+    from .runtime.jobs import TranslationJobError
+    try:
+        decision = enqueue.decide(_job_source_key(video_path, source_srt_file, embedded_source), to_lang, forced, hi)
+    except TranslationJobError:
+        raise
+    except Exception:
+        # A fault in the runtime's bookkeeping must not stop the request from being queued.
+        logging.exception('BAZARR could not record a translation request in the translation runtime')
+        return None
+    if decision.action == enqueue.FOLLOW:
+        return decision.queue_job_id or 0
+    if decision.action == enqueue.QUEUED_FOR_RETRY:
+        # The job is queued for a retry and nothing may be queued before its time; there is no queue job to
+        # follow yet, which callers read as "nothing queued now".
+        logging.info('BAZARR translation is waiting for its retry time (%s) and is not queued again before it',
+                     decision.retry_at)
+        return 0
+    return None
+
+
+def _runtime_attach(queue_job_id, video_path, source_srt_file, to_lang, forced, hi, embedded_source):
+    """Tell the runtime which queue job carries the job it made or joined for this request."""
+    if not queue_job_id or not _runtime_active():
+        return
+    from .runtime import enqueue
+    try:
+        enqueue.attach_for(queue_job_id, _job_source_key(video_path, source_srt_file, embedded_source), to_lang,
+                           forced, hi)
+    except Exception:
+        logging.exception('BAZARR could not attach a queued translation to its job in the translation runtime')
+
+
+def _runtime_ends_quietly(error):
+    """What the runtime's own non-failures are called, or None for any other error.
+
+    A closed gate means nothing ran and the provider search takes over; a decline means every engine asked
+    could not take the job. Neither is a failure of the translation.
+    """
+    if not type(error).__module__.startswith(_RUNTIME_MODULE):
+        return None
+    from .runtime.dispatch import Declined, GateClosed
+    if isinstance(error, GateClosed):
+        return 'gate_closed'
+    if isinstance(error, Declined):
+        return 'declined'
+    return None
+
+
+def _report_runtime_skip(job_id, from_lang, to_lang, why):
+    current_name = jobs_queue.get_job_name(job_id)
+    if current_name and 'Translating' in current_name:
+        jobs_queue.update_job_name(job_id=job_id, new_job_name=current_name.replace('Translating', 'Skipped'))
+    else:
+        jobs_queue.update_job_name(job_id=job_id, new_job_name=f'Skipped: {from_lang.upper()} → {to_lang.upper()} ({why})')
+
+
+def _search_providers_instead(media_type, radarr_id, sonarr_episode_id, arr_instance_id):
+    """A translation that cannot run falls back to the normal provider search for the same item."""
+    try:
+        if media_type == 'episode' and sonarr_episode_id:
+            from subtitles.wanted.series import wanted_download_subtitles
+            wanted_download_subtitles(sonarr_episode_id, arr_instance_id=arr_instance_id, translation_gate=False)
+        elif media_type in ('movie', 'movies') and radarr_id:
+            from subtitles.wanted.movies import wanted_download_subtitles_movie
+            wanted_download_subtitles_movie(radarr_id, arr_instance_id=arr_instance_id, translation_gate=False)
+    except JobCancelled:
+        raise
+    except Exception:
+        logging.exception('BAZARR the provider search that replaces a translation failed')
+
+
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
                              media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata,
                              job_id=None, arr_instance_id=None, sports_operation=None, embedded_source=None,
@@ -100,6 +195,11 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     inside its own job it returns the translation result.
     """
     if not job_id:
+        # With the v2 runtime on, a request for a source and target that already has a job joins it.
+        # Reusing ``job_id`` keeps the frame the queue records to the function's own parameters.
+        job_id = _runtime_follow(video_path, source_srt_file, to_lang, forced, hi, embedded_source)
+        if job_id is not None:
+            return job_id or None
         # Build the label inline: add_job_from_function captures the frame,
         # which must contain only function parameters before it is called.
         job_id = jobs_queue.add_job_from_function(
@@ -109,6 +209,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                           arr_instance_id,
                           **({'sports_context': sports_operation.context} if sports_operation else {}))),
             is_progress=True, return_existing=True)
+        _runtime_attach(job_id, video_path, source_srt_file, to_lang, forced, hi, embedded_source)
         return job_id or None
 
     translator_label = settings.translator.translator_type.replace("_", " ").title()
@@ -137,6 +238,10 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                 raise ValueError('Sports translation cannot use native media metadata')
             cancel = SportsJobSignal(arr_instance_id, job_id)
             sports_operation.validate(wanted=True, cancel=cancel)
+        # The runtime keys the job by its source as it was asked for, which for an embedded track is the track
+        # and not the file the extraction below produces.
+        runtime_on = _runtime_active()
+        source_key = _job_source_key(video_path, source_srt_file, embedded_source) if runtime_on else None
         if embedded_source:
             media_id = radarr_id if media_type == "movie" else (
                 sonarr_episode_id if media_type == "episode" else None)
@@ -177,8 +282,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         translator_type = settings.translator.translator_type
         logging.debug(f'Using translator type: {translator_type}')  # noqa: G004
 
-        translator = TranslatorFactory.create_translator(
-            translator_type,
+        translator_arguments = dict(
             source_srt_file=source_srt_file,
             dest_srt_file=dest_srt_file,
             lang_obj=lang_obj,
@@ -196,9 +300,20 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             expected_destination_versions=expected_destination_versions,
             **({'sports_operation': sports_operation, 'cancel': cancel} if sports_operation else {})
         )
+        if runtime_on:
+            # The selected engine of the runtime, with its failover, fallback and checkpoints, replaces the
+            # factory. The service it returns answers the same translate() call.
+            from .runtime.service import RuntimeTranslatorService
+            translator = RuntimeTranslatorService(**translator_arguments, source_key=source_key)
+        else:
+            translator = TranslatorFactory.create_translator(translator_type, **translator_arguments)
 
         logging.debug(f'Created translator instance: {translator.__class__.__name__}')  # noqa: G004
         result = translator.translate(job_id=job_id)
+        if getattr(translator, 'skipped', False) is True:
+            # Another job already runs this source and target, or a manual pick replaced this one.
+            _report_runtime_skip(job_id, from_lang, to_lang, 'replaced or already running')
+            return None
         if result is False:
             raise RuntimeError(f'{translator.__class__.__name__} returned a failed translation result')
         logging.debug(f'BAZARR saved translated subtitles to {dest_srt_file}')  # noqa: G004
@@ -264,6 +379,24 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     except JobCancelled:
         raise
     except Exception as e:
+        quiet = _runtime_ends_quietly(e)
+        if quiet == 'gate_closed':
+            # The gate closed while this job waited in the queue: nothing ran, and the normal provider search
+            # takes over for the item instead of leaving its language missing.
+            logging.info('BAZARR translation skipped, the gate closed while it waited: %s', e)
+            _report_runtime_skip(job_id, from_lang, to_lang, 'translation unavailable')
+            _search_providers_instead(media_type, radarr_id, sonarr_episode_id, arr_instance_id)
+            return None
+        if quiet == 'declined':
+            # Every engine asked declined the job; the provider search result stays in place. The item is held
+            # back like a failed one, so the next scan does not offer the same job again.
+            logging.info('BAZARR translation declined: %s', e)
+            record_failed_translation(arr_instance_id, media_type,
+                                      _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
+                                                               sports_operation),
+                                      from_lang, to_lang, forced, hi)
+            _report_runtime_skip(job_id, from_lang, to_lang, 'declined')
+            return None
         if expected_destination_versions and _destination_race(e):
             # Only a job an auto path queued with the capture reports the
             # moved destination as a skip. A sports operation's bound versions
@@ -279,7 +412,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         # and neither is one that found the OCR slot taken, its OCR output
         # name taken or its track unlisted: those say nothing about whether
         # this item can be translated, and the user asked for it by hand.
-        if getattr(e, 'reason', None) not in NO_HOLD_REASONS:
+        if getattr(e, 'reason', None) not in NO_HOLD_REASONS and not getattr(e, 'retry_later', False):
             record_failed_translation(arr_instance_id, media_type,
                                       _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
                                                                sports_operation),

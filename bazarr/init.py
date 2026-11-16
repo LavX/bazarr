@@ -304,6 +304,17 @@ try:
         refresh_secret_values(settings)
 except Exception:  # pragma: no cover - scrubbing must not prevent startup
     logging.exception("Unable to register the translator secrets for log scrubbing on startup")
+try:
+    # The jobs queue is in memory, so a translation the last run was in the middle of lost its place. The
+    # runtime marks those jobs to be retried, with their checkpoints kept. Nothing happens with the switch
+    # off, or before the runtime's tables exist.
+    if getattr(settings.translator, "runtime_v2", False) is True:
+        from subtitles.tools.translate.runtime import runtime_v2_enabled
+        if runtime_v2_enabled():
+            from subtitles.tools.translate.runtime.dispatch import recover_after_restart
+            recover_after_restart()
+except Exception:  # pragma: no cover - recovery must not prevent startup
+    logging.exception("Unable to recover interrupted translations on startup")
 init_binaries()
 path_mappings.update()
 
