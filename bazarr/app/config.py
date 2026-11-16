@@ -2116,8 +2116,11 @@ def _installed_provider_hub_manifest_fields():
 
 
 def _enabled_provider_ids():
-    """The ids in ``enabled_providers``, or none when the setting is not there (a settings object that has no
-    general section for it, as a test double can be)."""
+    """The ids in ``enabled_providers``.
+
+    The settings validator guarantees the list exists, so a missing one is not expected. If it is missing it
+    reads as empty, which can only add checks to a save: nothing is switched off that was on, and nothing
+    already on is judged less strictly."""
     return set(getattr(getattr(settings, 'general', None), 'enabled_providers', None) or [])
 
 

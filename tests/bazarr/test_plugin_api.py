@@ -377,7 +377,8 @@ def test_a_json_array_body_is_refused_before_any_field_is_read(client, monkeypat
     assert response.get_json() == "a JSON object is required"
 
 
-def test_the_subtitle_hub_install_route_accepts_an_answer_that_does_not_name_a_kind(client, monkeypatch):
+def test_the_subtitle_hub_install_route_still_checks_the_closure_of_an_answer_that_names_no_kind(
+        client, monkeypatch):
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
 
@@ -386,9 +387,17 @@ def test_the_subtitle_hub_install_route_accepts_an_answer_that_does_not_name_a_k
     monkeypatch.setattr(service, "resolve_catalog_install", lambda *args, **kwargs: {
         "source": "official", "provider_id": "catalogsubs", "version": "1.0.0", "name": "Catalogsubs",
         "entry_key": "official:catalogsubs:1.0.0"})
+    checked = []
+    needs = {"consent": False}
+    monkeypatch.setattr(service, "install_needs_consent",
+                        lambda *args, **kwargs: checked.append(args) or needs["consent"])
+    body = {"source": "official", "provider_id": "catalogsubs", "version": "1.0.0"}
 
-    accepted = client.post("/api/provider-hub/installations",
-                           json={"source": "official", "provider_id": "catalogsubs", "version": "1.0.0"},
-                           headers={"X-API-KEY": API_KEY})
+    accepted = client.post("/api/provider-hub/installations", json=body, headers={"X-API-KEY": API_KEY})
+    needs["consent"] = True
+    refused = client.post("/api/provider-hub/installations", json=body, headers={"X-API-KEY": API_KEY})
 
-    assert accepted.status_code == 202 and [func for func, _kwargs in queued] == ["install_provider"]
+    # The closure is checked either way, so a missing kind cannot let what needs consent through.
+    assert len(checked) == 2
+    assert accepted.status_code == 202 and refused.status_code == 400
+    assert [func for func, _kwargs in queued] == ["install_provider"]
