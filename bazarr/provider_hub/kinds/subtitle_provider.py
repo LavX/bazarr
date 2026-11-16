@@ -278,11 +278,14 @@ class SubtitleProviderKind(Kind):
         return validate_manifest(
             manifest, built_in_provider_ids=service._validation_built_in_provider_ids(manifest, trusted))
 
-    def smoke_test(self, validated, bundle_path, python_path) -> None:
+    def smoke_test(self, validated, bundle_path, python_path, timeout=None) -> None:
         # Looked up at call time, so a test that patches the service function reaches it.
         from provider_hub import service
 
-        service._smoke_validate_worker(validated, bundle_path, python_path)
+        if timeout is None:
+            service._smoke_validate_worker(validated, bundle_path, python_path)
+        else:
+            service._smoke_validate_worker(validated, bundle_path, python_path, timeout=timeout)
 
 
 SUBTITLE_PROVIDER_KIND = register_kind(SubtitleProviderKind())

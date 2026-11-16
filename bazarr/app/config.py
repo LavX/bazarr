@@ -2115,6 +2115,67 @@ def _installed_provider_hub_manifest_fields():
         return None, None
 
 
+def _enabled_provider_ids():
+    """The ids in ``enabled_providers``.
+
+    The settings validator guarantees the list exists, so a missing one is not expected. If it is missing it
+    reads as empty, which can only add checks to a save: nothing is switched off that was on, and nothing
+    already on is judged less strictly."""
+    return set(getattr(getattr(settings, 'general', None), 'enabled_providers', None) or [])
+
+
+def _refuse_provider_switch_with_dependencies(settings_items):
+    """The dependency rules for switching subtitle providers on and off in a settings save.
+
+    A subtitle provider is switched on by being in ``enabled_providers``, so this is where it is switched,
+    and the Provider Hub's own switch is not the only one. Switching off a plugin that another one that stays
+    on depends on is refused, and so is switching on a plugin whose supplier would not be running, judged on the
+    list the save would leave. The texts are the ones the Hub's own switch gives. Nothing is refused when the
+    Hub's state cannot be read.
+    """
+    submitted = None
+    for key, values in settings_items:
+        if key == 'settings-general-enabled_providers':
+            submitted = values if isinstance(values, list) else [values]
+    if submitted is None:
+        return
+    try:
+        from provider_hub import closure
+        from provider_hub.service import dependents_refusal_text, switch_on_refusal
+        from provider_hub.state import load_state
+        installations = load_state().get('installations') or {}
+    except Exception:
+        return
+    new = {str(item) for item in submitted}
+    current = _enabled_provider_ids()
+    removed, added = current - new, new - current
+    if not removed and not added:
+        return
+    # Judged on the list the save leaves: what is on afterwards must still have something running to rely on,
+    # whatever else the same save switches off or on.
+    override = {pid: True for pid in added} | {pid: False for pid in removed}
+
+    def stays_on(provider_id: str) -> bool:
+        return provider_id in added or (provider_id not in removed
+                                        and closure.is_on(installations.get(provider_id) or {}))
+
+    # Switching off: the Hub's own rule, on the active and the staged release of each dependent and with the
+    # alternative suppliers the saved list leaves on.
+    for provider_id in sorted(removed):
+        names = [name for name in closure.dependents({'installations': installations}, provider_id,
+                                                     enabled=override)
+                 if stays_on(name)]
+        if names:
+            raise ValidationError(dependents_refusal_text(provider_id, names, 'switched off'))
+    # Switching on: what the plugin needs has to be running, as it is judged at boot.
+    if added:
+        unmet = closure.unmet_needs(installations, override)
+        for provider_id in sorted(added):
+            if provider_id in unmet:
+                name = (installations.get(provider_id) or {}).get('name') or provider_id
+                raise ValidationError(switch_on_refusal(name, unmet[provider_id]))
+
+
 def _refuse_unverified_plugin_destination(settings_items):
     """The destination rule for plugin settings.
 
@@ -2646,6 +2707,23 @@ def _refuse_unverified_plex_destination(settings_items):
 
 
 def save_settings(settings_items):
+    # What a save switched on or off is told to the Provider Hub only after the save has let go of its locks:
+    # the Hub's own switch takes its state lock first and then the settings, so taking them the other way
+    # round here would let the two wait on each other.
+    switched = []
+    try:
+        return _save_settings_under_locks(settings_items, switched)
+    finally:
+        for switched_on, switched_off in switched:
+            try:
+                from provider_hub.service import note_switched_providers
+                note_switched_providers(switched_on, switched_off)
+            except Exception:
+                # What a held-back provider shows is a courtesy; the save itself is on disk.
+                logging.exception("Could not update what the switched providers show")
+
+
+def _save_settings_under_locks(settings_items, switched):
     from media_servers.http import MediaServerError, parse_verify_ssl
     from secret_store.registry import IMPORT_ONLY_SECTIONS
 
@@ -2694,6 +2772,8 @@ def save_settings(settings_items):
             plex_destination_lock_phase()
         _refuse_unverified_scalar_arr_destination(items)
         _refuse_unverified_plugin_destination(items)
+        _refuse_provider_switch_with_dependencies(items)
+        enabled_before = _enabled_provider_ids()
         metadata_submitted = any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
                                  for key, _ in items)
         changed = False
@@ -2717,6 +2797,10 @@ def save_settings(settings_items):
             persisted = True
             if changed:
                 invalidate_metadata()
+            # Told to the Provider Hub once the locks are released, which is what a held-back provider shows.
+            enabled_after = _enabled_provider_ids()
+            if enabled_after != enabled_before:
+                switched.append((enabled_after - enabled_before, enabled_before - enabled_after))
 
         try:
             _save_settings_with_native(items, strict_metadata=changed, on_persisted=settings_persisted)

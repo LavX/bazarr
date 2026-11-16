@@ -23,6 +23,7 @@ type Connected = {
   buildDate?: string;
   packageVersion?: string;
   sandbox?: System.SandboxStatus;
+  devPluginSource?: string | null;
 };
 
 const BAZARR_VERSION = "9.9.9-status-test";
@@ -36,6 +37,7 @@ function statusWith({
   buildDate = "",
   packageVersion = "",
   sandbox,
+  devPluginSource,
 }: Connected) {
   const instances = [
     ...(sonarr ? [sonarrDefault] : []),
@@ -57,6 +59,9 @@ function statusWith({
           package_version: packageVersion,
           ...(mediaServers ? { media_servers: mediaServers } : {}),
           ...(sandbox ? { sandbox } : {}),
+          ...(devPluginSource !== undefined
+            ? { dev_plugin_source: devPluginSource }
+            : {}),
         },
       }),
     ),
@@ -401,6 +406,26 @@ describe("System Status", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/^Sandboxed/)).toBeNull();
+  });
+
+  it("warns while a development plugin source is set and says nothing otherwise", async () => {
+    statusWith({ devPluginSource: "branch-catalog" });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Development Plugin Source", undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("branch-catalog")).toBeInTheDocument();
+  });
+
+  it("shows no development plugin source row on a normal install", async () => {
+    statusWith({ devPluginSource: null });
+    customRender(<SystemStatusView />);
+
+    await screen.findByText(BAZARR_VERSION, undefined, { timeout: 8000 });
+    expect(screen.queryByText("Development Plugin Source")).toBeNull();
   });
 
   it("says the sandbox check is still running, then shows the answer when it lands", async () => {

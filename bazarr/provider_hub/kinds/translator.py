@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from typing import Any
+from typing import Any, Sequence
 
 from . import ATTACH_ON_RESTART, TRANSLATOR, Kind, register_kind
 
@@ -38,7 +38,7 @@ class TranslatorKind(Kind):
     attach_policy = ATTACH_ON_RESTART
     noun = "translator"
 
-    def on_installed(self, plugin_id: str) -> bool:
+    def on_installed(self, plugin_id: str, missing_required: Sequence[str] = ()) -> bool:
         try:
             _store().ensure_instance(plugin_id)
         except Exception:

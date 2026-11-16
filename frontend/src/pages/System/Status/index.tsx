@@ -352,6 +352,16 @@ const SystemStatusView: FunctionComponent = () => {
               {sandboxValue(status.sandbox)}
             </Row>
           ) : null}
+          {status?.dev_plugin_source ? (
+            <Row title="Development Plugin Source">
+              <Text component="span" size="sm" c="red" fw="bold">
+                {status.dev_plugin_source}
+              </Text>
+              {
+                ": plugins of every kind can be installed from this source. It is not checked like the official catalog."
+              }
+            </Row>
+          ) : null}
           <Row title="Database Engine">{status?.database_engine}</Row>
           <Row title="Database Version">{status?.database_migration}</Row>
           <Row title="Bazarr Directory">{status?.bazarr_directory}</Row>

@@ -185,6 +185,10 @@ def reconcile_environments(
       the installation keeps the environment it had.
     * An active installation whose interpreter is gone is marked ``needs_repair``
       and gets the error text installation errors use.
+    * An active installation already flagged is looked at again, switched on or off, and its flag goes when
+      the static checks pass: the interpreter is there and fits this host, and the bundle matches its
+      manifest. No worker is started to prove it, so a fault only a worker would show is not this check's.
+      Only the repair message goes with the flag; any other error stays.
 
     The probes run without the state lock; the result is applied in one write
     that skips any row that changed in the meantime.
@@ -225,9 +229,9 @@ def reconcile_environments(
                 flags.append(provider_id)
                 summary["needs_repair"].append(provider_id)
                 continue
-            clearing = (
-                not staged and bool(row.get("needs_repair")) and row.get("last_error") == NEEDS_REPAIR_MESSAGE
-            )
+            # Any active row flagged as needing repair is looked at again, whatever its error says (or whether
+            # it has one) and whether it is switched on: the flag goes once its environment is back.
+            clearing = not staged and bool(row.get("needs_repair"))
             try:
                 manifest = validate(row, staged)
             except Exception:
@@ -322,9 +326,11 @@ def reconcile_environments(
             if provider_id in flags:
                 continue  # a check in this pass found it broken: the flag stays
             row = installations.get(provider_id)
-            if isinstance(row, dict) and row.get("last_error") == NEEDS_REPAIR_MESSAGE:
+            if isinstance(row, dict):
                 row.pop("needs_repair", None)
-                row["last_error"] = None
+                # Only the repair message goes with the flag; any other error is not this check's to clear.
+                if row.get("last_error") == NEEDS_REPAIR_MESSAGE:
+                    row["last_error"] = _held_back_error(row)
         for provider_id, python_key, old, new in repoints:
             row = installations.get(provider_id)
             if isinstance(row, dict) and row.get(python_key) == old:
@@ -362,6 +368,13 @@ def _row_uses(row: Any, python_path: str | None) -> bool:
     return isinstance(row, dict) and row.get("python_path") == python_path
 
 
+def _held_back_error(row: dict[str, Any]) -> str | None:
+    """What a row shows once its repair message is gone: the reason it was held back, while it is switched on."""
+    from .closure import held_back_error
+
+    return held_back_error(row)
+
+
 def mark_needs_repair(provider_id: str, python_path: str | None = None) -> None:
     """Flag an installation whose worker failed its check. The error text stays as the worker gave it.
 
@@ -385,7 +398,7 @@ def clear_needs_repair(provider_id: str, python_path: str | None = None) -> None
         row = (state.get("installations") or {}).get(provider_id)
         if _row_uses(row, python_path) and isinstance(row, dict) and row.pop("needs_repair", None):
             if row.get("last_error") == NEEDS_REPAIR_MESSAGE:
-                row["last_error"] = None
+                row["last_error"] = _held_back_error(row)
 
     mutate_state(clear)
 

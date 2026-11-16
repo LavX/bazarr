@@ -29,7 +29,7 @@ from secret_store.scrub import mask_credential_refusal, scrub_job_secrets, scrub
 from .manifest import ManifestValidationError, manifest_provider_id, validate_manifest
 from .kinds import SUBTITLE_PROVIDER, catalog_kind_of, get_kind, kind_for_api, kind_of, known_kinds
 from .kinds import subtitle_provider as provider_kind
-from . import floor
+from . import catalog_feed, closure, consent, dev_source, floor
 from .bundle import verify_bundle_tree
 from .compatibility import (
     CATALOG_LIST_PLUGINS, CATALOG_LIST_PROVIDERS, HostFacts, current_host, entry_compatibility, refusal_text,
@@ -68,6 +68,14 @@ class CatalogSourceError(ValueError):
 
 class ProviderHubInstallError(RuntimeError):
     """Raised when a Provider Hub install could not be staged."""
+
+
+class ProviderHubConsentError(ProviderHubInstallError):
+    """An install or update asked for consent that was not given, or given for a set that has changed."""
+
+    def __init__(self, message: str, *, changed: bool = False):
+        super().__init__(message)
+        self.changed = changed
 
 
 class ProviderHubStopped(Exception):
@@ -495,6 +503,81 @@ def _fetch_github_catalog(
     return payload, commit
 
 
+def _fetch_raw_file(owner: str, repo: str, commit: str, path: str) -> bytes | None:
+    """One file of the catalog repository at ``commit``, or None when the commit has no such file."""
+    response = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/{commit}/{path}", timeout=30)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.content
+
+
+def _fetch_signed_feed(owner: str, repo: str, commit: str, channel: str):
+    """The signed files of ``channel`` at ``commit``, or None when the commit has no signed catalog."""
+    body = _fetch_raw_file(owner, repo, commit, catalog_feed.SIGNED_CATALOG_PATH.format(channel=channel))
+    if body is None:
+        return None
+    return catalog_feed.FetchedFeed(
+        catalog=body,
+        envelope=_fetch_raw_file(owner, repo, commit, catalog_feed.SIGNED_ENVELOPE_PATH.format(channel=channel)),
+        key_file=_fetch_raw_file(owner, repo, commit, catalog_feed.KEY_FILE_PATH),
+    )
+
+
+def _fetch_official_catalog(
+    source: dict[str, Any], state: dict[str, Any], ancestry, unchanged_commit: str | None = None,
+    advertisement_sink=None,
+):
+    """The official catalog, read through the signature check.
+
+    Returns ``(catalog, head, feed)``: the catalog dictionary (None when the head is unchanged), the
+    commit the source's ref resolved to, and the ``VerifiedFeed`` when the catalog came from the signed
+    feed (None for the legacy catalog). The head is the commit trust is judged on; the manifests of a
+    verified catalog are pinned to the signed body's ``source_commit`` instead. The legacy catalog never
+    carries a plugins list. Raises ``catalog_feed.FeedRefused`` when a signed catalog fails its check.
+    """
+    channel = catalog_feed.feed_channel(source.get("dev_ref"))
+    host_latched = any(catalog_feed.stored_record(state, name).latched
+                       for name in (catalog_feed.CHANNEL_MAIN, catalog_feed.CHANNEL_BETA))
+    if channel is not None and not catalog_feed.signed_feed_enabled() and host_latched:
+        # A downgrade: this host accepted a signed catalog, and this release cannot verify one. The
+        # legacy catalog is not a substitute, so say why and what to do instead of reading it.
+        raise catalog_feed.FeedRefused(
+            catalog_feed.Status.UNSIGNED, catalog_feed.NO_ROOT_REASON.format(channel=channel))
+    if channel is None or not catalog_feed.signed_feed_enabled():
+        payload, head = _fetch_github_catalog(
+            source["url"], override_ref=source.get("dev_ref"), unchanged_commit=unchanged_commit,
+            advertisement_sink=advertisement_sink,
+        )
+        if payload is not None:
+            payload.pop("plugins", None)
+        return payload, head, None
+    owner, repo, ref, _path = _parse_github_file_url(source["url"])
+    ref = source.get("dev_ref") or ref
+    head = _resolve_github_ref(owner, repo, ref, advertisement_sink=advertisement_sink)
+    if unchanged_commit is not None and head == unchanged_commit.lower() and not _is_commit_sha(ref):
+        return None, head, None
+    feed = catalog_feed.verify_fetched(
+        _fetch_signed_feed(owner, repo, head, channel),
+        channel=channel,
+        stored=catalog_feed.stored_record(state, channel), now=catalog_feed.current_time(),
+        host_build_time=catalog_feed.build_time(), host_latched=host_latched,
+    )
+    if feed is None:
+        # No signed file at this commit and the channel has never latched: the legacy catalog.
+        payload, _same = _fetch_github_catalog(source["url"], override_ref=head)
+        payload.pop("plugins", None)
+        return payload, head, None
+    if feed.source_commit != head:
+        verdict, _reason = ancestry.check(feed.source_commit)
+        if verdict is False:
+            raise catalog_feed.FeedRefused(
+                catalog_feed.Status.MALFORMED,
+                "The signed catalog names a commit that is not on the official catalog's main or beta.",
+                key_file_version=feed.result.key_file_version)
+    return feed.catalog, head, feed
+
+
 # The official source is trusted only on these branches of the official catalog
 # repository, or on a commit that is an ancestor of one of them.
 _TRUSTED_BRANCHES = ("main", "beta")
@@ -886,14 +969,21 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
             # Named from the source record as it is now. Marked when its source
             # may not install it, or when this Bazarr+ cannot run it.
             source = catalog_source_for_entry(sources, entry)
-            entry = {**entry, "source_name": source.get("name") or entry.get("source")}
-            refusal = (_install_refusal(state, entry.get("source"), entry.get("provider_id"))
-                       or _host_refusal(entry, host))
+            entry = {**entry, "source_name": source.get("name") or entry.get("source"),
+                     "development_source": dev_source.is_dev_source(entry.get("source"), source)}
+            refusal = (_install_refusal(state, entry.get("source"), entry.get("provider_id"),
+                                        catalog_kind_of(entry))
+                       or _host_refusal(entry, host)
+                       or _closure_refusal(state, entry, host))
             if refusal:
                 entry["blocked_reason"] = refusal
         entries.append(entry)
     return {
-        "sources": list((state.get("catalog_sources") or {}).values()),
+        "sources": [
+            {**source, "development_source": dev_source.is_dev_source(source.get("id"), source)}
+            if isinstance(source, dict) else source
+            for source in (state.get("catalog_sources") or {}).values()
+        ],
         "entries": entries,
     }
 
@@ -1182,6 +1272,50 @@ def _rejected_plugin(source: dict[str, Any], manifest: dict[str, Any], reason: s
     }
 
 
+def _hold_unsigned_ref_to_the_latch(state: dict[str, Any], source: dict[str, Any]) -> None:
+    """Once a signed channel has latched, a ref that reads no signed channel is not trusted.
+
+    A tag, a pinned commit or a spelling of main that resolves to a commit on main or beta is trusted by
+    where that commit sits, yet it reads the unsigned legacy catalog. On a host that has accepted a signed
+    catalog, that would be a way around the signature, so such a ref stays untrusted.
+    """
+    if catalog_feed.feed_channel(source.get("dev_ref")) is not None:
+        return
+    if any(catalog_feed.stored_record(state, channel).latched
+           for channel in (catalog_feed.CHANNEL_MAIN, catalog_feed.CHANNEL_BETA)):
+        source["trusted"] = False
+        source["trust_reason"] = "unsigned ref on a host that requires signed catalogs"
+
+
+def _note_catalog_signature(
+    state: dict[str, Any], source: dict[str, Any], feed, accepted: dict[str, catalog_feed.ChannelRecord],
+) -> None:
+    """Record on the official source and in the state document what its signature check came to.
+
+    A verified catalog latches its channel and raises the stored counters. The legacy catalog is
+    shown as "unsigned (legacy)" and changes nothing a channel remembers.
+    """
+    if feed is None:
+        source["catalog_signature"] = catalog_feed.SIGNATURE_LEGACY
+        source["signature_verified"] = False
+        source["catalog_channel"] = catalog_feed.feed_channel(source.get("dev_ref"))
+        source["catalog_expires_at"] = None
+        source.pop("catalog_signed_version", None)
+        source.pop("catalog_key_file_version", None)
+        source.pop("catalog_signed_commit", None)
+        return
+    source["catalog_signature"] = catalog_feed.SIGNATURE_VERIFIED
+    source["signature_verified"] = True
+    source["catalog_channel"] = feed.channel
+    source["catalog_signed_version"] = feed.result.signed_version
+    source["catalog_key_file_version"] = feed.result.key_file_version
+    source["catalog_expires_at"] = catalog_feed._iso(feed.result.expires)
+    source["catalog_signed_commit"] = feed.source_commit
+    if feed.may_advance_state:
+        accepted[feed.channel] = catalog_feed.record_accepted(state, feed, catalog_feed.current_time())
+        catalog_feed.clear_refusal(state, feed.channel)
+
+
 def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict[str, Any]:
     """Refresh catalog sources. When ``source_ids`` is given, only those source ids
     are fetched (e.g. the startup migration refreshes only the official source so an
@@ -1201,6 +1335,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
             sources_count = 0
             failed_sources: list[str] = []
             rejected_plugins: list[dict[str, Any]] = []
+            accepted_feeds: dict[str, catalog_feed.ChannelRecord] = {}
             ancestry = _OfficialAncestry(state)
             for source_key, source in (state.get("catalog_sources") or {}).items():
                 if not isinstance(source, dict):
@@ -1238,8 +1373,18 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     "catalog_list" in entry for entry in stored_entries
                 ):
                     if not is_official:
-                        skip_commit = previous_commit
-                    elif not source.get("dev_ref") and source.get("trusted") is True:
+                        # The development source is always read: whether it may carry a new kind
+                        # depends on the variable, not on the commit.
+                        if not dev_source.is_dev_source(source_key, source):
+                            skip_commit = previous_commit
+                    elif (not source.get("dev_ref") and source.get("trusted") is True
+                          and (not catalog_feed.signed_feed_enabled() or (
+                              source.get("catalog_signature")
+                              and source.get("catalog_channel") == catalog_feed.CHANNEL_MAIN
+                              and catalog_feed.supply_refusal(state, source) is None))):
+                        # A source refreshed before the signature check existed, on another channel, or
+                        # whose cached catalog no longer meets what this host requires of one (a counter,
+                        # a key file version it lacks the record of) is fetched once more.
                         try:
                             url_ref = _parse_github_file_url(source["url"])[2]
                         except CatalogSourceError:
@@ -1247,17 +1392,32 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         if url_ref in _TRUSTED_BRANCHES:
                             skip_commit = previous_commit
                 from_floor = False
+                feed = None
                 try:
-                    catalog, commit = _fetch_github_catalog(
-                        source["url"], override_ref=source.get("dev_ref"),
-                        unchanged_commit=skip_commit,
-                        advertisement_sink=ancestry.note_advertisement,
-                    )
+                    if is_official:
+                        catalog, commit, feed = _fetch_official_catalog(
+                            source, state, ancestry, unchanged_commit=skip_commit,
+                            advertisement_sink=ancestry.note_advertisement,
+                        )
+                    else:
+                        catalog, commit = _fetch_github_catalog(
+                            source["url"], override_ref=source.get("dev_ref"),
+                            unchanged_commit=skip_commit,
+                            advertisement_sink=ancestry.note_advertisement,
+                        )
                     source["resolved_commit"] = commit
                     source["last_checked_at"] = now
                     source["last_error"] = None
                     floor.clear_seed(source)
                 except Exception as error:
+                    if isinstance(error, catalog_feed.FeedRefused):
+                        refused_channel = catalog_feed.feed_channel(source.get("dev_ref"))
+                        if refused_channel is not None:
+                            mirrored = catalog_feed.record_refusal(
+                                state, refused_channel, error, catalog_feed.current_time())
+                            if mirrored is not None:
+                                accepted_feeds[refused_channel] = catalog_feed._larger(
+                                    accepted_feeds.get(refused_channel), mirrored)
                     source["last_error"] = refusal_text(_catalog_source_error_message(error))
                     failed_sources.append(source.get("name") or source.get("id") or "?")
                     # An official source that has never refreshed falls back to
@@ -1290,12 +1450,17 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     )
                     continue
                 refreshed_sources.add(source_id)
+                # The commit the manifests and their bundles are pinned to: the signed body names it,
+                # and it can sit behind the head the source resolved to.
+                entry_commit = feed.source_commit if feed is not None else commit
 
                 if is_official:
                     if from_floor:
                         floor.trust_source(source)
                     else:
                         _set_official_trust(source, commit, previous_commit, ancestry)
+                        _hold_unsigned_ref_to_the_latch(state, source)
+                        _note_catalog_signature(state, source, feed, accepted_feeds)
                     published_ids = set()
                 claimed_kinds: dict[str, set[str]] = {}
                 for item in catalog.get("providers", []):
@@ -1304,7 +1469,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     manifest = item.get("manifest") if isinstance(item.get("manifest"), dict) else item
                     if not isinstance(manifest, dict):
                         continue
-                    manifest = _normalize_catalog_manifest(manifest, source, commit)
+                    manifest = _normalize_catalog_manifest(manifest, source, entry_commit)
                     provider_id = manifest_provider_id(manifest)
                     version = manifest.get("version") or item.get("version")
                     if not provider_id or not version:
@@ -1324,7 +1489,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         "version": version,
                         "trusted": bool(source.get("trusted", False)),
                         "manifest": manifest,
-                        "resolved_commit": commit,
+                        "resolved_commit": entry_commit,
                         "catalog_list": CATALOG_LIST_PROVIDERS,
                     }
                     refreshed_entry_keys.add(key)
@@ -1341,7 +1506,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if not isinstance(manifest, dict):
                         continue
                     try:
-                        manifest = _normalize_catalog_manifest(manifest, source, commit)
+                        manifest = _normalize_catalog_manifest(manifest, source, entry_commit)
                         parsed = parse_plugin_manifest(manifest)
                     except ManifestValidationError as error:
                         rejected_plugins.append(_rejected_plugin(
@@ -1367,6 +1532,12 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if kind.name != parsed.kind:
                         rejected_plugins.append(_rejected_plugin(
                             source, manifest, PLUGIN_KIND_MISMATCH_REASON))
+                        continue
+                    if kind.name != SUBTITLE_PROVIDER and not (
+                            (is_official and source.get("trusted") is True)
+                            or dev_source.is_dev_source(source_key, source)):
+                        rejected_plugins.append(_rejected_plugin(
+                            source, manifest, NEW_KIND_OFFICIAL_ONLY_REASON))
                         continue
                     try:
                         kind.validate_manifest(manifest, trusted=bool(source.get("trusted", False)))
@@ -1404,7 +1575,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         "version": version,
                         "trusted": bool(source.get("trusted", False)),
                         "manifest": claim["manifest"],
-                        "resolved_commit": commit,
+                        "resolved_commit": entry_commit,
                         "catalog_list": CATALOG_LIST_PLUGINS,
                     }
                     refreshed_entry_keys.add(key)
@@ -1429,11 +1600,14 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 "sources_ok": ok_sources,
                 "failed_sources": failed_sources,
                 "rejected_plugins": rejected_plugins,
+                "accepted_feeds": accepted_feeds,
             }
 
         # The fetches above run inside this mutation, so a lost race must not
         # run it again: it fails with a conflict and the refresh is retried.
         result = mutate_state(refresh, retry_on_conflict=False)
+        if result["accepted_feeds"]:
+            catalog_feed.write_counter_file(result["accepted_feeds"])
         sources_count = result["sources"]
         entries_count = result["entries"]
         ok_sources = result["sources_ok"]
@@ -1713,10 +1887,47 @@ def _restore_after_refused_update(provider_id: str, changes, restore) -> None:
         )
 
 
+def note_switched_providers(switched_on: set[str], switched_off: set[str]) -> None:
+    """Update what held-back providers show, once a settings save has switched some on or off.
+
+    Called after the save has released its settings locks, because it takes the state lock, which the Hub's
+    own switch takes first. A held-back provider that is now on shows its reason; one that is now off loses
+    it. Any other error is left alone."""
+    if not switched_on and not switched_off:
+        return
+
+    def apply(state: dict[str, Any]) -> None:
+        for provider_id, row in (state.get("installations") or {}).items():
+            if not isinstance(row, dict) or not row.get("blocked") or not row.get("blocked_reason"):
+                continue
+            if provider_id in switched_on:
+                row["last_error"] = row["blocked_reason"]
+            elif provider_id in switched_off and row.get("last_error") == row["blocked_reason"]:
+                row["last_error"] = None
+
+    mutate_state(apply)
+
+
+def switch_on_refusal(name: str, needs: list[str]) -> str:
+    """Why a plugin cannot be switched on: what it needs is not running."""
+    return f"{name} needs {', '.join(needs)}, which is not running, so it cannot be switched on."
+
+
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if config is not None:
         if not isinstance(config, dict):
             raise ValueError("config must be an object")
+    if enabled is False:
+        refusal = dependent_refusal(provider_id, "switched off", enabled_only=True)
+        if refusal:
+            raise ValueError(refusal)
+    if enabled is True:
+        # What a plugin relies on has to be running before it is switched on, as at the next boot.
+        rows = load_state().get("installations") or {}
+        needs = closure.unmet_needs(rows).get(provider_id)
+        if needs:
+            name = (rows.get(provider_id) or {}).get("name") or provider_id
+            raise ValueError(switch_on_refusal(name, needs))
 
     def _encrypt_provider_config(provider: dict[str, Any],
                                   config: dict[str, Any]) -> dict[str, Any]:
@@ -1866,6 +2077,14 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
         if enabled is not None:
             remember("enabled")
             provider["enabled"] = bool(enabled)
+            # A plugin held back at boot says why once it is switched on, and stops saying it once it is off.
+            if enabled and provider.get("blocked") and provider.get("blocked_reason"):
+                remember("last_error")
+                provider["last_error"] = provider["blocked_reason"]
+            elif not enabled and provider.get("blocked") and provider.get("last_error") == provider.get(
+                    "blocked_reason"):
+                remember("last_error")
+                provider["last_error"] = None
 
         if next_config is not None:
             remember("config")
@@ -2262,6 +2481,15 @@ def _remove_bundle_runtime_artifacts(bundle_path: Path) -> None:
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
+def _blocked_connection_result(provider_id: str, provider: dict[str, Any], job) -> dict[str, Any]:
+    """The answer for a plugin that was not started because what it relies on is not running."""
+    message = provider.get("blocked_reason") or provider.get("last_error") or (
+        "This plugin was not started because what it relies on is not running.")
+    job.data["state"] = "failed"
+    job.update(error=message, message=message, details={"status": "blocked"})
+    return {"provider_id": provider_id, "ok": False, "status": "blocked", "message": message}
+
+
 def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
     provider = get_provider(provider_id, redact=False)
     if not provider:
@@ -2286,18 +2514,26 @@ def test_provider_connection(provider_id: str) -> dict[str, Any] | None:
                 "status": "pending_restart",
                 "message": "Restart Bazarr+ before testing this staged plugin",
             }
+        if provider.get("blocked"):
+            return _blocked_connection_result(provider_id, provider, job)
 
         # The row is read again under the lock a cleanup decides under, and the
         # environment is held in the same step: a repair and a cleanup that ran
         # since the first read cannot take it away while the test runs.
         with _ENV_LOCK:
             provider = get_provider(provider_id, redact=False) or provider
+            blocked_now = bool(provider.get("blocked"))
             manifest_data = provider.get("manifest")
             active_path = provider.get("active_path")
             python_path = provider.get("python_path")
             release_environment = (
                 hold_environment(env_registry.env_dir_of(python_path)) if python_path else (lambda: None)
             )
+
+        if blocked_now:
+            # Held back since the first read: nothing of it is started to be tested.
+            release_environment()
+            return _blocked_connection_result(provider_id, provider, job)
 
         client = None
         try:
@@ -2399,6 +2635,31 @@ def _built_in_provider_ids() -> set[str]:
 
 def _manifest_provider_id(manifest: dict[str, Any]) -> str:
     return manifest_provider_id(manifest)
+
+
+PLUGIN_KIND_NOT_INSTALLED_REASON = "This Bazarr+ does not install this kind of plugin."
+NEW_KIND_OFFICIAL_ONLY_REASON = "Only the official catalog can install this kind of plugin."
+LOCAL_PACKAGE_KIND_REASON = (
+    "A local package can only be a subtitle provider. Only the official catalog can install this kind of plugin."
+)
+
+
+def _kind_for_manifest(manifest: Any):
+    """The registered kind that stages ``manifest``, or ManifestValidationError.
+
+    A schema 1 manifest, and anything that is not an object, belongs to the subtitle provider kind,
+    which gives the refusal it always has for a manifest it cannot read. A schema 2 manifest names
+    its kind and the contract it follows, and both must be defined by this Bazarr+.
+    """
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 2:
+        return get_kind(SUBTITLE_PROVIDER)
+    plugin = parse_plugin_manifest(manifest)
+    kind = kind_for_api(plugin.kind_api)
+    if kind is None:
+        raise ManifestValidationError(PLUGIN_KIND_NOT_INSTALLED_REASON)
+    if kind.name != plugin.kind:
+        raise ManifestValidationError(PLUGIN_KIND_MISMATCH_REASON)
+    return kind
 
 
 def _validation_built_in_provider_ids(manifest: dict[str, Any], trusted: bool) -> set[str]:
@@ -2679,9 +2940,34 @@ def _reserved_provider_ids(state: dict[str, Any]) -> set[str]:
     )
 
 
-def _install_refusal(state: dict[str, Any], source_id: str | None, provider_id: Any) -> str | None:
+def _supply_refusal(state: dict[str, Any]) -> str | None:
+    """Why nothing installs from the official source's cached catalog right now (expired, or older than a
+    counter or latch this host holds), or None. Running plugins are never touched."""
+    official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
+    return catalog_feed.supply_refusal(state, official) if isinstance(official, dict) else None
+
+
+def _source_may_carry_new_kinds(state: dict[str, Any], source_id: str | None) -> bool:
+    """Whether ``source_id`` may supply plugins of a kind other than the subtitle provider.
+
+    Only the official source may, and only while Bazarr+ trusts it. A community source never may, except
+    the one source the development install path names, which stays untrusted all the same.
+    """
+    source = (state.get("catalog_sources") or {}).get(source_id) if source_id else None
+    if source_id == OFFICIAL_CATALOG_SOURCE_ID:
+        return isinstance(source, dict) and source.get("trusted") is True
+    return isinstance(source, dict) and dev_source.is_dev_source(source_id, source)
+
+
+def _install_refusal(
+    state: dict[str, Any], source_id: str | None, provider_id: Any, kind: str = SUBTITLE_PROVIDER,
+) -> str | None:
+    if kind != SUBTITLE_PROVIDER and not _source_may_carry_new_kinds(state, source_id):
+        return NEW_KIND_OFFICIAL_ONLY_REASON
     if source_id != OFFICIAL_CATALOG_SOURCE_ID and str(provider_id) in _reserved_provider_ids(state):
         return RESERVED_ID_REASON
+    if source_id == OFFICIAL_CATALOG_SOURCE_ID:
+        return _supply_refusal(state)
     return None
 
 
@@ -2689,6 +2975,36 @@ def _host_refusal(entry: dict[str, Any], host: HostFacts) -> str | None:
     """Why this Bazarr+ cannot run a catalog entry, or None when it can."""
     compatible, reason = entry_compatibility(entry, host)
     return None if compatible else reason
+
+
+def _entry_usable(state: dict[str, Any], host: HostFacts):
+    """Whether a stored catalog entry may be installed here: its source may supply its kind, this host
+    can run it and its kind accepts its manifest. The rule a dependency is chosen by, as the plugin is."""
+
+    def usable(entry: dict[str, Any]) -> bool:
+        if _install_refusal(state, entry.get("source"), entry.get("provider_id"), catalog_kind_of(entry)):
+            return False
+        if _host_refusal(entry, host) is not None:
+            return False
+        try:
+            get_kind(catalog_kind_of(entry)).validate_manifest(entry["manifest"], bool(entry.get("trusted", False)))
+        except Exception:
+            return False
+        return True
+
+    return usable
+
+
+def _closure_of(state: dict[str, Any], entry: dict[str, Any], host: HostFacts | None = None):
+    host = host or current_host()
+    return closure.resolve_closure(state, entry, _entry_usable(state, host))
+
+
+def _closure_refusal(state: dict[str, Any], entry: dict[str, Any], host: HostFacts | None = None) -> str | None:
+    """Why the dependencies of ``entry`` do not resolve here, or None when they do or it has none."""
+    if not closure.has_needs(entry.get("manifest")):
+        return None
+    return _closure_of(state, entry, host).refusal
 
 
 def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
@@ -2705,6 +3021,8 @@ def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, A
     source = (state.get("catalog_sources") or {}).get(source_id) if source_id else None
     result["source_id"] = source_id
     result["source_name"] = source.get("name") if isinstance(source, dict) else None
+    # An install from the development source says so, and is never shown as official.
+    result["development_source"] = dev_source.is_dev_source(source_id, source)
     return result
 
 
@@ -2829,6 +3147,10 @@ def _staged_installation(
         "manifest": existing.get("manifest") if existing.get("active_version") else validated.raw,
         "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
+        # What the running release was met by, and whether it was held back, stay with it until the update
+        # takes over.
+        **({"supplied_by": existing["supplied_by"]} if existing.get("supplied_by") else {}),
+        **({"blocked": True, "blocked_reason": existing.get("blocked_reason")} if existing.get("blocked") else {}),
     }
 
 
@@ -2840,9 +3162,19 @@ def _failed_installation(
     origin: str = "catalog",
     source_id: str | None = None,
     catalog_list: str | None = None,
+    state: dict[str, Any] | None = None,
 ):
     existing = existing if isinstance(existing, dict) else {}
     message = refusal_text(error)
+    if (state is not None and existing.get("state") == "staged"
+            and isinstance(existing.get("staged_manifest"), dict)
+            and closure.broken_by(state, validated.provider_id, None)):
+        # The staged release, whether it updates an active one or is a first install still waiting for the
+        # restart, is what another plugin will rely on after it, so a restage that failed does not take it
+        # away.
+        installation = dict(existing)
+        installation["last_error"] = message
+        return installation
     if existing.get("active_version"):
         installation = dict(existing)
         if installation.get("state") == "staged":
@@ -2881,6 +3213,17 @@ def _failed_installation(
         "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
     }
+
+
+def _refuse_a_release_that_breaks_dependents(
+    state: dict[str, Any], provider_id: str, version: str | None, manifest: dict[str, Any],
+) -> None:
+    """Refuse a release of an installed plugin that drops a capability something installed or staged relies on."""
+    row = (state.get("installations") or {}).get(provider_id)
+    if isinstance(row, dict) and (row.get("active_version") or row.get("staged_version")):
+        broken = closure.broken_by(state, provider_id, manifest)
+        if broken:
+            raise ProviderHubInstallError(closure.breaks_text(provider_id, version, broken))
 
 
 def _stage_validated(
@@ -2946,16 +3289,17 @@ def _stage_validated(
             staged.append(env_path)
             staged_python_path = python_executable(env_path)
             step("Checking that the provider starts")
-            if deadline is None:
-                _smoke_validate_worker(validated, bundle_path, staged_python_path)
-            else:
+            smoke_timeout = None
+            if deadline is not None:
                 # The check shares the install's budget instead of adding its own.
                 left = deadline - time.monotonic()
                 if left <= 0:
                     raise ProviderHubInstallError(
                         f"install for {validated.provider_id} exceeded its time budget"
                     )
-                _smoke_validate_worker(validated, bundle_path, staged_python_path, timeout=min(10.0, left))
+                smoke_timeout = min(10.0, left)
+            get_kind(validated.kind).smoke_test(
+                validated, bundle_path, staged_python_path, timeout=smoke_timeout)
             step("Recording the installation")
         except ProviderHubStopped:
             _discard_stopped_install(staged, existing)
@@ -2972,7 +3316,7 @@ def _stage_validated(
                 installations = state.setdefault("installations", {})
                 current = installations.get(validated.provider_id, existing)
                 installation = _failed_installation(
-                    validated, current, install_error, source_trusted, origin, source_id, catalog_list
+                    validated, current, install_error, source_trusted, origin, source_id, catalog_list, state
                 )
                 installations[validated.provider_id] = installation
                 return dict(installation)
@@ -2983,6 +3327,7 @@ def _stage_validated(
         def record_staged_install(state: dict[str, Any]) -> dict[str, Any]:
             installations = state.setdefault("installations", {})
             current = installations.get(validated.provider_id, existing)
+            _refuse_a_release_that_breaks_dependents(state, validated.provider_id, validated.version, validated.raw)
             installation = _staged_installation(
                 validated,
                 current,
@@ -2993,6 +3338,10 @@ def _stage_validated(
                 source_id,
                 catalog_list,
             )
+            plugin = parse_plugin_manifest(validated.raw) if validated.raw.get("schema_version") == 2 else None
+            if plugin is not None:
+                # Which installed plugin supplies each capability it needs, kept with the release.
+                installation["staged_supplied_by"] = closure.supplier_map(state, plugin, validated.provider_id)
             installations[validated.provider_id] = installation
             # The environment passed the worker check, so it is now the one
             # recorded for this dependency set (a no-op when it already is).
@@ -3008,6 +3357,10 @@ def _stage_validated(
                 installation = mutate_state(record_staged_install)
         except env_registry.EnvironmentGone as error:
             raise ProviderHubInstallError(str(error)) from error
+        except ProviderHubInstallError:
+            # Refused in the write: another plugin's need would no longer be met. Nothing was recorded.
+            _discard_stopped_install(staged, existing)
+            raise
         missing_required = [] if is_update else missing_required_fields(installation)
         if not is_update and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
@@ -3084,17 +3437,14 @@ def stage_install(
     else:
         source_id, source_trusted = None, False
         catalog_list = CATALOG_LIST_PROVIDERS
-    validated = validate_manifest(
-        manifest,
-        built_in_provider_ids=_validation_built_in_provider_ids(
-            manifest,
-            source_trusted,
-        ),
-    )
-    refusal = (_install_refusal(state, source_id, validated.provider_id)
+    # The entry's own kind validates it: a translator is not a subtitle provider.
+    kind = _kind_for_manifest(manifest)
+    validated = kind.validate_manifest(manifest, source_trusted)
+    refusal = (_install_refusal(state, source_id, validated.provider_id, kind.name)
                or _host_refusal({"manifest": manifest}, current_host()))
     if refusal:
         raise ProviderHubInstallError(refusal)
+    _refuse_a_release_that_breaks_dependents(state, validated.provider_id, validated.version, validated.raw)
     origin = "catalog"
     manifest_source = validated.raw.get("source") if isinstance(validated.raw, dict) else None
     catalog_url = manifest_source.get("catalog_url") if isinstance(manifest_source, dict) else None
@@ -3172,8 +3522,9 @@ def _requested_entry(
             f"{source_id} does not list {provider_id} {version}; refresh the catalog and try again"
         )
     key, entry = found
-    refusal = (_install_refusal(state, source_id, provider_id)
-               or _host_refusal(entry, current_host()))
+    refusal = (_install_refusal(state, source_id, provider_id, catalog_kind_of(entry))
+               or _host_refusal(entry, current_host())
+               or _closure_refusal(state, entry))
     if refusal:
         raise ProviderHubInstallError(refusal)
     return key, entry
@@ -3184,7 +3535,7 @@ def resolve_catalog_install(
     catalog_list: Any = None,
 ) -> dict[str, Any]:
     """The catalog entry an install request names, as ``{source, provider_id,
-    version, name, entry_key}``, or ProviderHubInstallError with the reason it is refused.
+    version, name, entry_key, kind}``, or ProviderHubInstallError with the reason it is refused.
 
     A request names an entry by source, provider id and version. A raw manifest
     is taken only when it equals an entry Bazarr+ holds, and then names that one.
@@ -3200,23 +3551,229 @@ def resolve_catalog_install(
         "version": entry["version"],
         "name": entry.get("name") or entry["provider_id"],
         "entry_key": key,
+        "kind": catalog_kind_of(entry),
     }
+
+
+def _source_description(state: dict[str, Any]):
+    """How a consent summary names the source of a plugin: from Bazarr+'s own record, never the manifest."""
+    sources = state.get("catalog_sources") or {}
+
+    def describe(source_id: Any) -> dict[str, Any]:
+        source = sources.get(source_id) if isinstance(sources, dict) else None
+        source = source if isinstance(source, dict) else {}
+        official = source_id == OFFICIAL_CATALOG_SOURCE_ID
+        return {
+            "id": source_id,
+            "name": source.get("name") or source_id,
+            "official": official,
+            "trusted": bool(source.get("trusted")),
+            "development": dev_source.is_dev_source(source_id, source),
+            "signature": source.get("catalog_signature") if official else None,
+        }
+
+    return describe
+
+
+CONSENT_MISSING_REASON = "This kind of plugin needs your consent before it is installed."
+CONSENT_CHANGED_REASON = (
+    "What this install would add has changed since it was shown to you. Review it again before you agree."
+)
+
+
+class _StagedMembers(list):
+    """The ids of the plugins a call staged, and the kind of each one that was switched on before it started.
+
+    Removing a plugin switches it off, so a discard puts back the ones the person already had on."""
+
+    def __init__(self, ids=(), was_enabled=None):
+        super().__init__(ids)
+        self.was_enabled: dict[str, str] = dict(was_enabled or {})
+
+    @staticmethod
+    def snapshot_enabled(resolved) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for member in resolved.members:
+            if member.reason == "root":
+                continue
+            try:
+                if get_kind(member.plugin.kind).is_enabled({"provider_id": member.plugin_id}):
+                    found[member.plugin_id] = member.plugin.kind
+            except Exception:
+                continue
+        return found
+
+
+def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[str]:
+    """Stage the plugins a closure adds, dependencies first, before the plugin that needs them.
+
+    Returns the ids of the rows this call wrote, which is what to discard if the plugin they were staged
+    for then fails. A row counts as soon as ``stage_install`` wrote it, including a failed one, so a member
+    that raises after recording its row is not left behind. When a member fails, the rows written before it
+    in this call are discarded and the failure goes on.
+    """
+    def installed_ids() -> set[str]:
+        # A row that only records an earlier failure is not an installation: a plugin this call installs over
+        # one is new, and is discarded with the rest when the plugin being installed fails.
+        return {str(pid) for pid, row in (load_state().get("installations") or {}).items()
+                if isinstance(row, dict) and (row.get("active_version") or row.get("staged_version"))}
+
+    before = installed_ids()
+    # Only members this call has started to stage can have a row it wrote: a later member it never reached keeps
+    # whatever row it had, a record of an earlier failure included.
+    attempted: set[str] = set()
+    was_enabled = _StagedMembers.snapshot_enabled(resolved)
+
+    def written() -> "_StagedMembers":
+        rows = load_state().get("installations") or {}
+        return _StagedMembers(
+            [member.plugin_id for member in resolved.members
+             if member.reason != "root" and member.plugin_id in attempted and member.plugin_id not in before
+             and member.plugin_id in rows],
+            was_enabled)
+
+    current = None
+    try:
+        for member in resolved.members:
+            if member.reason == "root":
+                continue
+            current = member
+            attempted.add(member.plugin_id)
+            stage_install(
+                member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
+                catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+            )
+    except Exception as error:
+        _discard_staged_members(written(), resolved.members[-1].plugin_id if resolved.members else None)
+        if isinstance(error, ProviderHubSettingsError) and current is not None:
+            # The member was staged and could not be enabled. It is discarded with the rest, and the
+            # failure names it, because the plugin being installed was never staged.
+            raise ProviderHubInstallError(
+                f"{current.plugin.name}, which this install needs, could not be enabled, so nothing was "
+                f"installed: {ENABLED_PROVIDERS_NOT_SAVED}") from error
+        raise
+    return written()
+
+
+def _discard_staged_members(plugin_ids: list[str], root_id: str | None = None) -> None:
+    """Remove the plugins a call staged for a plugin that then failed to stage, last staged first.
+
+    A plugin leaves only when nothing outside that failed closure depends on it, active or staged: the
+    members themselves and the failed root do not count (the root's active release, when an update is the
+    one that failed, needed the capability before the member existed), but a plugin another install adopted
+    them for does, and keeps them. A removal that is refused or fails is logged.
+    """
+    own = set(plugin_ids) | ({root_id} if root_id else set())
+    was_enabled = getattr(plugin_ids, "was_enabled", {})
+    for plugin_id in reversed(plugin_ids):
+        try:
+            removed = remove_installation(plugin_id, ignoring_dependents=frozenset(own))
+            if removed and plugin_id in was_enabled:
+                # The person had it on before this install, and removing it switched it off.
+                get_kind(was_enabled[plugin_id]).set_enabled({"provider_id": plugin_id}, True)
+        except Exception:
+            # It stays, so it is no longer part of the failed closure: whatever it depends on is still
+            # needed, and the next member is judged with it counted as a dependent.
+            own.discard(plugin_id)
+            logging.getLogger(__name__).exception(
+                "Could not discard %s, which was staged for a plugin that failed to install", plugin_id)
+
+
+def _install_closure(state: dict[str, Any], entry: dict[str, Any]):
+    """The closure an install of ``entry`` acts on, or ProviderHubInstallError when it has no plugin to install."""
+    resolved = _closure_of(state, entry)
+    if not resolved.members:
+        raise ProviderHubInstallError(resolved.refusal or "The plugins this one needs could not be resolved.")
+    return resolved
+
+
+def _closure_needs_consent(resolved) -> bool:
+    """Whether installing this closure asks for the person's consent: any plugin in it that is not a subtitle provider."""
+    return any(member.plugin.kind != SUBTITLE_PROVIDER for member in resolved.members)
+
+
+def install_consent(
+    source_id: Any, provider_id: Any, version: Any, entry_key: Any = None, catalog_list: Any = None,
+) -> dict[str, Any]:
+    """The consent summary of installing the entry a request names, or ProviderHubInstallError with the
+    reason it cannot be installed. It describes the plugin and its whole dependency closure and carries
+    the digest an install request sends back."""
+    state = load_state()
+    _key, entry = _requested_entry(
+        state, source_id, provider_id, version, entry_key=entry_key, catalog_list=catalog_list)
+    summary = consent.install_summary(
+        _install_closure(state, entry), _source_description(state), consent.sandbox_status())
+    return summary
+
+
+def install_needs_consent(
+    source_id: Any, provider_id: Any, version: Any, entry_key: Any = None, catalog_list: Any = None,
+) -> bool:
+    """Whether installing the entry a request names, with its closure, asks for consent."""
+    state = load_state()
+    _key, entry = _requested_entry(
+        state, source_id, provider_id, version, entry_key=entry_key, catalog_list=catalog_list)
+    if catalog_kind_of(entry) == SUBTITLE_PROVIDER and not closure.has_needs(entry.get("manifest")):
+        return False
+    return _closure_needs_consent(_install_closure(state, entry))
+
+
+def check_install_consent(
+    digest: Any, source_id: Any, provider_id: Any, version: Any, entry_key: Any = None, catalog_list: Any = None,
+) -> dict[str, Any]:
+    """Refuse an install whose consent digest is missing, when anything it installs is not a subtitle
+    provider, or no longer matches.
+
+    A subtitle provider with only subtitle providers behind it installs without one, as it always has;
+    when it sends one, it must match too. Returns the summary it checked.
+    """
+    summary = install_consent(source_id, provider_id, version, entry_key=entry_key, catalog_list=catalog_list)
+    if digest is None or digest == "":
+        if any(member["kind"] != SUBTITLE_PROVIDER for member in summary["members"]):
+            raise ProviderHubConsentError(CONSENT_MISSING_REASON)
+        return summary
+    if digest != summary["digest"]:
+        raise ProviderHubConsentError(CONSENT_CHANGED_REASON, changed=True)
+    return summary
 
 
 def install_catalog_entry(
     source_id: str, provider_id: str, version: str, checkpoint=None, entry_key: str | None = None,
+    consent_digest: str | None = None,
 ) -> dict[str, Any]:
     """Install the entry ``source_id`` lists for ``provider_id`` at ``version``.
 
     ``entry_key`` pins the stored entry a request resolved to, which matters when
-    the source lists the same id and version in both catalog lists.
+    the source lists the same id and version in both catalog lists. When anything the install adds is not a
+    subtitle provider, ``consent_digest`` is required and must match what the install would add now, so the
+    job refuses a set nobody saw however it was queued.
     """
-    _key, entry = _requested_entry(load_state(), source_id, provider_id, version, entry_key=entry_key)
-    # An entry stored before the plugins list existed carries no list and came from providers.
-    return stage_install(
-        entry["manifest"], checkpoint=checkpoint, source_id=source_id,
-        catalog_list=entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
-    )
+    state = load_state()
+    _key, entry = _requested_entry(state, source_id, provider_id, version, entry_key=entry_key)
+    resolved = None
+    if closure.has_needs(entry.get("manifest")) or catalog_kind_of(entry) != SUBTITLE_PROVIDER:
+        resolved = _install_closure(state, entry)
+        if consent_digest is None and _closure_needs_consent(resolved):
+            raise ProviderHubConsentError(CONSENT_MISSING_REASON)
+    if consent_digest is not None:
+        # The set may have changed since the request was accepted, so the job checks it again.
+        shown = consent.install_summary(resolved or _install_closure(state, entry), _source_description(state))
+        if shown["digest"] != consent_digest:
+            raise ProviderHubConsentError(CONSENT_CHANGED_REASON, changed=True)
+    # The plugins it extends or needs are installed first, from the same source, by the same rules.
+    members = _stage_closure_members(resolved, source_id, checkpoint) if resolved is not None else []
+    try:
+        # An entry stored before the plugins list existed carries no list and came from providers.
+        return stage_install(
+            entry["manifest"], checkpoint=checkpoint, source_id=source_id,
+            catalog_list=entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+        )
+    except ProviderHubSettingsError:
+        # The plugin is staged and only could not be enabled: it keeps what it needs.
+        raise
+    except Exception:
+        _discard_staged_members(members, provider_id)
+        raise
 
 
 def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[str, Any]:
@@ -3244,6 +3801,10 @@ def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[st
     try:
         _safe_extract_zip(package, work_dir)
         manifest, bundle_root = _find_local_manifest(work_dir)
+        # A local package has no catalog behind it, and only the official catalog installs the other kinds.
+        if isinstance(manifest, dict) and manifest.get("schema_version") == 2 and (
+                manifest.get("kind") or SUBTITLE_PROVIDER) != SUBTITLE_PROVIDER:
+            raise ProviderHubInstallError(LOCAL_PACKAGE_KIND_REASON)
         # Untrusted (full built-in set, no replacements): a local package can
         # never shadow a built-in provider.
         validated = validate_manifest(
@@ -3263,6 +3824,54 @@ def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[st
         )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _apply_unmet_needs(installations: dict[str, Any]) -> bool:
+    """Hold back each plugin whose active release relies on one that is not running, and release the others.
+
+    A held-back plugin carries the reason and, while it is switched on, shows it as its error. A switched-off
+    one shows no error for not running, and loses the one an earlier pass wrote. An error that is not the
+    reason is never touched. Returns whether any row changed.
+    """
+    changed = False
+    unmet = closure.unmet_needs(installations)
+    for plugin_id, row in installations.items():
+        if not isinstance(row, dict):
+            continue
+        if plugin_id in unmet:
+            reason = (f"It needs {', '.join(unmet[plugin_id])}, which is not running, so it was not started. "
+                      "Once that is running again, restart Bazarr+.")
+            on = closure.is_on(row)
+            previous = row.get("blocked_reason")
+            if not row.get("blocked") or previous != reason:
+                row.update(blocked=True, blocked_reason=reason)
+                if on:
+                    row["last_error"] = reason
+                elif row.get("last_error") == previous:
+                    row["last_error"] = None
+                changed = True
+            elif on and not row.get("last_error"):
+                # Something cleared the reason (an activation, a repair): a held-back plugin always says why.
+                row["last_error"] = reason
+                changed = True
+            elif not on and row.get("last_error") == reason:
+                row["last_error"] = None
+                changed = True
+        elif row.get("blocked"):
+            if row.get("last_error") == row.get("blocked_reason"):
+                row["last_error"] = None
+            row.pop("blocked", None)
+            row.pop("blocked_reason", None)
+            changed = True
+    return changed
+
+
+def enforce_activation_needs() -> bool:
+    """Run the boot dependency check again, over what the environment reconciliation has since found.
+
+    A supplier whose environment is missing or damaged does not run, and that is only known once the
+    environments have been reconciled, which is after activation. Returns whether any row changed."""
+    return bool(mutate_state(lambda state: _apply_unmet_needs(state.setdefault("installations", {}))))
 
 
 def activate_staged_installations() -> list[str]:
@@ -3330,6 +3939,7 @@ def activate_staged_installations() -> list[str]:
                 installation["staged_path"] = None
                 installation["staged_python_path"] = None
                 installation["staged_manifest"] = None
+                installation.pop("staged_supplied_by", None)
                 installation["pending_restart"] = False
                 if installation.get("active_version"):
                     installation["state"] = "active"
@@ -3353,6 +3963,7 @@ def activate_staged_installations() -> list[str]:
             installation["staged_manifest"] = None
             installation.pop("previous_catalog_list", None)
             installation["manifest"] = manifest.raw
+            installation["supplied_by"] = installation.pop("staged_supplied_by", None) or {}
             installation["state"] = "active"
             installation["pending_restart"] = False
             installation["last_error"] = None
@@ -3373,6 +3984,9 @@ def activate_staged_installations() -> list[str]:
             else:
                 msg = f"Activated plugin '{target_name}' v{target_version}"
             job.update(message=msg)
+    # What actually activated is known now. A plugin whose active release relies on one that is not running
+    # does not start, and says why.
+    changed = _apply_unmet_needs(installations) or changed
     if changed:
         updated_installations = state.get("installations") or {}
 
@@ -3486,7 +4100,8 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
                 return {}
             current["python_path"] = str(python_path)
             if current.pop("needs_repair", None):
-                current["last_error"] = None
+                # A plugin held back at boot keeps saying why.
+                current["last_error"] = closure.held_back_error(current)
             env_registry.register_environment(state, environment_fingerprint(validated), env_path)
             return dict(current)
 
@@ -3538,11 +4153,31 @@ def cleanup_plugin_environments() -> list[str]:
     return env_registry.cleanup_environments(provider_hub_dir())
 
 
-def remove_installation(provider_id: str) -> bool:
+def dependents_refusal_text(provider_id: str, names: list[str], action: str) -> str:
+    """The refusal for removing or switching off a plugin that others depend on."""
+    return closure.dependents_text(provider_id, names, action)
+
+
+def dependent_refusal(provider_id: str, action: str, *, enabled_only: bool = False) -> str | None:
+    """Why ``provider_id`` cannot be removed or switched off while others depend on it, or None."""
+    names = closure.dependents(load_state(), provider_id, enabled_only=enabled_only)
+    return closure.dependents_text(provider_id, names, action) if names else None
+
+
+def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str] = frozenset()) -> bool:
+    """Stage the removal of an installation, or remove it at once when it was never active.
+
+    A plugin another one depends on is refused. ``ignoring_dependents`` names plugins that do not count as
+    dependents, which is how a failed install discards the plugins it staged for itself while any other
+    plugin that has come to depend on them still protects them.
+    """
     state = load_state()
     installations = state.setdefault("installations", {})
     if provider_id not in installations:
         return False
+    names = [name for name in closure.dependents(state, provider_id) if name not in ignoring_dependents]
+    if names:
+        raise ProviderHubInstallError(closure.dependents_text(provider_id, names, "removed"))
     item = installations[provider_id]
     target_name = (
         item.get("name") if isinstance(item, dict) else None
@@ -3573,6 +4208,11 @@ def remove_installation(provider_id: str) -> bool:
             item = installations.get(provider_id)
             if not isinstance(item, dict):
                 return "missing"
+            # Checked against the document this write commits to, so a dependent installed since the
+            # early check above still blocks the removal.
+            names = [name for name in closure.dependents(state, provider_id) if name not in ignoring_dependents]
+            if names:
+                raise ProviderHubInstallError(closure.dependents_text(provider_id, names, "removed"))
             if not item.get("active_version"):
                 del installations[provider_id]
                 return "removed_pending"
@@ -3616,6 +4256,7 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
         state = load_state()
         available = 0
         provider_summaries: list[str] = []
+        needs_consent: list[str] = []
         refusals: list[str] = []
         for provider_id, installation in (state.get("installations") or {}).items():
             if not isinstance(installation, dict):
@@ -3647,6 +4288,9 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
             if not latest_version:
                 continue
             available += 1
+            delta = _update_delta(state, installation, latest, _bound_source_id(installation))
+            if delta and delta["needs_consent"]:
+                needs_consent.append(provider_id)
             display_name = installation.get("name") or provider_id
             provider_summaries.append(
                 f"{display_name}: {active_version} -> {latest_version}"
@@ -3661,7 +4305,8 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
             message = f"{message} (newer version not offered for {'; '.join(refusals)})"
         job.update(
             message=message,
-            details={"updates_available": available, "providers": provider_summaries},
+            details={"updates_available": available, "providers": provider_summaries,
+                     "needs_consent": needs_consent},
         )
     persisted = get_job(job_id) if job_id else None
     return persisted or {}
@@ -3676,11 +4321,10 @@ def _offerable_as_update(entry: dict[str, Any], installed_kind: str) -> bool:
     """Whether a catalog entry may be offered as an update to an installation of ``installed_kind``.
 
     A candidate of another kind is never an update: a source replacing a subtitle provider with a
-    translator under the same id is not one. Updates are staged by ``stage_install``, which validates
-    as a subtitle provider, so only that kind is offered for now. A kind with its own staging lifts
-    the second condition.
+    translator under the same id is not one. ``stage_install`` stages every kind with that kind's own
+    rules, so an installation is offered updates of its own kind.
     """
-    return catalog_kind_of(entry) == installed_kind and installed_kind == SUBTITLE_PROVIDER
+    return catalog_kind_of(entry) == installed_kind
 
 
 def _latest_catalog_manifest(
@@ -3692,7 +4336,7 @@ def _latest_catalog_manifest(
     none gets no update, and a reserved id is updated only from the official one.
     ``catalog_list`` is the list the install came from: a version that list holds is
     never taken from the other one."""
-    if source_id is None or _install_refusal(state, source_id, provider_id):
+    if source_id is None or _install_refusal(state, source_id, provider_id, installed_kind):
         return None
     host = current_host()
 
@@ -3704,7 +4348,9 @@ def _latest_catalog_manifest(
             get_kind(catalog_kind_of(entry)).validate_manifest(manifest, bool(entry.get("trusted", False)))
         except ValueError:
             return False
-        return entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is None
+        return (entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is None
+                and _closure_refusal(state, entry, host) is None
+                and not closure.broken_by(state, provider_id, entry["manifest"]))
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
@@ -3719,7 +4365,7 @@ def _refused_update_reason(
     """The host refusal of the newest refused version ``source_id`` lists for ``provider_id``
     above ``active_version``, or None when no refused version is above it. Callers pass the
     offered version, or the installed version (the staged version when nothing is active) when none is offered."""
-    if source_id is None or _install_refusal(state, source_id, provider_id):
+    if source_id is None or _install_refusal(state, source_id, provider_id, installed_kind):
         return None
     host = current_host()
 
@@ -3727,16 +4373,57 @@ def _refused_update_reason(
         return (
             entry.get("origin") != ORIGIN_BUNDLED
             and _offerable_as_update(entry, installed_kind)
-            and _host_refusal(entry, host) is not None
+            and (_host_refusal(entry, host) is not None or _closure_refusal(state, entry, host) is not None
+                 or bool(closure.broken_by(state, provider_id, entry["manifest"])))
         )
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
         usable=refused, source_id=source_id, above_version=active_version, catalog_list=catalog_list)
-    return _host_refusal(entry, host) if entry else None
+    if not entry:
+        return None
+    broken = closure.broken_by(state, provider_id, entry["manifest"])
+    return (_host_refusal(entry, host) or _closure_refusal(state, entry, host)
+            or (closure.breaks_text(provider_id, entry["manifest"].get("version"), broken) if broken else None))
 
 
-def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
+def _update_delta(state: dict[str, Any], provider: dict[str, Any], manifest: dict[str, Any],
+                  source_id: str | None, *, marks: bool = False) -> dict[str, Any] | None:
+    """What updating ``provider`` to ``manifest`` adds, as ``consent.update_delta`` reads it.
+
+    ``marks`` asks the sandbox probe which permissions this host enforces, which only a summary shown to
+    a person needs; the digest and the decision do not.
+    """
+    if kind_of(provider) == SUBTITLE_PROVIDER and not closure.has_needs(manifest):
+        # The Subtitle Hub has no consent step: a provider's update has always been applied as offered.
+        return None
+    found = _find_catalog_entry(state, source_id, manifest_provider_id(manifest), manifest.get("version"),
+                                manifest=manifest)
+    if found is None:
+        return None
+    entry = found[1]
+    resolved = _closure_of(state, entry)
+    if kind_of(provider) == SUBTITLE_PROVIDER and not any(
+            member.reason != "root" and member.plugin.kind != SUBTITLE_PROVIDER for member in resolved.members):
+        return None
+    return consent.update_delta(
+        state, provider.get("manifest"), entry, resolved, consent.sandbox_status() if marks else None)
+
+
+def update_consent(provider_id: str) -> dict[str, Any] | None:
+    """The consent delta of the update ``apply_update`` would stage, or None when there is no update."""
+    provider = get_provider(provider_id, redact=False)
+    if not provider or provider.get("origin") == "local":
+        return None
+    state = load_state()
+    source_id = _bound_source_id(provider)
+    manifest = _latest_catalog_manifest(
+        state, provider_id, provider.get("active_version") or provider.get("staged_version"), source_id,
+        _installed_catalog_list(provider), installed_kind=kind_of(provider))
+    return _update_delta(state, provider, manifest, source_id, marks=True) if isinstance(manifest, dict) else None
+
+
+def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None = None) -> dict[str, Any] | None:
     provider = get_provider(provider_id, redact=False)
     if not provider:
         return None
@@ -3762,16 +4449,38 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
             source_id,
             catalog_list,
             installed_kind=kind_of(provider),
-        ) or "No update manifest is available"
+        ) or (_supply_refusal(state) if source_id == OFFICIAL_CATALOG_SOURCE_ID else None) \
+            or "No update manifest is available"
         return _record_failed_update(provider_id, provider, message)
+    # An update that adds a destination, a permission, a binary or a plugin asks again first.
+    delta = _update_delta(state, provider, manifest, source_id)
+    if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
+        return _record_failed_update(provider_id, provider, consent.delta_text(delta))
+    members: list[str] = []
+    if closure.has_needs(manifest):
+        # A plugin the new release needs is staged first, as an install does.
+        found = _find_catalog_entry(state, source_id, manifest_provider_id(manifest), manifest.get("version"),
+                                    manifest=manifest)
+        if found is not None:
+            try:
+                members = _stage_closure_members(_closure_of(state, found[1]), source_id, checkpoint)
+            except ProviderHubInstallError as error:
+                return _record_failed_update(provider_id, provider, refusal_text(error))
     try:
         return stage_install(manifest, checkpoint=checkpoint, source_id=source_id)
+    except ProviderHubSettingsError:
+        raise
     except ProviderHubInstallError:
+        _discard_staged_members(members, provider_id)
         return get_provider(provider_id)
     except ManifestValidationError as error:
         # The install path refused the manifest before it started a job, so the refusal is
         # recorded here as a failed update, the way a missing manifest is.
+        _discard_staged_members(members, provider_id)
         return _record_failed_update(provider_id, provider, refusal_text(error))
+    except Exception:
+        _discard_staged_members(members, provider_id)
+        raise
 
 
 def _record_failed_update(provider_id: str, provider: dict[str, Any], message: str) -> dict[str, Any]:

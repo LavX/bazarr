@@ -38,10 +38,14 @@ def client(monkeypatch, tmp_path, service_kind):
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(
         tmp_path / "state.json",
         catalog_sources={"official": verified_official_source()},
-        catalog_entries={"official:plugins:exampleservice:1.0.0": {
-            "source": "official", "feed": "plugins", "provider_id": "exampleservice",
-            "plugin_id": "exampleservice", "kind": SERVICE_KIND, "name": "Exampleservice", "version": "1.0.0",
-            "trusted": True, "verified": True, "manifest": service_manifest("exampleservice")}},
+        catalog_entries={
+            "official:plugins:exampleservice:1.0.0": {
+                "source": "official", "feed": "plugins", "provider_id": "exampleservice",
+                "plugin_id": "exampleservice", "kind": SERVICE_KIND, "name": "Exampleservice", "version": "1.0.0",
+                "trusted": True, "verified": True, "manifest": service_manifest("exampleservice")},
+            "official:catalogsubs:1.0.0": {
+                "source": "official", "provider_id": "catalogsubs", "name": "Catalogsubs", "version": "1.0.0",
+                "trusted": True, "manifest": provider_manifest_v1("catalogsubs")}},
         installations={
             "providerhub": {"provider_id": "providerhub", "name": "Provider", "active_version": "1.0.0",
                             "state": "active", "pending_restart": False,
@@ -125,18 +129,22 @@ def test_plugins_install_takes_a_catalog_reference_only(client, monkeypatch):
 
     queued = []
     monkeypatch.setattr(hub_jobs, "_enqueue", lambda label, func, kwargs: queued.append((func, kwargs)) or "job-1")
+    monkeypatch.setattr("provider_hub.consent.sandbox_status", lambda: {})
+    keyed = {"X-API-KEY": API_KEY}
 
-    refused = client.post("/api/plugins/installations", json={"manifest": provider_manifest_v1()},
-                          headers={"X-API-KEY": API_KEY})
+    refused = client.post("/api/plugins/installations", json={"manifest": provider_manifest_v1()}, headers=keyed)
+    # A plugin of a new kind installs with the digest of the consent summary the person agreed to.
+    digest = _get(client, "/api/plugins/catalog/consent?source=official&id=exampleservice&version=1.0.0").json["digest"]
     accepted = client.post("/api/plugins/installations",
-                           json={"source": "official", "id": "exampleservice", "version": "1.0.0"},
-                           headers={"X-API-KEY": API_KEY})
+                           json={"source": "official", "id": "exampleservice", "version": "1.0.0",
+                                 "consent": digest}, headers=keyed)
 
     assert refused.status_code == 400
     assert accepted.status_code == 202
     assert queued == [("install_provider", {"source_id": "official", "provider_id": "exampleservice",
                                             "version": "1.0.0", "name": "Exampleservice",
-                                            "entry_key": "official:plugins:exampleservice:1.0.0"})]
+                                            "entry_key": "official:plugins:exampleservice:1.0.0",
+                                            "consent": digest})]
 
 
 def test_the_provider_hub_install_route_queues_the_entry_key(client, monkeypatch):
@@ -146,13 +154,26 @@ def test_the_provider_hub_install_route_queues_the_entry_key(client, monkeypatch
     monkeypatch.setattr(hub_jobs, "_enqueue", lambda label, func, kwargs: queued.append((func, kwargs)) or "job-1")
 
     accepted = client.post("/api/provider-hub/installations",
-                           json={"source": "official", "provider_id": "exampleservice", "version": "1.0.0"},
+                           json={"source": "official", "provider_id": "catalogsubs", "version": "1.0.0"},
                            headers={"X-API-KEY": API_KEY})
 
     assert accepted.status_code == 202
-    assert queued == [("install_provider", {"source_id": "official", "provider_id": "exampleservice",
-                                            "version": "1.0.0", "name": "Exampleservice",
-                                            "entry_key": "official:plugins:exampleservice:1.0.0"})]
+    assert queued == [("install_provider", {"source_id": "official", "provider_id": "catalogsubs",
+                                            "version": "1.0.0", "name": "Catalogsubs",
+                                            "entry_key": "official:catalogsubs:1.0.0"})]
+
+
+def test_the_subtitle_hub_install_route_does_not_install_another_kind(client, monkeypatch):
+    from provider_hub import jobs as hub_jobs
+
+    queued = []
+    monkeypatch.setattr(hub_jobs, "_enqueue", lambda label, func, kwargs: queued.append((func, kwargs)) or "job-1")
+
+    refused = client.post("/api/provider-hub/installations",
+                          json={"source": "official", "provider_id": "exampleservice", "version": "1.0.0"},
+                          headers={"X-API-KEY": API_KEY})
+
+    assert refused.status_code == 400 and queued == []
 
 
 # The routes that start code. Whatever gate the provider-hub routes carry, the
@@ -354,3 +375,29 @@ def test_a_json_array_body_is_refused_before_any_field_is_read(client, monkeypat
 
     assert response.status_code == 400
     assert response.get_json() == "a JSON object is required"
+
+
+def test_the_subtitle_hub_install_route_still_checks_the_closure_of_an_answer_that_names_no_kind(
+        client, monkeypatch):
+    from provider_hub import jobs as hub_jobs
+    from provider_hub import service
+
+    queued = []
+    monkeypatch.setattr(hub_jobs, "_enqueue", lambda label, func, kwargs: queued.append((func, kwargs)) or "job-1")
+    monkeypatch.setattr(service, "resolve_catalog_install", lambda *args, **kwargs: {
+        "source": "official", "provider_id": "catalogsubs", "version": "1.0.0", "name": "Catalogsubs",
+        "entry_key": "official:catalogsubs:1.0.0"})
+    checked = []
+    needs = {"consent": False}
+    monkeypatch.setattr(service, "install_needs_consent",
+                        lambda *args, **kwargs: checked.append(args) or needs["consent"])
+    body = {"source": "official", "provider_id": "catalogsubs", "version": "1.0.0"}
+
+    accepted = client.post("/api/provider-hub/installations", json=body, headers={"X-API-KEY": API_KEY})
+    needs["consent"] = True
+    refused = client.post("/api/provider-hub/installations", json=body, headers={"X-API-KEY": API_KEY})
+
+    # The closure is checked either way, so a missing kind cannot let what needs consent through.
+    assert len(checked) == 2
+    assert accepted.status_code == 202 and refused.status_code == 400
+    assert [func for func, _kwargs in queued] == ["install_provider"]

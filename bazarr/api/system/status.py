@@ -97,6 +97,10 @@ class SystemStatus(Resource):
         system_status.update({'timezone': timezone})
         system_status.update({'cpu_cores': os.cpu_count()})
 
+        # The development plugin source, set only on a side container, is a standing warning.
+        from provider_hub.dev_source import dev_source_name
+        system_status.update({'dev_plugin_source': dev_source_name()})
+
         # What confines plugin workers on this host. The probe starts at boot
         # on its own thread; until it has stored a result this reports a
         # pending status instead of running it here. A host that cannot answer

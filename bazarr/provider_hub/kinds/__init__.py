@@ -7,7 +7,7 @@ that installing, enabling, configuring or removing one of its plugins has on
 the rest of Bazarr+. The shared Provider Hub core calls is_enabled,
 set_enabled, on_config_saved, on_installed and on_removed, and validate_manifest
 when a catalog refresh reads a plugin. It also calls validate_manifest and
-smoke_test when it activates a staged release, repairs an environment or
+smoke_test when it stages or activates a release, repairs an environment or
 reconciles environments at boot.
 """
 from __future__ import annotations
@@ -100,12 +100,14 @@ class Kind:
 
         raise ManifestValidationError(f"this Bazarr+ does not install {self.name} plugins")
 
-    def smoke_test(self, validated: "ValidatedManifest", bundle_path, python_path) -> None:
+    def smoke_test(self, validated: "ValidatedManifest", bundle_path, python_path,
+                   timeout: float | None = None) -> None:
         """Start the staged plugin once to prove it loads. The default has nothing to start.
 
-        The core calls this hook when it activates a staged release, repairs an environment and
-        reconciles environments at boot. The subtitle provider kind runs the worker health check;
-        a kind with nothing to start keeps this version.
+        The core calls this hook when it stages a release, activates a staged release, repairs an
+        environment and reconciles environments at boot. ``timeout``, when given, is what an install
+        that runs on a time budget has left for the check. The subtitle provider kind runs the worker
+        health check; a kind with nothing to start keeps this version.
         """
 
 

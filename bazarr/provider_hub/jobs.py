@@ -62,16 +62,19 @@ def _noun(source_id, provider_id, version, entry_key=None):
         return "plugin"
 
 
-def queue_install(source_id, provider_id, version, name=None, entry_key=None):
+def queue_install(source_id, provider_id, version, name=None, entry_key=None, consent=None):
     """Queue the install of the entry ``source_id`` lists for ``provider_id``.
 
     The job carries the reference, not a manifest: it installs what the source
     holds when it runs, bound to that source. ``entry_key`` pins the stored entry
-    that was resolved, for a source that lists one id and version twice.
+    that was resolved, for a source that lists one id and version twice. ``consent`` is the digest of
+    the summary the person agreed to; the job refuses to install a set that no longer matches it.
     """
     kwargs = {"source_id": source_id, "provider_id": provider_id, "version": version, "name": name}
     if entry_key is not None:
         kwargs["entry_key"] = entry_key
+    if consent is not None:
+        kwargs["consent"] = consent
     return _enqueue(f"Installing {_noun(source_id, provider_id, version, entry_key)} {name or provider_id}",
                     "install_provider", kwargs)
 
@@ -115,9 +118,11 @@ def queue_uninstall(provider_id, name=None):
                     {"provider_id": provider_id, "name": name})
 
 
-def queue_update(provider_id, name=None):
-    return _enqueue(f"Updating provider {name or provider_id}", "update_provider",
-                    {"provider_id": provider_id, "name": name})
+def queue_update(provider_id, name=None, consent=None):
+    kwargs = {"provider_id": provider_id, "name": name}
+    if consent is not None:
+        kwargs["consent"] = consent
+    return _enqueue(f"Updating provider {name or provider_id}", "update_provider", kwargs)
 
 
 def queue_repair(provider_id, name=None):
@@ -129,11 +134,12 @@ def queue_catalog_refresh():
     return _enqueue("Refreshing provider catalog", "refresh_catalog", {})
 
 
-def install_provider(source_id, provider_id, version, name=None, job_id=None, entry_key=None):
+def install_provider(source_id, provider_id, version, name=None, job_id=None, entry_key=None, consent=None):
     label = name or provider_id
     try:
         return service.install_catalog_entry(source_id, provider_id, version,
-                                             checkpoint=_checkpoint(job_id), entry_key=entry_key)
+                                             checkpoint=_checkpoint(job_id), entry_key=entry_key,
+                                             consent_digest=consent)
     except service.ProviderHubStopped as stopped:
         raise JobCancelled(str(stopped)) from stopped
     except Exception as error:
@@ -180,7 +186,7 @@ def repair_provider(provider_id, name=None, job_id=None):
         raise JobFailed(f"Could not repair {label}: {reason_of(error)}") from error
 
 
-def update_provider(provider_id, name=None, job_id=None):
+def update_provider(provider_id, name=None, job_id=None, consent=None):
     label = name or provider_id
     provider = service.get_provider(provider_id, redact=False)
     if not provider:
@@ -190,7 +196,7 @@ def update_provider(provider_id, name=None, job_id=None):
         # always been accepted and ignored.
         return service.get_provider(provider_id)
     try:
-        result = service.apply_update(provider_id, checkpoint=_checkpoint(job_id))
+        result = service.apply_update(provider_id, checkpoint=_checkpoint(job_id), consent_digest=consent)
     except service.ProviderHubStopped as stopped:
         raise JobCancelled(str(stopped)) from stopped
     except Exception as error:

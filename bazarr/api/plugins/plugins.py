@@ -21,7 +21,7 @@ from api.utils import (UploadTooLarge, authenticate, copy_bounded_upload, upload
 from provider_hub import jobs as hub_jobs
 from provider_hub import service
 from provider_hub.kinds import UnknownKindError, catalog_kind_of, get_kind, kind_of, known_kinds
-from provider_hub.service import CatalogSourceError, ProviderHubSettingsError
+from provider_hub.service import CatalogSourceError, ProviderHubConsentError, ProviderHubSettingsError
 
 
 api_ns_plugins = Namespace('Plugins', description='Plugin catalog and installation lifecycle for every kind')
@@ -64,6 +64,22 @@ class PluginsCatalog(Resource):
         return catalog
 
 
+@api_ns_plugins.route('plugins/catalog/consent')
+class PluginsCatalogConsent(Resource):
+    @authenticate
+    @api_ns_plugins.response(200, 'The consent summary and its digest')
+    @api_ns_plugins.response(400, 'The entry cannot be installed')
+    @api_ns_plugins.response(401, 'Not Authenticated')
+    def get(self):
+        """What installing a catalog entry and its dependencies would add, for the person to agree to."""
+        try:
+            return service.install_consent(
+                request.args.get("source"), request.args.get("id"), request.args.get("version"),
+                catalog_list=service.CATALOG_LIST_PLUGINS)
+        except service.ProviderHubInstallError as error:
+            return str(error), 400
+
+
 @api_ns_plugins.route('plugins/catalog/refresh')
 class PluginsCatalogRefresh(Resource):
     @authenticate
@@ -92,6 +108,7 @@ class PluginsInstallations(Resource):
     @api_ns_plugins.response(400, 'Invalid request')
     @api_ns_plugins.response(401, 'Not Authenticated')
     @api_ns_plugins.response(403, 'Password confirmation required')
+    @api_ns_plugins.response(409, 'What the install adds changed since the consent summary was shown')
     def post(self):
         # An install names a catalog entry by source, id and version, and
         # nothing else: a raw manifest is not an install request here.
@@ -102,11 +119,21 @@ class PluginsInstallations(Resource):
             entry = service.resolve_catalog_install(
                 payload.get("source"), payload.get("id"), payload.get("version"),
                 catalog_list=service.CATALOG_LIST_PLUGINS)
+            # A plugin of a new kind installs only with the digest of the summary the person agreed to,
+            # and any digest that is sent must still match the set the install would act on.
+            digest = payload.get("consent")
+            if digest is not None and not isinstance(digest, str):
+                return 'consent must be the digest of the consent summary', 400
+            service.check_install_consent(
+                digest, entry["source"], entry["provider_id"], entry["version"], entry_key=entry["entry_key"],
+                catalog_list=service.CATALOG_LIST_PLUGINS)
+        except ProviderHubConsentError as error:
+            return str(error), 409 if error.changed else 400
         except service.ProviderHubInstallError as error:
             return str(error), 400
         return {"job_id": hub_jobs.queue_install(
             entry["source"], entry["provider_id"], entry["version"], entry["name"],
-            entry_key=entry["entry_key"])}, 202
+            entry_key=entry["entry_key"], consent=digest or None)}, 202
 
 
 @api_ns_plugins.route('plugins/installations/local')
@@ -189,12 +216,16 @@ class PluginsInstallation(Resource):
 
     @authenticate
     @api_ns_plugins.response(202, 'Uninstall queued as a job')
+    @api_ns_plugins.response(400, 'Another plugin depends on it')
     @api_ns_plugins.response(401, 'Not Authenticated')
     @api_ns_plugins.response(404, 'Plugin not found')
     def delete(self, plugin_id):
         installation = _installation(plugin_id)
         if not installation:
             return 'Plugin not found', 404
+        refusal = service.dependent_refusal(plugin_id, "removed")
+        if refusal:
+            return refusal, 400
         return {"job_id": hub_jobs.queue_uninstall(plugin_id, installation.get("name"))}, 202
 
 
@@ -223,6 +254,22 @@ class PluginsUpdatesCheck(Resource):
         return service.check_updates()
 
 
+@api_ns_plugins.route('plugins/updates/consent')
+class PluginsUpdatesConsent(Resource):
+    @authenticate
+    @api_ns_plugins.response(200, 'What the update adds, whether it needs consent, and the digest to send back')
+    @api_ns_plugins.response(401, 'Not Authenticated')
+    @api_ns_plugins.response(404, 'Plugin not found or no update is available')
+    def get(self):
+        plugin_id = request.args.get("id")
+        if not plugin_id or not _installation(plugin_id):
+            return 'Plugin not found', 404
+        delta = service.update_consent(plugin_id)
+        if delta is None:
+            return 'No update is available', 404
+        return delta
+
+
 @api_ns_plugins.route('plugins/updates/apply')
 class PluginsUpdatesApply(Resource):
     @authenticate
@@ -244,7 +291,11 @@ class PluginsUpdatesApply(Resource):
         installation = _installation(plugin_id)
         if not installation:
             return 'Plugin not found', 404
-        return {"job_id": hub_jobs.queue_update(plugin_id, installation.get("name"))}, 202
+        digest = payload.get("consent")
+        if digest is not None and not isinstance(digest, str):
+            return 'consent must be the digest of the consent summary', 400
+        return {"job_id": hub_jobs.queue_update(
+            plugin_id, installation.get("name"), consent=digest or None)}, 202
 
 
 @api_ns_plugins.route('plugins/catalog/sources')
