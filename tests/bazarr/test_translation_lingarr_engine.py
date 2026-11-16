@@ -279,6 +279,15 @@ def test_an_empty_token_keeps_the_stored_one_and_a_new_one_replaces_it(world, ca
     _nothing_leaked(world, caplog)
 
 
+def test_the_mask_text_is_refused_as_a_new_token_and_the_stored_one_stays(world, caplog):
+    world.save({"token": TOKEN})
+    response = world.save({"token": "***"})
+    assert response.status_code == 400 and response.json["error"] == "invalid"
+    assert "token" in response.json["field_errors"]
+    assert world.fake.token_value == TOKEN
+    _nothing_leaked(world, caplog)
+
+
 def test_clearing_the_token_removes_it(world):
     world.save({"token": TOKEN})
     response = world.save(clear_secrets=["token"])

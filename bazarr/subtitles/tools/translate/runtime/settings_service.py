@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 from uuid import uuid4
 
 from provider_hub.plugin_manifest import parse_plugin_manifest
+from secret_store.scrub import mask_credential_refusal
 
 from . import catalog_view, legacy_engines
 from .destinations import DestinationError, DestinationSchema, effective_destinations, normalize_destination
@@ -649,7 +650,11 @@ class TranslatorSettingsService:
                 if given is not None and not isinstance(given, str):
                     errors[legacy_engines.TOKEN_KEY] = "must be text"
                 elif isinstance(given, str) and given.strip():
-                    token = given.strip()
+                    refusal = mask_credential_refusal(legacy_engines.TOKEN_KEY, given, before_token or None)
+                    if refusal:
+                        errors[legacy_engines.TOKEN_KEY] = refusal
+                    else:
+                        token = given.strip()
             if legacy_engines.TOKEN_KEY in clear and token is None:
                 token = ""
             if errors:
