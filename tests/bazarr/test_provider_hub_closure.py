@@ -249,7 +249,10 @@ def test_the_removal_checks_dependents_in_the_write_it_commits(tmp_path, monkeyp
     addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
     _world(tmp_path, monkeypatch, [], {**_installed(parent), **_installed(addon)})
     # The early check saw nothing, as when the dependent is installed a moment later.
-    monkeypatch.setattr(service, "dependent_refusal", lambda *args, **kwargs: None)
+    real = service.closure.dependents
+    calls = []
+    monkeypatch.setattr(service.closure, "dependents",
+                        lambda *args, **kwargs: [] if not calls and not calls.append(1) else real(*args, **kwargs))
 
     with pytest.raises(service.ProviderHubInstallError, match="addon depends on it"):
         service.remove_installation("parent")
@@ -346,7 +349,7 @@ def test_a_need_only_a_newer_release_of_an_installed_plugin_meets_asks_for_that_
     helper = _manifest("helper", "1.0.0")
     helper_next = _manifest("helper", "2.0.0", provides=["translit.v1"])
     user = _manifest("user", requires=["translit.v1"])
-    _world(tmp_path, monkeypatch, [user, helper_next], _installed(helper))
+    _world(tmp_path, monkeypatch, [user, helper_next], _installed(helper, source_id="official", source_bound=True))
 
     closure = _closure("user")
 
@@ -362,3 +365,57 @@ def test_an_add_on_does_not_install_against_a_parent_that_is_switched_off(tmp_pa
     closure = _closure("addon")
 
     assert not closure.resolved and "parent, which is switched off. Switch it on first." in closure.refusal
+
+
+def test_install_resolution_relies_on_a_supplier_only_for_what_it_keeps_providing(
+        tmp_path, monkeypatch, service_kind):
+    helper = _manifest("helper", provides=["translit.v1"])
+    helper_next = _manifest("helper", "2.0.0")
+    user = _manifest("user", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [user], _installed(
+        helper, staged_version="2.0.0", staged_manifest=helper_next, state="staged", pending_restart=True))
+
+    closure = _closure("user")
+
+    assert not closure.resolved and closure.satisfied_by == []
+    assert "provides in only one of its current and staged releases" in closure.refusal
+
+
+def test_a_staged_release_that_adds_a_capability_is_not_relied_on_before_it_runs(
+        tmp_path, monkeypatch, service_kind):
+    helper = _manifest("helper")
+    helper_next = _manifest("helper", "2.0.0", provides=["translit.v1"])
+    user = _manifest("user", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [user], _installed(
+        helper, staged_version="2.0.0", staged_manifest=helper_next, state="staged", pending_restart=True))
+
+    assert not _closure("user").resolved
+
+
+def test_a_parent_whose_staged_release_drops_the_capability_does_not_satisfy_an_add_on(
+        tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    parent_next = _manifest("parent", "2.0.0")
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    _world(tmp_path, monkeypatch, [addon], _installed(
+        parent, staged_version="2.0.0", staged_manifest=parent_next, state="staged", pending_restart=True))
+
+    assert "does not provide" in _closure("addon").refusal
+
+
+def test_the_update_hint_needs_a_real_newer_release_from_the_bound_source(tmp_path, monkeypatch, service_kind):
+    user = _manifest("user", requires=["translit.v1"])
+    installed = _manifest("helper", "2.0.0")
+    # An older release that has the capability is not an update.
+    older = _manifest("helper", "1.0.0", provides=["translit.v1"])
+    _world(tmp_path, monkeypatch, [user, older], _installed(installed, source_id="official", source_bound=True))
+    closure = _closure("user")
+    assert closure.resolved and closure.external == ["translit.v1"]
+
+    # Neither is a newer release the install is not bound to.
+    newer = _manifest("helper", "3.0.0", provides=["translit.v1"])
+    _world(tmp_path, monkeypatch, [user, newer], _installed(installed, source_id="elsewhere", source_bound=True))
+    assert _closure("user").resolved
+
+    _world(tmp_path, monkeypatch, [user, newer], _installed(installed, source_id="official", source_bound=True))
+    assert "Update helper first" in _closure("user").refusal

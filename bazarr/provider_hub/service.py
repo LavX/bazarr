@@ -572,7 +572,8 @@ def _fetch_official_catalog(
         if verdict is False:
             raise catalog_feed.FeedRefused(
                 catalog_feed.Status.MALFORMED,
-                "The signed catalog names a commit that is not on the official catalog's main or beta.")
+                "The signed catalog names a commit that is not on the official catalog's main or beta.",
+                key_file_version=feed.result.key_file_version)
     return feed.catalog, head, feed
 
 
@@ -3509,22 +3510,26 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
                 member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
                 catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
             )
+    except ProviderHubSettingsError:
+        raise
     except Exception:
-        _discard_staged_members(written())
+        _discard_staged_members(written(), resolved.members[-1].plugin_id if resolved.members else None)
         raise
     return written()
 
 
-def _discard_staged_members(plugin_ids: list[str]) -> None:
+def _discard_staged_members(plugin_ids: list[str], root_id: str | None = None) -> None:
     """Remove the plugins a call staged for a plugin that then failed to stage, last staged first.
 
-    Nothing else needs them: they were not installed before the call, and the plugin they were staged
-    for is not there. A dependent that is still installed, such as the active release of a plugin being
-    updated, does not stop the discard. A removal that fails is logged and leaves the rest to the person.
+    A plugin leaves only when nothing outside that failed closure depends on it, active or staged: the
+    members themselves and the failed root do not count (the root's active release, when an update is the
+    one that failed, needed the capability before the member existed), but a plugin another install adopted
+    them for does, and keeps them. A removal that is refused or fails is logged.
     """
+    own = frozenset(plugin_ids) | ({root_id} if root_id else frozenset())
     for plugin_id in reversed(plugin_ids):
         try:
-            remove_installation(plugin_id, check_dependents=False)
+            remove_installation(plugin_id, ignoring_dependents=own)
         except Exception:
             logging.getLogger(__name__).exception(
                 "Could not discard %s, which was staged for a plugin that failed to install", plugin_id)
@@ -3619,8 +3624,11 @@ def install_catalog_entry(
             entry["manifest"], checkpoint=checkpoint, source_id=source_id,
             catalog_list=entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
         )
+    except ProviderHubSettingsError:
+        # The plugin is staged and only could not be enabled: it keeps what it needs.
+        raise
     except Exception:
-        _discard_staged_members(members)
+        _discard_staged_members(members, provider_id)
         raise
 
 
@@ -3953,14 +3961,20 @@ def dependent_refusal(provider_id: str, action: str, *, enabled_only: bool = Fal
     return closure.dependents_text(provider_id, names, action) if names else None
 
 
-def remove_installation(provider_id: str, *, check_dependents: bool = True) -> bool:
+def remove_installation(provider_id: str, *, ignoring_dependents: frozenset[str] = frozenset()) -> bool:
+    """Stage the removal of an installation, or remove it at once when it was never active.
+
+    A plugin another one depends on is refused. ``ignoring_dependents`` names plugins that do not count as
+    dependents, which is how a failed install discards the plugins it staged for itself while any other
+    plugin that has come to depend on them still protects them.
+    """
     state = load_state()
     installations = state.setdefault("installations", {})
     if provider_id not in installations:
         return False
-    refusal = dependent_refusal(provider_id, "removed") if check_dependents else None
-    if refusal:
-        raise ProviderHubInstallError(refusal)
+    names = [name for name in closure.dependents(state, provider_id) if name not in ignoring_dependents]
+    if names:
+        raise ProviderHubInstallError(closure.dependents_text(provider_id, names, "removed"))
     item = installations[provider_id]
     target_name = (
         item.get("name") if isinstance(item, dict) else None
@@ -3993,7 +4007,7 @@ def remove_installation(provider_id: str, *, check_dependents: bool = True) -> b
                 return "missing"
             # Checked against the document this write commits to, so a dependent installed since the
             # early check above still blocks the removal.
-            names = closure.dependents(state, provider_id) if check_dependents else []
+            names = [name for name in closure.dependents(state, provider_id) if name not in ignoring_dependents]
             if names:
                 raise ProviderHubInstallError(closure.dependents_text(provider_id, names, "removed"))
             if not item.get("active_version"):
@@ -4245,16 +4259,18 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
                 return _record_failed_update(provider_id, provider, refusal_text(error))
     try:
         return stage_install(manifest, checkpoint=checkpoint, source_id=source_id)
+    except ProviderHubSettingsError:
+        raise
     except ProviderHubInstallError:
-        _discard_staged_members(members)
+        _discard_staged_members(members, provider_id)
         return get_provider(provider_id)
     except ManifestValidationError as error:
         # The install path refused the manifest before it started a job, so the refusal is
         # recorded here as a failed update, the way a missing manifest is.
-        _discard_staged_members(members)
+        _discard_staged_members(members, provider_id)
         return _record_failed_update(provider_id, provider, refusal_text(error))
     except Exception:
-        _discard_staged_members(members)
+        _discard_staged_members(members, provider_id)
         raise
 
 

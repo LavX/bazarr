@@ -472,8 +472,8 @@ def test_a_cache_without_the_key_file_record_is_repaired_by_a_refresh_with_an_un
 # --- a ref that reads no signed channel ----------------------------------------------------------------
 
 
-def test_a_pinned_ref_on_main_is_not_trusted_once_a_channel_has_latched(world):
-    from provider_hub.service import update_catalog_source
+def test_nothing_installs_from_a_pinned_ref_once_a_channel_has_latched(world):
+    from provider_hub.service import ProviderHubInstallError, resolve_catalog_install, update_catalog_source
 
     _latch(world)
     update_catalog_source("official", dev_ref=HEAD)
@@ -482,6 +482,12 @@ def test_a_pinned_ref_on_main_is_not_trusted_once_a_channel_has_latched(world):
     _refresh()
 
     assert _official()["trusted"] is False and "signed catalogs" in _official()["trust_reason"]
+    reasons = _blocked()
+    assert set(reasons) == {PROVIDER}
+    assert "ref that is not signed" in reasons[PROVIDER] and "main or beta" in reasons[PROVIDER]
+    assert "BAZARR_DEV_PLUGIN_SOURCE" in reasons[PROVIDER]
+    with pytest.raises(ProviderHubInstallError, match="ref that is not signed"):
+        resolve_catalog_install("official", PROVIDER, "9.9.9")
 
 
 def test_a_pinned_ref_on_main_is_trusted_as_before_while_nothing_has_latched(world):
@@ -492,7 +498,7 @@ def test_a_pinned_ref_on_main_is_trusted_as_before_while_nothing_has_latched(wor
 
     _refresh()
 
-    assert _official()["trusted"] is True
+    assert _official()["trusted"] is True and _blocked() == {PROVIDER: None}
 
 
 # --- the counter file is read once until something writes it -----------------------------------------------
@@ -514,6 +520,31 @@ def test_the_counter_file_is_parsed_once_for_many_checks(tmp_path, monkeypatch):
     catalog_feed.write_counter_file({"main": ChannelRecord(11, 2)})
     assert catalog_feed.stored_record({}, "main") == ChannelRecord(11, 2)
     assert len(parsed) == 2
+
+
+# --- a refusal after the signature checked out still keeps the key file -------------------------------------
+
+
+@pytest.mark.parametrize("what", ["malformed_commit", "off_branch_commit"])
+def test_a_refusal_for_what_the_body_says_still_remembers_the_authenticated_key_file(world, tmp_path, what):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    _latch(world)
+    _move_head(world, "e" * 40)
+    replacement = Ed25519PrivateKey.generate()
+    # A key file that revokes the cached signer and lists a replacement, which signs the next catalog.
+    key_file = world.key_file(version=2, revocations=[world.keys.revocation(world.now)],
+                              extra=[world.keys.entry(replacement)])
+    commit = "bad" if what == "malformed_commit" else "9" * 40
+    body = world.catalog_body(version=101, plugins=[_plugin()], providers=[_provider()], source_commit=commit)
+    world.publish(commit="e" * 40, body=body, envelope=world.sign(body, replacement), key_file=key_file)
+
+    _refresh()
+
+    assert "source_commit" in _official()["last_error"] or "not on the official" in _official()["last_error"]
+    assert _state()["catalog_feeds"]["main"]["key_file_version"] == 2
+    assert _counter_file(tmp_path)["channels"]["main"]["key_file_version"] == 2
+    assert all("older than one it already accepted" in reason for reason in _blocked().values())
 
 
 # --- one verification point ---------------------------------------------------------------------------

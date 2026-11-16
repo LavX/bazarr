@@ -626,3 +626,70 @@ def test_a_failed_update_discards_a_dependency_even_when_the_active_release_alre
     installations = load_state()["installations"]
     assert "helper" not in installations
     assert installations["addon"]["staged_version"] is None
+
+
+def test_a_failed_install_keeps_a_dependency_another_plugin_adopted_in_the_meantime(world, staging, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, mutate_state
+
+    helper = _plugin("helper", provides=["translit.v1"])
+    parent = _plugin("parent", provides=[PARENT_CAPABILITY], requires=["translit.v1"])
+    addon = _plugin("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    world([helper, parent, addon])
+    digest = _summary()["digest"]
+    other = _plugin("other", requires=["translit.v1"])
+    real_fetch = service._fetch_bundle
+
+    def fetch(manifest, deadline=None):
+        if manifest.provider_id == "addon":
+            # While the root is being staged, another install lands and relies on the helper.
+            mutate_state(lambda state: state["installations"].update(_installed(other)))
+        return real_fetch(manifest, deadline)
+
+    monkeypatch.setattr(service, "_fetch_bundle", fetch)
+
+    with pytest.raises(service.ProviderHubInstallError, match="download failed"):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    # The parent had no outside dependent and went; the helper had one and stays. The failed root keeps its
+    # failed row, as it always did.
+    installations = load_state()["installations"]
+    assert set(installations) == {"helper", "other", "addon"} and installations["addon"]["state"] == "failed"
+
+
+def test_a_root_that_stays_staged_keeps_its_dependencies(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            pass
+
+        def install(self, validated, timeout=None):
+            (tmp_path / "env" / "bin").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "env" / "bin" / "python").write_text("", encoding="utf-8")
+            return tmp_path / "env"
+
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    monkeypatch.setattr(service, "PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr(service, "python_executable", lambda env_path: tmp_path / "python")
+    parent, addon = _pair()
+    entries = {f"official:plugins:{m['id']}:{m['version']}": _entry(m) for m in (parent, addon)}
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(
+        tmp_path / "state.json",
+        catalog_sources={"official": verified_official_source(last_checked_at="2026-01-01T00:00:00Z")},
+        catalog_entries=entries)))
+    digest = _summary()["digest"]
+    real = service_kind.on_installed
+
+    def on_installed(plugin_id, missing_required=()):
+        # The root is staged, and only its switch cannot be saved.
+        return False if plugin_id == "addon" else real(plugin_id, missing_required)
+
+    monkeypatch.setattr(service_kind, "on_installed", on_installed)
+
+    with pytest.raises(service.ProviderHubSettingsError):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    installations = load_state()["installations"]
+    assert set(installations) == {"parent", "addon"} and installations["addon"]["state"] == "staged"

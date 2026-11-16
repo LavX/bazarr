@@ -116,12 +116,22 @@ def resolve_closure(
             usable=lambda entry: usable(entry) and (capability is None or provides(entry, capability)),
         )
 
+    def upgrade(plugin_id: str, capability: str) -> dict[str, Any] | None:
+        """A newer release of an installed plugin that provides ``capability``: from the source the
+        install is bound to, and above the installed version, so the hint names a real update."""
+        held, row = installed[plugin_id]
+        if not row.get("source_bound") or row.get("source_id") != root.get("source"):
+            return None
+        return select_entry(
+            entries, plugin_id, usable=lambda entry: usable(entry) and provides(entry, capability),
+            above_version=held.version)
+
     def satisfy(owner: PluginManifest, how: str, needed_id: str | None, capability: str) -> None:
         if how == "extends":
             held = installed.get(needed_id)
             if held is not None:
-                if capability not in held[0].provides:
-                    newer = choose(needed_id, capability)
+                if not _supplies(held[1], capability):
+                    newer = upgrade(needed_id, capability)
                     closure.unresolved.append(
                         f"{owner.name} extends {needed_id}, which is installed but does not provide {capability}"
                         + (f"; version {newer['manifest'].get('version')} does. Update {needed_id} first."
@@ -144,8 +154,14 @@ def resolve_closure(
             closure.external.append(capability)
             return
         switched_off = []
+        partial = []
         for plugin_id, (held, row) in sorted(installed.items()):
-            if plugin_id == owner.plugin_id or capability not in held.provides:
+            if plugin_id == owner.plugin_id:
+                continue
+            if not _supplies(row, capability):
+                # Provides it in one release and not the other: a staged update adds or drops it.
+                if _supplies(row, capability, either=True):
+                    partial.append(plugin_id)
                 continue
             # A plugin that is switched off supplies nothing.
             if _enabled(row):
@@ -158,13 +174,18 @@ def resolve_closure(
             and provides(entry, capability)
         })
         if not providers:
+            if partial and not switched_off:
+                closure.unresolved.append(
+                    f"{owner.name} needs {capability}, which {', '.join(partial)} provides in only one of its "
+                    "current and staged releases. Restart Bazarr+ to finish its update first.")
+                return
             if switched_off:
                 closure.unresolved.append(
                     f"{owner.name} needs {capability}, which only {', '.join(switched_off)} provides, "
                     "and it is switched off. Switch it on first.")
                 return
             for plugin_id in sorted(installed):
-                newer = choose(plugin_id, capability) if plugin_id != owner.plugin_id else None
+                newer = upgrade(plugin_id, capability) if plugin_id != owner.plugin_id else None
                 if newer is not None:
                     # The installed release lacks it and a newer one has it: an update comes first.
                     closure.unresolved.append(
@@ -218,6 +239,20 @@ def _manifest_in(row: dict[str, Any], phase: str) -> PluginManifest | None:
     if row.get("active_version"):
         return _parse(row.get("manifest"))
     return None
+
+
+def _supplies(row: dict[str, Any], capability: str, *, either: bool = False) -> bool:
+    """Whether an installation provides ``capability`` in both the release that runs now and the one that
+    runs after the next restart (in either of them, with ``either``), so a plugin is only relied on for
+    what it will keep providing."""
+    seen = []
+    for phase in ("now", "next"):
+        plugin = _manifest_in(row, phase)
+        if plugin is not None:
+            seen.append(capability in plugin.provides)
+    if not seen:
+        return False
+    return any(seen) if either else all(seen)
 
 
 def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = False) -> list[str]:

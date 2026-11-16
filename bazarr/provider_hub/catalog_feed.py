@@ -399,17 +399,22 @@ def verify_fetched(
         raise FeedRefused(
             result.status, _refusal_text(result),
             key_file_version=result.key_file_version if result.root_key_id is not None else None)
+    # From here the key file is authenticated, so a refusal for what the body says still carries its version.
+    authenticated = result.key_file_version
     try:
         catalog = json.loads(fetched.catalog.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as error:
-        raise FeedRefused(Status.MALFORMED, "The signed catalog could not be read (malformed).") from error
+        raise FeedRefused(Status.MALFORMED, "The signed catalog could not be read (malformed).",
+                          key_file_version=authenticated) from error
     if not isinstance(catalog, dict):
-        raise FeedRefused(Status.MALFORMED, "The signed catalog could not be read (malformed).")
+        raise FeedRefused(Status.MALFORMED, "The signed catalog could not be read (malformed).",
+                          key_file_version=authenticated)
     source_commit = catalog.get("source_commit")
     if not isinstance(source_commit, str) or not _COMMIT_RE.match(source_commit):
         raise FeedRefused(
             Status.MALFORMED,
-            "The signed catalog does not name the commit it was built from (malformed source_commit).")
+            "The signed catalog does not name the commit it was built from (malformed source_commit).",
+            key_file_version=authenticated)
     return VerifiedFeed(catalog=catalog, channel=channel, source_commit=source_commit, result=result)
 
 
@@ -432,6 +437,11 @@ def _expiry_text(expires: Any, channel: str, now: datetime, build: datetime | No
 STALE_CATALOG_REASON = (
     "The catalog this host holds is older than one it already accepted for the {channel} channel, so nothing "
     "installs from it. Refresh the catalog to install again."
+)
+UNSIGNED_REF_REASON = (
+    "This host has accepted a signed catalog, and the official source is set to a ref that is not signed, so "
+    "nothing installs from it. Set the source back to main or beta, or add the branch as a catalog source "
+    "named by BAZARR_DEV_PLUGIN_SOURCE for development."
 )
 NO_ROOT_REASON = (
     "This host has accepted a signed {channel} catalog, but this release of Bazarr+ has no signing key to "
@@ -463,6 +473,10 @@ def supply_refusal(state: Mapping[str, Any], source: Mapping[str, Any], now: dat
     """
     channel = supply_channel(source)
     if channel is None:
+        # A ref that reads no signed channel has no signature, expiry or counter to check, so once any
+        # channel has latched nothing installs from it.
+        if any(stored_record(state, name).latched for name in (CHANNEL_MAIN, CHANNEL_BETA)):
+            return UNSIGNED_REF_REASON
         return None
     now = now or current_time()
     build = host_build_time if host_build_time is not None else build_time()
