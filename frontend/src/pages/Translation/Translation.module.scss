@@ -530,9 +530,13 @@
   background: color-mix(in srgb, var(--bz-stat-processing) 9%, transparent);
 }
 
-/* Why an engine is off and what to do, in place of the line under its name. */
+/* Why an engine or a back end was turned off and what to do. */
 .attention {
   max-width: 62ch;
+}
+
+/* Under an engine's name it takes the place of the line that stands there. */
+.setupHead + .attention {
   margin-top: 8px;
 }
 

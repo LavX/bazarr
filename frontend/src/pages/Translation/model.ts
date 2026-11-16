@@ -77,13 +77,35 @@ export interface Status {
 }
 
 /**
- * Off, and flagged for the person to look at. A plugin update leaves an engine like this when what it
- * has saved no longer fits the new release. The server sends no reason of its own, and an engine that
- * was waiting for its key when it was turned off reads the same, so the page says "usually", never
- * "an update did this".
+ * Off, and flagged for the person to look at, with no saved key that the flag could be about. A plugin
+ * update leaves an engine or a back end like this when what it has saved no longer fits the new
+ * release. The flag is the one a changed address sets too, and there the server marks the saved key
+ * as stale: that one is a key to enter again, and is not held back. The server sends no reason of its
+ * own, so the page says "usually", never "an update did this".
  */
-export const heldBack = (engine: TranslationEngine) =>
-  !engine.enabled && engine.awaiting_secrets;
+export const heldBack = (
+  owner: Pick<
+    TranslationEngine | TranslationConnection,
+    "enabled" | "awaiting_secrets" | "secrets"
+  >,
+) =>
+  !owner.enabled &&
+  owner.awaiting_secrets &&
+  !Object.values(owner.secrets).some((entry) => entry.stale === true);
+
+/**
+ * What stands between a held-back back end and its switch: settings to check and save, or a type the
+ * engine's plugin no longer has, which leaves nothing to check and only the removal.
+ */
+export function backendHold(
+  engine: TranslationEngine,
+  item: TranslationConnection,
+): "review" | "gone" | null {
+  if (!heldBack(item)) {
+    return null;
+  }
+  return backendTypes(engine)[item.backend_type] ? "review" : "gone";
+}
 
 /** Whether an engine can take a job, and when it cannot, the reason and the next step. */
 export function engineStatus(engine: TranslationEngine): Status {
@@ -134,17 +156,33 @@ export function engineStatus(engine: TranslationEngine): Status {
       const waiting = engine.connections.some(
         (item) => item.enabled && item.awaiting_secrets,
       );
-      return waiting
-        ? {
-            tone: "warning",
-            label: "Needs its key again",
-            next: "A back end's address changed. Open it and enter its key again.",
-          }
-        : {
-            tone: "warning",
-            label: "No back end is on",
-            next: "Turn a back end on, or finish setting one up.",
-          };
+      if (waiting) {
+        return {
+          tone: "warning",
+          label: "Needs its key again",
+          next: "A back end's address changed. Open it and enter its key again.",
+        };
+      }
+      // None is on, and some are off for a reason the person did not choose: that comes before "turn
+      // one on". What to do with each is said above the list, so this only points there.
+      const held = engine.connections.filter(
+        (item) => backendHold(engine, item) === "review",
+      ).length;
+      if (held > 0) {
+        return {
+          tone: "warning",
+          label: "Needs a review",
+          next:
+            held === 1
+              ? "No back end is on. One was turned off until its settings are checked, usually after a plugin update. Open it under Back ends."
+              : `No back end is on. ${held} were turned off until their settings are checked, usually after a plugin update. Open them under Back ends.`,
+        };
+      }
+      return {
+        tone: "warning",
+        label: "No back end is on",
+        next: "Turn a back end on, or finish setting one up.",
+      };
     }
   }
   if (!engine.configured) {
@@ -280,7 +318,8 @@ export const JOB_STATUS: Record<
 /** What a stored secret may be said to be, in a few words. Never its value. */
 export function keyState(item: TranslationConnection): string {
   const entries = Object.values(item.secrets);
-  if (item.awaiting_secrets) {
+  // A held-back back end is flagged for its settings: its key is as it was.
+  if (item.awaiting_secrets && !heldBack(item)) {
     return "Key needed again";
   }
   const set = entries.find((entry) => entry.configured && !entry.stale);

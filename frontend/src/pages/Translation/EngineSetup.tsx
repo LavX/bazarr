@@ -1,6 +1,7 @@
 import { FunctionComponent, useState } from "react";
 import { Alert, Switch } from "@mantine/core";
 import type { TranslationEngine } from "@/types/translation";
+import AttentionNotice from "./AttentionNotice";
 import BackendList from "./BackendList";
 import EngineSettings from "./EngineSettings";
 import {
@@ -54,18 +55,17 @@ const EngineSetup: FunctionComponent<{
         />
       </div>
       {held ? (
-        <div className={styles.attention}>
-          <p className={styles.conflictTitle}>
-            {fields.length > 0
+        <AttentionNotice
+          title={
+            fields.length > 0
               ? "Turned off until its settings are checked"
-              : "This engine was turned off"}
-          </p>
-          <p className={styles.attentionText}>
-            {fields.length > 0
-              ? "What it has saved no longer fits, usually because a plugin update changed what the engine needs. Check the engine settings below and save them, then turn it on with the switch beside its name."
-              : "A plugin update usually does this. Turn it on with the switch beside its name."}
-          </p>
-        </div>
+              : "This engine was turned off"
+          }
+        >
+          {fields.length > 0
+            ? "What it has saved no longer fits, usually because a plugin update changed what the engine needs. Check the engine settings below and save them, then turn it on with the switch beside its name."
+            : "A plugin update usually does this. Turn it on with the switch beside its name."}
+        </AttentionNotice>
       ) : (
         <p className={styles.sectionHint}>
           {status.next ||

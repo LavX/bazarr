@@ -22,9 +22,10 @@ import type {
   TranslationConnection,
   TranslationEngine,
 } from "@/types/translation";
+import AttentionNotice from "./AttentionNotice";
 import ConflictNotice from "./ConflictNotice";
 import ConsentModal from "./ConsentModal";
-import { backendLabel, StartingPoint } from "./model";
+import { backendHold, backendLabel, heldBack, StartingPoint } from "./model";
 import { useDraftRevision } from "./useDraftRevision";
 import { useGuardedSave } from "./useGuardedSave";
 import styles from "./Translation.module.scss";
@@ -42,6 +43,11 @@ export interface BackendEditorProps {
    * with nowhere to go.
    */
   onBusy?: (busy: boolean) => void;
+  /**
+   * The fields the server named when it refused to turn this back end on, marked like the form's own
+   * field errors until a save answers them.
+   */
+  reviewErrors?: Record<string, string>;
 }
 
 /**
@@ -54,6 +60,7 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
   start,
   onClose,
   onBusy,
+  reviewErrors,
 }) => {
   const types = engine.schema?.backend_types ?? {};
   const backendType = connection?.backend_type ?? start?.typeId ?? "";
@@ -189,6 +196,8 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
   const name = connection
     ? backendLabel(engine, connection)
     : (start?.label ?? definition?.label ?? "back end");
+  // Turned off by a plugin update: what to check, or that there is nothing left to check.
+  const hold = connection ? backendHold(engine, connection) : null;
 
   return (
     <div className={styles.editor}>
@@ -198,7 +207,22 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
             {definition.description}
           </Text>
         )}
-        {connection?.awaiting_secrets && (
+        {hold === "review" && (
+          <AttentionNotice title="Turned off until its settings are checked">
+            What it has saved no longer fits, usually because a plugin update
+            changed what this back end needs. Check the settings below and save
+            them, then turn it on with the switch on its row.
+          </AttentionNotice>
+        )}
+        {hold === "gone" && (
+          <AttentionNotice title="This kind of back end is no longer offered">
+            The engine&apos;s plugin no longer has it, so there is nothing to
+            check and it cannot be turned on. Remove this back end and add
+            another in its place.
+          </AttentionNotice>
+        )}
+        {/* The key is the reason only when the server marked it: a changed address, never a held-back back end. */}
+        {connection?.awaiting_secrets && !heldBack(connection) && (
           <Alert color="yellow" title="Enter the key again">
             This back end&apos;s address changed, so its saved key no longer
             applies and was not sent to the new address.
@@ -208,7 +232,7 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
           fields={fields}
           values={values}
           secrets={connection?.secrets}
-          errors={form.fieldErrors}
+          errors={{ ...reviewErrors, ...form.fieldErrors }}
           // Locked while a conflict answer loads what is saved now: the save that follows sends what the
           // form held when the answer was given, so nothing may be typed in between.
           disabled={busy}
@@ -309,13 +333,16 @@ const BackendEditor: FunctionComponent<BackendEditorProps> = ({
             <Button variant="default" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button
-              loading={form.busy}
-              disabled={remove.isPending || loadingFor !== null}
-              onClick={() => void save()}
-            >
-              {connection ? "Save back end" : "Add back end"}
-            </Button>
+            {/* A back end whose type is gone has nothing to save: the way out is the removal. */}
+            {hold !== "gone" && (
+              <Button
+                loading={form.busy}
+                disabled={remove.isPending || loadingFor !== null}
+                onClick={() => void save()}
+              >
+                {connection ? "Save back end" : "Add back end"}
+              </Button>
+            )}
           </Group>
         )}
       </div>

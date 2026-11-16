@@ -5,7 +5,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
-import type { TranslationEngine, TranslationState } from "@/types/translation";
+import type {
+  TranslationConnection,
+  TranslationEngine,
+  TranslationState,
+} from "@/types/translation";
 import {
   connection,
   engine,
@@ -814,6 +818,163 @@ describe("Translation page", () => {
     const editor = await openEditor("OpenAI compatible, model-1");
     expect(
       within(editor).getByText(/was not sent to the new address/),
+    ).toBeVisible();
+  });
+
+  // A back end that a plugin update turned off: off and flagged, with its key as it was.
+  const heldBackEnd = (
+    id: number,
+    patch: Partial<TranslationConnection> = {},
+  ) =>
+    connection(id, {
+      enabled: false,
+      awaiting_secrets: true,
+      usable: false,
+      secrets: { api_key: { configured: true, last4: "WXYZ" } },
+      ...patch,
+    });
+  const withBackEnds = (...connections: TranslationConnection[]) => {
+    state = { ...state, instances: [second, engine({ connections })] };
+  };
+
+  it("marks a back end an update turned off, and says above the list what to do", async () => {
+    withBackEnds(connection(1), heldBackEnd(2));
+    await showPage();
+    const item = row("OpenAI compatible, model-2");
+    expect(within(item).getByText("Needs a review")).toBeVisible();
+    expect(within(item).getByText("Off")).toBeVisible();
+    // The flag is the one a changed address sets, and nothing here blames an address or a key.
+    expect(within(item).queryByText("Needs its key again")).toBeNull();
+    expect(within(item).getByText("Key ending WXYZ")).toBeVisible();
+    expect(
+      screen.getByText(
+        "A back end was turned off until its settings are checked",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/usually because a plugin update changed/),
+    ).toHaveTextContent(
+      "Open OpenAI compatible, model-2 with Edit, check its settings and save them, then turn it on with its switch.",
+    );
+    // Its form says the same at its top, so the line above the list steps aside while it is open.
+    const editor = await openEditor("OpenAI compatible, model-2");
+    expect(
+      within(editor).getByText("Turned off until its settings are checked"),
+    ).toBeVisible();
+    expect(
+      within(editor).getByText(/usually because a plugin update changed/),
+    ).toHaveTextContent(
+      "Check the settings below and save them, then turn it on with the switch on its row.",
+    );
+    expect(within(editor).queryByText("Enter the key again")).toBeNull();
+    expect(
+      screen.queryByText(
+        "A back end was turned off until its settings are checked",
+      ),
+    ).toBeNull();
+  });
+
+  it("counts the back ends an update turned off, and says so for the engine when none is left on", async () => {
+    withBackEnds(heldBackEnd(1), heldBackEnd(2));
+    const group = await showPage();
+    expect(
+      screen.getByText(
+        "2 back ends were turned off until their settings are checked",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/Open each one marked Needs a review with Edit/),
+    ).toBeVisible();
+    // The engine cannot take a job, and its card and the line at the top say why, not "turn one on".
+    const why =
+      "No back end is on. 2 were turned off until their settings are checked, usually after a plugin update. Open them under Back ends.";
+    expect(within(group).getByText(why)).toBeVisible();
+    expect(
+      within(
+        screen.getByRole("group", { name: "Translation status" }),
+      ).getByText(why),
+    ).toBeVisible();
+    expect(screen.queryByText("No back end is on")).toBeNull();
+  });
+
+  it("keeps the key hint for a back end that is off and whose address changed", async () => {
+    withBackEnds(
+      connection(1),
+      // The server marks the saved key as stale: the reason is the key, whatever the switch says.
+      heldBackEnd(2, {
+        secrets: { api_key: { configured: true, last4: "WXYZ", stale: true } },
+      }),
+    );
+    await showPage();
+    const item = row("OpenAI compatible, model-2");
+    expect(within(item).getByText("Needs its key again")).toBeVisible();
+    expect(within(item).getByText("Off")).toBeVisible();
+    expect(within(item).getByText("Key needed again")).toBeVisible();
+    expect(within(item).queryByText("Needs a review")).toBeNull();
+    expect(screen.queryByText(/turned off until/)).toBeNull();
+    const editor = await openEditor("OpenAI compatible, model-2");
+    expect(within(editor).getByText("Enter the key again")).toBeVisible();
+    expect(within(editor).queryByText(/Turned off until/)).toBeNull();
+  });
+
+  it("says where to go when a back end cannot be turned on yet, and marks the setting in its form", async () => {
+    withBackEnds(connection(1), heldBackEnd(2));
+    server.use(
+      // What the server answers while the saved settings do not fit the back end's type.
+      http.patch("/api/translation/connections/:id", async ({ request }) => {
+        record("patch", "connection", await request.json());
+        return HttpResponse.json(
+          {
+            error: "invalid",
+            message: "The values are not valid.",
+            field_errors: { base_url: "is required" },
+          },
+          { status: 400 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(
+      screen.getByRole("switch", { name: "Use OpenAI compatible, model-2" }),
+    );
+    expect(
+      await screen.findByText(
+        "OpenAI compatible, model-2 cannot be turned on yet: a setting needs fixing. Open it with Edit and save its settings, then turn it on.",
+      ),
+    ).toBeVisible();
+    expect(calls[0].body).toEqual({ enabled: true, expected_revision: 1 });
+    expect(screen.queryByText("The values are not valid.")).toBeNull();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "Use OpenAI compatible, model-2" }),
+      ).not.toBeChecked(),
+    );
+    const editor = await openEditor("OpenAI compatible, model-2");
+    expect(within(editor).getByText("is required")).toBeVisible();
+  });
+
+  it("says a held-back back end of a type the plugin dropped can only be removed", async () => {
+    withBackEnds(connection(1), heldBackEnd(2, { backend_type: "retired" }));
+    await showPage();
+    const item = row("retired, model-2");
+    expect(within(item).getByText("No longer offered")).toBeVisible();
+    // Nothing to check, so it is not counted among the ones to review.
+    expect(screen.queryByText(/turned off until/)).toBeNull();
+    const editor = await openEditor("retired, model-2");
+    expect(
+      within(editor).getByText("This kind of back end is no longer offered"),
+    ).toBeVisible();
+    expect(
+      within(editor).getByText(
+        /Remove this back end and add another in its place/,
+      ),
+    ).toBeVisible();
+    expect(
+      within(editor).queryByRole("button", { name: "Save back end" }),
+    ).toBeNull();
+    expect(
+      within(editor).getByRole("button", { name: "Remove back end" }),
     ).toBeVisible();
   });
 

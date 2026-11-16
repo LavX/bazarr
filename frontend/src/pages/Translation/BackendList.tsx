@@ -21,10 +21,13 @@ import type {
   TranslationConnection,
   TranslationEngine,
 } from "@/types/translation";
+import AttentionNotice from "./AttentionNotice";
 import BackendEditor from "./BackendEditor";
 import {
+  backendHold,
   backendLabel,
   backendName,
+  backendTypes,
   keyState,
   pricePair,
   StartingPoint,
@@ -76,6 +79,11 @@ const BackendList: FunctionComponent<{
   // The switches whose write is on its way, with the value they were set to.
   const [switching, setSwitching] = useState<Record<number, boolean>>({});
   const switchingNow = useRef(new Set<number>());
+  // The fields the server named when it refused to turn a back end on, for that back end's form to
+  // mark. They belong to the revision that was refused: a save moves the back end on and answers them.
+  const [refused, setRefused] = useState<
+    Record<number, { revision: number; errors: Record<string, string> }>
+  >({});
   const fresh = useFreshState();
   const reorder = useReorderConnections();
   const update = useUpdateConnection();
@@ -139,7 +147,27 @@ const BackendList: FunctionComponent<{
         body: { enabled, expected_revision: item.revision },
       });
     } catch (error) {
-      note(error);
+      // Turning a back end on is refused while what it has saved does not fit its type. The server
+      // names the fields and its sentence names none, so the page says where to go.
+      const refusal = readRefusal(error);
+      const shown = (backendTypes(engine)[item.backend_type]?.fields ?? []).map(
+        (field) => field.key,
+      );
+      if (
+        enabled &&
+        refusal &&
+        Object.keys(refusal.fieldErrors).some((key) => shown.includes(key))
+      ) {
+        setRefused((current) => ({
+          ...current,
+          [item.id]: { revision: item.revision, errors: refusal.fieldErrors },
+        }));
+        setProblem(
+          `${backendName(engine, item)} cannot be turned on yet: a setting needs fixing. Open it with Edit and save its settings, then turn it on.`,
+        );
+      } else {
+        note(error);
+      }
       // The row stays held until the page has what is saved now: released earlier, the switch and
       // the form would work from the revision that was just refused.
       await fresh().catch(() => undefined);
@@ -206,6 +234,12 @@ const BackendList: FunctionComponent<{
     setAdding(point);
   };
 
+  // The back ends a plugin update turned off and that can be brought back by checking their settings.
+  // The one whose form is open is left out: its form says the same at its top.
+  const toReview = items.filter(
+    (item) => backendHold(engine, item) === "review" && item.id !== editingId,
+  );
+
   return (
     <div>
       {problem && (
@@ -219,6 +253,20 @@ const BackendList: FunctionComponent<{
         >
           {problem}
         </Alert>
+      )}
+      {toReview.length > 0 && (
+        <AttentionNotice
+          style={{ marginBottom: 12 }}
+          title={
+            toReview.length === 1
+              ? "A back end was turned off until its settings are checked"
+              : `${toReview.length} back ends were turned off until their settings are checked`
+          }
+        >
+          {toReview.length === 1
+            ? `What it has saved no longer fits, usually because a plugin update changed what a back end needs. Open ${backendName(engine, toReview[0])} with Edit, check its settings and save them, then turn it on with its switch.`
+            : "What they have saved no longer fits, usually because a plugin update changed what a back end needs. Open each one marked Needs a review with Edit, check its settings and save them, then turn it on with its switch."}
+        </AttentionNotice>
       )}
       <SortableList
         items={items}
@@ -240,6 +288,7 @@ const BackendList: FunctionComponent<{
         renderItem={(item, index) => {
           const name = backendName(engine, item);
           const editing = editingId === item.id;
+          const hold = backendHold(engine, item);
           return (
             <div className={styles.backend} data-off={!item.enabled}>
               <div className={styles.backendIdentity}>
@@ -249,7 +298,11 @@ const BackendList: FunctionComponent<{
                 <div className={styles.backendText}>
                   <div className={styles.backendName}>
                     <span>{backendLabel(engine, item)}</span>
-                    {item.awaiting_secrets ? (
+                    {hold === "review" ? (
+                      <StatusBadge tone="warning" label="Needs a review" />
+                    ) : hold === "gone" ? (
+                      <StatusBadge tone="warning" label="No longer offered" />
+                    ) : item.awaiting_secrets ? (
                       <StatusBadge tone="warning" label="Needs its key again" />
                     ) : (
                       item.enabled &&
@@ -358,6 +411,11 @@ const BackendList: FunctionComponent<{
                     connection={item}
                     onClose={() => setEditingId(null)}
                     onBusy={setFormBusy}
+                    reviewErrors={
+                      refused[item.id]?.revision === item.revision
+                        ? refused[item.id].errors
+                        : undefined
+                    }
                   />
                 </div>
               )}

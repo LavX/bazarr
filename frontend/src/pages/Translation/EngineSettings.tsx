@@ -10,6 +10,7 @@ import {
 import type { TranslationEngine } from "@/types/translation";
 import ConflictNotice from "./ConflictNotice";
 import ConsentModal from "./ConsentModal";
+import { heldBack } from "./model";
 import type { useDraftRevision } from "./useDraftRevision";
 import { useGuardedSave } from "./useGuardedSave";
 import styles from "./Translation.module.scss";
@@ -123,8 +124,8 @@ const EngineSettings: FunctionComponent<{
           setCleared((current) => [...new Set([...current, key])])
         }
       />
-      {/* An engine that is off and flagged says why beside its name, and the reason there is not a changed address. */}
-      {engine.awaiting_secrets && engine.enabled && (
+      {/* A held-back engine says why under its name, and the reason there is not a changed address. */}
+      {engine.awaiting_secrets && !heldBack(engine) && (
         <Alert color="yellow" title="Enter the keys again">
           An address changed, so the saved keys no longer apply.
         </Alert>
