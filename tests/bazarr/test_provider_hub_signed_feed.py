@@ -415,7 +415,7 @@ def test_the_key_file_version_counts_across_both_channels(world):
     assert "key file is older" in _official()["last_error"]
 
 
-# --- one verification point for every origin ---------------------------------------------------
+# --- one verification point ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -426,64 +426,94 @@ def fetched_feed(world):
     return FetchedFeed(body, world.sign(body), world.key_file())
 
 
-def _verify(world, fetched, origin, **kwargs):
+def _verify(world, fetched, **kwargs):
     from provider_hub import catalog_feed
 
-    options = {"origin": origin, "channel": "main", "stored": catalog_feed.ChannelRecord(), "now": world.now}
+    options = {"channel": "main", "stored": catalog_feed.ChannelRecord(), "now": world.now}
     options.update(kwargs)
     return catalog_feed.verify_fetched(fetched, **options)
 
 
-@pytest.mark.parametrize("origin", ["raw", "mirror"])
-def test_the_raw_and_mirror_origins_are_verified_and_may_advance_state(world, fetched_feed, origin):
-    verified = _verify(world, fetched_feed, origin)
+def test_a_verified_catalog_may_advance_state(world, fetched_feed):
+    verified = _verify(world, fetched_feed)
 
-    assert verified.result.ok and verified.may_advance_state and verified.origin == origin
+    assert verified.result.ok and verified.may_advance_state and verified.source_commit == HEAD
 
 
-@pytest.mark.parametrize("origin", ["raw", "mirror", "floor"])
-def test_every_origin_refuses_a_flipped_byte(world, fetched_feed, origin):
+def test_a_flipped_byte_is_refused(world, fetched_feed):
     from provider_hub.catalog_feed import FeedRefused, FetchedFeed
 
     flipped = FetchedFeed(fetched_feed.catalog.replace(b"Official", b"Offical!"), fetched_feed.envelope,
                           fetched_feed.key_file)
 
     with pytest.raises(FeedRefused, match="bad signature"):
-        _verify(world, flipped, origin)
-
-
-def test_the_baked_floor_is_checked_for_signature_only_and_never_advances_state(world):
-    from provider_hub.catalog_feed import FetchedFeed
-
-    body = world.catalog_body(version=7, expires=world.now - timedelta(days=200),
-                              not_before=world.now - timedelta(days=290))
-    expired = FetchedFeed(body, world.sign(body), world.key_file())
-
-    verified = _verify(world, expired, "floor")
-
-    assert verified.result.baked and not verified.may_advance_state
+        _verify(world, flipped)
 
 
 def test_a_signed_file_with_no_envelope_is_refused_even_before_the_first_latch(world):
     from provider_hub.catalog_feed import FeedRefused, FetchedFeed
 
     with pytest.raises(FeedRefused, match="not signed"):
-        _verify(world, FetchedFeed(world.catalog_body(), None, world.key_file()), "raw")
-
-
-def test_an_unknown_origin_is_a_programming_error(world, fetched_feed):
-    with pytest.raises(ValueError):
-        _verify(world, fetched_feed, "carrier-pigeon")
+        _verify(world, FetchedFeed(world.catalog_body(), None, world.key_file()))
 
 
 def test_a_channel_that_has_never_latched_reads_the_legacy_catalog_and_a_latched_one_does_not(world):
     from provider_hub import catalog_feed
     from provider_hub.catalog_feed import ChannelRecord, FeedRefused
 
-    assert _verify(world, None, "raw") is None
+    assert _verify(world, None) is None
     with pytest.raises(FeedRefused, match="only accepts a signed"):
-        _verify(world, None, "raw", stored=ChannelRecord(5, 1))
+        _verify(world, None, stored=ChannelRecord(5, 1))
     assert catalog_feed.stored_record({}, "main") == ChannelRecord()
+
+
+# --- a host that cannot verify any more ----------------------------------------------------------------
+
+
+def test_a_latched_host_with_no_root_refuses_the_refresh_and_names_the_cause(world, monkeypatch):
+    from provider_hub import signing_roots
+
+    _latch(world)
+    _move_head(world, "e" * 40)
+    world.legacy(commit="e" * 40, providers=[_provider("9.9.9")])
+    # A downgrade: the database and the counter file remember the latch, this release trusts no root.
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", {})
+    requests_before = len(world.requests)
+
+    _refresh()
+
+    error = _official()["last_error"]
+    assert "no signing key" in error and "Update Bazarr+" in error
+    assert {entry["version"] for entry in _entries().values()} == {"1.0.0"}
+    assert not [url for url in world.requests[requests_before:] if url.endswith("catalog.json")]
+
+
+def test_a_stale_cache_on_a_host_with_no_root_says_to_update_rather_than_to_refresh(world, monkeypatch):
+    from provider_hub import signing_roots
+    from provider_hub.state import mutate_state
+
+    _latch(world)
+    mutate_state(lambda state: state["catalog_sources"]["official"].update(
+        catalog_signature="unsigned (legacy)", signature_verified=False))
+    monkeypatch.setattr(signing_roots, "SIGNING_ROOTS", {})
+
+    assert all("Update Bazarr+" in reason for reason in _blocked().values())
+
+
+# --- the stored key file version -----------------------------------------------------------------------
+
+
+def test_a_cache_checked_with_an_older_key_file_than_the_host_accepted_installs_nothing(world):
+    from provider_hub.catalog_feed import ChannelRecord, write_counter_file
+
+    _publish_signed(world, version=100, key_file=world.key_file(version=1))
+    _refresh()
+    assert _blocked() == {PROVIDER: None, SERVICE: None}
+    # A later refresh accepted a newer key file, which a restored database has not seen.
+    write_counter_file({"main": ChannelRecord(100, 2)})
+
+    assert set(_blocked()) == {PROVIDER, SERVICE}
+    assert all("older than one it already accepted" in reason for reason in _blocked().values())
 
 
 # --- the counter file ---------------------------------------------------------------------

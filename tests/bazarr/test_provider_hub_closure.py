@@ -256,3 +256,47 @@ def test_the_removal_checks_dependents_in_the_write_it_commits(tmp_path, monkeyp
 
     assert load_state()["installations"]["parent"]["state"] == "active"
     assert service_kind.calls[-1] == ("enabled", "parent", True)
+
+
+# --- capabilities a staged update supplies, and suppliers that are switched off -----------------------------
+
+
+def test_a_staged_supplier_update_protects_the_plugin_that_will_need_it(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import ProviderHubInstallError, remove_installation
+
+    supplier = _manifest("supplier")
+    supplier_next = _manifest("supplier", "2.0.0", provides=["translit.v1"])
+    consumer = _manifest("consumer")
+    consumer_next = _manifest("consumer", "2.0.0", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [], {
+        **_installed(supplier, staged_version="2.0.0", staged_manifest=supplier_next, state="staged",
+                     pending_restart=True),
+        **_installed(consumer, staged_version="2.0.0", staged_manifest=consumer_next, state="staged",
+                     pending_restart=True)})
+
+    with pytest.raises(ProviderHubInstallError, match="supplier cannot be removed while consumer depends on it"):
+        remove_installation("supplier")
+
+
+def test_an_enabled_installed_supplier_satisfies_a_need_and_a_switched_off_one_does_not(
+        tmp_path, monkeypatch, service_kind):
+    helper = _manifest("helper", provides=["translit.v1"])
+    user = _manifest("user", requires=["translit.v1"])
+
+    _world(tmp_path, monkeypatch, [user], _installed(helper))
+    assert _closure("user").satisfied_by == [{"id": "helper", "version": "1.0.0", "capability": "translit.v1"}]
+
+    _world(tmp_path, monkeypatch, [user], _installed(helper, enabled=False))
+    closure = _closure("user")
+    assert not closure.resolved and "only helper provides, and it is switched off" in closure.refusal
+    assert closure.satisfied_by == []
+
+
+def test_a_switched_off_supplier_gives_way_to_another_plugin_that_provides_the_capability(
+        tmp_path, monkeypatch, service_kind):
+    off = _manifest("off", provides=["translit.v1"])
+    other = _manifest("other", provides=["translit.v1"])
+    user = _manifest("user", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [user, other], _installed(off, enabled=False))
+
+    assert _ids(_closure("user")) == [("other", "requires"), ("user", "root")]

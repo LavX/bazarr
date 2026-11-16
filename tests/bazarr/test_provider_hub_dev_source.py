@@ -201,3 +201,35 @@ def test_the_status_page_reports_the_source_while_it_is_set(monkeypatch):
     assert handler(status.SystemStatus())["data"]["dev_plugin_source"] is None
     monkeypatch.setenv("BAZARR_DEV_PLUGIN_SOURCE", SOURCE)
     assert handler(status.SystemStatus())["data"]["dev_plugin_source"] == SOURCE
+
+
+def test_the_development_source_is_read_again_when_its_commit_did_not_move(tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import add_catalog_source, refresh_catalog
+    from test_provider_hub import _manifest
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if "LavX/bazarr-provider-catalog" in url:
+            return _FakeResponse({"providers": []})
+        return _FakeResponse({"providers": [{"manifest": _manifest(provider_id="devsubs")}],
+                              "plugins": [{"manifest": _plugin()}]})
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json")))
+    monkeypatch.delenv("BAZARR_DEV_PLUGIN_SOURCE", raising=False)
+    add_catalog_source(SOURCE, SOURCE_URL)
+    refresh_catalog()
+    # Its subtitle provider is stored, its plugin is not, and the commit stays the same.
+    assert {entry["provider_id"] for entry in _stored_all()} == {"devsubs"}
+
+    monkeypatch.setenv("BAZARR_DEV_PLUGIN_SOURCE", SOURCE)
+    refresh_catalog()
+
+    assert {entry["provider_id"] for entry in _stored_all()} == {"devsubs", PLUGIN}
+
+
+def _stored_all():
+    from provider_hub.state import load_state
+
+    return [entry for entry in load_state()["catalog_entries"].values() if entry["source"] == SOURCE]

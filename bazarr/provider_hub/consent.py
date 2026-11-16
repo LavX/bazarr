@@ -169,9 +169,22 @@ def update_delta(
     added_permissions = sorted(set(new.permissions) - old_permissions)
     added_binaries = [binary for binary in _binaries(new) if not old or binary["artifact"] != old.artifact]
     held = set(installed_plugins(state))
-    added_plugins = sorted(
-        member.plugin_id for member in new_closure.members
-        if member.reason != "root" and member.plugin_id not in held)
+    joining = sorted(
+        (member for member in new_closure.members if member.reason != "root" and member.plugin_id not in held),
+        key=lambda member: member.plugin_id)
+    added_plugins = [
+        {
+            "id": member.plugin_id,
+            "name": member.plugin.name,
+            "version": member.plugin.version,
+            "kind": member.plugin.kind,
+            "permissions": [{"name": name, "mark": permission_mark(name, sandbox)}
+                            for name in member.plugin.permissions],
+            "destinations": list(member.plugin.all_endpoints),
+            "binaries": _binaries(member.plugin),
+        }
+        for member in joining
+    ]
     added = {
         "destinations": added_destinations,
         "destination_fields": added_fields,
@@ -184,7 +197,10 @@ def update_delta(
         "id": new.plugin_id, "from": old.version if old else None, "to": new.version,
         "bundle_sha256": new_entry["manifest"].get("bundle_sha256"),
         "destinations": added_destinations, "destination_fields": added_fields,
-        "permissions": added_permissions, "binaries": added_binaries, "plugins": added_plugins,
+        "permissions": added_permissions, "binaries": added_binaries,
+        # Everything about each plugin that joins, so a dependency changed after the person agreed no
+        # longer matches.
+        "plugins": [_member_facts(member) for member in joining],
     }
     return {
         "plugin": {"id": new.plugin_id, "name": new.name, "from_version": old.version if old else None,
@@ -208,5 +224,6 @@ def delta_text(delta: Mapping[str, Any]) -> str:
     if added["binaries"]:
         parts.append("it runs " + ", ".join(item["artifact"] for item in added["binaries"]))
     if added["plugins"]:
-        parts.append("it installs " + ", ".join(added["plugins"]))
+        parts.append("it installs " + ", ".join(
+            f"{item['name']} {item['version']}" for item in added["plugins"]))
     return "This update needs your consent first: " + "; ".join(parts) + "."

@@ -311,7 +311,10 @@ def test_an_update_that_joins_a_plugin_to_the_closure_asks_again(world):
 
     delta = _delta()
 
-    assert delta["needs_consent"] is True and delta["added"]["plugins"] == ["helper"]
+    assert delta["needs_consent"] is True
+    # What joins is shown in full, not as a name.
+    assert [(item["id"], item["version"], item["permissions"], item["destinations"], item["binaries"])
+            for item in delta["added"]["plugins"]] == [("helper", "1.0.0", [], [], [])]
 
 
 def test_an_update_that_needs_consent_is_not_staged_without_its_digest_and_is_with_it(world, monkeypatch):
@@ -479,3 +482,106 @@ def test_an_update_blocked_by_an_expired_catalog_says_so(world, monkeypatch):
     refused = service.apply_update("addon")
 
     assert "signed main catalog expired" in refused["last_error"]
+
+
+# --- a dependency changed between the consent and the update --------------------------------------------
+
+
+def _helper_update_world(world):
+    old = _plugin("addon", "1.0.0")
+    helper = _plugin("helper", provides=["translit.v1"], permissions=["network"],
+                     endpoints=["https://helper.example.org:443"])
+    new = _plugin("addon", "1.1.0", requires=["translit.v1"])
+    _update_world(world, old, new, extra_manifests=[helper])
+    return helper
+
+
+def test_the_update_consent_shows_each_joining_plugin_in_full(world):
+    _helper_update_world(world)
+
+    [joining] = _delta()["added"]["plugins"]
+
+    assert (joining["id"], joining["version"], joining["kind"]) == ("helper", "1.0.0", "test_service")
+    assert joining["permissions"] == [{"name": "network", "mark": "enforced"}]
+    assert joining["destinations"] == ["https://helper.example.org:443"]
+
+
+@pytest.mark.parametrize("change", [
+    lambda helper: helper.update(permissions=["network", "media_read"]),
+    lambda helper: helper.update(endpoints=["https://other.example.org:443"]),
+    lambda helper: helper.update(bundle_sha256="c" * 64),
+    lambda helper: helper.update(version="1.0.1"),
+])
+def test_an_update_whose_dependency_changed_after_the_consent_is_not_staged(world, monkeypatch, change):
+    from provider_hub import service
+
+    helper = _helper_update_world(world)
+    digest = service.update_consent("addon")["digest"]
+    change(helper)
+    _update_world(world, _plugin("addon", "1.0.0"), _plugin("addon", "1.1.0", requires=["translit.v1"]),
+                  extra_manifests=[helper])
+    staged = []
+    monkeypatch.setattr(service, "stage_install",
+                        lambda manifest, **kwargs: staged.append(manifest["id"]) or {"state": "staged"})
+
+    refused = service.apply_update("addon", consent_digest=digest)
+
+    assert staged == [] and "needs your consent" in refused["last_error"]
+
+
+# --- a root that fails to stage takes its freshly staged dependencies with it -------------------------------
+
+
+@pytest.fixture
+def staging(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            pass
+
+        def install(self, validated, timeout=None):
+            (tmp_path / "env" / "bin").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "env" / "bin" / "python").write_text("", encoding="utf-8")
+            return tmp_path / "env"
+
+    def fetch(manifest, deadline=None):
+        if manifest.provider_id == "addon":
+            raise service.ProviderHubInstallError("the download failed")
+        return tmp_path / "bundle"
+
+    monkeypatch.setattr(service, "_fetch_bundle", fetch)
+    monkeypatch.setattr(service, "PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr(service, "python_executable", lambda env_path: tmp_path / "python")
+
+
+def test_a_failed_install_discards_the_dependencies_it_staged_in_the_same_call(world, staging):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    parent, addon = _pair()
+    world([parent, addon])
+    digest = _summary()["digest"]
+
+    with pytest.raises(service.ProviderHubInstallError, match="download failed"):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    installations = load_state()["installations"]
+    assert "parent" not in installations
+    assert installations["addon"]["state"] == "failed"
+
+
+def test_a_failed_update_discards_the_dependencies_it_staged_in_the_same_call(world, staging):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    old = _plugin("addon", "1.0.0")
+    helper = _plugin("helper", provides=["translit.v1"])
+    new = _plugin("addon", "1.1.0", requires=["translit.v1"])
+    _update_world(world, old, new, extra_manifests=[helper])
+
+    service.apply_update("addon", consent_digest=service.update_consent("addon")["digest"])
+
+    installations = load_state()["installations"]
+    assert "helper" not in installations
+    assert installations["addon"]["active_version"] == "1.0.0" and installations["addon"]["staged_version"] is None

@@ -137,15 +137,26 @@ def resolve_closure(
         if capability.startswith(HOST_CAPABILITY_PREFIX):
             closure.external.append(capability)
             return
-        for plugin_id, (held, _row) in sorted(installed.items()):
-            if plugin_id != owner.plugin_id and capability in held.provides:
+        switched_off = []
+        for plugin_id, (held, row) in sorted(installed.items()):
+            if plugin_id == owner.plugin_id or capability not in held.provides:
+                continue
+            # A plugin that is switched off supplies nothing.
+            if _enabled(row):
                 closure.satisfied_by.append({"id": plugin_id, "version": held.version, "capability": capability})
                 return
+            switched_off.append(plugin_id)
         providers = sorted({
             str(entry.get("provider_id")) for entry in entries
-            if entry.get("provider_id") != owner.plugin_id and provides(entry, capability)
+            if entry.get("provider_id") != owner.plugin_id and entry.get("provider_id") not in installed
+            and provides(entry, capability)
         })
         if not providers:
+            if switched_off:
+                closure.unresolved.append(
+                    f"{owner.name} needs {capability}, which only {', '.join(switched_off)} provides, "
+                    "and it is switched off. Switch it on first.")
+                return
             # No plugin provides it anywhere: a host capability or an address the user configures.
             closure.external.append(capability)
             return
@@ -195,12 +206,21 @@ def _row_manifests(row: dict[str, Any]) -> list[PluginManifest]:
     return found
 
 
+def _provided(row: dict[str, Any], active: PluginManifest) -> set[str]:
+    """Every capability a plugin supplies now or will after its staged update takes over."""
+    provided = set(active.provides)
+    for plugin in _row_manifests(row):
+        provided.update(plugin.provides)
+    return provided
+
+
 def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = False) -> list[str]:
     """The ids of installed plugins that depend on ``plugin_id``.
 
     A plugin depends on another when it extends it, or requires a capability the other provides and
     no other enabled plugin provides. Its staged update counts as well as its active release, because
-    the staged one is what runs after the next restart. With ``enabled_only``, plugins that are switched
+    the staged one is what runs after the next restart, and a supplier's staged update counts as supplying
+    what it will provide. With ``enabled_only``, plugins that are switched
     off do not count, which is the rule for switching a dependency off; removing one counts every
     installed dependent.
     """
@@ -208,6 +228,7 @@ def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = Fa
     target = installed.get(plugin_id)
     if target is None:
         return []
+    target_provides = _provided(target[1], target[0])
     found = []
     for other_id, (_active, row) in sorted(installed.items()):
         if other_id == plugin_id:
@@ -217,11 +238,11 @@ def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = Fa
             if plugin.extends is not None and plugin.extends.plugin_id == plugin_id:
                 depends = True
             for capability in plugin.requires:
-                if capability not in target[0].provides or capability in plugin.provides:
+                if capability not in target_provides or capability in plugin.provides:
                     continue
                 # A plugin that is switched off supplies nothing.
                 elsewhere = any(
-                    capability in held.provides for held_id, (held, held_row) in installed.items()
+                    capability in _provided(held_row, held) for held_id, (held, held_row) in installed.items()
                     if held_id not in (plugin_id, other_id) and _enabled(held_row))
                 if not elsewhere:
                     depends = True

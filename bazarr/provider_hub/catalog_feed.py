@@ -3,10 +3,11 @@
 
 The official catalog publishes, beside its legacy ``catalog.json``, one signed file per
 channel (``signed/<channel>/catalog.json``) with a detached signature and a root-signed key
-file. This module is the host's only caller of ``signing.verify_catalog``. Every origin the
-bytes can come from (the raw repository, the Pages mirror, the image's own snapshot) hands
-them to ``verify_fetched`` before anything parses them, and gets back a verified catalog or
-a typed refusal.
+file. This module is the host's only caller of ``signing.verify_catalog``. The bytes the raw
+repository serves go through ``verify_fetched`` before anything parses them, and it hands back a
+verified catalog or a typed refusal. The Pages mirror and the image's own snapshot have no transport
+or baked signed files yet; whatever adds them calls the same function and adds its origin (the snapshot
+is checked in baked mode, which never latches a channel or raises a counter).
 
 What a refresh keeps per channel lives in the state document under ``catalog_feeds``: the
 highest ``signed_version`` and ``key_file_version`` it accepted. The same two numbers are
@@ -38,11 +39,6 @@ logger = logging.getLogger(__name__)
 
 CHANNEL_MAIN = "main"
 CHANNEL_BETA = "beta"
-
-ORIGIN_RAW = "raw"
-ORIGIN_MIRROR = "mirror"
-ORIGIN_FLOOR = "floor"
-ORIGINS = (ORIGIN_RAW, ORIGIN_MIRROR, ORIGIN_FLOOR)
 
 SIGNED_CATALOG_PATH = "signed/{channel}/catalog.json"
 SIGNED_ENVELOPE_PATH = "signed/{channel}/catalog.json.sig"
@@ -99,7 +95,6 @@ class VerifiedFeed:
     channel: str
     source_commit: str
     result: signing.VerificationResult
-    origin: str
 
     @property
     def may_advance_state(self) -> bool:
@@ -268,7 +263,7 @@ def stored_record(state: Mapping[str, Any], channel: str) -> ChannelRecord:
 def record_accepted(state: dict[str, Any], verified: VerifiedFeed, now: datetime) -> ChannelRecord:
     """Store an accepted catalog's numbers and times for its channel and return them.
 
-    Only a catalog that may advance state gets here, so a baked snapshot never latches a channel.
+    Only a catalog that may advance state gets here.
     """
     result = verified.result
     store = state.setdefault(FEEDS_KEY, {})
@@ -333,28 +328,22 @@ def _refusal_text(result: signing.VerificationResult) -> str:
 def verify_fetched(
     fetched: FetchedFeed | None,
     *,
-    origin: str,
     channel: str,
     stored: ChannelRecord,
     now: datetime,
     roots: Mapping[str, bytes] | None = None,
     host_build_time: datetime | None = None,
 ) -> VerifiedFeed | None:
-    """Check what an origin served for ``channel``.
+    """Check what the raw repository served for ``channel``.
 
     Returns the verified catalog, or None when the commit has no signed file and the channel has
     never accepted one (the caller then reads the legacy catalog). Raises ``FeedRefused`` for
     everything else. Nothing is parsed before the signature, the chain, the channel and the
     freshness checked out.
 
-    ``origin`` is ``raw``, ``mirror`` or ``floor``. The floor is the snapshot baked into the
-    image: it is checked for signature and chain only and never advances the stored counters.
     """
-    if origin not in ORIGINS:
-        raise ValueError(f"unknown catalog origin: {origin}")
-    baked = origin == ORIGIN_FLOOR
     if fetched is None:
-        if stored.latched and not baked:
+        if stored.latched:
             raise FeedRefused(Status.UNSIGNED, _refusal_text(signing.VerificationResult(Status.UNSIGNED)))
         return None
     if roots is None:
@@ -366,10 +355,9 @@ def verify_fetched(
         roots=roots,
         channel=channel,
         now=now,
-        stored_counter=None if baked else stored.signed_version,
-        stored_key_file_version=None if baked else stored.key_file_version,
-        host_build_time=None if baked else host_build_time,
-        baked=baked,
+        stored_counter=stored.signed_version,
+        stored_key_file_version=stored.key_file_version,
+        host_build_time=host_build_time,
     )
     if not result.usable:
         raise FeedRefused(result.status, _refusal_text(result))
@@ -384,8 +372,7 @@ def verify_fetched(
         raise FeedRefused(
             Status.MALFORMED,
             "The signed catalog does not name the commit it was built from (malformed source_commit).")
-    return VerifiedFeed(catalog=catalog, channel=channel, source_commit=source_commit, result=result,
-                        origin=origin)
+    return VerifiedFeed(catalog=catalog, channel=channel, source_commit=source_commit, result=result)
 
 
 # --- what the signed state means for installs ------------------------------------------------
@@ -404,21 +391,14 @@ def _expiry_text(expires: Any, channel: str, now: datetime, build: datetime | No
     return None
 
 
-def expiry_refusal(state: Mapping[str, Any], channel: str | None, now: datetime | None = None,
-                   host_build_time: datetime | None = None) -> str | None:
-    """Why installs and updates from ``channel`` are blocked by its stored expiry, or None."""
-    if channel is None:
-        return None
-    item = feeds(state).get(channel)
-    if not isinstance(item, dict) or not item.get("expires"):
-        return None
-    return _expiry_text(item["expires"], channel, now or current_time(),
-                        host_build_time if host_build_time is not None else build_time())
-
-
 STALE_CATALOG_REASON = (
     "The catalog this host holds is older than one it already accepted for the {channel} channel, so nothing "
     "installs from it. Refresh the catalog to install again."
+)
+NO_ROOT_REASON = (
+    "This host has accepted a signed {channel} catalog, but this release of Bazarr+ has no signing key to "
+    "verify one, so nothing is read or installed from the catalog. Update Bazarr+ to the release you came "
+    "from or a later one."
 )
 
 
@@ -458,7 +438,15 @@ def supply_refusal(state: Mapping[str, Any], source: Mapping[str, Any], now: dat
     if not stored.latched:
         return None
     cached = source.get("catalog_signed_version")
-    if source.get("catalog_signature") != SIGNATURE_VERIFIED or not isinstance(cached, int) \
-            or cached < stored.signed_version:
-        return STALE_CATALOG_REASON.format(channel=channel)
-    return None
+    cached_keys = source.get("catalog_key_file_version")
+    # Older than the counter, or checked with an older key file than the host has accepted: a restored
+    # backup can bring either back, and an older key file may be the one that lacks a revocation.
+    stale = (
+        source.get("catalog_signature") != SIGNATURE_VERIFIED
+        or not isinstance(cached, int) or cached < stored.signed_version
+        or (stored.key_file_version is not None
+            and (not isinstance(cached_keys, int) or cached_keys < stored.key_file_version))
+    )
+    if not stale:
+        return None
+    return (STALE_CATALOG_REASON if signed_feed_enabled() else NO_ROOT_REASON).format(channel=channel)

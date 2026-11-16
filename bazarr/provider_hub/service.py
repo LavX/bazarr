@@ -537,6 +537,12 @@ def _fetch_official_catalog(
     carries a plugins list. Raises ``catalog_feed.FeedRefused`` when a signed catalog fails its check.
     """
     channel = catalog_feed.feed_channel(source.get("dev_ref"))
+    if channel is not None and not catalog_feed.signed_feed_enabled() \
+            and catalog_feed.stored_record(state, channel).latched:
+        # A downgrade: this host accepted a signed catalog, and this release cannot verify one. The
+        # legacy catalog is not a substitute, so say why and what to do instead of reading it.
+        raise catalog_feed.FeedRefused(
+            catalog_feed.Status.UNSIGNED, catalog_feed.NO_ROOT_REASON.format(channel=channel))
     if channel is None or not catalog_feed.signed_feed_enabled():
         payload, head = _fetch_github_catalog(
             source["url"], override_ref=source.get("dev_ref"), unchanged_commit=unchanged_commit,
@@ -552,7 +558,7 @@ def _fetch_official_catalog(
         return None, head, None
     feed = catalog_feed.verify_fetched(
         _fetch_signed_feed(owner, repo, head, channel),
-        origin=catalog_feed.ORIGIN_RAW, channel=channel,
+        channel=channel,
         stored=catalog_feed.stored_record(state, channel), now=catalog_feed.current_time(),
         host_build_time=catalog_feed.build_time(),
     )
@@ -1278,12 +1284,14 @@ def _note_catalog_signature(
         source["catalog_channel"] = catalog_feed.feed_channel(source.get("dev_ref"))
         source["catalog_expires_at"] = None
         source.pop("catalog_signed_version", None)
+        source.pop("catalog_key_file_version", None)
         source.pop("catalog_signed_commit", None)
         return
     source["catalog_signature"] = catalog_feed.SIGNATURE_VERIFIED
     source["signature_verified"] = True
     source["catalog_channel"] = feed.channel
     source["catalog_signed_version"] = feed.result.signed_version
+    source["catalog_key_file_version"] = feed.result.key_file_version
     source["catalog_expires_at"] = catalog_feed._iso(feed.result.expires)
     source["catalog_signed_commit"] = feed.source_commit
     if feed.may_advance_state:
@@ -1348,7 +1356,10 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     "catalog_list" in entry for entry in stored_entries
                 ):
                     if not is_official:
-                        skip_commit = previous_commit
+                        # The development source is always read: whether it may carry a new kind
+                        # depends on the variable, not on the commit.
+                        if not dev_source.is_dev_source(source_key, source):
+                            skip_commit = previous_commit
                     elif (not source.get("dev_ref") and source.get("trusted") is True
                           and (not catalog_feed.signed_feed_enabled() or (
                               source.get("catalog_signature")
@@ -3454,15 +3465,40 @@ CONSENT_CHANGED_REASON = (
 )
 
 
-def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> None:
-    """Stage the plugins a closure adds, dependencies first, before the plugin that needs them."""
-    for member in resolved.members:
-        if member.reason == "root":
-            continue
-        stage_install(
-            member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
-            catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
-        )
+def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[str]:
+    """Stage the plugins a closure adds, dependencies first, before the plugin that needs them.
+
+    Returns the ids it staged. When one of them fails, the ones staged before it in this call are
+    discarded and the failure goes on.
+    """
+    staged: list[str] = []
+    try:
+        for member in resolved.members:
+            if member.reason == "root":
+                continue
+            stage_install(
+                member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
+                catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+            )
+            staged.append(member.plugin_id)
+    except Exception:
+        _discard_staged_members(staged)
+        raise
+    return staged
+
+
+def _discard_staged_members(plugin_ids: list[str]) -> None:
+    """Remove the plugins a call staged for a plugin that then failed to stage, last staged first.
+
+    Nothing else needs them: they were not installed before the call, and the plugin they were staged
+    for is not there. A removal that fails is logged and leaves the rest to the person.
+    """
+    for plugin_id in reversed(plugin_ids):
+        try:
+            remove_installation(plugin_id)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Could not discard %s, which was staged for a plugin that failed to install", plugin_id)
 
 
 def _install_closure(state: dict[str, Any], entry: dict[str, Any]):
@@ -3547,13 +3583,16 @@ def install_catalog_entry(
         if shown["digest"] != consent_digest:
             raise ProviderHubConsentError(CONSENT_CHANGED_REASON, changed=True)
     # The plugins it extends or needs are installed first, from the same source, by the same rules.
-    if resolved is not None:
-        _stage_closure_members(resolved, source_id, checkpoint)
-    # An entry stored before the plugins list existed carries no list and came from providers.
-    return stage_install(
-        entry["manifest"], checkpoint=checkpoint, source_id=source_id,
-        catalog_list=entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
-    )
+    members = _stage_closure_members(resolved, source_id, checkpoint) if resolved is not None else []
+    try:
+        # An entry stored before the plugins list existed carries no list and came from providers.
+        return stage_install(
+            entry["manifest"], checkpoint=checkpoint, source_id=source_id,
+            catalog_list=entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
+        )
+    except Exception:
+        _discard_staged_members(members)
+        raise
 
 
 def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[str, Any]:
@@ -4165,23 +4204,29 @@ def apply_update(provider_id: str, checkpoint=None, consent_digest: str | None =
     delta = _update_delta(state, provider, manifest, source_id)
     if delta and delta["needs_consent"] and consent_digest != delta["digest"]:
         return _record_failed_update(provider_id, provider, consent.delta_text(delta))
+    members: list[str] = []
     if closure.has_needs(manifest):
         # A plugin the new release needs is staged first, as an install does.
         found = _find_catalog_entry(state, source_id, manifest_provider_id(manifest), manifest.get("version"),
                                     manifest=manifest)
         if found is not None:
             try:
-                _stage_closure_members(_closure_of(state, found[1]), source_id, checkpoint)
+                members = _stage_closure_members(_closure_of(state, found[1]), source_id, checkpoint)
             except ProviderHubInstallError as error:
                 return _record_failed_update(provider_id, provider, refusal_text(error))
     try:
         return stage_install(manifest, checkpoint=checkpoint, source_id=source_id)
     except ProviderHubInstallError:
+        _discard_staged_members(members)
         return get_provider(provider_id)
     except ManifestValidationError as error:
         # The install path refused the manifest before it started a job, so the refusal is
         # recorded here as a failed update, the way a missing manifest is.
+        _discard_staged_members(members)
         return _record_failed_update(provider_id, provider, refusal_text(error))
+    except Exception:
+        _discard_staged_members(members)
+        raise
 
 
 def _record_failed_update(provider_id: str, provider: dict[str, Any], message: str) -> dict[str, Any]:
