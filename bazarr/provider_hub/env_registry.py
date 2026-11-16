@@ -185,6 +185,10 @@ def reconcile_environments(
       the installation keeps the environment it had.
     * An active installation whose interpreter is gone is marked ``needs_repair``
       and gets the error text installation errors use.
+    * An active installation already flagged is looked at again, switched on or off, and its flag goes when
+      the static checks pass: the interpreter is there and fits this host, and the bundle matches its
+      manifest. No worker is started to prove it, so a fault only a worker would show is not this check's.
+      Only the repair message goes with the flag; any other error stays.
 
     The probes run without the state lock; the result is applied in one write
     that skips any row that changed in the meantime.

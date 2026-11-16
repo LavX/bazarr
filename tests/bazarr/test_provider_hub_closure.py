@@ -1045,6 +1045,6 @@ def test_the_boot_order_is_activation_then_reconciliation_then_the_second_depend
     assert load_state()["installations"]["user"]["blocked"] is True
 
     source = (Path(service.__file__).parents[1] / "init.py").read_text(encoding="utf-8")
-    assert (source.index("activate_staged_installations()")
+    assert (source.index("activated = activate_staged_installations()")
             < source.index("reconcile_plugin_environments()")
             < source.index("enforce_activation_needs()"))

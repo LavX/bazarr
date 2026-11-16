@@ -285,7 +285,9 @@ def _provides_now(row: dict[str, Any], capability: str) -> bool:
     return plugin is not None and capability in plugin.provides
 
 
-def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = False) -> list[str]:
+def dependents(
+    state: dict[str, Any], plugin_id: str, *, enabled_only: bool = False, enabled: dict[str, bool] | None = None,
+) -> list[str]:
     """The ids of installed plugins that depend on ``plugin_id``.
 
     A plugin depends on another when it extends it, or requires a capability the other provides and
@@ -293,16 +295,21 @@ def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = Fa
     next restart, each with one consistent set of releases: a staged update that drops a capability stops
     supplying it after the restart, and one that adds it does not supply it before. With ``enabled_only``,
     plugins that are switched off do not count, which is the rule for switching a dependency off;
-    removing one counts every installed dependent.
+    removing one counts every installed dependent. ``enabled`` overrides, by id, whether a plugin counts as
+    switched on, for a change that has not been saved yet.
     """
     installed = installed_plugins(state)
     if plugin_id not in installed:
         return []
+
+    def on(pid: str, row: dict[str, Any]) -> bool:
+        return enabled[pid] if enabled is not None and pid in enabled else _enabled(row)
+
     found = []
     for other_id, (_active, row) in sorted(installed.items()):
         if other_id == plugin_id:
             continue
-        if enabled_only and not _enabled(row):
+        if enabled_only and not on(other_id, row):
             continue
         for phase in ("now", "next"):
             consumer = _manifest_in(row, phase)
@@ -316,7 +323,7 @@ def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = Fa
                 # A plugin that is switched off supplies nothing.
                 elsewhere = False
                 for held_id, (_held, held_row) in installed.items():
-                    if held_id in (plugin_id, other_id) or not _enabled(held_row):
+                    if held_id in (plugin_id, other_id) or not on(held_id, held_row):
                         continue
                     supplier = _manifest_in(held_row, phase)
                     if supplier is not None and capability in supplier.provides:

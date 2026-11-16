@@ -1888,10 +1888,11 @@ def _restore_after_refused_update(provider_id: str, changes, restore) -> None:
 
 
 def note_switched_providers(switched_on: set[str], switched_off: set[str]) -> None:
-    """After a settings save that switched subtitle providers on or off, update what held-back ones show.
+    """Update what held-back providers show, once a settings save has switched some on or off.
 
-    The same rule the Hub's own switch applies: a held-back plugin shows its reason once it is on and loses
-    it once it is off, and no other error is touched."""
+    Called after the save has released its settings locks, because it takes the state lock, which the Hub's
+    own switch takes first. A held-back provider that is now on shows its reason; one that is now off loses
+    it. Any other error is left alone."""
     if not switched_on and not switched_off:
         return
 

@@ -3169,3 +3169,75 @@ def test_a_settings_save_that_switches_a_held_back_provider_on_shows_its_reason_
 
     config.save_settings([("settings-general-enabled_providers", ["supa", "supb"])])
     assert load_state()["installations"]["depsub"]["last_error"] is None
+
+
+def test_switching_off_the_only_running_alternative_supplier_is_refused(monkeypatch, tmp_path):
+    from app import config
+
+    # The dependent was recorded against supa, which is off; supb is the one that actually supplies it.
+    _alternative_supplier_rows(tmp_path, monkeypatch, ["supb", "depsub"])
+
+    with pytest.raises(ValidationError) as refused:
+        config.save_settings([("settings-general-enabled_providers", ["depsub"])])
+
+    assert refused.value.message == "supb cannot be switched off while depsub depends on it."
+
+
+def test_switching_off_a_supplier_a_staged_update_needs_is_refused(monkeypatch, tmp_path):
+    from plugin_platform_helpers import provider_manifest_v2, write_state
+    from app import config
+
+    supplier = provider_manifest_v2("supsub")
+    supplier["provides"] = ["translit.v1"]
+    dependent = provider_manifest_v2("depsub")
+    staged = provider_manifest_v2("depsub", "2.0.0")
+    staged["requires"] = ["translit.v1"]
+
+    def row(manifest, **extra):
+        return {"provider_id": manifest["id"], "name": manifest["name"], "kind": "subtitle_provider",
+                "active_version": "1.0.0", "state": "active", "pending_restart": False, "manifest": manifest,
+                **extra}
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "supsub": row(supplier),
+        "depsub": row(dependent, staged_version="2.0.0", staged_manifest=staged, state="staged",
+                      pending_restart=True)})))
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["supsub", "depsub"])
+
+    with pytest.raises(ValidationError) as refused:
+        config.save_settings([("settings-general-enabled_providers", ["depsub"])])
+
+    assert refused.value.message == "supsub cannot be switched off while depsub depends on it."
+
+
+def test_the_hub_is_told_about_a_switch_only_after_the_save_has_let_go_of_its_locks(monkeypatch, tmp_path):
+    import threading
+
+    from app import config
+    from discover.metadata import CONFIG_LOCK
+    from provider_hub import service
+
+    _alternative_supplier_rows(tmp_path, monkeypatch, ["supa", "supb"], blocked=True, blocked_reason="held")
+    _saveable(monkeypatch)
+    seen = []
+
+    def note(switched_on, switched_off):
+        # Another thread can take the settings lock only when this thread no longer holds it.
+        free = []
+
+        def try_the_lock():
+            got = CONFIG_LOCK.acquire(blocking=False)
+            free.append(got)
+            if got:
+                CONFIG_LOCK.release()
+
+        worker = threading.Thread(target=try_the_lock)
+        worker.start()
+        worker.join()
+        seen.append((free == [True], set(switched_on), set(switched_off)))
+
+    monkeypatch.setattr(service, "note_switched_providers", note)
+
+    config.save_settings([("settings-general-enabled_providers", ["supa", "supb", "depsub"])])
+
+    assert seen == [(True, {"depsub"}, set())]
