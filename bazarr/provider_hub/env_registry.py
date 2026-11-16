@@ -225,13 +225,9 @@ def reconcile_environments(
                 flags.append(provider_id)
                 summary["needs_repair"].append(provider_id)
                 continue
-            clearing = (
-                not staged and bool(row.get("needs_repair")) and (
-                    row.get("last_error") == NEEDS_REPAIR_MESSAGE
-                    # A held-back plugin's message is its reason, and it runs no worker to clear the flag.
-                    or (bool(row.get("blocked")) and row.get("last_error") == row.get("blocked_reason"))
-                )
-            )
+            # Any active row flagged as needing repair is looked at again, whatever its error says (or whether
+            # it has one) and whether it is switched on: the flag goes once its environment is back.
+            clearing = not staged and bool(row.get("needs_repair"))
             try:
                 manifest = validate(row, staged)
             except Exception:
@@ -326,12 +322,11 @@ def reconcile_environments(
             if provider_id in flags:
                 continue  # a check in this pass found it broken: the flag stays
             row = installations.get(provider_id)
-            if isinstance(row, dict) and row.get("last_error") == NEEDS_REPAIR_MESSAGE:
+            if isinstance(row, dict):
                 row.pop("needs_repair", None)
-                row["last_error"] = _held_back_error(row)
-            elif isinstance(row, dict) and row.get("blocked") and row.get("last_error") == row.get("blocked_reason"):
-                # A held-back plugin runs no worker that would clear the flag, and its message is its reason.
-                row.pop("needs_repair", None)
+                # Only the repair message goes with the flag; any other error is not this check's to clear.
+                if row.get("last_error") == NEEDS_REPAIR_MESSAGE:
+                    row["last_error"] = _held_back_error(row)
         for provider_id, python_key, old, new in repoints:
             row = installations.get(provider_id)
             if isinstance(row, dict) and row.get(python_key) == old:

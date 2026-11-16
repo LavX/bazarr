@@ -1887,6 +1887,26 @@ def _restore_after_refused_update(provider_id: str, changes, restore) -> None:
         )
 
 
+def note_switched_providers(switched_on: set[str], switched_off: set[str]) -> None:
+    """After a settings save that switched subtitle providers on or off, update what held-back ones show.
+
+    The same rule the Hub's own switch applies: a held-back plugin shows its reason once it is on and loses
+    it once it is off, and no other error is touched."""
+    if not switched_on and not switched_off:
+        return
+
+    def apply(state: dict[str, Any]) -> None:
+        for provider_id, row in (state.get("installations") or {}).items():
+            if not isinstance(row, dict) or not row.get("blocked") or not row.get("blocked_reason"):
+                continue
+            if provider_id in switched_on:
+                row["last_error"] = row["blocked_reason"]
+            elif provider_id in switched_off and row.get("last_error") == row["blocked_reason"]:
+                row["last_error"] = None
+
+    mutate_state(apply)
+
+
 def switch_on_refusal(name: str, needs: list[str]) -> str:
     """Why a plugin cannot be switched on: what it needs is not running."""
     return f"{name} needs {', '.join(needs)}, which is not running, so it cannot be switched on."

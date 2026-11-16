@@ -224,10 +224,11 @@ def write_counter_file(records: Mapping[str, ChannelRecord]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         # The read, the merge and the replacement are one step: two refreshes writing at once cannot let the
-        # older counter overwrite the newer one. A lock that cannot be had does not stop the write.
+        # older counter overwrite the newer one. A lock that cannot be had skips the write.
         with process_lock(path.parent / ".feed-counter.lock", wait=10.0) as held:
             if not held:
-                # Two writers could overwrite each other, so neither writes. The database holds the numbers.
+                # Without the lock an older counter could overwrite a newer one, so this writer does not write.
+                # The database stays authoritative for the numbers.
                 logger.warning("The catalog feed counter file was not written: its lock could not be taken")
                 return
             merged = {**read_counter_file()}

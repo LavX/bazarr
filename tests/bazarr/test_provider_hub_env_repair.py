@@ -2042,3 +2042,70 @@ def test_a_healthy_environment_clears_the_repair_flag_of_a_held_back_plugin_and_
 
     row = load_state()["installations"]["examplehub"]
     assert "needs_repair" not in row and row["last_error"] == reason and row["blocked"] is True
+
+
+def _healthy_env_row(hub, **extra):
+    env = _env(hub / "envs" / "alpha" / "1.0.0" / "fp1")
+    (env / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\nversion = {sys.version_info.major}.{sys.version_info.minor}.0\n", encoding="utf-8")
+    bundle = _bundle_with(hub)
+    return _active_row(bundle, env / "bin" / "python", needs_repair=True, **extra)
+
+
+def _reconcile_once():
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.service import _verify_bundle_for_run
+
+    return env_registry.reconcile_environments(
+        validate=lambda row, staged: validate_manifest(row["manifest"], built_in_provider_ids=set()),
+        probe=lambda *args: None, verify_bundle=_verify_bundle_for_run)
+
+
+@pytest.mark.parametrize("error", [None, "a download failed", env_registry.NEEDS_REPAIR_MESSAGE])
+def test_a_restored_environment_clears_the_flag_whatever_the_row_says_and_keeps_other_errors(hub, error):
+    state = load_state()
+    state["installations"] = {"examplehub": _healthy_env_row(hub, last_error=error)}
+    save_state(state)
+
+    _reconcile_once()
+
+    row = load_state()["installations"]["examplehub"]
+    assert "needs_repair" not in row
+    assert row["last_error"] == (None if error == env_registry.NEEDS_REPAIR_MESSAGE else error)
+
+
+def test_a_restored_environment_clears_the_flag_of_a_switched_off_row_too(hub, monkeypatch):
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: [])
+    state = load_state()
+    state["installations"] = {"examplehub": _healthy_env_row(hub, last_error=env_registry.NEEDS_REPAIR_MESSAGE)}
+    save_state(state)
+
+    _reconcile_once()
+
+    assert "needs_repair" not in load_state()["installations"]["examplehub"]
+
+
+@pytest.mark.parametrize("enabled,shown", [(["examplehub"], True), ([], False)])
+def test_a_repair_leaves_the_held_back_reason_only_on_a_row_that_is_on(hub, tmp_path, monkeypatch, enabled, shown):
+    from provider_hub.service import repair_installation_environment
+
+    monkeypatch.setattr("provider_hub.kinds.subtitle_provider.bazarr_enabled_providers", lambda: list(enabled))
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    old = _env(hub / "shared_envs" / "old")
+    reason = "It needs parent, which is not running."
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(
+        bundle, old / "bin" / "python", needs_repair=True, last_error=env_registry.NEEDS_REPAIR_MESSAGE,
+        blocked=True, blocked_reason=reason)}
+    save_state(state)
+    _patch_environment(monkeypatch)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker",
+                        lambda manifest, bundle_path, python_path: None)
+    monkeypatch.setattr("provider_hub.registry.register_active_provider_classes", lambda installations=None: [])
+
+    repair_installation_environment("examplehub")
+
+    row = load_state()["installations"]["examplehub"]
+    assert "needs_repair" not in row and row["blocked"] is True
+    assert row["last_error"] == (reason if shown else None)

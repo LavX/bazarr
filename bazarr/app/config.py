@@ -2140,19 +2140,28 @@ def _refuse_provider_switch_with_dependencies(settings_items):
     new = {str(item) for item in submitted}
     current = set(settings.general.enabled_providers or [])
     removed, added = current - new, new - current
-    for provider_id in sorted(removed):
-        # A dependent counts when it stays on, or is switched on by this same save.
-        names = [name for name in closure.dependents(load_state(), provider_id)
-                 if name in added or (name not in removed and closure.is_on(installations.get(name) or {}))]
-        if names:
-            raise ValidationError(dependents_refusal_text(provider_id, names, 'switched off'))
-    if added:
-        enabled = {pid: True for pid in added} | {pid: False for pid in removed}
-        unmet = closure.unmet_needs(installations, enabled)
-        for provider_id in sorted(added):
-            if provider_id in unmet:
-                name = (installations.get(provider_id) or {}).get('name') or provider_id
-                raise ValidationError(switch_on_refusal(name, unmet[provider_id]))
+    if not removed and not added:
+        return
+    # Judged on the list the save leaves: a plugin that is on afterwards must still have something running to
+    # rely on, whatever else the same save switches off or on.
+    before = closure.unmet_needs(installations)
+    after = closure.unmet_needs(installations, {pid: True for pid in added} | {pid: False for pid in removed})
+
+    def stays_on(provider_id: str) -> bool:
+        return provider_id in added or (provider_id not in removed
+                                        and closure.is_on(installations.get(provider_id) or {}))
+
+    for provider_id in sorted(after):
+        if provider_id in before and provider_id not in added:
+            continue  # it was already unmet; this save did not make it so
+        if not stays_on(provider_id):
+            continue
+        gone = [pid for pid in sorted(removed) if any(item.startswith(f'{pid} (') for item in after[provider_id])]
+        if gone:
+            raise ValidationError(dependents_refusal_text(gone[0], [provider_id], 'switched off'))
+        if provider_id in added:
+            name = (installations.get(provider_id) or {}).get('name') or provider_id
+            raise ValidationError(switch_on_refusal(name, after[provider_id]))
 
 
 def _refuse_unverified_plugin_destination(settings_items):
@@ -2735,6 +2744,7 @@ def save_settings(settings_items):
         _refuse_unverified_scalar_arr_destination(items)
         _refuse_unverified_plugin_destination(items)
         _refuse_provider_switch_with_dependencies(items)
+        enabled_before = set(settings.general.enabled_providers or [])
         metadata_submitted = any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
                                  for key, _ in items)
         changed = False
@@ -2758,6 +2768,15 @@ def save_settings(settings_items):
             persisted = True
             if changed:
                 invalidate_metadata()
+            # A held-back provider shows its reason once switched on, as the Hub's own switch does.
+            enabled_after = set(settings.general.enabled_providers or [])
+            if enabled_after != enabled_before:
+                try:
+                    from provider_hub.service import note_switched_providers
+                    note_switched_providers(enabled_after - enabled_before, enabled_before - enabled_after)
+                except Exception:
+                    # What a held-back provider shows is a courtesy; the save itself is on disk.
+                    logging.exception("Could not update what the switched providers show")
 
         try:
             _save_settings_with_native(items, strict_metadata=changed, on_persisted=settings_persisted)

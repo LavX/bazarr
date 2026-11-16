@@ -3089,3 +3089,83 @@ def test_a_settings_save_that_does_not_touch_the_provider_list_is_not_checked(mo
     _hub_rows(tmp_path, monkeypatch, ["depsub"])
 
     config._refuse_provider_switch_with_dependencies([("settings-general-theme", ["dark"])])
+
+
+def _alternative_supplier_rows(tmp_path, monkeypatch, enabled, **dependent_extra):
+    from plugin_platform_helpers import provider_manifest_v2, write_state
+    from app import config
+
+    def supplier(name):
+        manifest = provider_manifest_v2(name)
+        manifest["provides"] = ["translit.v1"]
+        return manifest
+
+    dependent = provider_manifest_v2("depsub")
+    dependent["requires"] = ["translit.v1"]
+
+    def row(manifest, **extra):
+        return {"provider_id": manifest["id"], "name": manifest["name"], "kind": "subtitle_provider",
+                "active_version": "1.0.0", "state": "active", "pending_restart": False, "manifest": manifest,
+                **extra}
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "supa": row(supplier("supa")), "supb": row(supplier("supb")),
+        "depsub": row(dependent, supplied_by={"translit.v1": "supa"}, **dependent_extra)})))
+    monkeypatch.setattr(config.settings.general, "enabled_providers", list(enabled))
+
+
+def test_switching_off_two_alternative_suppliers_in_one_save_is_refused(monkeypatch, tmp_path):
+    from app import config
+
+    _alternative_supplier_rows(tmp_path, monkeypatch, ["supa", "supb", "depsub"])
+
+    # Either one alone could go, so the stored list would allow each; the list the save leaves does not.
+    config._refuse_provider_switch_with_dependencies([("settings-general-enabled_providers", ["depsub", "supb"])])
+    with pytest.raises(ValidationError) as refused:
+        config.save_settings([("settings-general-enabled_providers", ["depsub"])])
+
+    assert refused.value.message == "supa cannot be switched off while depsub depends on it."
+
+
+def test_switching_one_supplier_off_while_switching_another_on_is_allowed(monkeypatch, tmp_path):
+    from app import config
+
+    _alternative_supplier_rows(tmp_path, monkeypatch, ["supa", "depsub"])
+
+    config._refuse_provider_switch_with_dependencies([("settings-general-enabled_providers", ["supb", "depsub"])])
+
+
+def test_a_save_does_not_refuse_what_was_already_unmet_before_it(monkeypatch, tmp_path):
+    from app import config
+
+    _alternative_supplier_rows(tmp_path, monkeypatch, ["depsub"])
+
+    config._refuse_provider_switch_with_dependencies([("settings-general-enabled_providers", [])])
+
+
+def _saveable(monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules, "app.database",
+        SimpleNamespace(database=SimpleNamespace(execute=lambda statement: None), update=lambda _model: _FakeUpdate(),
+                        System=object))
+
+
+def test_a_settings_save_that_switches_a_held_back_provider_on_shows_its_reason_and_off_clears_it(
+        monkeypatch, tmp_path):
+    from app import config
+    from provider_hub.state import load_state
+
+    reason = "It needs supa (translit.v1), which is not running. Once that is running again, restart Bazarr+."
+    _alternative_supplier_rows(tmp_path, monkeypatch, ["supa", "supb"], blocked=True, blocked_reason=reason)
+    _saveable(monkeypatch)
+
+    config.save_settings([("settings-general-enabled_providers", ["supa", "supb", "depsub"])])
+    assert load_state()["installations"]["depsub"]["last_error"] == reason
+
+    config.save_settings([("settings-general-enabled_providers", ["supa", "supb"])])
+    assert load_state()["installations"]["depsub"]["last_error"] is None

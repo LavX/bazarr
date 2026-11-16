@@ -1018,3 +1018,33 @@ def test_the_repair_sites_leave_the_reason_only_on_a_row_that_is_on(tmp_path, mo
 
     rows = load_state()["installations"]
     assert rows["on"]["last_error"] == reason and rows["off"]["last_error"] is None
+
+
+def test_the_boot_order_is_activation_then_reconciliation_then_the_second_dependency_check(
+        tmp_path, monkeypatch, service_kind):
+    from pathlib import Path
+
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    _world(tmp_path, monkeypatch, [], {
+        **_installed(parent), **_installed(user, supplied_by={PARENT_CAPABILITY: "parent"})})
+
+    # Activation runs first and sees a running supplier: nothing has said otherwise yet.
+    service.activate_staged_installations()
+    assert "blocked" not in load_state()["installations"]["user"]
+    # The reconciliation then finds that the supplier has no environment (it has no interpreter on disk), and
+    # flags it on its own.
+    service.reconcile_plugin_environments()
+    assert load_state()["installations"]["parent"]["needs_repair"] is True
+    assert "blocked" not in load_state()["installations"]["user"]
+    # Only the check run after it holds the dependent back.
+    assert service.enforce_activation_needs() is True
+    assert load_state()["installations"]["user"]["blocked"] is True
+
+    source = (Path(service.__file__).parents[1] / "init.py").read_text(encoding="utf-8")
+    assert (source.index("activate_staged_installations()")
+            < source.index("reconcile_plugin_environments()")
+            < source.index("enforce_activation_needs()"))
