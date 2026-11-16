@@ -3016,3 +3016,76 @@ def test_a_hub_config_save_checks_and_writes_inside_the_boundary_the_settings_sa
         assert config.settings[provider_id]["api_token"] == "typed-token"
     finally:
         config.settings.unset(provider_id.upper(), force=True)
+
+
+def _hub_rows(tmp_path, monkeypatch, enabled):
+    from plugin_platform_helpers import provider_manifest_v2, write_state
+    from app import config
+
+    supplier = provider_manifest_v2("supsub")
+    supplier["provides"] = ["translit.v1"]
+    dependent = provider_manifest_v2("depsub")
+    dependent["requires"] = ["translit.v1"]
+
+    def row(manifest, **extra):
+        return {"provider_id": manifest["id"], "name": manifest["name"], "kind": "subtitle_provider",
+                "active_version": "1.0.0", "state": "active", "pending_restart": False, "manifest": manifest,
+                **extra}
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "supsub": row(supplier), "depsub": row(dependent, supplied_by={"translit.v1": "supsub"})})))
+    monkeypatch.setattr(config.settings.general, "enabled_providers", list(enabled))
+
+
+def test_a_settings_save_refuses_to_switch_off_a_provider_another_one_depends_on(monkeypatch, tmp_path):
+    from app import config
+
+    _hub_rows(tmp_path, monkeypatch, ["supsub", "depsub"])
+
+    with pytest.raises(ValidationError) as refused:
+        config.save_settings([("settings-general-enabled_providers", ["depsub"])])
+
+    assert refused.value.message == "supsub cannot be switched off while depsub depends on it."
+
+
+def test_a_settings_save_allows_switching_both_off_together_and_the_dependent_off_alone(monkeypatch, tmp_path):
+    from app import config
+
+    _hub_rows(tmp_path, monkeypatch, ["supsub", "depsub"])
+
+    config._refuse_provider_switch_with_dependencies([("settings-general-enabled_providers", [])])
+    config._refuse_provider_switch_with_dependencies([("settings-general-enabled_providers", ["supsub"])])
+
+
+def test_a_settings_save_refuses_to_switch_on_a_provider_whose_supplier_is_off(monkeypatch, tmp_path):
+    from app import config
+
+    _hub_rows(tmp_path, monkeypatch, [])
+
+    with pytest.raises(ValidationError) as refused:
+        config.save_settings([("settings-general-enabled_providers", ["depsub"])])
+
+    assert refused.value.message == (
+        "Depsub needs supsub (translit.v1), which is not running, so it cannot be switched on.")
+    # With the supplier switched on by the same save, the dependent may be.
+    config._refuse_provider_switch_with_dependencies(
+        [("settings-general-enabled_providers", ["supsub", "depsub"])])
+
+
+def test_a_settings_save_refuses_switching_the_supplier_off_while_switching_its_dependent_on(monkeypatch, tmp_path):
+    from app import config
+
+    _hub_rows(tmp_path, monkeypatch, ["supsub"])
+
+    with pytest.raises(ValidationError) as refused:
+        config._refuse_provider_switch_with_dependencies([("settings-general-enabled_providers", ["depsub"])])
+
+    assert "supsub cannot be switched off while depsub depends on it." == refused.value.message
+
+
+def test_a_settings_save_that_does_not_touch_the_provider_list_is_not_checked(monkeypatch, tmp_path):
+    from app import config
+
+    _hub_rows(tmp_path, monkeypatch, ["depsub"])
+
+    config._refuse_provider_switch_with_dependencies([("settings-general-theme", ["dark"])])

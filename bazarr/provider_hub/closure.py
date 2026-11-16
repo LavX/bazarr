@@ -409,14 +409,26 @@ def supplier_map(state: dict[str, Any], plugin: PluginManifest, owner_id: str) -
     return found
 
 
-def unmet_needs(installations: dict[str, Any]) -> dict[str, list[str]]:
+def is_on(row: dict[str, Any]) -> bool:
+    """Whether an installation is switched on, by the rule of its own kind."""
+    return _enabled(row)
+
+
+def held_back_error(row: dict[str, Any]) -> str | None:
+    """The error a held-back plugin shows: its reason while it is switched on, nothing while it is off."""
+    return row.get("blocked_reason") if row.get("blocked") and _enabled(row) else None
+
+
+def unmet_needs(installations: dict[str, Any], enabled: dict[str, bool] | None = None) -> dict[str, list[str]]:
     """For each installation whose active release relies on a plugin that is not running, what is missing.
 
     Judged on the set that actually activated and is switched on. The plugin it extends must be that
     plugin, running and providing the capability. A capability it once had an installed supplier for is met
     by any running supplier of it, not only the one recorded, and is unmet only when none runs. A plugin
     that is itself unmet is not running, so what relies on it is unmet too, and a plugin that is switched
-    off supplies nothing (it is still judged, so switching it on cannot start it unmet).
+    off supplies nothing (it is still judged, so switching it on cannot start it unmet). A plugin whose
+    environment is flagged as needing repair does not run either. ``enabled`` overrides, by id, whether a
+    plugin counts as switched on, for a change that has not been saved yet.
     """
     rows = {
         str(pid): row for pid, row in installations.items()
@@ -428,7 +440,13 @@ def unmet_needs(installations: dict[str, Any]) -> dict[str, list[str]]:
 
     registered = set(known_kinds())
     # Only a plugin of a kind this Bazarr+ defines, switched on, is running to supply anything.
-    suppliers = {pid for pid in candidates if kind_of(rows[pid]) in registered and _enabled(rows[pid])}
+    def on(pid: str) -> bool:
+        return enabled[pid] if enabled is not None and pid in enabled else _enabled(rows[pid])
+
+    suppliers = {
+        pid for pid in candidates
+        if kind_of(rows[pid]) in registered and on(pid) and not rows[pid].get("needs_repair")
+    }
     blocked: dict[str, list[str]] = {}
     while True:
         newly: dict[str, list[str]] = {}

@@ -824,3 +824,24 @@ def test_the_counter_file_is_read_merged_and_replaced_under_one_lock(tmp_path, m
 
     assert events == ["lock", ("read", True), ("replace", True), "unlock"]
     assert real_read() == {"main": ChannelRecord(9, 1)}
+
+
+def test_a_counter_file_whose_lock_cannot_be_taken_is_not_written(tmp_path, monkeypatch, caplog):
+    import contextlib
+
+    from provider_hub import catalog_feed
+    from provider_hub.catalog_feed import ChannelRecord
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+    catalog_feed.write_counter_file({"main": ChannelRecord(5, 1)})
+
+    @contextlib.contextmanager
+    def refused(path, wait=0):
+        yield False
+
+    monkeypatch.setattr(catalog_feed, "process_lock", refused)
+
+    catalog_feed.write_counter_file({"main": ChannelRecord(9, 1)})
+
+    assert catalog_feed.read_counter_file() == {"main": ChannelRecord(5, 1)}
+    assert "lock could not be taken" in caplog.text

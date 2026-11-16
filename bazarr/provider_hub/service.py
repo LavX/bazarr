@@ -1887,6 +1887,11 @@ def _restore_after_refused_update(provider_id: str, changes, restore) -> None:
         )
 
 
+def switch_on_refusal(name: str, needs: list[str]) -> str:
+    """Why a plugin cannot be switched on: what it needs is not running."""
+    return f"{name} needs {', '.join(needs)}, which is not running, so it cannot be switched on."
+
+
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if config is not None:
         if not isinstance(config, dict):
@@ -1897,10 +1902,11 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
             raise ValueError(refusal)
     if enabled is True:
         # What a plugin relies on has to be running before it is switched on, as at the next boot.
-        needs = closure.unmet_needs((load_state().get("installations") or {})).get(provider_id)
+        rows = load_state().get("installations") or {}
+        needs = closure.unmet_needs(rows).get(provider_id)
         if needs:
-            raise ValueError(
-                f"{provider_id} needs {', '.join(needs)}, which is not running. Switch it on first.")
+            name = (rows.get(provider_id) or {}).get("name") or provider_id
+            raise ValueError(switch_on_refusal(name, needs))
 
     def _encrypt_provider_config(provider: dict[str, Any],
                                   config: dict[str, Any]) -> dict[str, Any]:
@@ -2050,6 +2056,14 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
         if enabled is not None:
             remember("enabled")
             provider["enabled"] = bool(enabled)
+            # A plugin held back at boot says why once it is switched on, and stops saying it once it is off.
+            if enabled and provider.get("blocked") and provider.get("blocked_reason"):
+                remember("last_error")
+                provider["last_error"] = provider["blocked_reason"]
+            elif not enabled and provider.get("blocked") and provider.get("last_error") == provider.get(
+                    "blocked_reason"):
+                remember("last_error")
+                provider["last_error"] = None
 
         if next_config is not None:
             remember("config")
@@ -3750,11 +3764,52 @@ def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[st
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def _row_is_on(row: dict[str, Any]) -> bool:
-    try:
-        return bool(get_kind(kind_of(row)).is_enabled(row))
-    except Exception:
-        return bool(row.get("enabled", True))
+def _apply_unmet_needs(installations: dict[str, Any]) -> bool:
+    """Hold back each plugin whose active release relies on one that is not running, and release the others.
+
+    A held-back plugin carries the reason and, while it is switched on, shows it as its error. A switched-off
+    one shows no error for not running, and loses the one an earlier pass wrote. An error that is not the
+    reason is never touched. Returns whether any row changed.
+    """
+    changed = False
+    unmet = closure.unmet_needs(installations)
+    for plugin_id, row in installations.items():
+        if not isinstance(row, dict):
+            continue
+        if plugin_id in unmet:
+            reason = (f"It needs {', '.join(unmet[plugin_id])}, which is not running, so it was not started. "
+                      "Once that is running again, restart Bazarr+.")
+            on = closure.is_on(row)
+            previous = row.get("blocked_reason")
+            if not row.get("blocked") or previous != reason:
+                row.update(blocked=True, blocked_reason=reason)
+                if on:
+                    row["last_error"] = reason
+                elif row.get("last_error") == previous:
+                    row["last_error"] = None
+                changed = True
+            elif on and not row.get("last_error"):
+                # Something cleared the reason (an activation, a repair): a held-back plugin always says why.
+                row["last_error"] = reason
+                changed = True
+            elif not on and row.get("last_error") == reason:
+                row["last_error"] = None
+                changed = True
+        elif row.get("blocked"):
+            if row.get("last_error") == row.get("blocked_reason"):
+                row["last_error"] = None
+            row.pop("blocked", None)
+            row.pop("blocked_reason", None)
+            changed = True
+    return changed
+
+
+def enforce_activation_needs() -> bool:
+    """Run the boot dependency check again, over what the environment reconciliation has since found.
+
+    A supplier whose environment is missing or damaged does not run, and that is only known once the
+    environments have been reconciled, which is after activation. Returns whether any row changed."""
+    return bool(mutate_state(lambda state: _apply_unmet_needs(state.setdefault("installations", {}))))
 
 
 def activate_staged_installations() -> list[str]:
@@ -3869,30 +3924,7 @@ def activate_staged_installations() -> list[str]:
             job.update(message=msg)
     # What actually activated is known now. A plugin whose active release relies on one that is not running
     # does not start, and says why.
-    unmet = closure.unmet_needs(installations)
-    for plugin_id, row in installations.items():
-        if not isinstance(row, dict):
-            continue
-        if plugin_id in unmet:
-            reason = (f"It needs {', '.join(unmet[plugin_id])}, which is not running, so it was not started. "
-                      "Once that is running again, restart Bazarr+.")
-            # A plugin that is switched off is not shown an error for not running.
-            shown = None if not _row_is_on(row) else reason
-            if not row.get("blocked") or row.get("blocked_reason") != reason:
-                row.update(blocked=True, blocked_reason=reason)
-                if shown:
-                    row["last_error"] = shown
-                changed = True
-            elif shown and not row.get("last_error"):
-                # Something cleared the reason (an activation, a repair): a held-back plugin always says why.
-                row["last_error"] = shown
-                changed = True
-        elif row.get("blocked"):
-            if row.get("last_error") == row.get("blocked_reason"):
-                row["last_error"] = None
-            row.pop("blocked", None)
-            row.pop("blocked_reason", None)
-            changed = True
+    changed = _apply_unmet_needs(installations) or changed
     if changed:
         updated_installations = state.get("installations") or {}
 
@@ -4007,7 +4039,7 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             current["python_path"] = str(python_path)
             if current.pop("needs_repair", None):
                 # A plugin held back at boot keeps saying why.
-                current["last_error"] = current.get("blocked_reason") if current.get("blocked") else None
+                current["last_error"] = closure.held_back_error(current)
             env_registry.register_environment(state, environment_fingerprint(validated), env_path)
             return dict(current)
 
@@ -4057,6 +4089,11 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
 def cleanup_plugin_environments() -> list[str]:
     """Remove environments no installation references. Not for boot."""
     return env_registry.cleanup_environments(provider_hub_dir())
+
+
+def dependents_refusal_text(provider_id: str, names: list[str], action: str) -> str:
+    """The refusal for removing or switching off a plugin that others depend on."""
+    return closure.dependents_text(provider_id, names, action)
 
 
 def dependent_refusal(provider_id: str, action: str, *, enabled_only: bool = False) -> str | None:

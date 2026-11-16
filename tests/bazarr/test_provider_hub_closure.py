@@ -758,8 +758,8 @@ def test_a_plugin_cannot_be_switched_on_while_its_supplier_is_switched_off(tmp_p
 
     service.update_provider("user", enabled=False)
     service.update_provider("parent", enabled=False)
-    with pytest.raises(ValueError, match=r"user needs parent \(demo_parent.backend.v1\), which is not running. "
-                                         "Switch it on first"):
+    with pytest.raises(ValueError, match=r"User needs parent \(demo_parent.backend.v1\), which is not running, "
+                                         "so it cannot be switched on."):
         service.update_provider("user", enabled=True)
     assert load_state()["installations"]["user"]["enabled"] is False
 
@@ -930,3 +930,91 @@ def test_the_boot_check_writes_the_reason_back_when_something_cleared_it(tmp_pat
     rows = _boot(tmp_path, monkeypatch, {**_installed(parent), **_installed(user, **cleared)})
 
     assert rows["user"]["last_error"] == cleared["blocked_reason"]
+
+
+# --- a supplier whose environment is lost does not run -----------------------------------------------------------
+
+
+def test_a_supplier_that_needs_repair_does_not_count_as_running(tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+
+    rows = _boot(tmp_path, monkeypatch, {
+        **_installed(parent, needs_repair=True), **_installed(user, supplied_by={PARENT_CAPABILITY: "parent"})})
+
+    assert rows["user"]["blocked"] is True
+
+
+def test_the_check_after_the_environment_reconciliation_holds_back_what_a_lost_environment_supplied(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    _world(tmp_path, monkeypatch, [], {
+        **_installed(parent), **_installed(user, supplied_by={PARENT_CAPABILITY: "parent"})})
+    service.activate_staged_installations()
+    assert "blocked" not in load_state()["installations"]["user"]
+
+    # The reconciliation, which runs after activation, finds the supplier's environment gone.
+    from provider_hub.state import mutate_state
+    mutate_state(lambda state: state["installations"]["parent"].update(needs_repair=True))
+    assert service.enforce_activation_needs() is True
+
+    row = load_state()["installations"]["user"]
+    assert row["blocked"] is True and "parent (demo_parent.backend.v1)" in row["last_error"]
+    assert service.enforce_activation_needs() is False
+
+
+# --- a switched-off plugin shows no error for not running, and what it shows is its own ----------------------
+
+
+def test_the_boot_check_clears_the_reason_from_a_row_that_is_off_and_keeps_other_errors(
+        tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent")
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    bound = {"supplied_by": {PARENT_CAPABILITY: "parent"}}
+    reason = ("It needs parent (demo_parent.backend.v1), which is not running, so it was not started. "
+              "Once that is running again, restart Bazarr+.")
+    held = {**bound, "enabled": False, "blocked": True, "blocked_reason": reason}
+
+    rows = _boot(tmp_path, monkeypatch, {**_installed(parent), **_installed(user, last_error=reason, **held)})
+    assert rows["user"]["last_error"] is None and rows["user"]["blocked"] is True
+
+    rows = _boot(tmp_path, monkeypatch, {**_installed(parent), **_installed(user, last_error="a download failed",
+                                                                          **held)})
+    assert rows["user"]["last_error"] == "a download failed"
+
+
+def test_switching_a_held_back_plugin_on_shows_its_reason_and_switching_it_off_clears_it(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    reason = "It needs parent (x), which is not running, so it was not started. Once that is running again, " \
+             "restart Bazarr+."
+    _world(tmp_path, monkeypatch, [], {**_installed(parent), **_installed(
+        user, enabled=False, supplied_by={PARENT_CAPABILITY: "parent"}, blocked=True, blocked_reason=reason)})
+
+    assert service.update_provider("user", enabled=True)["last_error"] == reason
+    assert service.update_provider("user", enabled=False)["last_error"] is None
+
+
+def test_the_repair_sites_leave_the_reason_only_on_a_row_that_is_on(tmp_path, monkeypatch, service_kind):
+    from provider_hub import env_registry
+    from provider_hub.state import load_state
+
+    reason = "It needs parent, which is not running."
+    on = _manifest("on")
+    off = _manifest("off")
+    flags = {"needs_repair": True, "last_error": env_registry.NEEDS_REPAIR_MESSAGE, "blocked": True,
+             "blocked_reason": reason, "python_path": "/x/bin/python"}
+    _world(tmp_path, monkeypatch, [], {**_installed(on, **flags), **_installed(off, enabled=False, **flags)})
+
+    env_registry.clear_needs_repair("on")
+    env_registry.clear_needs_repair("off")
+
+    rows = load_state()["installations"]
+    assert rows["on"]["last_error"] == reason and rows["off"]["last_error"] is None

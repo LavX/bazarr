@@ -2115,6 +2115,46 @@ def _installed_provider_hub_manifest_fields():
         return None, None
 
 
+def _refuse_provider_switch_with_dependencies(settings_items):
+    """The dependency rules for switching subtitle providers on and off in a settings save.
+
+    A subtitle provider is switched on by being in ``enabled_providers``, so this is where it is switched,
+    and the Provider Hub's own switch is not the only one. Switching off a plugin that another one that stays
+    on depends on is refused, and so is switching on a plugin whose supplier would not be running, judged on the
+    list the save would leave. The texts are the ones the Hub's own switch gives. Nothing is refused when the
+    Hub's state cannot be read.
+    """
+    submitted = None
+    for key, values in settings_items:
+        if key == 'settings-general-enabled_providers':
+            submitted = values if isinstance(values, list) else [values]
+    if submitted is None:
+        return
+    try:
+        from provider_hub import closure
+        from provider_hub.service import dependents_refusal_text, switch_on_refusal
+        from provider_hub.state import load_state
+        installations = load_state().get('installations') or {}
+    except Exception:
+        return
+    new = {str(item) for item in submitted}
+    current = set(settings.general.enabled_providers or [])
+    removed, added = current - new, new - current
+    for provider_id in sorted(removed):
+        # A dependent counts when it stays on, or is switched on by this same save.
+        names = [name for name in closure.dependents(load_state(), provider_id)
+                 if name in added or (name not in removed and closure.is_on(installations.get(name) or {}))]
+        if names:
+            raise ValidationError(dependents_refusal_text(provider_id, names, 'switched off'))
+    if added:
+        enabled = {pid: True for pid in added} | {pid: False for pid in removed}
+        unmet = closure.unmet_needs(installations, enabled)
+        for provider_id in sorted(added):
+            if provider_id in unmet:
+                name = (installations.get(provider_id) or {}).get('name') or provider_id
+                raise ValidationError(switch_on_refusal(name, unmet[provider_id]))
+
+
 def _refuse_unverified_plugin_destination(settings_items):
     """The destination rule for plugin settings.
 
@@ -2694,6 +2734,7 @@ def save_settings(settings_items):
             plex_destination_lock_phase()
         _refuse_unverified_scalar_arr_destination(items)
         _refuse_unverified_plugin_destination(items)
+        _refuse_provider_switch_with_dependencies(items)
         metadata_submitted = any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
                                  for key, _ in items)
         changed = False

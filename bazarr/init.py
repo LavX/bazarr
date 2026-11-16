@@ -174,8 +174,11 @@ except Exception:  # pragma: no cover - hub failures must not prevent startup
 try:
     # Records the environments installations already use and flags the ones
     # that went missing. It runs no pip: repairing is never a boot step.
-    from provider_hub.service import reconcile_plugin_environments
+    from provider_hub.service import enforce_activation_needs, reconcile_plugin_environments
     reconcile_plugin_environments()
+    # A supplier whose environment just turned out to be missing does not run, so what relies on it is held
+    # back too.
+    enforce_activation_needs()
 except Exception:  # pragma: no cover - hub failures must not prevent startup
     logging.exception("Unable to reconcile Provider Hub environments on startup")
 try:

@@ -328,7 +328,7 @@ def reconcile_environments(
             row = installations.get(provider_id)
             if isinstance(row, dict) and row.get("last_error") == NEEDS_REPAIR_MESSAGE:
                 row.pop("needs_repair", None)
-                row["last_error"] = row.get("blocked_reason") if row.get("blocked") else None
+                row["last_error"] = _held_back_error(row)
             elif isinstance(row, dict) and row.get("blocked") and row.get("last_error") == row.get("blocked_reason"):
                 # A held-back plugin runs no worker that would clear the flag, and its message is its reason.
                 row.pop("needs_repair", None)
@@ -369,6 +369,13 @@ def _row_uses(row: Any, python_path: str | None) -> bool:
     return isinstance(row, dict) and row.get("python_path") == python_path
 
 
+def _held_back_error(row: dict[str, Any]) -> str | None:
+    """What a row shows once its repair message is gone: the reason it was held back, while it is switched on."""
+    from .closure import held_back_error
+
+    return held_back_error(row)
+
+
 def mark_needs_repair(provider_id: str, python_path: str | None = None) -> None:
     """Flag an installation whose worker failed its check. The error text stays as the worker gave it.
 
@@ -392,7 +399,7 @@ def clear_needs_repair(provider_id: str, python_path: str | None = None) -> None
         row = (state.get("installations") or {}).get(provider_id)
         if _row_uses(row, python_path) and isinstance(row, dict) and row.pop("needs_repair", None):
             if row.get("last_error") == NEEDS_REPAIR_MESSAGE:
-                row["last_error"] = row.get("blocked_reason") if row.get("blocked") else None
+                row["last_error"] = _held_back_error(row)
 
     mutate_state(clear)
 
