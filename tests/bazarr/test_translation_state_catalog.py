@@ -10,7 +10,7 @@ import pytest
 from flask import Blueprint, Flask
 from flask_restx import Api
 
-from plugin_platform_helpers import service_manifest
+from plugin_platform_helpers import verified_official_source, service_manifest
 from subtitles.tools.translate.runtime import catalog_view
 from subtitles.tools.translate.runtime.settings_service import InstalledPlugin, TranslatorSettingsService
 from subtitles.tools.translate.runtime.store import OFFICIAL_ENGINE_PLUGIN_ID, TranslatorStore
@@ -34,16 +34,6 @@ def translator_kind():
         kinds._KINDS.pop("translator", None)
         if before is not None:
             kinds._KINDS["translator"] = before
-
-
-@pytest.fixture
-def stageable(monkeypatch):
-    """The installer accepts translator manifests, which the real one does not yet, so the tests that
-    list what the catalog offers can see it. The tests that need the real refusal do not use this."""
-    import provider_hub.service as hub
-
-    monkeypatch.setattr(hub, "real_validate_manifest", hub.validate_manifest, raising=False)
-    monkeypatch.setattr(hub, "validate_manifest", lambda manifest, **kwargs: None)
 
 
 def _ai_manifest(version="2.2.0", **extra):
@@ -70,10 +60,14 @@ def _entry(manifest, source="official", trusted=True):
             "version": manifest["version"], "trusted": trusted, "manifest": manifest, "catalog_list": "plugins"}
 
 
-def _state(tmp_path, monkeypatch, entries=(), installations=None):
+def _state(tmp_path, monkeypatch, entries=(), installations=None, official=None):
+    """A hub state whose official source is a verified, current one, unless ``official`` says otherwise."""
     state_file = tmp_path / "state.json"
     state_file.write_text(json.dumps({
-        "catalog_entries": {f"{e['source']}:{e['provider_id']}:{e['version']}": e for e in entries},
+        "catalog_sources": {"official": official or verified_official_source(),
+                            "community": {"id": "community", "name": "Community", "type": "github",
+                                          "enabled": True, "trusted": False}},
+        "catalog_entries": {f"{e['source']}:plugins:{e['provider_id']}:{e['version']}": e for e in entries},
         "installations": installations or {}, "jobs": []}), encoding="utf-8")
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
 
@@ -105,7 +99,7 @@ def test_a_description_is_trimmed_and_a_manifest_that_does_not_parse_is_skipped(
 
 # ---------------------------------------------------------------- the hub side
 
-def test_an_uninstalled_engine_is_installable_and_an_installed_one_is_not(tmp_path, monkeypatch, stageable):
+def test_an_uninstalled_engine_is_installable_and_an_installed_one_is_not(tmp_path, monkeypatch):
     from provider_hub.service import installable_catalog_plugins
 
     _state(tmp_path, monkeypatch, [_entry(_ai_manifest()), _entry(_google_manifest())],
@@ -114,7 +108,7 @@ def test_an_uninstalled_engine_is_installable_and_an_installed_one_is_not(tmp_pa
     assert [entry["provider_id"] for entry in installable_catalog_plugins("translator")] == [PLUGIN]
 
 
-def test_the_newest_version_of_each_engine_is_the_one_offered(tmp_path, monkeypatch, stageable):
+def test_the_newest_version_of_each_engine_is_the_one_offered(tmp_path, monkeypatch):
     from provider_hub.service import installable_catalog_plugins
 
     _state(tmp_path, monkeypatch, [_entry(_google_manifest("1.0.0")), _entry(_google_manifest("1.2.0")),
@@ -123,7 +117,7 @@ def test_the_newest_version_of_each_engine_is_the_one_offered(tmp_path, monkeypa
     assert entry["version"] == "1.2.0"
 
 
-def test_a_subtitle_provider_is_not_an_engine_and_a_trusted_source_wins_a_tie(tmp_path, monkeypatch, stageable):
+def test_a_subtitle_provider_is_not_an_engine_and_a_trusted_source_wins_a_tie(tmp_path, monkeypatch):
     from provider_hub.service import installable_catalog_plugins
 
     provider = provider_manifest(provider_id="examplehub", version="1.0.0")
@@ -135,19 +129,53 @@ def test_a_subtitle_provider_is_not_an_engine_and_a_trusted_source_wins_a_tie(tm
     assert (found["provider_id"], found["source"]) == (GOOGLE, "official")
 
 
-def test_an_engine_the_install_path_would_refuse_is_not_offered(tmp_path, monkeypatch):
-    from provider_hub.service import installable_catalog_plugins, stage_install
+def test_an_engine_only_the_official_signed_catalog_may_supply_is_the_only_one_offered(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
 
-    manifest = _google_manifest()
-    _state(tmp_path, monkeypatch, [_entry(manifest)])
-    # The install path refuses a translator manifest, so the page must not start that install.
-    with pytest.raises(ValueError):
-        stage_install(manifest, source_id="official")
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest(), source="community", trusted=False)])
+    # A kind other than the subtitle provider comes only from the trusted official source.
+    assert installable_catalog_plugins("translator") == []
+    assert catalog_view.available_engines() == []
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest())])
+    assert [entry["provider_id"] for entry in installable_catalog_plugins("translator")] == [GOOGLE]
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest())], official=verified_official_source(trusted=False))
+    assert installable_catalog_plugins("translator") == []
+
+
+def test_an_engine_from_an_expired_signed_catalog_is_not_offered(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest())],
+           official=verified_official_source(catalog_signature="verified", catalog_expires_at="2001-01-01T00:00:00Z"))
     assert installable_catalog_plugins("translator") == []
     assert catalog_view.available_engines() == []
 
 
-def test_an_entry_whose_manifest_is_not_a_valid_translator_is_not_offered(tmp_path, monkeypatch, stageable):
+def test_an_engine_whose_dependencies_do_not_resolve_is_not_offered(tmp_path, monkeypatch):
+    from provider_hub.service import installable_catalog_plugins
+
+    needy = _google_manifest(extends={"id": "gone", "capability": "gone.v1"})
+    _state(tmp_path, monkeypatch, [_entry(needy)])
+    assert installable_catalog_plugins("translator") == []
+
+
+def test_offering_an_engine_never_reaches_the_network(tmp_path, monkeypatch):
+    import requests
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the catalog view must read the stored catalog only")
+
+    monkeypatch.setattr(requests, "get", refuse)
+    monkeypatch.setattr(requests, "Session", refuse)
+    _state(tmp_path, monkeypatch, [_entry(_google_manifest()), _entry(_ai_manifest("2.3.0"))],
+           installations={PLUGIN: {"provider_id": PLUGIN, "name": "AI", "active_version": "2.2.0", "state": "active",
+                                   "pending_restart": False, "source_bound": True, "source_id": "official",
+                                   "kind": "translator", "manifest": _ai_manifest("2.2.0")}})
+    assert [item["plugin_id"] for item in catalog_view.available_engines()] == [GOOGLE]
+    assert catalog_view.update_version(PLUGIN) == "2.3.0"
+
+
+def test_an_entry_whose_manifest_is_not_a_valid_translator_is_not_offered(tmp_path, monkeypatch):
     from provider_hub.service import installable_catalog_plugins
 
     wrong_api = _google_manifest(version="1.0.1")
@@ -175,14 +203,53 @@ def test_the_update_a_page_shows_is_the_one_the_updates_tab_offers(tmp_path, mon
     assert offered_update_version("examplehub") is None
 
 
-def test_an_update_the_hub_does_not_stage_for_a_translator_is_not_announced(tmp_path, monkeypatch):
-    from provider_hub.service import offered_update_version
-
+def _installed_engine(**fields):
     row = {"provider_id": PLUGIN, "name": "AI", "active_version": "2.2.0", "active_path": "/old", "state": "active",
            "pending_restart": False, "source_bound": True, "source_id": "official", "kind": "translator",
            "manifest": _ai_manifest("2.2.0")}
-    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"))], installations={PLUGIN: row})
+    row.update(fields)
+    return {PLUGIN: row}
+
+
+def test_a_newer_engine_release_from_the_bound_official_source_is_announced(tmp_path, monkeypatch):
+    from provider_hub.service import offered_update_version
+
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"))], installations=_installed_engine())
+    assert offered_update_version(PLUGIN) == "2.3.0"
+
+
+def test_an_update_the_hub_would_refuse_for_an_engine_is_not_announced(tmp_path, monkeypatch):
+    from provider_hub.service import offered_update_version
+
+    # Not from the official source: a translator is never updated from a community one.
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"), source="community", trusted=False)],
+           installations=_installed_engine(source_id="community"))
     assert offered_update_version(PLUGIN) is None
+    # A signed catalog that has expired offers nothing.
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"))], installations=_installed_engine(),
+           official=verified_official_source(catalog_signature="verified", catalog_expires_at="2001-01-01T00:00:00Z"))
+    assert offered_update_version(PLUGIN) is None
+    # A release whose dependencies do not resolve.
+    needy = _ai_manifest("2.3.0", extends={"id": "gone", "capability": "gone.v1"})
+    _state(tmp_path, monkeypatch, [_entry(needy)], installations=_installed_engine())
+    assert offered_update_version(PLUGIN) is None
+
+
+def test_an_update_that_drops_a_capability_an_installed_plugin_relies_on_is_not_announced(tmp_path, monkeypatch):
+    from provider_hub.service import offered_update_version
+
+    capability = "demo_ai.engine.v1"
+    installed = _ai_manifest("2.2.0", provides=[capability])
+    user = service_manifest("demo_user", "1.0.0", requires=[capability])
+    dependents = {"demo_user": {"provider_id": "demo_user", "kind": user["kind"], "name": "User",
+                                "active_version": "1.0.0", "state": "active", "pending_restart": False,
+                                "manifest": user, "enabled": True}}
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"))],
+           installations={**_installed_engine(manifest=installed), **dependents})
+    assert offered_update_version(PLUGIN) is None
+    # With nobody relying on it, the same release is announced.
+    _state(tmp_path, monkeypatch, [_entry(_ai_manifest("2.3.0"))], installations=_installed_engine(manifest=installed))
+    assert offered_update_version(PLUGIN) == "2.3.0"
 
 
 def test_a_catalog_that_cannot_be_read_leaves_the_list_empty_and_the_chip_off(monkeypatch):

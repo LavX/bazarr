@@ -4381,30 +4381,23 @@ def offered_update_version(provider_id: str) -> str | None:
 def installable_catalog_plugins(kind: str) -> list[dict[str, Any]]:
     """The newest installable entry of each catalog plugin of ``kind`` that has no installation at all.
 
-    An entry is left out when its source may not install it, when this host cannot run it, when its
-    manifest is not valid for its kind, or when the install path would refuse it. A trusted source is preferred when two list the same version.
-    Each item is the stored entry: ``source``, ``provider_id``, ``name``, ``version``, ``trusted`` and
-    ``manifest``.
+    It asks what the install path asks, with the same functions: the entry's source may supply its kind (a kind
+    other than the subtitle provider only from the trusted official source, whose signed feed must be current),
+    this host can run it, its kind accepts its manifest and its dependencies resolve. An entry any of those
+    refuses is left out, so the page never starts an install the Hub
+    would refuse. A trusted source is preferred when two list the same version. Consent is not a refusal: the
+    install asks for it. Each item is the stored entry: ``source``, ``provider_id``, ``name``, ``version``,
+    ``trusted`` and ``manifest``.
     """
     state = load_state()
     installed = set((state.get("installations") or {}).keys())
     host = current_host()
     entries = sorted((entry for entry in _stored_manifest_entries(state) if catalog_kind_of(entry) == kind),
                      key=lambda entry: not bool(entry.get("trusted", False)))
+    entry_usable = _entry_usable(state, host)
 
     def usable(entry: dict[str, Any]) -> bool:
-        if _install_refusal(state, entry.get("source"), entry.get("provider_id")) or _host_refusal(entry, host):
-            return False
-        trusted = bool(entry.get("trusted", False))
-        try:
-            get_kind(kind).validate_manifest(entry["manifest"], trusted)
-            # The install path must accept it too: an engine it would refuse is not offered, so the page never
-            # starts an install that cannot succeed. A kind the installer learns to stage passes with no change.
-            validate_manifest(entry["manifest"], built_in_provider_ids=_validation_built_in_provider_ids(
-                entry["manifest"], trusted))
-        except ValueError:
-            return False
-        return True
+        return entry_usable(entry) and _closure_refusal(state, entry, host) is None
 
     found = []
     for provider_id in sorted({str(entry.get("provider_id") or "") for entry in entries} - installed - {""}):
