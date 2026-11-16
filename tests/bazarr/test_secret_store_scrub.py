@@ -642,17 +642,13 @@ def test_a_structured_leaf_equal_to_a_short_credential_is_masked(scrub_registry)
     }
 
 
-def test_a_job_row_masks_a_long_leaf_whole_and_a_short_one_only_in_context(scrub_registry):
-    # A job row is labels and ids as much as it is text, so a short credential is not wiped from a
-    # leaf that merely equals it (as in a job action); a long one is masked wherever it appears.
-    scrub_registry(["abc", FAKE_KEY])
+def test_a_job_row_leaf_equal_to_a_short_credential_is_masked(scrub_registry):
+    scrub_registry(["abc"])
     job = {"id": "abc", "action": "install", "message": "failed",
-           "details": {"config": {"api_key": FAKE_KEY, "region": "eu", "note": "abc"},
-                       "args": [FAKE_KEY, "other", "x=abc"]}}
+           "details": {"config": {"api_key": "abc", "region": "eu"}, "args": ["abc", "other"]}}
     assert scrub_job_secrets(job) is True
     assert job == {"id": "abc", "action": "install", "message": "failed",
-                   "details": {"config": {"api_key": "***", "region": "eu", "note": "abc"},
-                               "args": ["***", "other", "x=***"]}}
+                   "details": {"config": {"api_key": "***", "region": "eu"}, "args": ["***", "other"]}}
 
 
 def test_a_state_document_leaf_in_a_text_field_equal_to_a_short_credential_is_masked(scrub_registry):
@@ -1048,17 +1044,15 @@ def test_a_short_match_that_overlaps_a_long_one_leaves_no_part_of_either_readabl
     assert scrub_text("x=abc and y=bc@example") == "x=*** and y=***"
 
 
-def test_a_job_action_masks_a_long_leaf_and_leaves_a_short_label_alone(scrub_registry):
+def test_a_job_action_masks_a_leaf_equal_to_a_short_or_long_credential(scrub_registry):
     from secret_store.scrub import scrub_value
 
-    scrub_registry(["Save", "abc", FAKE_KEY])
+    scrub_registry(["abc", FAKE_KEY])
     action = {"kind": "discover.save", "label": "Save", "ticket": "abc", "file": f"x {FAKE_KEY}", "note": "a=abc"}
 
-    assert scrub_value(action, short_leaves=False) == {
-        "kind": "discover.save", "label": "Save", "ticket": "abc", "file": "x ***", "note": "a=***"}
-    assert scrub_value({"label": FAKE_KEY, "x": "Save"}, short_leaves=False) == {"label": "***", "x": "Save"}
-    # The default still masks a whole short leaf.
-    assert scrub_value(action)["ticket"] == "***"
+    assert scrub_value(action) == {
+        "kind": "discover.save", "label": "Save", "ticket": "***", "file": "x ***", "note": "a=***"}
+    assert scrub_value({"label": FAKE_KEY, "x": "abcd"}) == {"label": "***", "x": "abcd"}
 
 
 def test_the_repr_form_of_a_short_credential_is_masked_as_a_whole_token(scrub_registry):
@@ -1117,11 +1111,3 @@ def test_a_declared_hub_secret_survives_every_refresh_and_addition(scrub_registr
 def test_a_doubly_escaped_quote_is_a_quote_too(scrub_registry, text, masked):
     scrub_registry(["abc"])
     assert scrub_text(text) == masked
-
-
-def test_a_job_row_leaf_equal_to_a_short_credential_is_left_to_the_text_scrub(scrub_registry):
-    scrub_registry(["abc", "Save", FAKE_KEY])
-    job = {"message": "Save", "details": {"label": "abc", "file": "m.srt password=abc", "key": FAKE_KEY}}
-
-    assert scrub_job_secrets(job) is True
-    assert job == {"message": "Save", "details": {"label": "abc", "file": "m.srt password=***", "key": "***"}}

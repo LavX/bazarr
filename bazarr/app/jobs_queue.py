@@ -556,14 +556,13 @@ class JobsQueue:
         other job text: a filename a provider chose can carry a credential.
         ``kind`` is dispatch, not text, so it is kept as given: a credential
         that happens to equal a handler name must not stop the frontend
-        finding that handler. A leaf shorter than a credential minimum is a
-        label or an id more often than a secret, so only text scrubbing applies
-        to it: a short credential is masked in a filename where it stands in
-        context, not wherever a label happens to equal it.
+        finding that handler. Every other leaf is masked whole when it equals a
+        registered credential, short or long, and a short credential is masked
+        in a filename where it stands in context.
         """
         action = dict(action)
         kind = action.get('kind')
-        scrubbed = scrub_value(action, short_leaves=False)
+        scrubbed = scrub_value(action)
         if kind is not None:
             scrubbed['kind'] = kind
         with self._queue_lock:

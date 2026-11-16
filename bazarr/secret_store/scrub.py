@@ -456,22 +456,18 @@ def scrub_text(text: str) -> str:
     return ''.join(pieces)
 
 
-def scrub_leaf(text: str, *, short: bool = True) -> str:
+def scrub_leaf(text: str) -> str:
     """scrub_text for a string that stands alone as a value in a structure.
 
     A leaf of a dict or list is scrubbed without the key beside it, so a short
     credential has no context to be found in: {"api_key": "abc"} holds the bare
     string "abc". A leaf whose stripped text is exactly a registered credential
-    is that credential, so it is masked whole. Anything else takes scrub_text.
-    With ``short`` False the whole-leaf rule applies only to a credential of
-    ``MIN_CREDENTIAL_LENGTH`` characters or more, and a shorter leaf takes
-    scrub_text like any other text: for a structure whose leaves are labels and
-    identifiers that a short credential could equal by chance.
+    is that credential, so it is masked whole, short or long. Anything else
+    takes scrub_text.
     """
     if not isinstance(text, str) or not text:
         return text
-    stripped = text.strip()
-    if stripped in _VALUE_STATE[0] and (short or len(stripped) >= MIN_CREDENTIAL_LENGTH):
+    if text.strip() in _VALUE_STATE[0]:
         return MASK
     return scrub_text(text)
 
@@ -489,23 +485,22 @@ def _mask_patterns(text: str) -> str:
     return text
 
 
-def scrub_value(value: Any, *, short_leaves: bool = True) -> Any:
+def scrub_value(value: Any) -> Any:
     """The value with every string inside it scrubbed, for a payload that is
     stored or sent as a whole.
 
     A dict, list or tuple is rebuilt with scrubbed members, so the caller
     rebinds the result; every other type comes back as it is. Keys are
     structure, not text the backend prints, and stay as they are.
-    ``short_leaves`` is passed on to scrub_leaf.
     """
     if isinstance(value, str):
-        return scrub_leaf(value, short=short_leaves)
+        return scrub_leaf(value)
     if isinstance(value, dict):
-        return {key: scrub_value(item, short_leaves=short_leaves) for key, item in value.items()}
+        return {key: scrub_value(item) for key, item in value.items()}
     if isinstance(value, list):
-        return [scrub_value(item, short_leaves=short_leaves) for item in value]
+        return [scrub_value(item) for item in value]
     if isinstance(value, tuple):
-        return tuple(scrub_value(item, short_leaves=short_leaves) for item in value)
+        return tuple(scrub_value(item) for item in value)
     return value
 
 
@@ -825,7 +820,7 @@ def scrub_job_secrets(job) -> bool:
     def walk(node, in_text):
         nonlocal changed
         if isinstance(node, str):
-            masked = scrub_leaf(node, short=False) if in_text else _mask_patterns(node)
+            masked = scrub_leaf(node) if in_text else _mask_patterns(node)
             if masked != node:
                 changed = True
             return masked

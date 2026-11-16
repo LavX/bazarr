@@ -264,13 +264,13 @@ def test_a_job_action_keeps_its_handler_name_when_a_credential_matches_it(scrub_
     assert job.action["label"] == "Save"
 
 
-def test_a_job_action_label_equal_to_a_short_credential_is_not_masked(scrub_registry):
-    """A label or an id shorter than a credential minimum is not wiped because a short
-    secret happens to equal it; the same secret is still masked where it stands in context."""
+def test_a_job_action_leaf_equal_to_a_short_credential_is_masked(scrub_registry):
+    """A leaf whose whole value is a short secret is the whole-token case: it is masked, and so is
+    the same secret in context. The handler name stays as given."""
     from pytest import MonkeyPatch
     from test_sportarr_workflows import private_queue
 
-    scrub_registry(["Save", "7"])
+    scrub_registry(["7", "discover.save"])
     with MonkeyPatch.context() as monkeypatch:
         queue = private_queue(monkeypatch)
         queue.feed_jobs_pending_queue("Example", __name__, "noop")
@@ -281,8 +281,9 @@ def test_a_job_action_label_equal_to_a_short_credential_is_not_masked(scrub_regi
             "kind": "discover.save", "label": "Save", "ticket": "7", "file": "movie.srt password=7",
         }) is True
 
+    assert job.action["kind"] == "discover.save"
     assert job.action["label"] == "Save"
-    assert job.action["ticket"] == "7"
+    assert job.action["ticket"] == "***"
     assert job.action["file"] == "movie.srt password=***"
 
 
