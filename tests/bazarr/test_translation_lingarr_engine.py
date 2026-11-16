@@ -428,6 +428,58 @@ def test_the_config_backed_store_never_writes_the_mask_text_as_a_new_token(monke
     assert store.set(URL, TOKEN, restoring=True) is True
 
 
+def _lingarr_service():
+    from types import SimpleNamespace
+
+    from subtitles.tools.translate.services.lingarr_translator import LingarrTranslatorService
+
+    service = LingarrTranslatorService(
+        "a.srt", "b.srt", None, "hun", "en", "episode", "v.mkv", "hu", False, False, 1, 1, None)
+    service._check_cancelled = lambda job_id: None
+    return service, SimpleNamespace
+
+
+def test_a_retry_never_sends_the_old_token_to_an_address_saved_since(monkeypatch):
+    """A line request that is retried reads the address and the token again, together. An address change
+    takes the stored token with it, so the retry goes to the new address with no key, not to it with the old one."""
+    import requests
+
+    import subtitles.tools.translate.services.lingarr_translator as module
+    from app.config import settings
+
+    service, namespace = _lingarr_service()
+    old_url, new_url = "http://198.51.100.10:9876", "http://203.0.113.20:9876"
+    monkeypatch.setattr(settings.translator, "lingarr_url", old_url)
+    monkeypatch.setattr(settings.translator, "lingarr_token", TOKEN)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(module, "time", namespace(
+        monotonic=lambda: clock["now"], sleep=lambda seconds: clock.__setitem__("now", clock["now"] + seconds)))
+    sent = []
+
+    def post(url, **kwargs):
+        sent.append((url, kwargs["headers"].get("X-Api-Key")))
+        if len(sent) == 1:
+            # The address is saved while the first request is in flight: the token goes with the old address.
+            settings.translator.lingarr_url = new_url
+            settings.translator.lingarr_token = ""
+            return namespace(status_code=503, headers={})
+        return namespace(status_code=200, text="ok", headers={"Content-Type": "text/plain"})
+
+    monkeypatch.setattr(requests, "post", post)
+    assert service._translate_sports_line({"subtitleLine": "x"}, None) == "ok"
+    assert sent == [(old_url + "/api/translate/line", TOKEN), (new_url + "/api/translate/line", None)]
+
+
+def test_the_address_and_token_of_a_request_are_read_under_one_hold_of_the_config_lock(world):
+    seen = []
+    config = world.fake
+    real_url, real_token = config.url, config.token
+    config.url = lambda: (seen.append(("url", config.depth)), real_url())[1]
+    config.token = lambda: (seen.append(("token", config.depth)), real_token())[1]
+    assert legacy_engines.request_target(config) == (legacy_engines.DEFAULT_URL, "")
+    assert seen == [("url", 1), ("token", 1)]
+
+
 def test_the_config_lock_is_held_from_the_read_of_the_old_address_to_the_write(world):
     engine_id = world.lingarr()["id"]
     world.fake.calls.clear()

@@ -124,6 +124,18 @@ class ConfigLingarr:
         return True
 
 
+def request_target(config: ConfigLingarr | None = None) -> tuple[str, str]:
+    """The address and the token of one request, read together under the config lock.
+
+    A save that changes the address takes the stored token away in the same write, so a pair read under
+    the lock is always one the person set up together. Every request, a retry included, reads its own pair:
+    a header kept from an earlier attempt could otherwise reach an address saved since.
+    """
+    config = config or ConfigLingarr()
+    with config.lock():
+        return config.url().rstrip("/"), config.token()
+
+
 def configured(config: ConfigLingarr | None = None, instance_settings: Mapping[str, Any] | None = None) -> bool:
     """Whether Lingarr may serve a job: the person has set its address. The token is optional, as it always was.
 
