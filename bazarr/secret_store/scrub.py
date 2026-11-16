@@ -235,11 +235,13 @@ def register_secret_values(values: Iterable[Any]) -> int:
 # or after an authorization scheme name, whatever its case; or as an item of a
 # YAML block list, one or more "-" at the start of a line after any
 # indentation, or of a YAML flow list, right after its "[" or a ",". As a quoted string.
-# As the user of a URL, right after "://". The quote is its own group so that a
-# credential that begins with a quote can be found starting at it.
+# As the user of a URL, right after "://". A standalone quote is matched from the
+# start of its run of backslashes, so a long run is scanned once and not again from
+# every position in it. The quote is its own group so that a credential that
+# begins with a quote can be found starting at it.
 _SHORT_CONTEXT_RE = re.compile(
     r'(?P<after>(?P<pre>(?:[=:]|\b(?i:basic|bearer|digest|token)\s+)\s*|(?m:^)[ \t]*(?:-[ \t]+)+)(?:\\*["\'])?)'
-    r'|(?P<quote>\\*["\'])'
+    r'|(?P<quote>(?<!\\)\\*["\'])'
     r'|(?P<user>(?<=://))'
 )
 

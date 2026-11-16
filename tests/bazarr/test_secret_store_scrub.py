@@ -1111,3 +1111,16 @@ def test_a_declared_hub_secret_survives_every_refresh_and_addition(scrub_registr
 def test_a_doubly_escaped_quote_is_a_quote_too(scrub_registry, text, masked):
     scrub_registry(["abc"])
     assert scrub_text(text) == masked
+
+
+@pytest.mark.parametrize("tail", ["", '"', '"abc', "=", "x"])
+def test_the_quote_scan_stays_linear_over_a_long_run_of_backslashes(scrub_registry, tail):
+    scrub_registry(["abc"])
+    small = "\\" * 2000 + tail
+    large = small * 8 if not tail else "\\" * 16000 + tail
+
+    small_cost = _best_of(5, lambda: scrub_text(small))
+    large_cost = _best_of(5, lambda: scrub_text(large))
+
+    # Eight times the run takes about eight times as long, far from its square (64).
+    assert large_cost < max(small_cost, 0.002) * 40
