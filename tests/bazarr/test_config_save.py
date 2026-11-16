@@ -3254,3 +3254,14 @@ def test_a_settings_save_does_not_count_a_broken_alternative_supplier(monkeypatc
         config.save_settings([("settings-general-enabled_providers", ["supb", "depsub"])])
 
     assert refused.value.message == "supa cannot be switched off while depsub depends on it."
+
+
+def test_a_settings_object_without_the_provider_list_is_read_as_no_enabled_providers(monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "settings", SimpleNamespace(general=SimpleNamespace()))
+    assert config._enabled_provider_ids() == set()
+    monkeypatch.setattr(config, "settings", SimpleNamespace())
+    assert config._enabled_provider_ids() == set()
+    monkeypatch.setattr(config, "settings", SimpleNamespace(general=SimpleNamespace(enabled_providers=["a", "b"])))
+    assert config._enabled_provider_ids() == {"a", "b"}

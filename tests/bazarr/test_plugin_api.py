@@ -375,3 +375,20 @@ def test_a_json_array_body_is_refused_before_any_field_is_read(client, monkeypat
 
     assert response.status_code == 400
     assert response.get_json() == "a JSON object is required"
+
+
+def test_the_subtitle_hub_install_route_accepts_an_answer_that_does_not_name_a_kind(client, monkeypatch):
+    from provider_hub import jobs as hub_jobs
+    from provider_hub import service
+
+    queued = []
+    monkeypatch.setattr(hub_jobs, "_enqueue", lambda label, func, kwargs: queued.append((func, kwargs)) or "job-1")
+    monkeypatch.setattr(service, "resolve_catalog_install", lambda *args, **kwargs: {
+        "source": "official", "provider_id": "catalogsubs", "version": "1.0.0", "name": "Catalogsubs",
+        "entry_key": "official:catalogsubs:1.0.0"})
+
+    accepted = client.post("/api/provider-hub/installations",
+                           json={"source": "official", "provider_id": "catalogsubs", "version": "1.0.0"},
+                           headers={"X-API-KEY": API_KEY})
+
+    assert accepted.status_code == 202 and [func for func, _kwargs in queued] == ["install_provider"]

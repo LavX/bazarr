@@ -182,8 +182,10 @@ class ProviderHubInstallations(Resource):
         except service.ProviderHubInstallError as error:
             return str(error), 400
         try:
-            needs_consent = entry["kind"] != SUBTITLE_PROVIDER or service.install_needs_consent(
-                entry["source"], entry["provider_id"], entry["version"], entry_key=entry["entry_key"])
+            # The resolver says what kind the entry is; an answer that does not is read as a subtitle provider.
+            kind = entry.get("kind")
+            needs_consent = kind is not None and (kind != SUBTITLE_PROVIDER or service.install_needs_consent(
+                entry["source"], entry["provider_id"], entry["version"], entry_key=entry["entry_key"]))
         except service.ProviderHubInstallError as error:
             return str(error), 400
         if needs_consent:

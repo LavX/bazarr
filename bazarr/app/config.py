@@ -2115,6 +2115,12 @@ def _installed_provider_hub_manifest_fields():
         return None, None
 
 
+def _enabled_provider_ids():
+    """The ids in ``enabled_providers``, or none when the setting is not there (a settings object that has no
+    general section for it, as a test double can be)."""
+    return set(getattr(getattr(settings, 'general', None), 'enabled_providers', None) or [])
+
+
 def _refuse_provider_switch_with_dependencies(settings_items):
     """The dependency rules for switching subtitle providers on and off in a settings save.
 
@@ -2138,7 +2144,7 @@ def _refuse_provider_switch_with_dependencies(settings_items):
     except Exception:
         return
     new = {str(item) for item in submitted}
-    current = set(settings.general.enabled_providers or [])
+    current = _enabled_provider_ids()
     removed, added = current - new, new - current
     if not removed and not added:
         return
@@ -2764,7 +2770,7 @@ def _save_settings_under_locks(settings_items, switched):
         _refuse_unverified_scalar_arr_destination(items)
         _refuse_unverified_plugin_destination(items)
         _refuse_provider_switch_with_dependencies(items)
-        enabled_before = set(settings.general.enabled_providers or [])
+        enabled_before = _enabled_provider_ids()
         metadata_submitted = any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
                                  for key, _ in items)
         changed = False
@@ -2789,7 +2795,7 @@ def _save_settings_under_locks(settings_items, switched):
             if changed:
                 invalidate_metadata()
             # Told to the Provider Hub once the locks are released, which is what a held-back provider shows.
-            enabled_after = set(settings.general.enabled_providers or [])
+            enabled_after = _enabled_provider_ids()
             if enabled_after != enabled_before:
                 switched.append((enabled_after - enabled_before, enabled_before - enabled_after))
 
