@@ -144,7 +144,29 @@ def test_provider_side_effects_run_only_for_providers(tmp_path, monkeypatch, ser
         ("enabled", "exampleservice", False),
         ("configured", "exampleservice"),
         ("removed", "exampleservice"),
+        ("after_removed", "exampleservice"),
     ]
+
+
+def test_cleanup_that_deletes_data_runs_only_after_the_removal_is_saved(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
+        "exampleservice": _active_row("exampleservice", kind=SERVICE_KIND),
+    })))
+
+    real = service.mutate_state
+
+    def cannot_save_the_removal(mutation):
+        if mutation.__name__ == "remove_or_stage":
+            raise OSError("the state file cannot be written")
+        return real(mutation)
+
+    monkeypatch.setattr(service, "mutate_state", cannot_save_the_removal)
+    with pytest.raises(OSError):
+        service.remove_installation("exampleservice")
+    assert ("after_removed", "exampleservice") not in service_kind.calls
+    assert ("removed", "exampleservice") in service_kind.calls
 
 
 def test_an_update_check_covers_only_the_kind_it_is_asked_for(tmp_path, monkeypatch, service_kind):
@@ -154,9 +176,10 @@ def test_an_update_check_covers_only_the_kind_it_is_asked_for(tmp_path, monkeypa
     def bound(row):
         return dict(row, source_bound=True, source_id="official")
 
-    # The catalog stores the newer version of the other installation as a schema 1 manifest,
-    # which catalog_kind_of reads as a subtitle provider, so the kind filter is what keeps
-    # that installation out of the subtitle check.
+    # Only the subtitle kind is offered updates today, so the offer rule is lifted here to leave the
+    # kind filter of the update check as the one thing that keeps the other installation out of the
+    # subtitle check. The catalog stores both newer versions as schema 1 manifests.
+    monkeypatch.setattr(service, "_offerable_as_update", lambda entry, installed_kind: True)
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", catalog_entries={
         "official:providerhub:1.1.0": {"source": "official", "provider_id": "providerhub", "version": "1.1.0",
                                        "manifest": provider_manifest_v1("providerhub", "1.1.0")},

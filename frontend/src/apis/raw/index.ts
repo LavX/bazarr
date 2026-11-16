@@ -16,6 +16,7 @@ import series from "./series";
 import sports from "./sports";
 import subtitles from "./subtitles";
 import system from "./system";
+import translation from "./translation";
 import utils from "./utils";
 
 const api = {
@@ -38,6 +39,7 @@ const api = {
   distributionHub,
   arrInstances,
   seerr,
+  translation,
 };
 
 export default api;

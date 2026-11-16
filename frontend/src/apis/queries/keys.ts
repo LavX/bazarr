@@ -32,6 +32,7 @@ export enum QueryKeys {
   Plex = "plex",
   Seerr = "seerr",
   Translator = "translator",
+  Translation = "translation",
 }
 
 // Separate from the Series prefix: library-wide series events must not reload

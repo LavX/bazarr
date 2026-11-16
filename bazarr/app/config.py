@@ -467,6 +467,13 @@ validators = [
               cast=normalize_openrouter_provider_order),
     Validator('translator.openrouter_encryption_key', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('translator.lingarr_token', must_exist=True, default='', is_type_of=str, cast=str),
+    # The v2 translation runtime. runtime_v2 is the one switch behind which all of it stays dark. engine
+    # and fallback_engine hold an engine instance id, or '' for none. All three are server-owned: the
+    # settings API neither shows nor writes them (SERVER_OWNED_SETTING_PATHS), because the pointers have
+    # rules a plain write would skip (the two never name the same instance).
+    Validator('translator.runtime_v2', must_exist=True, default=False, is_type_of=bool),
+    Validator('translator.engine', must_exist=True, default='', is_type_of=str, cast=str),
+    Validator('translator.fallback_engine', must_exist=True, default='', is_type_of=str, cast=str),
 
     # sonarr section
     Validator('sonarr.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
@@ -1378,7 +1385,7 @@ def _get_settings():
             secret_descriptors = {}
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
-                if full_path == SESSION_GENERATION_PATH:
+                if full_path in SERVER_OWNED_SETTING_PATHS:
                     continue
                 if is_write_only_secret(full_path):
                     continue
@@ -2738,6 +2745,15 @@ def save_settings(settings_items):
 # bring a revoked cookie back to life.
 SESSION_GENERATION_PATH = 'auth.session_generation'
 
+# Settings only the server writes. The settings API never reads them out and never writes them, so a
+# client cannot revive a revoked cookie or switch on, or repoint, the v2 translation runtime.
+SERVER_OWNED_SETTING_PATHS = frozenset({
+    SESSION_GENERATION_PATH,
+    'translator.runtime_v2',
+    'translator.engine',
+    'translator.fallback_engine',
+})
+
 
 def _auth_identity():
     """The login settings a session depends on: the mode, the account and its password."""
@@ -2867,7 +2883,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         settings_keys = key.split('-')
 
-        if '.'.join(part.lower() for part in settings_keys[1:3]) == SESSION_GENERATION_PATH:
+        if '.'.join(part.lower() for part in settings_keys[1:3]) in SERVER_OWNED_SETTING_PATHS:
             continue
 
         if settings_keys[-1].startswith('__'):

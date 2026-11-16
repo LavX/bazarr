@@ -6,8 +6,9 @@ release attaches (at the next restart, or live), and owns every side effect
 that installing, enabling, configuring or removing one of its plugins has on
 the rest of Bazarr+. The shared Provider Hub core calls is_enabled,
 set_enabled, on_config_saved, on_installed and on_removed, and validate_manifest
-when a catalog refresh reads a plugin. The smoke_test hook is not called by the
-core; the core runs the same check directly.
+when a catalog refresh reads a plugin. It also calls validate_manifest and
+smoke_test when it activates a staged release, repairs an environment or
+reconciles environments at boot.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from ..manifest import ValidatedManifest
 
 SUBTITLE_PROVIDER = "subtitle_provider"
+TRANSLATOR = "translator"
 
 ATTACH_ON_RESTART = "restart"
 ATTACH_LIVE = "live"
@@ -57,6 +59,25 @@ class Kind:
         """This plugin was removed or its removal was staged. Same return rule."""
         return True
 
+    def after_removed(self, plugin_id: str) -> None:
+        """This plugin's removal has been saved. The place for cleanup that cannot be undone.
+
+        ``on_removed`` runs before the removal is saved and may be rolled back by a failure; anything
+        that deletes data belongs here instead. It cannot veto the removal, so it reports problems by
+        logging them.
+        """
+
+    def on_activated(self, plugin_id: str, previous_manifest: dict[str, Any] | None,
+                     manifest: dict[str, Any]) -> str | None:
+        """A new release of this plugin has just become the active one (``previous_manifest`` is the one it
+        replaced, or None for a first activation).
+
+        The place to bring what the kind stores in line with the new manifest. The release is already active,
+        so this cannot refuse it; it returns a short message when something needs the person's attention, which
+        the host shows as the plugin's last error, or None.
+        """
+        return None
+
     def set_enabled(self, installation: dict[str, Any], enabled: bool) -> bool:
         """Turn the plugin on or off. Same return rule."""
         installation["enabled"] = bool(enabled)
@@ -82,7 +103,9 @@ class Kind:
     def smoke_test(self, validated: "ValidatedManifest", bundle_path, python_path) -> None:
         """Start the staged plugin once to prove it loads. The default has nothing to start.
 
-        The core does not call this hook. The subtitle provider kind overrides it.
+        The core calls this hook when it activates a staged release, repairs an environment and
+        reconciles environments at boot. The subtitle provider kind runs the worker health check;
+        a kind with nothing to start keeps this version.
         """
 
 

@@ -419,6 +419,8 @@ jobs:
             tests/bazarr/test_provider_hub_shared_envs.py \
             tests/bazarr/test_provider_hub_subs_id_parity.py \
             tests/bazarr/test_provider_hub_transport.py \
+            tests/bazarr/test_provider_hub_kind_recovery.py \
+            tests/bazarr/test_provider_hub_update_kinds.py \
             tests/bazarr/test_arr_instances_schema.py \
             tests/bazarr/test_sportarr_instances.py \
             tests/bazarr/test_arr_ownership_columns.py \
@@ -629,6 +631,7 @@ jobs:
             tests/bazarr/test_translate_job_media_name.py \
             tests/bazarr/test_translate_surface_refusals.py \
             tests/bazarr/test_translator_auth.py \
+            tests/bazarr/test_translation_history_api.py \
             tests/bazarr/test_translator_sidecar_errors.py \
             tests/bazarr/test_upgrade_embedded_history.py \
             tests/bazarr/test_upgrade_subtitle_toggles.py \
@@ -935,6 +938,17 @@ jobs:
             tests/bazarr/test_provider_hub_state_migration.py \
             tests/bazarr/test_provider_hub_state_flows.py \
             tests/bazarr/test_provider_hub_state_safety.py \
+            tests/bazarr/test_translator_runtime_store.py \
+            tests/bazarr/test_translator_runtime_switch.py \
+            tests/bazarr/test_translator_output_checks.py \
+            tests/bazarr/test_translator_request_normalization.py \
+            tests/bazarr/test_translator_runtime_jobs.py \
+            tests/bazarr/test_translator_runtime_lane.py \
+            tests/bazarr/test_translator_runtime_usage.py \
+            tests/bazarr/test_translator_field_schema.py \
+            tests/bazarr/test_translation_api.py \
+            tests/bazarr/test_translator_settings_transaction.py \
+            tests/bazarr/test_translator_plugin_activation.py \
             tests/bazarr/test_sportarr_library_migration.py \
             tests/bazarr/test_sportarr_review_guards.py \
             tests/bazarr/test_sportarr_output.py \

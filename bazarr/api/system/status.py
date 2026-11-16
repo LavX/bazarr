@@ -114,6 +114,18 @@ class SystemStatus(Resource):
         except Exception:
             system_status.update({'compat_active': False})
 
+        # Present only while the v2 translation runtime is switched on; that is what makes
+        # Settings > Translation exist. An install with it off sees no new field.
+        try:
+            from app.config import settings
+            # The switch is read from the settings first, so a switched-off install imports nothing from the runtime.
+            if getattr(settings.translator, 'runtime_v2', False) is True:
+                from subtitles.tools.translate.runtime import runtime_v2_enabled
+                if runtime_v2_enabled():
+                    system_status.update({'translation_runtime_v2': True})
+        except Exception:
+            pass
+
         # The gate every translate action asks, with its reason, so the UI can
         # disable its actions with the same answer the queue paths refuse with.
         # The gate never raises: a configuration that cannot be read is just

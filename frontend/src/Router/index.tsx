@@ -21,6 +21,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { useBadges } from "@/apis/hooks";
 import { useEnabledStatus } from "@/apis/hooks/site";
+import { useTranslationRuntime } from "@/apis/hooks/translation";
 import App from "@/App";
 import { Lazy } from "@/components/async";
 import Authentication from "@/pages/Authentication";
@@ -44,6 +45,7 @@ import SettingsNotificationsView from "@/pages/Settings/Notifications";
 import SettingsProvidersView from "@/pages/Settings/Providers";
 import SettingsSchedulerView from "@/pages/Settings/Scheduler";
 import SettingsSubtitlesView from "@/pages/Settings/Subtitles";
+import SettingsTranslationView from "@/pages/Settings/Translation";
 import SettingsTranslatorView from "@/pages/Settings/Translator";
 import SettingsUIView from "@/pages/Settings/UI";
 import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
@@ -73,6 +75,9 @@ const SubtitleEditorPage = lazy(
 export function useRoutes(): CustomRouteObject[] {
   const { data } = useBadges();
   const { sonarr, radarr, sportarr } = useEnabledStatus();
+  // Settings > Translation exists only while the v2 translation runtime is on.
+  // With it off the route is not in the router at all, not just hidden.
+  const translationRuntime = useTranslationRuntime();
 
   return useMemo(
     () => [
@@ -301,6 +306,17 @@ export function useRoutes(): CustomRouteObject[] {
                 name: "AI Translator",
                 element: <SettingsTranslatorView></SettingsTranslatorView>,
               },
+              ...(translationRuntime
+                ? [
+                    {
+                      path: "translation",
+                      name: "Translation",
+                      element: (
+                        <SettingsTranslationView></SettingsTranslationView>
+                      ),
+                    },
+                  ]
+                : []),
               {
                 path: "external",
                 hidden: true,
@@ -453,6 +469,7 @@ export function useRoutes(): CustomRouteObject[] {
       radarr,
       sonarr,
       sportarr,
+      translationRuntime,
     ],
   );
 }

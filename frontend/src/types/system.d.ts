@@ -127,6 +127,12 @@ declare namespace System {
      */
     translation_availability?: System.TranslationAvailability;
     /**
+     * Whether the v2 translation runtime is switched on, which is what makes
+     * Settings > Translation exist. Present, and true, only while the runtime is
+     * switched on; absent otherwise and on responses from before the field.
+     */
+    translation_runtime_v2?: boolean;
+    /**
      * The editor's own answer to the same question: it translates through the
      * AI Subtitle Translator service whatever the settings page has selected,
      * so this field answers for that engine and the editor's controls match

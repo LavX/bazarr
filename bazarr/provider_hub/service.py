@@ -3290,6 +3290,7 @@ def activate_staged_installations() -> list[str]:
             continue
 
         previous_version = installation.get("active_version")
+        previous_manifest = installation.get("manifest") if previous_version else None
         target_version = installation.get("staged_version")
         target_name = installation.get("name") or provider_id
 
@@ -3303,23 +3304,12 @@ def activate_staged_installations() -> list[str]:
         ) as job:
             try:
                 trusted = bool(installation.get("trusted", False))
+                # The kind validates its own manifests: a translator is not a subtitle provider.
+                kind = get_kind(kind_of(installation))
                 manifest_data = installation.get("manifest") or {}
-                manifest = validate_manifest(
-                    manifest_data,
-                    built_in_provider_ids=_validation_built_in_provider_ids(
-                        manifest_data,
-                        trusted,
-                    ),
-                )
+                manifest = kind.validate_manifest(manifest_data, trusted)
                 if isinstance(installation.get("staged_manifest"), dict):
-                    staged_manifest = installation.get("staged_manifest")
-                    manifest = validate_manifest(
-                        staged_manifest,
-                        built_in_provider_ids=_validation_built_in_provider_ids(
-                            staged_manifest,
-                            trusted,
-                        ),
-                    )
+                    manifest = kind.validate_manifest(installation.get("staged_manifest"), trusted)
                 staged_path = installation.get("staged_path")
                 staged_python_path = installation.get("staged_python_path")
                 if not staged_path or not staged_python_path:
@@ -3332,7 +3322,7 @@ def activate_staged_installations() -> list[str]:
                     raise ProviderHubInstallError("staged bundle path is not one of the hub's bundles")
                 _remove_bundle_runtime_artifacts(staged_bundle_path)
                 verify_bundle_tree(manifest, staged_bundle_path)
-                _smoke_validate_worker(manifest, staged_bundle_path, staged_interpreter)
+                kind.smoke_test(manifest, staged_bundle_path, staged_interpreter)
             except Exception as error:
                 installation["last_error"] = refusal_text(error)
                 _abandon_staged_catalog_list(installation)
@@ -3368,6 +3358,14 @@ def activate_staged_installations() -> list[str]:
             installation["last_error"] = None
             installation.pop("needs_repair", None)
             installation["activated_at"] = utcnow_iso()
+            try:
+                attention = get_kind(kind_of(installation)).on_activated(
+                    provider_id, previous_manifest, manifest.raw)
+            except Exception:
+                logging.getLogger(__name__).exception("The kind's activation step failed for %s", provider_id)
+                attention = "Its saved settings could not be brought up to date with this version."
+            if attention:
+                installation["last_error"] = attention
             activated.append(provider_id)
             changed = True
             if previous_version:
@@ -3400,13 +3398,14 @@ def reconcile_plugin_environments() -> dict[str, list[str]]:
 
     def validate(row: dict[str, Any], staged: bool):
         raw = row.get("staged_manifest") if staged and isinstance(row.get("staged_manifest"), dict) else row.get("manifest")
-        return validate_manifest(
-            raw,
-            built_in_provider_ids=_validation_built_in_provider_ids(raw, bool(row.get("trusted", False))),
-        )
+        # Each kind validates its own manifests; the subtitle provider kind delegates to the provider validator.
+        return get_kind(kind_of(row)).validate_manifest(raw, bool(row.get("trusted", False)))
+
+    def probe(validated, bundle_path: Path, python_path: Path) -> None:
+        get_kind(kind_of(validated)).smoke_test(validated, bundle_path, python_path)
 
     return env_registry.reconcile_environments(
-        validate=validate, probe=_smoke_validate_worker, verify_bundle=_verify_bundle_for_run
+        validate=validate, probe=probe, verify_bundle=_verify_bundle_for_run
     )
 
 
@@ -3455,12 +3454,8 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
     ) as job, pin_scope():
         env_path = None
         try:
-            validated = validate_manifest(
-                manifest_data,
-                built_in_provider_ids=_validation_built_in_provider_ids(
-                    manifest_data, bool(row.get("trusted", False))
-                ),
-            )
+            kind = get_kind(kind_of(row))
+            validated = kind.validate_manifest(manifest_data, bool(row.get("trusted", False)))
             try:
                 _verify_bundle_for_run(validated, bundle_path)
             except Exception:
@@ -3471,7 +3466,7 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             env_path = PluginEnvironment(provider_hub_dir()).install(validated, rebuild=True)
             python_path = python_executable(env_path)
             step("Checking that the plugin starts")
-            _smoke_validate_worker(validated, bundle_path, python_path)
+            kind.smoke_test(validated, bundle_path, python_path)
             # A stop pressed during the check ends the repair here, before the
             # installation is pointed at the new environment.
             step("Recording the repair")
@@ -3507,31 +3502,33 @@ def _repair_environment(provider_id: str, checkpoint=None) -> dict[str, Any]:
             release_pins()
             env_registry.discard_if_unused(provider_hub_dir(), env_path)
             raise ProviderHubInstallError(f"{provider_id} changed while it was being repaired")
-        try:
-            from .registry import register_active_provider_classes
+        if kind_of(repaired) == SUBTITLE_PROVIDER:
+            # Only a subtitle provider has a registered class and pooled workers to refresh.
+            try:
+                from .registry import register_active_provider_classes
 
-            register_active_provider_classes(
-                [item for item in running_installations(kind=None) if item.provider_id == provider_id]
-            )
-        except Exception:
-            logging.getLogger(__name__).exception("Provider Hub: could not re-register %s after its repair", provider_id)
-        try:
-            # Pools keep the instance, and the worker, they built before the
-            # repair. They drop it now; it drains, and the old environment
-            # stays held until its worker has exited.
-            from .registry import retire_provider_instances
+                register_active_provider_classes(
+                    [item for item in running_installations(kind=None) if item.provider_id == provider_id]
+                )
+            except Exception:
+                logging.getLogger(__name__).exception("Provider Hub: could not re-register %s after its repair", provider_id)
+            try:
+                # Pools keep the instance, and the worker, they built before the
+                # repair. They drop it now; it drains, and the old environment
+                # stays held until its worker has exited.
+                from .registry import retire_provider_instances
 
-            retire_provider_instances(provider_id)
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "Provider Hub: could not retire the workers of %s after its repair; "
-                "its previous environment is kept in place", provider_id,
-            )
-            old_python = row.get("python_path")
-            if old_python:
-                # Never released: a worker may still run from it, and a cleanup
-                # must leave it alone until the process restarts.
-                hold_environment(env_registry.env_dir_of(old_python))
+                retire_provider_instances(provider_id)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Provider Hub: could not retire the workers of %s after its repair; "
+                    "its previous environment is kept in place", provider_id,
+                )
+                old_python = row.get("python_path")
+                if old_python:
+                    # Never released: a worker may still run from it, and a cleanup
+                    # must leave it alone until the process restarts.
+                    hold_environment(env_registry.env_dir_of(old_python))
         job.update(message=f"Rebuilt the environment of '{name}'")
         return _redact_installation(repaired)
 
@@ -3601,6 +3598,10 @@ def remove_installation(provider_id: str) -> bool:
             return False
         from . import runtime_status
         runtime_status.clear(provider_id)
+        try:
+            kind_hooks.after_removed(provider_id)
+        except Exception:
+            logging.getLogger(__name__).exception("Cleanup after the removal of %s failed", provider_id)
         if result == "removed_pending":
             job.update(message=f"Removed pending install of '{target_name}'")
             return True
@@ -3629,13 +3630,15 @@ def check_updates(*, kind: str | None = None) -> dict[str, Any]:
                 continue
             catalog_list = _installed_catalog_list(installation)
             latest = _latest_catalog_manifest(
-                state, provider_id, active_version, _bound_source_id(installation), catalog_list
+                state, provider_id, active_version, _bound_source_id(installation), catalog_list,
+                installed_kind=kind_of(installation),
             )
             refusal_floor = active_version
             if isinstance(latest, dict) and latest.get("version"):
                 refusal_floor = latest["version"]
             refusal = _refused_update_reason(
-                state, provider_id, refusal_floor, _bound_source_id(installation), catalog_list)
+                state, provider_id, refusal_floor, _bound_source_id(installation), catalog_list,
+                installed_kind=kind_of(installation))
             if refusal:
                 refusals.append(f"{installation.get('name') or provider_id}: {refusal}")
             if not isinstance(latest, dict):
@@ -3669,9 +3672,20 @@ def _bound_source_id(installation: dict[str, Any]) -> str | None:
     return installation.get("source_id") if installation.get("source_bound") else None
 
 
+def _offerable_as_update(entry: dict[str, Any], installed_kind: str) -> bool:
+    """Whether a catalog entry may be offered as an update to an installation of ``installed_kind``.
+
+    A candidate of another kind is never an update: a source replacing a subtitle provider with a
+    translator under the same id is not one. Updates are staged by ``stage_install``, which validates
+    as a subtitle provider, so only that kind is offered for now. A kind with its own staging lifts
+    the second condition.
+    """
+    return catalog_kind_of(entry) == installed_kind and installed_kind == SUBTITLE_PROVIDER
+
+
 def _latest_catalog_manifest(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
-    catalog_list: str | None = None,
+    catalog_list: str | None = None, installed_kind: str = SUBTITLE_PROVIDER,
 ) -> dict[str, Any] | None:
     """The newest version ``source_id`` lists for ``provider_id`` that this host can
     run. An install updates only from the source it is bound to, so an install with
@@ -3683,13 +3697,11 @@ def _latest_catalog_manifest(
     host = current_host()
 
     def usable(entry: dict[str, Any]) -> bool:
+        if not _offerable_as_update(entry, installed_kind):
+            return False
         manifest = entry["manifest"]
         try:
-            validate_manifest(
-                manifest,
-                built_in_provider_ids=_validation_built_in_provider_ids(
-                    manifest, bool(entry.get("trusted", False))),
-            )
+            get_kind(catalog_kind_of(entry)).validate_manifest(manifest, bool(entry.get("trusted", False)))
         except ValueError:
             return False
         return entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is None
@@ -3702,7 +3714,7 @@ def _latest_catalog_manifest(
 
 def _refused_update_reason(
     state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
-    catalog_list: str | None = None,
+    catalog_list: str | None = None, installed_kind: str = SUBTITLE_PROVIDER,
 ) -> str | None:
     """The host refusal of the newest refused version ``source_id`` lists for ``provider_id``
     above ``active_version``, or None when no refused version is above it. Callers pass the
@@ -3712,7 +3724,11 @@ def _refused_update_reason(
     host = current_host()
 
     def refused(entry: dict[str, Any]) -> bool:
-        return entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is not None
+        return (
+            entry.get("origin") != ORIGIN_BUNDLED
+            and _offerable_as_update(entry, installed_kind)
+            and _host_refusal(entry, host) is not None
+        )
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
@@ -3736,39 +3752,49 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
         provider.get("active_version") or provider.get("staged_version"),
         source_id,
         catalog_list,
+        installed_kind=kind_of(provider),
     )
     if not isinstance(manifest, dict):
-        target_name = provider.get("name") or provider_id
         message = _refused_update_reason(
             state,
             provider_id,
             provider.get("active_version") or provider.get("staged_version"),
             source_id,
             catalog_list,
+            installed_kind=kind_of(provider),
         ) or "No update manifest is available"
-        with record_job(
-            "stage_update",
-            target_kind="provider",
-            target_id=provider_id,
-            target_name=target_name,
-            from_version=provider.get("active_version") or provider.get("staged_version"),
-        ) as job:
-            provider["last_error"] = message
-
-            def record_missing_manifest(state: dict[str, Any]) -> None:
-                state.setdefault("installations", {})[provider_id] = provider
-
-            mutate_state(record_missing_manifest)
-            job.data["state"] = "failed"
-            job.update(
-                error=message,
-                message=message,
-            )
-        return _redact_installation(provider)
+        return _record_failed_update(provider_id, provider, message)
     try:
         return stage_install(manifest, checkpoint=checkpoint, source_id=source_id)
     except ProviderHubInstallError:
         return get_provider(provider_id)
+    except ManifestValidationError as error:
+        # The install path refused the manifest before it started a job, so the refusal is
+        # recorded here as a failed update, the way a missing manifest is.
+        return _record_failed_update(provider_id, provider, refusal_text(error))
+
+
+def _record_failed_update(provider_id: str, provider: dict[str, Any], message: str) -> dict[str, Any]:
+    """Record an update that could not be staged: the reason on the installation and a failed job."""
+    with record_job(
+        "stage_update",
+        target_kind="provider",
+        target_id=provider_id,
+        target_name=provider.get("name") or provider_id,
+        from_version=provider.get("active_version") or provider.get("staged_version"),
+    ) as job:
+        provider["last_error"] = message
+
+        def record_failure(state: dict[str, Any]) -> None:
+            state.setdefault("installations", {})[provider_id] = provider
+
+        mutate_state(record_failure)
+        job.data["state"] = "failed"
+        job.update(
+            error=message,
+            message=message,
+        )
+    return _redact_installation(provider)
 
 
 def list_jobs() -> list[dict[str, Any]]:

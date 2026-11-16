@@ -26,6 +26,7 @@ comes back unchanged after a bounded scan.
 
 import logging
 import re
+import sys
 from threading import Lock, RLock, local
 from typing import Any, Iterable, Mapping
 
@@ -564,6 +565,27 @@ def collect_settings_secret_values(settings_obj) -> set[str]:
     return values
 
 
+def collect_translator_secret_values(settings_obj) -> set[str]:
+    """Every decrypted translator secret, while the translation runtime is on.
+
+    Empty with the switch off, and before the database module has finished
+    loading (the first refresh runs while the settings module is still being
+    imported). With the switch off this reads one setting and imports nothing
+    from the translation modules. A database error raises, so the caller keeps
+    the set it already registered instead of publishing one without these.
+    """
+    if _read_setting(settings_obj, 'translator', 'runtime_v2') is not True:
+        return set()
+    database_module = sys.modules.get('app.database')
+    if database_module is None or not hasattr(database_module, 'init_db'):
+        return set()
+    from subtitles.tools.translate.runtime import runtime_v2_enabled
+    if not runtime_v2_enabled():
+        return set()
+    from subtitles.tools.translate.runtime.store import collect_secret_values
+    return collect_secret_values()
+
+
 def collect_hub_secret_values(state=None) -> set[str]:
     """Every plaintext credential a Provider Hub state document holds,
     decrypted: one value per registered secret field of every installation.
@@ -639,6 +661,7 @@ def refresh_secret_values(settings_obj=None, state=None) -> int:
                 from app.config import settings as settings_obj
             values = collect_settings_secret_values(settings_obj)
             values |= collect_hub_secret_values(state)
+            values |= collect_translator_secret_values(settings_obj)
         except Exception as error:
             logger.warning("The credential values to scrub could not be collected: %s",
                            type(error).__name__)
