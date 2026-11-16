@@ -16,7 +16,7 @@ from app import activity
 from app.event_handler import event_stream
 from app.process_session import PROCESS_SESSION
 from app.config import settings
-from secret_store.scrub import scrub_text, scrub_value
+from secret_store.scrub import scrub_leaf, scrub_text, scrub_value
 
 # The package directory, i.e. the one holding subtitles/, sonarr/, app/ and the
 # rest. add_job_from_function derives a job's module from its filename relative
@@ -1249,8 +1249,10 @@ class JobsQueue:
             # The message is whatever the raising code built, often from a
             # provider's own error body, so a credential can be inside it: it
             # is stored on the job, sent over the socket and read by the API,
-            # so it is scrubbed once, here, before any of them.
-            job.error = {"reason": e.reason, "message": scrub_text(str(e))}
+            # so it is scrubbed once, here, before any of them. It stands alone
+            # as a value, so it takes the leaf rule: a message that is exactly a
+            # short credential is masked whole, as in the translator's job rows.
+            job.error = {"reason": e.reason, "message": scrub_leaf(str(e))}
             if e.retryable is not None:
                 job.retryable = e.retryable
             self._mark_failed(job)
