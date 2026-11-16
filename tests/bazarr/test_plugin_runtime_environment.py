@@ -117,6 +117,14 @@ def test_extra_adds_new_names(tmp_path):
     assert snapshot("translator", tmp_path, extra={"PLUGIN_MODE": "fast"})["PLUGIN_MODE"] == "fast"
 
 
+@pytest.mark.parametrize("missing", ["home", "tmpdir"])
+def test_a_missing_home_or_tmpdir_is_refused(tmp_path, missing):
+    folders = {"home": tmp_path / "data", "tmpdir": tmp_path / "tmp"}
+    folders[missing] = None
+    with pytest.raises(PolicyError):
+        worker_environment("translator", host_env={}, ca_bundle=BUNDLE, **folders)
+
+
 @pytest.mark.parametrize("kind", ["", "Translator", "a", "bad kind", "../x", None, 7])
 def test_a_malformed_kind_is_refused(tmp_path, kind):
     with pytest.raises(PolicyError):

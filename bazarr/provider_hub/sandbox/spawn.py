@@ -116,8 +116,8 @@ STATUS_READ_PER_CALL = 64 * 1024
 # Names this host process as the owner of the workers it starts through the launcher: each
 # worker, and what it starts, carries it in its environment, so a later run can tell a leftover
 # of ours from a stranger's (see ``sweep``). The launcher itself is non-dumpable, so its own
-# environment cannot be read and does not carry it. Unset until ``sweep.configure_owner`` says
-# so, and then nothing is marked.
+# environment cannot be read and does not carry it. Until ``sweep.configure_owner`` sets it, nothing
+# is marked.
 OWNER_VARIABLE = "BAZARR_SANDBOX_OWNER"
 _owner_marker: "str | None" = None
 

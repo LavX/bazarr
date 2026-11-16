@@ -473,6 +473,26 @@ def test_a_permission_error_on_the_environment_counts_as_unreadable(tmp_path, in
     assert all(alive(pid) for pid in seen.values())
 
 
+def test_a_budget_that_runs_out_on_the_last_entry_is_a_partial_scan(tmp_path, instance, started, monkeypatch):
+    seen = make_tree(tmp_path, started, dead_owner(instance))
+    skew = [0.0]
+    real_clock = time.monotonic
+    monkeypatch.setattr(sweep.time, "monotonic", lambda: real_clock() + skew[0])
+    monkeypatch.setattr(sweep, "_list_pids", lambda: ([seen["child"]], False))
+
+    def slow(pid):
+        skew[0] = 1e6  # the budget is gone while the only entry is examined
+        return True
+
+    monkeypatch.setattr(sweep, "_same_pid_namespace", slow)
+    signals = Signals(monkeypatch)
+    result = sweep.sweep_leftovers(instance=instance, term_wait=0.5)
+    assert skew[0] > 0, "the entry was never examined"
+    assert result.truncated and "partial" in result.reason
+    assert result.sessions == [] and signals.sent == []
+    assert all(alive(pid) for pid in seen.values())
+
+
 @pytest.mark.parametrize("cut", ["time", "entries"])
 def test_a_partial_scan_signals_nothing(tmp_path, instance, started, monkeypatch, cut):
     seen = make_tree(tmp_path, started, dead_owner(instance))
@@ -751,15 +771,48 @@ def test_a_hidden_leader_with_the_launcher_argv_is_swept(tmp_path, instance, sta
 
 
 def test_a_leader_of_another_user_is_not_a_launcher(tmp_path, instance, started, monkeypatch):
+    """The uid check in ``_launcher_identity`` is what refuses it: the argv is the launcher's."""
     seen = _nondumpable_leader_tree(tmp_path, started, dead_owner(instance))
     real_cmdline = sweep._read_cmdline
     argv = ["python3", "-I", "-S", "-B", str(spawn.LAUNCHER_PATH)]
     monkeypatch.setattr(sweep, "_read_cmdline", lambda pid: argv if pid == seen["leader"] else real_cmdline(pid))
+    leader = sweep._read_proc(seen["leader"])
+    euid = os.geteuid()
+    assert sweep._launcher_identity(leader, euid)
     real = sweep._uids_of
     monkeypatch.setattr(sweep, "_uids_of", lambda pid: (12345, 12345) if pid == seen["leader"] else real(pid))
+    assert not sweep._launcher_identity(leader, euid)
     signals = Signals(monkeypatch)
     sweep.sweep_leftovers(instance=instance, term_wait=0.5)
     assert signals.sent == [] and alive(seen["leader"]) and alive(seen["worker"])
+
+
+def test_a_leader_that_stops_reading_as_a_launcher_after_the_pin_is_not_signalled(
+    tmp_path, instance, started, monkeypatch
+):
+    seen = _nondumpable_leader_tree(tmp_path, started, dead_owner(instance))
+    real_cmdline = sweep._read_cmdline
+    real_open = os.pidfd_open
+    argv = ["python3", "-I", "-S", "-B", str(spawn.LAUNCHER_PATH)]
+    pinned = []
+
+    def pidfd_open(pid, *args, **kwargs):
+        if pid == seen["leader"]:
+            pinned.append(pid)
+        return real_open(pid, *args, **kwargs)
+
+    def cmdline(pid):
+        if pid != seen["leader"]:
+            return real_cmdline(pid)
+        return None if pinned else argv
+
+    monkeypatch.setattr(os, "pidfd_open", pidfd_open)
+    monkeypatch.setattr(sweep, "_read_cmdline", cmdline)
+    signals = Signals(monkeypatch)
+    result = sweep.sweep_leftovers(instance=instance, term_wait=0.5)
+    assert pinned, "the leader was never pinned, so the re-check was not reached"
+    assert signals.sent == [] and alive(seen["leader"]) and alive(seen["worker"])
+    assert any("no longer reads as a launcher" in item.detail for item in result.sessions)
 
 
 def test_the_launcher_argv_is_recognised_by_its_script():

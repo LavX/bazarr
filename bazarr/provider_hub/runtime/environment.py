@@ -114,6 +114,8 @@ def worker_environment(
             raise PolicyError("the environment policy owns %s" % key)
         if isinstance(key, str) and is_proxy_key(key):
             raise PolicyError("workers get no proxy variables: %s" % key)
+    if home is None or tmpdir is None:
+        raise PolicyError("a worker environment needs both a home and a tmpdir")
     env = clean_env(home=home, tmpdir=tmpdir, path_prepend=path_prepend, extra=extra)
     for name in TEMP_VARIABLES[1:]:
         env[name] = env["TMPDIR"]

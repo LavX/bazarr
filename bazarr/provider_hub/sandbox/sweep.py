@@ -2,16 +2,18 @@
 """Boot-time sweep of plugin processes a previous run left behind.
 
 When Bazarr+ dies hard (a kill, a crash, an out-of-memory), its launchers see the
-lifeline close and clean up on their own. A launcher that was killed too, or one
-whose cleanup wedged, leaves a worker tree behind, and anything that moved itself into
-a session of its own is out of every group kill. The sweep finds those at the next
-boot and ends them.
+lifeline close and clean up on their own. A launcher that is still running but whose
+cleanup wedged, or a worker that moved itself into a session of its own, is left
+behind, and a detached session is out of every group kill. The sweep finds those at the
+next boot and ends them. A session whose leader is gone (a launcher that was killed too)
+is refused, not swept: see the last paragraph.
 
 Nothing is signalled by number. A pid or a group id can be handed to a stranger the
 moment its holder is gone, so the sweep never calls ``kill`` or ``killpg`` on one. Each
 process is pinned first with ``pidfd_open``, identified again through that handle, and
-signalled with ``pidfd_send_signal``, which reaches the process the handle pins and no other. Without ``pidfd_open`` and ``pidfd_send_signal`` (an old kernel, a seccomp profile,
-a platform that is not Linux) the sweep does nothing.
+signalled with ``pidfd_send_signal``, which reaches the process the handle pins and no other.
+Without ``pidfd_open`` and ``pidfd_send_signal`` (an old kernel, a seccomp profile, a
+platform that is not Linux) the sweep does nothing.
 
 Ownership comes from a marker, never from a guess. Once ``configure_owner`` has run,
 every worker the host starts through a launcher, and everything that worker starts,
@@ -20,9 +22,13 @@ environment cannot be read; it is found as the leader of its workers' session)::
 
     BAZARR_SANDBOX_OWNER=<instance>:<host pid>:<host start time>
 
-``instance`` is a digest of the config folder, so two Bazarr+ installs on one machine
-never touch each other's workers. The pid and ``/proc`` start time identify the host
-process that owned the launcher, the same identity mark the pool uses for a child's pid.
+``instance`` is a digest of the config folder's real path, so two Bazarr+ installs with
+different config folders on one machine never touch each other's workers. It does not tell
+apart two installs that share both a config folder and a pid namespace under the same user
+(``--pid=host``, or a pod with a shared process namespace): a live run is still protected by
+the owner check, but one of them can end the other's real leftovers. The pid and ``/proc``
+start time identify the host process that owned the launcher, the same identity mark the pool
+uses for a child's pid.
 
 A session is swept only when all of this holds, and a check that cannot be made counts as
 failed:
@@ -46,8 +52,9 @@ failed:
 A live leader gets ``SIGTERM`` first, which makes a launcher end its own tree (setsid
 children included) and wait for it. Whatever verified member is still running after the
 grace gets ``SIGKILL``, one by one. Processes that were not there when the scan ran are not
-touched; a session whose leader is gone is left alone, since nothing then ties its members
-to one another that the sweep can prove.
+touched. A session whose leader is gone, as when a launcher was killed too, is always left
+alone, since nothing then ties its members to one another that the sweep can prove; the
+members of such a session that are not detached survive every boot.
 """
 from __future__ import annotations
 
@@ -400,6 +407,8 @@ def _scan(instance: str, deadline: float, result: SweepResult) -> "tuple[dict[in
         if parsed is None or parsed[0] != instance:
             continue
         sessions.setdefault(entry.session, _Session(entry.session)).marked[pid] = value
+    if time.monotonic() > deadline:
+        result.truncated = True
     if result.truncated:
         return {}, table
     for number, item in sessions.items():
@@ -416,7 +425,7 @@ def _is_launcher_argv(args: "list[str]") -> bool:
     return any(arg == wanted or arg.replace(os.sep, "/").endswith("/sandbox/launcher.py") for arg in args[:6])
 
 
-def _launcher_identity(leader: _Proc, item: _Session, euid: int) -> bool:
+def _launcher_identity(leader: _Proc, euid: int) -> bool:
     """Whether an unreadable or marker-less session leader is a launcher of ours.
 
     The launcher makes itself non-dumpable, so on a host that is not root its environment
@@ -454,14 +463,14 @@ def _leader_refusal(item: _Session, euid: int) -> "str | None":
         return "its leader changed while it was read"
     if value is not None:
         return "its leader carries a marker the scan did not accept"
-    if _launcher_identity(leader, item, euid):
+    if _launcher_identity(leader, euid):
         return None
     if hidden:
         return "its leader hides its environment and does not read as a launcher"
     return "its leader's environment carries no marker and does not read as a launcher"
 
 
-def _refusal(item: _Session, instance: str, me: int, my_session: int, my_group: int, my_euid: int) -> "str | None":
+def _refusal(item: _Session, me: int, my_session: int, my_group: int, my_euid: int) -> "str | None":
     """Why this session must not be touched, or None when it may be swept."""
     if item.session <= 1 or item.session in (my_session, my_group):
         return "it is this process's own session"
@@ -568,7 +577,7 @@ def _end(item: _Session, result: SweepResult, term_wait: float) -> None:
             result.sessions.append(SweptSession(item.session, pids, "refused", "its leader is gone or changed"))
             return
         held.append(leader)
-        if leader.marker is None and not _launcher_identity(leader.entry, item, os.geteuid()):
+        if leader.marker is None and not _launcher_identity(leader.entry, os.geteuid()):
             result.sessions.append(SweptSession(item.session, pids, "refused", "its leader no longer reads as a launcher"))
             return
         for pid, entry in item.members.items():
@@ -634,7 +643,7 @@ def sweep_leftovers(
             logger.debug("Provider Hub: leftover process sweep skipped: %s", result.reason)
             return result
         deadline = time.monotonic() + SCAN_BUDGET_SECONDS
-        found, _table = _scan(instance, deadline, result)
+        found, _ = _scan(instance, deadline, result)
         if result.truncated:
             result.reason = "the /proc scan was partial, so nothing was signalled"
             logger.warning("Provider Hub: %s", result.reason)
@@ -642,7 +651,7 @@ def sweep_leftovers(
         me, my_session, my_group, my_euid = os.getpid(), os.getsid(0), os.getpgrp(), os.geteuid()
         for number in sorted(found):
             item = found[number]
-            refusal = _refusal(item, instance, me, my_session, my_group, my_euid)
+            refusal = _refusal(item, me, my_session, my_group, my_euid)
             if refusal is not None:
                 result.sessions.append(SweptSession(number, tuple(sorted(item.members)), "refused", refusal))
                 # A session of this run, or of an owner that still runs, is the normal case at boot.
