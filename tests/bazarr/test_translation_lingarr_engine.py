@@ -54,7 +54,7 @@ class FakeLingarr:
     def selected(self):
         return self.was_selected
 
-    def set(self, url, token):
+    def set(self, url, token, *, restoring=False):
         self.calls.append(("set", self.depth))
         if self.fail:
             return False
@@ -412,6 +412,21 @@ def test_the_config_backed_settings_are_the_existing_lingarr_keys(monkeypatch):
 
 
 # ----------------------------------------------------- locking, undo, ownership
+
+def test_the_config_backed_store_never_writes_the_mask_text_as_a_new_token(monkeypatch):
+    import app.config as config
+    from app.config import settings
+
+    store = legacy_engines.ConfigLingarr()
+    monkeypatch.setattr(config, "write_config", lambda *args, **kwargs: True)
+    assert store.set(URL, TOKEN) is True
+    assert store.set(URL, "***") is False
+    assert store.set(URL, "  ***  ") is False
+    assert settings.translator.lingarr_token == TOKEN
+    # Putting back a value this process read is not a new token.
+    assert store.set(URL, "***", restoring=True) is True and settings.translator.lingarr_token == "***"
+    assert store.set(URL, TOKEN, restoring=True) is True
+
 
 def test_the_config_lock_is_held_from_the_read_of_the_old_address_to_the_write(world):
     engine_id = world.lingarr()["id"]

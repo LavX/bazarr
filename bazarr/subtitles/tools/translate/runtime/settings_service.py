@@ -685,7 +685,7 @@ class TranslatorSettingsService:
                 with self._lingarr.lock():
                     if (self._lingarr.url(), self._lingarr.token()) != wrote:
                         return
-                    if not self._lingarr.set(before, before_token):
+                    if not self._lingarr.set(before, before_token, restoring=True):
                         logger.error("The Lingarr settings could not be put back after a failed save")
 
             return undo
