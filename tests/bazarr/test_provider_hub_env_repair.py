@@ -726,7 +726,24 @@ class _ScriptedWorkerClient:
         return Scripted()
 
 
-def test_two_gated_requests_across_a_repair_both_reach_the_replacement(hub, hub_registry, monkeypatch):
+def _end_scripted_worker(worker, threads_before):
+    """Let the scripted worker's process end, then wait for the drain threads this test started.
+
+    The script never exits on its own, so marking its process as exited is what keeps a
+    retired instance from leaving a release watcher polling for the rest of the process.
+    Only threads that did not exist when the test began are joined: one left by another
+    test is not this test's to wait for.
+    """
+    worker.process.returncode = 0
+    for thread in threading.enumerate():
+        if thread not in threads_before and thread.name.startswith(("hub-drain-", "hub-release-when-gone")):
+            thread.join(10)
+            assert not thread.is_alive(), thread.name
+
+
+def test_two_gated_requests_across_a_repair_both_reach_the_replacement(
+    hub, hub_registry, monkeypatch, request
+):
     from babelfish import Language
     from subliminal.video import Movie
     from provider_hub import registry
@@ -734,6 +751,8 @@ def test_two_gated_requests_across_a_repair_both_reach_the_replacement(hub, hub_
     from subliminal_patch.core import SZProviderPool
 
     worker = _ScriptedWorkerClient()
+    threads_before = set(threading.enumerate())
+    request.addfinalizer(lambda: _end_scripted_worker(worker, threads_before))
     monkeypatch.setattr(registry, "_global_worker_timeout", lambda: 0.5)
 
     class OldClass(HubProxyProvider):

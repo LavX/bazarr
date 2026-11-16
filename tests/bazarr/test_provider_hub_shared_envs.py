@@ -1243,6 +1243,22 @@ def _fake_proc(tmp_path, pid=None):
     return proc, entry
 
 
+def _venv_sleeps(monkeypatch, sleep):
+    """Replace the sleep the venv module sees with ``sleep``.
+
+    The venv module gets its own view of ``time``. Patching ``time.sleep`` itself
+    would also catch every other thread in the process that sleeps, such as a
+    worker-release poll left running by an earlier test, and make it spin.
+    """
+
+    class VenvClock:
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    VenvClock.sleep = staticmethod(sleep)
+    monkeypatch.setattr(venvmod, "time", VenvClock())
+
+
 def _unreadable_reads(monkeypatch, entry, failures):
     """Make the first ``failures`` reads of the fake process's exe link raise PermissionError."""
     real_readlink = venvmod.os.readlink
@@ -1256,7 +1272,7 @@ def _unreadable_reads(monkeypatch, entry, failures):
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", seen["sleeps"].append)
+    _venv_sleeps(monkeypatch, seen["sleeps"].append)
     return seen
 
 
@@ -1283,7 +1299,7 @@ def test_a_process_unreadable_once_and_then_gone_does_not_block_cleanup(tmp_path
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
     assert not entry.exists()
@@ -1304,7 +1320,7 @@ def test_a_process_unreadable_once_and_then_exited_with_a_lookup_error_does_not_
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
     assert not entry.exists()
@@ -1322,7 +1338,7 @@ def test_a_lookup_error_for_a_pid_whose_entry_is_still_there_still_blocks_cleanu
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
@@ -1343,7 +1359,7 @@ def test_an_io_error_on_a_descriptor_after_a_denied_first_look_keeps_the_process
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
@@ -1360,7 +1376,7 @@ def test_a_process_unreadable_once_and_then_failing_for_another_reason_still_blo
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
@@ -1377,7 +1393,7 @@ def test_a_missing_file_in_a_process_that_is_still_there_still_blocks_cleanup(tm
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
@@ -1409,7 +1425,7 @@ def test_a_denied_descriptor_is_unresolved_on_the_retry_and_keeps_the_process_in
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
@@ -1428,7 +1444,7 @@ def test_a_descriptor_denied_on_the_first_look_is_retried_and_dropped_once_reada
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
     assert seen["count"] == 2
@@ -1453,7 +1469,7 @@ def test_a_process_whose_entry_cannot_be_checked_after_a_missing_file_still_bloc
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
     monkeypatch.setattr(venvmod.os, "lstat", lstat)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is True
 
@@ -1475,7 +1491,7 @@ def _failing_exe(monkeypatch, entry, errors):
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
     return reads
 
 
@@ -1512,7 +1528,7 @@ def test_a_process_whose_entry_vanished_on_the_first_look_is_dropped(tmp_path, m
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", lambda _seconds: None)
+    _venv_sleeps(monkeypatch, lambda _seconds: None)
 
     assert venvmod.processes_using_directory(tmp_path / "env", proc=str(proc)) is False
 
