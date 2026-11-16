@@ -1895,6 +1895,12 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
         refusal = dependent_refusal(provider_id, "switched off", enabled_only=True)
         if refusal:
             raise ValueError(refusal)
+    if enabled is True:
+        # What a plugin relies on has to be running before it is switched on, as at the next boot.
+        needs = closure.unmet_needs((load_state().get("installations") or {})).get(provider_id)
+        if needs:
+            raise ValueError(
+                f"{provider_id} needs {', '.join(needs)}, which is not running. Switch it on first.")
 
     def _encrypt_provider_config(provider: dict[str, Any],
                                   config: dict[str, Any]) -> dict[str, Any]:
@@ -3744,6 +3750,13 @@ def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[st
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def _row_is_on(row: dict[str, Any]) -> bool:
+    try:
+        return bool(get_kind(kind_of(row)).is_enabled(row))
+    except Exception:
+        return bool(row.get("enabled", True))
+
+
 def activate_staged_installations() -> list[str]:
     state = load_state()
     installations = state.get("installations") or {}
@@ -3861,13 +3874,18 @@ def activate_staged_installations() -> list[str]:
         if not isinstance(row, dict):
             continue
         if plugin_id in unmet:
-            reason = f"It needs {', '.join(unmet[plugin_id])}, which is not running, so it was not started."
+            reason = (f"It needs {', '.join(unmet[plugin_id])}, which is not running, so it was not started. "
+                      "Once that is running again, restart Bazarr+.")
+            # A plugin that is switched off is not shown an error for not running.
+            shown = None if not _row_is_on(row) else reason
             if not row.get("blocked") or row.get("blocked_reason") != reason:
-                row.update(blocked=True, blocked_reason=reason, last_error=reason)
+                row.update(blocked=True, blocked_reason=reason)
+                if shown:
+                    row["last_error"] = shown
                 changed = True
-            elif not row.get("last_error"):
+            elif shown and not row.get("last_error"):
                 # Something cleared the reason (an activation, a repair): a held-back plugin always says why.
-                row["last_error"] = reason
+                row["last_error"] = shown
                 changed = True
         elif row.get("blocked"):
             if row.get("last_error") == row.get("blocked_reason"):

@@ -607,7 +607,8 @@ def test_a_plugin_whose_supplier_is_not_running_at_boot_does_not_start_and_says_
 
     assert rows["user"]["blocked"] is True
     assert rows["user"]["last_error"] == (
-        "It needs parent (demo_parent.backend.v1), which is not running, so it was not started.")
+        "It needs parent (demo_parent.backend.v1), which is not running, so it was not started. "
+        "Once that is running again, restart Bazarr+.")
     assert "blocked" not in rows["parent"]
     assert [row.provider_id for row in running_installations(kind=None)] == ["parent"]
     assert [row.provider_id for row in active_installations(kind=None)] == ["parent"]
@@ -722,7 +723,8 @@ def test_a_need_is_met_by_any_running_supplier_and_only_blocked_when_none_runs(t
     rows = _boot(tmp_path, monkeypatch, {**_installed(recorded), **_installed(user, **bound)})
     assert rows["user"]["blocked"] is True
     assert rows["user"]["last_error"] == (
-        "It needs recorded (demo_parent.backend.v1), which is not running, so it was not started.")
+        "It needs recorded (demo_parent.backend.v1), which is not running, so it was not started. "
+        "Once that is running again, restart Bazarr+.")
 
 
 def test_an_add_on_stays_bound_to_the_plugin_it_extends(tmp_path, monkeypatch, service_kind):
@@ -745,9 +747,9 @@ def test_a_switched_off_supplier_supplies_nothing_at_boot(tmp_path, monkeypatch,
     assert rows["user"]["blocked"] is True
 
 
-def test_re_enabling_a_plugin_after_its_supplier_was_switched_off_does_not_start_it(
-        tmp_path, monkeypatch, service_kind):
+def test_a_plugin_cannot_be_switched_on_while_its_supplier_is_switched_off(tmp_path, monkeypatch, service_kind):
     from provider_hub import service
+    from provider_hub.state import load_state
 
     parent = _manifest("parent", provides=[PARENT_CAPABILITY])
     user = _manifest("user", requires=[PARENT_CAPABILITY])
@@ -756,25 +758,54 @@ def test_re_enabling_a_plugin_after_its_supplier_was_switched_off_does_not_start
 
     service.update_provider("user", enabled=False)
     service.update_provider("parent", enabled=False)
-    service.update_provider("user", enabled=True)
-    service.activate_staged_installations()
+    with pytest.raises(ValueError, match=r"user needs parent \(demo_parent.backend.v1\), which is not running. "
+                                         "Switch it on first"):
+        service.update_provider("user", enabled=True)
+    assert load_state()["installations"]["user"]["enabled"] is False
 
-    from provider_hub.state import load_state
-    assert load_state()["installations"]["user"]["blocked"] is True
+    # Once the supplier is on, so can the plugin be.
+    service.update_provider("parent", enabled=True)
+    assert service.update_provider("user", enabled=True)["enabled"] is True
 
 
-def test_a_supplier_that_is_switched_off_is_not_recorded_as_the_supplier(tmp_path, monkeypatch, service_kind):
+def test_a_switched_off_plugin_is_held_back_at_boot_without_an_error_of_its_own(tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+
+    rows = _boot(tmp_path, monkeypatch, {
+        **_installed(parent, enabled=False),
+        **_installed(user, enabled=False, supplied_by={PARENT_CAPABILITY: "parent"})})
+
+    assert rows["user"]["blocked"] is True and "restart Bazarr+" in rows["user"]["blocked_reason"]
+    assert rows["user"].get("last_error") is None
+
+
+def test_a_supplier_that_is_switched_off_is_still_recorded_as_the_supplier(tmp_path, monkeypatch, service_kind):
     from provider_hub.closure import supplier_map
     from provider_hub.plugin_manifest import parse_plugin_manifest
     from provider_hub.state import load_state
 
-    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
     user = _manifest("user", requires=[PARENT_CAPABILITY])
-    _world(tmp_path, monkeypatch, [], _installed(parent, enabled=False))
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    # A new provider that is still waiting for its settings is staged and switched off.
+    waiting = {"active_version": None, "staged_version": "1.0.0", "staged_manifest": parent,
+               "state": "staged", "pending_restart": True}
+    _world(tmp_path, monkeypatch, [], _installed(parent, enabled=False, **waiting))
 
-    assert supplier_map(load_state(), parse_plugin_manifest(user), "user") == {}
-    _world(tmp_path, monkeypatch, [], _installed(parent))
     assert supplier_map(load_state(), parse_plugin_manifest(user), "user") == {PARENT_CAPABILITY: "parent"}
+
+
+def test_a_supplier_whose_kind_is_not_defined_does_not_count_as_running(tmp_path, monkeypatch, service_kind):
+    from plugin_platform_helpers import service_manifest
+
+    undefined = service_manifest("ghost", "1.0.0", kind="translator", kind_api="bazarr.translator.v1",
+                                 provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+
+    rows = _boot(tmp_path, monkeypatch, {
+        **_installed(undefined), **_installed(user, supplied_by={PARENT_CAPABILITY: "ghost"})})
+
+    assert rows["user"]["blocked"] is True
 
 
 def test_a_provider_held_back_at_boot_keeps_its_provider_list_entries_and_settings(
@@ -894,7 +925,7 @@ def test_the_boot_check_writes_the_reason_back_when_something_cleared_it(tmp_pat
     user = _manifest("user", requires=[PARENT_CAPABILITY])
     cleared = {"supplied_by": {PARENT_CAPABILITY: "parent"}, "blocked": True,
                "blocked_reason": "It needs parent (demo_parent.backend.v1), which is not running, so it was not "
-                                 "started.", "last_error": None}
+                                 "started. Once that is running again, restart Bazarr+.", "last_error": None}
 
     rows = _boot(tmp_path, monkeypatch, {**_installed(parent), **_installed(user, **cleared)})
 

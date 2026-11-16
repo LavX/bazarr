@@ -400,9 +400,10 @@ def supplier_map(state: dict[str, Any], plugin: PluginManifest, owner_id: str) -
             continue
         for held_id, (_held, held_row) in sorted(installed.items()):
             supplier = _manifest_in(held_row, "next")
-            # A plugin that is switched off supplies nothing.
-            if (held_id != owner_id and supplier is not None and capability in supplier.provides
-                    and _enabled(held_row)):
+            # Recorded whether or not the supplier is switched on (a new provider waits for its settings):
+            # which needs are backed by a plugin is a fact about the release, and the boot judges whether
+            # the supplier runs.
+            if held_id != owner_id and supplier is not None and capability in supplier.provides:
                 found[capability] = held_id
                 break
     return found
@@ -423,7 +424,11 @@ def unmet_needs(installations: dict[str, Any]) -> dict[str, list[str]]:
     }
     parsed = {pid: _parse(row.get("manifest")) for pid, row in rows.items()}
     candidates = {pid for pid, plugin in parsed.items() if plugin is not None}
-    suppliers = {pid for pid in candidates if _enabled(rows[pid])}
+    from .kinds import known_kinds, kind_of
+
+    registered = set(known_kinds())
+    # Only a plugin of a kind this Bazarr+ defines, switched on, is running to supply anything.
+    suppliers = {pid for pid in candidates if kind_of(rows[pid]) in registered and _enabled(rows[pid])}
     blocked: dict[str, list[str]] = {}
     while True:
         newly: dict[str, list[str]] = {}

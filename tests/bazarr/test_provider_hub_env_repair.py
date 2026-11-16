@@ -2008,7 +2008,7 @@ def test_a_repair_does_not_clear_the_reason_a_plugin_was_held_back(hub, tmp_path
     state = load_state()
     state["installations"] = {"examplehub": _active_row(
         bundle, old / "bin" / "python", needs_repair=True, last_error=env_registry.NEEDS_REPAIR_MESSAGE,
-        blocked=True, blocked_reason="It needs parent, which is not running, so it was not started.")}
+        blocked=True, blocked_reason="It needs parent, which is not running.")}
     save_state(state)
     _patch_environment(monkeypatch)
     monkeypatch.setattr("provider_hub.service._smoke_validate_worker",
@@ -2019,4 +2019,26 @@ def test_a_repair_does_not_clear_the_reason_a_plugin_was_held_back(hub, tmp_path
 
     row = load_state()["installations"]["examplehub"]
     assert "needs_repair" not in row and row["blocked"] is True
-    assert row["last_error"] == "It needs parent, which is not running, so it was not started."
+    assert row["last_error"] == "It needs parent, which is not running."
+
+
+def test_a_healthy_environment_clears_the_repair_flag_of_a_held_back_plugin_and_keeps_its_reason(hub):
+    from provider_hub.manifest import validate_manifest
+    from provider_hub.service import _verify_bundle_for_run
+
+    env = _env(hub / "envs" / "alpha" / "1.0.0" / "fp1")
+    (env / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\nversion = {sys.version_info.major}.{sys.version_info.minor}.0\n", encoding="utf-8")
+    bundle = _bundle_with(hub)
+    reason = "It needs parent, which is not running."
+    state = load_state()
+    state["installations"] = {"examplehub": _active_row(
+        bundle, env / "bin" / "python", needs_repair=True, last_error=reason, blocked=True, blocked_reason=reason)}
+    save_state(state)
+
+    env_registry.reconcile_environments(
+        validate=lambda row, staged: validate_manifest(row["manifest"], built_in_provider_ids=set()),
+        probe=lambda *args: None, verify_bundle=_verify_bundle_for_run)
+
+    row = load_state()["installations"]["examplehub"]
+    assert "needs_repair" not in row and row["last_error"] == reason and row["blocked"] is True

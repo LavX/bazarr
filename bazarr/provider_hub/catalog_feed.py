@@ -34,6 +34,7 @@ from typing import Any, Mapping
 
 from . import signing
 from .signing import Status
+from .state import process_lock
 
 logger = logging.getLogger(__name__)
 
@@ -221,29 +222,32 @@ def write_counter_file(records: Mapping[str, ChannelRecord]) -> None:
     """
     path = counter_file()
     try:
-        merged = {**read_counter_file()}
-        for channel, record in records.items():
-            merged[channel] = _larger(merged.get(channel), record)
-        document = {
-            "schema_version": _COUNTER_FILE_VERSION,
-            "channels": {
-                channel: {"signed_version": record.signed_version, "key_file_version": record.key_file_version}
-                for channel, record in sorted(merged.items())
-                if record.signed_version is not None or record.key_file_version is not None
-            },
-        }
         path.parent.mkdir(parents=True, exist_ok=True)
-        handle, temporary = tempfile.mkstemp(prefix=".feed-counter-", dir=str(path.parent))
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                json.dump(document, stream, sort_keys=True)
-            os.replace(temporary, path)
-        except BaseException:
+        # The read, the merge and the replacement are one step: two refreshes writing at once cannot let the
+        # older counter overwrite the newer one. A lock that cannot be had does not stop the write.
+        with process_lock(path.parent / ".feed-counter.lock", wait=10.0):
+            merged = {**read_counter_file()}
+            for channel, record in records.items():
+                merged[channel] = _larger(merged.get(channel), record)
+            document = {
+                "schema_version": _COUNTER_FILE_VERSION,
+                "channels": {
+                    channel: {"signed_version": record.signed_version, "key_file_version": record.key_file_version}
+                    for channel, record in sorted(merged.items())
+                    if record.signed_version is not None or record.key_file_version is not None
+                },
+            }
+            handle, temporary = tempfile.mkstemp(prefix=".feed-counter-", dir=str(path.parent))
             try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-            raise
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    json.dump(document, stream, sort_keys=True)
+                os.replace(temporary, path)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
     except Exception:
         logger.warning("The catalog feed counter file could not be written", exc_info=True)
 

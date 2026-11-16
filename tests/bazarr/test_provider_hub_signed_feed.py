@@ -790,3 +790,37 @@ def test_a_channel_restored_from_an_unsigned_backup_installs_nothing_once_anothe
 
     assert set(_blocked()) == {PROVIDER, SERVICE}
     assert all("older than one it already accepted" in reason for reason in _blocked().values())
+
+
+def test_the_counter_file_is_read_merged_and_replaced_under_one_lock(tmp_path, monkeypatch):
+    import contextlib
+
+    from provider_hub import catalog_feed
+    from provider_hub.catalog_feed import ChannelRecord
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+    catalog_feed.write_counter_file({"main": ChannelRecord(5, 1)})
+    held = []
+    events = []
+
+    @contextlib.contextmanager
+    def lock(path, wait=0):
+        held.append(True)
+        events.append("lock")
+        try:
+            yield True
+        finally:
+            held.pop()
+            events.append("unlock")
+
+    real_read = catalog_feed.read_counter_file
+    real_replace = catalog_feed.os.replace
+    monkeypatch.setattr(catalog_feed, "process_lock", lock)
+    monkeypatch.setattr(catalog_feed, "read_counter_file", lambda: events.append(("read", bool(held))) or real_read())
+    monkeypatch.setattr(catalog_feed.os, "replace",
+                        lambda source, target: events.append(("replace", bool(held))) or real_replace(source, target))
+
+    catalog_feed.write_counter_file({"main": ChannelRecord(9, 1)})
+
+    assert events == ["lock", ("read", True), ("replace", True), "unlock"]
+    assert real_read() == {"main": ChannelRecord(9, 1)}
