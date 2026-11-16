@@ -230,15 +230,16 @@ def register_secret_values(values: Iterable[Any]) -> int:
 
 # Where a short credential may stand. After "=" or ":" (key=value pairs, JSON
 # and YAML values, query parameters, headers), optionally followed by spaces and
-# an opening quote, plain or escaped as in JSON that was itself put in a string;
+# an opening quote, plain or escaped as in JSON that was itself put in a string
+# (once, or twice when that was put in a string again, any run of backslashes);
 # or after an authorization scheme name, whatever its case; or as an item of a
 # YAML block list, one or more "-" at the start of a line after any
 # indentation, or of a YAML flow list, right after its "[" or a ",". As a quoted string.
 # As the user of a URL, right after "://". The quote is its own group so that a
 # credential that begins with a quote can be found starting at it.
 _SHORT_CONTEXT_RE = re.compile(
-    r'(?P<after>(?P<pre>(?:[=:]|\b(?i:basic|bearer|digest|token)\s+)\s*|(?m:^)[ \t]*(?:-[ \t]+)+)(?:\\?["\'])?)'
-    r'|(?P<quote>\\?["\'])'
+    r'(?P<after>(?P<pre>(?:[=:]|\b(?i:basic|bearer|digest|token)\s+)\s*|(?m:^)[ \t]*(?:-[ \t]+)+)(?:\\*["\'])?)'
+    r'|(?P<quote>\\*["\'])'
     r'|(?P<user>(?<=://))'
 )
 
@@ -824,7 +825,7 @@ def scrub_job_secrets(job) -> bool:
     def walk(node, in_text):
         nonlocal changed
         if isinstance(node, str):
-            masked = scrub_leaf(node) if in_text else _mask_patterns(node)
+            masked = scrub_leaf(node, short=False) if in_text else _mask_patterns(node)
             if masked != node:
                 changed = True
             return masked

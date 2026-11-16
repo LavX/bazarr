@@ -642,13 +642,17 @@ def test_a_structured_leaf_equal_to_a_short_credential_is_masked(scrub_registry)
     }
 
 
-def test_a_job_row_leaf_equal_to_a_short_credential_is_masked(scrub_registry):
-    scrub_registry(["abc"])
+def test_a_job_row_masks_a_long_leaf_whole_and_a_short_one_only_in_context(scrub_registry):
+    # A job row is labels and ids as much as it is text, so a short credential is not wiped from a
+    # leaf that merely equals it (as in a job action); a long one is masked wherever it appears.
+    scrub_registry(["abc", FAKE_KEY])
     job = {"id": "abc", "action": "install", "message": "failed",
-           "details": {"config": {"api_key": "abc", "region": "eu"}, "args": ["abc", "other"]}}
+           "details": {"config": {"api_key": FAKE_KEY, "region": "eu", "note": "abc"},
+                       "args": [FAKE_KEY, "other", "x=abc"]}}
     assert scrub_job_secrets(job) is True
     assert job == {"id": "abc", "action": "install", "message": "failed",
-                   "details": {"config": {"api_key": "***", "region": "eu"}, "args": ["***", "other"]}}
+                   "details": {"config": {"api_key": "***", "region": "eu", "note": "abc"},
+                               "args": ["***", "other", "x=***"]}}
 
 
 def test_a_state_document_leaf_in_a_text_field_equal_to_a_short_credential_is_masked(scrub_registry):
@@ -805,12 +809,10 @@ def test_the_url_user_scan_stays_linear_with_many_colons(scrub_registry):
     assert large_cost < max(small_cost, 0.002) * 40
 
 
-def test_the_long_value_precheck_is_cheaper_than_the_alternation_it_guards(scrub_registry):
-    # About 100 long values on long lines that hold none of them. The look-ahead is one fast
-    # substring search per value; the alternation would be tried at every position of the text.
-    # The two are timed on their own, in the same process, so only their relation is asserted.
-    # The values start with different characters, so the regex engine cannot skip ahead on a
-    # shared prefix.
+def test_the_long_value_precheck_keeps_the_alternation_off_text_that_holds_none(scrub_registry):
+    # About 100 long values. A text that holds none of them is cleared by one substring search per
+    # value, and the alternation is never run over it; a text that holds one runs it once. Counted,
+    # not timed, so the check does not depend on the machine.
     import secret_store.scrub as scrub
 
     many = [f"{chr(97 + index % 26)}{index:05d}-credential-value-{index}" for index in range(100)]
@@ -818,19 +820,22 @@ def test_the_long_value_precheck_is_cheaper_than_the_alternation_it_guards(scrub
             "after a timeout of thirty seconds and no further detail\n") * 2500
 
     scrub_registry(many)
+    values, regex, short_values, long_values = scrub._VALUE_STATE
+
+    class Counting:
+        calls = 0
+
+        def finditer(self, subject):
+            Counting.calls += 1
+            return regex.finditer(subject)
+
+    scrub._VALUE_STATE = (values, Counting(), short_values, long_values)
+
     assert scrub_text(text) == text
-    long_values = scrub._VALUE_STATE[3]
-    alternation = scrub._VALUE_STATE[1]
+    assert Counting.calls == 0
 
-    precheck_cost = _best_of(7, lambda: any(value in text for value in long_values))
-    alternation_cost = _best_of(7, lambda: alternation.sub("***", text))
-
-    assert precheck_cost < alternation_cost
-    # And the whole path, patterns included, is cheaper than the alternation alone: dropping the
-    # look-ahead would add the alternation on top of the rest and fail this.
-    assert _best_of(7, lambda: scrub_text(text)) < alternation_cost * 0.8
-    # Still masked when one is present.
     assert scrub_text("x " + many[57] + " y") == "x *** y"
+    assert Counting.calls == 1
 
 
 def test_the_console_format_scrubs_only_the_message(scrub_registry):
@@ -1100,3 +1105,23 @@ def test_a_declared_hub_secret_survives_every_refresh_and_addition(scrub_registr
     scrub.refresh_secret_values({"omdb": {"apikey": FAKE_KEY}}, state={"installations": {}})
 
     assert scrub_text(f"a=declared-secret-1 b=dcl c=stored d=added e={FAKE_KEY}") == "a=*** b=*** c=*** d=*** e=***"
+
+
+@pytest.mark.parametrize("text, masked", [
+    ('{\\\\\\"pass\\\\\\": \\\\\\"abc\\\\\\"}', '{\\\\\\"pass\\\\\\": \\\\\\"***\\\\\\"}'),
+    ('\\\\\\"abc\\\\\\"', '\\\\\\"***\\\\\\"'),
+    ('x=\\\\\\"abc', 'x=\\\\\\"***'),
+    ('\\"abc\\"', '\\"***\\"'),
+    ('\\\\\\"abcd\\\\\\"', '\\\\\\"abcd\\\\\\"'),
+])
+def test_a_doubly_escaped_quote_is_a_quote_too(scrub_registry, text, masked):
+    scrub_registry(["abc"])
+    assert scrub_text(text) == masked
+
+
+def test_a_job_row_leaf_equal_to_a_short_credential_is_left_to_the_text_scrub(scrub_registry):
+    scrub_registry(["abc", "Save", FAKE_KEY])
+    job = {"message": "Save", "details": {"label": "abc", "file": "m.srt password=abc", "key": FAKE_KEY}}
+
+    assert scrub_job_secrets(job) is True
+    assert job == {"message": "Save", "details": {"label": "abc", "file": "m.srt password=***", "key": "***"}}
