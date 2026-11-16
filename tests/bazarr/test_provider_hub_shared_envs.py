@@ -1255,8 +1255,21 @@ def _unreadable_reads(monkeypatch, entry, failures):
                 raise PermissionError(13, "Permission denied")
         return real_readlink(path, *args, **kwargs)
 
+    class VenvClock:
+        """The venv module's own view of ``time``: only its sleeps are recorded.
+
+        Patching ``time.sleep`` itself would also catch every other thread in
+        the process that sleeps, such as a worker-release poll left running by
+        an earlier test.
+        """
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        sleep = staticmethod(seen["sleeps"].append)
+
     monkeypatch.setattr(venvmod.os, "readlink", readlink)
-    monkeypatch.setattr(venvmod.time, "sleep", seen["sleeps"].append)
+    monkeypatch.setattr(venvmod, "time", VenvClock())
     return seen
 
 
