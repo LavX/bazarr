@@ -1,6 +1,20 @@
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from subtitles import pool
+
+
+@pytest.fixture(autouse=True)
+def blacklist_database(schema_session, monkeypatch):
+    """Pool construction reads the blacklist tables. Give it an empty schema of
+    its own instead of the application database, which only exists once an
+    earlier test or the app has created it."""
+    from radarr import blacklist as radarr_blacklist
+    from sonarr import blacklist as sonarr_blacklist
+
+    monkeypatch.setattr(radarr_blacklist, "database", schema_session)
+    monkeypatch.setattr(sonarr_blacklist, "database", schema_session)
 
 
 def test_init_pool():
