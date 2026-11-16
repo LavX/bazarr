@@ -121,6 +121,7 @@ class RuntimeTranslatorService:
         self._dispatcher = dispatcher
         self._job_id = None
         self._versions = ()
+        self._source_real = None
 
     def _check(self):
         if self._job_id:
@@ -161,8 +162,9 @@ class RuntimeTranslatorService:
         # The versions of the source and of the destination as they are when the job starts, before the source
         # is read and before the engine is asked: whatever the remote call took, an edit made meanwhile must not
         # be published over. A source that is a link is followed, as the old services followed it.
-        self._versions = capture_subtitle_versions(
-            self.video_path, (os.path.realpath(self.source_srt_file), self.dest_srt_file), self.cancel)
+        self._source_real = os.path.realpath(self.source_srt_file)
+        self._versions = capture_subtitle_versions(self.video_path, (self._source_real, self.dest_srt_file),
+                                                   self.cancel)
         subs = pysubs2.load(self.source_srt_file, encoding="utf-8")
         lines = [x.plaintext for x in subs]
         if not lines:
@@ -248,6 +250,9 @@ class RuntimeTranslatorService:
         """Raise the same error the staged write would when the source or the destination is no longer as it
         was when the job started."""
         source, destination = self._versions
+        if os.path.realpath(self.source_srt_file) != self._source_real:
+            # A link that was pointed at another file while the engine worked: that is a different source.
+            raise SubtitleSourceChanged("The source subtitle is a link that now points elsewhere")
         try:
             validate_subtitle_versions((source,))
         except SubtitleSourceChanged:

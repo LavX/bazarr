@@ -297,7 +297,7 @@ def test_the_job_of_an_embedded_track_is_keyed_before_the_extraction_replaces_it
 def test_an_auto_queued_job_whose_captured_file_is_a_link_is_refused_before_the_runtime_is_reached(
         job, monkeypatch, tmp_path, linked):
     """The queue-time capture refuses a link, in main.py and before any engine work, as it always did. It runs the
-    same with the runtime on: no service is built and nothing is dispatched."""
+    same with the runtime on: no service is built and nothing is dispatched. The paths are the job's own."""
     from subtitles.tools.subsync_engines import capture_subtitle_versions
 
     monkeypatch.setattr(job.main, "_runtime_active", lambda: True)
@@ -308,10 +308,11 @@ def test_an_auto_queued_job_whose_captured_file_is_a_link_is_refused_before_the_
     plain.write_text(SRT, encoding="utf-8")
     link = tmp_path / "link.srt"
     link.symlink_to(real)
-    captured = capture_subtitle_versions(str(tmp_path / "film.mkv"),
-                                         (str(link), str(plain)) if linked == "destination"
-                                         else (str(plain), str(link)))
-    assert job(expected_destination_versions=captured) is None
+    source, destination = (plain, link) if linked == "destination" else (link, plain)
+    video = tmp_path / "film.mkv"
+    monkeypatch.setattr(job.main, "translated_destination_path", lambda *args, **kwargs: str(destination))
+    captured = capture_subtitle_versions(str(video), (str(destination), str(source)))
+    assert job(video_path=str(video), source_srt_file=str(source), expected_destination_versions=captured) is None
     assert made == [] and job.renamed[-1].startswith("Skipped")
 
 
@@ -696,6 +697,57 @@ def test_a_symlinked_destination_is_refused_before_anything_is_paid_for_and_is_n
     assert env.requests() == [], "the engine was never asked"
     assert env.last_job() is None, "and no job was made"
     assert target.read_text(encoding="utf-8") == SRT
+
+
+def test_a_link_pointed_elsewhere_during_the_call_is_a_changed_source(env, media, tmp_path):
+    from subtitles.tools.translate.runtime.service import TranslationRuntimeError
+
+    env.ai_engine()
+    first = tmp_path / "library" / "first.en.srt"
+    first.parent.mkdir()
+    first.write_text(SRT, encoding="utf-8")
+    second = tmp_path / "library" / "second.en.srt"
+    second.write_text(SRT, encoding="utf-8")
+    link = tmp_path / "link.en.srt"
+    link.symlink_to(first)
+
+    def retarget():
+        link.unlink()
+        link.symlink_to(second)
+
+    service = build_service(env, media, source_srt_file=str(link))
+    service._dispatcher = _EditsDuring(env.dispatcher(), retarget)
+    with pytest.raises(TranslationRuntimeError) as caught:
+        service.translate(job_id=None)
+    assert (caught.value.reason, caught.value.retry_later) == ("source_changed", True)
+    assert not media.dest.exists()
+
+
+@pytest.mark.parametrize("changed, state, error_class", [("destination", "failed", "destination_changed"),
+                                                         ("source", "awaiting_retry", "source_changed")])
+def test_a_refusal_by_the_staged_write_after_the_early_check_says_which_input_changed(
+        env, media, monkeypatch, changed, state, error_class):
+    """The staged write reports any change as a changed source. Something changes after the early check has
+    passed and the staged write refuses: the service finds out which one it was."""
+    from subtitles.tools.subsync_engines import SubtitleSourceChanged
+    from subtitles.tools.translate.runtime import service
+
+    env.ai_engine()
+
+    def refusing(*args, **kwargs):
+        if changed == "destination":
+            media.dest.write_text(SRT, encoding="utf-8")
+        else:
+            media.source.write_text(SRT.replace("One", "Uno y mas"), encoding="utf-8")
+        raise SubtitleSourceChanged("Queued subtitle input or destination changed")
+
+    monkeypatch.setattr(service, "staged_subtitle_write", refusing)
+    with pytest.raises(Exception) as caught:
+        build_service(env, media).translate(job_id=None)
+    job = env.last_job()
+    assert (job.state, job.error_class) == (state, error_class)
+    assert type(caught.value).__name__ == ("SubtitleDestinationChanged" if changed == "destination"
+                                           else "TranslationRuntimeError")
 
 
 def test_the_versions_are_taken_before_the_source_is_read(env, media, monkeypatch):
