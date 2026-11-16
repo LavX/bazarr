@@ -222,6 +222,100 @@ describe("Translation page", () => {
     ).toHaveValue("");
   });
 
+  it("turns an engine that an update switched off back on, and the form saves on top of that", async () => {
+    state = {
+      ...state,
+      instances: [
+        second,
+        engine({ enabled: false, awaiting_secrets: true, configured: false }),
+      ],
+    };
+    server.use(
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        const body = (await request.json()) as { enabled?: boolean };
+        record("patch", "engine", body);
+        if (body.enabled) {
+          state = { ...state, instances: [second, engine({ revision: 4 })] };
+        }
+        return HttpResponse.json({
+          engine: engine({ revision: 4 }),
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    const toggle = screen.getByRole("switch", { name: "Use this engine" });
+    expect(toggle).not.toBeChecked();
+    await user.click(toggle);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({ enabled: true, expected_revision: 3 });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "Use this engine" }),
+      ).toBeChecked(),
+    );
+    // The switch moved the revision on; the form it left alone is still current for the next save.
+    await user.click(
+      screen.getByRole("button", { name: "Save engine settings" }),
+    );
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1].body).toMatchObject({ expected_revision: 4 });
+  });
+
+  it("can turn on a disabled engine whose plugin declares no settings", async () => {
+    const bare = engine({
+      enabled: false,
+      awaiting_secrets: true,
+      values: {},
+      secrets: {},
+      connections: [],
+      schema: {
+        settings_version: 1,
+        endpoints: [],
+        fields: [],
+        backend_types: {},
+      },
+    });
+    state = { ...state, instances: [second, bare] };
+    server.use(
+      http.patch("/api/translation/engines/:id", async ({ request }) => {
+        record("patch", "engine", await request.json());
+        return HttpResponse.json({
+          engine: { ...bare, enabled: true, revision: 4 },
+          notices: [],
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    expect(
+      screen.queryByRole("button", { name: "Save engine settings" }),
+    ).toBeNull();
+    await user.click(screen.getByRole("switch", { name: "Use this engine" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({ enabled: true, expected_revision: 3 });
+  });
+
+  it("says why an engine cannot be turned on yet", async () => {
+    state = {
+      ...state,
+      instances: [second, engine({ enabled: false, awaiting_secrets: true })],
+    };
+    server.use(
+      http.patch("/api/translation/engines/:id", () =>
+        HttpResponse.json(
+          { error: "invalid", message: "Region is required." },
+          { status: 400 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    await showPage();
+    await user.click(screen.getByRole("switch", { name: "Use this engine" }));
+    expect(await screen.findByText("Region is required.")).toBeVisible();
+  });
+
   it("shows a field error beside its field", async () => {
     server.use(
       http.patch("/api/translation/engines/:id", () =>

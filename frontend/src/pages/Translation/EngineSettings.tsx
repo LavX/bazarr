@@ -1,7 +1,11 @@
 /* eslint-disable camelcase -- transport names. */
 import { FunctionComponent, useState } from "react";
-import { Alert, Button, Group, Stack } from "@mantine/core";
-import { useFreshState, useSaveEngine } from "@/apis/hooks/translation";
+import { Alert, Button, Group, Stack, Switch } from "@mantine/core";
+import {
+  readRefusal,
+  useFreshState,
+  useSaveEngine,
+} from "@/apis/hooks/translation";
 import {
   initialValues,
   PluginSettingsForm,
@@ -18,7 +22,8 @@ import styles from "./Translation.module.scss";
  * The engine's own settings, drawn from its manifest. Back ends have their
  * own form. The draft keeps the revision it was loaded from, so a save made
  * after another tab's save is refused. The form keeps what was typed when that
- * happens, and saving over the other change is then an explicit choice.
+ * happens, and saving over the other change is then an explicit choice. An
+ * engine whose plugin declares no settings has the switch only.
  */
 const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
   engine,
@@ -87,56 +92,94 @@ const EngineSettings: FunctionComponent<{ engine: TranslationEngine }> = ({
     await form.save();
   };
 
+  // A plugin update can turn an engine off until its settings are reviewed, and saving them does not turn it
+  // back on, so the switch is here. It carries the revision the engine has now; a form that was current
+  // before the switch stays current after it.
+  const [switchProblem, setSwitchProblem] = useState("");
+  const switchEngine = (enabled: boolean) => {
+    const draftIsCurrent = revision.forSave() === engine.revision;
+    setSwitchProblem("");
+    mutation.mutate(
+      { id: engine.id, body: { enabled, expected_revision: engine.revision } },
+      {
+        onSuccess: (saved) => {
+          if (draftIsCurrent) {
+            revision.reload(saved.engine.revision);
+          }
+        },
+        onError: (error) =>
+          setSwitchProblem(
+            readRefusal(error)?.message || "The request failed. Try again.",
+          ),
+      },
+    );
+  };
+
   return (
     <Stack className={styles.editorForm}>
-      <PluginSettingsForm
-        fields={fields}
-        values={values}
-        secrets={engine.secrets}
-        errors={form.fieldErrors}
-        // Locked while a conflict answer loads what is saved now: the save that follows sends what the
-        // form held when the answer was given, so nothing may be typed in between.
-        disabled={form.busy || loadingFor !== null}
-        pendingClear={cleared}
-        onChange={setValues}
-        onClearSecret={(key) =>
-          setCleared((current) => [...new Set([...current, key])])
-        }
+      <Switch
+        label="Use this engine"
+        checked={engine.enabled}
+        disabled={mutation.isPending || form.busy}
+        onChange={(event) => switchEngine(event.currentTarget.checked)}
       />
-      {engine.awaiting_secrets && (
-        <Alert color="yellow" title="Enter the keys again">
-          An address changed, so the saved keys no longer apply.
+      {switchProblem && (
+        <Alert color="red" role="alert">
+          {switchProblem}
         </Alert>
       )}
-      {form.stale ? (
-        <ConflictNotice
-          subject="These settings"
-          saving={form.busy || loadingFor === "mine"}
-          reloading={loadingFor === "discard"}
-          problem={reloadProblem}
-          onSaveMine={() => void saveMine()}
-          onDiscard={() => void discard()}
-        />
-      ) : (
-        form.message && (
-          <Alert color="red" role="alert">
-            {form.message}
-          </Alert>
-        )
+      {fields.length > 0 && (
+        <>
+          <PluginSettingsForm
+            fields={fields}
+            values={values}
+            secrets={engine.secrets}
+            errors={form.fieldErrors}
+            // Locked while a conflict answer loads what is saved now: the save that follows sends what the
+            // form held when the answer was given, so nothing may be typed in between.
+            disabled={form.busy || loadingFor !== null}
+            pendingClear={cleared}
+            onChange={setValues}
+            onClearSecret={(key) =>
+              setCleared((current) => [...new Set([...current, key])])
+            }
+          />
+          {engine.awaiting_secrets && (
+            <Alert color="yellow" title="Enter the keys again">
+              An address changed, so the saved keys no longer apply.
+            </Alert>
+          )}
+          {form.stale ? (
+            <ConflictNotice
+              subject="These settings"
+              saving={form.busy || loadingFor === "mine"}
+              reloading={loadingFor === "discard"}
+              problem={reloadProblem}
+              onSaveMine={() => void saveMine()}
+              onDiscard={() => void discard()}
+            />
+          ) : (
+            form.message && (
+              <Alert color="red" role="alert">
+                {form.message}
+              </Alert>
+            )
+          )}
+          {!form.stale && (
+            <Group>
+              <Button loading={form.busy} onClick={() => void form.save()}>
+                Save engine settings
+              </Button>
+            </Group>
+          )}
+          <ConsentModal
+            destinations={form.asking}
+            busy={form.busy}
+            onAccept={() => void form.accept()}
+            onCancel={form.decline}
+          />
+        </>
       )}
-      {!form.stale && (
-        <Group>
-          <Button loading={form.busy} onClick={() => void form.save()}>
-            Save engine settings
-          </Button>
-        </Group>
-      )}
-      <ConsentModal
-        destinations={form.asking}
-        busy={form.busy}
-        onAccept={() => void form.accept()}
-        onCancel={form.decline}
-      />
     </Stack>
   );
 };

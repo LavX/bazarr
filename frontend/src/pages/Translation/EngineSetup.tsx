@@ -42,7 +42,7 @@ const EngineSetup: FunctionComponent<{
           </section>
         )}
 
-        {fields.length > 0 && (
+        {(fields.length > 0 || !engine.enabled) && (
           <section className={styles.section}>
             <div className={styles.sectionHead}>
               <h3 className={styles.sectionTitle}>Engine settings</h3>
@@ -51,12 +51,15 @@ const EngineSetup: FunctionComponent<{
           </section>
         )}
 
-        {!backends && fields.length === 0 && canRun(engine) && (
-          <div className={styles.quiet}>
-            <p className={styles.quietTitle}>Nothing to set up</p>
-            This engine works as it is.
-          </div>
-        )}
+        {!backends &&
+          fields.length === 0 &&
+          engine.enabled &&
+          canRun(engine) && (
+            <div className={styles.quiet}>
+              <p className={styles.quietTitle}>Nothing to set up</p>
+              This engine works as it is.
+            </div>
+          )}
       </div>
     </div>
   );
