@@ -23,9 +23,11 @@ api_ns_translation = Namespace(
 def get_service():
     """The settings service on the application's database. Tests replace this."""
     from app.database import database
+    from subtitles.tools.translate.runtime.probe import worker_options, worker_probe
     from subtitles.tools.translate.runtime.store import TranslatorStore
 
-    return TranslatorSettingsService(TranslatorStore(database), legacy=True)
+    return TranslatorSettingsService(TranslatorStore(database), legacy=True, connection_probe=worker_probe,
+                                     options_source=worker_options)
 
 
 def refusal(method):

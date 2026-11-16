@@ -191,6 +191,8 @@ class ProbeRequest:
     output_token_limit: int
     timeout_seconds: float = TEST_TIMEOUT_SECONDS
     secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
+    # The plugin whose worker answers: the connection's own when an extension serves it, else its engine's.
+    plugin_id: str = ""
 
 
 # A probe runs on a thread of its own, not the request's. It must not use the request's database session, must be
@@ -1015,7 +1017,8 @@ class TranslatorSettingsService:
             instance_id=instance.id, connection_id=connection.id, backend_type=connection.backend_type,
             model=connection.model, values=dict(values), destinations=destinations,
             input_token_limit=TEST_INPUT_TOKENS, output_token_limit=TEST_OUTPUT_TOKENS,
-            timeout_seconds=TEST_TIMEOUT_SECONDS, secrets=dict(secrets))
+            timeout_seconds=TEST_TIMEOUT_SECONDS, secrets=dict(secrets),
+            plugin_id=connection.plugin_id or instance.plugin_id)
         started = time.monotonic()
         answer: Mapping[str, Any] = {}
         failure: Exception | None = None

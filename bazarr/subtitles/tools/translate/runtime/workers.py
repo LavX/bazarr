@@ -27,6 +27,8 @@ from typing import Any, Callable, Mapping, Protocol
 logger = logging.getLogger(__name__)
 
 TRANSLATE_OP = "translate"
+TEST_OP = "test"
+OPTIONS_OP = "options"
 
 
 class RunningCall(Protocol):
@@ -42,6 +44,10 @@ class WorkerPort(Protocol):
     def abandon(self, plugin_id: str) -> None:
         """Take the plugin's worker out of service once the jobs it holds are done: it ignored a cancel."""
 
+    def call(self, plugin_id: str, op: str, params: dict, secrets: Mapping[str, str] | None, *,
+             timeout: float) -> Any:
+        """One short request (``test`` or ``options``) to the plugin's worker, answered or raised within ``timeout``."""
+
 
 class UnboundWorkers:
     """The port before anything is bound: no translator worker exists yet."""
@@ -53,6 +59,11 @@ class UnboundWorkers:
 
     def abandon(self, plugin_id):
         return None
+
+    def call(self, plugin_id, op, params, secrets, *, timeout):
+        from provider_hub.runtime.pool import PoolCodes, PoolUnavailable
+
+        raise PoolUnavailable("no translator worker is bound for this plugin", code=PoolCodes.UNAVAILABLE)
 
 
 class PoolWorkers:
@@ -93,6 +104,16 @@ class PoolWorkers:
         key = self._ensure(plugin_id)
         return self._pool.submit(key, TRANSLATE_OP, {"request": request}, secrets=dict(secrets) or None,
                                  on_progress=on_progress, context=context)
+
+    def call(self, plugin_id, op, params, secrets, *, timeout):
+        key = self._ensure(plugin_id)
+        handle = self._pool.submit(key, op, params, secrets=dict(secrets or {}) or None, timeout=timeout)
+        try:
+            outcome = handle.wait(timeout + 2)
+        except BaseException:
+            handle.cancel("timeout")
+            raise
+        return outcome
 
     def abandon(self, plugin_id):
         try:
