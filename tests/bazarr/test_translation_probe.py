@@ -13,8 +13,7 @@ import pytest
 from api.translation.translation import get_service as real_get_service
 from plugin_platform_helpers import service_manifest
 from subtitles.tools.translate.runtime import workers
-from subtitles.tools.translate.runtime.settings_service import (InstalledPlugin, OPEN_TEST,
-                                                                TranslatorSettingsService)
+from subtitles.tools.translate.runtime.settings_service import (InstalledPlugin, TranslatorSettingsService)
 from subtitles.tools.translate.runtime.store import OFFICIAL_ENGINE_PLUGIN_ID, TranslatorStore
 
 PLUGIN = OFFICIAL_ENGINE_PLUGIN_ID
@@ -150,7 +149,6 @@ def test_a_model_list_with_no_worker_bound_is_unavailable_so_the_page_offers_tex
 
 def test_the_test_sends_the_snapshot_it_cut_and_never_reads_the_connection_again(app_service, monkeypatch):
     """An address saved between the cut of the secrets and the send must not pair the new address with the key."""
-    from subtitles.tools.translate.runtime.settings_service import TranslatorSettingsService
 
     service = app_service.service
     port = FakePort({"ok": True})
@@ -189,7 +187,6 @@ def test_a_test_sends_the_engines_secrets_as_a_translation_would(app_service):
 
 
 def test_a_worker_busy_with_a_translation_is_not_charged_and_the_person_is_told(app_service):
-    from subtitles.tools.translate.runtime.usage import UsageLedger
     from app.database import TableTranslationUsage
 
     class Busy(FakePort):
