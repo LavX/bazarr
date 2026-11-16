@@ -179,7 +179,8 @@ def default_plugin_active(plugin_id: str) -> bool:
     from provider_hub.kinds import UnknownKindError, get_kind, kind_of
 
     item = (hub_state.load_state().get("installations") or {}).get(plugin_id)
-    if not isinstance(item, dict) or not item.get("active_version") or item.get("state") == "removed":
+    if (not isinstance(item, dict) or not item.get("active_version") or item.get("state") == "removed"
+            or item.get("blocked")):
         return False
     try:
         return bool(get_kind(kind_of(item)).is_enabled(item))

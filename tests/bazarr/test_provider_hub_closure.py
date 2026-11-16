@@ -456,3 +456,252 @@ def test_the_update_hint_needs_a_real_newer_release_from_the_bound_source(tmp_pa
 
     _world(tmp_path, monkeypatch, [user, newer], _installed(installed, source_id="official", source_bound=True))
     assert "Update helper first" in _closure("user").refusal
+
+
+def test_an_add_on_that_extends_a_plugin_already_chosen_in_a_release_without_the_capability_does_not_resolve(
+        tmp_path, monkeypatch, service_kind):
+    # The root needs alpha first, which only helper 1.0.0 provides, and then an add-on that extends helper
+    # with beta, which only helper 2.0.0 provides: the release already chosen cannot be changed.
+    helper_one = _manifest("helper", "1.0.0", provides=["alpha.v1"])
+    helper_two = _manifest("helper", "2.0.0", provides=["beta.v1"])
+    addon = _manifest("addon", provides=["addon.v1"], extends={"id": "helper", "capability": "beta.v1"})
+    root = _manifest("user", requires=["alpha.v1", "addon.v1"])
+    _world(tmp_path, monkeypatch, [root, helper_one, helper_two, addon])
+
+    closure = _closure("user")
+
+    assert not closure.resolved
+    assert "already chosen for this install (1.0.0) does not provide beta.v1" in closure.refusal
+
+
+# --- a release that others rely on cannot be taken away or dropped -------------------------------------------
+
+
+def _rely_world(tmp_path, monkeypatch, extra=(), consumer_staged=False):
+    """parent 1.0.0 runs without the capability, its staged 2.0.0 provides it, and an add-on relies on it."""
+    parent = _manifest("parent")
+    parent_next = _manifest("parent", "2.0.0", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    row_extra = {"staged_version": "2.0.0", "staged_manifest": parent_next, "state": "staged",
+                 "pending_restart": True, "source_id": "official", "source_bound": True}
+    user_extra = ({"active_version": None, "staged_version": "1.0.0", "staged_manifest": user, "state": "staged",
+                   "pending_restart": True} if consumer_staged else {})
+    _world(tmp_path, monkeypatch, list(extra), {**_installed(parent, **row_extra),
+                                                  **_installed(user, **user_extra)})
+    return parent, parent_next, user
+
+
+def test_a_failed_restage_keeps_the_staged_release_another_plugin_relies_on(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    third = _manifest("parent", "3.0.0", provides=[PARENT_CAPABILITY])
+    _rely_world(tmp_path, monkeypatch, extra=[third])
+    monkeypatch.setattr(service, "_fetch_bundle",
+                        lambda manifest, deadline=None: (_ for _ in ()).throw(
+                            service.ProviderHubInstallError("the download failed")))
+
+    with pytest.raises(service.ProviderHubInstallError, match="download failed"):
+        service.stage_install(third, source_id="official", catalog_list="plugins")
+
+    row = load_state()["installations"]["parent"]
+    assert row["staged_version"] == "2.0.0" and row["staged_manifest"]["version"] == "2.0.0"
+    assert row["state"] == "staged" and row["last_error"] == "the download failed"
+
+
+def test_a_failed_restage_still_clears_a_staged_release_nothing_relies_on(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    parent = _manifest("parent")
+    parent_next = _manifest("parent", "2.0.0", provides=[PARENT_CAPABILITY])
+    third = _manifest("parent", "3.0.0", provides=[PARENT_CAPABILITY])
+    _world(tmp_path, monkeypatch, [third], _installed(
+        parent, staged_version="2.0.0", staged_manifest=parent_next, state="staged", pending_restart=True,
+        source_id="official", source_bound=True))
+    monkeypatch.setattr(service, "_fetch_bundle",
+                        lambda manifest, deadline=None: (_ for _ in ()).throw(
+                            service.ProviderHubInstallError("the download failed")))
+
+    with pytest.raises(service.ProviderHubInstallError):
+        service.stage_install(third, source_id="official", catalog_list="plugins")
+
+    assert load_state()["installations"]["parent"]["staged_version"] is None
+
+
+def test_an_update_that_drops_a_capability_a_dependent_needs_is_neither_offered_nor_staged(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    dropped = _manifest("parent", "2.0.0")
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    _world(tmp_path, monkeypatch, [dropped],
+           {**_installed(parent, source_id="official", source_bound=True), **_installed(user)})
+
+    assert service._latest_catalog_manifest(
+        load_state(), "parent", "1.0.0", "official", "plugins", installed_kind="test_service") is None
+    assert service.check_updates()["details"]["updates_available"] == 0
+    refused = service.apply_update("parent")
+    assert refused["last_error"] == "parent 2.0.0 no longer provides demo_parent.backend.v1, which user relies on."
+    with pytest.raises(service.ProviderHubInstallError, match="which user relies on"):
+        service.stage_install(dropped, source_id="official", catalog_list="plugins")
+
+
+def test_an_update_that_drops_a_capability_is_refused_in_the_write_when_a_dependent_lands_meanwhile(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state, mutate_state
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            pass
+
+        def install(self, validated, timeout=None):
+            (tmp_path / "env" / "bin").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "env" / "bin" / "python").write_text("", encoding="utf-8")
+            return tmp_path / "env"
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    dropped = _manifest("parent", "2.0.0")
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    _world(tmp_path, monkeypatch, [dropped], _installed(parent, source_id="official", source_bound=True))
+
+    def fetch(manifest, deadline=None):
+        # The early check saw nothing relying on the parent; a dependent installs while the bundle downloads.
+        mutate_state(lambda state: state["installations"].update(_installed(user)))
+        return tmp_path / "bundle"
+
+    monkeypatch.setattr(service, "_fetch_bundle", fetch)
+    monkeypatch.setattr(service, "PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr(service, "python_executable", lambda env_path: tmp_path / "python")
+
+    with pytest.raises(service.ProviderHubInstallError, match="which user relies on"):
+        service.stage_install(dropped, source_id="official", catalog_list="plugins")
+
+    assert load_state()["installations"]["parent"].get("staged_version") is None
+
+
+# --- the boot re-check ----------------------------------------------------------------------------------------
+
+
+def _boot(tmp_path, monkeypatch, installations):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _world(tmp_path, monkeypatch, [], installations)
+    service.activate_staged_installations()
+    return load_state()["installations"]
+
+
+def test_a_plugin_whose_supplier_is_not_running_at_boot_does_not_start_and_says_why(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.state import active_installations, running_installations
+
+    parent = _manifest("parent")
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    # The supplier's staged release provided the capability when the add-on installed; it never activated.
+    rows = _boot(tmp_path, monkeypatch, {
+        **_installed(parent), **_installed(user, supplied_by={PARENT_CAPABILITY: "parent"})})
+
+    assert rows["user"]["blocked"] is True
+    assert rows["user"]["last_error"] == (
+        "It needs parent (demo_parent.backend.v1), which is not running, so it was not started.")
+    assert "blocked" not in rows["parent"]
+    assert [row.provider_id for row in running_installations(kind=None)] == ["parent"]
+    assert [row.provider_id for row in active_installations(kind=None)] == ["parent"]
+
+
+def test_an_add_on_whose_parent_does_not_provide_the_capability_does_not_start(tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent")
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+
+    rows = _boot(tmp_path, monkeypatch, {**_installed(parent), **_installed(addon)})
+
+    assert rows["addon"]["blocked"] is True and "parent (demo_parent.backend.v1)" in rows["addon"]["last_error"]
+
+
+def test_what_relies_on_a_plugin_that_did_not_start_does_not_start_either(tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent")
+    middle = _manifest("middle", provides=["mid.v1"], requires=[PARENT_CAPABILITY])
+    top = _manifest("top", requires=["mid.v1"])
+
+    rows = _boot(tmp_path, monkeypatch, {
+        **_installed(parent), **_installed(middle, supplied_by={PARENT_CAPABILITY: "parent"}),
+        **_installed(top, supplied_by={"mid.v1": "middle"})})
+
+    assert rows["middle"]["blocked"] is True and rows["top"]["blocked"] is True
+
+
+def test_a_plugin_that_is_met_runs_and_a_blocked_one_is_released_once_its_supplier_runs(
+        tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    blocked = {"blocked": True, "blocked_reason": "old reason", "last_error": "old reason",
+               "supplied_by": {PARENT_CAPABILITY: "parent"}}
+
+    rows = _boot(tmp_path, monkeypatch, {**_installed(parent), **_installed(user, **blocked)})
+
+    assert "blocked" not in rows["user"] and rows["user"]["last_error"] is None
+
+
+def test_a_need_with_no_recorded_supplier_is_left_to_the_host_and_never_blocks(tmp_path, monkeypatch, service_kind):
+    user = _manifest("user", requires=["host.ffmpeg.v1", "llm.openai.v1"])
+
+    rows = _boot(tmp_path, monkeypatch, _installed(user))
+
+    assert "blocked" not in rows["user"]
+
+
+def test_a_supplier_whose_staged_release_fails_to_activate_blocks_the_plugin_installed_against_it(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    parent = _manifest("parent")
+    parent_next = _manifest("parent", "2.0.0", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY])
+    bundle = tmp_path / "bundles" / "parent" / "2.0.0" / ("b" * 40)
+    python = tmp_path / "envs" / "parent" / "2.0.0" / "test" / "bin" / "python"
+    _world(tmp_path, monkeypatch, [], {
+        **_installed(parent, staged_version="2.0.0", staged_manifest=parent_next, state="staged",
+                     pending_restart=True, staged_path=str(bundle), staged_python_path=str(python)),
+        **_installed(user, supplied_by={PARENT_CAPABILITY: "parent"})})
+    monkeypatch.setattr(service, "verify_bundle_tree", lambda manifest, root: None)
+
+    def refuse(validated, bundle_path, python_path, timeout=None):
+        raise RuntimeError("the worker did not start")
+
+    monkeypatch.setattr(service_kind, "smoke_test", refuse)
+
+    service.activate_staged_installations()
+
+    rows = load_state()["installations"]
+    assert rows["parent"]["active_version"] == "1.0.0" and rows["parent"]["staged_version"] is None
+    assert rows["user"]["blocked"] is True and "parent (demo_parent.backend.v1)" in rows["user"]["last_error"]
+
+
+def test_a_release_records_which_installed_plugin_supplies_each_need(tmp_path, monkeypatch, service_kind):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            pass
+
+        def install(self, validated, timeout=None):
+            (tmp_path / "env" / "bin").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "env" / "bin" / "python").write_text("", encoding="utf-8")
+            return tmp_path / "env"
+
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    user = _manifest("user", requires=[PARENT_CAPABILITY, "host.ffmpeg.v1", "llm.openai.v1"])
+    _world(tmp_path, monkeypatch, [user], _installed(parent))
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    monkeypatch.setattr(service, "PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr(service, "python_executable", lambda env_path: tmp_path / "python")
+
+    service.stage_install(user, source_id="official", catalog_list="plugins")
+
+    assert load_state()["installations"]["user"]["staged_supplied_by"] == {PARENT_CAPABILITY: "parent"}

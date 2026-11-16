@@ -98,7 +98,7 @@ def installed_plugin(plugin_id: str) -> InstalledPlugin | None:
     if not isinstance(item, dict) or not isinstance(item.get("manifest"), dict):
         return None
     manifest = item["manifest"]
-    active = bool(item.get("active_version")) and item.get("state") != "removed"
+    active = bool(item.get("active_version")) and item.get("state") != "removed" and not item.get("blocked")
     return InstalledPlugin(plugin_id, str(item.get("name") or manifest.get("name") or plugin_id),
                            str(item.get("active_version") or manifest.get("version") or ""), active, manifest)
 

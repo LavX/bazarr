@@ -745,3 +745,29 @@ def test_a_verified_body_that_is_not_a_json_object_is_refused_and_keeps_the_key_
         _verify(world, FetchedFeed(body, b"{}", b"{}"))
 
     assert refused.value.key_file_version == 4
+
+
+def test_a_host_latched_on_one_channel_does_not_read_another_channel_unsigned(world):
+    from provider_hub.service import update_catalog_source
+
+    _latch(world)
+    update_catalog_source("official", dev_ref="beta")
+    world.legacy(commit=HEAD, providers=[_provider("9.9.9")])
+
+    _refresh()
+
+    assert "only accepts a signed catalog" in _official()["last_error"]
+    # Nothing of beta's unsigned catalog was stored or trusted, and the cached main entries still install.
+    assert {entry["version"] for entry in _entries().values()} == {"1.0.0"}
+    assert _blocked() == {PROVIDER: None, SERVICE: None}
+
+
+def test_a_host_that_never_latched_still_reads_the_other_channel_as_legacy(world):
+    from provider_hub.service import update_catalog_source
+
+    world.legacy(commit=HEAD, providers=[_provider()])
+    update_catalog_source("official", dev_ref="beta")
+
+    _refresh()
+
+    assert _official()["last_error"] is None and _official()["catalog_signature"] == "unsigned (legacy)"

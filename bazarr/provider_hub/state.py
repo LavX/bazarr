@@ -821,7 +821,7 @@ def active_installations(
             continue
         if kind is not None and kind_of(item) != kind:
             continue
-        if item.get("state") != "active" or item.get("pending_restart"):
+        if item.get("state") != "active" or item.get("pending_restart") or item.get("blocked"):
             continue
         manifest = item.get("manifest")
         if not isinstance(manifest, dict):
@@ -851,7 +851,8 @@ def running_installations(
             continue
         if kind is not None and kind_of(item) != kind:
             continue
-        if not item.get("active_version"):
+        # A plugin held back at boot because what it relies on is not running does not run.
+        if not item.get("active_version") or item.get("blocked"):
             continue
         manifest = item.get("manifest")
         if not isinstance(manifest, dict):

@@ -330,6 +330,120 @@ def dependents(state: dict[str, Any], plugin_id: str, *, enabled_only: bool = Fa
     return found
 
 
+def broken_by(state: dict[str, Any], plugin_id: str, replacement: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """The installed or staged dependents a change to ``plugin_id`` would leave without a capability.
+
+    ``replacement`` is the manifest that would become its staged release, and None means its staged release
+    goes away and its active one is what runs after the restart. A dependent counts when it relies on a
+    capability this plugin supplies after the next restart (or, for ``extends``, on it as the parent), the
+    change drops that capability, and no other enabled plugin supplies it. Returns ``(dependent id,
+    capability)`` pairs, sorted.
+    """
+    installed = installed_plugins(state)
+    held = installed.get(plugin_id)
+    if held is None:
+        return []
+    row = held[1]
+    current = _manifest_in(row, "next")
+    if current is None:
+        return []
+    if replacement is None:
+        after = _parse(row.get("manifest")) if row.get("active_version") else None
+    else:
+        after = _parse(replacement)
+    broken: set[tuple[str, str]] = set()
+    for other_id, (_active, other_row) in installed.items():
+        if other_id == plugin_id:
+            continue
+        consumer = _manifest_in(other_row, "next")
+        if consumer is None:
+            continue
+        needs = []
+        if consumer.extends is not None and consumer.extends.plugin_id == plugin_id:
+            needs.append((consumer.extends.capability, True))
+        needs.extend((capability, False) for capability in consumer.requires if capability not in consumer.provides)
+        for capability, parent in needs:
+            if capability not in current.provides or (after is not None and capability in after.provides):
+                continue
+            if not parent and _supplied_elsewhere(installed, capability, (plugin_id, other_id)):
+                continue
+            broken.add((other_id, capability))
+    return sorted(broken)
+
+
+def _supplied_elsewhere(installed: dict[str, Any], capability: str, excluding: tuple[str, ...]) -> bool:
+    for held_id, (_held, held_row) in installed.items():
+        if held_id in excluding or not _enabled(held_row):
+            continue
+        supplier = _manifest_in(held_row, "next")
+        if supplier is not None and capability in supplier.provides:
+            return True
+    return False
+
+
+def breaks_text(plugin_id: str, version: str | None, broken: list[tuple[str, str]]) -> str:
+    """Why a release of ``plugin_id`` is refused: the dependents it would leave without a capability."""
+    names = sorted({other for other, _capability in broken})
+    capabilities = sorted({capability for _other, capability in broken})
+    return (f"{plugin_id}{' ' + version if version else ''} no longer provides {', '.join(capabilities)}, "
+            f"which {', '.join(names)} relies on.")
+
+
+def supplier_map(state: dict[str, Any], plugin: PluginManifest, owner_id: str) -> dict[str, str]:
+    """For each capability ``plugin`` requires that an installed plugin will supply after the next restart,
+    which plugin that is. Recorded with the release, so a boot can tell a need a plugin once met from one
+    nothing ever supplied."""
+    installed = installed_plugins(state)
+    found: dict[str, str] = {}
+    for capability in plugin.requires:
+        if capability in plugin.provides or capability.startswith(HOST_CAPABILITY_PREFIX):
+            continue
+        for held_id, (_held, held_row) in sorted(installed.items()):
+            supplier = _manifest_in(held_row, "next")
+            if held_id != owner_id and supplier is not None and capability in supplier.provides:
+                found[capability] = held_id
+                break
+    return found
+
+
+def unmet_needs(installations: dict[str, Any]) -> dict[str, list[str]]:
+    """For each installation whose active release relies on a plugin that is not running, what is missing.
+
+    Judged on the set that actually activated: the plugin it extends must be active and provide the
+    capability, and each capability it once had an installed supplier for must still have that supplier
+    active and providing it. A plugin that is itself unmet is not running, so what relies on it is unmet too.
+    """
+    rows = {
+        str(pid): row for pid, row in installations.items()
+        if isinstance(row, dict) and row.get("active_version") and row.get("state") != "removed"
+    }
+    parsed = {pid: _parse(row.get("manifest")) for pid, row in rows.items()}
+    running = {pid for pid, plugin in parsed.items() if plugin is not None}
+    blocked: dict[str, list[str]] = {}
+    while True:
+        newly: dict[str, list[str]] = {}
+        for pid in sorted(running):
+            plugin = parsed[pid]
+            missing = []
+            if plugin.extends is not None:
+                parent = parsed.get(plugin.extends.plugin_id) if plugin.extends.plugin_id in running else None
+                if parent is None or plugin.extends.capability not in parent.provides:
+                    missing.append(f"{plugin.extends.plugin_id} ({plugin.extends.capability})")
+            for capability, supplier in sorted((rows[pid].get("supplied_by") or {}).items()):
+                if capability not in plugin.requires:
+                    continue
+                provider = parsed.get(supplier) if supplier in running else None
+                if provider is None or capability not in provider.provides:
+                    missing.append(f"{supplier} ({capability})")
+            if missing:
+                newly[pid] = missing
+        if not newly:
+            return blocked
+        # What is not running supplies nothing, so judge the rest again without it.
+        blocked.update(newly)
+        running -= set(newly)
+
+
 def _enabled(row: dict[str, Any]) -> bool:
     from .kinds import UnknownKindError, get_kind, kind_of
 

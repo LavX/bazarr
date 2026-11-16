@@ -537,8 +537,9 @@ def _fetch_official_catalog(
     carries a plugins list. Raises ``catalog_feed.FeedRefused`` when a signed catalog fails its check.
     """
     channel = catalog_feed.feed_channel(source.get("dev_ref"))
-    if channel is not None and not catalog_feed.signed_feed_enabled() \
-            and catalog_feed.stored_record(state, channel).latched:
+    host_latched = any(catalog_feed.stored_record(state, name).latched
+                       for name in (catalog_feed.CHANNEL_MAIN, catalog_feed.CHANNEL_BETA))
+    if channel is not None and not catalog_feed.signed_feed_enabled() and host_latched:
         # A downgrade: this host accepted a signed catalog, and this release cannot verify one. The
         # legacy catalog is not a substitute, so say why and what to do instead of reading it.
         raise catalog_feed.FeedRefused(
@@ -560,7 +561,7 @@ def _fetch_official_catalog(
         _fetch_signed_feed(owner, repo, head, channel),
         channel=channel,
         stored=catalog_feed.stored_record(state, channel), now=catalog_feed.current_time(),
-        host_build_time=catalog_feed.build_time(),
+        host_build_time=catalog_feed.build_time(), host_latched=host_latched,
     )
     if feed is None:
         # No signed file at this commit and the channel has never latched: the legacy catalog.
@@ -3088,6 +3089,10 @@ def _staged_installation(
         "manifest": existing.get("manifest") if existing.get("active_version") else validated.raw,
         "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
+        # What the running release was met by, and whether it was held back, stay with it until the update
+        # takes over.
+        **({"supplied_by": existing["supplied_by"]} if existing.get("supplied_by") else {}),
+        **({"blocked": True, "blocked_reason": existing.get("blocked_reason")} if existing.get("blocked") else {}),
     }
 
 
@@ -3099,11 +3104,19 @@ def _failed_installation(
     origin: str = "catalog",
     source_id: str | None = None,
     catalog_list: str | None = None,
+    state: dict[str, Any] | None = None,
 ):
     existing = existing if isinstance(existing, dict) else {}
     message = refusal_text(error)
     if existing.get("active_version"):
         installation = dict(existing)
+        if (state is not None and installation.get("state") == "staged"
+                and isinstance(installation.get("staged_manifest"), dict)
+                and closure.broken_by(state, validated.provider_id, None)):
+            # The staged release is what another plugin will rely on after the restart, so a restage that
+            # failed does not take it away.
+            installation["last_error"] = message
+            return installation
         if installation.get("state") == "staged":
             # A restage that fails drops the staged update the row still holds.
             _abandon_staged_catalog_list(installation)
@@ -3140,6 +3153,17 @@ def _failed_installation(
         "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
     }
+
+
+def _refuse_a_release_that_breaks_dependents(
+    state: dict[str, Any], provider_id: str, version: str | None, manifest: dict[str, Any],
+) -> None:
+    """Refuse a release of an installed plugin that drops a capability something installed or staged relies on."""
+    row = (state.get("installations") or {}).get(provider_id)
+    if isinstance(row, dict) and row.get("active_version"):
+        broken = closure.broken_by(state, provider_id, manifest)
+        if broken:
+            raise ProviderHubInstallError(closure.breaks_text(provider_id, version, broken))
 
 
 def _stage_validated(
@@ -3232,7 +3256,7 @@ def _stage_validated(
                 installations = state.setdefault("installations", {})
                 current = installations.get(validated.provider_id, existing)
                 installation = _failed_installation(
-                    validated, current, install_error, source_trusted, origin, source_id, catalog_list
+                    validated, current, install_error, source_trusted, origin, source_id, catalog_list, state
                 )
                 installations[validated.provider_id] = installation
                 return dict(installation)
@@ -3243,6 +3267,7 @@ def _stage_validated(
         def record_staged_install(state: dict[str, Any]) -> dict[str, Any]:
             installations = state.setdefault("installations", {})
             current = installations.get(validated.provider_id, existing)
+            _refuse_a_release_that_breaks_dependents(state, validated.provider_id, validated.version, validated.raw)
             installation = _staged_installation(
                 validated,
                 current,
@@ -3253,6 +3278,10 @@ def _stage_validated(
                 source_id,
                 catalog_list,
             )
+            plugin = parse_plugin_manifest(validated.raw) if validated.raw.get("schema_version") == 2 else None
+            if plugin is not None:
+                # Which installed plugin supplies each capability it needs, kept with the release.
+                installation["staged_supplied_by"] = closure.supplier_map(state, plugin, validated.provider_id)
             installations[validated.provider_id] = installation
             # The environment passed the worker check, so it is now the one
             # recorded for this dependency set (a no-op when it already is).
@@ -3268,6 +3297,10 @@ def _stage_validated(
                 installation = mutate_state(record_staged_install)
         except env_registry.EnvironmentGone as error:
             raise ProviderHubInstallError(str(error)) from error
+        except ProviderHubInstallError:
+            # Refused in the write: another plugin's need would no longer be met. Nothing was recorded.
+            _discard_stopped_install(staged, existing)
+            raise
         missing_required = [] if is_update else missing_required_fields(installation)
         if not is_update and not get_kind(validated.kind).on_installed(
                 validated.provider_id, missing_required=missing_required):
@@ -3351,6 +3384,7 @@ def stage_install(
                or _host_refusal({"manifest": manifest}, current_host()))
     if refusal:
         raise ProviderHubInstallError(refusal)
+    _refuse_a_release_that_breaks_dependents(state, validated.provider_id, validated.version, validated.raw)
     origin = "catalog"
     manifest_source = validated.raw.get("source") if isinstance(validated.raw, dict) else None
     catalog_url = manifest_source.get("catalog_url") if isinstance(manifest_source, dict) else None
@@ -3518,7 +3552,8 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
             # The member was staged and could not be enabled. It is discarded with the rest, and the
             # failure names it, because the plugin being installed was never staged.
             raise ProviderHubInstallError(
-                f"{current.plugin.name} could not be installed for it: {error}") from error
+                f"{current.plugin.name}, which this install needs, could not be enabled, so nothing was "
+                f"installed: {ENABLED_PROVIDERS_NOT_SAVED}") from error
         raise
     return written()
 
@@ -3755,6 +3790,7 @@ def activate_staged_installations() -> list[str]:
                 installation["staged_path"] = None
                 installation["staged_python_path"] = None
                 installation["staged_manifest"] = None
+                installation.pop("staged_supplied_by", None)
                 installation["pending_restart"] = False
                 if installation.get("active_version"):
                     installation["state"] = "active"
@@ -3778,6 +3814,7 @@ def activate_staged_installations() -> list[str]:
             installation["staged_manifest"] = None
             installation.pop("previous_catalog_list", None)
             installation["manifest"] = manifest.raw
+            installation["supplied_by"] = installation.pop("staged_supplied_by", None) or {}
             installation["state"] = "active"
             installation["pending_restart"] = False
             installation["last_error"] = None
@@ -3798,6 +3835,23 @@ def activate_staged_installations() -> list[str]:
             else:
                 msg = f"Activated plugin '{target_name}' v{target_version}"
             job.update(message=msg)
+    # What actually activated is known now. A plugin whose active release relies on one that is not running
+    # does not start, and says why.
+    unmet = closure.unmet_needs(installations)
+    for plugin_id, row in installations.items():
+        if not isinstance(row, dict):
+            continue
+        if plugin_id in unmet:
+            reason = f"It needs {', '.join(unmet[plugin_id])}, which is not running, so it was not started."
+            if row.get("blocked_reason") != reason:
+                row.update(blocked=True, blocked_reason=reason, last_error=reason)
+                changed = True
+        elif row.get("blocked"):
+            if row.get("last_error") == row.get("blocked_reason"):
+                row["last_error"] = None
+            row.pop("blocked", None)
+            row.pop("blocked_reason", None)
+            changed = True
     if changed:
         updated_installations = state.get("installations") or {}
 
@@ -4154,7 +4208,8 @@ def _latest_catalog_manifest(
         except ValueError:
             return False
         return (entry.get("origin") != ORIGIN_BUNDLED and _host_refusal(entry, host) is None
-                and _closure_refusal(state, entry, host) is None)
+                and _closure_refusal(state, entry, host) is None
+                and not closure.broken_by(state, provider_id, entry["manifest"]))
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
@@ -4177,13 +4232,18 @@ def _refused_update_reason(
         return (
             entry.get("origin") != ORIGIN_BUNDLED
             and _offerable_as_update(entry, installed_kind)
-            and (_host_refusal(entry, host) is not None or _closure_refusal(state, entry, host) is not None)
+            and (_host_refusal(entry, host) is not None or _closure_refusal(state, entry, host) is not None
+                 or bool(closure.broken_by(state, provider_id, entry["manifest"])))
         )
 
     entry = select_entry(
         _stored_manifest_entries(state), provider_id,
         usable=refused, source_id=source_id, above_version=active_version, catalog_list=catalog_list)
-    return (_host_refusal(entry, host) or _closure_refusal(state, entry, host)) if entry else None
+    if not entry:
+        return None
+    broken = closure.broken_by(state, provider_id, entry["manifest"])
+    return (_host_refusal(entry, host) or _closure_refusal(state, entry, host)
+            or (closure.breaks_text(provider_id, entry["manifest"].get("version"), broken) if broken else None))
 
 
 def _update_delta(state: dict[str, Any], provider: dict[str, Any], manifest: dict[str, Any],

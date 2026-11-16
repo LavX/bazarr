@@ -736,7 +736,7 @@ def test_a_member_that_cannot_be_enabled_is_discarded_and_named(world, staging, 
                         lambda plugin_id, missing_required=(): False if plugin_id == "parent"
                         else real(plugin_id, missing_required))
 
-    with pytest.raises(service.ProviderHubInstallError, match="Parent could not be installed for it"):
+    with pytest.raises(service.ProviderHubInstallError, match="Parent, which this install needs, could not be enabled, so nothing was installed"):
         service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
 
     # Neither the member that could not be enabled nor the one staged before it is left behind.

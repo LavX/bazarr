@@ -369,17 +369,20 @@ def verify_fetched(
     now: datetime,
     roots: Mapping[str, bytes] | None = None,
     host_build_time: datetime | None = None,
+    host_latched: bool = False,
 ) -> VerifiedFeed | None:
     """Check what the raw repository served for ``channel``.
 
-    Returns the verified catalog, or None when the commit has no signed file and the channel has
-    never accepted one (the caller then reads the legacy catalog). Raises ``FeedRefused`` for
+    Returns the verified catalog, or None when the commit has no signed file and no channel of this host
+    has ever accepted one (the caller then reads the legacy catalog). ``host_latched`` says some channel has,
+    which makes a missing signed file on this one a refusal too: a host that has required a signature once
+    does not fall back to an unsigned catalog by changing channel. Raises ``FeedRefused`` for
     everything else. Nothing is parsed before the signature, the chain, the channel and the
     freshness checked out.
 
     """
     if fetched is None:
-        if stored.latched:
+        if stored.latched or host_latched:
             raise FeedRefused(Status.UNSIGNED, _refusal_text(signing.VerificationResult(Status.UNSIGNED)))
         return None
     if roots is None:
