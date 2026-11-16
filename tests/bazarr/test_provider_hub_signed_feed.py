@@ -415,6 +415,107 @@ def test_the_key_file_version_counts_across_both_channels(world):
     assert "key file is older" in _official()["last_error"]
 
 
+# --- an authenticated key file counts even when its catalog is refused -------------------------------------
+
+
+def test_a_root_signed_key_file_that_revokes_the_cached_signer_is_remembered_with_its_refusal(world, tmp_path):
+    _latch(world)
+    _move_head(world, "e" * 40)
+    revoking = world.key_file(version=2, revocations=[world.keys.revocation(world.now)])
+    world.publish(commit="e" * 40, version=101, key_file=revoking, plugins=[_plugin()], providers=[_provider()])
+
+    _refresh()
+
+    assert "revoked key" in _official()["last_error"]
+    assert _state()["catalog_feeds"]["main"]["key_file_version"] == 2
+    assert _counter_file(tmp_path)["channels"]["main"]["key_file_version"] == 2
+    # The cache the old key file vouched for no longer installs, and the old key file is not taken back.
+    assert set(_blocked()) == {PROVIDER, SERVICE}
+    assert all("older than one it already accepted" in reason for reason in _blocked().values())
+    _move_head(world, "f" * 40)
+    world.ancestors.add("e" * 40)
+    world.publish(commit="f" * 40, version=102, plugins=[_plugin()], providers=[_provider()])
+
+    _refresh()
+
+    assert "key file is older" in _official()["last_error"]
+
+
+def test_a_key_file_seen_before_the_first_latch_is_remembered_too(world, tmp_path):
+    revoking = world.key_file(version=3, revocations=[world.keys.revocation(world.now)])
+    world.publish(version=100, key_file=revoking)
+
+    _refresh()
+
+    assert "revoked key" in _official()["last_error"]
+    assert _counter_file(tmp_path)["channels"]["main"] == {"signed_version": None, "key_file_version": 3}
+    assert _state()["catalog_feeds"]["main"]["key_file_version"] == 3
+    world.publish(commit=HEAD, version=101, key_file=world.key_file(version=1))
+    _refresh()
+    assert "key file is older" in _official()["last_error"]
+
+
+def test_a_cache_without_the_key_file_record_is_repaired_by_a_refresh_with_an_unchanged_head(world):
+    from provider_hub.state import mutate_state
+
+    _latch(world)
+    # A cache from a release that did not record the key file version: the commit has not moved.
+    mutate_state(lambda state: state["catalog_sources"]["official"].pop("catalog_key_file_version"))
+    assert all("older than one it already accepted" in reason for reason in _blocked().values())
+
+    _refresh()
+
+    assert _official()["catalog_key_file_version"] == 1
+    assert _blocked() == {PROVIDER: None, SERVICE: None}
+
+
+# --- a ref that reads no signed channel ----------------------------------------------------------------
+
+
+def test_a_pinned_ref_on_main_is_not_trusted_once_a_channel_has_latched(world):
+    from provider_hub.service import update_catalog_source
+
+    _latch(world)
+    update_catalog_source("official", dev_ref=HEAD)
+    world.legacy(commit=HEAD, providers=[_provider("9.9.9")])
+
+    _refresh()
+
+    assert _official()["trusted"] is False and "signed catalogs" in _official()["trust_reason"]
+
+
+def test_a_pinned_ref_on_main_is_trusted_as_before_while_nothing_has_latched(world):
+    from provider_hub.service import update_catalog_source
+
+    world.legacy(commit=HEAD, providers=[_provider()])
+    update_catalog_source("official", dev_ref=HEAD)
+
+    _refresh()
+
+    assert _official()["trusted"] is True
+
+
+# --- the counter file is read once until something writes it -----------------------------------------------
+
+
+def test_the_counter_file_is_parsed_once_for_many_checks(tmp_path, monkeypatch):
+    from provider_hub import catalog_feed
+    from provider_hub.catalog_feed import ChannelRecord
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+    catalog_feed.write_counter_file({"main": ChannelRecord(10, 2)})
+    parsed = []
+    real = catalog_feed._parse_counter_file
+    monkeypatch.setattr(catalog_feed, "_parse_counter_file", lambda path: parsed.append(path) or real(path))
+
+    for _ in range(5):
+        assert catalog_feed.stored_record({}, "main") == ChannelRecord(10, 2)
+    assert len(parsed) == 1
+    catalog_feed.write_counter_file({"main": ChannelRecord(11, 2)})
+    assert catalog_feed.stored_record({}, "main") == ChannelRecord(11, 2)
+    assert len(parsed) == 2
+
+
 # --- one verification point ---------------------------------------------------------------------------
 
 

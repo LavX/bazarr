@@ -585,3 +585,44 @@ def test_a_failed_update_discards_the_dependencies_it_staged_in_the_same_call(wo
     installations = load_state()["installations"]
     assert "helper" not in installations
     assert installations["addon"]["active_version"] == "1.0.0" and installations["addon"]["staged_version"] is None
+
+
+def test_a_second_member_that_fails_takes_the_first_with_it_and_leaves_no_row_of_its_own(
+        world, staging, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    helper = _plugin("helper", provides=["translit.v1"])
+    parent = _plugin("parent", provides=[PARENT_CAPABILITY], requires=["translit.v1"])
+    addon = _plugin("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    world([helper, parent, addon])
+    digest = _summary()["digest"]
+    real_fetch = service._fetch_bundle
+
+    def fetch(manifest, deadline=None):
+        if manifest.provider_id == "parent":
+            raise service.ProviderHubInstallError("the parent download failed")
+        return real_fetch(manifest, deadline)
+
+    monkeypatch.setattr(service, "_fetch_bundle", fetch)
+
+    with pytest.raises(service.ProviderHubInstallError, match="parent download failed"):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    assert set(load_state()["installations"]) == set()
+
+
+def test_a_failed_update_discards_a_dependency_even_when_the_active_release_already_needed_it(world, staging):
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    old = _plugin("addon", "1.0.0", requires=["translit.v1"])
+    helper = _plugin("helper", provides=["translit.v1"])
+    new = _plugin("addon", "1.1.0", requires=["translit.v1"])
+    _update_world(world, old, new, extra_manifests=[helper])
+
+    service.apply_update("addon", consent_digest=service.update_consent("addon")["digest"])
+
+    installations = load_state()["installations"]
+    assert "helper" not in installations
+    assert installations["addon"]["staged_version"] is None

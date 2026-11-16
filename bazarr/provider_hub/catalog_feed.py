@@ -57,10 +57,13 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 class FeedRefused(ValueError):
     """A signed catalog was not accepted. The text says why and is safe to show."""
 
-    def __init__(self, status: Status, message: str):
+    def __init__(self, status: Status, message: str, key_file_version: int | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        # The version of a key file the root signed, when the check got far enough to authenticate one.
+        # The catalog may be refused, but a root-signed key file (a revocation, say) still counts.
+        self.key_file_version = key_file_version
 
 
 @dataclass(frozen=True)
@@ -172,10 +175,31 @@ def _positive_int(value: Any) -> int | None:
     return value
 
 
+# The parsed counter file, keyed by where it is and what it looks like on disk, so the install checks
+# that ask for the counters once per catalog entry read the file once until something writes it.
+_COUNTER_CACHE: tuple[tuple[str, int, int, int], dict[str, "ChannelRecord"]] | None = None
+
+
 def read_counter_file() -> dict[str, ChannelRecord]:
     """The mirrored counters. A missing or unreadable file holds nothing."""
+    global _COUNTER_CACHE
+    path = counter_file()
     try:
-        document = json.loads(counter_file().read_text(encoding="utf-8"))
+        info = path.stat()
+    except OSError:
+        return {}
+    key = (str(path), info.st_mtime_ns, info.st_size, info.st_ino)
+    cached = _COUNTER_CACHE
+    if cached is not None and cached[0] == key:
+        return dict(cached[1])
+    records = _parse_counter_file(path)
+    _COUNTER_CACHE = (key, records)
+    return dict(records)
+
+
+def _parse_counter_file(path: Path) -> dict[str, ChannelRecord]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
     except (OSError, ValueError):
@@ -204,7 +228,8 @@ def write_counter_file(records: Mapping[str, ChannelRecord]) -> None:
             "schema_version": _COUNTER_FILE_VERSION,
             "channels": {
                 channel: {"signed_version": record.signed_version, "key_file_version": record.key_file_version}
-                for channel, record in sorted(merged.items()) if record.signed_version is not None
+                for channel, record in sorted(merged.items())
+                if record.signed_version is not None or record.key_file_version is not None
             },
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,12 +305,23 @@ def record_accepted(state: dict[str, Any], verified: VerifiedFeed, now: datetime
     return ChannelRecord(result.signed_version, result.key_file_version)
 
 
-def record_refusal(state: dict[str, Any], channel: str, refusal: FeedRefused, now: datetime) -> None:
-    """Remember why the last check of ``channel`` failed. The last good catalog and its counters stay."""
+def record_refusal(state: dict[str, Any], channel: str, refusal: FeedRefused, now: datetime) -> ChannelRecord | None:
+    """Remember why the last check of ``channel`` failed. The last good catalog and its counters stay.
+
+    A key file the root signed counts even when the catalog it came with is refused: a revocation lives
+    there, and the host must not accept an older key file after seeing it. Returns what to mirror to the
+    counter file, or None when the refusal carried no key file.
+    """
     store = state.setdefault(FEEDS_KEY, {})
     item = store.get(channel) if isinstance(store.get(channel), dict) else {}
     item["last_refusal"] = {"status": str(refusal.status), "message": refusal.message, "at": _iso(now)}
+    record = None
+    if refusal.key_file_version is not None:
+        held = _positive_int(item.get("key_file_version"))
+        item["key_file_version"] = max(held or 0, refusal.key_file_version)
+        record = ChannelRecord(None, item["key_file_version"])
     store[channel] = item
+    return record
 
 
 def clear_refusal(state: dict[str, Any], channel: str) -> None:
@@ -360,7 +396,9 @@ def verify_fetched(
         host_build_time=host_build_time,
     )
     if not result.usable:
-        raise FeedRefused(result.status, _refusal_text(result))
+        raise FeedRefused(
+            result.status, _refusal_text(result),
+            key_file_version=result.key_file_version if result.root_key_id is not None else None)
     try:
         catalog = json.loads(fetched.catalog.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as error:

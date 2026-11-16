@@ -1270,6 +1270,21 @@ def _rejected_plugin(source: dict[str, Any], manifest: dict[str, Any], reason: s
     }
 
 
+def _hold_unsigned_ref_to_the_latch(state: dict[str, Any], source: dict[str, Any]) -> None:
+    """Once a signed channel has latched, a ref that reads no signed channel is not trusted.
+
+    A tag, a pinned commit or a spelling of main that resolves to a commit on main or beta is trusted by
+    where that commit sits, yet it reads the unsigned legacy catalog. On a host that has accepted a signed
+    catalog, that would be a way around the signature, so such a ref stays untrusted.
+    """
+    if catalog_feed.feed_channel(source.get("dev_ref")) is not None:
+        return
+    if any(catalog_feed.stored_record(state, channel).latched
+           for channel in (catalog_feed.CHANNEL_MAIN, catalog_feed.CHANNEL_BETA)):
+        source["trusted"] = False
+        source["trust_reason"] = "unsigned ref on a host that requires signed catalogs"
+
+
 def _note_catalog_signature(
     state: dict[str, Any], source: dict[str, Any], feed, accepted: dict[str, catalog_feed.ChannelRecord],
 ) -> None:
@@ -1363,9 +1378,11 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     elif (not source.get("dev_ref") and source.get("trusted") is True
                           and (not catalog_feed.signed_feed_enabled() or (
                               source.get("catalog_signature")
-                              and source.get("catalog_channel") == catalog_feed.CHANNEL_MAIN))):
-                        # A source refreshed before the signature check existed, or on another
-                        # channel, is fetched once more.
+                              and source.get("catalog_channel") == catalog_feed.CHANNEL_MAIN
+                              and catalog_feed.supply_refusal(state, source) is None))):
+                        # A source refreshed before the signature check existed, on another channel, or
+                        # whose cached catalog no longer meets what this host requires of one (a counter,
+                        # a key file version it lacks the record of) is fetched once more.
                         try:
                             url_ref = _parse_github_file_url(source["url"])[2]
                         except CatalogSourceError:
@@ -1394,8 +1411,11 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     if isinstance(error, catalog_feed.FeedRefused):
                         refused_channel = catalog_feed.feed_channel(source.get("dev_ref"))
                         if refused_channel is not None:
-                            catalog_feed.record_refusal(
+                            mirrored = catalog_feed.record_refusal(
                                 state, refused_channel, error, catalog_feed.current_time())
+                            if mirrored is not None:
+                                accepted_feeds[refused_channel] = catalog_feed._larger(
+                                    accepted_feeds.get(refused_channel), mirrored)
                     source["last_error"] = refusal_text(_catalog_source_error_message(error))
                     failed_sources.append(source.get("name") or source.get("id") or "?")
                     # An official source that has never refreshed falls back to
@@ -1437,6 +1457,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                         floor.trust_source(source)
                     else:
                         _set_official_trust(source, commit, previous_commit, ancestry)
+                        _hold_unsigned_ref_to_the_latch(state, source)
                         _note_catalog_signature(state, source, feed, accepted_feeds)
                     published_ids = set()
                 claimed_kinds: dict[str, set[str]] = {}
@@ -3468,10 +3489,18 @@ CONSENT_CHANGED_REASON = (
 def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[str]:
     """Stage the plugins a closure adds, dependencies first, before the plugin that needs them.
 
-    Returns the ids it staged. When one of them fails, the ones staged before it in this call are
-    discarded and the failure goes on.
+    Returns the ids of the rows this call wrote, which is what to discard if the plugin they were staged
+    for then fails. A row counts as soon as ``stage_install`` wrote it, including a failed one, so a member
+    that raises after recording its row is not left behind. When a member fails, the rows written before it
+    in this call are discarded and the failure goes on.
     """
-    staged: list[str] = []
+    before = set((load_state().get("installations") or {}))
+
+    def written() -> list[str]:
+        rows = load_state().get("installations") or {}
+        return [member.plugin_id for member in resolved.members
+                if member.reason != "root" and member.plugin_id not in before and member.plugin_id in rows]
+
     try:
         for member in resolved.members:
             if member.reason == "root":
@@ -3480,22 +3509,22 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
                 member.entry["manifest"], checkpoint=checkpoint, source_id=source_id,
                 catalog_list=member.entry.get("catalog_list", CATALOG_LIST_PROVIDERS),
             )
-            staged.append(member.plugin_id)
     except Exception:
-        _discard_staged_members(staged)
+        _discard_staged_members(written())
         raise
-    return staged
+    return written()
 
 
 def _discard_staged_members(plugin_ids: list[str]) -> None:
     """Remove the plugins a call staged for a plugin that then failed to stage, last staged first.
 
     Nothing else needs them: they were not installed before the call, and the plugin they were staged
-    for is not there. A removal that fails is logged and leaves the rest to the person.
+    for is not there. A dependent that is still installed, such as the active release of a plugin being
+    updated, does not stop the discard. A removal that fails is logged and leaves the rest to the person.
     """
     for plugin_id in reversed(plugin_ids):
         try:
-            remove_installation(plugin_id)
+            remove_installation(plugin_id, check_dependents=False)
         except Exception:
             logging.getLogger(__name__).exception(
                 "Could not discard %s, which was staged for a plugin that failed to install", plugin_id)
@@ -3924,12 +3953,12 @@ def dependent_refusal(provider_id: str, action: str, *, enabled_only: bool = Fal
     return closure.dependents_text(provider_id, names, action) if names else None
 
 
-def remove_installation(provider_id: str) -> bool:
+def remove_installation(provider_id: str, *, check_dependents: bool = True) -> bool:
     state = load_state()
     installations = state.setdefault("installations", {})
     if provider_id not in installations:
         return False
-    refusal = dependent_refusal(provider_id, "removed")
+    refusal = dependent_refusal(provider_id, "removed") if check_dependents else None
     if refusal:
         raise ProviderHubInstallError(refusal)
     item = installations[provider_id]
@@ -3964,7 +3993,7 @@ def remove_installation(provider_id: str) -> bool:
                 return "missing"
             # Checked against the document this write commits to, so a dependent installed since the
             # early check above still blocks the removal.
-            names = closure.dependents(state, provider_id)
+            names = closure.dependents(state, provider_id) if check_dependents else []
             if names:
                 raise ProviderHubInstallError(closure.dependents_text(provider_id, names, "removed"))
             if not item.get("active_version"):

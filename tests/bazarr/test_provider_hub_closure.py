@@ -300,3 +300,65 @@ def test_a_switched_off_supplier_gives_way_to_another_plugin_that_provides_the_c
     _world(tmp_path, monkeypatch, [user, other], _installed(off, enabled=False))
 
     assert _ids(_closure("user")) == [("other", "requires"), ("user", "root")]
+
+
+# --- one consistent set of releases per phase ----------------------------------------------------------------
+
+
+def test_a_staged_update_that_drops_a_capability_does_not_keep_another_supplier_removable(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import ProviderHubInstallError, remove_installation
+
+    first = _manifest("first", provides=["translit.v1"])
+    second = _manifest("second", provides=["translit.v1"])
+    second_next = _manifest("second", "2.0.0")
+    user = _manifest("user", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [], {
+        **_installed(first),
+        **_installed(second, staged_version="2.0.0", staged_manifest=second_next, state="staged",
+                     pending_restart=True),
+        **_installed(user)})
+
+    with pytest.raises(ProviderHubInstallError, match="first cannot be removed while user depends on it"):
+        remove_installation("first")
+
+
+def test_a_staged_update_that_adds_a_capability_does_not_justify_removing_the_only_current_supplier(
+        tmp_path, monkeypatch, service_kind):
+    from provider_hub.service import ProviderHubInstallError, remove_installation
+
+    first = _manifest("first", provides=["translit.v1"])
+    second = _manifest("second")
+    second_next = _manifest("second", "2.0.0", provides=["translit.v1"])
+    user = _manifest("user", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [], {
+        **_installed(first),
+        **_installed(second, staged_version="2.0.0", staged_manifest=second_next, state="staged",
+                     pending_restart=True),
+        **_installed(user)})
+
+    with pytest.raises(ProviderHubInstallError, match="first cannot be removed while user depends on it"):
+        remove_installation("first")
+
+
+def test_a_need_only_a_newer_release_of_an_installed_plugin_meets_asks_for_that_update_first(
+        tmp_path, monkeypatch, service_kind):
+    helper = _manifest("helper", "1.0.0")
+    helper_next = _manifest("helper", "2.0.0", provides=["translit.v1"])
+    user = _manifest("user", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [user, helper_next], _installed(helper))
+
+    closure = _closure("user")
+
+    assert not closure.resolved and closure.external == []
+    assert "provides from version 2.0.0. Update helper first." in closure.refusal
+
+
+def test_an_add_on_does_not_install_against_a_parent_that_is_switched_off(tmp_path, monkeypatch, service_kind):
+    parent = _manifest("parent", provides=[PARENT_CAPABILITY])
+    addon = _manifest("addon", extends={"id": "parent", "capability": PARENT_CAPABILITY})
+    _world(tmp_path, monkeypatch, [addon], _installed(parent, enabled=False))
+
+    closure = _closure("addon")
+
+    assert not closure.resolved and "parent, which is switched off. Switch it on first." in closure.refusal
