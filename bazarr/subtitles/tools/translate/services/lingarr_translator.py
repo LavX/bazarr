@@ -11,7 +11,6 @@ import time
 from retry.api import retry
 from deep_translator.exceptions import TooManyRequests, RequestError
 
-from app.config import settings
 from app.database import TableShows, TableEpisodes, TableMovies, database, select  # noqa: F401
 from app.jobs_queue import jobs_queue, JobCancelled
 from sportarr.connection import check_cancelled
