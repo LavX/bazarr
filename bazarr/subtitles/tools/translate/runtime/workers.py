@@ -22,13 +22,26 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Callable, Mapping, Protocol
 
 logger = logging.getLogger(__name__)
 
 TRANSLATE_OP = "translate"
+# How long a request that was told to stop is waited for: the session gives a worker its cancel grace and then
+# its kill grace, so a request that is still running after this is a worker that cannot be stopped.
+STOP_SETTLE_SECONDS = 60.0
 TEST_OP = "test"
 OPTIONS_OP = "options"
+
+
+class NotSent(Exception):
+    """A short request was refused before anything left Bazarr+: no worker, a worker busy with a translation, or
+    one that would not start. ``busy`` tells a worker that is only occupied from one that is not there."""
+
+    def __init__(self, message: str, *, busy: bool = False):
+        super().__init__(message)
+        self.busy = busy
 
 
 class RunningCall(Protocol):
@@ -46,7 +59,12 @@ class WorkerPort(Protocol):
 
     def call(self, plugin_id: str, op: str, params: dict, secrets: Mapping[str, str] | None, *,
              timeout: float) -> Any:
-        """One short request (``test`` or ``options``) to the plugin's worker, answered or raised within ``timeout``."""
+        """One short request (``test`` or ``options``) to the plugin's worker.
+
+        Answered, or raised within ``timeout``, or ``NotSent`` when it was refused before anything was sent.
+        It returns or raises only once the request has really ended: one that ran out of time is cancelled and
+        waited for, so a caller that treats the return as "no longer running" is right.
+        """
 
 
 class UnboundWorkers:
@@ -61,9 +79,7 @@ class UnboundWorkers:
         return None
 
     def call(self, plugin_id, op, params, secrets, *, timeout):
-        from provider_hub.runtime.pool import PoolCodes, PoolUnavailable
-
-        raise PoolUnavailable("no translator worker is bound for this plugin", code=PoolCodes.UNAVAILABLE)
+        raise NotSent("no translator worker is bound for this plugin")
 
 
 class PoolWorkers:
@@ -106,14 +122,40 @@ class PoolWorkers:
                                  on_progress=on_progress, context=context)
 
     def call(self, plugin_id, op, params, secrets, *, timeout):
-        key = self._ensure(plugin_id)
-        handle = self._pool.submit(key, op, params, secrets=dict(secrets or {}) or None, timeout=timeout)
+        from provider_hub.runtime.errors import SessionBusy, SessionError
+        from provider_hub.runtime.pool import PoolError
+
         try:
-            outcome = handle.wait(timeout + 2)
+            key = self._ensure(plugin_id)
+            handle = self._pool.submit(key, op, params, secrets=dict(secrets or {}) or None, timeout=timeout)
+        except SessionBusy:
+            raise NotSent("the worker is busy", busy=True) from None
+        except (PoolError, SessionError) as error:
+            # Refused or failed to start, before a request was written.
+            raise NotSent(f"the worker could not take the request ({type(error).__name__})") from None
+        try:
+            return handle.wait(timeout + 2)
         except BaseException:
+            # Out of time, or the caller was interrupted: stop the request and wait until the session confirms it
+            # is gone, so nothing is still running when the caller lets go of what it held.
             handle.cancel("timeout")
+            self._settle(plugin_id, handle)
             raise
-        return outcome
+
+    def _settle(self, plugin_id, handle) -> None:
+        deadline = time.monotonic() + STOP_SETTLE_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                handle.wait(1.0)
+            except TimeoutError:
+                if handle.done():
+                    return
+                continue
+            except BaseException:
+                return  # the request ended, cancelled or failed
+            return
+        logger.warning("A request to translator %s did not stop when cancelled", plugin_id)
+        self.abandon(plugin_id)
 
     def abandon(self, plugin_id):
         try:

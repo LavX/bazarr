@@ -176,9 +176,14 @@ OPEN_TEST = "The translation engine is not running, so this back end cannot be t
 class ProbeRequest:
     """One small request to a saved connection, as the engine's worker is asked to make it.
 
-    ``secrets`` holds only what the connection's stored secrets may carry to ``destinations``: a secret bound
-    to other addresses is left out, exactly as for a real translation. The worker must send them nowhere else,
-    follow no redirect, and put none of them in what it answers.
+    It is one snapshot, taken by the caller in one pass: the settings the destinations were worked out from and
+    the secrets cut to them. A probe sends exactly this and never reads the connection again, so an address
+    saved in the meantime cannot pair a new address with an old key.
+
+    ``secrets`` holds what the engine's and the connection's stored secrets may carry to their own
+    destinations, as for a real translation (the connection's win a name they share): a secret bound to other
+    addresses is left out. The worker must send them nowhere else, follow no redirect, and put none of them in
+    what it answers.
     """
 
     instance_id: int
@@ -193,6 +198,10 @@ class ProbeRequest:
     secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
     # The plugin whose worker answers: the connection's own when an extension serves it, else its engine's.
     plugin_id: str = ""
+    # The engine's own saved settings, without secrets, and the connection's prices, as they were when read.
+    engine_values: Mapping[str, Any] = field(default_factory=dict)
+    price_input_per_million: float = 0
+    price_output_per_million: float = 0
 
 
 # A probe runs on a thread of its own, not the request's. It must not use the request's database session, must be
@@ -307,12 +316,15 @@ class TranslatorSettingsService:
                  catalog_engines: Callable[[], list[dict[str, Any]]] | None = None,
                  update_lookup: Callable[[str], str | None] | None = None,
                  cost_limits: Callable[[], "CostLimits"] | None = None, legacy: bool = False,
-                 lingarr: legacy_engines.ConfigLingarr | None = None):
+                 lingarr: legacy_engines.ConfigLingarr | None = None,
+                 test_ready: Callable[[], bool] | None = None):
         self._store = store
         self._plugin = plugin_lookup or installed_plugin
         self._validator = plugin_validator
         self._options_source = options_source
         self._probe = connection_probe
+        # Whether something can answer a test right now (a worker is bound). None means always.
+        self._test_ready = test_ready
         self._catalog_engines = catalog_engines or catalog_view.available_engines
         self._update_lookup = update_lookup or catalog_view.update_version
         self._cost_limits = cost_limits
@@ -385,7 +397,9 @@ class TranslatorSettingsService:
 
     def can_test(self) -> bool:
         """Whether a connection test has anything to ask: a probe, or the model list the engine can fetch."""
-        return self._probe is not None or self._options_source is not None
+        if self._probe is None and self._options_source is None:
+            return False
+        return self._test_ready() if self._test_ready is not None else True
 
     def capabilities(self) -> list[str]:
         """The routes of the page that work now. The page shows a control only for one listed here."""
@@ -895,6 +909,11 @@ class TranslatorSettingsService:
             return self._test_result(False, "The address changed after the key was saved, so the saved key is not "
                                             "sent to the new one. Enter the key again and save.")
         secrets = self._store.secrets_for_request(owner, destinations)
+        engine_values = dict(self._store.settings_of(instance))
+        engine_refusal, engine_secrets = self._engine_secrets(instance, engine_values)
+        if engine_refusal:
+            return self._test_result(False, engine_refusal)
+        secrets = {**engine_secrets, **secrets}  # the connection's win a name they share
         # Every saved secret of the connection and of its engine, for masking only.
         held = {**{f"engine.{name}": value for name, value in
                    self._store.secrets_for_request((INSTANCE, instance.id), frozenset()).items()},
@@ -907,7 +926,8 @@ class TranslatorSettingsService:
         result: dict[str, Any] | None = None
         try:
             if self._probe is not None:
-                result = self._paid_test(connection, instance, values, destinations, secrets, held, where, claim)
+                result = self._paid_test(connection, instance, values, destinations, secrets, held, where, claim,
+                                         engine_values)
             else:
                 result = self._listing_test(connection, instance, values, where)
         except Exception as error:
@@ -974,8 +994,27 @@ class TranslatorSettingsService:
             return self._test_result(True, "", started)
         return self._test_result(False, self._unanswered(where))
 
+    def _engine_secrets(self, instance, engine_values: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
+        """The engine's stored secrets a test may send, cut to the engine's own destinations, or a refusal.
+
+        The same rule a translation keeps: a key entered for other addresses is never sent to these.
+        """
+        owner = (INSTANCE, instance.id)
+        if not self._store.secrets_for_request(owner, frozenset()):
+            return "", {}
+        parsed = self._parsed(self._plugin(instance.plugin_id))
+        if parsed is None:
+            return "", {}
+        destinations = effective_destinations(DestinationSchema(fields=parsed.settings_fields,
+                                                                endpoints=parsed.endpoints), engine_values)
+        if (instance.awaiting_secrets or self._store.has_stale_secrets(owner, destinations)
+                or any(item.startswith("invalid:") for item in destinations)):
+            return ("The address of the engine changed after its key was saved, so the saved key is not sent to "
+                    "the new one. Enter the key again and save."), {}
+        return "", dict(self._store.secrets_for_request(owner, destinations))
+
     def _paid_test(self, connection, instance, values, destinations, secrets, held, where,
-                   claim: _Claim) -> dict[str, Any]:
+                   claim: _Claim, engine_values: Mapping[str, Any] | None = None) -> dict[str, Any]:
         # Imported here: the ledger reads the database tables at import, and a caller that only lists
         # engines or saves settings must not need them.
         from .usage import RESERVED, CostLimits, UsageLedger, worst_case_micros
@@ -1018,7 +1057,9 @@ class TranslatorSettingsService:
             model=connection.model, values=dict(values), destinations=destinations,
             input_token_limit=TEST_INPUT_TOKENS, output_token_limit=TEST_OUTPUT_TOKENS,
             timeout_seconds=TEST_TIMEOUT_SECONDS, secrets=dict(secrets),
-            plugin_id=connection.plugin_id or instance.plugin_id)
+            plugin_id=connection.plugin_id or instance.plugin_id, engine_values=dict(engine_values or {}),
+            price_input_per_million=_price(connection.price_input_per_million),
+            price_output_per_million=_price(connection.price_output_per_million))
         started = time.monotonic()
         answer: Mapping[str, Any] = {}
         failure: Exception | None = None

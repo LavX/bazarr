@@ -2,13 +2,13 @@
 """The two calls the Translation page makes to a plugin's worker: a connection test and a model list.
 
 Both are the plugin's own ``test`` and ``options`` methods, sent through the worker port the dispatcher uses.
-While no worker is bound the test says so and sends nothing, so it costs nothing and the page shows why.
+While no worker is bound the page does not offer the test; one that is refused before it is sent is settled at nothing.
 
-Secrets. A test sends the connection's stored secrets only to the addresses they were entered under: the
-caller (``TranslatorSettingsService.test_connection``) has already cut the set to the connection's present
-destinations, and a request that would carry a stale secret never gets here. A model list is asked for with a
-draft the person has not saved, so it carries no stored secret at all: an engine that needs a key for its list
-answers nothing, and the page offers a text field instead of a list.
+Secrets. A test sends what a translation would: the engine's stored secrets and the connection's, each only to
+the addresses it was entered under. The caller (``TranslatorSettingsService.test_connection``) cuts them and takes
+the settings they were cut against in one pass, and the probe sends that snapshot and reads nothing again. A
+model list is asked for with a draft the person has not saved, so it carries no stored secret at all: an engine
+that needs a key for its list answers nothing, and the page offers a text field instead of a list.
 """
 from __future__ import annotations
 
@@ -24,44 +24,37 @@ logger = logging.getLogger(__name__)
 _TOKEN_KEYS = ("input_tokens", "output_tokens")
 
 
-def _unavailable(error: BaseException) -> bool:
-    from provider_hub.runtime.pool import PoolUnavailable
-
-    return isinstance(error, PoolUnavailable)
+BUSY_TEST = ("The translation engine is busy translating. Try the test again in a moment.")
+UNSTARTED_TEST = "The translation engine could not take the test. Try again in a moment."
 
 
 def worker_probe(request: ProbeRequest) -> Mapping[str, Any]:
     """Ask the connection's plugin to check the credentials and model with one small request.
 
+    The request is the whole snapshot: the settings, address, prices and secrets the caller checked together.
+    Nothing is read again here, so the key that is sent is always the one cut for the address it goes to.
+
     Returns the answer ``TranslatorSettingsService`` reads: ``ok``, a ``message``, the tokens the request used
-    when the plugin reports them, and ``sent: false`` when nothing left Bazarr+ (no worker, or it refused to start).
+    when the plugin reports them, and ``sent: false`` for every refusal that happened before anything left
+    Bazarr+ (no worker, a worker busy with a translation, one that would not start), so a priced test is
+    settled at nothing.
     """
     port = workers.bound_port()
     if not workers.is_bound(port):
         return {"ok": False, "sent": False, "message": OPEN_TEST}
-    from app.database import database
-    from .store import TranslatorStore
-
-    try:
-        store = TranslatorStore(database)
-        instance = store.get_instance(request.instance_id, fresh=True)
-        connection = store.get_connection(request.connection_id, fresh=True)
-        if instance is None or connection is None:
-            return {"ok": False, "sent": False, "message": "This back end was removed."}
-        config = {"settings": dict(store.settings_of(instance)),
-                  "connection": wire.connection_wire(connection, store.settings_of(connection)),
-                  "limits": {"input_tokens": request.input_token_limit, "output_tokens": request.output_token_limit}}
-    finally:
-        remove = getattr(database, "remove", None)
-        if remove is not None:
-            remove()
+    config = {
+        "settings": dict(request.engine_values),
+        "connection": {"id": str(request.connection_id), "type": request.backend_type, "enabled": True,
+                       "settings": {**dict(request.values), "model": request.model,
+                                    "price_input_per_million": request.price_input_per_million,
+                                    "price_output_per_million": request.price_output_per_million}},
+        "limits": {"input_tokens": request.input_token_limit, "output_tokens": request.output_token_limit},
+    }
     try:
         outcome = port.call(request.plugin_id, workers.TEST_OP, {"config": config}, dict(request.secrets),
                             timeout=request.timeout_seconds)
-    except Exception as error:
-        if _unavailable(error):
-            return {"ok": False, "sent": False, "message": OPEN_TEST}
-        raise
+    except workers.NotSent as refused:
+        return {"ok": False, "sent": False, "message": BUSY_TEST if refused.busy else UNSTARTED_TEST}
     value = wire.unwrap(outcome.result, outcome.data)
     if not isinstance(value, Mapping):
         return {"ok": False, "message": ""}
@@ -84,17 +77,14 @@ def worker_options(instance_id: int, backend_type: str, field_key: str, values: 
     from app.database import database
     from .store import TranslatorStore
 
-    try:
-        store = TranslatorStore(database)
-        instance = store.get_instance(instance_id, fresh=True)
-        if instance is None:
-            return None
-        plugin_id = instance.plugin_id
-        engine_settings = dict(store.settings_of(instance))
-    finally:
-        remove = getattr(database, "remove", None)
-        if remove is not None:
-            remove()
+    # Read on the caller's own thread through the same scoped session the service reads through, so the session is
+    # the caller's and is left alone: dropping it here would drop what the caller still holds.
+    store = TranslatorStore(database)
+    instance = store.get_instance(instance_id, fresh=True)
+    if instance is None:
+        return None
+    plugin_id = instance.plugin_id
+    engine_settings = dict(store.settings_of(instance))
     if backend_type:
         config: dict[str, Any] = {"settings": engine_settings,
                                   "connection": {"id": "", "type": backend_type, "enabled": True,
@@ -103,9 +93,9 @@ def worker_options(instance_id: int, backend_type: str, field_key: str, values: 
         config = {"settings": {**engine_settings, **dict(values)}}
     try:
         outcome = port.call(plugin_id, workers.OPTIONS_OP, {"field": field_key, "config": config}, {}, timeout=15.0)
+    except workers.NotSent:
+        return None
     except Exception as error:
-        if _unavailable(error):
-            return None
         logger.debug("A model list could not be fetched: %s", type(error).__name__)
         return None
     items = wire.unwrap(outcome.result, outcome.data)
