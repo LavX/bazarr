@@ -741,3 +741,22 @@ def test_a_member_that_cannot_be_enabled_is_discarded_and_named(world, staging, 
 
     # Neither the member that could not be enabled nor the one staged before it is left behind.
     assert load_state()["installations"] == {}
+
+
+def test_a_helper_that_was_only_a_failed_row_is_discarded_with_a_root_that_fails(world, staging, monkeypatch):
+    from provider_hub import service
+    from provider_hub.state import load_state, mutate_state
+
+    parent, addon = _pair()
+    world([parent, addon])
+    digest = _summary()["digest"]
+    # An earlier attempt to install the parent failed and left a row that records only that.
+    mutate_state(lambda state: state["installations"].update({"parent": {
+        "provider_id": "parent", "kind": "test_service", "name": "Parent", "state": "failed", "active_version": None,
+        "staged_version": None, "last_error": "an earlier download failed", "manifest": parent}}))
+
+    with pytest.raises(service.ProviderHubInstallError, match="download failed"):
+        service.install_catalog_entry("official", "addon", "1.0.0", consent_digest=digest)
+
+    installations = load_state()["installations"]
+    assert "parent" not in installations and installations["addon"]["state"] == "failed"

@@ -3589,7 +3589,13 @@ def _stage_closure_members(resolved, source_id: str, checkpoint=None) -> list[st
     that raises after recording its row is not left behind. When a member fails, the rows written before it
     in this call are discarded and the failure goes on.
     """
-    before = set((load_state().get("installations") or {}))
+    def installed_ids() -> set[str]:
+        # A row that only records an earlier failure is not an installation: a plugin this call installs over
+        # one is new, and is discarded with the rest when the plugin being installed fails.
+        return {str(pid) for pid, row in (load_state().get("installations") or {}).items()
+                if isinstance(row, dict) and (row.get("active_version") or row.get("staged_version"))}
+
+    before = installed_ids()
 
     def written() -> list[str]:
         rows = load_state().get("installations") or {}

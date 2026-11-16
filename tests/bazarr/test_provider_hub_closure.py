@@ -1048,3 +1048,22 @@ def test_the_boot_order_is_activation_then_reconciliation_then_the_second_depend
     assert (source.index("activated = activate_staged_installations()")
             < source.index("reconcile_plugin_environments()")
             < source.index("enforce_activation_needs()"))
+
+
+@pytest.mark.parametrize("broken", [{"needs_repair": True}, {"blocked": True, "blocked_reason": "held"}])
+def test_a_supplier_that_is_on_but_broken_is_not_an_alternative_when_switching_one_off(
+        tmp_path, monkeypatch, service_kind, broken):
+    from provider_hub import service
+
+    first = _manifest("first", provides=["translit.v1"])
+    second = _manifest("second", provides=["translit.v1"])
+    user = _manifest("user", requires=["translit.v1"])
+    _world(tmp_path, monkeypatch, [], {
+        **_installed(first), **_installed(second, **broken), **_installed(user)})
+
+    with pytest.raises(ValueError, match="first cannot be switched off while user depends on it"):
+        service.update_provider("first", enabled=False)
+
+    # With the other one working, the same switch is allowed.
+    _world(tmp_path, monkeypatch, [], {**_installed(first), **_installed(second), **_installed(user)})
+    assert service.update_provider("first", enabled=False)["enabled"] is False

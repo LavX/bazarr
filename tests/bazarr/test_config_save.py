@@ -3091,7 +3091,7 @@ def test_a_settings_save_that_does_not_touch_the_provider_list_is_not_checked(mo
     config._refuse_provider_switch_with_dependencies([("settings-general-theme", ["dark"])])
 
 
-def _alternative_supplier_rows(tmp_path, monkeypatch, enabled, **dependent_extra):
+def _alternative_supplier_rows(tmp_path, monkeypatch, enabled, supb_extra=None, **dependent_extra):
     from plugin_platform_helpers import provider_manifest_v2, write_state
     from app import config
 
@@ -3109,7 +3109,7 @@ def _alternative_supplier_rows(tmp_path, monkeypatch, enabled, **dependent_extra
                 **extra}
 
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(write_state(tmp_path / "state.json", installations={
-        "supa": row(supplier("supa")), "supb": row(supplier("supb")),
+        "supa": row(supplier("supa")), "supb": row(supplier("supb"), **(supb_extra or {})),
         "depsub": row(dependent, supplied_by={"translit.v1": "supa"}, **dependent_extra)})))
     monkeypatch.setattr(config.settings.general, "enabled_providers", list(enabled))
 
@@ -3241,3 +3241,16 @@ def test_the_hub_is_told_about_a_switch_only_after_the_save_has_let_go_of_its_lo
     config.save_settings([("settings-general-enabled_providers", ["supa", "supb", "depsub"])])
 
     assert seen == [(True, {"depsub"}, set())]
+
+
+@pytest.mark.parametrize("broken", [{"needs_repair": True}, {"blocked": True, "blocked_reason": "held"}])
+def test_a_settings_save_does_not_count_a_broken_alternative_supplier(monkeypatch, tmp_path, broken):
+    from app import config
+
+    # supb is switched on but does not run, so switching supa off leaves the dependent without a supplier.
+    _alternative_supplier_rows(tmp_path, monkeypatch, ["supa", "supb", "depsub"], supb_extra=broken)
+
+    with pytest.raises(ValidationError) as refused:
+        config.save_settings([("settings-general-enabled_providers", ["supb", "depsub"])])
+
+    assert refused.value.message == "supa cannot be switched off while depsub depends on it."
